@@ -1,6 +1,6 @@
 use crate::lex::Token;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Op {
     Add,
     Sub,
@@ -21,89 +21,140 @@ pub enum Op {
     BitwiseXor,
     BitwiseLeftShift,
     BitwiseRightShift,
-    Assign,
 }
 
-#[derive(Debug)]
-pub enum Expr {
-    // Literals
+#[derive(Debug, Clone)]
+pub enum Literal {
     String(String),
     Number(usize),
+}
 
-    List {},
-    Tuple,
+#[derive(Debug, Clone)]
+pub enum Expr {
+    Assignment {
+        lhs: String,
+        rhs: Box<Expr>,
+    },
+    // Parenthesized(BoxExpr>),
+    Literal(Literal),
 
-    BinOp {
+    // List {},
+    // Tuple,
+    BinExpr {
         lhs: Box<Expr>,
         op: Op,
         rhs: Box<Expr>,
     },
 }
 
-pub fn parse(tokens: Vec<Token>) {
-    let lines: Vec<Vec<Token>> = tokens
-        .split(|val| match val {
-            Token::Newline => true,
-            _ => false,
-        })
-        .map(|s| s.to_vec())
-        .collect();
+pub fn parse(tokens: Vec<Token>) -> Vec<Expr> {
+    let mut ast: Vec<Expr> = Vec::new();
+    let mut current_expr: Vec<Token> = Vec::new();
 
-    // for line in lines {
-    //     let mut toks = line.iter().peekable();
-    //     while let Some(token) = toks.next() {
-    //         match token {
-    //             // Token::Id(val) => toks.peek(),
-    //             _ => (),
-    //         }
-    //     }
-    // }
-
-    println!("{:#?}", lines);
-}
-
-// Parse function to convert Vec<Token> into AST
-fn parse_1(tokens: &[Token]) -> Result<Expr, String> {
-    let mut index = 0;
-
-    // Helper function to get the current token
-    fn current_token(tokens: &[Token], index: usize) -> Option<&Token> {
-        tokens.get(index)
-    }
-
-    // Helper function to advance to the next token
-    fn next_token(tokens: &[Token], index: &mut usize) -> Option<&Token> {
-        *index += 1;
-        current_token(tokens, *index)
-    }
-
-    // Recursive expression parsing function
-    fn parse_expression(tokens: &[Token], index: &mut usize) -> Result<Expr, String> {
-        let current = current_token(tokens, *index);
-
-        match current {
-            // Some(Token::Id())
-            // Some(Token::Number(num)) => {
-            //     *index += 1;
-            //     Ok(Expr::Literal(*num))
-            // }
-            // Some(Token::Op(op)) => {
-            //     *index += 1;
-            //     let left = parse_expression(tokens, index)?;
-            //     let right = parse_expression(tokens, index)?;
-            //     Ok(Expr::BinOp(Box::new(left), op, Box::new(right)))
-            // }
-            _ => Err("Unexpected token".to_string()),
+    for token in tokens {
+        match token {
+            Token::Newline => {
+                if !current_expr.is_empty() {
+                    if let Some(expr) = build_expr(&current_expr) {
+                        ast.push(expr);
+                    }
+                    current_expr.clear();
+                }
+            }
+            _ => current_expr.push(token),
         }
     }
 
-    // Start parsing from the first token
-    let ast = parse_expression(tokens, &mut index)?;
+    if !current_expr.is_empty() {
+        if let Some(expr) = build_expr(&current_expr) {
+            ast.push(expr);
+        }
+    }
 
-    // Ensure all tokens have been consumed
-    if index < tokens.len() {
-        Err("Unexpected tokens after parsing".to_string())
+    ast
+}
+
+fn build_expr(tokens: &[Token]) -> Option<Expr> {
+    let mut index = 0;
+    parse_expr(tokens, &mut index)
+}
+
+// Recursive descent parser
+fn parse_expr(tokens: &[Token], index: &mut usize) -> Option<Expr> {
+    let mut left = parse_primary(tokens, index)?;
+
+    while let Some(token) = tokens.get(*index) {
+        let op = match token {
+            Token::Plus => Op::Add,
+            Token::Dash => Op::Sub,
+            Token::Star => Op::Mul,
+            Token::SlashBack => Op::Div,
+            _ => break,
+        };
+
+        *index += 1;
+        let right = parse_primary(tokens, index)?;
+        // left = Expr::BinOp(Box::new(left), operator, Box::new(right));
+        left = Expr::BinExpr {
+            lhs: Box::new(left),
+            op,
+            rhs: Box::new(right),
+        };
+    }
+
+    Some(left)
+}
+
+fn parse_primary(tokens: &[Token], index: &mut usize) -> Option<Expr> {
+    if let Some(token) = tokens.get(*index) {
+        match token {
+            Token::Pound => {
+                *index += 1;
+                let expr = parse_expr(tokens, index)?;
+                if let Some(Token::Newline) = tokens.get(*index) {
+                    *index += 1;
+                    Some(expr)
+                } else {
+                    panic!("Missing end to comment")
+                }
+            }
+            Token::String(s) => {
+                *index += 1;
+                Some(Expr::Literal(Literal::String(s.to_string())))
+            }
+            Token::Number(num) => {
+                *index += 1;
+                Some(Expr::Literal(Literal::Number(*num)))
+            }
+            Token::Id(name) => {
+                *index += 1;
+                if let Some(Token::Colon) = tokens.get(*index) {
+                    *index += 1;
+                    let expr = parse_expr(tokens, index)?;
+                    Some(Expr::Assignment {
+                        lhs: name.to_string(),
+                        rhs: Box::new(expr),
+                    })
+                } else {
+                    panic!("Missing colon after Token::Id");
+                }
+            }
+            Token::ParenLeft => {
+                *index += 1;
+                let expr = parse_expr(tokens, index)?;
+
+                if let Some(Token::ParenRight) = tokens.get(*index) {
+                    *index += 1;
+                    Some(expr)
+                } else {
+                    panic!("Missing closing parenthesis")
+                }
+            }
+            Token::Colon => None,
+            Token::EOF => None,
+            tok => panic!("Unexpected token: {:#?}", tok),
+        }
     } else {
-        Ok(ast)
+        None
     }
 }
