@@ -6,3 +6,8 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "master", features = ["llvm16-0"] }
+llvm-sys-150 = { package = "llvm-sys", version = "160.0.6", features = ["prefer-dynamic"] }
+# melior = "0.9.9"
+# llvm-sys-150 = { package = "llvm-sys", version = "150.1.0", features = ["prefer-dynamic"] }
+# mlir-sys = {path= "../../mlir-sys"}

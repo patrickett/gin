@@ -1,27 +1,45 @@
+use std::{iter::Peekable, str::Chars};
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum Keyword {
     If,
     Else,
     For,
+    Return,
 }
 
 #[derive(Debug, PartialEq, Clone)]
+pub enum Literal {
+    String(String),
+    Number(usize)
+}
+
+
+#[derive(Debug, PartialEq, Clone)]
 pub enum Token {
-    ParenLeft,
-    ParenRight,
+    ParenOpen,
+    ParenClose,
+    CurlyOpen,
+    CurlyClose,
     SlashBack,
     SlashForward,
     Colon,
+    SemiColon,
     Comma,
     Tab,
     Space,
     Newline,
+    // LineReturn,
+    Comment(String),
     Id(String),
-    Number(usize),
-    String(String),
-    EOF,
+    // Number(usize),
+    // String(String),
 
-    Pound,
+    Literal(Literal),
+    LessThan,
+    GreaterThan,
+    RightArrow,
+
     Plus,
     Dash,
     Equals,
@@ -31,69 +49,134 @@ pub enum Token {
     Keyword(Keyword),
 }
 
-fn parse_keyword(keyword: &str) -> Option<Keyword> {
-    match keyword {
-        "for" => Some(Keyword::For),
-        "if" => Some(Keyword::If),
-        "else" => Some(Keyword::Else),
-        _ => None,
-    }
-}
-
-fn add_token(token: Token, ct: &mut String, tokens: &mut Vec<Token>) {
-    if !ct.is_empty() {
-        if ct.chars().all(|c| c.is_digit(10)) {
-            let res: Result<usize, _> = ct.parse();
-            if let Ok(n) = res {
-                tokens.push(Token::Number(n));
-            }
-        } else if let Some(keyword) = parse_keyword(&ct) {
-            tokens.push(Token::Keyword(keyword))
-        } else if ct.starts_with('"') && ct.ends_with('"') {
-            tokens.push(Token::String(ct.clone()));
-        } else {
-            tokens.push(Token::Id(ct.clone()))
-        }
-        ct.clear();
-    }
-
-    if token != Token::Space {
-        tokens.push(token);
-    }
-}
-
 // TODO: add { start: usize, end: usize } for LSP in the future
-pub fn tokenize(source_code: String) -> Vec<Token> {
-    let mut tokens: Vec<Token> = Vec::new();
-    let mut token = String::new();
+pub struct Lexer {
+    buffer: String,
+    pub tokens: Vec<Token>,
+}
 
-    for (_, c) in source_code.chars().enumerate() {
-        match c {
-            // TODO: replace handling comments in parsing with a better lex for comments
-            '#' => add_token(Token::Pound, &mut token, &mut tokens),
-            '&' => add_token(Token::Ampersand, &mut token, &mut tokens),
-            '*' => add_token(Token::Star, &mut token, &mut tokens),
-            '%' => add_token(Token::Percent, &mut token, &mut tokens),
-            '=' => add_token(Token::Equals, &mut token, &mut tokens),
-            '+' => add_token(Token::Plus, &mut token, &mut tokens),
-            '-' => add_token(Token::Dash, &mut token, &mut tokens),
-            ' ' => add_token(Token::Space, &mut token, &mut tokens),
-            '\\' => add_token(Token::SlashForward, &mut token, &mut tokens),
-            '/' => add_token(Token::SlashBack, &mut token, &mut tokens),
-            '\t' => add_token(Token::Tab, &mut token, &mut tokens),
-            ':' => add_token(Token::Colon, &mut token, &mut tokens),
-            ',' => add_token(Token::Comma, &mut token, &mut tokens),
-            '\n' => add_token(Token::Newline, &mut token, &mut tokens),
-            '(' => add_token(Token::ParenLeft, &mut token, &mut tokens),
-            ')' => add_token(Token::ParenRight, &mut token, &mut tokens),
-            _ => token.push(c),
+impl Lexer {
+    pub fn new() -> Self {
+        Self {
+            buffer: String::new(),
+            tokens: Vec::new(),
         }
     }
 
-    if !token.is_empty() {
-        tokens.push(Token::Id(token.clone()))
+    fn add(&mut self, tok: Token) {
+        self.buffer.clear();
+        self.tokens.push(tok);
     }
 
-    tokens.push(Token::EOF);
-    tokens
+    fn resolve_buffer_then_add(&mut self, src: &mut Peekable<Chars>, tok: Token) {
+        self.resolve_buffer(src);
+        self.add(tok);
+    }
+
+    fn next(&mut self, src: &mut Peekable<Chars>)  {
+        let next = src.next();
+        if let Some(c) = next {
+            self.buffer.push(c);
+        }
+        // next
+    }
+
+    fn resolve_buffer(&mut self, src: &mut Peekable<Chars>) {
+        if !self.buffer.is_empty() {
+            let tok = match self.buffer.as_str() {
+                "+" => Token::Plus,
+                "-" => Token::Dash,
+                "=" => Token::Equals,
+                "&" => Token::Ampersand,
+                "*" => Token::Star,
+                "/" => Token::SlashBack,
+                "%" => Token::Percent,
+                "<" => Token::LessThan,
+                ">" => Token::GreaterThan,
+                "->" => Token::RightArrow,
+                "return" => Token::Keyword(Keyword::Return),
+                "for" => Token::Keyword(Keyword::For),
+                "if" => Token::Keyword(Keyword::If),
+                "else" => Token::Keyword(Keyword::Else),
+                id => {
+                    if id.chars().all(|c| c.is_digit(10)) {
+                        let num: Result<usize, _> = id.parse();
+                        if let Ok(n) = num {
+                            Token::Literal(Literal::Number(n))
+                            // Token::Number(n)
+                        } else {
+                            Token::Id(id.to_string())
+                        }
+                    } else {
+                        Token::Id(id.to_string())
+                    }
+                },
+            };
+            self.add(tok);
+        }
+        self.next(src);
+    }
+
+    fn resolve_comment(&mut self, src: &mut Peekable<Chars>) {
+        self.resolve_buffer(src);
+        loop {
+            match src.peek() {
+                Some('\r' | '\n') | None => break,
+                _ => {}
+            }
+            self.next(src);
+        }
+
+        let comment_text = self.buffer.clone().to_string();
+        let comment = Token::Comment(comment_text);
+        self.add(comment);
+    }
+
+    fn resolve_string(&mut self, src: &mut Peekable<Chars>) {
+        self.resolve_buffer(src);
+        loop {
+            match src.peek() {
+                Some('"') | None => {
+                    self.next(src);
+                    break;
+                }
+                _ => {}
+            }
+            self.next(src);
+        }
+
+        let string_text = self.buffer.clone().to_string();
+        let string = Token::Literal(Literal::String(string_text));
+        self.add(string);
+    }
+
+    // resolve -> push tok
+    pub fn lex(&mut self, src: &str) -> Vec<Token> {
+        self.buffer.clear();
+        self.tokens.clear();
+        let mut src = src.chars().peekable();
+        loop {
+            match src.peek() {
+                Some(c) => match c {
+                    ' ' => self.resolve_buffer_then_add(&mut src, Token::Space),
+                    ':' => self.resolve_buffer_then_add(&mut src, Token::Colon),
+                    '\t' => self.resolve_buffer_then_add(&mut src, Token::Tab),
+                    ',' => self.resolve_buffer_then_add(&mut src, Token::Comma),
+                    ';' => self.resolve_buffer_then_add(&mut src, Token::SemiColon),
+                    '\n' => self.resolve_buffer_then_add(&mut src, Token::Newline),
+                    '{' => self.resolve_buffer_then_add(&mut src, Token::CurlyOpen),
+                    '}' => self.resolve_buffer_then_add(&mut src, Token::CurlyClose),
+                    '#' => self.resolve_comment(&mut src),
+                    '"' => self.resolve_string(&mut src),
+                    _ => {
+                        // println!("_ =>");
+                        self.next(&mut src);
+                    }
+                },
+                None => break,
+            }
+        }
+        self.resolve_buffer(&mut src);
+        self.tokens.clone()
+    }
 }
