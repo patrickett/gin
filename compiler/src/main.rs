@@ -1,38 +1,40 @@
-use std::{env, fs, path::Path};
+#![allow(unused)]
+use std::{env, fs, path::Path, process::exit};
 
-use crate::parser::Parser;
-// mod compiler;
+use crate::{exit_status::ExitStatus, parse::Parser};
+
+mod exit_status;
 mod lex;
-// mod mlir;
-mod parser;
+mod parse;
 
 fn main() {
     if let Some(path) = env::args().nth(1) {
         let path = Path::new(&path);
-        let src = fs::read_to_string(path).expect("Invalid path");
+        if !path.exists() {
+            eprintln!("No such file or directory: {}", path.display());
+            exit(ExitStatus::NoSuchFileOrDirectory.into())
+        }
 
-        let file_name = path
-            .file_stem()
-            .expect("Failed to get filename")
-            .to_str()
-            .expect("Failed to convert filename to str");
+        if let Ok(source_file) = fs::read_to_string(path) {
+            let file_name = path
+                .file_stem()
+                .expect("Failed to read file name")
+                .to_str()
+                .expect("Failed to convert file name to str");
 
-        // println!("{}", file_name);
-        // let tokens1: Vec<Token> = lex::Tokenizer::new(src.clone()).collect();
-        let mut lexer = lex::Lexer::new();
-        let tokens = lexer.lex(&src);
-        // println!("{:#?}", &tokens);
-        // println!("{:#?}", &tokens1);
-        // a file exports a default empty module with the name of the file
-        
-        let mut parser = Parser::new();
+            let mut lexer = lex::Lexer::new();
+            let tokens = lexer.lex(&source_file);
+            // a file exports a default empty module with the name of the file
 
-        let ast = parser.parse(&tokens);
-        // let exprs = parser::parse_mod(tokens, file_name.to_string());
-        println!("ast: \n{:#?}", ast);
+            let mut parser = Parser::new();
+            let ast = parser.parse(tokens);
 
-        // let ir = compiler::compile_exprs(exprs, file_name);
-        // let res = evaluate_exprs(exprs);
+            println!("ast: \n{:#?}", ast);
+        } else {
+            eprintln!("Unable to read contents of file: {}", path.display());
+            // TODO: better exit code?
+            exit(ExitStatus::NoSuchFileOrDirectory.into())
+        }
     } else {
         eprintln!("Failed to provide gin file")
     }
