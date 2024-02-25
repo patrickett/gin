@@ -2,6 +2,7 @@ do:
     handle:
         personName: "John"
         personName
+    handle
 
 secondDo:
     "hello"

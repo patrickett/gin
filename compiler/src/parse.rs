@@ -18,10 +18,10 @@ const TAB_SIZE: usize = 4;
 #[derive(Debug, Clone)]
 pub struct Module {
     path: PathBuf,
-    body: Vec<Expr>,
+    pub body: Vec<Expr>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum GinType {
     Bool,
     List,
@@ -50,7 +50,7 @@ impl FromStr for GinType {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum FnArg {
     String(String),
     Number(usize),
@@ -58,7 +58,7 @@ pub enum FnArg {
     Id(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Literal(Literal),
 
