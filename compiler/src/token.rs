@@ -1,5 +1,6 @@
 #[derive(Debug, PartialEq, Clone)]
 pub enum Literal {
+    Bool(bool),
     String(String),
     Number(usize),
 }
@@ -52,6 +53,7 @@ pub enum TokenKind {
     Space,
     Newline,
     Comment(String),
+    DocComment(String),
     Id(String),
     Literal(Literal),
     LessThan,

@@ -47,12 +47,14 @@ impl Lexer {
                 "-" => TokenKind::Dash,
                 "=" => TokenKind::Equals,
                 "&" => TokenKind::Ampersand,
-                "*" => TokenKind::Ampersand,
-                "/" => TokenKind::Ampersand,
-                "%" => TokenKind::Ampersand,
-                "<" => TokenKind::Ampersand,
-                ">" => TokenKind::Ampersand,
-                "->" => TokenKind::Ampersand,
+                "*" => TokenKind::Star,
+                "/" => TokenKind::SlashForward,
+                "%" => TokenKind::Percent,
+                "<" => TokenKind::LessThan,
+                ">" => TokenKind::GreaterThan,
+                "->" => TokenKind::RightArrow,
+                "true" => TokenKind::Literal(Literal::Bool(true)),
+                "false" => TokenKind::Literal(Literal::Bool(false)),
                 "return" => TokenKind::Keyword(Keyword::Return),
                 "for" => TokenKind::Keyword(Keyword::For),
                 "if" => TokenKind::Keyword(Keyword::If),
@@ -89,14 +91,16 @@ impl Lexer {
         self.resolve_buffer();
         loop {
             match self.next_char() {
-                Some('\r' | '\n') | None => break,
+                // TODO: doc comment
+                Some('\r' | '\n' | '#') | None => {
+                    let comment_text = self.buffer.clone().to_string();
+                    let comment = Token::new(TokenKind::Comment(comment_text), self.source_index);
+                    self.add(comment);
+                    break;
+                }
                 Some(c) => self.buffer.push(c),
             }
         }
-
-        let comment_text = self.buffer.clone().to_string();
-        let comment = Token::new(TokenKind::Comment(comment_text), self.source_index);
-        self.add(comment);
     }
 
     fn resolve_string(&mut self) {

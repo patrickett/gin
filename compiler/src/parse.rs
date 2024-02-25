@@ -54,6 +54,7 @@ impl FromStr for GinType {
 pub enum FnArg {
     String(String),
     Number(usize),
+    Bool(bool),
     Id(String),
 }
 
@@ -76,6 +77,7 @@ impl Expr {
     fn gin_type(&self) -> GinType {
         match self {
             Expr::Literal(lit) => match lit {
+                Literal::Bool(_) => GinType::Bool,
                 Literal::String(_) => GinType::String,
                 Literal::Number(_) => GinType::Number,
             },
@@ -271,10 +273,10 @@ impl Parser {
                                                 }
                                                 _ => None,
                                             },
-                                            _ => None,
+                                            None => None,
                                         },
                                         _ => panic!(
-                                            "Unexpected ({:?}) at positon {} line {}",
+                                            "Unexpected ({:?}) at positon {} line {} 1",
                                             tok.kind(),
                                             tok.pos(),
                                             self.line_number
@@ -371,7 +373,7 @@ impl Parser {
                                 Some(Expr::FunctionDefinition(name, body, ret_type))
                             }
                             _ => panic!(
-                                "Unexpected ({:?}) at positon {} line {}",
+                                "Unexpected ({:?}) at positon {} line {} 2",
                                 tok.kind(),
                                 tok.pos(),
                                 self.line_number
@@ -391,6 +393,7 @@ impl Parser {
                         match tok.kind() {
                             TokenKind::Literal(lit) => {
                                 let arg = match lit {
+                                    Literal::Bool(b) => FnArg::Bool(b),
                                     Literal::String(s) => FnArg::String(s),
                                     Literal::Number(n) => FnArg::Number(n),
                                 };
@@ -423,10 +426,21 @@ impl Parser {
                                         Some(ntk) => match ntk.kind() {
                                             TokenKind::CurlyClose => break,
                                             TokenKind::Id(id) => {
-                                                self.eat(TokenKind::Space);
+                                                loop {
+                                                    if let Some(token) = self.next_token() {
+                                                        match token.kind() {
+                                                            TokenKind::Space => {}
+                                                            _ => {
+                                                                self.lexer.return_to_queue(token);
+                                                                break;
+                                                            }
+                                                        }
+                                                    }
 
-                                                let nntk = self.next_token();
-                                                if let Some(tkn) = nntk {
+                                                    self.eat(TokenKind::Space);
+                                                }
+
+                                                if let Some(tkn) = self.next_token() {
                                                     match tkn.kind() {
                                                         TokenKind::Id(obj_t) => {
                                                             let obj_type =
