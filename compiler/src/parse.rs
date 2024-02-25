@@ -1,13 +1,25 @@
 use std::{
     collections::HashMap,
+    fs,
     iter::{Map, Peekable},
+    path::{Path, PathBuf},
+    ptr::null,
     slice::Iter,
     str::FromStr,
 };
 
-use crate::lex::{Literal, Token, TokenKind};
+use crate::{
+    lex::Lexer,
+    token::{Literal, Token, TokenKind},
+};
 
 const TAB_SIZE: usize = 4;
+
+#[derive(Debug, Clone)]
+pub struct Module {
+    path: PathBuf,
+    body: Vec<Expr>,
+}
 
 #[derive(Debug, Clone)]
 pub enum GinType {
@@ -85,7 +97,8 @@ impl Expr {
 
 pub struct Parser {
     tokens: Vec<Token>,
-    index: usize,
+    token_index: usize,
+    lexer: Lexer,
     line_number: usize,
     scope: usize,
 }
@@ -93,63 +106,29 @@ pub struct Parser {
 impl Parser {
     pub fn new() -> Self {
         Self {
-            tokens: vec![],
-            index: 0,
+            tokens: Vec::new(),
+            token_index: 0,
+            lexer: Lexer::new(),
             scope: 0,
             line_number: 0,
         }
     }
 
     fn current(&self) -> Option<Token> {
-        if self.index < self.tokens.len() {
-            let item = Some(self.tokens[self.index - 1].clone());
+        if self.token_index < self.tokens.len() {
+            let item = Some(self.tokens[self.token_index - 1].clone());
             item
         } else {
             None
         }
     }
 
-    fn next_kind(&mut self) -> Option<TokenKind> {
-        if self.index < self.tokens.len() {
-            let item = self.tokens[self.index].clone();
-            self.index += 1;
-            Some(item.kind())
-        } else {
-            None
-        }
-    }
-
-    fn panic_position(&self) {
-        if let Some(token) = self.current() {
-            panic!(
-                "Unexpected ({:?}) at positon {} line {}",
-                token.kind(),
-                token.pos(),
-                self.line_number
-            )
-        }
-    }
-
-    fn peek(&self) -> Option<Token> {
-        if self.index < self.tokens.len() {
-            let item = Some(self.tokens[self.index].clone());
-            item
-        } else {
-            None
-        }
-    }
-
-    fn peek_kind(&self) -> Option<TokenKind> {
-        if self.index < self.tokens.len() {
-            let item = self.tokens[self.index].clone();
-            Some(item.kind())
-        } else {
-            None
-        }
+    fn next_token(&mut self) -> Option<Token> {
+        self.token_index += 1;
+        self.lexer.next()
     }
 
     fn saw_newline(&mut self) {
-        // println!("self.saw_newline");
         self.line_number += 1;
         self.scope = 0;
     }
@@ -158,31 +137,39 @@ impl Parser {
     fn handle_indentation(&mut self) {
         // println!("self.handle_indentation");
         loop {
-            if let Some(tok) = self.peek_kind() {
-                // self.next();
-                match tok {
+            // println!("handle indent loop");
+            if let Some(token) = self.next_token() {
+                match token.kind() {
                     TokenKind::Tab => self.scope += 1,
                     TokenKind::Space => {
                         let mut space_count = 1;
 
                         loop {
                             // println!("space loop");
-                            if let Some(TokenKind::Space) = self.peek_kind() {
-                                self.next(); // eat the space
-                                space_count += 1;
-                            } else {
-                                break;
+                            match self.next_token() {
+                                Some(tok) => match tok.kind() {
+                                    TokenKind::Space => {
+                                        space_count += 1; // eat space
+                                    }
+                                    _ => {
+                                        self.lexer.return_to_queue(tok);
+                                        break;
+                                    }
+                                },
+                                None => break,
                             }
                         }
                         self.scope = space_count / TAB_SIZE
                     }
-                    _ => break,
+                    _ => {
+                        self.lexer.return_to_queue(token);
+                        break;
+                    }
                 }
             } else {
                 break;
             }
         }
-        // println!("scope_level: {}", self.scope);
     }
 
     fn find_implicit_return_type(&self, body: &Vec<Expr>) -> GinType {
@@ -214,23 +201,26 @@ impl Parser {
     }
 
     fn eat(&mut self, token_kind: TokenKind) {
-        if let Some(kind) = self.peek_kind() {
-            if kind == token_kind {
-                self.next(); // eat token
-                             // println!("ate {:#?}", token_kind);
+        match self.next_token() {
+            Some(tk) => {
+                if tk.kind() == token_kind {
+                    // eat token
+                } else {
+                    self.lexer.return_to_queue(tk)
+                }
             }
+            _ => {}
         }
     }
 
     fn handle_id(&mut self, name: String) -> Option<Expr> {
-        // println!("self.handle_id({})", &name);
-        if let Some(kind) = self.next_kind() {
-            match kind {
+        if let Some(token) = self.next_token() {
+            match token.kind() {
                 TokenKind::Colon => {
                     self.eat(TokenKind::Space);
 
                     // after a :
-                    if let Some(tok) = self.next() {
+                    if let Some(tok) = self.next_token() {
                         let mut body = Vec::new();
 
                         match tok.kind() {
@@ -239,14 +229,15 @@ impl Parser {
                                 self.saw_newline();
                                 self.handle_indentation();
 
-                                if let Some(kind) = self.next_kind() {
-                                    match kind {
+                                if let Some(tk) = self.next_token() {
+                                    match tk.kind() {
                                         TokenKind::Id(n) => {
                                             if let Some(xpr) = self.handle_id(n) {
                                                 body.push(xpr)
                                             }
                                             self.handle_indentation();
                                             loop {
+                                                // println!("scope loop");
                                                 if self.scope > 0 {
                                                     if let Some(xpr) = self.expr() {
                                                         body.push(xpr);
@@ -267,28 +258,21 @@ impl Parser {
                                             // we finished the line
                                             Some(xpr)
                                         }
-                                        TokenKind::Literal(lit) => {
-                                            if let Some(TokenKind::Newline) = self.next_kind() {
-                                                self.saw_newline();
-                                                body.push(Expr::Literal(lit.clone()));
+                                        TokenKind::Literal(lit) => match self.next_token() {
+                                            Some(ltk) => match ltk.kind() {
+                                                TokenKind::Newline => {
+                                                    self.saw_newline();
+                                                    body.push(Expr::Literal(lit.clone()));
 
-                                                let return_type =
-                                                    self.find_implicit_return_type(&body);
+                                                    let ret = self.find_implicit_return_type(&body);
 
-                                                let xpr = Expr::FunctionDefinition(
-                                                    name,
-                                                    body,
-                                                    return_type,
-                                                );
-
-                                                // we finished the line
-                                                Some(xpr)
-                                            } else {
-                                                self.panic_position();
-                                                None
-                                            }
-                                        }
-
+                                                    // we finished the line
+                                                    Some(Expr::FunctionDefinition(name, body, ret))
+                                                }
+                                                _ => None,
+                                            },
+                                            _ => None,
+                                        },
                                         _ => panic!(
                                             "Unexpected ({:?}) at positon {} line {}",
                                             tok.kind(),
@@ -301,8 +285,8 @@ impl Parser {
                                 }
                             }
                             TokenKind::Literal(lit) => {
-                                if let Some(kind) = self.peek_kind() {
-                                    match kind {
+                                if let Some(tok) = self.next_token() {
+                                    match tok.kind() {
                                         TokenKind::Newline => {
                                             self.saw_newline();
                                             self.eat(TokenKind::Newline);
@@ -328,8 +312,17 @@ impl Parser {
                                         }
                                         TokenKind::Space => {
                                             self.eat(TokenKind::Space);
-                                            if let Some(TokenKind::CurlyClose) = self.peek_kind() {
-                                                Some(Expr::Literal(lit))
+
+                                            if let Some(tok) = self.next_token() {
+                                                match tok.kind() {
+                                                    TokenKind::CurlyClose => {
+                                                        Some(Expr::Literal(lit))
+                                                    }
+                                                    _ => {
+                                                        self.lexer.return_to_queue(tok);
+                                                        None
+                                                    }
+                                                }
                                             } else {
                                                 None
                                             }
@@ -344,26 +337,30 @@ impl Parser {
                                 }
                             }
                             TokenKind::CurlyOpen => {
-                                println!("got curly open");
+                                // println!("got curly open");
 
                                 let mut object_contents: HashMap<String, Expr> = HashMap::new();
                                 self.eat(TokenKind::Space);
 
                                 loop {
-                                    let kind = self.next_kind();
-                                    if let Some(TokenKind::Id(o_name)) = kind {
-                                        if let Some(expr) = self.handle_id(o_name.clone()) {
-                                            // println!("expr: {:#?}", &expr);
-                                            object_contents.insert(o_name, expr);
-                                        } else {
-                                            println!("got nothing from handle_id")
+                                    println!("curly loop");
+                                    if let Some(token) = self.next_token() {
+                                        match token.kind() {
+                                            TokenKind::Id(o_name) => {
+                                                if let Some(expr) = self.handle_id(o_name.clone()) {
+                                                    object_contents.insert(o_name, expr);
+                                                } else {
+                                                    println!("got nothing from handle_id")
+                                                }
+                                                self.eat(TokenKind::Space);
+                                            }
+                                            TokenKind::CurlyClose => {
+                                                self.eat(TokenKind::Space);
+                                                println!("got curly close");
+                                                break;
+                                            }
+                                            _ => break,
                                         }
-                                        self.eat(TokenKind::Space);
-                                    } else if Some(TokenKind::CurlyClose) == kind {
-                                        self.eat(TokenKind::Space);
-
-                                        println!("got curly close");
-                                        break;
                                     }
                                 }
 
@@ -381,12 +378,16 @@ impl Parser {
                             ),
                         }
                     } else {
-                        self.panic_position();
-                        None
+                        panic!(
+                            "Unexpected ({:?}) at positon {} line {}",
+                            token.kind(),
+                            token.pos(),
+                            self.line_number
+                        );
                     }
                 }
                 TokenKind::Space => {
-                    if let Some(tok) = self.next() {
+                    if let Some(tok) = self.next_token() {
                         match tok.kind() {
                             TokenKind::Literal(lit) => {
                                 let arg = match lit {
@@ -401,8 +402,11 @@ impl Parser {
                             }
                             TokenKind::CurlyOpen => {
                                 // this is the start to a object definition
-                                if let Some(TokenKind::Newline) = self.peek_kind() {
-                                    self.next(); // eat newline
+                                if let Some(tk) = self.next_token() {
+                                    match tk.kind() {
+                                        TokenKind::Newline => {}
+                                        _ => self.lexer.return_to_queue(tk),
+                                    }
                                 }
 
                                 // this is a bit eager, but we are going to assume we only
@@ -412,19 +416,29 @@ impl Parser {
                                 let mut object_contents: HashMap<String, GinType> = HashMap::new();
                                 // loop until end of object
                                 loop {
+                                    // println!("curly2 loop");
                                     self.handle_indentation();
-                                    let maybe_next_kind = self.next_kind();
-                                    if let Some(next_kind) = maybe_next_kind {
-                                        match next_kind {
+
+                                    match self.next_token() {
+                                        Some(ntk) => match ntk.kind() {
                                             TokenKind::CurlyClose => break,
                                             TokenKind::Id(id) => {
                                                 self.eat(TokenKind::Space);
-                                                if let Some(TokenKind::Id(obj_t)) = self.next_kind()
-                                                {
-                                                    let obj_type =
-                                                        GinType::from_str(&obj_t.as_str())
-                                                            .expect("Failed to parse object type");
-                                                    object_contents.insert(id, obj_type);
+
+                                                let nntk = self.next_token();
+                                                if let Some(tkn) = nntk {
+                                                    match tkn.kind() {
+                                                        TokenKind::Id(obj_t) => {
+                                                            let obj_type =
+                                                                GinType::from_str(&obj_t.as_str())
+                                                                    .expect(
+                                                                    "Failed to parse object type",
+                                                                );
+                                                            object_contents.insert(id, obj_type);
+                                                        }
+                                                        // TODO: panic?
+                                                        _ => {}
+                                                    }
                                                 }
                                             }
                                             TokenKind::Newline => continue,
@@ -434,10 +448,8 @@ impl Parser {
                                                 "Unexpected ({:?}) line {}",
                                                 kind, self.line_number
                                             ),
-                                        }
-                                    } else {
-                                        // got nothing
-                                        break;
+                                        },
+                                        _ => break,
                                     }
                                 }
 
@@ -453,8 +465,12 @@ impl Parser {
                             }
                         }
                     } else {
-                        self.panic_position();
-                        None
+                        panic!(
+                            "Unexpected ({:?}) at positon {} line {}",
+                            token.kind(),
+                            token.pos(),
+                            self.line_number
+                        );
                     }
                 }
                 TokenKind::Newline => {
@@ -483,21 +499,23 @@ impl Parser {
     fn expr(&mut self) -> Option<Expr> {
         // skip newline spam
         loop {
-            if let Some(TokenKind::Newline) = self.peek_kind() {
-                self.saw_newline();
-                self.next(); // eats the newline
+            // println!("expr newline loop");
+            if let Some(t) = self.next_token() {
+                match t.kind() {
+                    TokenKind::Newline => self.saw_newline(),
+                    _ => {
+                        self.lexer.return_to_queue(t);
+                        break;
+                    }
+                }
             } else {
                 break;
             }
         }
 
-        if let Some(tok) = self.next() {
-            let kind = tok.kind();
-            match kind {
-                TokenKind::Id(name) => {
-                    // println!("{} | self.expr -> handle_id({})", self.scope, name);
-                    self.handle_id(name)
-                }
+        if let Some(tok) = self.next_token() {
+            match tok.kind() {
+                TokenKind::Id(name) => self.handle_id(name),
                 TokenKind::Space => {
                     panic!(
                         "Cannot start a expression with ({:?}) at positon {} line {}",
@@ -514,44 +532,30 @@ impl Parser {
         }
     }
 
-    pub fn parse(&mut self, mut tokens: Vec<Token>) -> Vec<Expr> {
-        // will get replaced with a single ignore check on next token
-        // when we stream tokens one at a time
-        tokens.retain(|token| match token.kind() {
-            TokenKind::Comment(_) => false,
-            _ => true,
-        });
+    pub fn parse_module(&mut self, path: &Path) -> Module {
+        let mut module = Module {
+            path: path.to_path_buf(),
+            body: Vec::new(),
+        };
 
-        self.tokens = tokens;
+        if let Ok(file_contents) = fs::read_to_string(path) {
+            let file_name = path
+                .file_stem()
+                .expect("Failed to read file name")
+                .to_str()
+                .expect("Failed to convert file name to str");
 
-        // We are assuming we are getting the result of tokens from a file.
-        // so by default we have a root module
+            self.lexer.set_source_content(file_contents);
 
-        let mut body: Vec<Expr> = Vec::new();
-
-        loop {
-            if let Some(expr) = self.expr() {
-                body.push(expr)
-            } else {
-                break;
+            loop {
+                // println!("parse mod loop");
+                if let Some(expr) = self.expr() {
+                    module.body.push(expr)
+                } else {
+                    break;
+                }
             }
         }
-
-        body
-    }
-}
-
-impl Iterator for Parser {
-    type Item = Token;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        // println!("index: {}", self.index);
-        if self.index < self.tokens.len() {
-            let item = Some(self.tokens[self.index].clone());
-            self.index += 1;
-            item
-        } else {
-            None
-        }
+        module
     }
 }

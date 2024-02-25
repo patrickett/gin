@@ -1,109 +1,46 @@
-use std::{iter::Peekable, str::Chars};
+use std::{collections::VecDeque, iter::Peekable, str::Chars};
 
-#[derive(Debug, PartialEq, Clone)]
-pub enum Keyword {
-    If,
-    Else,
-    For,
-    Return,
-}
+use crate::token::{Keyword, Literal, Token, TokenKind};
 
-#[derive(Debug, PartialEq, Clone)]
-pub enum Literal {
-    String(String),
-    Number(usize),
-}
-
-#[derive(Debug, PartialEq, Clone)]
-pub struct Token {
-    pos: usize,
-    // end: usize,
-    kind: TokenKind,
-}
-
-impl Token {
-    pub fn new(kind: TokenKind, pos: usize) -> Token {
-        Self {
-            pos,
-            // end: start + length,
-            kind,
-        }
-    }
-
-    pub fn kind(&self) -> TokenKind {
-        self.kind.to_owned()
-    }
-
-    pub fn pos(&self) -> usize {
-        self.pos.to_owned()
-    }
-}
-
-#[derive(Debug, PartialEq, Clone)]
-pub enum TokenKind {
-    ParenOpen,
-    ParenClose,
-    CurlyOpen,
-    CurlyClose,
-    SlashBack,
-    SlashForward,
-    Colon,
-    SemiColon,
-    Comma,
-    Tab,
-    Space,
-    Newline,
-    Comment(String),
-    Id(String),
-    Literal(Literal),
-    LessThan,
-    GreaterThan,
-    RightArrow,
-    Plus,
-    Dash,
-    Equals,
-    Ampersand,
-    Star,
-    Percent,
-    Keyword(Keyword),
-    EOF,
-}
-
+#[derive(Clone)]
 pub struct Lexer {
-    index: usize,
+    token_count: usize,
+    source_index: usize,
     buffer: String,
-    pub tokens: Vec<Token>,
+    queue: VecDeque<Token>,
+    source_content: String,
 }
 
 impl Lexer {
     pub fn new() -> Self {
         Self {
-            index: 0,
+            token_count: 0,
+            source_index: 0,
             buffer: String::new(),
-            tokens: Vec::new(),
+            source_content: String::new(),
+            queue: VecDeque::new(),
         }
+    }
+
+    pub fn set_source_content(&mut self, source_content: String) {
+        self.source_content = source_content;
+    }
+
+    pub fn return_to_queue(&mut self, t: Token) {
+        self.queue.push_front(t)
     }
 
     fn add(&mut self, tok: Token) {
         self.buffer.clear();
-        self.tokens.push(tok);
+        self.queue.push_back(tok);
     }
 
-    fn resolve_buffer_then_add(&mut self, src: &mut Peekable<Chars>, tok: TokenKind) {
-        self.resolve_buffer(src);
-        self.add(Token::new(tok, self.index));
+    fn resolve_buffer_then_add(&mut self, tok: TokenKind) {
+        self.resolve_buffer();
+        self.queue.push_back(Token::new(tok, self.source_index));
     }
 
-    fn next(&mut self, src: &mut Peekable<Chars>) {
-        let next = src.next();
-        if let Some(c) = next {
-            self.buffer.push(c);
-            self.index += 1;
-        }
-        // next
-    }
-
-    fn resolve_buffer(&mut self, src: &mut Peekable<Chars>) {
+    fn resolve_buffer(&mut self) {
         if !self.buffer.is_empty() {
             let tok = match self.buffer.as_str() {
                 "+" => TokenKind::Plus,
@@ -125,7 +62,6 @@ impl Lexer {
                         let num: Result<usize, _> = id.parse();
                         if let Ok(n) = num {
                             TokenKind::Literal(Literal::Number(n))
-                            // Token::Number(n)
                         } else {
                             TokenKind::Id(id.to_string())
                         }
@@ -135,73 +71,86 @@ impl Lexer {
                 }
             };
 
-            self.add(Token::new(tok, self.index));
+            self.buffer.clear();
+            self.queue.push_back(Token::new(tok, self.source_index));
         }
-        self.next(src);
     }
 
-    fn resolve_comment(&mut self, src: &mut Peekable<Chars>) {
-        self.resolve_buffer(src);
+    fn next_char(&mut self) -> Option<char> {
+        if self.source_index < self.source_content.len() {
+            self.source_index += 1;
+            self.source_content.chars().nth(self.source_index - 1)
+        } else {
+            None
+        }
+    }
+
+    fn resolve_comment(&mut self) {
+        self.resolve_buffer();
         loop {
-            match src.peek() {
+            match self.next_char() {
                 Some('\r' | '\n') | None => break,
-                _ => {}
+                Some(c) => self.buffer.push(c),
             }
-            self.next(src);
         }
 
         let comment_text = self.buffer.clone().to_string();
-        let comment = Token::new(TokenKind::Comment(comment_text), self.index);
+        let comment = Token::new(TokenKind::Comment(comment_text), self.source_index);
         self.add(comment);
     }
 
-    fn resolve_string(&mut self, src: &mut Peekable<Chars>) {
-        self.resolve_buffer(src);
+    fn resolve_string(&mut self) {
+        self.resolve_buffer();
         loop {
-            match src.peek() {
-                Some('"') | None => {
-                    self.next(src);
-                    break;
-                }
-                _ => {}
+            match self.next_char() {
+                Some('"') | None => break,
+                Some(c) => self.buffer.push(c),
             }
-            self.next(src);
         }
 
         let string_text = self.buffer.clone().to_string();
-        let string = Token::new(TokenKind::Literal(Literal::String(string_text)), 1);
+        let string = Token::new(
+            TokenKind::Literal(Literal::String(string_text)),
+            self.source_index,
+        );
         self.add(string);
     }
+}
 
-    // resolve -> push tok
-    pub fn lex(&mut self, src: &str) -> Vec<Token> {
-        self.buffer.clear();
-        self.tokens.clear();
-        let mut src = src.chars().peekable();
+impl Iterator for Lexer {
+    type Item = Token;
 
+    fn next(&mut self) -> Option<Self::Item> {
         loop {
-            match src.peek() {
-                Some(c) => match c {
-                    ' ' => self.resolve_buffer_then_add(&mut src, TokenKind::Space),
-                    ':' => self.resolve_buffer_then_add(&mut src, TokenKind::Colon),
-                    '\t' => self.resolve_buffer_then_add(&mut src, TokenKind::Tab),
-                    ',' => self.resolve_buffer_then_add(&mut src, TokenKind::Comma),
-                    ';' => self.resolve_buffer_then_add(&mut src, TokenKind::SemiColon),
-                    '\n' => self.resolve_buffer_then_add(&mut src, TokenKind::Newline),
-                    '{' => self.resolve_buffer_then_add(&mut src, TokenKind::CurlyOpen),
-                    '}' => self.resolve_buffer_then_add(&mut src, TokenKind::CurlyClose),
-                    '#' => self.resolve_comment(&mut src),
-                    '"' => self.resolve_string(&mut src),
-                    _ => {
-                        // println!("_ =>");
-                        self.next(&mut src);
+            if self.queue.len() > 0 {
+                self.token_count += 1;
+                return self.queue.pop_front();
+            }
+
+            if let Some(c) = self.next_char() {
+                match c {
+                    ' ' => self.resolve_buffer_then_add(TokenKind::Space),
+                    ':' => self.resolve_buffer_then_add(TokenKind::Colon),
+                    '\t' => self.resolve_buffer_then_add(TokenKind::Tab),
+                    ',' => self.resolve_buffer_then_add(TokenKind::Comma),
+                    ';' => self.resolve_buffer_then_add(TokenKind::SemiColon),
+                    '\n' => self.resolve_buffer_then_add(TokenKind::Newline),
+                    '{' => self.resolve_buffer_then_add(TokenKind::CurlyOpen),
+                    '}' => self.resolve_buffer_then_add(TokenKind::CurlyClose),
+                    '#' => self.resolve_comment(),
+                    '"' => self.resolve_string(),
+                    ch => {
+                        self.buffer.push(ch);
                     }
-                },
-                None => break,
+                }
+            } else {
+                if !self.buffer.is_empty() {
+                    self.resolve_buffer();
+                    continue;
+                }
+
+                return None;
             }
         }
-        self.resolve_buffer(&mut src);
-        // self.add(Token::new(TokenKind::EOF, self.index));
-        self.tokens.clone()
     }
 }
