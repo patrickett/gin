@@ -1,37 +1,8 @@
-#[derive(Debug, PartialEq, Clone)]
-pub enum Literal {
-    Bool(bool),
-    String(String),
-    Number(usize),
-}
-
-#[derive(Debug, PartialEq, Clone)]
-pub struct Token {
-    pos: usize,
-    // end: usize,
-    kind: TokenKind,
-}
-
-impl Token {
-    pub fn new(kind: TokenKind, pos: usize) -> Token {
-        Self {
-            pos,
-            // end: start + length,
-            kind,
-        }
-    }
-
-    pub fn kind(&self) -> TokenKind {
-        self.kind.to_owned()
-    }
-
-    pub fn pos(&self) -> usize {
-        self.pos.to_owned()
-    }
-}
+use crate::expr::Literal;
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Keyword {
+    Include,
     If,
     Else,
     For,
@@ -39,11 +10,13 @@ pub enum Keyword {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub enum TokenKind {
+pub enum Token {
     ParenOpen,
     ParenClose,
     CurlyOpen,
     CurlyClose,
+    BracketOpen,
+    BracketClose,
     SlashBack,
     SlashForward,
     Colon,
@@ -57,8 +30,11 @@ pub enum TokenKind {
     Id(String),
     Literal(Literal),
     LessThan,
+    LessThanOrEqualTo,
     GreaterThan,
+    GreaterThanOrEqualTo,
     RightArrow,
+    LeftArrow,
     Plus,
     Dash,
     Equals,

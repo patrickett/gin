@@ -1,43 +1,49 @@
 #![allow(unused)]
+use clap::*;
+
 use std::{env, fs, path::Path, process::exit};
 
-use crate::{exit_status::ExitStatus, parse::Parser};
+use crate::{exit_status::ExitStatus, ngin::Ngin};
 
+mod compiler;
 mod exit_status;
+mod expr;
+mod gin_type;
 mod lex;
+mod module;
+mod ngin;
 mod parse;
 mod tests;
 pub mod token;
 
-// we are assuming that if you pass a file you want it run
-pub fn ast(path: &str) -> parse::Module {
-    let path = Path::new(&path);
-    if !path.exists() {
-        eprintln!("No such file or directory: {}", path.display());
-        exit(ExitStatus::NoSuchFileOrDirectory.into())
-    }
-
-    let mut parser = Parser::new();
-    parser.parse_module(path)
-}
-
-// we are assuming that if you pass a file you want it run
-pub fn run(path: String) {
-    let path = Path::new(&path);
-    if !path.exists() {
-        eprintln!("No such file or directory: {}", path.display());
-        exit(ExitStatus::NoSuchFileOrDirectory.into())
-    }
-
-    let mut parser = Parser::new();
-    let module = parser.parse_module(path);
-    println!("{:#?}", module);
+#[derive(Parser, Debug)]
+#[command(version)]
+struct Args {
+    /// Path to the .gin file
+    file_path: Option<String>,
+    #[arg(short, long)]
+    debug: bool,
 }
 
 fn main() {
-    if let Some(path) = env::args().nth(1) {
-        run(path)
-    } else {
-        eprintln!("Failed to provide gin file")
+    let args = Args::parse();
+    match args.file_path {
+        Some(p) => {
+            let mut runtime = Ngin::new();
+            let root_module = runtime.include(&p);
+            if let Some(module) = root_module {
+                if args.debug {
+                    println!("{:#?}", module.get_body());
+                } else {
+                    let a = runtime.execute(&module.get_body());
+                }
+            } else {
+                // TODO: handle better
+                println!("unable to find module at location: {}", p);
+            }
+        }
+        None => {
+            println!("starting repl")
+        }
     }
 }

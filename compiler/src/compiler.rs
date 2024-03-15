@@ -1,100 +1,110 @@
-use std::{
-    path::Path,
-    process::{Command, Stdio},
-};
+use crate::expr::Expr;
 
-use inkwell::{
-    context::Context,
-    targets::{CodeModel, FileType, RelocMode, Target, TargetMachine},
-    values::IntValue,
-    OptimizationLevel,
-};
+use inkwell::context::Context;
+use inkwell::module::Linkage;
+use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, IntType, PointerType};
+use inkwell::values::{FloatValue, FunctionValue};
+use inkwell::FloatPredicate;
+use inkwell::*;
+use inkwell::{builder::Builder, values::BasicValueEnum};
+use inkwell::{module::Module, values::PointerValue};
+use std::collections::HashMap;
 
-use crate::parser::{Expr, Literal, Op};
-
-// Recursive function to generate IR for an expression
-fn generate_expr_ir<'a>(
-    context: &'a Context,
-    module: &'a inkwell::module::Module,
-    builder: &'a inkwell::builder::Builder,
-    expr: &'a Expr,
-) -> IntValue<'a> {
-    match expr {
-        Expr::BinExpr { lhs, op, rhs } => {
-            let lhs_value = generate_expr_ir(context, module, builder, lhs);
-            let rhs_value = generate_expr_ir(context, module, builder, rhs);
-
-            match op {
-                Op::Add => builder.build_int_add(lhs_value, rhs_value, "addtmp"),
-                Op::Sub => builder.build_int_sub(lhs_value, rhs_value, "subtmp"),
-                Op::Mul => builder.build_int_mul(lhs_value, rhs_value, "multmp"),
-                Op::Div => todo!(),
-                Op::Assign => todo!(),
-            }
-        }
-        // Expr::Assignment { symbol, expr } => todo!(),
-        Expr::Literal(literal) => match literal {
-            Literal::String(_) => todo!(),
-            Literal::Number(n) => context.i32_type().const_int(*n as u64, false),
-        },
-        Expr::Id(_) => todo!(),
-    }
-}
-
-pub fn compile_exprs(exprs: Vec<Expr>, mod_name: &str) {
+pub fn compile() {
     let context = Context::create();
-    let module = context.create_module("add");
+    let module = context.create_module("repl");
     let builder = context.create_builder();
 
-    // Define the main function
-    let main_func = module.add_function("main", context.i32_type().fn_type(&[], false), None);
-    let entry_block = context.append_basic_block(main_func, "entry");
+    Compiler::new(&context, &builder, &module);
+}
 
-    // Set the builder position to the entry block
-    builder.position_at_end(entry_block);
+pub struct Compiler<'a, 'ctx> {
+    pub context: &'ctx Context,
+    pub builder: &'a Builder<'ctx>,
+    pub module: &'a Module<'ctx>,
+}
 
-    // Generate IR for each expression in the Vec
-    let result = generate_expr_ir(&context, &module, &builder, &exprs[0]);
+impl<'a, 'ctx> Compiler<'a, 'ctx> {
+    pub fn new(context: &'ctx Context, builder: &'a Builder<'ctx>, module: &'a Module<'ctx>) {
+        let compiler = Compiler {
+            context,
+            builder,
+            module,
+        };
 
-    // Return the result at the end of the main function
-    builder.build_return(Some(&result));
+        compiler.compile();
+    }
 
-    // Print LLVM IR to console
-    module.print_to_stderr();
+    pub fn compile(&self) {
+        let i64_type = self.context.i64_type();
+        let function_type =
+            i64_type.fn_type(&[i64_type.into(), i64_type.into(), i64_type.into()], false);
 
-    module
-        .print_to_file(format!("{}.ll", mod_name))
-        .expect("Failed to write to .ll file");
+        let main_function = self.module.add_function("main", function_type, None);
+        let basic_block = self.context.append_basic_block(main_function, "entrypoint");
 
-    // Emit machine code
-    Target::initialize_native(&Default::default()).expect("Failed to initialize target");
-    let target_triple = TargetMachine::get_default_triple();
-    let target = Target::from_triple(&target_triple).expect("Failed to get target");
-    let target_machine = target
-        .create_target_machine(
-            &target_triple,
-            "generic",
-            "",
-            OptimizationLevel::Default,
-            RelocMode::Default,
-            CodeModel::Default,
-        )
-        .expect("Failed to create target machine");
-    target_machine
-        .write_to_file(
-            &module,
-            FileType::Object,
-            Path::new(&format!("{}.o", mod_name)),
-        )
-        .expect("Failed to write machine code to file");
+        self.builder.position_at_end(basic_block);
 
-    // replace with lld
-    Command::new("ld")
-        .args(&[&format!("{}.o", mod_name), "-o", mod_name])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .expect("Failed to run ld");
+        let i32_type = self.emit_printf_call("hello, world!\n", "hello");
+        self.builder
+            .build_return(Some(&i32_type.const_int(0, false)));
 
-    // println!("Executable generated as 'my_program'");
+        let _result = self.module.print_to_file("main.ll");
+        self.execute()
+    }
+
+    fn emit_printf_call(&self, hello_str: &str, name: &str) -> IntType {
+        let i32_type = self.context.i32_type();
+        let str_type = self.context.i8_type().ptr_type(AddressSpace::default());
+        let printf_type = i32_type.fn_type(&[str_type.into()], true);
+
+        // `printf` is same to `puts`
+        let printf = self
+            .module
+            .add_function("puts", printf_type, Some(Linkage::External));
+
+        let pointer_value = self.emit_global_string(hello_str, name);
+        self.builder.build_call(printf, &[pointer_value.into()], "");
+
+        i32_type
+    }
+
+    fn execute(&self) {
+        let ee = self
+            .module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .unwrap();
+        let maybe_fn = unsafe { ee.get_function::<unsafe extern "C" fn() -> f64>("main") };
+
+        let compiled_fn = match maybe_fn {
+            Ok(f) => f,
+            Err(err) => {
+                panic!("{:?}", err);
+            }
+        };
+
+        unsafe {
+            compiled_fn.call();
+        }
+    }
+
+    fn emit_global_string(&self, string: &str, name: &str) -> PointerValue {
+        let ty = self.context.i8_type().array_type(string.len() as u32);
+        let gv = self
+            .module
+            .add_global(ty, Some(AddressSpace::default()), name);
+        gv.set_linkage(Linkage::Internal);
+        gv.set_initializer(&self.context.const_string(string.as_ref(), false));
+
+        let pointer_value = self
+            .builder
+            .build_pointer_cast(
+                gv.as_pointer_value(),
+                self.context.i8_type().ptr_type(AddressSpace::default()),
+                name,
+            )
+            .expect("failed to create pointer value");
+
+        pointer_value
+    }
 }

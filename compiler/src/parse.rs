@@ -1,7 +1,7 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
-    iter::{Map, Peekable},
+    iter::Map,
     path::{Path, PathBuf},
     ptr::null,
     slice::Iter,
@@ -9,125 +9,30 @@ use std::{
 };
 
 use crate::{
+    expr::{Define, Expr, Literal},
+    gin_type::GinType,
     lex::Lexer,
-    token::{Literal, Token, TokenKind},
+    module::GinModule,
+    token::{Keyword, Token},
 };
 
 const TAB_SIZE: usize = 4;
 
-#[derive(Debug, Clone)]
-pub struct Module {
-    path: PathBuf,
-    pub body: Vec<Expr>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum GinType {
-    Bool,
-    List,
-    Object(HashMap<String, GinType>),
-    String,
-    Number,
-    // TODO: If a literal is unchanged in a function we should be able to return the actual value
-    // we will refer to this as a constant since it is constant and unchanged
-    // ConstantString(String),
-    // ConstantNumber(usize),
-    // ConstantObject(Map<String,>)
-    Custom(String),
-    Nothing,
-}
-
-impl FromStr for GinType {
-    type Err = ();
-
-    fn from_str(input: &str) -> Result<GinType, Self::Err> {
-        match input {
-            "number" => Ok(GinType::Number),
-            "string" => Ok(GinType::String),
-            "bool" => Ok(GinType::Bool),
-            custom => Ok(GinType::Custom(custom.into())),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum FnArg {
-    String(String),
-    Number(usize),
-    Bool(bool),
-    Id(String),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Expr {
-    Literal(Literal),
-
-    /// Object Name, Object Type Defintions
-    ObjectDefinition(String, HashMap<String, GinType>),
-
-    ObjectLiteral(HashMap<String, Expr>),
-
-    /// Name, Body, ReturnType
-    FunctionDefinition(String, Vec<Expr>, GinType),
-    /// FunctionName, Argument
-    FunctionCall(String, Option<FnArg>),
-}
-
-impl Expr {
-    fn gin_type(&self) -> GinType {
-        match self {
-            Expr::Literal(lit) => match lit {
-                Literal::Bool(_) => GinType::Bool,
-                Literal::String(_) => GinType::String,
-                Literal::Number(_) => GinType::Number,
-            },
-            Expr::ObjectLiteral(obj) => {
-                let mut obj_def: HashMap<String, GinType> = HashMap::new();
-
-                for (key, expr) in obj.iter() {
-                    obj_def.insert(key.clone(), expr.gin_type());
-                }
-
-                GinType::Object(obj_def)
-            }
-            Expr::ObjectDefinition(_, _) => GinType::Nothing,
-            Expr::FunctionDefinition(_, _, _) => GinType::Nothing,
-            Expr::FunctionCall(_, _) => GinType::Nothing,
-        }
-    }
-}
-
 pub struct Parser {
     tokens: Vec<Token>,
-    token_index: usize,
     lexer: Lexer,
     line_number: usize,
     scope: usize,
 }
 
 impl Parser {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             tokens: Vec::new(),
-            token_index: 0,
             lexer: Lexer::new(),
             scope: 0,
             line_number: 0,
         }
-    }
-
-    fn current(&self) -> Option<Token> {
-        if self.token_index < self.tokens.len() {
-            let item = Some(self.tokens[self.token_index - 1].clone());
-            item
-        } else {
-            None
-        }
-    }
-
-    fn next_token(&mut self) -> Option<Token> {
-        self.token_index += 1;
-        self.lexer.next()
     }
 
     fn saw_newline(&mut self) {
@@ -135,22 +40,18 @@ impl Parser {
         self.scope = 0;
     }
 
-    /// handle tabs and indentation
     fn handle_indentation(&mut self) {
-        // println!("self.handle_indentation");
         loop {
-            // println!("handle indent loop");
-            if let Some(token) = self.next_token() {
-                match token.kind() {
-                    TokenKind::Tab => self.scope += 1,
-                    TokenKind::Space => {
+            match self.lexer.next() {
+                Some(token) => match token {
+                    Token::Tab => self.scope += 1,
+                    Token::Space => {
                         let mut space_count = 1;
 
                         loop {
-                            // println!("space loop");
-                            match self.next_token() {
-                                Some(tok) => match tok.kind() {
-                                    TokenKind::Space => {
+                            match self.lexer.next() {
+                                Some(tok) => match tok {
+                                    Token::Space => {
                                         space_count += 1; // eat space
                                     }
                                     _ => {
@@ -167,409 +68,323 @@ impl Parser {
                         self.lexer.return_to_queue(token);
                         break;
                     }
-                }
-            } else {
-                break;
+                },
+                None => break,
             }
         }
     }
 
     fn find_implicit_return_type(&self, body: &Vec<Expr>) -> GinType {
-        if let Some(t) = body.last() {
-            match t {
+        match body.last() {
+            Some(t) => match t {
                 // if we get a fncall we need find its decl
                 // then we return its return type
-                Expr::FunctionCall(f_name_call, _) => {
+                Expr::Call(f_name_call, _) => {
                     let e = body.iter().find(|e| match e {
-                        Expr::ObjectDefinition(_, _) => false,
-                        Expr::Literal(_) => false,
-                        Expr::FunctionDefinition(f_name_def, _, _) => f_name_def == f_name_call,
-                        Expr::FunctionCall(_, _) => false,
-                        Expr::ObjectLiteral(_) => false,
+                        Expr::Define(Define::Function(f_name_def, _, _)) => {
+                            f_name_def == f_name_call
+                        }
+                        _ => false,
                     });
 
-                    if let Some(expr) = e {
-                        if let Expr::FunctionDefinition(_, _, r_type) = expr {
-                            return r_type.to_owned();
-                        }
+                    if let Some(Expr::Define(Define::Function(_, _, r_type))) = e {
+                        return r_type.to_owned();
                     }
                     GinType::Nothing
                 }
                 expr => expr.gin_type(),
-            }
-        } else {
-            GinType::Nothing
+            },
+            None => GinType::Nothing,
         }
     }
 
-    fn eat(&mut self, token_kind: TokenKind) {
-        match self.next_token() {
-            Some(tk) => {
-                if tk.kind() == token_kind {
-                    // eat token
-                } else {
-                    self.lexer.return_to_queue(tk)
-                }
+    fn eat(&mut self, token_kind: Token) {
+        if let Some(token) = self.lexer.next() {
+            if token != token_kind {
+                self.lexer.return_to_queue(token)
             }
-            _ => {}
         }
     }
 
-    fn handle_id(&mut self, name: String) -> Option<Expr> {
-        if let Some(token) = self.next_token() {
-            match token.kind() {
-                TokenKind::Colon => {
-                    self.eat(TokenKind::Space);
+    fn handle_multi_line_function(&mut self, name: String) -> Option<Expr> {
+        let starting_scope = self.scope;
+        self.saw_newline();
+        self.handle_indentation();
 
-                    // after a :
-                    if let Some(tok) = self.next_token() {
-                        let mut body = Vec::new();
+        let mut body = Vec::new();
 
-                        match tok.kind() {
-                            TokenKind::Newline => {
-                                // multiline fn
-                                self.saw_newline();
-                                self.handle_indentation();
-
-                                if let Some(tk) = self.next_token() {
-                                    match tk.kind() {
-                                        TokenKind::Id(n) => {
-                                            if let Some(xpr) = self.handle_id(n) {
-                                                body.push(xpr)
-                                            }
-                                            self.handle_indentation();
-                                            loop {
-                                                // println!("scope loop");
-                                                if self.scope > 0 {
-                                                    if let Some(xpr) = self.expr() {
-                                                        body.push(xpr);
-                                                    }
-                                                } else {
-                                                    break;
-                                                }
-                                            }
-
-                                            let return_type = self.find_implicit_return_type(&body);
-
-                                            // implicit return type
-                                            // return the type of the last expression in the function body
-
-                                            let xpr =
-                                                Expr::FunctionDefinition(name, body, return_type);
-
-                                            // we finished the line
-                                            Some(xpr)
-                                        }
-                                        TokenKind::Literal(lit) => match self.next_token() {
-                                            Some(ltk) => match ltk.kind() {
-                                                TokenKind::Newline => {
-                                                    self.saw_newline();
-                                                    body.push(Expr::Literal(lit.clone()));
-
-                                                    let ret = self.find_implicit_return_type(&body);
-
-                                                    // we finished the line
-                                                    Some(Expr::FunctionDefinition(name, body, ret))
-                                                }
-                                                _ => None,
-                                            },
-                                            None => None,
-                                        },
-                                        _ => panic!(
-                                            "Unexpected ({:?}) at positon {} line {} 1",
-                                            tok.kind(),
-                                            tok.pos(),
-                                            self.line_number
-                                        ),
-                                    }
-                                } else {
-                                    None
-                                }
-                            }
-                            TokenKind::Literal(lit) => {
-                                if let Some(tok) = self.next_token() {
-                                    match tok.kind() {
-                                        TokenKind::Newline => {
-                                            self.saw_newline();
-                                            self.eat(TokenKind::Newline);
-
-                                            let expr = Expr::Literal(lit.clone());
-                                            body.push(expr.clone());
-                                            // we finished the line
-
-                                            Some(Expr::FunctionDefinition(
-                                                name,
-                                                body,
-                                                expr.gin_type(),
-                                            ))
-                                        }
-                                        TokenKind::Comma => {
-                                            self.eat(TokenKind::Comma);
-                                            self.eat(TokenKind::Space);
-                                            Some(Expr::Literal(lit))
-                                        }
-                                        TokenKind::CurlyClose => {
-                                            self.eat(TokenKind::Space);
-                                            Some(Expr::Literal(lit))
-                                        }
-                                        TokenKind::Space => {
-                                            self.eat(TokenKind::Space);
-
-                                            if let Some(tok) = self.next_token() {
-                                                match tok.kind() {
-                                                    TokenKind::CurlyClose => {
-                                                        Some(Expr::Literal(lit))
-                                                    }
-                                                    _ => {
-                                                        self.lexer.return_to_queue(tok);
-                                                        None
-                                                    }
-                                                }
-                                            } else {
-                                                None
-                                            }
-                                        }
-                                        u => {
-                                            println!("found u: {:#?}", u);
-                                            None
-                                        }
-                                    }
-                                } else {
-                                    None
-                                }
-                            }
-                            TokenKind::CurlyOpen => {
-                                // println!("got curly open");
-
-                                let mut object_contents: HashMap<String, Expr> = HashMap::new();
-                                self.eat(TokenKind::Space);
-
-                                loop {
-                                    println!("curly loop");
-                                    if let Some(token) = self.next_token() {
-                                        match token.kind() {
-                                            TokenKind::Id(o_name) => {
-                                                if let Some(expr) = self.handle_id(o_name.clone()) {
-                                                    object_contents.insert(o_name, expr);
-                                                } else {
-                                                    println!("got nothing from handle_id")
-                                                }
-                                                self.eat(TokenKind::Space);
-                                            }
-                                            TokenKind::CurlyClose => {
-                                                self.eat(TokenKind::Space);
-                                                println!("got curly close");
-                                                break;
-                                            }
-                                            _ => break,
-                                        }
-                                    }
-                                }
-
-                                self.eat(TokenKind::Newline);
-                                body.push(Expr::ObjectLiteral(object_contents));
-                                let ret_type = self.find_implicit_return_type(&body);
-
-                                Some(Expr::FunctionDefinition(name, body, ret_type))
-                            }
-                            _ => panic!(
-                                "Unexpected ({:?}) at positon {} line {} 2",
-                                tok.kind(),
-                                tok.pos(),
-                                self.line_number
-                            ),
-                        }
-                    } else {
-                        panic!(
-                            "Unexpected ({:?}) at positon {} line {}",
-                            token.kind(),
-                            token.pos(),
-                            self.line_number
-                        );
-                    }
-                }
-                TokenKind::Space => {
-                    if let Some(tok) = self.next_token() {
-                        match tok.kind() {
-                            TokenKind::Literal(lit) => {
-                                let arg = match lit {
-                                    Literal::Bool(b) => FnArg::Bool(b),
-                                    Literal::String(s) => FnArg::String(s),
-                                    Literal::Number(n) => FnArg::Number(n),
-                                };
-
-                                Some(Expr::FunctionCall(name, Some(arg)))
-                            }
-                            TokenKind::Id(id) => {
-                                Some(Expr::FunctionCall(name, Some(FnArg::Id(id))))
-                            }
-                            TokenKind::CurlyOpen => {
-                                // this is the start to a object definition
-                                if let Some(tk) = self.next_token() {
-                                    match tk.kind() {
-                                        TokenKind::Newline => {}
-                                        _ => self.lexer.return_to_queue(tk),
-                                    }
-                                }
-
-                                // this is a bit eager, but we are going to assume we only
-                                // have one pair of curlies and there is no nesting yet.
-                                //
-
-                                let mut object_contents: HashMap<String, GinType> = HashMap::new();
-                                // loop until end of object
-                                loop {
-                                    // println!("curly2 loop");
-                                    self.handle_indentation();
-
-                                    match self.next_token() {
-                                        Some(ntk) => match ntk.kind() {
-                                            TokenKind::CurlyClose => break,
-                                            TokenKind::Id(id) => {
-                                                loop {
-                                                    if let Some(token) = self.next_token() {
-                                                        match token.kind() {
-                                                            TokenKind::Space => {}
-                                                            _ => {
-                                                                self.lexer.return_to_queue(token);
-                                                                break;
-                                                            }
-                                                        }
-                                                    }
-
-                                                    self.eat(TokenKind::Space);
-                                                }
-
-                                                if let Some(tkn) = self.next_token() {
-                                                    match tkn.kind() {
-                                                        TokenKind::Id(obj_t) => {
-                                                            let obj_type =
-                                                                GinType::from_str(&obj_t.as_str())
-                                                                    .expect(
-                                                                    "Failed to parse object type",
-                                                                );
-                                                            object_contents.insert(id, obj_type);
-                                                        }
-                                                        // TODO: panic?
-                                                        _ => {}
-                                                    }
-                                                }
-                                            }
-                                            TokenKind::Newline => continue,
-                                            // NOTE: commas are not needed when defining
-                                            // only in runtime as it could be mistaken for a fnCall arugment
-                                            kind => panic!(
-                                                "Unexpected ({:?}) line {}",
-                                                kind, self.line_number
-                                            ),
-                                        },
-                                        _ => break,
-                                    }
-                                }
-
-                                Some(Expr::ObjectDefinition(name, object_contents))
-                            }
-                            _ => {
-                                panic!(
-                                    "Unexpected ({:?}) at positon {} line {} ",
-                                    tok.kind(),
-                                    tok.pos(),
-                                    self.line_number
-                                )
-                            }
-                        }
-                    } else {
-                        panic!(
-                            "Unexpected ({:?}) at positon {} line {}",
-                            token.kind(),
-                            token.pos(),
-                            self.line_number
-                        );
-                    }
-                }
-                TokenKind::Newline => {
-                    self.saw_newline();
-                    Some(Expr::FunctionCall(name, None))
-                }
-                unexpected => {
-                    if let Some(token) = self.current() {
-                        panic!(
-                            "Unexpected ({:?}) at positon {} line {}",
-                            token.kind(),
-                            token.pos(),
-                            self.line_number
-                        )
-                    } else {
-                        panic!("Unexpected: {:#?}", unexpected)
-                    }
-                }
-            }
-        } else {
-            println!("WHY ARE WE HERE? JUST TO SUFFER?");
-            None
-        }
-    }
-
-    fn expr(&mut self) -> Option<Expr> {
-        // skip newline spam
-        loop {
-            // println!("expr newline loop");
-            if let Some(t) = self.next_token() {
-                match t.kind() {
-                    TokenKind::Newline => self.saw_newline(),
-                    _ => {
-                        self.lexer.return_to_queue(t);
-                        break;
-                    }
-                }
+        while self.scope > starting_scope {
+            if let Some(expr) = self.next() {
+                body.push(expr);
+                self.handle_indentation();
             } else {
                 break;
             }
         }
+        let return_type = self.find_implicit_return_type(&body);
+        let xpr = Expr::Define(Define::Function(name, body, return_type));
+        Some(xpr)
+    }
 
-        if let Some(tok) = self.next_token() {
-            match tok.kind() {
-                TokenKind::Id(name) => self.handle_id(name),
-                TokenKind::Space => {
-                    panic!(
-                        "Cannot start a expression with ({:?}) at positon {} line {}",
-                        tok.kind(),
-                        tok.pos(),
+    /// everything to the right of `:`
+    fn handle_assignment(&mut self, name: String) -> Option<Expr> {
+        self.eat(Token::Space);
+
+        match self.lexer.next() {
+            Some(tok) => match tok {
+                Token::Newline => self.handle_multi_line_function(name),
+                Token::Literal(lit) => match self.lexer.next() {
+                    Some(tok) => match tok {
+                        Token::Newline => {
+                            self.saw_newline();
+                            // self.eat(Token::Newline);
+
+                            let expr = Expr::Literal(lit.clone());
+                            // we finished the line
+
+                            Some(Expr::Define(Define::Function(
+                                name,
+                                vec![expr.clone()],
+                                expr.gin_type(),
+                            )))
+                        }
+                        Token::Comma => {
+                            self.eat(Token::Comma);
+                            self.eat(Token::Space);
+                            Some(Expr::Literal(lit))
+                        }
+                        Token::CurlyClose => {
+                            self.eat(Token::Space);
+                            Some(Expr::Literal(lit))
+                        }
+                        Token::Space => {
+                            self.eat(Token::Space);
+
+                            match self.lexer.next() {
+                                Some(tok) => match tok {
+                                    Token::CurlyClose => Some(Expr::Literal(lit)),
+                                    _ => {
+                                        self.lexer.return_to_queue(tok);
+                                        None
+                                    }
+                                },
+                                None => panic!(
+                                    "Unexpected (None) at positon {} line {}",
+                                    self.lexer.pos(),
+                                    self.line_number
+                                ),
+                            }
+                        }
+                        u => {
+                            println!("found u: {:#?}", u);
+                            None
+                        }
+                    },
+                    None => panic!(
+                        "Unexpected (None) at positon {} line {}",
+                        self.lexer.pos(),
                         self.line_number
-                    )
+                    ),
+                },
+
+                Token::CurlyOpen => {
+                    let mut object_contents: HashMap<String, Expr> = HashMap::new();
+                    self.eat(Token::Space);
+                    loop {
+                        match self.lexer.next() {
+                            Some(token) => match token {
+                                Token::Id(o_name) => {
+                                    if let Some(expr) = self.handle_id(o_name.clone()) {
+                                        object_contents.insert(o_name, expr);
+                                    }
+                                    self.eat(Token::Space);
+                                }
+                                Token::CurlyClose => {
+                                    self.eat(Token::Space);
+                                    break;
+                                }
+                                _ => break,
+                            },
+                            None => panic!(
+                                "Unexpected (None) at positon {} line {}",
+                                self.lexer.pos(),
+                                self.line_number
+                            ),
+                        }
+                    }
+
+                    self.eat(Token::Newline);
+
+                    let ex = Expr::Literal(Literal::Object(object_contents));
+
+                    Some(Expr::Define(Define::Function(
+                        name,
+                        vec![ex.clone()],
+                        ex.gin_type(),
+                    )))
                 }
-                _ => self.expr(),
-            }
-        } else {
-            // println!("-- End of tokens --");
-            None
+                Token::BracketOpen => {
+                    let mut list = Vec::new();
+                    loop {
+                        match self.next() {
+                            Some(expr) => list.push(expr),
+                            None => panic!(
+                                "Unexpected (None) at positon {} line {}",
+                                self.lexer.pos(),
+                                self.line_number
+                            ),
+                        }
+                    }
+                }
+                _ => panic!(
+                    "Unexpected ({:?}) at positon {} line {} 2",
+                    tok,
+                    self.lexer.pos(),
+                    self.line_number
+                ),
+            },
+            None => panic!(
+                "Unexpected (None) at positon {} line {}",
+                self.lexer.pos(),
+                self.line_number
+            ),
         }
     }
 
-    pub fn parse_module(&mut self, path: &Path) -> Module {
-        let mut module = Module {
-            path: path.to_path_buf(),
-            body: Vec::new(),
-        };
+    fn handle_data_type(&mut self) -> Option<Expr> {
+        // already have seen the curlyopen
+        // because this is a different context we have
+        // to manually iterate for the items in the data defintion
 
-        if let Ok(file_contents) = fs::read_to_string(path) {
-            let file_name = path
-                .file_stem()
-                .expect("Failed to read file name")
-                .to_str()
-                .expect("Failed to convert file name to str");
-
-            self.lexer.set_source_content(file_contents);
-
-            loop {
-                // println!("parse mod loop");
-                if let Some(expr) = self.expr() {
-                    module.body.push(expr)
-                } else {
-                    break;
+        // eats potential newline
+        match self.lexer.next() {
+            Some(tok) => match tok {
+                Token::Newline => {
+                    self.saw_newline();
                 }
+                _ => self.lexer.return_to_queue(tok),
+            },
+            None => panic!("finish writing your data type"),
+        }
+
+        // this is a bit eager, but we are going to assume we only
+        // have one pair of curlies and there is no nesting yet.
+
+        let mut data_content: HashMap<String, GinType> = HashMap::new();
+        loop {
+            self.handle_indentation();
+
+            let Some(token) = self.lexer.next() else {
+                break;
+            };
+
+            match token {
+                Token::CurlyClose => break,
+                // seperates { [field] [type] \n [field] [type] }
+                Token::Newline => {
+                    // TODO: hint add comma,
+                    continue;
+                }
+                // seperates { [field] [type] , [field] [type] }
+                Token::Comma => continue,
+                Token::Id(id_name) => {
+                    self.eat(Token::Space);
+
+                    let Some(Token::Id(token_type)) = self.lexer.next() else {
+                        panic!("failed to declare type on data field {id_name}")
+                    };
+
+                    let gin_type = GinType::from_str(&token_type.as_str())
+                        .expect("parsed gin type from token_type");
+
+                    data_content.insert(id_name, gin_type);
+                }
+                unknown => panic!(
+                    "Unexpected {unknown:#?} at position: {} line: {}",
+                    self.lexer.pos(),
+                    self.line_number
+                ),
             }
         }
-        module
+
+        Some(Expr::Define(Define::DataContent(data_content)))
+    }
+
+    fn handle_token(&mut self, token: Token) -> Option<Expr> {
+        match token {
+            Token::Keyword(keyword) => match keyword {
+                Keyword::Include => todo!(),
+                Keyword::If => todo!(),
+                Keyword::Else => todo!(),
+                Keyword::For => todo!(),
+                Keyword::Return => todo!(),
+            },
+            Token::Newline => {
+                self.saw_newline();
+                self.handle_indentation();
+                self.next()
+            }
+            Token::Literal(lit) => Some(Expr::Literal(lit)),
+            Token::Id(name) => self.handle_id(name),
+            Token::CurlyOpen => self.handle_data_type(),
+            _ => self.next(),
+        }
+    }
+
+    fn handle_id(&mut self, id_name: String) -> Option<Expr> {
+        let Some(token) = self.lexer.next() else {
+            return Some(Expr::Call(id_name, None));
+        };
+
+        match token {
+            Token::Colon => self.handle_assignment(id_name),
+            Token::Newline => {
+                self.saw_newline();
+                Some(Expr::Call(id_name, None))
+            }
+            Token::Literal(lit) => {
+                let expr = Some(Box::new(Expr::Literal(lit)));
+                Some(Expr::Call(id_name, expr))
+            }
+            // function call does require a space
+            Token::Space => {
+                let next_expr = self.next();
+                if let Some(Expr::Define(Define::DataContent(dc))) = &next_expr {
+                    return Some(Expr::Define(Define::Data(id_name, dc.to_owned())));
+                }
+
+                let expr = next_expr.map(|v| Box::new(v));
+
+                Some(Expr::Call(id_name, expr))
+            }
+            Token::CurlyOpen => {
+                if let Some(Expr::Define(Define::DataContent(dc))) = self.handle_data_type() {
+                    return Some(Expr::Define(Define::Data(id_name, dc)));
+                }
+                panic!("Failed to get data_content for {id_name}")
+            }
+            unknown => panic!(
+                "Unexpected ({unknown:?}) at positon {} line {}",
+                self.lexer.pos(),
+                self.line_number
+            ),
+        }
+    }
+
+    pub fn start(&mut self, path: &Path) -> GinModule {
+        let file_contents = fs::read_to_string(path).expect("unable to read path to string");
+        self.lexer.set_source_content(file_contents);
+        GinModule::new(path.to_path_buf(), self.collect())
+    }
+}
+
+impl Iterator for Parser {
+    type Item = Expr;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.lexer.next() {
+            Some(tok) => self.handle_token(tok),
+            None => None,
+        }
     }
 }

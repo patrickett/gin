@@ -1,4 +1,4 @@
 point {
-    x number
+    x number,
     y number
 }
