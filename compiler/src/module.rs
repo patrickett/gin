@@ -1,16 +1,14 @@
-use std::path::PathBuf;
-
 use crate::expr::Expr;
 
 #[derive(Debug, Clone)]
 pub struct GinModule {
-    path: PathBuf,
+    full_path: String,
     body: Vec<Expr>,
 }
 
 impl GinModule {
-    pub const fn new(path: PathBuf, body: Vec<Expr>) -> Self {
-        Self { path, body }
+    pub const fn new(full_path: String, body: Vec<Expr>) -> Self {
+        Self { full_path, body }
     }
 
     // pub fn filename(&self) -> &str {

@@ -1,63 +1,55 @@
-use std::{collections::HashMap, fs, path::Path, str::FromStr};
+use std::{collections::HashMap, path::PathBuf, str::FromStr};
 
 use crate::{
-    expr::{define::Define, literal::Literal, Expr},
+    expr::{define::Define, literal::Literal, Binary, Expr, Op},
     gin_type::GinType,
-    lex::Lexer,
-    module::GinModule,
-    token::{Keyword, Token},
+    lexer::Lexer,
+    token::Token,
 };
 
+#[derive(Debug, Clone)]
 pub struct Parser {
+    path: Option<PathBuf>,
     lexer: Lexer,
-    line_number: usize,
     scope: usize,
 }
 
 impl Parser {
-    pub const fn new() -> Self {
+    pub fn new(shared_lexer: Option<Lexer>) -> Self {
         Self {
-            lexer: Lexer::new(),
+            path: None,
+            lexer: shared_lexer.unwrap_or(Lexer::new()),
             scope: 0,
-            line_number: 0,
         }
     }
 
     fn saw_newline(&mut self) {
-        self.line_number += 1;
         self.scope = 0;
     }
 
     fn handle_indentation(&mut self) {
-        loop {
-            match self.lexer.next() {
-                Some(token) => match token {
-                    Token::Tab => self.scope += 1,
-                    Token::Space => {
-                        let mut space_count = 1;
+        while let Some(token) = self.lexer.next() {
+            match token {
+                Token::Tab => self.scope += 1,
+                Token::Space => {
+                    let mut space_count = 1;
 
-                        loop {
-                            match self.lexer.next() {
-                                Some(tok) => match tok {
-                                    Token::Space => {
-                                        space_count += 1; // eat space
-                                    }
-                                    _ => {
-                                        self.lexer.return_to_queue(tok);
-                                        break;
-                                    }
-                                },
-                                None => break,
+                    while let Some(tok) = self.lexer.next() {
+                        match tok {
+                            Token::Space => space_count += 1, // eat space
+                            _ => {
+                                self.lexer.return_to_queue(tok);
+                                break;
                             }
                         }
-                        self.scope = space_count / 2
                     }
-                    _ => {
-                        self.lexer.return_to_queue(token);
-                        break;
-                    }
-                },
-                None => break,
+
+                    self.scope = space_count / 2
+                }
+                _ => {
+                    self.lexer.return_to_queue(token);
+                    break;
+                }
             }
         }
     }
@@ -98,7 +90,6 @@ impl Parser {
         let starting_scope = self.scope;
         self.saw_newline();
         self.handle_indentation();
-
         let mut body = Vec::new();
 
         while self.scope > starting_scope {
@@ -110,14 +101,32 @@ impl Parser {
             }
         }
         let return_type = self.find_implicit_return_type(&body);
-        let xpr = Expr::Define(Define::Function(name, body, return_type));
-        Some(xpr)
+        Some(Expr::Define(Define::Function(name, body, return_type)))
+    }
+
+    fn handle_op(&mut self, lhs: Expr, op: Op) -> Option<Expr> {
+        let Some(rhs) = self.next() else {
+            panic!("failed to get rhs operation: {op:#?}")
+        };
+
+        Some(Expr::Opertation(Box::new(lhs), op, Box::new(rhs)))
+    }
+
+    fn handle_lit_op(&mut self, lhs: Literal, op: Op) -> Option<Expr> {
+        let Some(expr) = self.next() else {
+            panic!("failed to get rhs operation: {op:#?}")
+        };
+
+        Some(Expr::Opertation(
+            Box::new(Expr::Literal(lhs)),
+            op,
+            Box::new(expr),
+        ))
     }
 
     /// everything to the right of `:`
     fn handle_assignment(&mut self, name: String) -> Option<Expr> {
         self.eat(Token::Space);
-
         match self.lexer.next() {
             Some(tok) => match tok {
                 Token::Newline => self.handle_multi_line_function(name),
@@ -147,59 +156,159 @@ impl Parser {
                         }
                         Token::Space => {
                             self.eat(Token::Space);
+                            // [id] [arg?] (method on type)
+                            // [+|-|/|*] [expr]
+                            if let Some(fn_or_op) = self.lexer.next() {
+                                match fn_or_op {
+                                    Token::Id(_) => todo!(),
+                                    Token::Plus => {
+                                        self.eat(Token::Space);
+                                        let op = self
+                                            .handle_lit_op(lit, Op::Bin(Binary::Add))
+                                            .expect("failed to get binop");
 
-                            match self.lexer.next() {
-                                Some(tok) => match tok {
-                                    Token::CurlyClose => Some(Expr::Literal(lit)),
-                                    _ => {
-                                        self.lexer.return_to_queue(tok);
-                                        None
+                                        Some(Expr::Define(Define::Function(
+                                            name,
+                                            vec![op.clone()],
+                                            op.gin_type(),
+                                        )))
                                     }
-                                },
-                                None => panic!(
-                                    "Unexpected (None) at positon {} line {}",
-                                    self.lexer.pos(),
-                                    self.line_number
-                                ),
+                                    Token::Star => {
+                                        self.eat(Token::Space);
+
+                                        let op = self
+                                            .handle_lit_op(lit, Op::Bin(Binary::Mul))
+                                            .expect("failed to get binop");
+
+                                        Some(Expr::Define(Define::Function(
+                                            name,
+                                            vec![op.clone()],
+                                            op.gin_type(),
+                                        )))
+                                    }
+                                    Token::Dash => {
+                                        self.eat(Token::Space);
+
+                                        let op = self
+                                            .handle_lit_op(lit, Op::Bin(Binary::Sub))
+                                            .expect("failed to get binop");
+
+                                        Some(Expr::Define(Define::Function(
+                                            name,
+                                            vec![op.clone()],
+                                            op.gin_type(),
+                                        )))
+                                    }
+                                    Token::SlashForward => {
+                                        self.eat(Token::Space);
+
+                                        let op = self
+                                            .handle_lit_op(lit, Op::Bin(Binary::Div))
+                                            .expect("failed to get binop");
+
+                                        Some(Expr::Define(Define::Function(
+                                            name,
+                                            vec![op.clone()],
+                                            op.gin_type(),
+                                        )))
+                                    }
+                                    _ => todo!(),
+                                }
+                            } else {
+                                None
                             }
+                            // match self.lexer.next() {
+                            //     Some(tok) => match tok {
+                            //         Token::CurlyClose => Some(Expr::Literal(lit)),
+                            //         tk => {
+                            //             self.lexer.return_to_queue(tk);
+                            //             self.next()
+                            //         }
+                            //     },
+                            //     None => panic!(
+                            //         "Unexpected (None) at positon {} line {}",
+                            //         self.lexer.pos(),
+                            //         self.line_number
+                            //     ),
+                            // }
                         }
-                        u => {
-                            println!("found u: {:#?}", u);
-                            None
+                        Token::Plus => {
+                            let op = self
+                                .handle_lit_op(lit, Op::Bin(Binary::Add))
+                                .expect("failed to get binop");
+
+                            Some(Expr::Define(Define::Function(
+                                name,
+                                vec![op.clone()],
+                                op.gin_type(),
+                            )))
                         }
+                        Token::Star => {
+                            let op = self
+                                .handle_lit_op(lit, Op::Bin(Binary::Mul))
+                                .expect("failed to get binop");
+
+                            Some(Expr::Define(Define::Function(
+                                name,
+                                vec![op.clone()],
+                                op.gin_type(),
+                            )))
+                        }
+                        Token::Dash => {
+                            let op = self
+                                .handle_lit_op(lit, Op::Bin(Binary::Sub))
+                                .expect("failed to get binop");
+
+                            Some(Expr::Define(Define::Function(
+                                name,
+                                vec![op.clone()],
+                                op.gin_type(),
+                            )))
+                        }
+                        Token::SlashForward => {
+                            let op = self
+                                .handle_lit_op(lit, Op::Bin(Binary::Div))
+                                .expect("failed to get binop");
+
+                            Some(Expr::Define(Define::Function(
+                                name,
+                                vec![op.clone()],
+                                op.gin_type(),
+                            )))
+                        }
+                        unknown => panic!(
+                            "Unexpected token [{unknown:#?}] at {}:{}",
+                            self.path.clone().expect("asd").to_str().expect("msg"),
+                            self.lexer.pos()
+                        ),
                     },
-                    None => panic!(
-                        "Unexpected (None) at positon {} line {}",
-                        self.lexer.pos(),
-                        self.line_number
-                    ),
+                    None => panic!("Unexpected (None) at {}", self.lexer.pos()),
                 },
 
                 Token::CurlyOpen => {
                     let mut object_contents: HashMap<String, Expr> = HashMap::new();
                     self.eat(Token::Space);
-                    loop {
-                        match self.lexer.next() {
-                            Some(token) => match token {
-                                Token::Id(o_name) => {
-                                    if let Some(expr) = self.handle_id(o_name.clone()) {
-                                        object_contents.insert(o_name, expr);
-                                    }
-                                    self.eat(Token::Space);
+                    while let Some(token) = self.lexer.next() {
+                        match token {
+                            Token::Id(o_name) => {
+                                if let Some(expr) = self.handle_id(o_name.clone()) {
+                                    object_contents.insert(o_name, expr);
                                 }
-                                Token::CurlyClose => {
-                                    self.eat(Token::Space);
-                                    break;
-                                }
-                                _ => break,
-                            },
-                            None => panic!(
-                                "Unexpected (None) at positon {} line {}",
-                                self.lexer.pos(),
-                                self.line_number
-                            ),
+                                self.eat(Token::Space);
+                            }
+                            Token::CurlyClose => {
+                                self.eat(Token::Space);
+                                break;
+                            }
+                            _ => break,
                         }
                     }
+                    // loop {
+                    //     match self.lexer.next() {
+                    //         Some(token) => ,
+                    //         None => panic!("Unexpected (None) at {}", self.lexer.pos()),
+                    //     }
+                    // }
 
                     self.eat(Token::Newline);
 
@@ -216,34 +325,25 @@ impl Parser {
                     loop {
                         match self.next() {
                             Some(expr) => list.push(expr),
-                            None => panic!(
-                                "Unexpected (None) at positon {} line {}",
-                                self.lexer.pos(),
-                                self.line_number
-                            ),
+                            None => panic!("Unexpected (None) at {}", self.lexer.pos()),
                         }
                     }
                 }
-                _ => panic!(
-                    "Unexpected ({:?}) at positon {} line {} 2",
-                    tok,
-                    self.lexer.pos(),
-                    self.line_number
+                Token::Id(id_name) => self.handle_id(id_name),
+                unknown => panic!(
+                    "Unexpected token [{unknown:#?}] at {}:{}",
+                    self.path.clone().expect("asd").to_str().expect("msg"),
+                    self.lexer.pos()
                 ),
             },
-            None => panic!(
-                "Unexpected (None) at positon {} line {}",
-                self.lexer.pos(),
-                self.line_number
-            ),
+            None => panic!("Unexpected (None) at {}", self.lexer.pos()),
         }
     }
 
+    // already have seen the curlyopen
+    // because this is a different context we have
+    // to manually iterate for the items in the data defintion
     fn handle_data_type(&mut self) -> Option<Expr> {
-        // already have seen the curlyopen
-        // because this is a different context we have
-        // to manually iterate for the items in the data defintion
-
         // eats potential newline
         match self.lexer.next() {
             Some(tok) => match tok {
@@ -288,9 +388,9 @@ impl Parser {
                     data_content.insert(id_name, gin_type);
                 }
                 unknown => panic!(
-                    "Unexpected {unknown:#?} at position: {} line: {}",
-                    self.lexer.pos(),
-                    self.line_number
+                    "Unexpected token [{unknown:#?}] at {}:{}",
+                    self.path.clone().expect("asd").to_str().expect("msg"),
+                    self.lexer.pos()
                 ),
             }
         }
@@ -300,13 +400,6 @@ impl Parser {
 
     fn handle_token(&mut self, token: Token) -> Option<Expr> {
         match token {
-            Token::Keyword(keyword) => match keyword {
-                Keyword::Include => todo!(),
-                Keyword::If => todo!(),
-                Keyword::Else => todo!(),
-                Keyword::For => todo!(),
-                Keyword::Return => todo!(),
-            },
             Token::Newline => {
                 self.saw_newline();
                 self.handle_indentation();
@@ -315,7 +408,12 @@ impl Parser {
             Token::Literal(lit) => Some(Expr::Literal(lit)),
             Token::Id(name) => self.handle_id(name),
             Token::CurlyOpen => self.handle_data_type(),
-            _ => self.next(),
+            Token::Comment(_) => self.next(),
+            unknown => panic!(
+                "Unexpected token [{unknown:#?}] at {}:{}",
+                self.path.clone().expect("asd").to_str().expect("msg"),
+                self.lexer.pos()
+            ),
         }
     }
 
@@ -352,18 +450,16 @@ impl Parser {
                 panic!("Failed to get data_content for {id_name}")
             }
             unknown => panic!(
-                "Unexpected ({unknown:?}) at positon {} line {}",
-                self.lexer.pos(),
-                self.line_number
+                "Unexpected token [{unknown:#?}] at {}:{}",
+                self.path.clone().expect("asd").to_str().expect("msg"),
+                self.lexer.pos()
             ),
         }
     }
 
-    pub fn start(&mut self, path: &Path) -> GinModule {
-        let file_contents = fs::read_to_string(path).expect("unable to read path to string");
-        self.lexer.set_source_content(file_contents);
-        GinModule::new(path.to_path_buf(), self.collect())
-    }
+    // pub fn build_expr(&self) -> Option<Expr> {
+    //     let next = self.lexer.next()?;
+    // }
 }
 
 impl Iterator for Parser {

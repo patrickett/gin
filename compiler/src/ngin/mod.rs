@@ -1,14 +1,19 @@
-use std::{collections::HashMap, path::Path, process::exit};
+use std::collections::HashMap;
 
-use crate::expr::define::Define;
-use crate::{
+mod value;
+pub use crate::expr::define::Define;
+use crate::lexer::source_file::SourceFile;
+pub use crate::{
     exit_status::ExitStatus,
     expr::{literal::Literal, Expr},
     module::GinModule,
     parse::Parser,
 };
 
+use self::value::GinValue;
+
 pub struct Ngin {
+    files: HashMap<String, SourceFile>,
     parser: Parser,
     scope: HashMap<String, Vec<Expr>>,
 }
@@ -21,39 +26,19 @@ pub struct Ngin {
 // runtime introspection
 // catch errors as they happen give option to fix and continue
 
-pub enum GinValue {
-    Bool(bool),
-    String(String),
-    Number(usize),
-    Nothing,
-}
-
-impl std::fmt::Display for GinValue {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
-        match self {
-            GinValue::Nothing => Ok(()),
-            GinValue::String(s) => write!(fmt, "{}", s),
-            GinValue::Number(n) => write!(fmt, "{}", n),
-            GinValue::Bool(b) => write!(fmt, "{}", b),
-        }
-    }
-}
-
 impl Ngin {
-    pub fn include(&mut self, path: &String) -> Option<GinModule> {
-        let path = Path::new(&path);
-        // TODO: prompt user don't error
-        if !path.exists() {
-            eprintln!("No such file or directory: {}", path.display());
-            exit(ExitStatus::NoSuchFileOrDirectory.into());
-        }
-        Some(self.parser.start(path))
+    pub fn include(&mut self, path: String) -> GinModule {
+        let mut sf = SourceFile::new(path);
+        let module = sf.to_module();
+        self.files.insert(sf.full_path().to_owned(), sf);
+        module
     }
 
     pub fn new() -> Self {
         Self {
-            parser: Parser::new(),
+            parser: Parser::new(None),
             scope: HashMap::new(),
+            files: HashMap::new(),
         }
     }
 
@@ -115,7 +100,15 @@ impl Ngin {
                 Define::DataContent(_) => todo!(),
             },
             Expr::Include(_, _) => todo!(),
-            Expr::Opertation(_, _, _) => todo!(),
+            Expr::Opertation(lhs, op, rhs) => match op {
+                crate::expr::Op::Compare(_) => todo!(),
+                crate::expr::Op::Bin(binop) => match binop {
+                    crate::expr::Binary::Add => self.evaluate(&lhs) + self.evaluate(&rhs),
+                    crate::expr::Binary::Sub => todo!(),
+                    crate::expr::Binary::Div => todo!(),
+                    crate::expr::Binary::Mul => todo!(),
+                },
+            },
         }
     }
 }
