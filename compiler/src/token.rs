@@ -1,4 +1,4 @@
-use crate::expr::Literal;
+use crate::expr::literal::Literal;
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Keyword {

@@ -2,6 +2,7 @@ use std::{path::Path, process::exit};
 
 use crate::{exit_status::ExitStatus, module::GinModule, parse::Parser};
 
+#[allow(unused)]
 pub fn ast(path: &str) -> GinModule {
     let path = Path::new(&path);
     if !path.exists() {
@@ -15,13 +16,31 @@ pub fn ast(path: &str) -> GinModule {
 
 #[cfg(test)]
 mod parse {
-    use std::{collections::HashMap, path::PathBuf};
+    use std::collections::HashMap;
 
     use crate::{
-        expr::{Define, Expr, Literal},
+        expr::{define::Define, literal::Literal, Expr},
         gin_type::GinType,
         tests::ast,
     };
+
+    #[test]
+    fn comments() {
+        let module = ast("../examples/comments.gin");
+
+        let body: Vec<Expr> = vec![
+            Expr::Call(
+                String::from("print"),
+                Some(Box::new(Expr::Literal(Literal::String(String::from("a"))))),
+            ),
+            Expr::Call(
+                String::from("print"),
+                Some(Box::new(Expr::Literal(Literal::String(String::from("a"))))),
+            ),
+        ];
+
+        assert_eq!(module.get_body(), &body);
+    }
 
     #[test]
     fn assign() {

@@ -1,13 +1,10 @@
-#![allow(unused)]
 use clap::*;
 
-use std::{env, fs, path::Path, process::exit};
+use crate::ngin::Ngin;
 
-use crate::{exit_status::ExitStatus, ngin::Ngin};
-
-mod compiler;
+// mod compiler;
 mod exit_status;
-mod expr;
+pub mod expr;
 mod gin_type;
 mod lex;
 mod module;
@@ -21,6 +18,7 @@ pub mod token;
 struct Args {
     /// Path to the .gin file
     file_path: Option<String>,
+
     #[arg(short, long)]
     debug: bool,
 }
@@ -35,7 +33,7 @@ fn main() {
                 if args.debug {
                     println!("{:#?}", module.get_body());
                 } else {
-                    let a = runtime.execute(&module.get_body());
+                    runtime.execute(&module.get_body());
                 }
             } else {
                 // TODO: handle better

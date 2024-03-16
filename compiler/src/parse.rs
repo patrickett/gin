@@ -1,25 +1,14 @@
-use std::{
-    collections::{HashMap, HashSet},
-    fs,
-    iter::Map,
-    path::{Path, PathBuf},
-    ptr::null,
-    slice::Iter,
-    str::FromStr,
-};
+use std::{collections::HashMap, fs, path::Path, str::FromStr};
 
 use crate::{
-    expr::{Define, Expr, Literal},
+    expr::{define::Define, literal::Literal, Expr},
     gin_type::GinType,
     lex::Lexer,
     module::GinModule,
     token::{Keyword, Token},
 };
 
-const TAB_SIZE: usize = 4;
-
 pub struct Parser {
-    tokens: Vec<Token>,
     lexer: Lexer,
     line_number: usize,
     scope: usize,
@@ -28,7 +17,6 @@ pub struct Parser {
 impl Parser {
     pub const fn new() -> Self {
         Self {
-            tokens: Vec::new(),
             lexer: Lexer::new(),
             scope: 0,
             line_number: 0,
@@ -62,7 +50,7 @@ impl Parser {
                                 None => break,
                             }
                         }
-                        self.scope = space_count / TAB_SIZE
+                        self.scope = space_count / 2
                     }
                     _ => {
                         self.lexer.return_to_queue(token);

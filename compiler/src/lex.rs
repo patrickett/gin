@@ -1,7 +1,7 @@
-use std::{collections::VecDeque, iter::Peekable, str::Chars};
+use std::collections::VecDeque;
 
 use crate::{
-    expr::Literal,
+    expr::literal::Literal,
     token::{Keyword, Token},
 };
 
@@ -90,19 +90,34 @@ impl Lexer {
     }
 
     fn next_char(&mut self) -> Option<char> {
-        if self.position < self.source_content.len() {
-            self.position += 1;
-            return self.source_content.chars().nth(self.position - 1);
+        if self.position > self.source_content.len() {
+            return None;
         }
-        None
+        let next_char = self.source_content.chars().nth(self.position);
+        self.position += 1;
+        next_char
     }
 
     fn resolve_comment(&mut self) {
         self.resolve_buffer();
         loop {
             match self.next_char() {
-                // TODO: doc comment
-                Some('\r' | '\n' | '#') | None => {
+                Some('\r' | '\n') | None => {
+                    let comment_text = self.buffer.clone().to_string();
+                    let comment = Token::Comment(comment_text);
+                    self.add(comment);
+                    break;
+                }
+                Some(c) => self.buffer.push(c),
+            }
+        }
+    }
+
+    fn resolve_doc_comment(&mut self) {
+        self.resolve_buffer();
+        loop {
+            match self.next_char() {
+                Some('\r' | '\n') | None => {
                     let comment_text = self.buffer.clone().to_string();
                     let comment = Token::Comment(comment_text);
                     self.add(comment);
@@ -166,7 +181,14 @@ impl Iterator for Lexer {
                     ']' => self.resolve_buffer_then_add(Token::BracketClose),
                     '{' => self.resolve_buffer_then_add(Token::CurlyOpen),
                     '}' => self.resolve_buffer_then_add(Token::CurlyClose),
-                    '#' => self.resolve_comment(),
+                    '#' => {
+                        let peek = self.source_content.chars().nth(self.position);
+                        if let Some('#') = peek {
+                            self.resolve_doc_comment()
+                        } else {
+                            self.resolve_comment()
+                        }
+                    }
                     '"' => self.resolve_string(),
                     '`' => self.resolve_template_string(),
                     ch => {

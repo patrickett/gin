@@ -1,8 +1,9 @@
 use std::{collections::HashMap, path::Path, process::exit};
 
+use crate::expr::define::Define;
 use crate::{
     exit_status::ExitStatus,
-    expr::{Define, Expr, Literal},
+    expr::{literal::Literal, Expr},
     module::GinModule,
     parse::Parser,
 };
@@ -57,7 +58,7 @@ impl Ngin {
     }
 
     /// compile a function to llvm ir (JIT?)
-    pub fn compile_function() {}
+    // pub fn compile_function() {}
 
     pub fn execute(&mut self, body: &Vec<Expr>) -> GinValue {
         let mut res = GinValue::Nothing;
@@ -75,15 +76,20 @@ impl Ngin {
         }
     }
 
+    pub fn println(&self, value: GinValue) -> GinValue {
+        println!("{}", value);
+        GinValue::Nothing
+    }
+
     pub fn evaluate(&mut self, expr: &Expr) -> GinValue {
         match expr {
             Expr::Call(name, arg) => {
                 if let Some(arg) = arg {
                     let v = self.evaluate(arg);
                     if name == "print" {
-                        println!("{}", v);
-                        GinValue::Nothing
+                        self.println(v)
                     } else {
+                        println!("printing: ({}), name: {name}", v);
                         todo!()
                     }
                 } else {
@@ -108,8 +114,8 @@ impl Ngin {
                 Define::Data(_, _) => todo!(),
                 Define::DataContent(_) => todo!(),
             },
-            Expr::Include(path, _) => todo!(),
-            Expr::Opertation(left, op, right) => todo!(),
+            Expr::Include(_, _) => todo!(),
+            Expr::Opertation(_, _, _) => todo!(),
         }
     }
 }

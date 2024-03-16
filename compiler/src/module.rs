@@ -13,13 +13,13 @@ impl GinModule {
         Self { path, body }
     }
 
-    pub fn filename(&self) -> &str {
-        self.path
-            .file_stem()
-            .expect("Getting file_stem from path")
-            .to_str()
-            .expect("converting file_stem to str")
-    }
+    // pub fn filename(&self) -> &str {
+    //     self.path
+    //         .file_stem()
+    //         .expect("Getting file_stem from path")
+    //         .to_str()
+    //         .expect("converting file_stem to str")
+    // }
 
     pub fn get_body(&self) -> &Vec<Expr> {
         &self.body

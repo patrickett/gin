@@ -1,6 +1,21 @@
+pub mod define;
+pub mod literal;
+
 use std::collections::HashMap;
 
 use crate::gin_type::GinType;
+
+use self::{define::Define, literal::Literal};
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Expr {
+    Include(String, Option<IdOrDestructuredObject>),
+    /// FunctionName, Argument
+    Call(String, Option<Box<Expr>>),
+    Literal(Literal),
+    Define(Define),
+    Opertation(Box<Expr>, Op, Box<Expr>),
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum IdOrDestructuredObject {
@@ -31,58 +46,11 @@ pub enum Op {
     Bin(Binary),
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum Expr {
-    Include(String, Option<IdOrDestructuredObject>),
-    /// FunctionName, Argument
-    Call(String, Option<Box<Expr>>),
-    Literal(Literal),
-    Define(Define),
-    Opertation(Box<Expr>, Op, Box<Expr>),
-}
-
-#[derive(Debug, PartialEq, Clone)]
-pub enum Literal {
-    // list of properties on object to destructure {x,y,z} -> [x,y,z]
-    DestructureObject(Vec<String>),
-    Object(HashMap<String, Expr>),
-    List(Vec<Expr>),
-    TemplateString(String),
-    Bool(bool),
-    String(String),
-    Number(usize),
-}
-
-impl std::fmt::Display for Literal {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
-        match self {
-            Literal::DestructureObject(_) => todo!(),
-            Literal::Object(_) => todo!(),
-            Literal::List(_) => todo!(),
-            Literal::TemplateString(_) => todo!(),
-            Literal::Bool(b) => write!(fmt, "{}", b),
-            Literal::String(s) => write!(fmt, "{}", s),
-            Literal::Number(n) => write!(fmt, "{}", n),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Define {
-    /// Object Name, Object Type Defintions
-    Data(String, HashMap<String, GinType>),
-
-    DataContent(HashMap<String, GinType>),
-
-    /// Name, Body, ReturnType
-    Function(String, Vec<Expr>, GinType),
-}
-
 impl Expr {
     pub fn gin_type(&self) -> GinType {
         match self {
             Expr::Include(_, _) => todo!(),
-            Expr::Call(function_name, _) => {
+            Expr::Call(_, _) => {
                 // need to find the function and check its return type
 
                 GinType::Nothing
