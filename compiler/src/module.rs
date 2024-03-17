@@ -2,13 +2,17 @@ use crate::expr::Expr;
 
 #[derive(Debug, Clone)]
 pub struct GinModule {
-    full_path: String,
+    // full_path: String,
     body: Vec<Expr>,
 }
 
 impl GinModule {
-    pub const fn new(full_path: String, body: Vec<Expr>) -> Self {
-        Self { full_path, body }
+    // module might need path in the future,
+    // but removing it for now as I am not actually using it.
+    // SourceFile keeps state and will regenerate the Vec<Expr> body
+    // when needed
+    pub const fn new(body: Vec<Expr>) -> Self {
+        Self { body }
     }
 
     // pub fn filename(&self) -> &str {

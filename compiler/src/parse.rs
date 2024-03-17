@@ -1,26 +1,28 @@
-use std::{collections::HashMap, path::PathBuf, str::FromStr};
+use std::{collections::HashMap, str::FromStr};
 
 use crate::{
     expr::{define::Define, literal::Literal, Binary, Expr, Op},
     gin_type::GinType,
-    lexer::Lexer,
+    lexer::{source_file::SourceFile, Lexer},
     token::Token,
 };
 
 #[derive(Debug, Clone)]
 pub struct Parser {
-    path: Option<PathBuf>,
     lexer: Lexer,
     scope: usize,
 }
 
 impl Parser {
-    pub fn new(shared_lexer: Option<Lexer>) -> Self {
+    pub const fn new() -> Self {
         Self {
-            path: None,
-            lexer: shared_lexer.unwrap_or(Lexer::new()),
+            lexer: Lexer::new(),
             scope: 0,
         }
+    }
+
+    pub fn set_content(&mut self, source_file: &SourceFile) {
+        self.lexer.set_content(source_file)
     }
 
     fn saw_newline(&mut self) {
@@ -212,9 +214,13 @@ impl Parser {
                                             op.gin_type(),
                                         )))
                                     }
-                                    _ => todo!(),
+                                    unknown => panic!(
+                                        "Unexpected token [{unknown:#?}] at {}",
+                                        self.lexer.location()
+                                    ),
                                 }
                             } else {
+                                println!("getting here");
                                 None
                             }
                             // match self.lexer.next() {
@@ -277,12 +283,11 @@ impl Parser {
                             )))
                         }
                         unknown => panic!(
-                            "Unexpected token [{unknown:#?}] at {}:{}",
-                            self.path.clone().expect("asd").to_str().expect("msg"),
-                            self.lexer.pos()
+                            "Unexpected token [{unknown:#?}] at {}",
+                            self.lexer.location()
                         ),
                     },
-                    None => panic!("Unexpected (None) at {}", self.lexer.pos()),
+                    None => panic!("Unexpected (None) at {}", self.lexer.location()),
                 },
 
                 Token::CurlyOpen => {
@@ -325,18 +330,17 @@ impl Parser {
                     loop {
                         match self.next() {
                             Some(expr) => list.push(expr),
-                            None => panic!("Unexpected (None) at {}", self.lexer.pos()),
+                            None => panic!("Unexpected (None) at {}", self.lexer.location()),
                         }
                     }
                 }
                 Token::Id(id_name) => self.handle_id(id_name),
                 unknown => panic!(
-                    "Unexpected token [{unknown:#?}] at {}:{}",
-                    self.path.clone().expect("asd").to_str().expect("msg"),
-                    self.lexer.pos()
+                    "Unexpected token [{unknown:#?}] at {}",
+                    self.lexer.location()
                 ),
             },
-            None => panic!("Unexpected (None) at {}", self.lexer.pos()),
+            None => panic!("Unexpected (None) at {}", self.lexer.location()),
         }
     }
 
@@ -388,9 +392,8 @@ impl Parser {
                     data_content.insert(id_name, gin_type);
                 }
                 unknown => panic!(
-                    "Unexpected token [{unknown:#?}] at {}:{}",
-                    self.path.clone().expect("asd").to_str().expect("msg"),
-                    self.lexer.pos()
+                    "Unexpected token [{unknown:#?}] at {}",
+                    self.lexer.location()
                 ),
             }
         }
@@ -409,10 +412,10 @@ impl Parser {
             Token::Id(name) => self.handle_id(name),
             Token::CurlyOpen => self.handle_data_type(),
             Token::Comment(_) => self.next(),
+            Token::DocComment(_) => self.next(),
             unknown => panic!(
-                "Unexpected token [{unknown:#?}] at {}:{}",
-                self.path.clone().expect("asd").to_str().expect("msg"),
-                self.lexer.pos()
+                "Unexpected token [{unknown:#?}] at {}",
+                self.lexer.location()
             ),
         }
     }
@@ -450,9 +453,8 @@ impl Parser {
                 panic!("Failed to get data_content for {id_name}")
             }
             unknown => panic!(
-                "Unexpected token [{unknown:#?}] at {}:{}",
-                self.path.clone().expect("asd").to_str().expect("msg"),
-                self.lexer.pos()
+                "Unexpected token [{unknown:#?}] at {}",
+                self.lexer.location()
             ),
         }
     }

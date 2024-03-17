@@ -4,38 +4,48 @@ use std::collections::VecDeque;
 
 use crate::{
     expr::literal::Literal,
-    lexer::source_file::SourceFile,
     token::{Keyword, Token},
 };
 
+use self::source_file::SourceFile;
+
+// TODO: when done lexing
+// empty vec content and remove full_path
+
 #[derive(Debug, Clone)]
 pub struct Lexer {
-    file_content: Option<SourceFile>,
     line: usize,
     line_position: usize,
-    // char_index: usize,
+
+    content: Vec<char>,
+    content_index: usize,
+    full_path: String,
+
     buffer: String,
     queue: VecDeque<Token>,
-    // content: String,
 }
 
 impl Lexer {
     pub const fn new() -> Self {
         Self {
-            file_content: None,
             line: 1,
             line_position: 0,
-            // char_index: 0,
             buffer: String::new(),
-            // content: String::new(),
+            full_path: String::new(),
+            content: Vec::new(),
+            content_index: 0,
             queue: VecDeque::new(),
         }
+    }
+
+    pub fn location(&self) -> String {
+        format!("{}:{}", self.full_path, self.pos())
     }
 
     /// Colon seperated line:column
     ///
     /// ex `3:6`
-    pub fn pos(&self) -> String {
+    fn pos(&self) -> String {
         format!("{}:{}", self.line, self.line_position)
     }
 
@@ -45,8 +55,9 @@ impl Lexer {
         self.line_position = 0;
     }
 
-    pub fn set_content(&mut self, sf: SourceFile) {
-        self.file_content = Some(sf);
+    pub fn set_content(&mut self, source_file: &SourceFile) {
+        self.content = source_file.content().chars().collect();
+        self.full_path = source_file.full_path().to_owned();
     }
 
     pub fn return_to_queue(&mut self, t: Token) {
@@ -106,46 +117,30 @@ impl Lexer {
     }
 
     fn next_char(&mut self) -> Option<char> {
-        let fc = self
-            .file_content
-            .as_mut()
-            .expect("should have file_content set");
+        self.content_index += 1;
         self.line_position += 1;
-        fc.next()
-    }
-
-    fn peek_char(&mut self) -> Option<char> {
-        let fc = self
-            .file_content
-            .as_mut()
-            .expect("should have file_content set");
-        fc.nth(fc.index() + 1)
+        self.content.get(self.content_index - 1).map(|&c| c)
     }
 
     fn resolve_comment(&mut self) {
         self.resolve_buffer();
-        while let Some(c) = self.next_char() {
-            match c {
-                '\n' | '\r' => {
-                    self.saw_newline();
-                    let comment_text = self.buffer.clone().to_string();
-                    let comment = Token::Comment(comment_text);
-                    self.add(comment);
-                    break;
-                }
-                c => self.buffer.push(c),
-            }
+        let mut is_doc_comment = false;
+        let second_char = self.next_char();
+        if let Some('#') = second_char {
+            is_doc_comment = true;
+        } else if let Some(c) = second_char {
+            self.buffer.push(c)
         }
-    }
 
-    fn resolve_doc_comment(&mut self) {
-        self.resolve_buffer();
         while let Some(c) = self.next_char() {
             match c {
-                '\n' | '\r' => {
+                '\r' | '\n' => {
                     self.saw_newline();
-                    let comment_text = self.buffer.clone().to_string();
-                    let comment = Token::DocComment(comment_text);
+                    let comment_text = self.buffer.trim().to_string();
+                    let comment = match is_doc_comment {
+                        true => Token::DocComment(comment_text),
+                        false => Token::Comment(comment_text),
+                    };
                     self.add(comment);
                     break;
                 }
@@ -186,7 +181,8 @@ impl Iterator for Lexer {
         loop {
             if self.queue.len() > 0 {
                 return self.queue.pop_front();
-            } else if let Some(c) = self.next_char() {
+            }
+            if let Some(c) = self.next_char() {
                 match c {
                     '+' => self.resolve_buffer_then_add(Token::Plus),
                     '-' => self.resolve_buffer_then_add(Token::Dash),
@@ -205,13 +201,7 @@ impl Iterator for Lexer {
                     ']' => self.resolve_buffer_then_add(Token::BracketClose),
                     '{' => self.resolve_buffer_then_add(Token::CurlyOpen),
                     '}' => self.resolve_buffer_then_add(Token::CurlyClose),
-                    '#' => {
-                        if let Some('#') = self.peek_char() {
-                            self.resolve_doc_comment()
-                        } else {
-                            self.resolve_comment()
-                        }
-                    }
+                    '#' => self.resolve_comment(),
                     '"' => self.resolve_string(),
                     '`' => self.resolve_template_string(),
                     ch => self.buffer.push(ch),

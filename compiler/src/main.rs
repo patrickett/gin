@@ -1,5 +1,4 @@
 use clap::*;
-use lexer::source_file::SourceFile;
 pub mod lexer;
 pub mod ngin;
 pub use crate::ngin::Ngin;
@@ -33,14 +32,13 @@ fn main() {
     match args.file_path {
         Some(path) => {
             let mut runtime = Ngin::new();
-            let source_file = SourceFile::new(path.clone());
+            let root_module = runtime.include(path);
             if !args.debug && !args.tokens {
-                let root_module = runtime.include(path);
                 runtime.execute(&root_module.get_body());
             } else if args.debug {
-                println!("{:#?}", source_file.debug());
+                // println!("{:#?}", source_file.debug());
             } else if args.tokens {
-                println!("{:#?}", source_file.tokens())
+                // println!("{:#?}", source_file.tokens())
             }
         }
         None => println!("starting repl"),

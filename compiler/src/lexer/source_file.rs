@@ -1,35 +1,35 @@
 use std::{
-    char,
     fs::{self, canonicalize},
     path::Path,
+    time::SystemTime,
 };
-
-use crate::{expr::Expr, module::GinModule, parse::Parser, token::Token};
-
-use super::Lexer;
 
 // having this file wrapper allows us to do some cool things in the future
 // 1. dynamically mutate files based on user imput
 // 2. reload files with their changes
-#[derive(Debug, Clone)]
 pub struct SourceFile {
     // we keep the full path in case something else imports
     // so we can just reuse the same already parsed file
     full_path: String,
-    // we use a vec here so we can mutate in the future
-    // Chars iter is readonly
-    chars: Vec<char>,
-    index: usize,
+    content: String,
+    last_modified: SystemTime,
 }
-// TODO: ask runtime to run SourceFile.to_module() -> GinModule
 
 impl SourceFile {
-    pub fn index(&self) -> usize {
-        self.index
-    }
-
     pub fn full_path(&self) -> &String {
         &self.full_path
+    }
+
+    pub fn modified(&mut self) -> bool {
+        let metadata = fs::metadata(self.full_path.to_string()).expect("user will have corrected");
+        let recent_modified = metadata.modified().expect("has last modified date");
+
+        if recent_modified > self.last_modified {
+            self.last_modified = recent_modified;
+            true
+        } else {
+            false
+        }
     }
 
     pub fn new(p: String) -> Self {
@@ -40,48 +40,36 @@ impl SourceFile {
             eprintln!("No such file or directory: {}", path.display());
         }
 
-        let content = fs::read_to_string(path.clone()).expect("msg");
+        let full_path = path.to_str().expect("msg").to_string();
+        // this is scary if the file is really large
+        let content = fs::read_to_string(full_path.clone()).expect("msg");
+
+        let metadata = fs::metadata(&full_path).expect("user will have corrected");
+        let last_modified = metadata.modified().expect("has last modified date");
 
         Self {
-            // this is scary if the file is really large
-            chars: content.chars().collect(),
-            index: 0,
-            full_path: path.to_str().expect("msg").to_string(),
+            content,
+            full_path,
+            last_modified,
         }
     }
 
-    pub fn to_module(&mut self) -> GinModule {
-        GinModule::new(self.full_path().to_owned(), self.debug())
+    // because in previous parts we will have confimred with the user
+    // we can always return content
+    pub fn content(&self) -> &String {
+        &self.content
+    }
+
+    fn read_from_disk(&self) -> String {
+        // TODO: check modified
+        fs::read_to_string(self.full_path.clone()).expect("msg")
     }
 
     // if changes to file were made on disk, this allows us to re-lex-parse the file
-    pub fn reload() {}
-
-    // Print ast for source file
-    pub fn debug(&self) -> Vec<Expr> {
-        let mut lexer = Lexer::new();
-        lexer.set_content(self.to_owned());
-        let parser = Parser::new(Some(lexer));
-        parser.collect()
-    }
-
-    // Print ast for source file
-    pub fn tokens(&self) -> Vec<Token> {
-        let mut lexer = Lexer::new();
-        lexer.set_content(self.to_owned());
-        lexer.collect()
-    }
-}
-
-impl Iterator for SourceFile {
-    type Item = char;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.index >= self.chars.len() {
-            return None;
+    pub fn reload(&mut self) {
+        if self.modified() {
+            self.content = self.read_from_disk()
+        } else {
         }
-        let a = Some(self.chars[self.index]);
-        self.index += 1;
-        a
     }
 }

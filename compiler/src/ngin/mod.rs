@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{borrow::BorrowMut, collections::HashMap};
 
 mod value;
 pub use crate::expr::define::Define;
@@ -11,6 +11,9 @@ pub use crate::{
 };
 
 use self::value::GinValue;
+
+// TODO: files needs to be able to check last_modified
+// if the file is open in another buffer (has write or read lock)
 
 pub struct Ngin {
     files: HashMap<String, SourceFile>,
@@ -27,16 +30,26 @@ pub struct Ngin {
 // catch errors as they happen give option to fix and continue
 
 impl Ngin {
+    // TODO: read_file -> Result<SourceFile, UserDeny>
+
+    /// This will create a stateful reader reference to a file
+    /// on the filesystem.
+    pub fn get_source_file(&mut self, path: String) -> SourceFile {
+        SourceFile::new(path)
+    }
+
     pub fn include(&mut self, path: String) -> GinModule {
-        let mut sf = SourceFile::new(path);
-        let module = sf.to_module();
-        self.files.insert(sf.full_path().to_owned(), sf);
-        module
+        let source_file = self.get_source_file(path);
+        self.parser.set_content(&source_file);
+        let full_path = source_file.full_path().to_string();
+        self.files.insert(full_path, source_file);
+        let ast = self.parser.borrow_mut().collect();
+        GinModule::new(ast)
     }
 
     pub fn new() -> Self {
         Self {
-            parser: Parser::new(None),
+            parser: Parser::new(),
             scope: HashMap::new(),
             files: HashMap::new(),
         }

@@ -5,13 +5,13 @@ mod parse {
     use crate::{
         expr::{define::Define, literal::Literal, Expr},
         gin_type::GinType,
-        lexer::source_file::SourceFile,
+        Ngin,
     };
 
     #[test]
     fn comments() {
-        let sf = SourceFile::new("../examples/comments.gin".to_string());
-        let ast = sf.debug();
+        let mut runtime = Ngin::new();
+        let module = runtime.include("../examples/comments.gin".to_string());
 
         let body: Vec<Expr> = vec![
             Expr::Call(
@@ -24,13 +24,13 @@ mod parse {
             ),
         ];
 
-        assert_eq!(ast, body);
+        assert_eq!(*module.get_body(), body);
     }
 
     #[test]
     fn assign() {
-        let sf = SourceFile::new("../examples/assign.gin".to_string());
-        let ast = sf.debug();
+        let mut runtime = Ngin::new();
+        let module = runtime.include("../examples/assign.gin".to_string());
 
         let body: Vec<Expr> = vec![
             Expr::Define(Define::Function(
@@ -45,13 +45,13 @@ mod parse {
             )),
         ];
 
-        assert_eq!(ast, body);
+        assert_eq!(*module.get_body(), body);
     }
 
     #[test]
     fn bool() {
-        let sf = SourceFile::new("../examples/bool.gin".to_string());
-        let ast = sf.debug();
+        let mut runtime = Ngin::new();
+        let module = runtime.include("../examples/bool.gin".to_string());
 
         let body: Vec<Expr> = vec![Expr::Define(Define::Function(
             String::from("a"),
@@ -59,13 +59,13 @@ mod parse {
             GinType::Bool,
         ))];
 
-        assert_eq!(ast, body);
+        assert_eq!(*module.get_body(), body);
     }
 
     #[test]
     fn fn_call_fn() {
-        let sf = SourceFile::new("../examples/fnCallFn.gin".to_string());
-        let ast = sf.debug();
+        let mut runtime = Ngin::new();
+        let module = runtime.include("../examples/fnCallFn.gin".to_string());
 
         let body: Vec<Expr> = vec![
             Expr::Define(Define::Function(
@@ -79,13 +79,13 @@ mod parse {
             ),
         ];
 
-        assert_eq!(ast, body);
+        assert_eq!(*module.get_body(), body);
     }
 
     #[test]
     fn hello_world() {
-        let sf = SourceFile::new("../examples/helloWorld.gin".to_string());
-        let ast = sf.debug();
+        let mut runtime = Ngin::new();
+        let module = runtime.include("../examples/helloWorld.gin".to_string());
 
         let body: Vec<Expr> = vec![Expr::Call(
             String::from("print"),
@@ -94,13 +94,13 @@ mod parse {
             ))))),
         )];
 
-        assert_eq!(ast, body);
+        assert_eq!(*module.get_body(), body);
     }
 
     #[test]
     fn nested() {
-        let sf = SourceFile::new("../examples/nested.gin".to_string());
-        let ast = sf.debug();
+        let mut runtime = Ngin::new();
+        let module = runtime.include("../examples/nested.gin".to_string());
 
         let body: Vec<Expr> = vec![
             Expr::Define(Define::Function(
@@ -129,13 +129,13 @@ mod parse {
             )),
         ];
 
-        assert_eq!(ast, body);
+        assert_eq!(*module.get_body(), body);
     }
 
     #[test]
     fn point() {
-        let sf = SourceFile::new("../examples/point.gin".to_string());
-        let ast = sf.debug();
+        let mut runtime = Ngin::new();
+        let module = runtime.include("../examples/point.gin".to_string());
 
         let mut hash = HashMap::new();
         hash.insert(String::from("x"), GinType::Number);
@@ -143,13 +143,13 @@ mod parse {
 
         let body: Vec<Expr> = vec![Expr::Define(Define::Data(String::from("point"), hash))];
 
-        assert_eq!(ast, body);
+        assert_eq!(*module.get_body(), body);
     }
 
     #[test]
     fn single_line_point() {
-        let sf = SourceFile::new("../examples/singleLinePoint.gin".to_string());
-        let ast = sf.debug();
+        let mut runtime = Ngin::new();
+        let module = runtime.include("../examples/singleLinePoint.gin".to_string());
 
         let mut hash = HashMap::new();
         hash.insert(String::from("x"), GinType::Number);
@@ -157,13 +157,13 @@ mod parse {
 
         let body: Vec<Expr> = vec![Expr::Define(Define::Data(String::from("point"), hash))];
 
-        assert_eq!(ast, body);
+        assert_eq!(*module.get_body(), body);
     }
 
     #[test]
     fn return_obj() {
-        let sf = SourceFile::new("../examples/returnObj.gin".to_string());
-        let ast = sf.debug();
+        let mut runtime = Ngin::new();
+        let module = runtime.include("../examples/returnObj.gin".to_string());
 
         let mut object_hash = HashMap::new();
         object_hash.insert(String::from("index"), GinType::Number);
@@ -188,7 +188,7 @@ mod parse {
             object_type,
         ))];
 
-        assert_eq!(ast, body);
+        assert_eq!(*module.get_body(), body);
     }
 
     // #[test]
