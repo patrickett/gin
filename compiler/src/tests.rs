@@ -11,7 +11,7 @@ mod parse {
     #[test]
     fn comments() {
         let mut runtime = Ngin::new();
-        let module = runtime.include("../examples/comments.gin".to_string());
+        let module = runtime.include("../examples/lang/comments.gin".to_string());
 
         let body: Vec<Expr> = vec![
             Expr::Call(
@@ -30,7 +30,7 @@ mod parse {
     #[test]
     fn assign() {
         let mut runtime = Ngin::new();
-        let module = runtime.include("../examples/assign.gin".to_string());
+        let module = runtime.include("../examples/lang/assign.gin".to_string());
 
         let body: Vec<Expr> = vec![
             Expr::Define(Define::Function(
@@ -51,7 +51,7 @@ mod parse {
     #[test]
     fn bool() {
         let mut runtime = Ngin::new();
-        let module = runtime.include("../examples/bool.gin".to_string());
+        let module = runtime.include("../examples/lang/bool.gin".to_string());
 
         let body: Vec<Expr> = vec![Expr::Define(Define::Function(
             String::from("a"),
@@ -65,7 +65,7 @@ mod parse {
     #[test]
     fn fn_call_fn() {
         let mut runtime = Ngin::new();
-        let module = runtime.include("../examples/fnCallFn.gin".to_string());
+        let module = runtime.include("../examples/lang/fnCallFn.gin".to_string());
 
         let body: Vec<Expr> = vec![
             Expr::Define(Define::Function(
@@ -100,7 +100,7 @@ mod parse {
     #[test]
     fn nested() {
         let mut runtime = Ngin::new();
-        let module = runtime.include("../examples/nested.gin".to_string());
+        let module = runtime.include("../examples/lang/nested.gin".to_string());
 
         let body: Vec<Expr> = vec![
             Expr::Define(Define::Function(
@@ -135,13 +135,13 @@ mod parse {
     #[test]
     fn point() {
         let mut runtime = Ngin::new();
-        let module = runtime.include("../examples/point.gin".to_string());
+        let module = runtime.include("../examples/lang/point.gin".to_string());
 
         let mut hash = HashMap::new();
         hash.insert(String::from("x"), GinType::Number);
         hash.insert(String::from("y"), GinType::Number);
 
-        let body: Vec<Expr> = vec![Expr::Define(Define::Data(String::from("point"), hash))];
+        let body: Vec<Expr> = vec![Expr::Define(Define::Data(String::from("Point"), hash))];
 
         assert_eq!(*module.get_body(), body);
     }
@@ -149,13 +149,13 @@ mod parse {
     #[test]
     fn single_line_point() {
         let mut runtime = Ngin::new();
-        let module = runtime.include("../examples/singleLinePoint.gin".to_string());
+        let module = runtime.include("../examples/lang/singleLinePoint.gin".to_string());
 
         let mut hash = HashMap::new();
         hash.insert(String::from("x"), GinType::Number);
         hash.insert(String::from("y"), GinType::Number);
 
-        let body: Vec<Expr> = vec![Expr::Define(Define::Data(String::from("point"), hash))];
+        let body: Vec<Expr> = vec![Expr::Define(Define::Data(String::from("Point"), hash))];
 
         assert_eq!(*module.get_body(), body);
     }
@@ -163,7 +163,7 @@ mod parse {
     #[test]
     fn return_obj() {
         let mut runtime = Ngin::new();
-        let module = runtime.include("../examples/returnObj.gin".to_string());
+        let module = runtime.include("../examples/lang/returnObj.gin".to_string());
 
         let mut object_hash = HashMap::new();
         object_hash.insert(String::from("index"), GinType::Number);
@@ -180,7 +180,7 @@ mod parse {
             vec![
                 Expr::Define(Define::Function(
                     String::from("state"),
-                    vec![Expr::Literal(Literal::Object(object_literal_hash))],
+                    vec![Expr::Literal(Literal::Data(object_literal_hash))],
                     object_type.clone(),
                 )),
                 Expr::Call(String::from("state"), None),

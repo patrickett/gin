@@ -95,8 +95,7 @@ impl Lexer {
                 "false" => Token::Literal(Literal::Bool(false)),
                 "return" => Token::Keyword(Keyword::Return),
                 "for" => Token::Keyword(Keyword::For),
-                "if" => Token::Keyword(Keyword::If),
-                "else" => Token::Keyword(Keyword::Else),
+                "when" => Token::Keyword(Keyword::When),
                 id => {
                     if id.chars().all(|c| c.is_digit(10)) {
                         let num: Result<usize, _> = id.parse();
@@ -106,7 +105,17 @@ impl Lexer {
                             Token::Id(id.to_string())
                         }
                     } else {
-                        Token::Id(id.to_string())
+                        let c = id.chars().next();
+                        if let Some(c) = c {
+                            if c.is_uppercase() {
+                                // TODO: swap to Token::Tag(id.to_string())
+                                Token::Id(id.to_string())
+                            } else {
+                                Token::Id(id.to_string())
+                            }
+                        } else {
+                            panic!("not sure how you did this")
+                        }
                     }
                 }
             };

@@ -3,7 +3,6 @@ pub mod lexer;
 pub mod ngin;
 pub use crate::ngin::Ngin;
 
-mod exit_status;
 pub mod expr;
 mod gin_type;
 
@@ -21,10 +20,9 @@ pub struct Args {
     /// Print abstract syntax tree for the provided file
     #[arg(short, long)]
     debug: bool,
-
-    /// Print lexed tokens for the provided file
-    #[arg(short, long)]
-    tokens: bool,
+    //Print lexed tokens for the provided file
+    // #[arg(short, long)]
+    // tokens: bool,
 }
 
 fn main() {
@@ -33,12 +31,10 @@ fn main() {
         Some(path) => {
             let mut runtime = Ngin::new();
             let root_module = runtime.include(path);
-            if !args.debug && !args.tokens {
+            if !args.debug {
                 runtime.execute(&root_module.get_body());
-            } else if args.debug {
-                // println!("{:#?}", source_file.debug());
-            } else if args.tokens {
-                // println!("{:#?}", source_file.tokens())
+            } else {
+                println!("{:#?}", root_module.get_body());
             }
         }
         None => println!("starting repl"),

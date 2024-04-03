@@ -3,8 +3,7 @@ use crate::expr::literal::Literal;
 #[derive(Debug, PartialEq, Clone)]
 pub enum Keyword {
     Include,
-    If,
-    Else,
+    When,
     For,
     Return,
 }
@@ -28,6 +27,7 @@ pub enum Token {
     Comment(String),
     DocComment(String),
     Id(String),
+    Tag(String),
     Literal(Literal),
     LessThan,
     LessThanOrEqualTo,

@@ -21,9 +21,9 @@ impl FromStr for GinType {
 
     fn from_str(input: &str) -> Result<GinType, Self::Err> {
         match input {
-            "number" => Ok(GinType::Number),
-            "string" => Ok(GinType::String),
-            "bool" => Ok(GinType::Bool),
+            "Number" => Ok(GinType::Number),
+            "String" => Ok(GinType::String),
+            "Bool" => Ok(GinType::Bool),
             custom => Ok(GinType::Custom(custom.into())),
         }
     }

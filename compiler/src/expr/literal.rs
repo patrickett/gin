@@ -6,10 +6,10 @@ use super::Expr;
 pub enum Literal {
     Bool(bool),
     // list of properties on object to destructure {x,y,z} -> [x,y,z]
-    DestructureObject(Vec<String>),
+    DestructureData(Vec<String>),
     List(Vec<Expr>),
     Number(usize),
-    Object(HashMap<String, Expr>),
+    Data(HashMap<String, Expr>),
     String(String),
     TemplateString(String),
 }
@@ -17,8 +17,8 @@ pub enum Literal {
 impl std::fmt::Display for Literal {
     fn fmt(&self, fmt: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
         match self {
-            Literal::DestructureObject(_) => todo!(),
-            Literal::Object(_) => todo!(),
+            Literal::DestructureData(_) => todo!(),
+            Literal::Data(_) => todo!(),
             Literal::List(_) => todo!(),
             Literal::TemplateString(_) => todo!(),
             Literal::Bool(b) => write!(fmt, "{}", b),

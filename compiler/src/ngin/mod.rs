@@ -2,18 +2,27 @@ use std::{borrow::BorrowMut, collections::HashMap};
 
 mod value;
 pub use crate::expr::define::Define;
-use crate::lexer::source_file::SourceFile;
 pub use crate::{
-    exit_status::ExitStatus,
     expr::{literal::Literal, Expr},
     module::GinModule,
     parse::Parser,
+};
+use crate::{
+    expr::{Binary, Op},
+    lexer::source_file::SourceFile,
 };
 
 use self::value::GinValue;
 
 // TODO: files needs to be able to check last_modified
 // if the file is open in another buffer (has write or read lock)
+//
+// behind the scenes we should transition to machine compiled code
+// JIT compile where possible but jit code that can interface with the runtime
+// provide errors and state so that we can recover in the runtime
+//
+// basically we have a development runtime that can be optionally removed
+// for a build
 
 pub struct Ngin {
     files: HashMap<String, SourceFile>,
@@ -62,11 +71,14 @@ impl Ngin {
         let mut res = GinValue::Nothing;
         for expr in body {
             res = self.evaluate(&expr);
+            // println!("res: {}", &res);
         }
         res
     }
 
-    pub fn call(&mut self, name: &String) -> GinValue {
+    pub fn call(&mut self, name: &String, arg: Option<Box<Expr>>) -> GinValue {
+        // println!("{:#?}", self.scope);
+        // println!("{} {:#?}", name, arg);
         if let Some(body) = self.scope.clone().get(name) {
             self.execute(body)
         } else {
@@ -74,34 +86,27 @@ impl Ngin {
         }
     }
 
-    pub fn println(&self, value: GinValue) -> GinValue {
-        println!("{}", value);
-        GinValue::Nothing
-    }
-
     pub fn evaluate(&mut self, expr: &Expr) -> GinValue {
         match expr {
             Expr::Call(name, arg) => {
-                if let Some(arg) = arg {
-                    let v = self.evaluate(arg);
-                    if name == "print" {
-                        self.println(v)
-                    } else {
-                        println!("printing: ({}), name: {name}", v);
-                        todo!()
+                if name.as_str() == "print" {
+                    if let Some(arg) = arg {
+                        // println!("print {:#?}", &arg);
+                        println!("{}", self.evaluate(arg));
                     }
+                    GinValue::Nothing
                 } else {
-                    self.call(name)
+                    self.call(name, arg.to_owned())
                 }
             }
             Expr::Literal(lit) => match lit {
-                Literal::Object(_) => todo!(),
+                Literal::Data(map) => todo!(),
                 Literal::List(_) => todo!(),
                 Literal::TemplateString(_) => todo!(),
                 Literal::Bool(b) => GinValue::Bool(*b),
                 Literal::String(s) => GinValue::String(s.to_owned()),
                 Literal::Number(num) => GinValue::Number(*num),
-                Literal::DestructureObject(_) => todo!(),
+                Literal::DestructureData(_) => todo!(),
             },
             Expr::Define(def) => match def {
                 Define::Function(name, body, _) => {
@@ -109,17 +114,23 @@ impl Ngin {
                     self.scope.insert(name.clone(), body.clone());
                     GinValue::Nothing
                 }
-                Define::Data(_, _) => todo!(),
+                Define::Data(_, _) => {
+                    // defining a structure really doesnt provide anything
+                    // for the runtime in terms of values
+
+                    GinValue::Nothing
+                }
                 Define::DataContent(_) => todo!(),
+                Define::When() => todo!(),
             },
             Expr::Include(_, _) => todo!(),
-            Expr::Opertation(lhs, op, rhs) => match op {
-                crate::expr::Op::Compare(_) => todo!(),
-                crate::expr::Op::Bin(binop) => match binop {
-                    crate::expr::Binary::Add => self.evaluate(&lhs) + self.evaluate(&rhs),
-                    crate::expr::Binary::Sub => todo!(),
-                    crate::expr::Binary::Div => todo!(),
-                    crate::expr::Binary::Mul => todo!(),
+            Expr::Operation(lhs, op, rhs) => match op {
+                Op::Compare(_) => todo!(),
+                Op::Bin(binop) => match binop {
+                    Binary::Add => self.evaluate(&lhs) + self.evaluate(&rhs),
+                    Binary::Sub => todo!(),
+                    Binary::Div => todo!(),
+                    Binary::Mul => todo!(),
                 },
             },
         }

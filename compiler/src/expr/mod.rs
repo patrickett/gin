@@ -9,18 +9,18 @@ use self::{define::Define, literal::Literal};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
-    Include(String, Option<IdOrDestructuredObject>),
+    Include(String, Option<IdOrDestructuredData>),
     /// FunctionName, Argument
     Call(String, Option<Box<Expr>>),
     Literal(Literal),
     Define(Define),
-    Opertation(Box<Expr>, Op, Box<Expr>),
+    Operation(Box<Expr>, Op, Box<Expr>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum IdOrDestructuredObject {
+pub enum IdOrDestructuredData {
     Id(String),
-    DestructuredObject(Vec<String>),
+    DestructuredData(Vec<String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -70,7 +70,7 @@ impl Expr {
 
                     GinType::List(deduplicated_vec)
                 }
-                Literal::Object(o) => {
+                Literal::Data(o) => {
                     let mut obj_def: HashMap<String, GinType> = HashMap::new();
 
                     for (key, expr) in o.iter() {
@@ -79,13 +79,13 @@ impl Expr {
 
                     GinType::Object(obj_def)
                 }
-                Literal::DestructureObject(_) => todo!(),
+                Literal::DestructureData(_) => todo!(),
                 Literal::String(_) => GinType::String,
                 Literal::TemplateString(_) => GinType::String,
                 Literal::Bool(_) => GinType::Bool,
                 Literal::Number(_) => GinType::Number,
             },
-            Expr::Opertation(left, op, right) => match op {
+            Expr::Operation(left, op, right) => match op {
                 Op::Compare(_) => GinType::Bool,
                 Op::Bin(_) => {
                     let left = *left.to_owned();
