@@ -1,0 +1,10 @@
+# basic comment
+print "a" # comment at the end of line
+
+## This is a function
+## that prints the letter a
+
+print "a"
+
+
+##
