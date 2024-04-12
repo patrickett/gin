@@ -81,6 +81,41 @@ impl Div for GinValue {
     }
 }
 
+impl Sub for GinValue {
+    type Output = Self;
+
+    fn sub(self, other: Self) -> Self {
+        match self {
+            GinValue::String(l_string) => match other {
+                GinValue::String(_) => {
+                    panic!("The right-hand side of an subtract operation must be of type 'Number'.")
+                }
+                GinValue::Number(_) => {
+                    panic!("The left-hand side of an subtract operation must be of type 'Number'.")
+                }
+                // something - nothing  = something
+                GinValue::Nothing => GinValue::String(l_string),
+                _ => {
+                    panic!("The left-hand side of an subtract operation must be of type 'Number'.")
+                }
+            },
+            GinValue::Number(l_number) => match other {
+                GinValue::String(_) => {
+                    panic!("The right-hand side of an subtract operation must be of type 'Number'.")
+                }
+                GinValue::Number(r_number) => GinValue::Number(l_number + r_number),
+                // expect something - nothing = something
+                GinValue::Nothing => GinValue::Number(l_number),
+                _ => {
+                    panic!("The left-hand side of an subtract operation must be of type 'Number'.")
+                }
+            },
+            GinValue::Nothing => GinValue::Nothing,
+            val => panic!("{val:#?} cannot be divided"),
+        }
+    }
+}
+
 impl std::fmt::Display for GinValue {
     fn fmt(&self, fmt: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
         match self {

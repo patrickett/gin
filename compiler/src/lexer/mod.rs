@@ -60,7 +60,7 @@ impl Lexer {
         self.full_path = source_file.full_path().to_owned();
     }
 
-    pub fn return_to_queue(&mut self, t: Token) {
+    pub fn defer(&mut self, t: Token) {
         self.queue.push_front(t)
     }
 
@@ -109,7 +109,7 @@ impl Lexer {
                         if let Some(c) = c {
                             if c.is_uppercase() {
                                 // TODO: swap to Token::Tag(id.to_string())
-                                Token::Id(id.to_string())
+                                Token::Tag(id.to_string())
                             } else {
                                 Token::Id(id.to_string())
                             }
@@ -120,6 +120,7 @@ impl Lexer {
                 }
             };
 
+            // println!("{:#?}", tok);
             self.buffer.clear();
             self.queue.push_back(tok);
         }

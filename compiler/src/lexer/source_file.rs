@@ -32,8 +32,12 @@ impl SourceFile {
         }
     }
 
-    pub fn new(p: String) -> Self {
-        let path = Path::new(&p);
+    pub fn new(path: String) -> Self {
+        let path = Path::new(&path);
+        if !path.exists() {
+            // TODO: prompt user don't error
+            eprintln!("No such file or directory: {}", path.display());
+        }
         let path = canonicalize(path).expect("failed to get real path");
         if !path.exists() {
             // TODO: prompt user don't error
@@ -41,6 +45,7 @@ impl SourceFile {
         }
 
         let full_path = path.to_str().expect("msg").to_string();
+
         // this is scary if the file is really large
         let content = fs::read_to_string(full_path.clone()).expect("msg");
 

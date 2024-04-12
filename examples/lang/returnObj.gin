@@ -1,0 +1,3 @@
+main:
+    state: { index: 0, length: 256 }
+    state

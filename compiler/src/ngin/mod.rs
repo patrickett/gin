@@ -1,3 +1,5 @@
+// use std::fs::canonicalize;
+// use std::path::Path;
 use std::{borrow::BorrowMut, collections::HashMap};
 
 mod value;
@@ -37,6 +39,10 @@ pub struct Ngin {
 //
 // runtime introspection
 // catch errors as they happen give option to fix and continue
+
+pub enum SourceFileError {
+    FileNotFound,
+}
 
 impl Ngin {
     // TODO: read_file -> Result<SourceFile, UserDeny>
@@ -100,7 +106,7 @@ impl Ngin {
                 }
             }
             Expr::Literal(lit) => match lit {
-                Literal::Data(map) => todo!(),
+                Literal::Data(_) => todo!(),
                 Literal::List(_) => todo!(),
                 Literal::TemplateString(_) => todo!(),
                 Literal::Bool(b) => GinValue::Bool(*b),
