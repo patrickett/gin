@@ -1,13 +1,10 @@
-pub mod source_file;
-
 use std::collections::VecDeque;
 
-use crate::{
-    expr::literal::Literal,
-    token::{Keyword, Token},
-};
+use crate::ngin::{gin_type::number::GinNumber, source_file::SourceFile, value::GinValue};
 
-use self::source_file::SourceFile;
+use self::token::{Keyword, Token};
+
+pub mod token;
 
 // TODO: when done lexing
 // empty vec content and remove full_path
@@ -90,32 +87,28 @@ impl Lexer {
                 ">=" => Token::GreaterThanOrEqualTo,
                 "->" => Token::RightArrow,
                 "<-" => Token::LeftArrow,
+                "if" => Token::Keyword(Keyword::If),
+                "else" => Token::Keyword(Keyword::Else),
+                "then" => Token::Keyword(Keyword::Then),
                 "include" => Token::Keyword(Keyword::Include),
-                "true" => Token::Literal(Literal::Bool(true)),
-                "false" => Token::Literal(Literal::Bool(false)),
+                "true" => Token::Literal(GinValue::Bool(true)),
+                "false" => Token::Literal(GinValue::Bool(false)),
                 "return" => Token::Keyword(Keyword::Return),
                 "for" => Token::Keyword(Keyword::For),
                 "when" => Token::Keyword(Keyword::When),
                 id => {
-                    if id.chars().all(|c| c.is_digit(10)) {
-                        let num: Result<usize, _> = id.parse();
-                        if let Ok(n) = num {
-                            Token::Literal(Literal::Number(n))
+                    let first_char = id.chars().next().expect("Failed to get first char");
+
+                    if first_char.is_numeric() {
+                        if let Ok(num) = id.parse::<GinNumber>() {
+                            Token::Literal(GinValue::Number(num))
                         } else {
-                            Token::Id(id.to_string())
+                            todo!()
                         }
+                    } else if first_char.is_uppercase() {
+                        Token::Tag(id.to_string())
                     } else {
-                        let c = id.chars().next();
-                        if let Some(c) = c {
-                            if c.is_uppercase() {
-                                // TODO: swap to Token::Tag(id.to_string())
-                                Token::Tag(id.to_string())
-                            } else {
-                                Token::Id(id.to_string())
-                            }
-                        } else {
-                            panic!("not sure how you did this")
-                        }
+                        Token::Id(id.to_string())
                     }
                 }
             };
@@ -167,7 +160,7 @@ impl Lexer {
                 c => self.buffer.push(c),
             }
         }
-        let string = Token::Literal(Literal::TemplateString(self.buffer.to_string()));
+        let string = Token::Literal(GinValue::TemplateString(self.buffer.to_string()));
         self.add(string);
     }
 
@@ -179,7 +172,7 @@ impl Lexer {
                 c => self.buffer.push(c),
             }
         }
-        let string = Token::Literal(Literal::String(self.buffer.to_string()));
+        let string = Token::Literal(GinValue::String(self.buffer.to_string()));
         self.add(string);
     }
 }

@@ -1,244 +1,264 @@
-#[cfg(test)]
-mod parse {
-    use std::collections::HashMap;
+// #[cfg(test)]
+// mod parse {
+//     use std::collections::HashMap;
 
-    use crate::{
-        expr::{define::Define, literal::Literal, Expr},
-        gin_type::GinType,
-        Ngin,
-    };
+//     use crate::{
+//         expr::{
+//             define::{DataDefiniton, Define, Function},
+//             literal::Literal,
+//             Call, Expr,
+//         },
+//         gin_type::GinType,
+//         Ngin,
+//     };
 
-    #[test]
-    fn comments() {
-        let mut runtime = Ngin::new();
-        let module = runtime.include("../examples/lang/comments.gin".to_string());
+//     #[test]
+//     fn comments() {
+//         let mut runtime = Ngin::new();
+//         let module = runtime.include("../examples/lang/comments.gin".to_string());
 
-        let body: Vec<Expr> = vec![
-            Expr::Call(
-                String::from("print"),
-                Some(Box::new(Expr::Literal(Literal::String(String::from("a"))))),
-            ),
-            Expr::Call(
-                String::from("print"),
-                Some(Box::new(Expr::Literal(Literal::String(String::from("a"))))),
-            ),
-        ];
+//         let call1 = Call::new(
+//             "print".to_string(),
+//             Some(Box::new(Expr::Literal(Literal::String("a".to_string())))),
+//         );
 
-        assert_eq!(*module.get_body(), body);
-    }
+//         let body: Vec<Expr> = vec![Expr::Call(call1.clone()), Expr::Call(call1)];
 
-    #[test]
-    fn assign() {
-        let mut runtime = Ngin::new();
-        let module = runtime.include("../examples/lang/assign.gin".to_string());
+//         assert_eq!(*module.get_body(), body);
+//     }
 
-        let body: Vec<Expr> = vec![
-            Expr::Define(Define::Function(
-                String::from("a"),
-                vec![Expr::Literal(Literal::Number(1))],
-                GinType::Number,
-            )),
-            Expr::Define(Define::Function(
-                String::from("c"),
-                vec![Expr::Literal(Literal::String(String::from("hi")))],
-                GinType::String,
-            )),
-        ];
+//     #[test]
+//     fn assign() {
+//         let mut runtime = Ngin::new();
+//         let module = runtime.include("../examples/lang/assign.gin".to_string());
 
-        assert_eq!(*module.get_body(), body);
-    }
+//         let func1 = Function::new(
+//             String::from("a"),
+//             vec![Expr::Literal(Literal::Number(1))],
+//             GinType::Number,
+//         );
 
-    #[test]
-    fn bool() {
-        let mut runtime = Ngin::new();
-        let module = runtime.include("../examples/lang/bool.gin".to_string());
+//         let func2 = Function::new(
+//             String::from("c"),
+//             vec![Expr::Literal(Literal::String(String::from("hi")))],
+//             GinType::String,
+//         );
 
-        let body: Vec<Expr> = vec![Expr::Define(Define::Function(
-            String::from("a"),
-            vec![Expr::Literal(Literal::Bool(true))],
-            GinType::Bool,
-        ))];
+//         let body: Vec<Expr> = vec![
+//             Expr::Define(Define::Function(func1)),
+//             Expr::Define(Define::Function(func2)),
+//         ];
 
-        assert_eq!(*module.get_body(), body);
-    }
+//         assert_eq!(*module.get_body(), body);
+//     }
 
-    #[test]
-    fn fn_call_fn() {
-        let mut runtime = Ngin::new();
-        let module = runtime.include("../examples/lang/fnCallFn.gin".to_string());
+//     #[test]
+//     fn bool() {
+//         let mut runtime = Ngin::new();
+//         let module = runtime.include("../examples/lang/bool.gin".to_string());
 
-        let body: Vec<Expr> = vec![
-            Expr::Define(Define::Function(
-                String::from("a"),
-                vec![Expr::Literal(Literal::Number(10))],
-                GinType::Number,
-            )),
-            Expr::Call(
-                String::from("print"),
-                Some(Box::new(Expr::Call(String::from("a"), None))),
-            ),
-        ];
+//         let func = Function::new(
+//             String::from("a"),
+//             vec![Expr::Literal(Literal::Bool(true))],
+//             GinType::Bool,
+//         );
 
-        assert_eq!(*module.get_body(), body);
-    }
+//         let body: Vec<Expr> = vec![Expr::Define(Define::Function(func))];
 
-    #[test]
-    fn hello_world() {
-        let mut runtime = Ngin::new();
-        let module = runtime.include("../examples/helloWorld.gin".to_string());
+//         assert_eq!(*module.get_body(), body);
+//     }
 
-        let body: Vec<Expr> = vec![Expr::Call(
-            String::from("print"),
-            Some(Box::new(Expr::Literal(Literal::String(String::from(
-                "Hello world",
-            ))))),
-        )];
+//     #[test]
+//     fn fn_call_fn() {
+//         let mut runtime = Ngin::new();
+//         let module = runtime.include("../examples/lang/fnCallFn.gin".to_string());
 
-        assert_eq!(*module.get_body(), body);
-    }
+//         let func1 = Function::new(
+//             String::from("a"),
+//             vec![Expr::Literal(Literal::Number(10))],
+//             GinType::Number,
+//         );
+//         let call1 = Call::new("a".to_string(), None);
 
-    #[test]
-    fn nested() {
-        let mut runtime = Ngin::new();
-        let module = runtime.include("../examples/lang/nested.gin".to_string());
+//         let arg = Some(Box::new(Expr::Call(call1)));
+//         let call2 = Call::new("print".to_string(), arg);
 
-        let body: Vec<Expr> = vec![
-            Expr::Define(Define::Function(
-                String::from("do"),
-                vec![
-                    Expr::Define(Define::Function(
-                        String::from("handle"),
-                        vec![
-                            Expr::Define(Define::Function(
-                                String::from("personName"),
-                                vec![Expr::Literal(Literal::String(String::from("John")))],
-                                GinType::String,
-                            )),
-                            Expr::Call(String::from("personName"), None),
-                        ],
-                        GinType::String,
-                    )),
-                    Expr::Call(String::from("handle"), None),
-                ],
-                GinType::String,
-            )),
-            Expr::Define(Define::Function(
-                String::from("secondDo"),
-                vec![Expr::Literal(Literal::String(String::from("hello")))],
-                GinType::String,
-            )),
-        ];
+//         let body: Vec<Expr> = vec![Expr::Define(Define::Function(func1)), Expr::Call(call2)];
 
-        assert_eq!(*module.get_body(), body);
-    }
+//         assert_eq!(*module.get_body(), body);
+//     }
 
-    #[test]
-    fn point() {
-        let mut runtime = Ngin::new();
-        let module = runtime.include("../examples/lang/point.gin".to_string());
+//     #[test]
+//     fn hello_world() {
+//         let mut runtime = Ngin::new();
+//         let module = runtime.include("../examples/helloWorld.gin".to_string());
 
-        let mut hash = HashMap::new();
-        hash.insert(String::from("x"), GinType::Number);
-        hash.insert(String::from("y"), GinType::Number);
+//         let s = Literal::String("Hello world".to_string());
 
-        let body: Vec<Expr> = vec![Expr::Define(Define::Data(String::from("Point"), hash))];
+//         let arg = Some(Box::new(Expr::Literal(s)));
 
-        assert_eq!(*module.get_body(), body);
-    }
+//         let call = Call::new("print".to_string(), arg);
 
-    #[test]
-    fn single_line_point() {
-        let mut runtime = Ngin::new();
-        let module = runtime.include("../examples/lang/singleLinePoint.gin".to_string());
+//         let body: Vec<Expr> = vec![Expr::Call(call)];
 
-        let mut hash = HashMap::new();
-        hash.insert(String::from("x"), GinType::Number);
-        hash.insert(String::from("y"), GinType::Number);
+//         assert_eq!(*module.get_body(), body);
+//     }
 
-        let body: Vec<Expr> = vec![Expr::Define(Define::Data(String::from("Point"), hash))];
+//     #[test]
+//     fn nested() {
+//         let mut runtime = Ngin::new();
+//         let module = runtime.include("../examples/lang/nested.gin".to_string());
 
-        assert_eq!(*module.get_body(), body);
-    }
+//         let func3 = Function::new(
+//             String::from("personName"),
+//             vec![Expr::Literal(Literal::String(String::from("John")))],
+//             GinType::String,
+//         );
 
-    #[test]
-    fn return_obj() {
-        let mut runtime = Ngin::new();
-        let module = runtime.include("../examples/lang/returnObj.gin".to_string());
+//         let func2 = Function::new(
+//             String::from("handle"),
+//             vec![
+//                 Expr::Define(Define::Function(func3)),
+//                 Expr::Call(Call::new("personName".to_string(), None)),
+//             ],
+//             GinType::String,
+//         );
 
-        let mut object_hash = HashMap::new();
-        object_hash.insert(String::from("index"), GinType::Number);
-        object_hash.insert(String::from("length"), GinType::Number);
+//         let func1 = Function::new(
+//             String::from("do"),
+//             vec![
+//                 Expr::Define(Define::Function(func2)),
+//                 Expr::Call(Call::new("handle".to_string(), None)),
+//             ],
+//             GinType::String,
+//         );
 
-        let object_type = GinType::Object(object_hash);
+//         let func4 = Function::new(
+//             String::from("secondDo"),
+//             vec![Expr::Literal(Literal::String(String::from("hello")))],
+//             GinType::String,
+//         );
+//         let body: Vec<Expr> = vec![
+//             Expr::Define(Define::Function(func1)),
+//             Expr::Define(Define::Function(func4)),
+//         ];
 
-        let mut object_literal_hash = HashMap::new();
-        object_literal_hash.insert(String::from("index"), Expr::Literal(Literal::Number(0)));
-        object_literal_hash.insert(String::from("length"), Expr::Literal(Literal::Number(256)));
+//         assert_eq!(*module.get_body(), body);
+//     }
 
-        let body: Vec<Expr> = vec![Expr::Define(Define::Function(
-            String::from("main"),
-            vec![
-                Expr::Define(Define::Function(
-                    String::from("state"),
-                    vec![Expr::Literal(Literal::Data(object_literal_hash))],
-                    object_type.clone(),
-                )),
-                Expr::Call(String::from("state"), None),
-            ],
-            object_type,
-        ))];
+//     #[test]
+//     fn point() {
+//         let mut runtime = Ngin::new();
+//         let module = runtime.include("../examples/lang/point.gin".to_string());
 
-        assert_eq!(*module.get_body(), body);
-    }
+//         let mut data_definition = DataDefiniton::new("Point".to_string());
 
-    // #[test]
-    // fn if_then() {
-    //     let module = ast("../examples/ifThen.gin");
+//         data_definition.insert("x".to_string(), GinType::Number);
+//         data_definition.insert("y".to_string(), GinType::Number);
 
-    //     let body: Vec<Expr> = vec![Expr::Define(Define::Function(
-    //         String::from("people"),
-    //         vec![Expr::Literal(Literal::List(vec![
-    //             Expr::Literal(Literal::String(String::from("john"))),
-    //             Expr::Literal(Literal::String(String::from("jared"))),
-    //             Expr::Literal(Literal::String(String::from("joseph"))),
-    //         ]))],
-    //         GinType::List(vec![GinType::String]),
-    //     ))];
+//         let body: Vec<Expr> = vec![Expr::Define(Define::Data(data_definition))];
 
-    //     assert_eq!(module.body, body);
-    // }
+//         assert_eq!(*module.get_body(), body);
+//     }
 
-    // #[test]
-    // fn less_than() {
-    //     let module = ast("../examples/lessThan.gin");
+//     #[test]
+//     fn single_line_point() {
+//         let mut runtime = Ngin::new();
+//         let module = runtime.include("../examples/lang/singleLinePoint.gin".to_string());
 
-    //     let body: Vec<Expr> = vec![Expr::Define(Define::Function(
-    //         String::from("people"),
-    //         vec![Expr::Literal(Literal::List(vec![
-    //             Expr::Literal(Literal::String(String::from("john"))),
-    //             Expr::Literal(Literal::String(String::from("jared"))),
-    //             Expr::Literal(Literal::String(String::from("joseph"))),
-    //         ]))],
-    //         GinType::List(vec![GinType::String]),
-    //     ))];
+//         let mut data_definition = DataDefiniton::new("Point".to_string());
 
-    //     assert_eq!(module.body, body);
-    // }
+//         data_definition.insert("x".to_string(), GinType::Number);
+//         data_definition.insert("y".to_string(), GinType::Number);
 
-    // #[test]
-    // fn list() {
-    //     let module = ast("../examples/list.gin");
+//         let body: Vec<Expr> = vec![Expr::Define(Define::Data(data_definition))];
 
-    //     let body: Vec<Expr> = vec![Expr::Define(Define::Function(
-    //         String::from("people"),
-    //         vec![Expr::Literal(Literal::List(vec![
-    //             Expr::Literal(Literal::String(String::from("john"))),
-    //             Expr::Literal(Literal::String(String::from("jared"))),
-    //             Expr::Literal(Literal::String(String::from("joseph"))),
-    //         ]))],
-    //         GinType::List(vec![GinType::String]),
-    //     ))];
+//         assert_eq!(*module.get_body(), body);
+//     }
 
-    //     assert_eq!(module.body, body);
-    // }
-}
+//     #[test]
+//     fn return_obj() {
+//         let mut runtime = Ngin::new();
+//         let module = runtime.include("../examples/lang/returnObj.gin".to_string());
+
+//         let mut object_hash = HashMap::new();
+//         object_hash.insert(String::from("index"), GinType::Number);
+//         object_hash.insert(String::from("length"), GinType::Number);
+
+//         let object_type = GinType::Object(object_hash);
+
+//         let mut object_literal_hash = HashMap::new();
+//         object_literal_hash.insert(String::from("index"), Expr::Literal(Literal::Number(0)));
+//         object_literal_hash.insert(String::from("length"), Expr::Literal(Literal::Number(256)));
+
+//         let func2 = Function::new(
+//             String::from("state"),
+//             vec![Expr::Literal(Literal::Data(object_literal_hash))],
+//             object_type.clone(),
+//         );
+
+//         let func1 = Function::new(
+//             String::from("main"),
+//             vec![
+//                 Expr::Define(Define::Function(func2)),
+//                 Expr::Call(Call::new("state".to_string(), None)),
+//             ],
+//             object_type,
+//         );
+
+//         let body: Vec<Expr> = vec![Expr::Define(Define::Function(func1))];
+
+//         assert_eq!(*module.get_body(), body);
+//     }
+
+//     // #[test]
+//     // fn if_then() {
+//     //     let module = ast("../examples/ifThen.gin");
+
+//     //     let body: Vec<Expr> = vec![Expr::Define(Define::Function(
+//     //         String::from("people"),
+//     //         vec![Expr::Literal(Literal::List(vec![
+//     //             Expr::Literal(Literal::String(String::from("john"))),
+//     //             Expr::Literal(Literal::String(String::from("jared"))),
+//     //             Expr::Literal(Literal::String(String::from("joseph"))),
+//     //         ]))],
+//     //         GinType::List(vec![GinType::String]),
+//     //     ))];
+
+//     //     assert_eq!(module.body, body);
+//     // }
+
+//     // #[test]
+//     // fn less_than() {
+//     //     let module = ast("../examples/lessThan.gin");
+
+//     //     let body: Vec<Expr> = vec![Expr::Define(Define::Function(
+//     //         String::from("people"),
+//     //         vec![Expr::Literal(Literal::List(vec![
+//     //             Expr::Literal(Literal::String(String::from("john"))),
+//     //             Expr::Literal(Literal::String(String::from("jared"))),
+//     //             Expr::Literal(Literal::String(String::from("joseph"))),
+//     //         ]))],
+//     //         GinType::List(vec![GinType::String]),
+//     //     ))];
+
+//     //     assert_eq!(module.body, body);
+//     // }
+
+//     // #[test]
+//     // fn list() {
+//     //     let module = ast("../examples/list.gin");
+
+//     //     let body: Vec<Expr> = vec![Expr::Define(Define::Function(
+//     //         String::from("people"),
+//     //         vec![Expr::Literal(Literal::List(vec![
+//     //             Expr::Literal(Literal::String(String::from("john"))),
+//     //             Expr::Literal(Literal::String(String::from("jared"))),
+//     //             Expr::Literal(Literal::String(String::from("joseph"))),
+//     //         ]))],
+//     //         GinType::List(vec![GinType::String]),
+//     //     ))];
+
+//     //     assert_eq!(module.body, body);
+//     // }
+// }

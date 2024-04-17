@@ -1,7 +1,10 @@
-use crate::expr::literal::Literal;
+use crate::ngin::value::GinValue;
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Keyword {
+    If,
+    Else,
+    Then,
     Include,
     When,
     For,
@@ -28,7 +31,7 @@ pub enum Token {
     DocComment(String),
     Id(String),
     Tag(String),
-    Literal(Literal),
+    Literal(GinValue),
     LessThan,
     LessThanOrEqualTo,
     GreaterThan,

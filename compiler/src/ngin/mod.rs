@@ -1,20 +1,24 @@
 // use std::fs::canonicalize;
 // use std::path::Path;
-use std::{borrow::BorrowMut, collections::HashMap};
-
+use std::{borrow::BorrowMut, collections::HashMap, path::Path};
+pub mod gin_type;
+pub mod parser;
+pub mod source_file;
+pub mod user_input;
 mod value;
-pub use crate::expr::define::Define;
-pub use crate::{
-    expr::{literal::Literal, Expr},
-    module::GinModule,
-    parse::Parser,
-};
-use crate::{
-    expr::{Binary, Op},
-    lexer::source_file::SourceFile,
-};
 
-use self::value::GinValue;
+use self::{
+    parser::{
+        module::{
+            definition::Define,
+            expression::{Binary, Expr, Op},
+            Node,
+        },
+        Parser,
+    },
+    source_file::SourceFile,
+    value::GinValue,
+};
 
 // TODO: files needs to be able to check last_modified
 // if the file is open in another buffer (has write or read lock)
@@ -29,7 +33,7 @@ use self::value::GinValue;
 pub struct Ngin {
     files: HashMap<String, SourceFile>,
     parser: Parser,
-    scope: HashMap<String, Vec<Expr>>,
+    scope: HashMap<String, Vec<Node>>,
 }
 
 // no compile run cycle. compile inside of the program
@@ -40,28 +44,9 @@ pub struct Ngin {
 // runtime introspection
 // catch errors as they happen give option to fix and continue
 
-pub enum SourceFileError {
-    FileNotFound,
-}
+// TODO: ask if its okay to read a directory or file
 
 impl Ngin {
-    // TODO: read_file -> Result<SourceFile, UserDeny>
-
-    /// This will create a stateful reader reference to a file
-    /// on the filesystem.
-    pub fn get_source_file(&mut self, path: String) -> SourceFile {
-        SourceFile::new(path)
-    }
-
-    pub fn include(&mut self, path: String) -> GinModule {
-        let source_file = self.get_source_file(path);
-        self.parser.set_content(&source_file);
-        let full_path = source_file.full_path().to_string();
-        self.files.insert(full_path, source_file);
-        let ast = self.parser.borrow_mut().collect();
-        GinModule::new(ast)
-    }
-
     pub fn new() -> Self {
         Self {
             parser: Parser::new(),
@@ -70,21 +55,60 @@ impl Ngin {
         }
     }
 
+    /// Prints to the console for the user to see
+    pub fn print_error(&self, error: String) {
+        eprintln!("{}", error)
+    }
+
+    pub fn include(&mut self, path: &String) -> Vec<Node> {
+        if let Some(file) = self.files.get(path) {
+            let module = file.to_module(&mut self.parser);
+            return module.body;
+        }
+
+        let path = Path::new(&path);
+
+        if !path.exists() {
+            // TODO: prompt user don't error
+            self.print_error(format!("No such file or directory: {}", path.display()));
+            std::process::exit(1)
+        }
+
+        let source_file = SourceFile::new(path);
+
+        self.parser.set_content(&source_file);
+        let full_path = source_file.full_path().to_string();
+        self.files.insert(full_path, source_file);
+        let ast = self.parser.borrow_mut().collect();
+
+        ast
+    }
+
     /// compile a function to llvm ir (JIT?)
     // pub fn compile_function() {}
 
-    pub fn execute(&mut self, body: &Vec<Expr>) -> GinValue {
+    pub fn execute(&mut self, body: &Vec<Node>) -> GinValue {
         let mut res = GinValue::Nothing;
-        for expr in body {
-            res = self.evaluate(&expr);
-            // println!("res: {}", &res);
+
+        for node in body {
+            match node {
+                Node::Expression(expr) => {
+                    res = self.evaluate(&expr);
+                }
+                Node::Definition(def) => match def {
+                    Define::Data(_data) => todo!(),
+                    Define::Function(func) => {
+                        self.scope
+                            .insert(func.name.to_owned(), func.body.to_owned());
+                    }
+                },
+                Node::Statement(_) => todo!(),
+            }
         }
         res
     }
 
-    pub fn call(&mut self, name: &String, arg: Option<Box<Expr>>) -> GinValue {
-        // println!("{:#?}", self.scope);
-        // println!("{} {:#?}", name, arg);
+    pub fn call(&mut self, name: &String, _arg: Option<Box<Expr>>) -> GinValue {
         if let Some(body) = self.scope.clone().get(name) {
             self.execute(body)
         } else {
@@ -94,42 +118,32 @@ impl Ngin {
 
     pub fn evaluate(&mut self, expr: &Expr) -> GinValue {
         match expr {
-            Expr::Call(name, arg) => {
-                if name.as_str() == "print" {
-                    if let Some(arg) = arg {
+            Expr::Call(call) => {
+                if call.name.as_str() == "print" {
+                    if let Some(arg) = &call.arg {
                         // println!("print {:#?}", &arg);
                         println!("{}", self.evaluate(arg));
                     }
                     GinValue::Nothing
                 } else {
-                    self.call(name, arg.to_owned())
+                    self.call(&call.name, call.arg.to_owned())
                 }
             }
             Expr::Literal(lit) => match lit {
-                Literal::Data(_) => todo!(),
-                Literal::List(_) => todo!(),
-                Literal::TemplateString(_) => todo!(),
-                Literal::Bool(b) => GinValue::Bool(*b),
-                Literal::String(s) => GinValue::String(s.to_owned()),
-                Literal::Number(num) => GinValue::Number(*num),
-                Literal::DestructureData(_) => todo!(),
+                GinValue::Bool(_) => todo!(),
+                GinValue::String(_) => todo!(),
+                GinValue::Number(_) => todo!(),
+                GinValue::Nothing => todo!(),
+                GinValue::TemplateString(_) => todo!(),
+                GinValue::Object(_) => todo!(),
+                // Literal::Data(_) => todo!(),
+                // Literal::List(_) => todo!(),
+                // Literal::TemplateString(_) => todo!(),
+                // Literal::Bool(b) => GinValue::Bool(*b),
+                // Literal::String(s) => GinValue::String(s.to_owned()),
+                // Literal::Number(num) => GinValue::Number(*num),
+                // Literal::DestructureData(_) => todo!(),
             },
-            Expr::Define(def) => match def {
-                Define::Function(name, body, _) => {
-                    // push this to a hashmap, when called we evaluate the body
-                    self.scope.insert(name.clone(), body.clone());
-                    GinValue::Nothing
-                }
-                Define::Data(_, _) => {
-                    // defining a structure really doesnt provide anything
-                    // for the runtime in terms of values
-
-                    GinValue::Nothing
-                }
-                Define::DataContent(_) => todo!(),
-                Define::When() => todo!(),
-            },
-            Expr::Include(_, _) => todo!(),
             Expr::Operation(lhs, op, rhs) => match op {
                 Op::Compare(_) => todo!(),
                 Op::Bin(binop) => match binop {

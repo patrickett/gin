@@ -1,10 +1,17 @@
-use std::ops::{Add, Div, Mul, Sub};
+use std::{
+    collections::HashMap,
+    ops::{Add, Div, Mul, Sub},
+};
 
-#[derive(Debug, Clone)]
+use super::{gin_type::number::GinNumber, parser::module::expression::Expr};
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum GinValue {
+    TemplateString(String),
+    Object(HashMap<String, Expr>),
     Bool(bool),
     String(String),
-    Number(usize),
+    Number(GinNumber),
     Nothing,
 }
 
@@ -121,8 +128,10 @@ impl std::fmt::Display for GinValue {
         match self {
             GinValue::Nothing => Ok(()),
             GinValue::String(s) => write!(fmt, "{}", s),
-            GinValue::Number(n) => write!(fmt, "{}", n),
+            GinValue::Number(n) => write!(fmt, "{}", n.to_string()),
             GinValue::Bool(b) => write!(fmt, "{}", b),
+            GinValue::TemplateString(_) => todo!(),
+            GinValue::Object(_) => todo!(),
         }
     }
 }

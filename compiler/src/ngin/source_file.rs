@@ -1,8 +1,13 @@
 use std::{
+    borrow::BorrowMut,
     fs::{self, canonicalize},
     path::Path,
     time::SystemTime,
 };
+
+use super::parser::{module::GinModule, Parser};
+
+// TODO: read_file -> Result<SourceFile, UserDeny>
 
 // having this file wrapper allows us to do some cool things in the future
 // 1. dynamically mutate files based on user imput
@@ -32,18 +37,8 @@ impl SourceFile {
         }
     }
 
-    pub fn new(path: String) -> Self {
-        let path = Path::new(&path);
-        if !path.exists() {
-            // TODO: prompt user don't error
-            eprintln!("No such file or directory: {}", path.display());
-        }
+    pub fn new(path: &Path) -> Self {
         let path = canonicalize(path).expect("failed to get real path");
-        if !path.exists() {
-            // TODO: prompt user don't error
-            eprintln!("No such file or directory: {}", path.display());
-        }
-
         let full_path = path.to_str().expect("msg").to_string();
 
         // this is scary if the file is really large
@@ -57,6 +52,11 @@ impl SourceFile {
             full_path,
             last_modified,
         }
+    }
+
+    pub fn to_module(&self, parser: &mut Parser) -> GinModule {
+        parser.set_content(self);
+        GinModule::new(parser.borrow_mut().collect())
     }
 
     // because in previous parts we will have confimred with the user

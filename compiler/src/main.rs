@@ -1,15 +1,14 @@
+use std::path::Path;
+
 use clap::*;
-pub mod lexer;
+use ngin::{
+    parser::lexer::{token::Token, Lexer},
+    source_file::SourceFile,
+    Ngin,
+};
 pub mod ngin;
-pub use crate::ngin::Ngin;
 
-pub mod expr;
-mod gin_type;
-
-mod module;
-mod parse;
 mod tests;
-pub mod token;
 
 #[derive(Parser, Debug)]
 #[command(version)]
@@ -20,9 +19,9 @@ pub struct Args {
     /// Print abstract syntax tree for the provided file
     #[arg(short, long)]
     debug: bool,
-    //Print lexed tokens for the provided file
-    // #[arg(short, long)]
-    // tokens: bool,
+    /// Print lexed tokens for the provided file
+    #[arg(short, long)]
+    tokens: bool,
 }
 
 fn main() {
@@ -30,11 +29,22 @@ fn main() {
     match args.file_path {
         Some(path) => {
             let mut runtime = Ngin::new();
-            let root_module = runtime.include(path);
-            if !args.debug {
-                runtime.execute(&root_module.get_body());
-            } else {
-                println!("{:#?}", root_module.get_body());
+            let body = runtime.include(&path);
+            if args.tokens {
+                let mut lexer = Lexer::new();
+                let path = Path::new(&path);
+                let source_file = SourceFile::new(path);
+                lexer.set_content(&source_file);
+                let tokens: Vec<Token> = lexer.collect();
+                println!("{:#?}", tokens);
+                // runtime.tokens(&body)
+            }
+            if args.debug {
+                println!("{:#?}", body);
+            }
+
+            if !args.debug && !args.tokens {
+                runtime.execute(&body);
             }
         }
         None => println!("starting repl"),

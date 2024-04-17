@@ -1,5 +1,8 @@
 use std::{collections::HashMap, str::FromStr};
 
+use super::parser::module::Node;
+pub mod number;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum GinType {
     Bool,
@@ -16,26 +19,32 @@ pub enum GinType {
     Nothing,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum GinTypeError {
+    InvalidTypeName,
+}
+
 impl FromStr for GinType {
-    type Err = ();
+    type Err = GinTypeError;
 
     fn from_str(input: &str) -> Result<GinType, Self::Err> {
         match input {
             "Number" => Ok(GinType::Number),
             "String" => Ok(GinType::String),
             "Bool" => Ok(GinType::Bool),
-            custom => Ok(GinType::Custom(custom.into())),
+            custom => {
+                if let Some(c) = custom.chars().nth(0) {
+                    if !c.is_uppercase() {
+                        return Err(GinTypeError::InvalidTypeName);
+                    }
+                }
+
+                Ok(GinType::Custom(custom.into()))
+            }
         }
     }
 }
 
-// impl std::fmt::Display for EvaluatedResult {
-//     fn fmt(&self, fmt: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
-//         match self {
-//             EvaluatedResult::String(s) => write!(fmt, "{}", s),
-//             EvaluatedResult::Number(n) => write!(fmt, "{}", n),
-//             EvaluatedResult::Nothing => Ok(()),
-//             EvaluatedResult::Bool(b) => write!(fmt, "{}", b),
-//         }
-//     }
-// }
+pub trait GinTyped {
+    fn gin_type(&self, context: Option<&Vec<Node>>) -> GinType;
+}
