@@ -1,11 +1,19 @@
 use std::{
     borrow::BorrowMut,
-    fs::{self, canonicalize},
+    fs::{self, canonicalize, File},
     path::Path,
     time::SystemTime,
 };
 
-use super::parser::{module::GinModule, Parser};
+use std::io::prelude::*;
+
+use super::{
+    compiler_error::CompilerError,
+    parser::{ast::Node, Parser},
+    user_input::ask_yes_no,
+    validator::validate,
+};
+use crate::handle_error;
 
 // TODO: read_file -> Result<SourceFile, UserDeny>
 
@@ -13,68 +21,103 @@ use super::parser::{module::GinModule, Parser};
 // 1. dynamically mutate files based on user imput
 // 2. reload files with their changes
 pub struct SourceFile {
-    // we keep the full path in case something else imports
-    // so we can just reuse the same already parsed file
     full_path: String,
-    content: String,
-    last_modified: SystemTime,
+    last_modified: Option<SystemTime>,
+    content: Option<String>,
 }
 
 impl SourceFile {
-    pub fn full_path(&self) -> &String {
-        &self.full_path
+    pub fn full_path(&self) -> String {
+        self.full_path.clone()
     }
 
-    pub fn modified(&mut self) -> bool {
+    pub fn get_current_modified(&self) -> SystemTime {
         let metadata = fs::metadata(self.full_path.to_string()).expect("user will have corrected");
-        let recent_modified = metadata.modified().expect("has last modified date");
+        let modified = metadata.modified().expect("has last modified date");
+        modified
+    }
 
-        if recent_modified > self.last_modified {
-            self.last_modified = recent_modified;
-            true
-        } else {
-            false
-        }
+    pub fn been_modified(&mut self) -> bool {
+        let current_modified = self.get_current_modified();
+        let last_modified = match self.last_modified {
+            Some(m) => m,
+            None => {
+                self.read_from_disk();
+                self.last_modified.expect("failed to read last_modified")
+            }
+        };
+
+        current_modified > last_modified
     }
 
     pub fn new(path: &Path) -> Self {
         let path = canonicalize(path).expect("failed to get real path");
         let full_path = path.to_str().expect("msg").to_string();
 
-        // this is scary if the file is really large
-        let content = fs::read_to_string(full_path.clone()).expect("msg");
-
-        let metadata = fs::metadata(&full_path).expect("user will have corrected");
-        let last_modified = metadata.modified().expect("has last modified date");
-
         Self {
-            content,
             full_path,
-            last_modified,
+            content: None,
+            last_modified: None,
         }
     }
 
-    pub fn to_module(&self, parser: &mut Parser) -> GinModule {
+    pub fn to_module(&mut self, parser: &mut Parser) -> Vec<Node> {
         parser.set_content(self);
-        GinModule::new(parser.borrow_mut().collect())
-    }
-
-    // because in previous parts we will have confimred with the user
-    // we can always return content
-    pub fn content(&self) -> &String {
-        &self.content
-    }
-
-    fn read_from_disk(&self) -> String {
-        // TODO: check modified
-        fs::read_to_string(self.full_path.clone()).expect("msg")
-    }
-
-    // if changes to file were made on disk, this allows us to re-lex-parse the file
-    pub fn reload(&mut self) {
-        if self.modified() {
-            self.content = self.read_from_disk()
+        let ast_attempt: Vec<Result<Node, CompilerError>> = parser.borrow_mut().collect();
+        let maybe_ast = handle_error(ast_attempt);
+        if let Some(ast) = maybe_ast {
+            let validate_result = validate(ast);
+            match validate_result {
+                Ok(compile_ready_ast) => compile_ready_ast,
+                Err(compiler_error) => {
+                    eprint!("{}", compiler_error);
+                    panic!("");
+                }
+            }
         } else {
+            panic!("")
         }
+    }
+
+    pub fn get_content(&mut self) -> String {
+        // check modified
+        let modified = false;
+
+        if modified {
+            let question = format!("The file {} has been modified since it was last used. Do you want to use the new changes? ", &self.full_path);
+            let use_modified_file = ask_yes_no(&question);
+
+            if use_modified_file {
+                self.read_from_disk();
+            }
+        }
+
+        let c = self.content.clone();
+
+        match c {
+            Some(content) => content,
+            None => {
+                self.read_from_disk();
+                self.content.clone().unwrap()
+            }
+        }
+    }
+
+    fn read_from_disk(&mut self) {
+        // TODO: check modified
+        let mut content = String::new();
+
+        let mut file = File::open(&self.full_path).expect("failed to open file");
+        let metadata = file.metadata().expect("failed to get metadata for file");
+        self.last_modified = Some(
+            metadata
+                .modified()
+                .expect("failed to read modified metadata for file"),
+        );
+
+        file.read_to_string(&mut content)
+            .expect("failed to read file to string");
+
+        self.content = Some(content);
     }
 }

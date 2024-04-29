@@ -1,19 +1,15 @@
-// use std::fs::canonicalize;
-// use std::path::Path;
 use std::{borrow::BorrowMut, collections::HashMap, path::Path};
+pub mod compiler_error;
 pub mod gin_type;
 pub mod parser;
 pub mod source_file;
 pub mod user_input;
+pub mod validator;
 mod value;
 
 use self::{
     parser::{
-        module::{
-            definition::Define,
-            expression::{Binary, Expr, Op},
-            Node,
-        },
+        ast::{definition::Define, expression::Expr, Node},
         Parser,
     },
     source_file::SourceFile,
@@ -61,9 +57,9 @@ impl Ngin {
     }
 
     pub fn include(&mut self, path: &String) -> Vec<Node> {
-        if let Some(file) = self.files.get(path) {
-            let module = file.to_module(&mut self.parser);
-            return module.body;
+        let temp_path = path.clone();
+        if let Some(&mut ref mut file) = self.files.get_mut(&temp_path) {
+            return file.to_module(&mut self.parser);
         }
 
         let path = Path::new(&path);
@@ -74,14 +70,15 @@ impl Ngin {
             std::process::exit(1)
         }
 
-        let source_file = SourceFile::new(path);
+        let mut source_file = SourceFile::new(path);
 
-        self.parser.set_content(&source_file);
+        self.parser.set_content(&mut source_file);
         let full_path = source_file.full_path().to_string();
         self.files.insert(full_path, source_file);
-        let ast = self.parser.borrow_mut().collect();
+        let ast: Vec<Result<Node, compiler_error::CompilerError>> =
+            self.parser.borrow_mut().collect();
 
-        ast
+        vec![]
     }
 
     /// compile a function to llvm ir (JIT?)
@@ -96,10 +93,13 @@ impl Ngin {
                     res = self.evaluate(&expr);
                 }
                 Node::Definition(def) => match def {
-                    Define::Data(_data) => todo!(),
-                    Define::Function(func) => {
-                        self.scope
-                            .insert(func.name.to_owned(), func.body.to_owned());
+                    Define::Record { .. } => todo!(),
+                    Define::Function {
+                        name,
+                        body,
+                        returns: _,
+                    } => {
+                        self.scope.insert(name.to_owned(), body.to_owned());
                     }
                 },
                 Node::Statement(_) => todo!(),
@@ -118,41 +118,41 @@ impl Ngin {
 
     pub fn evaluate(&mut self, expr: &Expr) -> GinValue {
         match expr {
-            Expr::Call(call) => {
-                if call.name.as_str() == "print" {
-                    if let Some(arg) = &call.arg {
+            Expr::Call { name, arg } => {
+                if name.as_str() == "print" {
+                    if let Some(arg) = &arg {
                         // println!("print {:#?}", &arg);
                         println!("{}", self.evaluate(arg));
                     }
                     GinValue::Nothing
                 } else {
-                    self.call(&call.name, call.arg.to_owned())
+                    self.call(&name, arg.to_owned())
                 }
             }
-            Expr::Literal(lit) => match lit {
-                GinValue::Bool(_) => todo!(),
-                GinValue::String(_) => todo!(),
-                GinValue::Number(_) => todo!(),
-                GinValue::Nothing => todo!(),
-                GinValue::TemplateString(_) => todo!(),
-                GinValue::Object(_) => todo!(),
-                // Literal::Data(_) => todo!(),
-                // Literal::List(_) => todo!(),
-                // Literal::TemplateString(_) => todo!(),
-                // Literal::Bool(b) => GinValue::Bool(*b),
-                // Literal::String(s) => GinValue::String(s.to_owned()),
-                // Literal::Number(num) => GinValue::Number(*num),
-                // Literal::DestructureData(_) => todo!(),
-            },
-            Expr::Operation(lhs, op, rhs) => match op {
-                Op::Compare(_) => todo!(),
-                Op::Bin(binop) => match binop {
-                    Binary::Add => self.evaluate(&lhs) + self.evaluate(&rhs),
-                    Binary::Sub => todo!(),
-                    Binary::Div => todo!(),
-                    Binary::Mul => todo!(),
-                },
-            },
+            Expr::Literal(lit) => lit.clone(),
+            Expr::Arithmetic(_) => todo!(),
+            Expr::Relational(_) => todo!(),
+            Expr::If {
+                cond,
+                true_body,
+                false_body,
+            } => {
+                let cond_result = self.evaluate(cond);
+                match cond_result {
+                    GinValue::Bool(b) => {
+                        if b {
+                            self.execute(true_body)
+                        } else {
+                            if let Some(false_body) = false_body {
+                                self.execute(false_body)
+                            } else {
+                                GinValue::Nothing
+                            }
+                        }
+                    }
+                    _ => todo!(),
+                }
+            }
         }
     }
 }

@@ -1,13 +1,16 @@
-use std::{collections::HashMap, str::FromStr};
+use std::{cmp::Ordering, collections::HashMap, str::FromStr};
 
-use super::parser::module::Node;
+use super::parser::ast::Node;
 pub mod number;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum GinType {
+    /// Can be any ONE of the types within
+    Union(Vec<GinType>),
     Bool,
+    /// Can contain MULTIPLE of the types within
     List(Vec<GinType>),
-    Object(HashMap<String, GinType>),
+    Record(HashMap<String, GinType>),
     String,
     Number,
     // TODO: If a literal is unchanged in a function we should be able to return the actual value
@@ -17,6 +20,38 @@ pub enum GinType {
     // ConstantObject(Map<String,>)
     Custom(String),
     Nothing,
+}
+
+// impl Ord for GinType {
+//     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+//         match (self, other) {
+//             (MyEnum::Variant1, MyEnum::Variant1) => std::cmp::Ordering::Equal,
+//             (MyEnum::Variant1, _) => std::cmp::Ordering::Less,
+//             (_, MyEnum::Variant1) => std::cmp::Ordering::Greater,
+//             (MyEnum::Variant2(x), MyEnum::Variant2(y)) => x.cmp(y),
+//             (MyEnum::Variant2(_), _) => std::cmp::Ordering::Less,
+//             (_, MyEnum::Variant2(_)) => std::cmp::Ordering::Greater,
+//             (MyEnum::Variant3(x), MyEnum::Variant3(y)) => x.cmp(y),
+//         }
+//     }
+// }
+
+impl GinType {
+    /// Will only return a Union if there are 2 or more unique types
+    /// after it is deduped. Otherwise it will return the single type.
+    pub fn create_union(mut types: Vec<GinType>) -> GinType {
+        if types.len() == 0 {
+            GinType::Nothing
+        } else if types.len() == 1 {
+            types[0].clone()
+        } else {
+            // will dedup any repeating types
+            // types.sort();
+            types.dedup();
+
+            GinType::Union(types)
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
