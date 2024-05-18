@@ -1,7 +1,7 @@
 use crate::{
     compiler_error::CompilerError,
     gin_type::{GinType, GinTyped},
-    parser::ast::{definition::Define, statement::Statement, Node},
+    syntax::ast::{definition::Define, statement::Statement, Node},
 };
 
 pub struct TypeChecker;

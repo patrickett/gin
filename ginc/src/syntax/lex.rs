@@ -1,11 +1,11 @@
-use super::lexer::token::{Keyword, Token, TokenKind};
-use crate::compiler_error::CompilerError;
-use crate::gin_type::number::GinNumber;
 use crate::value::GinValue;
+use crate::{compiler_error::CompilerError, gin_type::number::GinNumber};
 use std::fs::File;
 use std::io::Read;
 use std::iter::Peekable;
 use std::str::Chars;
+
+use super::token::{Keyword, Token, TokenKind};
 
 pub struct SimpleLexer {
     buffer: String,
@@ -15,6 +15,19 @@ pub struct SimpleLexer {
 
 pub struct LexedFile {
     pub tokens: Vec<Token>,
+}
+
+#[derive(Debug)]
+pub struct Location {
+    line: usize,
+    start_position: usize,
+    file_path: String,
+}
+
+impl ToString for Location {
+    fn to_string(&self) -> String {
+        format!("{}:{}:{}", self.file_path, self.line, self.start_position)
+    }
 }
 
 impl SimpleLexer {

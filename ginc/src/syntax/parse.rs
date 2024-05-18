@@ -1,17 +1,13 @@
 use super::{
     ast::{
-        definition::{Define, Function, Parameter},
+        definition::{Define, Function, Parameter, Record},
         expression::{ArithmeticExpr, Expr},
         Node,
     },
     lex::LexedFile,
-    lexer::token::{Token, TokenKind},
+    token::{Keyword, Token, TokenKind},
 };
-use crate::{
-    compiler_error::CompilerError,
-    gin_type::GinType,
-    parser::{ast::definition::Record, lexer::token::Keyword},
-};
+use crate::{compiler_error::CompilerError, gin_type::GinType};
 use std::{iter::Peekable, slice::Iter, str::FromStr};
 
 pub struct SimpleParser;

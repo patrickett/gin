@@ -1,5 +1,5 @@
 use self::verifier::Verifier;
-use super::{compiler_error::CompilerError, parser::ast::Node};
+use super::{compiler_error::CompilerError, syntax::ast::Node};
 use crate::validator::type_checker::TypeChecker;
 
 pub mod type_checker;

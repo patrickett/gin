@@ -1,6 +1,7 @@
 use std::{collections::HashMap, str::FromStr};
 
-use super::parser::ast::Node;
+use crate::syntax::ast::Node;
+
 pub mod number;
 
 #[derive(Debug, Clone, PartialEq)]

@@ -1,6 +1,6 @@
 // use std::collections::HashMap;
 
-use crate::{gin_type::GinType, parser::ast::expression::Expr};
+use crate::{gin_type::GinType, syntax::ast::expression::Expr};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ControlFlow {

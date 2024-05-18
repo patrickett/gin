@@ -3,7 +3,7 @@ use std::{
     ops::{Add, Div, Mul, Sub},
 };
 
-use super::{gin_type::number::GinNumber, parser::ast::expression::Expr};
+use super::{gin_type::number::GinNumber, syntax::ast::expression::Expr};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum GinValue {

@@ -1,10 +1,11 @@
-use self::{definition::Define, expression::Expr, statement::Statement};
-use crate::gin_type::GinTyped;
-use crate::parser::GinType;
+use crate::gin_type::{GinType, GinTyped};
+
 pub mod control_flow;
 pub mod definition;
 pub mod expression;
 pub mod statement;
+
+use self::{definition::Define, expression::Expr, statement::Statement};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Node {

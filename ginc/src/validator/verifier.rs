@@ -1,4 +1,4 @@
-use crate::{compiler_error::CompilerError, parser::ast::Node};
+use crate::{compiler_error::CompilerError, syntax::ast::Node};
 
 pub struct Verifier;
 

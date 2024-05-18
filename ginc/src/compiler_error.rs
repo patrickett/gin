@@ -1,4 +1,4 @@
-use super::parser::lexer::{token::Token, Location};
+use crate::syntax::{lex::Location, token::Token};
 
 // #[derive(Debug)]
 pub enum CompilerError {
