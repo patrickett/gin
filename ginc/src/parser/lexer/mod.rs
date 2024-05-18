@@ -1,9 +1,9 @@
-use crate::ngin::{
-    compiler_error::CompilerError, gin_type::number::GinNumber, source_file::SourceFile,
+use self::token::{Keyword, Token, TokenKind};
+use crate::{
+    compiler_error::CompilerError, gin_type::number::GinNumber, source_file::SourceFile,parse
     value::GinValue,
 };
-
-use self::token::{Keyword, Token, TokenKind};
+use std::collections::VecDeque;
 
 pub mod token;
 
@@ -18,7 +18,7 @@ pub struct Lexer {
     char_count: usize,
     full_path: String,
     buffer: String,
-    holding: Option<Token>,
+    queue: VecDeque<Result<Token, CompilerError>>,
 }
 
 #[derive(Debug)]
@@ -44,7 +44,7 @@ impl Lexer {
             content: Vec::new(),
             char_count: 0,
             last_position: 1,
-            holding: None,
+            queue: VecDeque::new(),
         }
     }
 
@@ -71,11 +71,7 @@ impl Lexer {
     }
 
     pub fn defer(&mut self, t: Token) {
-        // self.queue.push_front(t)
-        if self.holding.is_some() {
-            panic!("cannot insert already some");
-        }
-        self.holding = Some(t);
+        self.queue.push_front(Ok(t))
     }
 
     fn create(&mut self, kind: TokenKind) -> Token {
@@ -87,17 +83,10 @@ impl Lexer {
     }
 
     fn resolve_buffer_then_add(&mut self, kind: TokenKind) -> Result<Token, CompilerError> {
+        self.resolve_buffer();
         self.line_position -= 1;
         self.line_position += 1;
-        if !self.buffer.is_empty() {
-            if self.holding.is_some() {
-                panic!("cannot double insert holding")
-            }
-            self.holding = Some(self.create(kind));
-            self.resolve_buffer()
-        } else {
-            Ok(self.create(kind))
-        }
+        Ok(self.create(kind))
     }
 
     fn resolve_range(&self, ident: &str) -> Result<TokenKind, CompilerError> {
@@ -114,10 +103,10 @@ impl Lexer {
         }
     }
 
-    fn resolve_buffer(&mut self) -> Result<Token, CompilerError> {
-        // if self.buffer.is_empty() {
-        //     return;
-        // };
+    fn resolve_buffer(&mut self) {
+        if self.buffer.is_empty() {
+            return;
+        };
 
         let tok = match self.buffer.as_str() {
             "+" => TokenKind::Plus,
@@ -150,7 +139,11 @@ impl Lexer {
                     if id.contains("..") {
                         match self.resolve_range(id) {
                             Ok(kind) => kind,
-                            Err(e) => return Err(e),
+                            Err(e) => {
+                                self.buffer.clear();
+                                self.queue.push_back(Err(e));
+                                return;
+                            }
                         }
                     } else if let Ok(num) = id.parse::<GinNumber>() {
                         TokenKind::Literal(GinValue::Number(num))
@@ -167,8 +160,8 @@ impl Lexer {
 
         self.buffer.clear();
         let t = self.create(tok);
-        Ok(t)
-        // self.queue.push_back(t);
+        // println!("{:#?}", &t);
+        self.queue.push_back(Ok(t));
     }
 
     fn next_char(&mut self) -> Option<char> {
@@ -198,12 +191,7 @@ impl Lexer {
                     let c = self.create(comment);
                     self.buffer.clear();
                     let nwl = self.saw_newline()?; // -> T & T
-                    if self.holding.is_some() {
-                        panic!("cannot doublely set holding")
-                    }
-
-                    self.holding = Some(nwl);
-
+                    self.queue.push_back(Ok(nwl));
                     return Ok(c);
                 }
                 c => self.buffer.push(c),
@@ -229,6 +217,7 @@ impl Lexer {
 
     fn resolve_string(&mut self) -> Result<Token, CompilerError> {
         self.resolve_buffer();
+
         while let Some(c) = self.next_char() {
             match c {
                 '"' => break,
@@ -247,10 +236,8 @@ impl Iterator for Lexer {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            if let Some(t) = &self.holding {
-                let tok = t.clone();
-                self.holding = None;
-                return Some(Ok(tok));
+            if self.queue.len() > 0 {
+                return self.queue.pop_front();
             }
 
             if let Some(c) = self.next_char() {
@@ -264,7 +251,6 @@ impl Iterator for Lexer {
                     '[' => return Some(self.resolve_buffer_then_add(TokenKind::BracketOpen)),
                     ']' => return Some(self.resolve_buffer_then_add(TokenKind::BracketClose)),
                     '{' => return Some(self.resolve_buffer_then_add(TokenKind::CurlyOpen)),
-
                     '}' => return Some(self.resolve_buffer_then_add(TokenKind::CurlyClose)),
                     '#' => return Some(self.resolve_comment()),
                     '"' => return Some(self.resolve_string()),
@@ -273,7 +259,8 @@ impl Iterator for Lexer {
                 }
             } else {
                 if !self.buffer.is_empty() {
-                    return Some(self.resolve_buffer());
+                    self.resolve_buffer();
+                    continue;
                 }
 
                 return None;

@@ -1,9 +1,8 @@
-use crate::ngin::{
+use super::Node;
+use crate::{
     gin_type::{GinType, GinTyped},
     value::GinValue,
 };
-
-use super::Node;
 
 #[derive(Debug, Clone, PartialEq)]
 /// Expressions are things that can be evaluated to a value.
@@ -14,13 +13,16 @@ pub enum Expr {
         true_body: Vec<Node>,
         false_body: Option<Vec<Node>>,
     },
-    Call {
-        name: String,
-        arg: Option<Box<Expr>>,
-    },
+    Call(FunctionCall),
     Arithmetic(Box<ArithmeticExpr>),
     Relational(Box<RelationalExpr>),
     Literal(GinValue),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FunctionCall {
+    name: String,
+    arg: Option<Box<Expr>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -44,7 +46,7 @@ pub enum ArithmeticExpr {
 impl GinTyped for Expr {
     fn gin_type(&self, context: Option<&Vec<Node>>) -> GinType {
         match self {
-            Expr::Call {name, arg} => match context {
+            Expr::Call {..} => match context {
                 Some(ctx) => ctx.gin_type(context),
                 None => panic!("function call: '{:#?}' must be provided with context to determine what its calling and returning", self),
             }

@@ -1,4 +1,4 @@
-use crate::ngin::{
+use crate::{
     compiler_error::CompilerError,
     gin_type::{GinType, GinTyped},
     parser::ast::{definition::Define, statement::Statement, Node},
@@ -10,21 +10,17 @@ impl TypeChecker {
     pub fn check_types(mut ast: Vec<Node>) -> Result<Vec<Node>, CompilerError> {
         for node in &mut ast {
             match node {
-                Node::Expression(expr) => {
+                Node::Expression(_expr) => {
                     // println!("{:#?}", expr);
                 }
                 Node::Definition(def) => {
                     // println!("{:#?}", def);
                     match def {
                         Define::Record { .. } => todo!(),
-                        Define::Function {
-                            name: _,
-                            body,
-                            returns,
-                        } => {
-                            if *returns == GinType::Nothing {
+                        Define::Function(function) => {
+                            if function.returns == GinType::Nothing {
                                 // need to double check return type
-                                let mut body_iter = body.iter();
+                                let mut body_iter = function.body.iter();
 
                                 let has_control_flow = body_iter.any(|n| {
                                     matches!(n, Node::Statement(Statement::ControlFlow(_)))
@@ -35,11 +31,11 @@ impl TypeChecker {
                                     // todo!();
                                 } else {
                                     // implicit last expression return
-                                    let last_node = body.last();
+                                    let last_node = function.body.last();
                                     if let Some(Node::Expression(expr)) = last_node {
                                         let rt = expr.gin_type(None);
                                         // println!("{:#?}", &rt);
-                                        *returns = rt;
+                                        function.returns = rt;
                                     } else {
                                         // println!("{:#?}", last_node)
                                     }
@@ -51,7 +47,7 @@ impl TypeChecker {
                         }
                     }
                 }
-                Node::Statement(stmt) => {
+                Node::Statement(_stmt) => {
                     // println!("{:#?}", stmt);
                 }
             }

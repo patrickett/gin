@@ -11,9 +11,8 @@ use super::{
     compiler_error::CompilerError,
     parser::{ast::Node, Parser},
     user_input::ask_yes_no,
-    validator::validate,
 };
-use crate::handle_error;
+// use crate::extract_errors_and_nodes;
 
 // TODO: read_file -> Result<SourceFile, UserDeny>
 
@@ -64,19 +63,24 @@ impl SourceFile {
     pub fn to_module(&mut self, parser: &mut Parser) -> Vec<Node> {
         parser.set_content(self);
         let ast_attempt: Vec<Result<Node, CompilerError>> = parser.borrow_mut().collect();
-        let maybe_ast = handle_error(ast_attempt);
-        if let Some(ast) = maybe_ast {
-            let validate_result = validate(ast);
-            match validate_result {
-                Ok(compile_ready_ast) => compile_ready_ast,
-                Err(compiler_error) => {
-                    eprint!("{}", compiler_error);
-                    panic!("");
-                }
-            }
-        } else {
-            panic!("")
-        }
+        Vec::new()
+        // let maybe_ast = extract_errors_and_nodes(ast_attempt);
+        // match maybe_ast {
+        //     Ok(ast) => ast,
+        //     Err(errors) => todo!(),
+        // }
+        // if let Some(ast) = maybe_ast {
+        //     let validate_result = validate(ast);
+        //     match validate_result {
+        //         Ok(compile_ready_ast) => compile_ready_ast,
+        //         Err(compiler_error) => {
+        //             eprint!("{}", compiler_error);
+        //             panic!("");
+        //         }
+        //     }
+        // } else {
+        //     panic!("")
+        // }
     }
 
     pub fn get_content(&mut self) -> String {

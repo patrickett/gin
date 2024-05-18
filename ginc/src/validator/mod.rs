@@ -1,6 +1,6 @@
 use self::verifier::Verifier;
 use super::{compiler_error::CompilerError, parser::ast::Node};
-use crate::ngin::validator::type_checker::TypeChecker;
+use crate::validator::type_checker::TypeChecker;
 
 pub mod type_checker;
 pub mod verifier;

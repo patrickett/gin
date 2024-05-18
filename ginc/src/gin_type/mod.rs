@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, collections::HashMap, str::FromStr};
+use std::{collections::HashMap, str::FromStr};
 
 use super::parser::ast::Node;
 pub mod number;

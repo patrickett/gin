@@ -1,4 +1,4 @@
-use crate::ngin::{compiler_error::CompilerError, parser::ast::Node};
+use crate::{compiler_error::CompilerError, parser::ast::Node};
 
 pub struct Verifier;
 

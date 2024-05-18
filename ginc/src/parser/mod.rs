@@ -1,11 +1,13 @@
 pub mod ast;
+pub mod lex;
 pub mod lexer;
+pub mod parse;
 
 use std::{collections::HashMap, str::FromStr};
 
 use self::{
     ast::{
-        definition::Define,
+        definition::{Define, Function},
         expression::{ArithmeticExpr, Expr, RelationalExpr},
         Node,
     },
@@ -18,6 +20,7 @@ use self::{
 use super::{
     compiler_error::CompilerError, gin_type::GinType, source_file::SourceFile, value::GinValue,
 };
+use crate::parser::ast::definition::Record;
 
 /// The Parsers job is to convert the Token stream into an AST
 /// not to perform semantic analysis.
@@ -83,27 +86,22 @@ impl Parser {
         let starting_scope = self.scope;
         self.saw_newline();
 
-        let mut body = Vec::new();
+        let mut function = Function::new(name, None, GinType::Nothing);
         while self.scope > starting_scope {
             if let Some(Ok(node)) = self.next() {
-                body.push(node);
+                function.body.push(node);
             } else {
                 break;
             }
         }
 
-        Some(Define::Function {
-            name,
-            body,
-            returns: GinType::Nothing,
-        })
+        Some(Define::Function(function))
     }
 
     /// everything to the right of `:`
     fn handle_assignment(&mut self, name: String) -> Option<Result<Node, CompilerError>> {
         self.skip(TokenKind::Space);
-        let token = self.lexer.next()?;
-        match token {
+        match self.lexer.next()? {
             Ok(tok) => {
                 if tok.kind() == &TokenKind::Newline {
                     return match self.handle_multi_line_function(name) {
@@ -116,15 +114,12 @@ impl Parser {
                 // we can assume its only a single expr since if it was a func def
                 // it would have been picked up above in the self.handle_multi_line_function
 
+                let mut function = Function::new(name, None, GinType::Nothing);
                 let nt = self.next()?;
                 match nt {
                     Ok(n) => {
-                        let func = Define::Function {
-                            name,
-                            body: vec![n],
-                            returns: GinType::Nothing,
-                        };
-
+                        function.body.push(n);
+                        let func = Define::Function(function);
                         Some(Ok(Node::Definition(func)))
                     }
                     Err(e) => Some(Err(e)),
@@ -175,12 +170,7 @@ impl Parser {
                         todo!()
                     }
                 }
-                unknown => {
-                    return Some(Err(CompilerError::UnknownToken(
-                        self.lexer.current_location(),
-                        token,
-                    )))
-                }
+                _ => return Some(Err(CompilerError::UnknownToken(token, None))),
             }
         }
 
@@ -188,23 +178,24 @@ impl Parser {
     }
 
     fn handle_data_type(&mut self, name: String) -> Option<Result<Define, CompilerError>> {
+        println!("starting record");
         self.skip(TokenKind::Space);
 
-        match self.lexer.next() {
-            Some(Ok(tok)) => match tok.kind() {
-                TokenKind::Newline => {
-                    self.saw_newline();
-                }
-                _ => self.lexer.defer(tok),
-            },
-            Some(Err(e)) => return Some(Err(e)),
-            None => panic!("finish writing your data type"),
-        }
+        // match self.lexer.next() {
+        //     Some(Ok(tok)) => match tok.kind() {
+        //         TokenKind::Newline => {
+        //             self.saw_newline();
+        //         }
+        //         _ => self.lexer.defer(tok),
+        //     },
+        //     Some(Err(e)) => return Some(Err(e)),
+        //     None => panic!("finish writing your data type"),
+        // }
 
         // this is a bit eager, but we are going to assume we only
         // have one pair of curlies and there is no nesting yet.
 
-        let mut body = HashMap::new();
+        let mut record = Record::new(name);
 
         loop {
             self.handle_indentation();
@@ -216,26 +207,23 @@ impl Parser {
 
             match token.kind() {
                 TokenKind::CurlyClose => break,
-                TokenKind::Newline => continue,
+                TokenKind::Newline => {
+                    self.saw_newline();
+                    continue;
+                }
                 TokenKind::Comma => continue,
                 TokenKind::Id(id_name) => {
                     self.skip(TokenKind::Space);
-                    let nt = self.lexer.next()?;
 
-                    match nt {
+                    match self.lexer.next()? {
                         Ok(inner_token) => match token.kind() {
                             TokenKind::Tag(token_type) => {
                                 let gin_type = GinType::from_str(&token_type.as_str())
                                     .expect("parsed gin type from token_type");
 
-                                body.insert(id_name.to_owned(), gin_type);
+                                record.insert(id_name.to_owned(), gin_type);
                             }
-                            unknown => {
-                                return Some(Err(CompilerError::UnknownToken(
-                                    self.lexer.current_location(),
-                                    inner_token,
-                                )))
-                            }
+                            _ => return Some(Err(CompilerError::UnknownToken(inner_token, None))),
                         },
 
                         Err(e) => return Some(Err(e)),
@@ -255,16 +243,12 @@ impl Parser {
                     // };
                 }
 
-                unknown => {
-                    return Some(Err(CompilerError::UnknownToken(
-                        self.lexer.current_location(),
-                        token,
-                    )))
-                }
+                _ => return Some(Err(CompilerError::UnknownToken(token, None))),
             }
         }
 
-        Some(Ok(Define::Record { name, body }))
+        println!("finished record");
+        Some(Ok(Define::Record(record)))
     }
 
     fn handle_potential_binop(
@@ -331,7 +315,7 @@ impl Parser {
         match next_token {
             Ok(nt) => match nt.kind() {
                 TokenKind::Newline => Some(Ok(Expr::Literal(literal))),
-                other => self.handle_potential_binop(&nt, Expr::Literal(literal)),
+                _ => self.handle_potential_binop(&nt, Expr::Literal(literal)),
             },
             Err(e) => Some(Err(e)),
         }
@@ -370,32 +354,43 @@ impl Parser {
 
     fn handle_tag(&mut self, tag_name: String) -> Option<Result<Node, CompilerError>> {
         self.skip(TokenKind::Space);
-        let nt = self.lexer.next()?;
-        match nt {
+
+        // if let Ok(token) = self.lexer.next()? {
+        //     if token.kind() == &TokenKind::Keyword(Keyword::Is) {
+        //         if let Ok(token2) = self.lexer.next()? {
+        //             println!("{:#?}", token2.kind());
+        //             let n = self.handle_data_type(tag_name)?;
+        //             None
+        //         } else {
+        //             panic!("");
+        //         }
+        //     } else {
+        //         panic!("");
+        //     }
+        // } else {
+        //     panic!("");
+        // }
+        match self.lexer.next()? {
             Ok(token) => match token.kind() {
                 TokenKind::Keyword(Keyword::Is) => {
                     self.skip(TokenKind::Space);
                     // defining a tag-type
-                    let nt = self.lexer.next()?;
-                    match nt {
-                        Ok(ref tok) => {
-                            if tok.kind() == &TokenKind::CurlyOpen {
-                                match self.handle_data_type(tag_name) {
-                                    Some(Ok(def)) => Some(Ok(Node::Definition(def))),
-                                    Some(Err(e)) => Some(Err(e)),
-                                    None => todo!(),
-                                }
-                            } else {
-                                todo!("{:#?}", nt)
-                            }
-                        }
+                    // let nt = self.lexer.next()?;
+                    match self.lexer.next()? {
+                        Ok(ref tok) => match tok.kind() {
+                            TokenKind::CurlyOpen => match self.handle_data_type(tag_name) {
+                                Some(Ok(def)) => Some(Ok(Node::Definition(def))),
+                                Some(Err(e)) => Some(Err(e)),
+                                None => todo!(),
+                            },
+                            other => panic!("{other}"),
+                        },
                         Err(e) => Some(Err(e)),
                     }
                 }
-                _ => Some(Err(CompilerError::UnknownToken(
-                    self.lexer.current_location(),
-                    token,
-                ))), // TODO: This could also be return type tagging
+                _ => {
+                    Some(Err(CompilerError::UnknownToken(token, None))) // TODO: This could also be return type tagging
+                }
             },
             Err(e) => Some(Err(e)),
         }
@@ -423,7 +418,7 @@ impl Parser {
             TokenKind::DocComment(_) => self.next(),
             TokenKind::Space => self.next(),
             TokenKind::Keyword(keyword) => match keyword {
-                lexer::token::Keyword::If => {
+                Keyword::If => {
                     if let Ok(Node::Expression(_cond)) = self.next()? {
                         // if let Expr::Operation(_, Op::Compare(_), _) = cond {
                         //     let if_statement = ControlFlow::If(cond, vec![], None);
@@ -436,21 +431,19 @@ impl Parser {
                         panic!("")
                     }
                 }
-                lexer::token::Keyword::Else => todo!(),
-                lexer::token::Keyword::Then => {
+                Keyword::Else => todo!(),
+                Keyword::Then => {
                     // then marks the end of expr
                     self.next()
                 }
-                lexer::token::Keyword::Include => todo!(),
-                lexer::token::Keyword::When => todo!(),
-                lexer::token::Keyword::For => todo!(),
-                lexer::token::Keyword::Return => todo!(),
-                lexer::token::Keyword::Is => todo!(),
+                Keyword::Include => todo!(),
+                Keyword::When => todo!(),
+                Keyword::For => todo!(),
+                Keyword::Return => todo!(),
+                Keyword::Is => todo!(),
+                Keyword::Where => todo!(),
             },
-            unknown => Some(Err(CompilerError::UnknownToken(
-                self.lexer.current_location(),
-                token,
-            ))),
+            _ => Some(Err(CompilerError::UnknownToken(token, None))),
         }
     }
 
@@ -538,14 +531,11 @@ impl Parser {
             },
             TokenKind::RightArrow => {
                 // optional return type
-                let f = self.next();
+                let _f = self.next();
                 // println!("{:#?}", f);
                 None
             }
-            unknown => Some(Err(CompilerError::UnknownToken(
-                self.lexer.current_location(),
-                token,
-            ))),
+            _ => Some(Err(CompilerError::UnknownToken(token, None))),
         }
     }
 }

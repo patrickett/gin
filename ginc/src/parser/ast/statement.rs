@@ -1,6 +1,4 @@
-use self::control_flow::ControlFlow;
-
-pub mod control_flow;
+use super::control_flow::ControlFlow;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum IdOrDestructuredData {
