@@ -1,4 +1,3 @@
-use crate::value::GinValue;
 use std::fmt;
 
 #[derive(Debug, PartialEq, Clone)]
@@ -79,6 +78,14 @@ impl Token {
 }
 
 #[derive(Debug, PartialEq, Clone)]
+pub enum Literal {
+    String(String),
+    Float(f64),
+    Int(u128),
+    Nothing,
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub enum TokenKind {
     /// Range(start, end)
     Range(usize, usize),
@@ -100,7 +107,7 @@ pub enum TokenKind {
     DocComment(String),
     Id(String),
     Tag(String),
-    Literal(GinValue),
+    Literal(Literal),
     LessThan,
     LessThanOrEqualTo,
     GreaterThan,
@@ -125,15 +132,10 @@ impl TokenKind {
             TokenKind::Id(id) => id.len(),
             TokenKind::Tag(tag) => tag.len(),
             TokenKind::Literal(lit) => match lit {
-                GinValue::TemplateString(ts) => ts.len(),
-                GinValue::Object(_) => todo!(),
-                GinValue::Bool(b) => match b {
-                    true => 4,
-                    false => 5,
-                },
-                GinValue::String(s) => s.len(),
-                GinValue::Number(num) => num.to_string().len(),
-                GinValue::Nothing => 7,
+                Literal::String(s) => s.len(),
+                Literal::Float(float) => float.to_string().len(),
+                Literal::Int(integer) => integer.to_string().len(),
+                Literal::Nothing => 7,
             },
             TokenKind::LessThanOrEqualTo => 2,
             TokenKind::GreaterThanOrEqualTo => 2,

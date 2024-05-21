@@ -9,6 +9,7 @@ pub enum CompilerError {
 
     InvalidRange(Location),
     CannotCallNonExpr(Location),
+    UnparsableType(String),
 
     // TODO: add location
     UnexpectedEOF,
@@ -29,7 +30,8 @@ impl std::fmt::Debug for CompilerError {
                     "unknown token `{}` at: {}:{}",
                     token.kind(),
                     path_str,
-                    token.position().to_string()
+                    token.position().to_string(),
+                    // line!()
                 )
             }
             CompilerError::CannotCallNonExpr(loc) => {
@@ -45,9 +47,9 @@ impl std::fmt::Debug for CompilerError {
             CompilerError::IO(err) => write!(f, "io error: {}", err),
             CompilerError::UnexpectedEOF => write!(f, "unexpected eof"),
             CompilerError::NoSuchFileOrDirectory => write!(f, "no such file or directory"),
-            // CompilerError::UnexpectedEOF(loc) => {
-            //     write!(f, "unexpected end of file at: {}", loc.to_string())
-            // }
+            CompilerError::UnparsableType(kind) => write!(f, "unparsable type: {}", kind), // CompilerError::UnexpectedEOF(loc) => {
+                                                                                           //     write!(f, "unexpected end of file at: {}", loc.to_string())
+                                                                                           // }
         }
     }
 }

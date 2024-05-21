@@ -20,32 +20,38 @@ pub struct Parameter {
     kind: GinType,
 }
 
+impl Parameter {
+    pub fn new(name: String, kind: GinType) -> Self {
+        Self { name, kind }
+    }
+}
 #[derive(Debug, Clone, PartialEq)]
 pub struct Function {
     name: String,
     parameter: Option<Parameter>,
+    explicit_return: Option<GinType>,
     pub body: Vec<Node>,
-    pub returns: GinType,
 }
 
 impl Function {
-    pub fn new(name: String, parameter: Option<Parameter>, returns: GinType) -> Self {
+    pub fn new(
+        name: String,
+        parameter: Option<Parameter>,
+        explicit_return: Option<GinType>,
+    ) -> Self {
         Self {
             name,
             parameter,
             body: Vec::new(),
-            returns,
+            explicit_return,
         }
     }
-
-    // TODO: check body to find the actual return type
-    // CompilerError when mismtach
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Record {
     name: String,
-    body: HashMap<String, GinType>,
+    pub body: HashMap<String, GinType>,
 }
 
 impl Record {
@@ -54,9 +60,5 @@ impl Record {
             body: HashMap::new(),
             name,
         }
-    }
-
-    pub fn insert(&mut self, k: String, v: GinType) -> Option<GinType> {
-        self.body.insert(k, v)
     }
 }

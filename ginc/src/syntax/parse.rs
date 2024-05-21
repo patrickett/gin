@@ -7,7 +7,9 @@ use super::{
     lex::LexedFile,
     token::{Keyword, Token, TokenKind},
 };
-use crate::{compiler_error::CompilerError, gin_type::GinType};
+use crate::{
+    compiler_error::CompilerError, gin_type::GinType, syntax::ast::expression::FunctionCall,
+};
 use std::{iter::Peekable, slice::Iter, str::FromStr};
 
 pub struct SimpleParser;
@@ -46,7 +48,7 @@ impl<'a> SimpleParser {
                 TokenKind::Space => continue,
                 TokenKind::Id(id) => self.id(&mut tokens, id)?,
                 TokenKind::Tag(tag) => self.tag(tag, &mut tokens)?,
-                _ => return Err(self.unknown_token(token.clone())),
+                _ => return Err(CompilerError::UnknownToken(token.clone(), None)),
             };
             nodes.push(node);
         }
@@ -54,71 +56,59 @@ impl<'a> SimpleParser {
         Ok(ParsedFile { nodes })
     }
 
-    fn expr(&mut self, tokens: &mut Peekable<Iter<'_, Token>>) -> Result<Expr, CompilerError> {
+    fn node(&mut self, tokens: &mut Peekable<Iter<'_, Token>>) -> Result<Node, CompilerError> {
         // starting to wonder if spaces are ever context dependent
         // newlines are for sure. but spaces currently only helpful for lexer
         self.skip_space(tokens);
-        let token = self.next_token(tokens)?;
+        let token = self.next_token(tokens)?.clone();
 
         let expr = match token.kind() {
             TokenKind::Literal(lhs) => {
                 let lhs = Expr::Literal(lhs.clone());
                 self.skip_space(tokens);
-                let token = self.next_token(tokens)?;
+                let token = self.next_token(tokens)?.clone();
                 match token.kind() {
                     TokenKind::Plus => {
-                        let rhs = self.expr(tokens)?;
-                        let e = ArithmeticExpr::Add { lhs, rhs };
-                        Expr::Arithmetic(Box::new(e))
+                        if let Node::Expression(rhs) = self.node(tokens)? {
+                            let e = ArithmeticExpr::Add { lhs, rhs };
+                            Node::Expression(Expr::Arithmetic(Box::new(e)))
+                        } else {
+                            return Err(CompilerError::UnknownToken(token, None));
+                        }
                     }
                     TokenKind::Dash => {
-                        let rhs = self.expr(tokens)?;
-                        let e = ArithmeticExpr::Sub { lhs, rhs };
-                        Expr::Arithmetic(Box::new(e))
+                        if let Node::Expression(rhs) = self.node(tokens)? {
+                            let e = ArithmeticExpr::Sub { lhs, rhs };
+                            Node::Expression(Expr::Arithmetic(Box::new(e)))
+                        } else {
+                            return Err(CompilerError::UnknownToken(token, None));
+                        }
                     }
                     TokenKind::Star => {
-                        let rhs = self.expr(tokens)?;
-                        let e = ArithmeticExpr::Mul { lhs, rhs };
-                        Expr::Arithmetic(Box::new(e))
+                        if let Node::Expression(rhs) = self.node(tokens)? {
+                            let e = ArithmeticExpr::Mul { lhs, rhs };
+                            Node::Expression(Expr::Arithmetic(Box::new(e)))
+                        } else {
+                            return Err(CompilerError::UnknownToken(token, None));
+                        }
                     }
                     TokenKind::SlashForward => {
-                        let rhs = self.expr(tokens)?;
-                        let e = ArithmeticExpr::Div { lhs, rhs };
-                        Expr::Arithmetic(Box::new(e))
+                        if let Node::Expression(rhs) = self.node(tokens)? {
+                            let e = ArithmeticExpr::Div { lhs, rhs };
+                            Node::Expression(Expr::Arithmetic(Box::new(e)))
+                        } else {
+                            return Err(CompilerError::UnknownToken(token, None));
+                        }
                     }
-                    TokenKind::Newline => lhs,
-
-                    _ => return Err(self.unknown_token(token.clone())),
+                    TokenKind::Newline => Node::Expression(lhs),
+                    _ => return Err(CompilerError::UnknownToken(token.clone(), None)),
                 }
             }
-            TokenKind::Id(func_call) => {
-                let token = self.next_token(tokens)?;
-                let expr = match token.kind() {
-                    // fn arg
-                    //      ^ could also have another + after
-                    TokenKind::Id(argument) => todo!(),
-                    // fn + fn
-                    TokenKind::Plus => {
-                        let rhs = self.expr(tokens)?;
-                    }
-
-                    _ => return Err(self.unknown_token(token.clone())),
-                };
-
-                todo!()
-            }
-            _ => return Err(self.unknown_token(token.clone())),
+            TokenKind::Id(func_name) => self.id(tokens, func_name)?,
+            _ => return Err(CompilerError::UnknownToken(token.clone(), None)),
         };
 
         Ok(expr)
-    }
-
-    fn multi_line_func(
-        &mut self,
-        tokens: &mut Peekable<Iter<'_, Token>>,
-    ) -> Result<Node, CompilerError> {
-        // continue until we don't start with a tab
-        todo!()
     }
 
     /// parse the body of a function
@@ -129,15 +119,14 @@ impl<'a> SimpleParser {
         arg: Option<Parameter>,
     ) -> Result<Function, CompilerError> {
         self.skip_space(tokens);
-        let mut function = Function::new(name.to_string(), arg, GinType::Nothing);
+        let mut function = Function::new(name.to_string(), arg, None);
 
         if let Some(_newline) = tokens.next_if(|t| t.kind() == &TokenKind::Newline) {
             // Multi-line function
         } else {
             // note: i am just assuming anything rhs will be an expr
             // this could be wrong
-            let expr = self.expr(tokens)?;
-            let node = Node::Expression(expr);
+            let node = self.node(tokens)?;
             function.body.push(node);
         }
         Ok(function)
@@ -149,10 +138,48 @@ impl<'a> SimpleParser {
         id: &str,
     ) -> Result<Node, CompilerError> {
         self.skip_space(tokens);
-        let token = self.next_token(tokens)?;
+        let token = self.next_token(tokens)?.clone();
         let node = match token.kind() {
+            TokenKind::Newline => {
+                // fnCall, ex. doAction (no arg)
+                let func_call = FunctionCall::new(id.to_string(), None);
+                Node::Expression(Expr::Call(func_call))
+            }
+            // fn arg
+            //      ^ could also have another + after
+            TokenKind::Id(arg_name) => {
+                if let Some(_colon) = tokens.next_if(|t| t.kind() == &TokenKind::Colon) {
+                    // fn arg Colon
+                    let func = self.func(
+                        tokens,
+                        id,
+                        Some(Parameter::new(arg_name.to_string(), GinType::Nothing)),
+                    )?;
+
+                    Node::Definition(Define::Function(func))
+                } else if let Node::Expression(rhs) = self.id(tokens, arg_name)? {
+                    let func_call = FunctionCall::new(id.to_string(), Some(Box::new(rhs)));
+                    Node::Expression(Expr::Call(func_call))
+                } else {
+                    return Err(CompilerError::UnknownToken(token, None));
+                }
+            }
+            // fn + fn
+            TokenKind::Plus => {
+                let func_call = FunctionCall::new(id.to_string(), None);
+                let lhs = Expr::Call(func_call);
+                if let Node::Expression(rhs) = self.node(tokens)? {
+                    let e = ArithmeticExpr::Add { lhs, rhs };
+                    Node::Expression(Expr::Arithmetic(Box::new(e)))
+                } else {
+                    return Err(CompilerError::UnknownToken(token, None));
+                }
+            }
+
+            // fn: [body]
+            // doesnt support arg
             TokenKind::Colon => Node::Definition(Define::Function(self.func(tokens, id, None)?)),
-            _ => return Err(self.unknown_token(token.clone())),
+            _ => return Err(CompilerError::UnknownToken(token.clone(), None)),
         };
 
         Ok(node)
@@ -200,30 +227,33 @@ impl<'a> SimpleParser {
                                             //     "inserted {{ {}: {:#?} }}",
                                             //     &property_name, property_type
                                             // );
-                                            record.insert(property_name.clone(), property_type)
+                                            record.body.insert(property_name.clone(), property_type)
                                         }
                                         Err(_) => {
                                             // panic!("type error");
-                                            return Err(self.unknown_token(token.clone()));
+                                            return Err(CompilerError::UnknownToken(
+                                                token.clone(),
+                                                None,
+                                            ));
                                         }
                                     }
                                 }
-                                _ => return Err(self.unknown_token(token.clone())),
+                                _ => return Err(CompilerError::UnknownToken(token.clone(), None)),
                             };
                         }
-                        _ => return Err(self.unknown_token(token.clone())),
+                        _ => return Err(CompilerError::UnknownToken(token.clone(), None)),
                     };
                 }
 
                 Ok(Define::Record(record))
             }
             // - Computed (generic arg + -> bool)
-            TokenKind::Id(generic_argument) => {
+            TokenKind::Id(_generic_argument) => {
                 self.skip_space(tokens);
                 let token = self.next_token(tokens)?;
                 match token.kind() {
                     TokenKind::Keyword(Keyword::Where) => todo!(),
-                    _ => return Err(self.unknown_token(token.clone())),
+                    _ => Err(CompilerError::UnknownToken(token.clone(), None)),
                 }
             }
             // - Range
@@ -233,7 +263,7 @@ impl<'a> SimpleParser {
             //                          - Tuesday
             //      untagged would be
             //      Return is "hello" | 5
-            _ => Err(self.unknown_token(token.clone())),
+            _ => Err(CompilerError::UnknownToken(token.clone(), None)),
         }
     }
 
@@ -242,14 +272,6 @@ impl<'a> SimpleParser {
     /// ex. Data <expr>
     fn tag_return(&self) {
         todo!()
-    }
-
-    fn unknown_token(&self, token: Token) -> CompilerError {
-        // let mut tokens = tokens;
-        // let token = self.get_token(&mut tokens).unwrap();
-        // let path = self.path();
-        let path = Some("".to_string()); // TODO: in the future find the actual path
-        CompilerError::UnknownToken(token, path)
     }
 
     fn tag(
@@ -279,9 +301,9 @@ impl<'a> SimpleParser {
                 // This is the only case where we are defining something
                 // everything else is treated as returning tagged data
                 Keyword::Is => Node::Definition(self.tag_define(tag, &mut tokens)?),
-                _ => return Err(self.unknown_token(token.clone())),
+                _ => return Err(CompilerError::UnknownToken(token.clone(), None)),
             },
-            _ => return Err(self.unknown_token(token.clone())),
+            _ => return Err(CompilerError::UnknownToken(token.clone(), None)),
         };
 
         Ok(node)

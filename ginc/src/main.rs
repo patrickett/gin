@@ -1,10 +1,7 @@
 mod compiler_error;
 mod gin_type;
-mod path_registry;
 mod syntax;
-mod user_input;
 mod validator;
-mod value;
 use clap::*;
 use compiler_error::CompilerError;
 use syntax::lex::SimpleLexer;
@@ -26,7 +23,6 @@ pub struct Args {
 
 fn main() -> Result<(), CompilerError> {
     let args = Args::parse();
-    // let mut path_registry = path_registry::PathRegistry::new();
 
     let mut simple_lexer = SimpleLexer::new();
     let lexed_file = simple_lexer.lex(&args.path)?;

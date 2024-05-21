@@ -1,11 +1,10 @@
-use crate::value::GinValue;
-use crate::{compiler_error::CompilerError, gin_type::number::GinNumber};
+use crate::compiler_error::CompilerError;
 use std::fs::File;
 use std::io::Read;
 use std::iter::Peekable;
 use std::str::Chars;
 
-use super::token::{Keyword, Token, TokenKind};
+use super::token::{Keyword, Literal, Token, TokenKind};
 
 pub struct SimpleLexer {
     buffer: String,
@@ -103,40 +102,45 @@ impl SimpleLexer {
         }
     }
 
+    fn string(&mut self, tokens: &mut Vec<Token>, source: &mut Peekable<Chars>) {
+        let mut string = String::new();
+
+        while let Some(ch) = source.next() {
+            self.start += 1;
+            match ch {
+                '\n' => self.newline(tokens),
+                c => string.push(c),
+            }
+        }
+
+        self.push(
+            tokens,
+            TokenKind::Literal(Literal::String(string.to_string())),
+        );
+    }
+
     // check the buffer and push any tokens if possible
     fn buffer(&mut self, tokens: &mut Vec<Token>) {
         if !self.buffer.is_empty() {
             match self.buffer.as_str() {
                 "where" => self.push(tokens, TokenKind::Keyword(Keyword::Where)),
+                "return" => self.push(tokens, TokenKind::Keyword(Keyword::Return)),
                 "is" => self.push(tokens, TokenKind::Keyword(Keyword::Is)),
                 word => {
-                    // if first_char.is_numeric() {
-                    //     if id.contains("..") {
-                    //         match self.resolve_range(id) {
-                    //             Ok(kind) => kind,
-                    //             Err(e) => {
-                    //                 self.buffer.clear();
-                    //                 self.queue.push_back(Err(e));
-                    //                 return;
-                    //             }
-                    //         }
-                    //     } else if let Ok(num) = id.parse::<GinNumber>() {
-                    //         TokenKind::Literal(GinValue::Number(num))
-                    //     } else {
-                    //         todo!()
-                    //     }
-                    // } else if first_char.is_uppercase() {
-                    //     TokenKind::Tag(id.to_string())
-                    // } else {
-                    //     TokenKind::Id(id.to_string())
-                    // }
-                    //
                     if let Some(first_char) = word.chars().next() {
                         if first_char.is_numeric() {
                             if word.contains("..") {
                                 todo!() // range
-                            } else if let Ok(number) = word.parse::<GinNumber>() {
-                                self.push(tokens, TokenKind::Literal(GinValue::Number(number)))
+                            }
+                            if word.contains(".") {
+                                if let Ok(num) = word.parse::<f64>() {
+                                    // float
+                                    self.push(tokens, TokenKind::Literal(Literal::Float(num)))
+                                } else {
+                                    panic!("failed to parse number");
+                                }
+                            } else if let Ok(num) = word.parse::<u128>() {
+                                self.push(tokens, TokenKind::Literal(Literal::Int(num)))
                             } else {
                                 todo!()
                             }
@@ -164,6 +168,7 @@ impl SimpleLexer {
             // println!("index: {}, char: {}", self.start, &ch);
             self.start += 1;
             match ch {
+                '\'' => self.string(&mut tokens, &mut source),
                 ':' => {
                     self.buffer(&mut tokens);
                     self.push(&mut tokens, TokenKind::Colon)
