@@ -1,17 +1,14 @@
-// for block loop
-// if block return yield
-
 use crate::frontend::prelude::*;
 
 #[derive(Debug, Clone)]
-pub enum CondBranchEnding<'src> {
-    Return(Expr<'src>),
-    Yield(Expr<'src>),
+pub enum CondBranchEnding {
+    Return(Expr),
+    Yield(Expr),
     NoEnding,
 }
 
 #[derive(Debug, Clone)]
-pub enum ControlFlow<'src> {
+pub enum ControlFlow {
     /// An if expression allows you to branch your code depending on conditions.
     /// You provide a condition and then state, “If this condition is met, run this block of code.
     /// If the condition is not met, do not run this block of code.”
@@ -27,10 +24,10 @@ pub enum ControlFlow<'src> {
     If {
         // if (i = 5, i < 3) then
         //   print('hi')
-        conds: Vec<Expr<'src>>,
-        block: Vec<Expr<'src>>,
-        ending: Box<CondBranchEnding<'src>>, // NOTE: I kinda don't want to support else branches
-                                             // else_branch: Box<Expr<'src>>,
+        conds: Vec<Expr>,
+        block: Vec<Expr>,
+        ending: Box<CondBranchEnding>, // NOTE: I kinda don't want to support else branches
+                                       // else_branch: Box<Expr<'src>>,
     },
     ///
     /// Example:
@@ -50,4 +47,14 @@ pub enum ControlFlow<'src> {
     /// ```
     ForIn {},
     While {},
+}
+
+pub enum Conditonal {
+    If,
+    Is, // Pattern match?
+}
+
+pub enum Loop {
+    For,
+    While,
 }

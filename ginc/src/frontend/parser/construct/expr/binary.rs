@@ -1,10 +1,10 @@
 use crate::frontend::prelude::*;
 
 #[derive(Debug, Clone)]
-pub struct Binary<'src> {
-    lhs: Box<Expr<'src>>,
+pub struct Binary {
+    lhs: Box<Expr>,
     op: BinOp,
-    rhs: Box<Expr<'src>>,
+    rhs: Box<Expr>,
 }
 
 /// Binary operations are defined as `lhs op rhs`

@@ -8,32 +8,29 @@ use chumsky::{input::ValueInput, prelude::*};
 /// use http.web, crypto.hash
 /// ```
 #[derive(Debug, Clone)]
-pub struct UseExpr<'src>(Vec<ModuleImport<'src>>);
+pub struct UseExpr(Vec<ModuleImport>);
+
+// TODO: import * from module
+// `use core.http (...)`
 
 /// An import is structured like the following:
 ///
 /// `use {module_name}.path.to_sub_mod (import1, ImportTag)`
 //  The ending (...) syntax is shared across lambda functions
 #[derive(Debug, Clone)]
-pub struct ModuleImport<'src> {
-    pub path: Path<'src>,
-    pub alias: Option<&'src str>,
+pub struct ModuleImport {
+    pub path: Path,
+    pub alias: Option<String>,
 }
 
-impl<'src> ModuleImport<'src> {
-    pub fn new(path: Path<'src>, alias: Option<&'src str>) -> Self {
+impl ModuleImport {
+    pub fn new(path: Path, alias: Option<String>) -> Self {
         Self { path, alias }
     }
 }
 
-pub struct FromUse<'src> {
-    // from
-    path: Path<'src>,
-    // use
-}
-
 // Use expressions should be at the top of any module.
-pub fn import<'t, 's: 't, I>() -> impl Parser<'t, I, UseExpr<'s>, ParserError<'t, 's>>
+pub fn import<'t, 's: 't, I>() -> impl Parser<'t, I, UseExpr, ParserError<'t, 's>>
 where
     I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
 {
@@ -51,7 +48,10 @@ where
             UseExpr(
                 items
                     .into_iter()
-                    .map(|(path, alias)| ModuleImport { path, alias })
+                    .map(|(path, alias)| ModuleImport {
+                        path,
+                        alias: alias.map(|a| a.to_string()),
+                    })
                     .collect::<Vec<ModuleImport>>(),
             )
         })

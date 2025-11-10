@@ -3,16 +3,16 @@
 use crate::frontend::prelude::*;
 
 #[derive(Debug, Clone)]
-pub enum Tag<'src> {
+pub enum Tag {
     Generic {
-        name: &'src str,
-        parameters: Vec<Parameter<'src>>,
+        name: String,
+        parameters: Vec<Parameter>,
     },
     Nominal {
-        name: &'src str,
+        name: String,
     },
     Union {
-        variants: Vec<Tag<'src>>,
+        variants: Vec<Tag>,
     },
 }
 
@@ -20,8 +20,8 @@ pub enum Tag<'src> {
 // TagName(id)
 // TagName(id AnotherTag(some_generic_value, num Number) | YetAnother)
 pub fn tag<'t, 's: 't, I>(
-    expr: impl Parser<'t, I, Expr<'s>, ParserError<'t, 's>> + Clone + 't,
-) -> impl Parser<'t, I, Tag<'s>, ParserError<'t, 's>> + Clone
+    expr: impl Parser<'t, I, Expr, ParserError<'t, 's>> + Clone + 't,
+) -> impl Parser<'t, I, Tag, ParserError<'t, 's>> + Clone
 where
     I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
 {
@@ -40,10 +40,14 @@ where
         // --- nominal or generic tag
         let nominal_or_generic = tag_name
             .then(params)
-            .map(|(name, params)| match params {
-                None => Tag::Nominal { name },
-                Some(parameters) if parameters.is_empty() => Tag::Nominal { name },
-                Some(parameters) => Tag::Generic { name, parameters },
+            .map(|(name, params)| {
+                let name = name.to_string();
+
+                match params {
+                    None => Tag::Nominal { name },
+                    Some(parameters) if parameters.is_empty() => Tag::Nominal { name },
+                    Some(parameters) => Tag::Generic { name, parameters },
+                }
             })
             .boxed();
 

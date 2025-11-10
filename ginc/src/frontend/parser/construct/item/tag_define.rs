@@ -1,27 +1,28 @@
 use crate::frontend::prelude::*;
 
 #[derive(Debug, Clone)]
-pub enum TagValue<'src> {
+pub enum TagValue {
     // Tag2 ::= Tag1
     // PossibleTags ::= Tag1 | Tag2
-    Alias(Tag<'src>),
+    Alias(Tag),
     // Person ::= (name String, age Number)
-    Record(Vec<Parameter<'src>>),
+    Record(Vec<Parameter>),
     // Record(std::iter::Map<&'src str, Box<TagValue<'src>>>),
     // PersonSet ::= { p : Person }
     Set(/* TODO */),
 }
 
 #[derive(Debug, Clone)]
-pub struct DefineTag<'src> {
-    pub tag: Tag<'src>,
-    pub value: TagValue<'src>,
+pub struct DefineTag {
+    pub doc_comment: Option<DocComment>,
+    pub tag: Tag,
+    pub value: TagValue,
 }
 
 // TODO: can we use Map<ParameterName, ParameterValue> instead Vec<Parameter>
 pub fn define_tag<'t, 's: 't, I>(
-    expr: impl Parser<'t, I, Expr<'s>, ParserError<'t, 's>> + Clone + 't,
-) -> impl Parser<'t, I, DefineTag<'s>, ParserError<'t, 's>> + Clone
+    expr: impl Parser<'t, I, Expr, ParserError<'t, 's>> + Clone + 't,
+) -> impl Parser<'t, I, DefineTag, ParserError<'t, 's>> + Clone
 where
     I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
 {
@@ -35,13 +36,15 @@ where
             .delimited_by(just(Token::ParenOpen), just(Token::ParenClose))
             .or_not();
 
-        tag_name
-            .then(params)
-            .map(|(name, parameters)| match parameters {
+        tag_name.then(params).map(|(name, parameters)| {
+            let name = name.to_string();
+
+            match parameters {
                 None => Tag::Nominal { name },
                 Some(parameters) if parameters.is_empty() => Tag::Nominal { name },
                 Some(parameters) => Tag::Generic { name, parameters },
-            })
+            }
+        })
     };
 
     // RHS: either a union of tags or a record
@@ -56,7 +59,12 @@ where
         record.map(TagValue::Record),
     ));
 
-    lhs.then_ignore(just(Token::IsReplacedBy))
-        .then(rhs_value)
-        .map(|(tag, value)| DefineTag { tag, value })
+    doc_comment()
+        .or_not()
+        .then(lhs.then_ignore(just(Token::Is)).then(rhs_value))
+        .map(|(doc_comment, (tag, value))| DefineTag {
+            doc_comment,
+            tag,
+            value,
+        })
 }

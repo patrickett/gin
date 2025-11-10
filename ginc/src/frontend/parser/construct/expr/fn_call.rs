@@ -1,14 +1,14 @@
 use crate::frontend::prelude::*;
 
 #[derive(Debug, Clone)]
-pub struct FnCall<'src> {
-    path: Path<'src>,
-    args: Option<Vec<Expr<'src>>>,
+pub struct FnCall {
+    path: Path,
+    args: Option<Vec<Expr>>,
 }
 
 pub fn fn_call<'tokens, 'src: 'tokens, I>(
-    expr: impl Parser<'tokens, I, Expr<'src>, ParserError<'tokens, 'src>> + Clone + 'tokens,
-) -> impl Parser<'tokens, I, Expr<'src>, ParserError<'tokens, 'src>>
+    expr: impl Parser<'tokens, I, Expr, ParserError<'tokens, 'src>> + Clone + 'tokens,
+) -> impl Parser<'tokens, I, Expr, ParserError<'tokens, 'src>>
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SimpleSpan>,
 {
