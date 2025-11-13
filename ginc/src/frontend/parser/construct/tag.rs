@@ -4,16 +4,9 @@ use crate::frontend::prelude::*;
 
 #[derive(Debug, Clone)]
 pub enum Tag {
-    Generic {
-        name: String,
-        parameters: Vec<Parameter>,
-    },
-    Nominal {
-        name: String,
-    },
-    Union {
-        variants: Vec<Tag>,
-    },
+    Nominal(TagName),
+    Generic(TagName, Parameters),
+    Union { variants: Vec<Tag> },
 }
 
 // TagName
@@ -27,27 +20,17 @@ where
 {
     recursive(|tag| {
         // --- parse tag name (capitalized)
-        let tag_name = select! { Token::Tag(name) => name };
+        let tag_name = select! { Token::Tag(name) => TagName(name.to_string()) };
 
         // --- parse optional parameters inside parens
-        let params = parameter(expr.clone(), tag.clone())
-            .separated_by(just(Token::Comma))
-            .allow_trailing()
-            .collect::<Vec<_>>()
-            .delimited_by(just(Token::ParenOpen), just(Token::ParenClose))
-            .or_not();
 
         // --- nominal or generic tag
         let nominal_or_generic = tag_name
-            .then(params)
-            .map(|(name, params)| {
-                let name = name.to_string();
-
-                match params {
-                    None => Tag::Nominal { name },
-                    Some(parameters) if parameters.is_empty() => Tag::Nominal { name },
-                    Some(parameters) => Tag::Generic { name, parameters },
-                }
+            .then(params(expr.clone(), tag.clone()).or_not())
+            .map(|(name, params)| match params {
+                None => Tag::Nominal(name),
+                Some(parameters) if parameters.is_empty() => Tag::Nominal(name),
+                Some(parameters) => Tag::Generic(name, parameters),
             })
             .boxed();
 

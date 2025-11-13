@@ -8,7 +8,7 @@ use chumsky::{input::ValueInput, prelude::*};
 /// use http.web, crypto.hash
 /// ```
 #[derive(Debug, Clone)]
-pub struct UseExpr(Vec<ModuleImport>);
+pub struct Import(pub Vec<ModuleImport>);
 
 // TODO: import * from module
 // `use core.http (...)`
@@ -30,7 +30,7 @@ impl ModuleImport {
 }
 
 // Use expressions should be at the top of any module.
-pub fn import<'t, 's: 't, I>() -> impl Parser<'t, I, UseExpr, ParserError<'t, 's>>
+pub fn import<'t, 's: 't, I>() -> impl Parser<'t, I, Import, ParserError<'t, 's>>
 where
     I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
 {
@@ -45,7 +45,7 @@ where
                 .then_ignore(just(Token::Newline)),
         )
         .map(|items| {
-            UseExpr(
+            Import(
                 items
                     .into_iter()
                     .map(|(path, alias)| ModuleImport {

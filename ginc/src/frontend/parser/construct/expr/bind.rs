@@ -1,21 +1,19 @@
 use crate::frontend::prelude::*;
 
 #[derive(Debug, Clone)]
-pub enum Bind {
-    Single {
-        doc_comment: Option<DocComment>,
-        name: String,
-        // PERF: remove Vec<_> here
-        params: Option<Vec<Parameter>>,
-        expr: Box<Expr>,
-    },
-    Body {
-        doc_comment: Option<DocComment>,
-        name: String,
-        params: Option<Vec<Parameter>>,
-        exprs: Vec<Expr>,
-        ret: Return,
-    },
+pub struct Params<Value> {
+    pub params: Option<Parameters>,
+    /// typically the rhs of a `fn_name : {value}` or Tag is `{value}`
+    pub value: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DefName(String);
+
+#[derive(Debug, Clone)]
+pub enum DefValue {
+    Expr { expr: Box<Expr> },
+    Body { exprs: Vec<Expr>, ret: Return },
 }
 
 // TODO:
@@ -26,36 +24,70 @@ pub enum Bind {
 // TODO: support full function signature
 // add(x Num, y Num) = Num: ...
 
-pub fn bind<'t, 's: 't, I>(
+#[derive(Debug, Clone)]
+
+pub enum Bind {
+    Tag(TagName, Params<TagValue>),
+    Def(DefName, Params<DefValue>),
+}
+
+// TODO: can we use Map<ParameterName, ParameterValue> instead Vec<Parameter>
+pub fn tag_value<'t, 's: 't, I>(
     expr: impl Parser<'t, I, Expr, ParserError<'t, 's>> + Clone + 't,
-    tag: impl Parser<'t, I, Tag, ParserError<'t, 's>> + Clone + 't,
+    params: impl Parser<'t, I, Parameters, ParserError<'t, 's>> + Clone + 't,
 ) -> impl Parser<'t, I, Bind, ParserError<'t, 's>> + Clone
 where
     I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
 {
-    let params = parameter(expr.clone(), tag.clone())
+    // // LHS-only parser: nominal or generic, but no union
+    let tag_name = select! { Token::Tag(name) => TagName(name.to_string()) };
+
+    let lhs = tag_name.then(params.or_not()).then_ignore(just(Token::Is));
+    // .map(|(name, parameters)| match parameters {
+    //     None => Tag::Nominal(name),
+    //     Some(parameters) if parameters.is_empty() => Tag::Nominal(name),
+    //     Some(parameters) => Tag::Generic(name, parameters),
+    // });
+
+    // RHS: either a union of tags or a record
+    let record = parameter(expr.clone(), tag(expr.clone()))
         .separated_by(just(Token::Comma))
         .allow_trailing()
         .collect::<Vec<_>>()
-        .delimited_by(just(Token::ParenOpen), just(Token::ParenClose))
-        .or_not();
+        .delimited_by(just(Token::ParenOpen), just(Token::ParenClose));
 
-    let lhs = doc_comment().or_not().then(
-        select! { Token::Id(name) => name }
-            .then(params)
-            .then_ignore(just(Token::Colon)),
-    );
+    let rhs = choice((
+        tag(expr.clone()).map(TagValue::Alias),
+        record.map(TagValue::Record),
+    ));
+
+    lhs.then(rhs)
+        .map(|((tag_name, params), value)| Bind::Tag(tag_name, Params { params, value }))
+}
+
+pub fn def_value<'t, 's: 't, I>(
+    expr: impl Parser<'t, I, Expr, ParserError<'t, 's>> + Clone + 't,
+    params: impl Parser<'t, I, Parameters, ParserError<'t, 's>> + Clone + 't,
+) -> impl Parser<'t, I, Bind, ParserError<'t, 's>> + Clone
+where
+    I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
+{
+    let lhs = select! { Token::Id(name) => DefName(name.to_string()) }
+        .then(params.or_not())
+        .then_ignore(just(Token::Colon));
 
     // Single-line assignment
-    let single = lhs
-        .clone()
-        .then(expr.clone())
-        .map(|((doc_comment, (name, params)), rhs)| Bind::Single {
-            doc_comment,
-            name: name.to_string(),
-            params,
-            expr: Box::new(rhs),
-        });
+    let single = lhs.clone().then(expr.clone()).map(|((name, params), rhs)| {
+        Bind::Def(
+            name,
+            Params {
+                params,
+                value: DefValue::Expr {
+                    expr: Box::new(rhs),
+                },
+            },
+        )
+    });
 
     // Multi-line assignment
     let multiple = lhs
@@ -65,13 +97,31 @@ where
         .then_ignore(just(Token::Dedent))
         .then_ignore(just(Token::Newline).repeated().at_least(1).or_not())
         .then(r#return(expr.clone()))
-        .map(|(((doc_comment, (name, params)), exprs), ret)| Bind::Body {
-            name: name.to_string(),
-            doc_comment,
-            params,
-            exprs,
-            ret,
+        .map(|(((name, params), exprs), ret)| {
+            Bind::Def(
+                name,
+                Params {
+                    params,
+                    value: DefValue::Body { exprs, ret },
+                },
+            )
         });
 
     choice((multiple, single))
 }
+
+pub fn bind<'t, 's: 't, I>(
+    expr: impl Parser<'t, I, Expr, ParserError<'t, 's>> + Clone + 't,
+) -> impl Parser<'t, I, Bind, ParserError<'t, 's>> + Clone
+where
+    I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
+{
+    let params = params(expr.clone(), tag(expr.clone()));
+    let def_parser = def_value(expr.clone(), params.clone());
+    let tag_parser = tag_value(expr, params);
+
+    choice((def_parser, tag_parser))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TagName(pub String);

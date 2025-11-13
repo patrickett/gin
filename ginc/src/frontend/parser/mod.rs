@@ -12,15 +12,40 @@ pub type ParserError<'tokens, 'source_code> = extra::Err<Rich<'tokens, Token<'so
 //     's = 'source_code
 
 /// Parses a stream of tokens
-pub fn token_parser<'t, 's: 't, I>() -> impl Parser<'t, I, GinAST, ParserError<'t, 's>>
+pub fn token_parser<'t, 's: 't, I>() -> impl Parser<'t, I, ParsedFile, ParserError<'t, 's>>
 where
     I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
 {
-    item()
-        // .separated_by(just(Token::Newline).then_ignore(just(Token::Newline)))
+    import()
         .repeated()
-        .collect::<Vec<Item>>()
-        .map(GinAST)
+        .collect::<Vec<_>>()
+        .or_not()
+        .then(item().repeated().collect::<(TagMap, DefMap)>())
+        .map(|(imports, (tags, defs))| ParsedFile {
+            imports,
+            tags,
+            defs,
+        })
+}
+
+impl FromIterator<Item> for (TagMap, DefMap) {
+    fn from_iter<I: IntoIterator<Item = Item>>(iter: I) -> Self {
+        let mut tags = TagMap::new();
+        let mut defs = DefMap::new();
+
+        for item in iter {
+            match item.value {
+                ItemValue::TagValue(name, bind) => {
+                    tags.insert(name, bind);
+                }
+                ItemValue::DefValue(name, bind) => {
+                    defs.insert(name, bind);
+                }
+            }
+        }
+
+        (tags, defs)
+    }
 }
 
 // pub fn parse_program_and_report<'t, 's: 't, I>(

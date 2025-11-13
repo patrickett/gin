@@ -4,8 +4,8 @@ mod control_flow;
 pub use control_flow::*;
 mod literal;
 pub use literal::*;
-mod r#use;
-pub use r#use::*;
+mod import;
+pub use import::*;
 mod fn_call;
 pub use fn_call::*;
 mod binary;
@@ -19,7 +19,7 @@ pub enum Expr {
     FnCall(FnCall),
     Lit(Literal),
 
-    Bind(Bind),
+    Expr(Bind),
     Nothing,
 }
 
@@ -29,7 +29,7 @@ where
 {
     recursive(|expr| {
         choice((
-            bind(expr.clone(), tag(expr.clone())).map(Expr::Bind),
+            bind(expr.clone()).map(Expr::Expr),
             literal().boxed().map(Expr::Lit),
             // binary_expr(expr.clone()),
             // if_expr(expr.clone()),

@@ -1,3 +1,5 @@
+use std::ops::Deref;
+
 use crate::frontend::prelude::*;
 
 #[derive(Debug, Clone)]
@@ -49,4 +51,31 @@ where
             None => Parameter::Generic { name },
         }
     })
+}
+
+// TODO: make HashMap
+#[derive(Debug, Clone)]
+pub struct Parameters(pub Vec<Parameter>);
+
+impl Deref for Parameters {
+    type Target = Vec<Parameter>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+pub fn params<'t, 's: 't, I>(
+    expr: impl Parser<'t, I, Expr, ParserError<'t, 's>> + Clone + 't,
+    tag: impl Parser<'t, I, Tag, ParserError<'t, 's>> + Clone + 't,
+) -> impl Parser<'t, I, Parameters, ParserError<'t, 's>> + Clone
+where
+    I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
+{
+    parameter(expr.clone(), tag.clone())
+        .separated_by(just(Token::Comma))
+        // .allow_trailing()
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::ParenOpen), just(Token::ParenClose))
+        .map(Parameters)
 }

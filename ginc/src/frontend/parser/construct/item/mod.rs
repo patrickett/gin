@@ -1,17 +1,21 @@
 use crate::frontend::prelude::*;
-mod tag_define;
-pub use tag_define::*;
+mod tag_value;
+pub use tag_value::*;
 
 /// This represents a top level item. Not all constructs can be created
 /// at the root/top level.
 ///
 /// Unlike languages like Python. This is so you cannot have side effects
 #[derive(Debug, Clone)]
-pub enum Item {
-    Import(UseExpr),
-    // definetag and assignment can start with a doc comment
-    DefineTag(DefineTag),
-    Bind(Bind),
+pub struct Item {
+    pub doc_comment: Option<DocComment>,
+    pub value: ItemValue,
+}
+
+#[derive(Debug, Clone)]
+pub enum ItemValue {
+    TagValue(TagName, Params<TagValue>),
+    DefValue(DefName, Params<DefValue>),
 }
 
 pub fn item<'t, 's: 't, I>() -> impl Parser<'t, I, Item, ParserError<'t, 's>> + Clone
@@ -19,15 +23,20 @@ where
     I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
 {
     let expr = expression();
-    let tag = tag(expr.clone());
     let comment = comment();
 
-    choice((
-        // comment().boxed().map(Item::Comment),
-        import().boxed().map(Item::Import),
-        define_tag(expression()).map(Item::DefineTag),
-        bind(expr.clone(), tag.clone()).map(Item::Bind),
-    ))
-    .padded_by(just(Token::Newline).repeated()) // ignore newlines around everything
-    .padded_by(comment.repeated())
+    doc_comment()
+        .or_not()
+        .then(
+            bind(expr)
+                .padded_by(just(Token::Newline).repeated()) // ignore newlines around everything
+                .padded_by(comment.repeated()),
+        )
+        .map(|(doc_comment, bind)| Item {
+            doc_comment,
+            value: match bind {
+                Bind::Tag(tag_name, bind) => ItemValue::TagValue(tag_name, bind),
+                Bind::Def(def_name, bind) => ItemValue::DefValue(def_name, bind),
+            },
+        })
 }

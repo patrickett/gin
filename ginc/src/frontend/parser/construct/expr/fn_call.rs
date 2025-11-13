@@ -2,8 +2,8 @@ use crate::frontend::prelude::*;
 
 #[derive(Debug, Clone)]
 pub struct FnCall {
-    path: Path,
-    args: Option<Vec<Expr>>,
+    pub path: Path,
+    pub args: Option<Vec<Expr>>,
 }
 
 pub fn fn_call<'tokens, 'src: 'tokens, I>(
