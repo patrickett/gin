@@ -153,6 +153,7 @@ impl ToGin for PathBuf {
         if self.is_dir() {
             Some(GinFolder(self))
         } else {
+            None
         }
     }
 

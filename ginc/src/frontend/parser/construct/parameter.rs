@@ -1,12 +1,12 @@
-use std::ops::Deref;
+use std::collections::HashMap;
 
 use crate::frontend::prelude::*;
 
 #[derive(Debug, Clone)]
-pub enum Parameter {
-    Generic { name: String },
-    Tagged { name: String, tag: Tag },
-    Default { name: String, expr: Expr },
+pub enum ParameterKind {
+    Generic,
+    Tagged(Tag),
+    Default(Expr),
 }
 
 #[derive(Debug, Clone)]
@@ -23,11 +23,11 @@ pub enum ParamInfo {
 pub fn parameter<'t, 's: 't, I>(
     expr: impl Parser<'t, I, Expr, ParserError<'t, 's>> + Clone + 't,
     tag: impl Parser<'t, I, Tag, ParserError<'t, 's>> + Clone + 't,
-) -> impl Parser<'t, I, Parameter, ParserError<'t, 's>> + Clone
+) -> impl Parser<'t, I, (ParamName, ParameterKind), ParserError<'t, 's>> + Clone
 where
     I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
 {
-    let id = select! { Token::Id(name) => name };
+    let id = select! { Token::Id(name) => name.to_string() };
 
     // Parse parameter with explicit handling of Tag tokens vs generic identifiers
     let param_info = choice((
@@ -41,29 +41,20 @@ where
     .or_not();
 
     id.then(param_info).map(|(name, info)| {
-        let name = name.to_string();
-
-        match info {
+        let kind = match info {
             Some(info) => match info {
-                ParamInfo::Tag(tag) => Parameter::Tagged { name, tag },
-                ParamInfo::Default(expr) => Parameter::Default { name, expr },
+                ParamInfo::Tag(tag) => ParameterKind::Tagged(tag),
+                ParamInfo::Default(expr) => ParameterKind::Default(expr),
             },
-            None => Parameter::Generic { name },
-        }
+            None => ParameterKind::Generic,
+        };
+
+        (name, kind)
     })
 }
 
-// TODO: make HashMap
-#[derive(Debug, Clone)]
-pub struct Parameters(pub Vec<Parameter>);
-
-impl Deref for Parameters {
-    type Target = Vec<Parameter>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
+pub type ParamName = String;
+pub type Parameters = HashMap<ParamName, ParameterKind>;
 
 pub fn params<'t, 's: 't, I>(
     expr: impl Parser<'t, I, Expr, ParserError<'t, 's>> + Clone + 't,
@@ -75,7 +66,6 @@ where
     parameter(expr.clone(), tag.clone())
         .separated_by(just(Token::Comma))
         // .allow_trailing()
-        .collect::<Vec<_>>()
+        .collect::<Parameters>()
         .delimited_by(just(Token::ParenOpen), just(Token::ParenClose))
-        .map(Parameters)
 }

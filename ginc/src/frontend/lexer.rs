@@ -93,9 +93,9 @@ pub enum Token<'src> {
     Or,
 
     // ids
-    #[regex("[A-Z][a-zA-Z]*(?:[A-Z][a-zA-Z]*)*")]
+    #[regex("[A-Z][a-zA-Z]*")]
     Tag(&'src str),
-    #[regex("(_?[a-z]+(_[a-z]+)*)")]
+    #[regex("_?[a-z]+(?:_[a-z]+)*")]
     Id(&'src str),
 
     // Match floating-point numbers first
@@ -112,8 +112,12 @@ pub enum Token<'src> {
     // Strings
     String(&'src str),
     // Normal comment (skipped)
-    // #[regex(r"--[^\n]*", logos::skip)]
-    // Comment,
+    // #[regex(, handle_comment)]
+    // Comment(String),
+    #[regex(r"---[^\n]*", callback = |lex| { lex.slice() })]
+    DocComment(&'src str),
+    #[regex(r"--[^\n]*", callback = |lex| { lex.slice() })]
+    Comment(&'src str),
     #[token("...")]
     Ellipsis,
     #[token("::=")]
@@ -126,10 +130,8 @@ pub enum Token<'src> {
     // Operators (longest first)
     #[token("==")]
     EqEq,
-    #[token("--")]
-    DashDash,
-    #[token("---")]
-    DashDashDash,
+    // #[token("--")]
+    // DashDash,
     #[token("!=")]
     NotEq,
     #[token("<=")]
@@ -197,19 +199,6 @@ pub enum Token<'src> {
     Whitespace,
     Error,
 }
-
-// fn handle_comment<'src>(lex: &mut Lexer<'src, Token<'src>>) -> Token<'src> {
-//     // Consume everything up to but not including the newline.
-//     let mut consumed = 0usize;
-//     for ch in lex.remainder().chars() {
-//         if ch == '\n' {
-//             break;
-//         }
-//         consumed += ch.len_utf8();
-//     }
-//     lex.bump(consumed);
-//     Token::Comment
-// }
 
 /// Callback for newlines: measure indentation and enqueue Indent/Dedent
 fn handle_newline<'src>(lex: &mut Lexer<'src, Token<'src>>) -> Token<'src> {

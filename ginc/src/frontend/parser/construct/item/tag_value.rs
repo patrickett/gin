@@ -6,7 +6,7 @@ pub enum TagValue {
     // PossibleTags ::= Tag1 | Tag2
     Alias(Tag),
     // Person ::= (name String, age Number)
-    Record(Vec<Parameter>),
+    Record(Parameters),
     // Record(std::iter::Map<&'src str, Box<TagValue<'src>>>),
     // PersonSet ::= { p : Person }
     Set(/* TODO */),

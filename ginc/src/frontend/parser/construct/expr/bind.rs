@@ -42,7 +42,9 @@ where
     // // LHS-only parser: nominal or generic, but no union
     let tag_name = select! { Token::Tag(name) => TagName(name.to_string()) };
 
-    let lhs = tag_name.then(params.or_not()).then_ignore(just(Token::Is));
+    let lhs = tag_name
+        .then(params.clone().or_not())
+        .then_ignore(just(Token::Is));
     // .map(|(name, parameters)| match parameters {
     //     None => Tag::Nominal(name),
     //     Some(parameters) if parameters.is_empty() => Tag::Nominal(name),
@@ -50,11 +52,7 @@ where
     // });
 
     // RHS: either a union of tags or a record
-    let record = parameter(expr.clone(), tag(expr.clone()))
-        .separated_by(just(Token::Comma))
-        .allow_trailing()
-        .collect::<Vec<_>>()
-        .delimited_by(just(Token::ParenOpen), just(Token::ParenClose));
+    let record = params;
 
     let rhs = choice((
         tag(expr.clone()).map(TagValue::Alias),
