@@ -12,14 +12,16 @@ pub fn fn_call<'tokens, 'src: 'tokens, I>(
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SimpleSpan>,
 {
+    use Token::*;
+
     let args = expr
-        .separated_by(just(Token::Comma))
+        .separated_by(just(Comma))
         .collect::<Vec<_>>()
-        .delimited_by(just(Token::ParenOpen), just(Token::ParenClose))
+        .delimited_by(just(ParenOpen), just(ParenClose))
         .or_not();
 
     path()
         .then(args)
-        .then_ignore(just(Token::Newline).or_not())
+        .then_ignore(just(Newline).or_not())
         .map(|(path, args)| Expr::FnCall(FnCall { path, args }))
 }

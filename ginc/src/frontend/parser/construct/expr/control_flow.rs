@@ -45,7 +45,7 @@ pub enum ControlFlow {
     ///     loop
     /// return
     /// ```
-    ForIn {},
+    ForIn(ForInLoop),
     While {},
 }
 

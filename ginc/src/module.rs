@@ -38,7 +38,10 @@ impl Parsable for Either<GinFile, GinFolder> {
 
     fn parse(&self) -> Self::Value {
         match self {
-            Either::Left(file) => Ok(Either::Left(file.parse().expect("failed to parse a file"))),
+            Either::Left(file) => match file.parse() {
+                Ok(file) => Ok(Either::Left(file)),
+                Err(e) => Err(e),
+            },
             Either::Right(folder) => Ok(Either::Right(folder.parse().expect("msg"))),
         }
     }
@@ -81,6 +84,12 @@ impl Parsable for GinFile {
         if let Some(parsed_file) = maybe_output {
             Ok(parsed_file)
         } else {
+            // #[cfg(debug_assertions)]
+            // {
+            //     let tokens_range = GinLexer::new(&source_code).collect::<Vec<_>>();
+            //     println!("{:#?}", tokens_range)
+            // }
+
             let filename = self.0.file_name().unwrap().to_str().unwrap().to_string();
 
             let mut cache = ariadne::sources([(filename.clone(), &source_code)]);
@@ -137,7 +146,9 @@ impl Parsable for GinFolder {
                                     folders.insert(path, folder);
                                 }
                             },
-                            Err(_) => todo!(),
+                            Err(_) => {
+                                // eprintln!("failed to parse");
+                            }
                         }
                     }
                     (files, folders)

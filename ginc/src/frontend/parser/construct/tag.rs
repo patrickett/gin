@@ -18,6 +18,7 @@ pub fn tag<'t, 's: 't, I>(
 where
     I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
 {
+    // use Token::*;
     recursive(|tag| {
         // --- parse tag name (capitalized)
         let tag_name = select! { Token::Tag(name) => TagName(name.to_string()) };

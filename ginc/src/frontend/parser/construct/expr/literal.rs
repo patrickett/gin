@@ -6,6 +6,7 @@ pub enum Literal {
     Float(f64),
     Int(i64),
     String(String),
+    Ellipsis,
 }
 
 pub fn literal<'tokens, 'src: 'tokens, I>()
@@ -13,9 +14,11 @@ pub fn literal<'tokens, 'src: 'tokens, I>()
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SimpleSpan>,
 {
+    use Token::*;
     select! {
-        Token::Int(n) => Literal::Int(n),
-        Token::Float(f) => Literal::Float(f),
+        Ellipsis => Literal::Ellipsis,
+        Int(n) => Literal::Int(n),
+        Float(f) => Literal::Float(f),
     }
-    .then_ignore(just(Token::Newline).or_not())
+    .then_ignore(just(Newline).or_not())
 }

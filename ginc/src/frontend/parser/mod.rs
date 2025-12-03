@@ -16,11 +16,17 @@ pub fn token_parser<'t, 's: 't, I>() -> impl Parser<'t, I, ParsedFile, ParserErr
 where
     I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
 {
+    use Token::*;
     import()
-        .repeated()
+        .padded_by(comments().or_not())
+        .separated_by(just(Newline))
         .collect::<Vec<_>>()
-        .or_not()
-        .then(item().repeated().collect::<(TagMap, DefMap)>())
+        .then(
+            item()
+                .padded_by(comments().or_not())
+                .repeated()
+                .collect::<(TagMap, DefMap)>(),
+        )
         .map(|(imports, (tags, defs))| ParsedFile {
             imports,
             tags,
@@ -33,6 +39,7 @@ impl FromIterator<Item> for (TagMap, DefMap) {
         let mut tags = TagMap::new();
         let mut defs = DefMap::new();
 
+        // TODO: we are dropping doc_comments here
         for item in iter {
             match item.value {
                 ItemValue::TagValue(name, bind) => {

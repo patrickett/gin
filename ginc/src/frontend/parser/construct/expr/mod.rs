@@ -1,3 +1,5 @@
+use crate::frontend::prelude::*;
+
 mod bind;
 pub use bind::*;
 mod control_flow;
@@ -9,8 +11,9 @@ pub use import::*;
 mod fn_call;
 pub use fn_call::*;
 mod binary;
-use crate::frontend::prelude::*;
 pub use binary::*;
+mod for_loop;
+pub use for_loop::*;
 
 #[derive(Debug, Clone)]
 pub enum Expr {
@@ -19,7 +22,7 @@ pub enum Expr {
     FnCall(FnCall),
     Lit(Literal),
 
-    Expr(Bind),
+    Bind(Bind),
     Nothing,
 }
 
@@ -27,16 +30,21 @@ pub fn expression<'t, 's: 't, I>() -> impl Parser<'t, I, Expr, ParserError<'t, '
 where
     I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
 {
+    use Token::*;
     recursive(|expr| {
         choice((
-            bind(expr.clone()).map(Expr::Expr),
+            bind(expr.clone()).map(Expr::Bind),
             literal().boxed().map(Expr::Lit),
+            for_in_loop(expr.clone())
+                .boxed()
+                .map(ControlFlow::ForIn)
+                .map(Expr::CtrlFlow),
             // binary_expr(expr.clone()),
             // if_expr(expr.clone()),
             // for_in(expr.clone()),
             fn_call(expr.clone()).boxed(),
         ))
     })
-    .padded_by(just(Token::Newline).repeated()) // ignore newlines around everything
-    .padded_by(comment().repeated())
+    .padded_by(just(Newline).repeated()) // ignore newlines around everything
+    .padded_by(comments())
 }

@@ -6,6 +6,8 @@ mod ast;
 pub use ast::*;
 
 // sub constructs that are nothing by themself
+mod range;
+pub use range::*;
 mod parameter;
 pub use parameter::*;
 mod path;
@@ -18,3 +20,6 @@ mod doc_comment;
 pub use doc_comment::*;
 mod r#return;
 pub use r#return::*;
+
+mod pattern;
+pub use pattern::*;

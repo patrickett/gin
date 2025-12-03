@@ -3,7 +3,7 @@ use ginc::{Args, compile};
 
 fn main() {
     match compile(Args::parse()) {
-        Ok(warnings) => {
+        Ok((warnings, _)) => {
             for warning in warnings {
                 eprintln!("{warning:#?}")
             }

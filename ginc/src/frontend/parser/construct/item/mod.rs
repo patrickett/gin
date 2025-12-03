@@ -1,6 +1,8 @@
 use crate::frontend::prelude::*;
 mod tag_value;
 pub use tag_value::*;
+mod def_value;
+pub use def_value::*;
 
 /// This represents a top level item. Not all constructs can be created
 /// at the root/top level.
@@ -23,14 +25,12 @@ where
     I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
 {
     let expr = expression();
-    let comment = comment();
-
     doc_comment()
         .or_not()
         .then(
             bind(expr)
                 .padded_by(just(Token::Newline).repeated()) // ignore newlines around everything
-                .padded_by(comment.repeated()),
+                .padded_by(comments()),
         )
         .map(|(doc_comment, bind)| Item {
             doc_comment,

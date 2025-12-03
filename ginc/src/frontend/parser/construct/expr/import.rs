@@ -34,15 +34,16 @@ pub fn import<'t, 's: 't, I>() -> impl Parser<'t, I, Import, ParserError<'t, 's>
 where
     I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
 {
+    use Token::*;
     let id = select! { Token::Id(name) => name };
 
-    just(Token::Use)
+    just(Use)
         .ignore_then(
             path()
-                .then(just(Token::As).ignore_then(id).or_not())
-                .separated_by(just(Token::Comma))
+                .then(just(As).ignore_then(id).or_not())
+                .separated_by(just(Comma))
                 .collect::<Vec<_>>()
-                .then_ignore(just(Token::Newline)),
+                .then_ignore(just(Newline)),
         )
         .map(|items| {
             Import(

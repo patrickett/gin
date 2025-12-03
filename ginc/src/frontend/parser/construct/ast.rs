@@ -26,7 +26,7 @@ impl Container<Item> for (TagMap, DefMap) {
 #[derive(Debug, Clone, Default)]
 /// Output of parsing a gin file
 pub struct ParsedFile {
-    pub imports: Option<Vec<Import>>, // import specifiers
+    pub imports: Vec<Import>, // import specifiers
     pub tags: TagMap,
     pub defs: DefMap,
     // pub path: PathBuf,
@@ -36,7 +36,7 @@ pub struct ParsedFile {
     // pub version: u64, // for incremental updates
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ParsedFolder {
     pub subfolders: BTreeMap<PathBuf, ParsedFolder>,
     pub files: BTreeMap<PathBuf, ParsedFile>, // keeps files sorted for deterministic iteration
