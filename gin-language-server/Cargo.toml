@@ -10,3 +10,7 @@ tower-lsp = "0.20"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "io-std"] }
+ropey = "1.5"
+dashmap = "6.1.0"
+ginc = { path="../ginc" }
+lsp-types = "0.94.1"
