@@ -1,0 +1,29 @@
+-- use http.web as h, crypto.hash where version ^1.0.0 as c
+use http.web as h, crypto.hash as c
+
+literal: 4.0
+
+-- comment
+Result is Ok(t) | Err(e)
+
+DiceThrow is 1..6
+
+--- These are all the states
+--- a server can have
+ServerState is Idle      |
+               Connected |
+               Error     |
+               Retrying
+
+f(x): x
+
+complex_function(params):
+    n: f(params)
+
+    f: f(params)
+return f
+
+complex_function(params):
+    n: f(params)
+    f: f(params)
+return f

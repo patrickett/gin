@@ -1,0 +1,21 @@
+{
+  "name": "hello_world",
+  "version": "0.0.1",
+  "license": "MIT",
+  "description": "An example Gin app",
+  "authors": [
+    "Patrick Trickett <patrickett@protonmail.com>"
+  ],
+  "dependencies": {
+    "http": {
+      "version": "0.0.1"
+    },
+    "http_local": {
+      "path": "../../"
+    },
+    "http_git": {
+      "url": "git@"
+    }
+  },
+  "made_in": "USA"
+}
