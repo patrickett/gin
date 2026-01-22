@@ -121,7 +121,7 @@ pub enum Token<'src> {
     // #[token("--")]
     // DashDash,
     #[token("!=")]
-    NotEq,
+    NotEqual,
     #[token("<=")]
     LessEq,
     #[token("<-")]
