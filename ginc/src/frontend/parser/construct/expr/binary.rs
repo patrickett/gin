@@ -10,6 +10,14 @@ pub struct Binary {
 /// Binary operations are defined as `lhs op rhs`
 #[derive(Debug, Clone)]
 pub enum BinOp {
+    /// <=
+    LessThanOrEqual,
+    /// >=
+    GreaterThanOrEqual,
+    /// <
+    LessThan,
+    /// >
+    GreaterThan,
     /// +
     Add,
     /// /
@@ -18,8 +26,12 @@ pub enum BinOp {
     Multiply,
     /// -
     Subtract,
-    /// :=
+    /// :
     Assign,
+    /// !=
+    NotEqual,
+    /// =
+    Equal,
 }
 
 pub fn binary_expr<'t, 's: 't, I, P>(expr: P) -> impl Parser<'t, I, Binary, ParserError<'t, 's>>

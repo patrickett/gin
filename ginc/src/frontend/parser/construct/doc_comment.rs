@@ -1,7 +1,14 @@
 use crate::frontend::prelude::*;
 use chumsky::{Parser, input::ValueInput, prelude::*, span::SimpleSpan};
 
-// TODO: introduce doc comment lexer and parser for doc comments
+#[derive(Debug, Clone)]
+pub struct Documented<Item> {
+    pub doc: Option<DocComment>,
+    /// Should only ever be a Tag or Def
+    pub item: Item,
+}
+
+// TODO: Implement doc comment lexer and parser support
 #[derive(Debug, Clone)]
 pub struct DocComment(pub String);
 
@@ -12,6 +19,7 @@ where
 {
     select! { Token::DocComment(text) => text }
         .separated_by(just(Token::Newline))
+        .at_least(1)
         .collect::<Vec<_>>()
         .map(|c| {
             DocComment(
