@@ -32,11 +32,14 @@ where
                 .padded_by(just(Token::Newline).repeated()) // ignore newlines around everything
                 .padded_by(comments()),
         )
-        .map(|(doc_comment, bind)| Item {
-            doc_comment,
-            value: match bind {
-                Bind::Tag(tag_name, bind) => ItemValue::TagValue(tag_name, bind),
-                Bind::Def(def_name, bind) => ItemValue::DefValue(def_name, bind),
-            },
+        .map(|(doc_comment, bind)| {
+            let doc_comment = doc_comment.and_then(|d| if d.0.is_empty() { None } else { Some(d) });
+            Item {
+                doc_comment,
+                value: match bind {
+                    Bind::Tag(tag_name, bind) => ItemValue::TagValue(tag_name, bind),
+                    Bind::Def(def_name, bind) => ItemValue::DefValue(def_name, bind),
+                },
+            }
         })
 }

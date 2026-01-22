@@ -29,6 +29,7 @@ where
 
     let lhs = tag_name
         .then(params.clone().or_not())
+        // TODO: maybe we replace Token::Is with `=`
         .then_ignore(choice((just(Token::Is), just(Token::IsReplacedBy))));
 
     // RHS: either a union of tags or a record
@@ -39,5 +40,5 @@ where
     ));
 
     lhs.then(rhs)
-        .map(|((tag_name, params), value)| Bind::Tag(tag_name, Params { params, value }))
+        .map(|((tag_name, params), value)| Bind::Tag(tag_name, Params(params, value)))
 }

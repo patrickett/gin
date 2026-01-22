@@ -20,6 +20,8 @@ mod doc_comment;
 pub use doc_comment::*;
 mod r#return;
 pub use r#return::*;
+mod block;
+pub use block::*;
 
 mod pattern;
 pub use pattern::*;

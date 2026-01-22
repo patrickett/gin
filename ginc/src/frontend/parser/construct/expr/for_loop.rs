@@ -16,15 +16,17 @@ where
 {
     use Token::*;
 
-    just(For)
-        .ignore_then(pattern())
-        .then_ignore(just(In))
-        .then(expr.clone().map(Box::new))
-        .then_ignore(just(Newline))
-        .then_ignore(just(Indent))
-        .then(expr.clone().repeated().collect::<Vec<_>>())
-        .then_ignore(just(Dedent))
-        .then_ignore(just(Newline).repeated().at_least(1).or_not())
-        .then_ignore(just(Loop))
-        .map(|((pat, iter), exprs)| ForInLoop { exprs, iter, pat })
+    block(
+        // header
+        just(For)
+            .ignore_then(pattern())
+            .then_ignore(just(In))
+            .then(expr.clone().map(Box::new))
+            .then_ignore(just(Newline)),
+        // body
+        expr.clone(),
+        // closer
+        just(Token::Loop),
+    )
+    .map(|((pat, iter), exprs, _loop)| ForInLoop { pat, iter, exprs })
 }

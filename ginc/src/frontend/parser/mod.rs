@@ -1,8 +1,9 @@
-use crate::frontend::prelude::*;
-
-// PERF: replace Vec<T> where possible with sized arrays
-
 pub mod construct;
+mod parsable;
+
+use crate::frontend::prelude::*;
+use chumsky::{input::ValueInput, span::SimpleSpan};
+pub use parsable::*;
 
 pub type Spanned<T> = (T, SimpleSpan);
 pub type ParserError<'tokens, 'source_code> = extra::Err<Rich<'tokens, Token<'source_code>>>;
@@ -12,7 +13,7 @@ pub type ParserError<'tokens, 'source_code> = extra::Err<Rich<'tokens, Token<'so
 //     's = 'source_code
 
 /// Parses a stream of tokens
-pub fn token_parser<'t, 's: 't, I>() -> impl Parser<'t, I, ParsedFile, ParserError<'t, 's>>
+pub fn token_parser<'t, 's: 't, I>() -> impl Parser<'t, I, AstNode, ParserError<'t, 's>>
 where
     I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
 {
@@ -27,7 +28,7 @@ where
                 .repeated()
                 .collect::<(TagMap, DefMap)>(),
         )
-        .map(|(imports, (tags, defs))| ParsedFile {
+        .map(|(imports, (tags, defs))| AstNode {
             imports,
             tags,
             defs,
@@ -39,14 +40,23 @@ impl FromIterator<Item> for (TagMap, DefMap) {
         let mut tags = TagMap::new();
         let mut defs = DefMap::new();
 
-        // TODO: we are dropping doc_comments here
         for item in iter {
             match item.value {
                 ItemValue::TagValue(name, bind) => {
-                    tags.insert(name, bind);
+                    let doc = Documented {
+                        item: bind,
+                        doc: item.doc_comment,
+                    };
+
+                    tags.insert(name, doc);
                 }
                 ItemValue::DefValue(name, bind) => {
-                    defs.insert(name, bind);
+                    let doc = Documented {
+                        item: bind,
+                        doc: item.doc_comment,
+                    };
+
+                    defs.insert(name, doc);
                 }
             }
         }

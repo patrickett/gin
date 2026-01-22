@@ -10,7 +10,7 @@ use chumsky::{input::ValueInput, prelude::*};
 #[derive(Debug, Clone)]
 pub struct Import(pub Vec<ModuleImport>);
 
-// TODO: import * from module
+// TODO: Implement import wildcard support (*)
 // `use core.http (...)`
 
 /// An import is structured like the following:
@@ -43,7 +43,7 @@ where
                 .then(just(As).ignore_then(id).or_not())
                 .separated_by(just(Comma))
                 .collect::<Vec<_>>()
-                .then_ignore(just(Newline)),
+                .then_ignore(just(Newline).or_not()),
         )
         .map(|items| {
             Import(

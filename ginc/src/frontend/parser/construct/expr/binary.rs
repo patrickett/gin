@@ -21,3 +21,27 @@ pub enum BinOp {
     /// :=
     Assign,
 }
+
+pub fn binary_expr<'t, 's: 't, I, P>(expr: P) -> impl Parser<'t, I, Binary, ParserError<'t, 's>>
+where
+    I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
+    P: Parser<'t, I, Expr, ParserError<'t, 's>> + Clone + 't,
+{
+    use Token::*;
+
+    let op = select! {
+        Plus => BinOp::Add,
+        Minus => BinOp::Subtract,
+        Star => BinOp::Multiply,
+        Slash => BinOp::Divide,
+        Assignment => BinOp::Assign,
+    };
+
+    expr.clone()
+        .then(op.then(expr))
+        .map(|(lhs, (op, rhs))| Binary {
+            lhs: Box::new(lhs),
+            op,
+            rhs: Box::new(rhs),
+        })
+}

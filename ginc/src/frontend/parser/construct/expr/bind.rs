@@ -1,11 +1,11 @@
 use crate::frontend::prelude::*;
 
 #[derive(Debug, Clone)]
-pub struct Params<Value> {
-    pub params: Option<Parameters>,
+pub struct Params<Value>(
+    pub Option<Parameters>,
     /// typically the rhs of a `fn_name : {value}` or Tag is `{value}`
-    pub value: Value,
-}
+    pub Value,
+);
 
 // TODO:
 // Ellipsis
