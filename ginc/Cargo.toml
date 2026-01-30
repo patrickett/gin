@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 ariadne = "0.5.1"
-chumsky = "0.10.1"
+chumsky = { version = "0.10.1", features = ["pratt", "extension"] }
 clap = { version = "4.5.2", features = ["derive"] }
 dashmap = "6.1.0"
 logos = "0.15.1"
@@ -16,6 +16,12 @@ serde_json = "1.0.143"
 sha2 = "0.10.9"
 thiserror = "2.0.11"
 lsp-types = "0.94.1"
+colored = "3.0.0"
+salsa = "0.25.2"
+melior = "0.26.3"
+eyre = "0.6.12"
+notify-debouncer-mini = "0.4.1"
+crossbeam-channel = "0.5.15"
 
 [dev-dependencies]
 criterion = "0.5"

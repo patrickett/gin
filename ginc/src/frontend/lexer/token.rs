@@ -1,10 +1,9 @@
-use crate::frontend::lexer::Extras;
 use crate::frontend::lexer::handle_newline;
-// PERF: Evaluate if Logos overhead can be reduced by custom lexer for high‑frequency tokens
+use crate::frontend::lexer::Extras;
 use logos::Logos;
 
-// NOTE: sort everything by longest first
-// PERF: remove regex and replace with isFirstLetterCapital
+// TODO: can we get away with removing logos and skipping lexing and incremental parsing
+// or go from source -> ast maybe with some incomplete nodes
 #[derive(Logos, Debug, PartialEq, Clone)]
 #[logos(extras = Extras)]
 pub enum Token<'src> {
