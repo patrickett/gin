@@ -1,9 +1,7 @@
-use crate::{
-    command::{build::begin_build, doc::begin_doc},
-    flask::FlaskConfig,
-};
+use crate::command::{build::begin_build, doc::begin_doc};
 use clap::*;
-use ginc::GincResult;
+use flask::FlaskConfig;
+
 use std::path::PathBuf;
 
 mod build;
@@ -48,16 +46,14 @@ pub enum BeginCommand {
 }
 
 impl BeginCommand {
-    pub fn run(&self, config: FlaskConfig) -> GincResult<()> {
-        let warnings = Vec::new();
-
+    pub fn run(&self, config: FlaskConfig) {
         match &self {
             BeginCommand::Build { path: input, .. } => begin_build(config, input.to_owned()),
             BeginCommand::Doc(_cmd) => begin_doc(config),
             BeginCommand::Version(ver) => match ver {
                 VersionCommand::Bump {} => {
                     println!("bumping version");
-                    Ok((warnings, ()))
+                    // Ok((warnings, ()))
                 }
             },
             _ => todo!(),

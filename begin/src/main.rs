@@ -1,8 +1,15 @@
 mod command;
 mod dep_cache;
-mod flask;
-use crate::{command::BeginCommand, flask::FlaskConfig};
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+pub static APP_VERSION: &str = VERSION;
+
+pub mod tui;
+
+use crate::{command::BeginCommand, tui::App};
 use clap::*;
+use flask::FlaskConfig;
 
 // TODO: So if a semantic version is of the same major version the interface should
 // be the same which means begin can use an already compiled one of the same
@@ -12,18 +19,26 @@ use clap::*;
 #[command(version, about)]
 /// Begin is the package manager for the Gin programming language
 pub struct BeginArguments {
+    // path: PathBuf,
     #[command(subcommand)]
-    command: BeginCommand,
+    command: Option<BeginCommand>,
 }
 
 fn main() {
-    if let Some(config) = FlaskConfig::from_current_directory() {
-        match BeginArguments::parse().command.run(config) {
-            Ok(_) => {
-                // #[cfg(debug_assertions)]
-                // println!("");
+    match BeginArguments::parse().command {
+        Some(cmd) => {
+            if let Some(config) = FlaskConfig::from_current_directory() {
+                cmd.run(config);
             }
-            Err(ginc_error) => eprintln!("{ginc_error:#?}"),
-        };
+        }
+        None => {
+            let terminal = ratatui::init();
+            let app_result = App::default().run(terminal);
+            ratatui::restore();
+            match app_result {
+                Ok(_) => {}
+                Err(e) => eprintln!("{e}"),
+            }
+        }
     }
 }

@@ -1,11 +1,9 @@
-use crate::flask::FlaskConfig;
-use ginc::GincResult;
+use flask::FlaskConfig;
 
 /// `begin doc` will build docs
-pub fn begin_doc(_config: FlaskConfig) -> GincResult<()> {
+pub fn begin_doc(_config: FlaskConfig) {
     #[cfg(debug_assertions)]
     println!("info: generating docs...");
 
-    let warnings = Vec::new();
-    Ok((warnings, ()))
+    // Ok((warnings, ()))
 }
