@@ -1,5 +1,5 @@
 use crate::frontend::prelude::*;
-use chumsky::{Parser, input::ValueInput, prelude::*};
+use chumsky::{input::ValueInput, prelude::*, Parser};
 
 pub fn block<'tokens, 'src: 'tokens, I, Header, Closer, Body>(
     header: impl Parser<'tokens, I, Header, ParserError<'tokens, 'src>> + Clone,

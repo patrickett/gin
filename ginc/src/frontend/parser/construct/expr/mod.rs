@@ -30,8 +30,8 @@ pub fn expression<'t, 's: 't, I>() -> impl Parser<'t, I, Expr, ParserError<'t, '
 where
     I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
 {
-    use Token::*;
     use chumsky::pratt::{infix, left};
+    use Token::*;
 
     let atom = choice((
         literal().boxed().map(Expr::Lit),

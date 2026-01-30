@@ -9,8 +9,8 @@ pub enum Literal {
     Ellipsis,
 }
 
-pub fn literal<'tokens, 'src: 'tokens, I>()
--> impl Parser<'tokens, I, Literal, ParserError<'tokens, 'src>>
+pub fn literal<'tokens, 'src: 'tokens, I>(
+) -> impl Parser<'tokens, I, Literal, ParserError<'tokens, 'src>>
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SimpleSpan>,
 {

@@ -6,6 +6,6 @@ pub mod parser;
 
 pub mod prelude {
     pub use crate::frontend::lexer::*;
-    pub use crate::frontend::parser::{ParserError, Spanned, construct::*};
+    pub use crate::frontend::parser::{construct::*, ParserError, Spanned};
     pub use chumsky::{input::ValueInput, prelude::*};
 }
