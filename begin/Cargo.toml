@@ -6,10 +6,10 @@ edition = "2024"
 
 [dependencies]
 # ginc = { path = "../ginc" }
-clap = { version = "4.5.41", features = ["derive"] }
+clap = { workspace = true }
 ratatui = {version="0.30.0", features=["unstable-widget-ref"]}
 crossterm = { version = "0.28.1", features = ["events"] }
-flask = { path = "../flask" }
+flask = { workspace = true }
 strum = { version = "0.27", features = ["derive"] }
 strum_macros = "0.27"
 tui-tree-widget = "0.24.0"
