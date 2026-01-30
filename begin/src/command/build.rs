@@ -2,6 +2,8 @@ use flask::FlaskConfig;
 // use ginc::{Args, GinCompiler, GincResult};
 use std::path::PathBuf;
 
+// TODO: compiler performance, show time spend on io, and the number of syscalls
+
 /// `begin (b)uild` will build
 pub fn begin_build(_config: FlaskConfig, input: Option<PathBuf>) {
     // check if we have a `main.gin` if so we build binary

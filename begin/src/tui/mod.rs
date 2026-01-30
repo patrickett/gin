@@ -16,8 +16,10 @@ use crate::tui::{
     tabs::{Build, Docs, Flasks, FlasksState, Info, InputMode},
 };
 
+// TODO: maybe show program flow: https://ratatui.rs/showcase/third-party-widgets/#tui-nodes--
+
 #[derive(Default)]
-pub struct App {
+pub struct TUI {
     state: AppState,
     selected_tab: SelectedTab,
     input_mode: InputMode,
@@ -35,7 +37,7 @@ enum AppState {
     Quitting,
 }
 
-impl App {
+impl TUI {
     pub fn run(mut self, mut terminal: DefaultTerminal) -> std::io::Result<()> {
         while self.state == AppState::Running {
             terminal.draw(|frame| frame.render_widget(&self, frame.area()))?;
@@ -166,7 +168,7 @@ impl App {
     }
 }
 
-impl Widget for &App {
+impl Widget for &TUI {
     fn render(self, area: Rect, buf: &mut Buffer) {
         use Constraint::{Length, Min};
         use SelectedTab::*;

@@ -1,13 +1,8 @@
 mod command;
 mod dep_cache;
+mod tui;
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-pub static APP_VERSION: &str = VERSION;
-
-pub mod tui;
-
-use crate::{command::BeginCommand, tui::App};
+use crate::{command::BeginCommand, tui::TUI};
 use clap::*;
 use flask::FlaskConfig;
 
@@ -25,20 +20,21 @@ pub struct BeginArguments {
 }
 
 fn main() {
-    match BeginArguments::parse().command {
-        Some(cmd) => {
-            if let Some(config) = FlaskConfig::from_current_directory() {
-                cmd.run(config);
-            }
-        }
-        None => {
-            let terminal = ratatui::init();
-            let app_result = App::default().run(terminal);
-            ratatui::restore();
-            match app_result {
-                Ok(_) => {}
-                Err(e) => eprintln!("{e}"),
-            }
+    let Some(config) = FlaskConfig::from_current_directory() else {
+        eprintln!("No 'flask.json' in current directory.");
+        // TODO: create a nice input for asking if they want to init
+        return;
+    };
+
+    if let Some(cmd) = BeginArguments::parse().command {
+        cmd.run(config)
+    } else {
+        let terminal = ratatui::init();
+        let app_result = TUI::default().run(terminal);
+        ratatui::restore();
+        match app_result {
+            Ok(_) => {}
+            Err(e) => eprintln!("{e}"),
         }
     }
 }
