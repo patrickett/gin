@@ -5,7 +5,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-# ginc = { path = "../ginc" }
+ginc = { path = "../ginc" }
 clap = { workspace = true }
 ratatui = {version="0.30.0", features=["unstable-widget-ref"]}
 crossterm = { version = "0.28.1", features = ["events"] }

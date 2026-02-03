@@ -1,5 +1,5 @@
 use flask::FlaskConfig;
-// use ginc::{Args, GinCompiler, GincResult};
+use ginc::{Args, GinCompiler};
 use std::path::PathBuf;
 
 // TODO: compiler performance, show time spend on io, and the number of syscalls
@@ -18,10 +18,10 @@ pub fn begin_build(_config: FlaskConfig, input: Option<PathBuf>) {
         todo!("fancy error message for path 404")
     }
 
-    // let args = Args {
-    //     input: path,
-    //     ..Default::default()
-    // };
+    let mut args = Args {
+        input: path,
+        ..Default::default()
+    };
 
-    // GinCompiler::compile(args)
+    GinCompiler::compile(&mut args)
 }

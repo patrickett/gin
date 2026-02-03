@@ -1,6 +1,5 @@
+use crate::database::{File, input_database::Db};
 use salsa::Accumulator;
-
-use crate::database::{input_database::Db, File};
 
 #[salsa::accumulator]
 pub struct Diagnostic(pub String);

@@ -3,6 +3,18 @@ use crate::frontend::prelude::*;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DefName(String);
 
+impl DefName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for DefName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum DefValue {
     Expr(Box<Expr>),

@@ -85,7 +85,7 @@ fn test_parse_arithmetic_expression() {
 
 #[test]
 fn test_parse_comparison_expression() {
-    let ast = "is_equal(a, b): a == b".to_ast().unwrap();
+    let ast = "is_equal(a, b): a = b".to_ast().unwrap();
 
     // one node
     assert_eq!(ast.nodes.len(), 1);

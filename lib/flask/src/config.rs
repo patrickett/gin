@@ -7,7 +7,7 @@ pub const PACKAGE_CONFIG_NAME: &str = "flask.json";
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Feature {}
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub struct DependencyCommon {
     #[serde(default)]
     pub features: Vec<Feature>,
@@ -88,7 +88,10 @@ impl FlaskConfig {
                                     .expect("if we have the json expect to read it");
                                 return Some(config);
                             }
-                            Err(_) => todo!(),
+                            Err(_) => eprintln!(
+                                "error: could not find `{PACKAGE_CONFIG_NAME}` in `{}` or any parent directory",
+                                original_dir.display()
+                            ),
                         },
                         None => {
                             eprintln!(

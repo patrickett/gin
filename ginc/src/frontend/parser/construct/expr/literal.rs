@@ -7,6 +7,7 @@ pub enum Literal {
     Int(i64),
     String(String),
     Ellipsis,
+    Nothing,
 }
 
 pub fn literal<'tokens, 'src: 'tokens, I>(
@@ -16,9 +17,11 @@ where
 {
     use Token::*;
     select! {
+        Nothing => Literal::Nothing,
         Ellipsis => Literal::Ellipsis,
         Int(n) => Literal::Int(n),
         Float(f) => Literal::Float(f),
+        String(s) => Literal::String(s.to_string()),
     }
     .then_ignore(just(Newline).or_not())
 }

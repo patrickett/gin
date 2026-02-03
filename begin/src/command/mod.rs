@@ -1,4 +1,6 @@
 use crate::command::{
+    add::{AddArgs, begin_add},
+    audit::begin_audit,
     build::begin_build,
     doc::{DocCommand, begin_doc},
     version::{VersionCommand, version},
@@ -7,6 +9,8 @@ use clap::*;
 use flask::FlaskConfig;
 use std::path::PathBuf;
 
+mod add;
+mod audit;
 mod build;
 mod doc;
 mod version;
@@ -60,6 +64,11 @@ pub enum BeginCommand {
 impl BeginCommand {
     pub fn run(&self, config: FlaskConfig) {
         match &self {
+            BeginCommand::Add => {
+                let args = AddArgs::parse_from(std::env::args());
+                begin_add(config, args)
+            }
+            BeginCommand::Audit => begin_audit(config),
             BeginCommand::Build { path: input, .. } => begin_build(config, input.to_owned()),
             BeginCommand::Doc(_cmd) => begin_doc(config),
             BeginCommand::Version(cmd) => version(cmd),

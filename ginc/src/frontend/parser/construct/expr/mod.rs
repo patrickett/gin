@@ -26,51 +26,31 @@ pub enum Expr {
     Nothing,
 }
 
-pub fn expression<'t, 's: 't, I>() -> impl Parser<'t, I, Expr, ParserError<'t, 's>> + Clone
+/// Create a simple expression parser for for loop headers.
+/// This includes range expressions and arithmetic, but not assignment or nested for loops.
+fn for_loop_header_expr<'t, 's: 't, I>() -> impl Parser<'t, I, Expr, ParserError<'t, 's>> + Clone
 where
     I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
 {
-    use chumsky::pratt::{infix, left};
     use Token::*;
+    use chumsky::pratt::{infix, left};
 
-    let atom = choice((
-        literal().boxed().map(Expr::Lit),
-        fn_call(expression_atom()).boxed(),
-        bind(expression_atom()).map(Expr::Bind),
-        for_in_loop(expression_atom())
-            .boxed()
-            .map(ControlFlow::ForIn)
-            .map(Expr::CtrlFlow),
-    ));
+    let atom = recursive(|expr| {
+        choice((
+            literal().boxed().map(Expr::Lit),
+            fn_call(expr.clone()).boxed(),
+            bind(expr.clone()).map(Expr::Bind),
+        ))
+    });
 
-    // Assignment has lowest precedence (1)
-    let assignment = infix(left(1), just(Assignment), |lhs: Expr, _, rhs: Expr, _| {
+    // Range operator (precedence 2)
+    let range = infix(left(2), just(DotDot), |lhs: Expr, _, rhs: Expr, _| {
         Expr::Binary(Binary {
             lhs: Box::new(lhs),
-            op: BinOp::Assign,
+            op: BinOp::Range,
             rhs: Box::new(rhs),
         })
     });
-
-    // Comparison operators (precedence 2)
-    let comparison = infix(
-        left(2),
-        select! {
-            Equals => BinOp::Equal,
-            NotEqual => BinOp::NotEqual,
-            Less => BinOp::LessThan,
-            Greater => BinOp::GreaterThan,
-            LessEq => BinOp::LessThanOrEqual,
-            GreaterEq => BinOp::GreaterThanOrEqual,
-        },
-        |lhs: Expr, op: BinOp, rhs: Expr, _| {
-            Expr::Binary(Binary {
-                lhs: Box::new(lhs),
-                op,
-                rhs: Box::new(rhs),
-            })
-        },
-    );
 
     // Arithmetic operators (precedence 3)
     let arithmetic = infix(
@@ -90,26 +70,103 @@ where
         },
     );
 
-    // Build the Pratt parser
-    atom.pratt((assignment, comparison, arithmetic))
-        .padded_by(just(Newline).repeated()) // ignore newlines around everything
+    atom.pratt((range, arithmetic))
+        .padded_by(just(Newline).repeated())
         .padded_by(comments())
 }
 
-// prevent infinite recursion in atomic elements
-fn expression_atom<'t, 's: 't, I>() -> impl Parser<'t, I, Expr, ParserError<'t, 's>> + Clone
+pub fn expression<'t, 's: 't, I>() -> impl Parser<'t, I, Expr, ParserError<'t, 's>> + Clone
 where
     I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
 {
     recursive(|expr| {
-        choice((
+        use Token::*;
+        use chumsky::pratt::{infix, left};
+
+        let atom = choice((
             literal().boxed().map(Expr::Lit),
-            fn_call(expr.clone()).boxed(),
-            bind(expr.clone()).map(Expr::Bind),
-            for_in_loop(expr)
+            fn_call(expression_atom_inner(expr.clone())).boxed(),
+            bind(expression_atom_inner(expr.clone())).map(Expr::Bind),
+            for_in_loop(for_loop_header_expr(), expr.clone())
                 .boxed()
                 .map(ControlFlow::ForIn)
                 .map(Expr::CtrlFlow),
-        ))
+        ));
+
+        // Assignment has lowest precedence (1) - uses Colon token
+        let assignment = infix(left(1), just(Colon), |lhs: Expr, _, rhs: Expr, _| {
+            Expr::Binary(Binary {
+                lhs: Box::new(lhs),
+                op: BinOp::Assign,
+                rhs: Box::new(rhs),
+            })
+        });
+
+        // Range operator (precedence 2) - higher than comparison, lower than arithmetic
+        let range = infix(left(2), just(DotDot), |lhs: Expr, _, rhs: Expr, _| {
+            Expr::Binary(Binary {
+                lhs: Box::new(lhs),
+                op: BinOp::Range,
+                rhs: Box::new(rhs),
+            })
+        });
+
+        // Comparison operators (precedence 3)
+        let comparison = infix(
+            left(3),
+            select! {
+                Equals => BinOp::Equal,
+                NotEqual => BinOp::NotEqual,
+                Less => BinOp::LessThan,
+                Greater => BinOp::GreaterThan,
+                LessEq => BinOp::LessThanOrEqual,
+                GreaterEq => BinOp::GreaterThanOrEqual,
+            },
+            |lhs: Expr, op: BinOp, rhs: Expr, _| {
+                Expr::Binary(Binary {
+                    lhs: Box::new(lhs),
+                    op,
+                    rhs: Box::new(rhs),
+                })
+            },
+        );
+
+        // Arithmetic operators (precedence 4)
+        let arithmetic = infix(
+            left(4),
+            select! {
+                Plus => BinOp::Add,
+                Minus => BinOp::Subtract,
+                Star => BinOp::Multiply,
+                Slash => BinOp::Divide,
+            },
+            |lhs: Expr, op: BinOp, rhs: Expr, _| {
+                Expr::Binary(Binary {
+                    lhs: Box::new(lhs),
+                    op,
+                    rhs: Box::new(rhs),
+                })
+            },
+        );
+
+        // Build the Pratt parser
+        atom.pratt((assignment, comparison, range, arithmetic))
+            .padded_by(just(Newline).repeated()) // ignore newlines around everything
+            .padded_by(comments())
     })
+}
+
+/// Helper for expression atom that takes a recursive parser as parameter
+fn expression_atom_inner<'t, 's: 't, I>(
+    expr: impl Parser<'t, I, Expr, ParserError<'t, 's>> + Clone + 't,
+) -> impl Parser<'t, I, Expr, ParserError<'t, 's>> + Clone + 't
+where
+    I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
+{
+    choice((
+        literal().boxed().map(Expr::Lit),
+        fn_call(expr.clone()).boxed(),
+        bind(expr.clone()).map(Expr::Bind),
+        // Note: for loops are NOT included in expression_atom to avoid infinite recursion
+    ))
 }

@@ -1,19 +1,16 @@
-use std::{
-    path::PathBuf,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
-
+use crate::database::File;
+use crossbeam_channel::Sender;
 use dashmap::{DashMap, Entry};
 use notify_debouncer_mini::{
     DebounceEventResult, Debouncer, new_debouncer,
     notify::{RecommendedWatcher, RecursiveMode},
 };
 use salsa::{Database, Storage};
-
-use crossbeam_channel::Sender;
-
-use crate::database::File;
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 #[salsa::db]
 pub trait Db: Database {
@@ -61,20 +58,20 @@ pub struct InputDatabase {
 
 impl InputDatabase {
     pub fn new(tx: Sender<DebounceEventResult>) -> Self {
-        let logs: Arc<Mutex<Vec<String>>> = Default::default();
+        Self::new_with_debug_logging(tx, false)
+    }
+
+    pub fn new_with_debug_logging(tx: Sender<DebounceEventResult>, _debug: bool) -> Self {
+        // let logs: Arc<Mutex<Vec<String>>> = Default::default();
         Self {
             storage: Storage::new(Some(Box::new({
-                let logs = logs.clone();
+                // let logs = logs.clone();
                 move |event| {
-                    // don't log boring events
-                    if let salsa::EventKind::WillExecute { .. } = event.kind {
-                        logs.lock().unwrap().push(format!("{event:?}"));
-                    }
+                    eprintln!("{event:?}");
                 }
             }))),
             // logs,
             files: DashMap::new(),
-
             file_watcher: Arc::new(Mutex::new(
                 new_debouncer(Duration::from_secs(1), tx).unwrap(),
             )),

@@ -19,7 +19,7 @@ use crate::tui::{
 // TODO: maybe show program flow: https://ratatui.rs/showcase/third-party-widgets/#tui-nodes--
 
 #[derive(Default)]
-pub struct TUI {
+pub struct Tui {
     state: AppState,
     selected_tab: SelectedTab,
     input_mode: InputMode,
@@ -37,7 +37,7 @@ enum AppState {
     Quitting,
 }
 
-impl TUI {
+impl Tui {
     pub fn run(mut self, mut terminal: DefaultTerminal) -> std::io::Result<()> {
         while self.state == AppState::Running {
             terminal.draw(|frame| frame.render_widget(&self, frame.area()))?;
@@ -168,7 +168,7 @@ impl TUI {
     }
 }
 
-impl Widget for &TUI {
+impl Widget for &Tui {
     fn render(self, area: Rect, buf: &mut Buffer) {
         use Constraint::{Length, Min};
         use SelectedTab::*;

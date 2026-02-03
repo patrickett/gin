@@ -2,7 +2,7 @@ mod command;
 mod dep_cache;
 mod tui;
 
-use crate::{command::BeginCommand, tui::TUI};
+use crate::{command::BeginCommand, tui::Tui};
 use clap::*;
 use flask::FlaskConfig;
 
@@ -21,7 +21,6 @@ pub struct BeginArguments {
 
 fn main() {
     let Some(config) = FlaskConfig::from_current_directory() else {
-        eprintln!("No 'flask.json' in current directory.");
         // TODO: create a nice input for asking if they want to init
         return;
     };
@@ -30,7 +29,7 @@ fn main() {
         cmd.run(config)
     } else {
         let terminal = ratatui::init();
-        let app_result = TUI::default().run(terminal);
+        let app_result = Tui::default().run(terminal);
         ratatui::restore();
         match app_result {
             Ok(_) => {}

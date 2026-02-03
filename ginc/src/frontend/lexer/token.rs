@@ -25,6 +25,8 @@ pub enum Token<'src> {
     Return,
     #[token("break")]
     Break,
+    #[token("Nothing")]
+    Nothing,
     #[token("alias")]
     Alias,
     #[token("macro")]
@@ -96,8 +98,14 @@ pub enum Token<'src> {
     // #[regex("[0-9]+")]
     // Number,
 
-    // Strings
+    // Strings - single quoted strings
+    #[regex(r"'[^'\n]*'", |lex| {
+        let s = lex.slice();
+        &s[1..s.len()-1] // strip the quotes
+    })]
     String(&'src str),
+    #[token("'")]
+    SingleQuote,
     // Normal comment (skipped)
     // #[regex(, handle_comment)]
     // Comment(String),
@@ -109,8 +117,8 @@ pub enum Token<'src> {
     Ellipsis,
     #[token("::=")]
     IsReplacedBy,
-    #[token(":=")]
-    Assignment,
+    // #[token(":=")]
+    // Assignment,
     #[token("|-")]
     /// https://en.wikipedia.org/wiki/Turnstile_(symbol)
     Turnstile,

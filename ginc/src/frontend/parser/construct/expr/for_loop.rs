@@ -9,7 +9,8 @@ pub struct ForInLoop {
 }
 
 pub fn for_in_loop<'tokens, 'src: 'tokens, I>(
-    expr: impl Parser<'tokens, I, Expr, ParserError<'tokens, 'src>> + Clone + 'tokens,
+    header_expr: impl Parser<'tokens, I, Expr, ParserError<'tokens, 'src>> + Clone + 'tokens,
+    body_expr: impl Parser<'tokens, I, Expr, ParserError<'tokens, 'src>> + Clone + 'tokens,
 ) -> impl Parser<'tokens, I, ForInLoop, ParserError<'tokens, 'src>>
 where
     I: ValueInput<'tokens, Token = Token<'src>, Span = SimpleSpan>,
@@ -21,10 +22,9 @@ where
         just(For)
             .ignore_then(pattern())
             .then_ignore(just(In))
-            .then(expr.clone().map(Box::new))
-            .then_ignore(just(Newline)),
+            .then(header_expr.clone().map(Box::new)),
         // body
-        expr.clone(),
+        body_expr.clone(),
         // closer
         just(Token::Loop),
     )

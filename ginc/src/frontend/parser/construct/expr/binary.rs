@@ -32,6 +32,8 @@ pub enum BinOp {
     NotEqual,
     /// =
     Equal,
+    /// ..
+    Range,
 }
 
 pub fn binary_expr<'t, 's: 't, I, P>(expr: P) -> impl Parser<'t, I, Binary, ParserError<'t, 's>>
@@ -46,7 +48,8 @@ where
         Minus => BinOp::Subtract,
         Star => BinOp::Multiply,
         Slash => BinOp::Divide,
-        Assignment => BinOp::Assign,
+        Colon => BinOp::Assign,
+        // Assignment => BinOp::Assign,
     };
 
     expr.clone()

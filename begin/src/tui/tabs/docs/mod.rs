@@ -8,6 +8,7 @@ use tui_tree_widget::{Scrollbar, Tree, TreeItem, TreeState};
 
 use crate::tui::tabs::{InputMode, SearchInput};
 
+#[allow(unused)]
 #[derive(Default, PartialEq, Eq)]
 pub enum FocusedDocWidget {
     #[default]
@@ -21,7 +22,7 @@ pub enum FocusedDocWidget {
 pub struct Docs {
     pub focused: FocusedDocWidget,
     pub state: TreeState<&'static str>,
-    items: Vec<TreeItem<'static, &'static str>>,
+    // items: Vec<TreeItem<'static, &'static str>>,
     pub docs_query: String,
 }
 
