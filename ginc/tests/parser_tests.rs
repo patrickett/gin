@@ -113,6 +113,34 @@ fn test_parse_multi_line_empty_nothing_variable() {
     assert_eq!(ast.tags.len(), 0);
 }
 
+#[test]
+fn test_parse_unterminated_string() {
+    let ast = parse_str("hello_text: 'hello\n");
+
+    // Should parse successfully (error is accumulated as diagnostic)
+    assert!(ast.uses.is_empty());
+    // The definition should still be created
+    assert_eq!(ast.defs.len(), 1);
+}
+
+#[test]
+fn test_parse_unterminated_string_lone_quote() {
+    let ast = parse_str("y: '\nx: '\n");
+
+    // Should parse successfully (errors are accumulated as diagnostics)
+    assert!(ast.uses.is_empty());
+    assert_eq!(ast.defs.len(), 2);
+}
+
+#[test]
+fn test_parse_unterminated_string_multiple_newlines() {
+    let ast = parse_str("hello_text: 'hello\n\n\n");
+
+    // Should parse successfully (error is accumulated as diagnostic)
+    assert!(ast.uses.is_empty());
+    assert_eq!(ast.defs.len(), 1);
+}
+
 // #[test]
 // fn test_parse_conditional() {
 //     let src = "

@@ -196,3 +196,107 @@ fn test_play() {
     assert!(matches!(tokens[4], Token::ParenOpen));
     assert!(matches!(tokens[5], Token::ParenClose));
 }
+
+#[test]
+fn test_string_literal() {
+    let src = "'foo' 'bar' 'baz'";
+
+    let mut lexer = GinLexer::new(src);
+    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+
+    assert!(matches!(tokens[0], Token::String(_)));
+    assert_eq!(
+        if let Token::String(s) = &tokens[0] {
+            *s
+        } else {
+            ""
+        },
+        "foo"
+    );
+
+    assert!(matches!(tokens[1], Token::String(_)));
+    assert_eq!(
+        if let Token::String(s) = &tokens[1] {
+            *s
+        } else {
+            ""
+        },
+        "bar"
+    );
+
+    assert!(matches!(tokens[2], Token::String(_)));
+    assert_eq!(
+        if let Token::String(s) = &tokens[2] {
+            *s
+        } else {
+            ""
+        },
+        "baz"
+    );
+}
+
+#[test]
+fn test_unterminated_string_with_content() {
+    let src = "x: 'bar\nz: 'baz";
+
+    let mut lexer = GinLexer::new(src);
+    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+
+    // x : UnterminatedString("bar") Newline z : UnterminatedString("baz")
+    assert!(matches!(tokens[0], Token::Id(_)));
+    assert!(matches!(tokens[1], Token::Colon));
+    assert!(matches!(tokens[2], Token::UnterminatedString(_)));
+    assert_eq!(
+        if let Token::UnterminatedString(s) = &tokens[2] {
+            *s
+        } else {
+            ""
+        },
+        "bar"
+    );
+    assert!(matches!(tokens[3], Token::Newline));
+    assert!(matches!(tokens[4], Token::Id(_)));
+    assert!(matches!(tokens[5], Token::Colon));
+    assert!(matches!(tokens[6], Token::UnterminatedString(_)));
+    assert_eq!(
+        if let Token::UnterminatedString(s) = &tokens[6] {
+            *s
+        } else {
+            ""
+        },
+        "baz"
+    );
+}
+
+#[test]
+fn test_unterminated_string_lone_quote() {
+    let src = "y: '\nx: '";
+
+    let mut lexer = GinLexer::new(src);
+    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+
+    // y : UnterminatedString("") Newline x : UnterminatedString("")
+    assert!(matches!(tokens[0], Token::Id(_)));
+    assert!(matches!(tokens[1], Token::Colon));
+    assert!(matches!(tokens[2], Token::UnterminatedString(_)));
+    assert_eq!(
+        if let Token::UnterminatedString(s) = &tokens[2] {
+            *s
+        } else {
+            ""
+        },
+        ""
+    );
+    assert!(matches!(tokens[3], Token::Newline));
+    assert!(matches!(tokens[4], Token::Id(_)));
+    assert!(matches!(tokens[5], Token::Colon));
+    assert!(matches!(tokens[6], Token::UnterminatedString(_)));
+    assert_eq!(
+        if let Token::UnterminatedString(s) = &tokens[6] {
+            *s
+        } else {
+            ""
+        },
+        ""
+    );
+}

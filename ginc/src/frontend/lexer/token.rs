@@ -117,14 +117,11 @@ pub enum Token<'src> {
         &s[1..s.len()-1] // strip the quotes
     })]
     String(&'src str),
-    #[regex(r"'[^'\n]+", |lex| {
+    #[regex(r"'[^'\n]*", |lex| {
         let s = lex.slice();
         &s[1..] // strip opening quote
     })]
-    // TODO: handle case of single ' opening without char
     UnterminatedString(&'src str),
-    #[token("'")]
-    SingleQuote,
     #[regex(r"---[^\n]*", callback = |lex| { lex.slice() })]
     DocComment(&'src str),
     #[regex(r"--[^\n]*", callback = |lex| { lex.slice() })]

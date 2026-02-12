@@ -56,8 +56,8 @@ impl InputDatabase {
     pub fn new_with_debug_logging(tx: Sender<DebounceEventResult>, _debug: bool) -> Self {
         Self {
             storage: Storage::new(Some(Box::new({
-                #[cfg(debug_assertions)]
                 move |event| {
+                    #[cfg(debug_assertions)]
                     eprintln!("{event:?}");
                 }
             }))),
