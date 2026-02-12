@@ -4,17 +4,17 @@
 // PERF: Handwritten lexer can be optimized for specific Gin syntax patterns
 // we can assume lowercase word is id and first letter upper is tag
 
-mod lexable;
 mod semantic_token_type;
 mod token;
+mod tokenize;
 
 use chumsky::span::SimpleSpan;
 use logos::{Lexer, Logos};
 use std::collections::VecDeque;
 
-pub use lexable::*;
 pub use semantic_token_type::*;
 pub use token::*;
+pub use tokenize::*;
 
 /// Synthetic tokens for indentation handling
 #[derive(Debug, Clone, PartialEq)]

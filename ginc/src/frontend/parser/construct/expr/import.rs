@@ -7,7 +7,7 @@ use chumsky::{input::ValueInput, prelude::*};
 /// ```gin
 /// use http.web, crypto.hash
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Import(pub Vec<ModuleImport>);
 
 // TODO: Implement import wildcard support (*)
@@ -17,7 +17,7 @@ pub struct Import(pub Vec<ModuleImport>);
 ///
 /// `use {module_name}.path.to_sub_mod (import1, ImportTag)`
 //  The ending (...) syntax is shared across lambda functions
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ModuleImport {
     pub path: Path,
     pub alias: Option<String>,

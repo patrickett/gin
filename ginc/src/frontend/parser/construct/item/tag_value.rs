@@ -1,6 +1,6 @@
 use crate::frontend::prelude::*;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct TagName(pub String);
 
 #[derive(Debug, Clone)]

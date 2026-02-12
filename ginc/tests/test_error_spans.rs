@@ -1,29 +1,29 @@
 // Test to verify span information is available in parser errors
-use ginc::frontend::parser::Parsable;
+// Uses the token_parser directly to check error spans without Salsa overhead.
+
+use chumsky::Parser;
+use chumsky::input::Stream;
+use ginc::frontend::lexer::GinLexer;
+use ginc::frontend::parser::token_parser;
 
 fn main() {
-    // Test with invalid syntax to trigger an error
     let source = "x + "; // Incomplete expression
 
-    let result = source.to_ast();
-    match result {
-        Ok(ast) => {
-            println!("Unexpected success: {:?}", ast);
-        }
-        Err(errs) => {
-            println!("Got errors as expected:");
-            for (error_list, path) in errs {
-                println!("  Path: {:?}", path);
-                for error in error_list {
-                    println!("    Error: {:?}", error);
-                    // Check if the error has span information
-                    let span_ref = error.span();
-                    println!(
-                        "      Span start: {}, end: {}",
-                        span_ref.start, span_ref.end
-                    );
-                }
-            }
+    let lexer = GinLexer::new(source);
+    let token_stream = Stream::from_iter(lexer.map(|(t, _s)| t));
+    let (output, errors) = token_parser().parse(token_stream).into_output_errors();
+
+    if errors.is_empty() {
+        println!("Unexpected success: {:?}", output);
+    } else {
+        println!("Got errors as expected:");
+        for error in &errors {
+            println!("    Error: {:?}", error);
+            let span_ref = error.span();
+            println!(
+                "      Span start: {}, end: {}",
+                span_ref.start, span_ref.end
+            );
         }
     }
 }

@@ -3,19 +3,16 @@ pub mod backend;
 pub mod database;
 pub mod diagnostic;
 pub mod frontend;
-pub mod source;
-use crate::database::{
-    accumulator::Diagnostic,
-    input_database::{Db, InputDatabase},
+use crate::{
+    backend::compile::compile,
+    database::input_database::{Db, InputDatabase},
+    diagnostic::Symptom,
 };
-use crate::diagnostic::*;
 pub use args::*;
 use crossbeam_channel::unbounded;
 
 pub const GIN_FILE_EXT: &str = "gin";
 pub const BINARY_ENTRY_FILE_NAME: &str = "main.gin";
-
-pub type GincResult<'a, T> = Result<(GincWarnings, T), GincFlaw<'a>>;
 
 /// Analagous to the `ginc` command
 pub struct GinCompiler;
@@ -27,7 +24,7 @@ impl GinCompiler {
 
         let path = args.input.to_owned();
 
-        let entry = match db.input(path) {
+        let entry = match db.input(path.clone()) {
             Ok(file) => file,
             Err(err) => {
                 eprintln!("Error: {}", err);
@@ -35,21 +32,35 @@ impl GinCompiler {
             }
         };
 
-        // Use salsa query instead of Parsable::to_ast()
-        let (_ast, _deps) = database::parse(&db, entry);
+        // Read the source file for error reporting
+        let source = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(err) => {
+                eprintln!("Error reading file: {}", err);
+                return;
+            }
+        };
 
-        // Report diagnostics from accumulator
-        let diagnostics = database::parse_dependencies::accumulated::<Diagnostic>(&db, entry);
-        for diagnostic in diagnostics {
-            eprintln!("{}", diagnostic.0);
+        // Compile (this triggers parse → resolve_imports → codegen)
+        let compiled = compile(&db, entry);
+
+        // Collect and print all accumulated diagnostics
+        let filename = path.to_string_lossy().to_string();
+        let diagnostics = compile::accumulated::<Symptom>(&db, entry);
+        let has_flaws = diagnostics
+            .iter()
+            .any(|d| matches!(d.category, diagnostic::Category::Flaw));
+
+        for diagnostic in &diagnostics {
+            diagnostic.print(&source, &filename);
         }
 
-        // Compile to MLIR
-        let compiled = database::compile(&db, entry);
-        let bytecode = compiled.bytecode(&db);
+        if has_flaws {
+            return;
+        }
 
+        let bytecode = compiled.bytecode(&db);
         if !bytecode.is_empty() {
-            // Print the MLIR for debugging
             let mlir_text = String::from_utf8_lossy(bytecode);
             println!("\n```mlir\n{mlir_text}```\n");
         } else {

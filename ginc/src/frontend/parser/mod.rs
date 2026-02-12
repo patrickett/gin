@@ -1,10 +1,11 @@
 pub mod construct;
-mod parsable;
+
+pub mod parse;
 
 use crate::frontend::prelude::*;
 use chumsky::{input::ValueInput, span::SimpleSpan};
-pub use parsable::*;
 
+pub use parse::*;
 pub type Spanned<T> = (T, SimpleSpan);
 pub type ParserError<'tokens, 'source_code> = extra::Err<Rich<'tokens, Token<'source_code>>>;
 
@@ -13,7 +14,7 @@ pub type ParserError<'tokens, 'source_code> = extra::Err<Rich<'tokens, Token<'so
 //     's = 'source_code
 
 /// Parses a stream of tokens
-pub fn token_parser<'t, 's: 't, I>() -> impl Parser<'t, I, AstNode, ParserError<'t, 's>>
+pub fn token_parser<'t, 's: 't, I>() -> impl Parser<'t, I, FileAst, ParserError<'t, 's>>
 where
     I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
 {
@@ -28,8 +29,8 @@ where
                 .repeated()
                 .collect::<(TagMap, DefMap)>(),
         )
-        .map(|(imports, (tags, defs))| AstNode {
-            imports,
+        .map(|(imports, (tags, defs))| FileAst {
+            uses: imports,
             tags,
             defs,
         })

@@ -7,7 +7,7 @@ use chumsky::{input::ValueInput, prelude::*, select, span::SimpleSpan};
 /// `root` and every element of `segments` are **owned** strings.
 /// This removes the need for a `'src` lifetime and allows the type to be
 /// stored in caches or sent across threads safely.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Path {
     /// The root of a path can be a name mapped in `flask.json` or
     /// a child folder in the current directory.

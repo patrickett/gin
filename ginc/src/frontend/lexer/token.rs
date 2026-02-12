@@ -1,6 +1,19 @@
-use crate::frontend::lexer::handle_newline;
 use crate::frontend::lexer::Extras;
+use crate::frontend::lexer::handle_newline;
 use logos::Logos;
+
+// TODO: only track indent after certain trigger tokens
+// in python its [: , = , ->]
+// its ours just after each newline? except if followed by another newline
+//
+//
+// fnc:
+// \n
+// \n
+// \t\n -- prevent this from creating new scope
+// \n   -- same if tab was on this line
+// return
+//
 
 // TODO: can we get away with removing logos and skipping lexing and incremental parsing
 // or go from source -> ast maybe with some incomplete nodes
@@ -104,11 +117,14 @@ pub enum Token<'src> {
         &s[1..s.len()-1] // strip the quotes
     })]
     String(&'src str),
+    #[regex(r"'[^'\n]+", |lex| {
+        let s = lex.slice();
+        &s[1..] // strip opening quote
+    })]
+    // TODO: handle case of single ' opening without char
+    UnterminatedString(&'src str),
     #[token("'")]
     SingleQuote,
-    // Normal comment (skipped)
-    // #[regex(, handle_comment)]
-    // Comment(String),
     #[regex(r"---[^\n]*", callback = |lex| { lex.slice() })]
     DocComment(&'src str),
     #[regex(r"--[^\n]*", callback = |lex| { lex.slice() })]
@@ -198,5 +214,4 @@ pub enum Token<'src> {
     // Inline whitespace (skip, but only non-leading)
     #[regex(r"[ \t]+", logos::skip)]
     Whitespace,
-    Error,
 }
