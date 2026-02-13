@@ -10,16 +10,14 @@ pub trait ContextExt {
     fn i64(&self) -> Type<'_>;
     fn i1(&self) -> Type<'_>;
     fn f64(&self) -> Type<'_>;
-    /// String type - LLVM pointer to i8 for null-terminated C strings
-    /// Compatible with printf's %s format specifier
+    /// String type — `!llvm.struct<(ptr, i64)>` fat pointer (data, len)
     fn string_type(&self) -> Type<'_>;
     /// Unit/void type for Nothing - currently represented as i64
-    /// Will be replaced with proper void type after LLVM dialect integration
     fn unit(&self) -> Type<'_>;
     /// LLVM void type for Nothing/unit values
     fn llvm_void(&self) -> Type<'_>;
-    /// LLVM pointer to i8 type for strings
-    fn llvm_i8_ptr(&self) -> Type<'_>;
+    /// LLVM opaque pointer type
+    fn llvm_ptr(&self) -> Type<'_>;
 }
 
 impl ContextExt for Context {
@@ -40,7 +38,11 @@ impl ContextExt for Context {
     }
 
     fn string_type(&self) -> Type<'_> {
-        self.llvm_i8_ptr()
+        r#type::r#struct(
+            self,
+            &[r#type::pointer(self, 0), IntegerType::new(self, 64).into()],
+            false,
+        )
     }
 
     fn unit(&self) -> Type<'_> {
@@ -51,7 +53,7 @@ impl ContextExt for Context {
         r#type::void(self)
     }
 
-    fn llvm_i8_ptr(&self) -> Type<'_> {
+    fn llvm_ptr(&self) -> Type<'_> {
         r#type::pointer(self, 0)
     }
 }
@@ -98,6 +100,22 @@ pub trait OperationBuilderExt<'c> {
         rhs: Value<'c, 'c>,
     ) -> Operation<'c>;
     fn build_cmpi(&self, predicate: u64, lhs: Value<'c, 'c>, rhs: Value<'c, 'c>) -> Operation<'c>;
+    /// `llvm.mlir.undef` — produce an undefined value of the given type
+    fn llvm_undef(&self, ty: Type<'c>) -> Operation<'c>;
+    /// `llvm.insertvalue` — insert a value into an aggregate at `position`
+    fn llvm_insertvalue(
+        &self,
+        container: Value<'c, 'c>,
+        value: Value<'c, 'c>,
+        position: i64,
+    ) -> Operation<'c>;
+    /// `llvm.extractvalue` — extract a value from an aggregate at `position`
+    fn llvm_extractvalue(
+        &self,
+        container: Value<'c, 'c>,
+        position: i64,
+        result_type: Type<'c>,
+    ) -> Operation<'c>;
 }
 
 impl<'c> OperationBuilderExt<'c> for &'c Context {
@@ -144,6 +162,40 @@ impl<'c> OperationBuilderExt<'c> for &'c Context {
             .build()
             .unwrap()
     }
+
+    fn llvm_undef(&self, ty: Type<'c>) -> Operation<'c> {
+        melior::dialect::llvm::undef(ty, self.unknown_loc())
+    }
+
+    fn llvm_insertvalue(
+        &self,
+        container: Value<'c, 'c>,
+        value: Value<'c, 'c>,
+        position: i64,
+    ) -> Operation<'c> {
+        melior::dialect::llvm::insert_value(
+            self,
+            container,
+            DenseI64ArrayAttribute::new(self, &[position]),
+            value,
+            self.unknown_loc(),
+        )
+    }
+
+    fn llvm_extractvalue(
+        &self,
+        container: Value<'c, 'c>,
+        position: i64,
+        result_type: Type<'c>,
+    ) -> Operation<'c> {
+        melior::dialect::llvm::extract_value(
+            self,
+            container,
+            DenseI64ArrayAttribute::new(self, &[position]),
+            result_type,
+            self.unknown_loc(),
+        )
+    }
 }
 
 /// Extension trait for [`melior::ir::Block`] to simplify appending operations.
@@ -170,14 +222,24 @@ impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
     }
 
     fn const_string_with_ctx(&self, ctx: &CodegenContext<'_, 'c>, value: &str) -> Value<'c, 'c> {
-        // Register the string and get its symbol name
+        let c = ctx.mlir;
         let symbol_name = ctx.register_string(value);
-        // Get the address of the global string
-        // Note: This will be resolved during module generation
-        // For now, we return a placeholder that will be fixed up later
-        // The actual addressof operation will be created when the global exists
-        crate::backend::codegen::addressof_string_global(ctx.mlir, self, &symbol_name)
-            .unwrap_or_else(|_| self.const_i64(ctx.mlir, 42))
+
+        // llvm.mlir.addressof @symbol → !llvm.ptr
+        let ptr = crate::backend::codegen::addressof_string_global(c, self, &symbol_name)
+            .expect("addressof should succeed");
+
+        // llvm.mlir.undef : !llvm.struct<(ptr, i64)>
+        let undef = self.append_op(c.llvm_undef(c.string_type()));
+
+        // llvm.insertvalue ptr, undef[0]
+        let with_ptr = self.append_op(c.llvm_insertvalue(undef, ptr, 0));
+
+        // arith.constant <byte len> : i64
+        let len = self.const_i64(c, value.len() as i64);
+
+        // llvm.insertvalue len, struct[1]
+        self.append_op(c.llvm_insertvalue(with_ptr, len, 1))
     }
 
     fn unit_value(&self, ctx: &CodegenContext<'_, 'c>) -> Value<'c, 'c> {

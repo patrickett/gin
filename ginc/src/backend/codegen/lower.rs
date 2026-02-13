@@ -104,6 +104,7 @@ impl<'c> Lower<'c> for Box<Expr> {
 
 pub fn generate_mlir(ast: &FileAst) -> Result<String, CodegenSymptom> {
     let context = Context::new();
+    melior::dialect::DialectHandle::llvm().register_dialect(&context);
     context.get_or_load_dialect("arith");
     context.get_or_load_dialect("func");
     context.get_or_load_dialect("scf");
@@ -124,22 +125,12 @@ pub fn generate_mlir(ast: &FileAst) -> Result<String, CodegenSymptom> {
         func_ops.push(func_op);
     }
 
-    // Create string global operations
-    let string_literals = ctx.string_literals.borrow().clone();
+    // Create string globals (must appear before function ops in the module)
     let string_symbols = ctx.string_symbols.borrow().clone();
 
-    // Build a reverse mapping: symbol name -> string value
-    let mut symbol_to_value: HashMap<String, String> = HashMap::new();
-    for (value, symbol) in string_symbols.iter() {
-        symbol_to_value.insert(symbol.clone(), value.clone());
-    }
-
-    // Create global string operations
-    for symbol in string_literals.iter() {
-        if let Some(value) = symbol_to_value.get(symbol) {
-            let global_op = create_string_global(&context, symbol, value)?;
-            module.body().append_operation(global_op);
-        }
+    for (value, symbol) in &string_symbols {
+        let global_op = create_string_global(&context, symbol, value)?;
+        module.body().append_operation(global_op);
     }
 
     for func_op in func_ops {
@@ -151,8 +142,7 @@ pub fn generate_mlir(ast: &FileAst) -> Result<String, CodegenSymptom> {
 }
 
 /// Create a global string constant operation using LLVM dialect.
-/// This creates an immutable global constant containing the string data
-/// with a null terminator for C compatibility (printf %s).
+/// Produces: `llvm.mlir.global internal constant @name("value\00") : !llvm.array<N x i8>`
 pub fn create_string_global<'c>(
     context: &'c Context,
     name: &str,
@@ -160,27 +150,42 @@ pub fn create_string_global<'c>(
 ) -> Result<Operation<'c>, CodegenSymptom> {
     let loc = context.unknown_loc();
 
-    // Create null-terminated string bytes
-    let string_bytes: Vec<u8> = format!("{}\0", value).into_bytes();
-    let string_len: u32 = string_bytes
+    // Null-terminated string bytes
+    let with_nul = format!("{}\0", value);
+    let byte_len: u32 = with_nul
         .len()
         .try_into()
         .map_err(|_| CodegenSymptom::Internal("String too long for u32".to_string()))?;
 
-    // Create i8 type
     let i8_type = Type::from(IntegerType::new(context, 8));
+    let array_type = r#type::array(i8_type, byte_len);
 
-    // Create array type for the string: [N x i8]
-    let array_type = r#type::array(i8_type, string_len);
+    let linkage_attr = melior::dialect::llvm::attributes::linkage(
+        context,
+        melior::dialect::llvm::attributes::Linkage::Internal,
+    );
 
-    // Build the global string constant operation
-    let sym_name = Identifier::new(context, "sym_name");
-
-    // For now, create a simpler global without complex attributes
-    // The global will be initialized later with the string data
-    let global = OperationBuilder::new("llvm.global", loc)
-        .add_attributes(&[(sym_name, context.str_attr(name))])
-        .add_results(&[array_type])
+    let global = OperationBuilder::new("llvm.mlir.global", loc)
+        .add_attributes(&[
+            (Identifier::new(context, "sym_name"), context.str_attr(name)),
+            (
+                Identifier::new(context, "global_type"),
+                TypeAttribute::new(array_type).into(),
+            ),
+            (
+                Identifier::new(context, "value"),
+                StringAttribute::new(context, &with_nul).into(),
+            ),
+            (Identifier::new(context, "linkage"), linkage_attr),
+            (
+                Identifier::new(context, "constant"),
+                Attribute::unit(context),
+            ),
+            (
+                Identifier::new(context, "addr_space"),
+                IntegerAttribute::new(IntegerType::new(context, 32).into(), 0).into(),
+            ),
+        ])
         .build()
         .map_err(|e| CodegenSymptom::Internal(format!("Failed to build string global: {}", e)))?;
 
@@ -195,12 +200,12 @@ pub fn addressof_string_global<'c>(
     global_name: &str,
 ) -> Result<Value<'c, 'c>, CodegenSymptom> {
     let loc = context.unknown_loc();
-    let sym_name = Identifier::new(context, "sym_name");
+    let global_name_id = Identifier::new(context, "global_name");
+    let symbol_ref = context.symbol_ref_attr(global_name);
 
-    // Create llvm.addressof operation to get pointer to the global
-    let addressof_op = OperationBuilder::new("llvm.addressof", loc)
-        .add_attributes(&[(sym_name, context.str_attr(global_name))])
-        .add_results(&[context.llvm_i8_ptr()])
+    let addressof_op = OperationBuilder::new("llvm.mlir.addressof", loc)
+        .add_attributes(&[(global_name_id, symbol_ref)])
+        .add_results(&[context.llvm_ptr()])
         .build()
         .map_err(|e| CodegenSymptom::Internal(format!("Failed to build addressof: {}", e)))?;
 

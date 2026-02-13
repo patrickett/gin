@@ -53,12 +53,16 @@ fn test_compile_string_literal() {
     let db = InputDatabase::new(tx);
     let file = File::new(&db, PathBuf::from("test.gin"), src.to_string());
 
-    // This should compile successfully
-    let _compiled = compile(&db, file);
+    let compiled = compile(&db, file);
 
-    // Collect diagnostics only, don't print
     let diagnostics = compile::accumulated::<Symptom>(&db, file);
-    println!("Diagnostics count: {}", diagnostics.len());
+    assert_eq!(diagnostics.len(), 0, "expected no diagnostics");
+
+    let mlir = String::from_utf8_lossy(compiled.bytecode(&db));
+    assert!(mlir.contains("llvm.mlir.global"), "should contain global: {mlir}");
+    assert!(mlir.contains("llvm.mlir.addressof"), "should contain addressof: {mlir}");
+    assert!(mlir.contains("llvm.insertvalue"), "should contain insertvalue: {mlir}");
+    assert!(mlir.contains("llvm.struct"), "should contain struct type: {mlir}");
 }
 
 #[test]

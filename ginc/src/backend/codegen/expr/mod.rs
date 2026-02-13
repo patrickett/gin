@@ -114,7 +114,10 @@ fn infer_return_type<'c>(
     }
 }
 
-fn infer_expr_type<'c>(ctx: &CodegenContext<'_, 'c>, expr: &Expr) -> Result<Type<'c>, CodegenSymptom> {
+fn infer_expr_type<'c>(
+    ctx: &CodegenContext<'_, 'c>,
+    expr: &Expr,
+) -> Result<Type<'c>, CodegenSymptom> {
     match expr {
         Expr::Lit(literal) => match literal {
             Literal::Int(_) | Literal::Number(_) => Ok(ctx.mlir.i64()),

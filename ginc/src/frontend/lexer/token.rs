@@ -177,6 +177,8 @@ pub enum Token<'src> {
     DotDot,
     #[token(".")]
     Dot,
+    #[token("@")]
+    At,
     #[token("#")]
     Pound,
     #[token(":")]

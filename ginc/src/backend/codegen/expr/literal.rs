@@ -1,7 +1,6 @@
 //! Lower literal expressions to MLIR.
 
 use crate::{backend::prelude::*, diagnostic::codegen::CodegenSymptom};
-use crate::backend::codegen::addressof_string_global;
 
 impl<'c> Lower<'c> for Literal {
     fn lower(
@@ -16,12 +15,7 @@ impl<'c> Lower<'c> for Literal {
             Literal::Float(f) => {
                 block.append_op(ctx.mlir.const_op(ctx.mlir.f64_attr(*f), ctx.mlir.f64()))
             }
-            Literal::String(s) => {
-                // Register the string and get its symbol name
-                let symbol_name = ctx.register_string(s);
-                // Get the address of the global string
-                addressof_string_global(ctx.mlir, block, &symbol_name)?
-            }
+            Literal::String(s) => block.const_string_with_ctx(ctx, s),
             Literal::Ellipsis => block.const_i64(ctx.mlir, 0),
             Literal::Nothing => block.const_i64(ctx.mlir, 0),
         })

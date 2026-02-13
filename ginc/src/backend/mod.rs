@@ -11,10 +11,10 @@ pub mod prelude {
         dialect::llvm::r#type,
         ir::{
             Attribute, Block, BlockLike, BlockRef, Identifier, Location, Module, Operation, Region,
-            RegionLike, Type, Value,
+            RegionLike, Type, Value, ValueLike,
             attribute::{
-                FlatSymbolRefAttribute, FloatAttribute, IntegerAttribute, StringAttribute,
-                TypeAttribute,
+                DenseI64ArrayAttribute, FlatSymbolRefAttribute, FloatAttribute,
+                IntegerAttribute, StringAttribute, TypeAttribute,
             },
             operation::OperationBuilder,
             r#type::{id::*, *},
