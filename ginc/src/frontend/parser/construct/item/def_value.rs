@@ -32,7 +32,7 @@ where
 
     let lhs = select! { Token::Id(name) => DefName(name.to_string()) }
         .then(params.or_not())
-        .then(just(Token::Equals).ignore_then(tag(expr.clone())).or_not())
+        .then(tag(expr.clone()).or_not())
         .then_ignore(just(Token::Colon));
 
     let single = lhs

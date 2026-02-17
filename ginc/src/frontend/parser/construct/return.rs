@@ -1,5 +1,5 @@
 use crate::frontend::prelude::*;
-use chumsky::{input::ValueInput, prelude::*, span::SimpleSpan, Parser};
+use chumsky::{Parser, input::ValueInput, prelude::*, span::SimpleSpan};
 
 #[derive(Debug, Clone)]
 pub struct Return(pub Option<Box<Expr>>);
@@ -10,7 +10,14 @@ pub fn r#return<'t, 's: 't, I>(
 where
     I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
 {
-    just(Token::Return)
-        .ignore_then(expr.or_not())
-        .map(|e| Return(e.map(Box::new)))
+    // try bare return first so it doesn't consume trailing newlines
+    let bare = just(Token::Return)
+        .then_ignore(just(Token::Newline))
+        .to(Return(None));
+
+    let with_value = just(Token::Return)
+        .ignore_then(expr)
+        .map(|e| Return(Some(Box::new(e))));
+
+    choice((bare, with_value))
 }
