@@ -1,7 +1,7 @@
 //! Frontend is everything the user interacts with. This is what handles the source code.
 
 pub mod lexer;
-pub use lexer::{GinLexer, IndentToken, Token};
+pub use lexer::{GinLexer, Token};
 pub mod parser;
 
 pub mod prelude {

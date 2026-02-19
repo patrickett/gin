@@ -10,59 +10,80 @@ mod tokenize;
 
 use chumsky::span::SimpleSpan;
 use logos::{Lexer, Logos};
-use std::collections::VecDeque;
 
 pub use semantic_token_type::*;
 pub use token::*;
 pub use tokenize::*;
 
-/// Synthetic tokens for indentation handling
-#[derive(Debug, Clone, PartialEq)]
-pub enum IndentToken {
-    Indent,
-    Dedent,
-}
+pub const MAX_INDENT_DEPTH: usize = 16;
 
-/// Extras for the lexer: indentation stack and pending tokens
+/// Indent and Dedent are mutually exclusive branches per newline.
+/// We can exploit this by using `pending_indent` and `pending_dedents`
 #[derive(Debug)]
-pub struct Extras {
-    indent_stack: Vec<usize>,
-    pending: VecDeque<IndentToken>,
+pub struct LexContext {
+    indent_stack: [u16; MAX_INDENT_DEPTH],
+    indent_depth: u8,
+    /// Dedent tokens still to be emitted, decremented one per call.
+    pending_dedents: u8,
+    /// Whether a single Indent token is waiting to be emitted.
+    pending_indent: bool,
 }
 
-impl Default for Extras {
+impl Default for LexContext {
     fn default() -> Self {
         Self {
-            indent_stack: vec![0],
-            pending: VecDeque::new(),
+            indent_stack: [0u16; MAX_INDENT_DEPTH],
+            indent_depth: 1,
+            pending_dedents: 0,
+            pending_indent: false,
         }
     }
 }
 
-/// Callback for newlines: measure indentation and enqueue Indent/Dedent
+#[inline]
 fn handle_newline<'src>(lex: &mut Lexer<'src, Token<'src>>) -> Token<'src> {
-    let remainder = lex.remainder();
-    let mut count = 0;
-    for c in remainder.chars() {
-        match c {
-            ' ' => count += 1,
-            '\t' => count += 4, // tab width
+    // `bytes` and `indent` are tracked separately so that a tab (1 byte, 4 columns)
+    // does not cause `lex.bump` to skip real source characters.
+
+    let remainder = lex.remainder().as_bytes();
+    let mut indent = 0u16;
+    let mut bytes = 0usize;
+    for &b in remainder {
+        match b {
+            b' ' => {
+                indent += 1;
+                bytes += 1;
+            }
+            b'\t' => {
+                indent += 4;
+                bytes += 1;
+            }
             _ => break,
         }
     }
-    lex.bump(count);
+    lex.bump(bytes);
 
     let extras = &mut lex.extras;
-    let current = *extras.indent_stack.last().unwrap_or(&0);
+    let depth = extras.indent_depth as usize;
+    let current = extras.indent_stack[depth - 1];
 
-    if count > current {
-        extras.indent_stack.push(count);
-        extras.pending.push_back(IndentToken::Indent);
-    } else if count < current {
-        while extras.indent_stack.last().copied().unwrap_or(0) > count {
-            extras.indent_stack.pop();
-            extras.pending.push_back(IndentToken::Dedent);
+    if indent > current {
+        if depth < MAX_INDENT_DEPTH {
+            extras.indent_stack[depth] = indent;
+            extras.indent_depth += 1;
+            extras.pending_indent = true;
         }
+        // Silently cap at MAX_INDENT_DEPTH; parser continues at the deepest
+        // valid level. Callers that need to detect overflow can inspect the
+        // token stream for unexpected structure.
+    } else if indent < current {
+        // Walk the stack with a local, write indent_depth once at the end.
+        let mut d = depth;
+        while extras.indent_stack[d - 1] > indent {
+            d -= 1;
+        }
+        extras.pending_dedents = (depth - d) as u8;
+        extras.indent_depth = d as u8;
     }
 
     Token::Newline
@@ -73,51 +94,49 @@ pub struct GinLexer<'src> {
 }
 
 impl<'src> GinLexer<'src> {
-    pub fn new_owned(src: String) -> Self {
-        // We need to extend the lifetime of src to 'src
-        let boxed: Box<str> = src.into_boxed_str();
-        let leaked = Box::leak(boxed);
-        Self {
-            inner: Token::lexer_with_extras(leaked, Extras::default()),
-        }
-    }
-
     pub fn new(src: &'src str) -> Self {
         Self {
-            inner: Token::lexer_with_extras(src, Extras::default()),
+            inner: Token::lexer_with_extras(src, LexContext::default()),
         }
     }
 
+    #[inline(always)]
     fn next_with_indent(&mut self) -> Option<(Token<'src>, SimpleSpan)> {
-        // Check if there are pending indent/dedent tokens
-        if let Some(tok) = self.inner.extras.pending.pop_front() {
-            let span = self.inner.span(); // reuse last span or synthesize
-            let simple_span: SimpleSpan = span.into();
-
-            return Some((
-                match tok {
-                    IndentToken::Indent => Token::Indent,
-                    IndentToken::Dedent => Token::Dedent,
-                },
-                simple_span,
-            ));
+        // Pending synthetic tokens are rare; the CPU branch predictor handles these
+        // well after the first few tokens of any real file.
+        if self.inner.extras.pending_dedents > 0 {
+            self.inner.extras.pending_dedents -= 1;
+            let span: SimpleSpan = self.inner.span().into();
+            return Some((Token::Dedent, span));
+        }
+        if self.inner.extras.pending_indent {
+            self.inner.extras.pending_indent = false;
+            let span: SimpleSpan = self.inner.span().into();
+            return Some((Token::Indent, span));
         }
 
-        // Otherwise, read next Logos token and track its span
-        let start = self.inner.span().end; // where we left off
-        let next = self.inner.next()?;
-        let end = self.inner.span().end;
-        let span = start..end;
+        // Hot path: read real tokens. Invalid bytes are skipped without
+        // recursion and without eprintln (parser handles error reporting).
+        loop {
+            let start = self.inner.span().end;
+            let next = self.inner.next()?;
+            let end = self.inner.span().end;
+            let span: SimpleSpan = (start..end).into();
 
-        let simple_span: SimpleSpan = span.into();
-
-        match next {
-            Ok(tok) => Some((tok, simple_span)),
-            Err(()) => {
-                let ch = self.inner.remainder().chars().next();
-                eprintln!("Unexpected character: {ch:?}");
-                self.inner.bump(ch.map(|c| c.len_utf8()).unwrap_or(1));
-                self.next_with_indent()
+            match next {
+                Ok(tok) => return Some((tok, span)),
+                Err(()) => {
+                    // Skip one Unicode scalar value. `leading_ones()` on a
+                    // UTF-8 leading byte gives the byte-width of the sequence.
+                    // If the remainder is empty after a failed match, treat it
+                    // as EOF rather than attempting a zero-length bump.
+                    let skip = match self.inner.remainder().as_bytes().first() {
+                        None => break None,
+                        Some(&b) if b.is_ascii() => 1,
+                        Some(&b) => b.leading_ones() as usize,
+                    };
+                    self.inner.bump(skip);
+                }
             }
         }
     }
@@ -127,25 +146,27 @@ impl<'src> Iterator for GinLexer<'src> {
     type Item = (Token<'src>, SimpleSpan);
 
     fn next(&mut self) -> Option<Self::Item> {
-        let item = self.next_with_indent();
-
-        if item.is_none() {
-            // flush pending dedents at EOF
-            let dedent_count = self.inner.extras.indent_stack.len().saturating_sub(1);
-            if dedent_count > 0 {
-                for _ in 0..dedent_count {
-                    self.inner.extras.indent_stack.pop();
-                    self.inner.extras.pending.push_back(IndentToken::Dedent);
-                }
-                return self.next_with_indent();
-            }
+        if let Some(item) = self.next_with_indent() {
+            return Some(item);
         }
 
-        if let Some(item) = item {
-            let simple_span: SimpleSpan = item.1;
-            Some((item.0, simple_span))
+        // EOF: flush remaining open indent levels as Dedents.
+        let dedent_count = self.inner.extras.indent_depth as usize - 1;
+        if dedent_count > 0 {
+            self.inner.extras.indent_depth = 1;
+            self.inner.extras.pending_dedents = dedent_count as u8;
+            self.next_with_indent()
         } else {
             None
         }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        // Estimate ~4 bytes per token so that `collect()` pre-allocates once.
+        let pending = self.inner.extras.pending_dedents as usize
+            + usize::from(self.inner.extras.pending_indent);
+        let from_source = self.inner.remainder().len() / 4;
+        let estimate = from_source + pending;
+        (estimate, Some(estimate + estimate / 2))
     }
 }

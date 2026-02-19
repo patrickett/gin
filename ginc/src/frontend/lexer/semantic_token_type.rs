@@ -13,41 +13,28 @@ impl<'src> HasSemanticTokenType for Token<'src> {
         use Token::*;
 
         match self {
-            Id(_) => SemanticTokenType::FUNCTION,
             Tag(_) => SemanticTokenType::TYPE,
             Comment(_) | DocComment(_) => SemanticTokenType::COMMENT,
             Continue | Derives | Private | Public | Define | Return | Break | Alias | Macro
-            | Needs | Then | When | Does | From | For | Use | Has | And | Def | Where | As | Do
-            | If | In | Is | Of | Or => SemanticTokenType::KEYWORD,
+            | Needs | Then | When | Does | From | For | Loop | Use | Has | And | Def | Where
+            | As | Do | If | In | Is | Of | Or | Else => SemanticTokenType::KEYWORD,
+            Int(_) | Float(_) => SemanticTokenType::NUMBER,
+            String(_) | FormatString(_) => SemanticTokenType::STRING,
             _ => SemanticTokenType::OPERATOR,
-            // TODO: Implement semantic token type indexing for all remaining token types
-            // PERF: Complete this to enable full LSP semantic highlighting support
         }
     }
-
-    // pub const LEGEND_TYPE: &[SemanticTokenType] = &[
-    //     SemanticTokenType::FUNCTION,
-    //     SemanticTokenType::STRUCT,
-    //     SemanticTokenType::COMMENT,
-    //     SemanticTokenType::KEYWORD,
-    //     SemanticTokenType::OPERATOR,
-    //     SemanticTokenType::VARIABLE,
-    //     SemanticTokenType::STRING,
-    //     SemanticTokenType::NUMBER,
-    //     SemanticTokenType::PARAMETER,
-    // ];
 
     fn semantic_token_type_index(&self) -> Option<usize> {
         use Token::*;
 
         match self {
-            Id(_) => Some(0),
             Tag(_) => Some(1),
             Comment(_) | DocComment(_) => Some(2),
             Continue | Derives | Private | Public | Define | Return | Break | Alias | Macro
-            | Needs | Then | When | Else | Does | From | For | Use | Has | And | Def | Where
-            | As | Do | If | In | Is | Of | Or => Some(3),
-            Int(_) | Float(_) => Some(11),
+            | Needs | Then | When | Else | Does | From | For | Loop | Use | Has | And | Def
+            | Where | As | Do | If | In | Is | Of | Or => Some(3),
+            Int(_) | Float(_) | DotDot => Some(7),
+            String(_) | FormatString(_) => Some(6),
             _ => None,
         }
     }
