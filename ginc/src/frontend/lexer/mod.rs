@@ -11,10 +11,8 @@ use chumsky::span::SimpleSpan;
 use logos::{Lexer, Logos};
 
 pub use semantic_token_type::*;
-pub use token::{handle_newline, InternedToken, LexContext, Token, MAX_INDENT_DEPTH};
+pub use token::{LexContext, MAX_INDENT_DEPTH, Token, handle_newline};
 
-/// Zero-allocation lexer that yields [`Token`]s with `&str` slices into source.
-/// Comments are filtered during iteration.
 pub struct GinLexer<'src> {
     pub inner: Lexer<'src, Token<'src>>,
 }
@@ -28,8 +26,6 @@ impl<'src> GinLexer<'src> {
 
     #[inline(always)]
     fn next_with_indent(&mut self) -> Option<(Token<'src>, SimpleSpan)> {
-        // Pending synthetic tokens are rare; the CPU branch predictor handles these
-        // well after the first few tokens of any real file.
         if self.inner.extras.pending_dedents > 0 {
             self.inner.extras.pending_dedents -= 1;
             let span: SimpleSpan = self.inner.span().into();
@@ -41,8 +37,6 @@ impl<'src> GinLexer<'src> {
             return Some((Token::Indent, span));
         }
 
-        // Hot path: read real tokens. Invalid bytes are skipped without
-        // recursion and without eprintln (parser handles error reporting).
         loop {
             let start = self.inner.span().end;
             let next = self.inner.next()?;

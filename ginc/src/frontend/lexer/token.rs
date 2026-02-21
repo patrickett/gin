@@ -1,4 +1,3 @@
-use crate::intern::IStr;
 use logos::{Lexer, Logos};
 
 /// Maximum indentation depth supported by the lexer.
@@ -81,20 +80,10 @@ pub fn handle_newline<'src>(lex: &mut Lexer<'src, Token<'src>>) -> Token<'src> {
 #[derive(Logos, Debug, PartialEq, Clone, Copy)]
 #[logos(extras = LexContext)]
 pub enum Token<'src> {
-    #[token("optional")]
-    Optional,
-    #[token("required")]
-    Required,
     #[token("continue")]
     Continue,
-    #[token("derives")]
-    Derives,
     #[token("private")]
     Private,
-    #[token("public")]
-    Public,
-    #[token("define")]
-    Define,
     #[token("return")]
     Return,
     #[token("break")]
@@ -131,14 +120,10 @@ pub enum Token<'src> {
     Has,
     #[token("and")]
     And,
-    #[token("def")]
-    Def,
     #[token("where")]
     Where,
     #[token("as")]
     As,
-    #[token("do")]
-    Do,
     #[token("if")]
     If,
     #[token("in")]
@@ -252,36 +237,4 @@ pub enum Token<'src> {
 
     #[regex(r"[ \t]+", logos::skip)]
     Whitespace,
-}
-
-impl<'src> Token<'src> {
-    pub fn to_interned(&self) -> InternedToken {
-        match self {
-            Token::Tag(s) => InternedToken::Tag(IStr::new(s.to_string())),
-            Token::Id(s) => InternedToken::Id(IStr::new(s.to_string())),
-            Token::String(s) => InternedToken::String(IStr::new(s.to_string())),
-            Token::UnterminatedString(s) => {
-                InternedToken::UnterminatedString(IStr::new(s.to_string()))
-            }
-            Token::FormatString(s) => InternedToken::FormatString(IStr::new(s.to_string())),
-            Token::UnterminatedFormatString(s) => {
-                InternedToken::UnterminatedFormatString(IStr::new(s.to_string()))
-            }
-            Token::DocComment(s) => InternedToken::DocComment(IStr::new(s.to_string())),
-            Token::Comment(s) => InternedToken::Comment(IStr::new(s.to_string())),
-            _ => panic!("to_interned only called for string-bearing variants"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum InternedToken {
-    Tag(IStr),
-    Id(IStr),
-    String(IStr),
-    UnterminatedString(IStr),
-    FormatString(IStr),
-    UnterminatedFormatString(IStr),
-    DocComment(IStr),
-    Comment(IStr),
 }

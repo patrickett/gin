@@ -4,7 +4,6 @@ use chumsky::error::Rich;
 use chumsky::span::SimpleSpan;
 use chumsky::{Parser, input::Stream};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use salsa::Accumulator;
 
@@ -12,7 +11,7 @@ use crate::database::{File, input_database::Db};
 use crate::diagnostic::io as io_symptom;
 use crate::diagnostic::lex as lex_symptom;
 use crate::diagnostic::parse as parse_symptom;
-use crate::frontend::lexer::{Token, tokenize};
+use crate::frontend::lexer::{GinLexer, Token};
 use crate::frontend::parser::construct::{FileAst, ImportSource, ModPath as ImportPath};
 use crate::frontend::parser::token_parser;
 
@@ -37,47 +36,20 @@ pub fn parse<'db>(db: &'db dyn Db, file: File) -> FileAst {
 }
 
 /// Result of parsing a file (not tracked).
-struct ParseResult<'db> {
+struct ParseResult {
     ast: FileAst,
-    errors: Vec<Rich<'db, Token<'db>>>,
-    real_spans: Arc<Vec<SimpleSpan>>,
+    /// Pre-formatted error messages with their real byte spans.
+    parse_errors: Vec<(String, SimpleSpan)>,
     unterminated_strings: Vec<SimpleSpan>,
 }
 
 /// Accumulate all diagnostics from a parse result into the Salsa accumulator.
-fn accumulate_diagnostics(db: &dyn Db, parsed: &ParseResult<'_>) {
-    use chumsky::error::RichReason;
-
-    // Unterminated string diagnostics (real byte spans from tokenization)
+fn accumulate_diagnostics(db: &dyn Db, parsed: &ParseResult) {
     for span in &parsed.unterminated_strings {
         lex_symptom::unclosed_string(*span).accumulate(db);
     }
-
-    // Chumsky parse errors (synthetic spans mapped to real byte offsets)
-    for err in &parsed.errors {
-        let real_span = resolve_span(err.span(), &parsed.real_spans);
-
-        let msg = match err.reason() {
-            RichReason::ExpectedFound { expected, found } => {
-                let expected_str = if expected.is_empty() {
-                    "something else".to_string()
-                } else {
-                    expected
-                        .iter()
-                        .map(|e| format!("{e:?}"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                };
-                match found {
-                    Some(tok) => format!("expected {expected_str}, found {tok:?}"),
-                    None => format!("expected {expected_str}, found end of input"),
-                }
-            }
-            RichReason::Custom(msg) => msg.clone(),
-        };
-
-        let symptom = parse_symptom::custom(msg, real_span);
-        symptom.accumulate(db);
+    for (msg, span) in &parsed.parse_errors {
+        parse_symptom::custom(msg.clone(), *span).accumulate(db);
     }
 }
 
@@ -95,9 +67,40 @@ fn resolve_span(synth: &SimpleSpan, real_spans: &[SimpleSpan]) -> SimpleSpan {
     SimpleSpan::from(start..end)
 }
 
+/// Format a chumsky Rich error into an owned string.
+fn format_rich_error(err: &Rich<'_, Token<'_>>) -> String {
+    use chumsky::error::RichReason;
+    match err.reason() {
+        RichReason::ExpectedFound { expected, found } => {
+            let expected_str = if expected.is_empty() {
+                "something else".to_string()
+            } else {
+                expected
+                    .iter()
+                    .map(|e| format!("{e:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            match found {
+                Some(tok) => format!("expected {expected_str}, found {tok:?}"),
+                None => format!("expected {expected_str}, found end of input"),
+            }
+        }
+        RichReason::Custom(msg) => msg.clone(),
+    }
+}
+
 /// Internal function to parse the AST (not tracked).
-fn parse_ast_internal<'db>(db: &'db dyn Db, file: File) -> ParseResult<'db> {
-    let tokens = tokenize(db, file);
+fn parse_ast_internal(db: &dyn Db, file: File) -> ParseResult {
+    #[cfg(debug_assertions)]
+    let parse_start = std::time::Instant::now();
+    #[cfg(debug_assertions)]
+    eprintln!("[ginc:parse] start: {:?}", file.path(db));
+
+    let src = file.contents(db);
+
+    let lexer = GinLexer::new(src);
+    let tokens: Vec<_> = lexer.collect();
 
     // Collect unterminated string spans — highlight the full token
     let unterminated_strings: Vec<_> = tokens
@@ -108,7 +111,6 @@ fn parse_ast_internal<'db>(db: &'db dyn Db, file: File) -> ParseResult<'db> {
 
     // Store the real spans from logos before we lose them
     let real_spans: Vec<_> = tokens.iter().map(|(_, s)| *s).collect();
-    let real_spans = Arc::new(real_spans);
 
     // Convert to chumsky stream - extract just the token
     // Chumsky will create synthetic spans based on token index (0, 1, 2, ...)
@@ -120,10 +122,29 @@ fn parse_ast_internal<'db>(db: &'db dyn Db, file: File) -> ParseResult<'db> {
     let (maybe_ast, errors) = result.into_output_errors();
 
     let ast = maybe_ast.unwrap_or_default();
+
+    let parse_errors: Vec<(String, SimpleSpan)> = errors
+        .iter()
+        .map(|err| {
+            let real_span = resolve_span(err.span(), &real_spans);
+            let msg = format_rich_error(err);
+            (msg, real_span)
+        })
+        .collect();
+
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "[ginc:parse] done: {:?} ({:.2?}, {} defs, {} tags, {} errors)",
+        file.path(db),
+        parse_start.elapsed(),
+        ast.defs.len(),
+        ast.tags.len(),
+        parse_errors.len(),
+    );
+
     ParseResult {
         ast,
-        errors,
-        real_spans,
+        parse_errors,
         unterminated_strings,
     }
 }
@@ -143,16 +164,37 @@ fn extract_import_files(db: &dyn Db, ast: &FileAst, current_file: File) -> Vec<F
 
     for import in &ast.uses {
         for module_import in &import.0 {
-            // Convert import path to filesystem path
-            let import_path = resolve_import_path(current_dir, &module_import.path);
-
-            match db.input(import_path) {
-                Ok(imported_file) => {
-                    files.push(imported_file);
+            match &module_import.source {
+                ImportSource::Package(path) => {
+                    let import_path = resolve_import_path(current_dir, path);
+                    match db.input(import_path) {
+                        Ok(imported_file) => files.push(imported_file),
+                        Err(_) => {
+                            io_symptom::resolution_failed(SimpleSpan::from(0..0)).accumulate(db);
+                        }
+                    }
                 }
-                Err(_) => {
-                    let symptom = io_symptom::resolution_failed(SimpleSpan::from(0..0));
-                    symptom.accumulate(db);
+                ImportSource::Local(path) => {
+                    let folder = current_dir.join(path);
+                    match std::fs::read_dir(&folder) {
+                        Ok(entries) => {
+                            for entry in entries.flatten() {
+                                let p = entry.path();
+                                if p.extension().is_some_and(|e| e == "gin") {
+                                    match db.input(p) {
+                                        Ok(f) => files.push(f),
+                                        Err(_) => {
+                                            io_symptom::resolution_failed(SimpleSpan::from(0..0))
+                                                .accumulate(db);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            io_symptom::resolution_failed(SimpleSpan::from(0..0)).accumulate(db);
+                        }
+                    }
                 }
             }
         }

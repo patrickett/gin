@@ -21,7 +21,6 @@ pub enum Expr {
     Binary(Binary),
     FnCall(FnCall),
     Lit(Literal),
-
     Bind(Bind),
     Nothing,
 }
