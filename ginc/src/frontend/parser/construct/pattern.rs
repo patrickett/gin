@@ -1,18 +1,18 @@
 use crate::frontend::prelude::*;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Pattern {
-    Ident(String),
+    Ident(IStr),
     Tuple(Vec<Pattern>),
     // etc.
 }
 
-pub fn pattern<'tokens, 'src: 'tokens, I>(
-) -> impl Parser<'tokens, I, Pattern, ParserError<'tokens, 'src>> + Clone
+pub fn pattern<'t, I>(
+) -> impl Parser<'t, I, Pattern, ParserError<'t>> + Clone
 where
-    I: ValueInput<'tokens, Token = Token<'src>, Span = SimpleSpan>,
+    I: ValueInput<'t, Token = Token, Span = SimpleSpan>,
 {
-    let id = select! {Token::Id(s) => s.to_string()}.map(Pattern::Ident);
+    let id = select! { Token::Id(s) => s }.map(Pattern::Ident);
     let tuple = id
         .repeated()
         .collect::<Vec<_>>()

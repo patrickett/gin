@@ -1,6 +1,6 @@
 use crate::frontend::prelude::*;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ForInLoop {
     pub pat: Pattern,
     // TODO: check and make sure it accepts expression that can be iterated
@@ -8,12 +8,12 @@ pub struct ForInLoop {
     pub exprs: Vec<Expr>,
 }
 
-pub fn for_in_loop<'tokens, 'src: 'tokens, I>(
-    header_expr: impl Parser<'tokens, I, Expr, ParserError<'tokens, 'src>> + Clone + 'tokens,
-    body_expr: impl Parser<'tokens, I, Expr, ParserError<'tokens, 'src>> + Clone + 'tokens,
-) -> impl Parser<'tokens, I, ForInLoop, ParserError<'tokens, 'src>>
+pub fn for_in_loop<'tokens, I>(
+    header_expr: impl Parser<'tokens, I, Expr, ParserError<'tokens>> + Clone + 'tokens,
+    body_expr: impl Parser<'tokens, I, Expr, ParserError<'tokens>> + Clone + 'tokens,
+) -> impl Parser<'tokens, I, ForInLoop, ParserError<'tokens>>
 where
-    I: ValueInput<'tokens, Token = Token<'src>, Span = SimpleSpan>,
+    I: ValueInput<'tokens, Token = Token, Span = SimpleSpan>,
 {
     use Token::*;
 

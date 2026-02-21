@@ -13,7 +13,7 @@ impl<'c> Lower<'c> for Bind {
             Bind::Def(name, params) => {
                 // For function definitions, we generate a func.func operation
                 // This is typically handled at the module level, not within expressions
-                let func_op = lower_function(ctx, name, params)?;
+                let func_op = lower_function(ctx, name, params, None)?;
                 block.append_operation(func_op);
 
                 // Return a placeholder value (TODO: consider returning function reference)

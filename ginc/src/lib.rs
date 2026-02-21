@@ -3,11 +3,8 @@ pub mod backend;
 pub mod database;
 pub mod diagnostic;
 pub mod frontend;
-use crate::{
-    backend::compile::compile,
-    database::input_database::{Db, InputDatabase},
-    diagnostic::Symptom,
-};
+pub mod intern;
+
 pub use args::*;
 use crossbeam_channel::unbounded;
 

@@ -27,7 +27,7 @@ pub enum SymbolKind {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Symbol {
     /// The symbol name (e.g., "http.web.handle" or "foo")
-    pub name: String,
+    pub name: IStr,
 
     /// Which file defined this symbol
     pub source_file: PathBuf,
@@ -38,7 +38,7 @@ pub struct Symbol {
 
 impl Symbol {
     /// Create a new symbol.
-    pub fn new(name: String, source_file: PathBuf, kind: SymbolKind) -> Self {
+    pub fn new(name: IStr, source_file: PathBuf, kind: SymbolKind) -> Self {
         Self {
             name,
             source_file,
@@ -49,7 +49,7 @@ impl Symbol {
     /// Create a tag symbol.
     pub fn tag(name: TagName, source_file: PathBuf) -> Self {
         Self {
-            name: name.0.clone(),
+            name: name.0,
             source_file,
             kind: SymbolKind::Tag(name),
         }
@@ -58,7 +58,7 @@ impl Symbol {
     /// Create a function symbol.
     pub fn function(name: DefName, source_file: PathBuf) -> Self {
         Self {
-            name: name.as_str().to_string(),
+            name: name.0,
             source_file,
             kind: SymbolKind::Function(name),
         }
@@ -67,7 +67,7 @@ impl Symbol {
     /// Create a bind symbol.
     pub fn bind(name: DefName, source_file: PathBuf) -> Self {
         Self {
-            name: name.as_str().to_string(),
+            name: name.0,
             source_file,
             kind: SymbolKind::Bind(name),
         }
@@ -100,7 +100,7 @@ impl Symbol {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SymbolTable {
     /// Map of symbol name to symbol information
-    pub symbols: HashMap<String, Symbol>,
+    pub symbols: HashMap<IStr, Symbol>,
 }
 
 impl SymbolTable {
@@ -113,43 +113,43 @@ impl SymbolTable {
 
     /// Insert a symbol into the table.
     pub fn insert(&mut self, symbol: Symbol) {
-        self.symbols.insert(symbol.name.clone(), symbol);
+        self.symbols.insert(symbol.name, symbol);
     }
 
     /// Look up a symbol by name.
-    pub fn get(&self, name: &str) -> Option<&Symbol> {
+    pub fn get(&self, name: &IStr) -> Option<&Symbol> {
         self.symbols.get(name)
     }
 
     /// Check if a symbol exists.
-    pub fn contains(&self, name: &str) -> bool {
+    pub fn contains(&self, name: &IStr) -> bool {
         self.symbols.contains_key(name)
     }
 
     /// Get all function names.
-    pub fn function_names(&self) -> Vec<String> {
+    pub fn function_names(&self) -> Vec<IStr> {
         self.symbols
             .values()
             .filter(|s| s.is_function())
-            .map(|s| s.name.clone())
+            .map(|s| s.name)
             .collect()
     }
 
     /// Get all bind names.
-    pub fn bind_names(&self) -> Vec<String> {
+    pub fn bind_names(&self) -> Vec<IStr> {
         self.symbols
             .values()
             .filter(|s| s.is_bind())
-            .map(|s| s.name.clone())
+            .map(|s| s.name)
             .collect()
     }
 
     /// Get all tag names.
-    pub fn tag_names(&self) -> Vec<String> {
+    pub fn tag_names(&self) -> Vec<IStr> {
         self.symbols
             .values()
             .filter(|s| s.is_tag())
-            .map(|s| s.name.clone())
+            .map(|s| s.name)
             .collect()
     }
 
@@ -229,8 +229,7 @@ pub struct FileAst {
 
 impl PartialEq for FileAst {
     fn eq(&self, other: &Self) -> bool {
-        // Use content hash for comparison
-        self.compute_content_hash() == other.compute_content_hash()
+        self.uses == other.uses && self.tags == other.tags && self.defs == other.defs
     }
 }
 
@@ -238,41 +237,28 @@ impl Eq for FileAst {}
 
 impl Hash for FileAst {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        // Use content hash for hashing
-        self.compute_content_hash().hash(state);
+        self.uses.hash(state);
+        let mut tag_keys: Vec<_> = self.tags.keys().collect();
+        tag_keys.sort();
+        for k in tag_keys {
+            k.hash(state);
+            self.tags[k].hash(state);
+        }
+        let mut def_keys: Vec<_> = self.defs.keys().collect();
+        def_keys.sort();
+        for k in def_keys {
+            k.hash(state);
+            self.defs[k].hash(state);
+        }
     }
 }
 
 impl FileAst {
-    /// Compute a content-based hash for efficient change detection.
-    /// This is deterministic and more efficient than Debug formatting.
+    /// Compute a content-based hash for change detection within a compilation session.
     pub fn compute_content_hash(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-
-        // Hash imports in order (order matters for imports)
-        for import in &self.uses {
-            import.hash(&mut hasher);
-        }
-
-        // Hash tags (sorted by name for determinism)
-        let mut tag_names: Vec<_> = self.tags.keys().collect();
-        tag_names.sort();
-        for name in tag_names {
-            name.hash(&mut hasher);
-            // Hash the documented item - use Debug for nested structs
-            format!("{:?}", self.tags[name]).hash(&mut hasher);
-        }
-
-        // Hash defs (sorted by name for determinism)
-        let mut def_names: Vec<_> = self.defs.keys().collect();
-        def_names.sort();
-        for name in def_names {
-            name.hash(&mut hasher);
-            // Hash the documented item - use Debug for nested structs
-            format!("{:?}", self.defs[name]).hash(&mut hasher);
-        }
-
+        self.hash(&mut hasher);
         hasher.finish()
     }
 }

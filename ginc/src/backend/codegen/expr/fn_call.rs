@@ -10,12 +10,13 @@ impl<'c> Lower<'c> for FnCall {
         symtab: &mut RuntimeSymbolTable<'c>,
     ) -> Result<Value<'c, 'c>, CodegenSymptom> {
         let func_name = if self.path.segments.is_empty() {
-            self.path.root.clone()
+            self.path.root
         } else {
-            format!("{}.{}", self.path.root, self.path.segments.join("."))
+            let segs: Vec<&str> = self.path.segments.iter().map(|s| s.as_str()).collect();
+            IStr::new(format!("{}.{}", self.path.root, segs.join(".")))
         };
 
-        if func_name == "print" {
+        if func_name.as_str() == "print" {
             return self.lower_print_call(ctx, block, symtab);
         }
 

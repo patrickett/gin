@@ -6,14 +6,13 @@
 
 mod semantic_token_type;
 mod token;
-mod tokenize;
+pub mod tokenize;
 
 use chumsky::span::SimpleSpan;
 use logos::{Lexer, Logos};
 
 pub use semantic_token_type::*;
 pub use token::*;
-pub use tokenize::*;
 
 pub const MAX_INDENT_DEPTH: usize = 16;
 
@@ -41,7 +40,7 @@ impl Default for LexContext {
 }
 
 #[inline]
-fn handle_newline<'src>(lex: &mut Lexer<'src, Token<'src>>) -> Token<'src> {
+fn handle_newline<'src>(lex: &mut Lexer<'src, Token>) -> Token {
     // `bytes` and `indent` are tracked separately so that a tab (1 byte, 4 columns)
     // does not cause `lex.bump` to skip real source characters.
 
@@ -90,7 +89,7 @@ fn handle_newline<'src>(lex: &mut Lexer<'src, Token<'src>>) -> Token<'src> {
 }
 
 pub struct GinLexer<'src> {
-    pub inner: Lexer<'src, Token<'src>>,
+    pub inner: Lexer<'src, Token>,
 }
 
 impl<'src> GinLexer<'src> {
@@ -101,7 +100,7 @@ impl<'src> GinLexer<'src> {
     }
 
     #[inline(always)]
-    fn next_with_indent(&mut self) -> Option<(Token<'src>, SimpleSpan)> {
+    fn next_with_indent(&mut self) -> Option<(Token, SimpleSpan)> {
         // Pending synthetic tokens are rare; the CPU branch predictor handles these
         // well after the first few tokens of any real file.
         if self.inner.extras.pending_dedents > 0 {
@@ -143,7 +142,7 @@ impl<'src> GinLexer<'src> {
 }
 
 impl<'src> Iterator for GinLexer<'src> {
-    type Item = (Token<'src>, SimpleSpan);
+    type Item = (Token, SimpleSpan);
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(item) = self.next_with_indent() {

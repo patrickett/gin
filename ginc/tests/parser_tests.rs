@@ -15,7 +15,7 @@ fn test_parse_simple_function() {
 
 #[test]
 fn test_parse_tag_definition() {
-    let ast = parse_str("Result is Ok | Err");
+    let ast = parse_str("Result is Ok \\ Err");
 
     assert!(ast.uses.is_empty());
     assert_eq!(ast.tags.len(), 1);
@@ -29,6 +29,44 @@ fn test_parse_import() {
     assert_eq!(ast.uses.len(), 1);
     assert_eq!(ast.defs.len(), 0);
     assert_eq!(ast.tags.len(), 0);
+
+    let module = &ast.uses[0].0[0];
+    assert!(matches!(
+        &module.source,
+        ginc::frontend::parser::construct::ImportSource::Package(_)
+    ));
+    assert_eq!(module.alias.as_deref().map(String::as_str), Some("h"));
+}
+
+#[test]
+fn test_parse_local_import() {
+    let ast = parse_str("use './math' as math\n");
+
+    assert_eq!(ast.uses.len(), 1);
+    assert_eq!(ast.defs.len(), 0);
+    assert_eq!(ast.tags.len(), 0);
+
+    let module = &ast.uses[0].0[0];
+    assert!(matches!(
+        &module.source,
+        ginc::frontend::parser::construct::ImportSource::Local(_)
+    ));
+    assert_eq!(module.alias.as_deref().map(String::as_str), Some("math"));
+    assert_eq!(module.effective_name(), "math");
+}
+
+#[test]
+fn test_parse_local_import_no_alias() {
+    let ast = parse_str("use './util'\n");
+
+    assert_eq!(ast.uses.len(), 1);
+    let module = &ast.uses[0].0[0];
+    assert!(matches!(
+        &module.source,
+        ginc::frontend::parser::construct::ImportSource::Local(_)
+    ));
+    assert!(module.alias.is_none());
+    assert_eq!(module.effective_name(), "util");
 }
 
 // TODO: FIXME: test broken, need to error when return statement indented
@@ -79,7 +117,7 @@ fn test_parse_function_call() {
 
 #[test]
 fn test_parse_return_type() {
-    let ast = parse_str("add(x Number, y Number) = Number: x + y");
+    let ast = parse_str("add(x Number, y Number) Number: x + y");
 
     assert!(ast.uses.is_empty());
     assert_eq!(ast.defs.len(), 1);
@@ -88,7 +126,7 @@ fn test_parse_return_type() {
 
 #[test]
 fn test_parse_typed_variable() {
-    let ast = parse_str("five_hundred = Number: 500");
+    let ast = parse_str("five_hundred Number: 500");
 
     assert!(ast.uses.is_empty());
     assert_eq!(ast.defs.len(), 1);

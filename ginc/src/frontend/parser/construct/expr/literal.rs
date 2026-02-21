@@ -13,7 +13,7 @@ pub enum Literal {
 pub fn literal<'tokens, 'src: 'tokens, I>()
 -> impl Parser<'tokens, I, Literal, ParserError<'tokens, 'src>>
 where
-    I: ValueInput<'tokens, Token = Token<'src>, Span = SimpleSpan>,
+    I: ValueInput<'t, Token = Token, Span = SimpleSpan>,
 {
     use Token::*;
     let valid = select! {

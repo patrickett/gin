@@ -1,13 +1,13 @@
 use crate::frontend::prelude::*;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CondBranchEnding {
     Return(Expr),
     Yield(Expr),
     NoEnding,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ControlFlow {
     /// An if expression allows you to branch your code depending on conditions.
     /// You provide a condition and then state, “If this condition is met, run this block of code.

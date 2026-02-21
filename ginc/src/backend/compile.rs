@@ -42,6 +42,7 @@ pub fn compile<'db>(db: &'db dyn Db, file: File) -> CompiledModule<'db> {
 pub fn compile_entry<'db>(db: &'db dyn Db, entry: File) -> CompiledModule<'db> {
     let imported_files = resolve_imports(db, entry);
 
+    // TODO: parallel/async compile instead of sequential
     for imported_file in imported_files {
         compile(db, imported_file);
     }

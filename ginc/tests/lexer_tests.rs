@@ -207,7 +207,7 @@ fn test_string_literal() {
     assert!(matches!(tokens[0], Token::String(_)));
     assert_eq!(
         if let Token::String(s) = &tokens[0] {
-            *s
+            s.as_str()
         } else {
             ""
         },
@@ -217,7 +217,7 @@ fn test_string_literal() {
     assert!(matches!(tokens[1], Token::String(_)));
     assert_eq!(
         if let Token::String(s) = &tokens[1] {
-            *s
+            s.as_str()
         } else {
             ""
         },
@@ -227,7 +227,7 @@ fn test_string_literal() {
     assert!(matches!(tokens[2], Token::String(_)));
     assert_eq!(
         if let Token::String(s) = &tokens[2] {
-            *s
+            s.as_str()
         } else {
             ""
         },
@@ -248,7 +248,7 @@ fn test_unterminated_string_with_content() {
     assert!(matches!(tokens[2], Token::UnterminatedString(_)));
     assert_eq!(
         if let Token::UnterminatedString(s) = &tokens[2] {
-            *s
+            s.as_str()
         } else {
             ""
         },
@@ -260,11 +260,129 @@ fn test_unterminated_string_with_content() {
     assert!(matches!(tokens[6], Token::UnterminatedString(_)));
     assert_eq!(
         if let Token::UnterminatedString(s) = &tokens[6] {
-            *s
+            s.as_str()
         } else {
             ""
         },
         "baz"
+    );
+}
+
+#[test]
+fn test_unicode_string_literals() {
+    // Multi-byte UTF-8 characters inside single-quoted strings
+    let src = "'héllo' 'こんにちは'";
+
+    let mut lexer = GinLexer::new(src);
+    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+
+    assert!(matches!(tokens[0], Token::String(_)));
+    assert_eq!(
+        if let Token::String(s) = &tokens[0] { s.as_str() } else { "" },
+        "héllo"
+    );
+
+    assert!(matches!(tokens[1], Token::String(_)));
+    assert_eq!(
+        if let Token::String(s) = &tokens[1] { s.as_str() } else { "" },
+        "こんにちは"
+    );
+}
+
+#[test]
+fn test_unicode_format_strings() {
+    // Multi-byte UTF-8 characters inside double-quoted format strings
+    let src = r#""héllo" "こんにちは""#;
+
+    let mut lexer = GinLexer::new(src);
+    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+
+    assert!(matches!(tokens[0], Token::FormatString(_)));
+    assert_eq!(
+        if let Token::FormatString(s) = &tokens[0] { s.as_str() } else { "" },
+        "héllo"
+    );
+
+    assert!(matches!(tokens[1], Token::FormatString(_)));
+    assert_eq!(
+        if let Token::FormatString(s) = &tokens[1] { s.as_str() } else { "" },
+        "こんにちは"
+    );
+}
+
+#[test]
+fn test_unicode_comments() {
+    // Comments may contain non-ASCII characters
+    let src = "-- héllo wörld";
+
+    let mut lexer = GinLexer::new(src);
+    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+
+    assert!(matches!(tokens[0], Token::Comment(_)));
+    assert_eq!(
+        if let Token::Comment(s) = &tokens[0] { s.as_str() } else { "" },
+        "-- héllo wörld"
+    );
+}
+
+#[test]
+fn test_unicode_tags() {
+    // Tags starting with a non-ASCII uppercase letter (\p{Lu})
+    let src = "Ångström Élève";
+
+    let mut lexer = GinLexer::new(src);
+    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+
+    assert!(matches!(tokens[0], Token::Tag(_)));
+    assert_eq!(
+        if let Token::Tag(s) = &tokens[0] { s.as_str() } else { "" },
+        "Ångström"
+    );
+
+    assert!(matches!(tokens[1], Token::Tag(_)));
+    assert_eq!(
+        if let Token::Tag(s) = &tokens[1] { s.as_str() } else { "" },
+        "Élève"
+    );
+}
+
+#[test]
+fn test_unicode_identifiers() {
+    // Identifiers consisting entirely of Unicode lowercase letters (\p{Ll})
+    let src = "café αλφα";
+
+    let mut lexer = GinLexer::new(src);
+    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+
+    assert!(matches!(tokens[0], Token::Id(_)));
+    assert_eq!(
+        if let Token::Id(s) = &tokens[0] { s.as_str() } else { "" },
+        "café"
+    );
+
+    assert!(matches!(tokens[1], Token::Id(_)));
+    assert_eq!(
+        if let Token::Id(s) = &tokens[1] { s.as_str() } else { "" },
+        "αλφα"
+    );
+}
+
+#[test]
+fn test_unicode_non_letter_not_id() {
+    // `hello_世界`: `世` and `界` are Other_Letter (Lo), not Lowercase_Letter (Ll),
+    // so they cannot form a snake_case segment. Only `hello` is tokenised as Id;
+    // the remaining characters are silently skipped as unrecognised.
+    let src = "hello_世界";
+
+    let mut lexer = GinLexer::new(src);
+    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+
+    // First (and only) real token is the `hello` identifier
+    assert_eq!(tokens.len(), 1);
+    assert!(matches!(tokens[0], Token::Id(_)));
+    assert_eq!(
+        if let Token::Id(s) = &tokens[0] { s.as_str() } else { "" },
+        "hello"
     );
 }
 
@@ -281,7 +399,7 @@ fn test_unterminated_string_lone_quote() {
     assert!(matches!(tokens[2], Token::UnterminatedString(_)));
     assert_eq!(
         if let Token::UnterminatedString(s) = &tokens[2] {
-            *s
+            s.as_str()
         } else {
             ""
         },
@@ -293,7 +411,7 @@ fn test_unterminated_string_lone_quote() {
     assert!(matches!(tokens[6], Token::UnterminatedString(_)));
     assert_eq!(
         if let Token::UnterminatedString(s) = &tokens[6] {
-            *s
+            s.as_str()
         } else {
             ""
         },

@@ -13,8 +13,8 @@ pub mod prelude {
             Attribute, Block, BlockLike, BlockRef, Identifier, Location, Module, Operation, Region,
             RegionLike, Type, Value, ValueLike,
             attribute::{
-                DenseI64ArrayAttribute, FlatSymbolRefAttribute, FloatAttribute,
-                IntegerAttribute, StringAttribute, TypeAttribute,
+                DenseI32ArrayAttribute, DenseI64ArrayAttribute, FlatSymbolRefAttribute,
+                FloatAttribute, IntegerAttribute, StringAttribute, TypeAttribute,
             },
             operation::OperationBuilder,
             r#type::{id::*, *},

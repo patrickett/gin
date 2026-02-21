@@ -1,12 +1,12 @@
-use crate::frontend::lexer::LexContext;
-use crate::frontend::lexer::handle_newline;
+use crate::frontend::lexer::{LexContext, handle_newline};
+use crate::intern::IStr;
 use logos::Logos;
 
 // TODO: can we get away with removing logos and skipping lexing and incremental parsing
 // or go from source -> ast maybe with some incomplete nodes
 #[derive(Logos, Debug, PartialEq, Clone)]
 #[logos(extras = LexContext)]
-pub enum Token<'src> {
+pub enum Token {
     #[token("optional")]
     Optional,
     #[token("required")]
@@ -75,39 +75,39 @@ pub enum Token<'src> {
     Of,
     #[token("or")]
     Or,
-    #[regex(r"\p{Lu}[\p{L}]*")]
-    Tag(&'src str),
-    #[regex(r"_?\p{Ll}+(?:_\p{Ll}+)*")]
-    Id(&'src str),
+    #[regex(r"\p{Lu}[\p{L}]*", |lex| IStr::new(lex.slice().to_string()))]
+    Tag(IStr),
+    #[regex(r"_?\p{Ll}+(?:_\p{Ll}+)*", |lex| IStr::new(lex.slice().to_string()))]
+    Id(IStr),
     #[regex(r"[0-9]+\.[0-9]+", |lex| lex.slice().parse::<f64>().unwrap())]
     Float(f64),
     #[regex(r"[0-9]+", |lex| lex.slice().parse::<i64>().unwrap())]
     Int(i64),
     #[regex(r"'[^'\n]*'", |lex| {
         let s = lex.slice();
-        &s[1..s.len()-1] // strip the quotes
+        IStr::new(s[1..s.len()-1].to_string())
     })]
-    String(&'src str),
+    String(IStr),
     #[regex(r"'[^'\n]*", |lex| {
         let s = lex.slice();
-        &s[1..] // strip opening quote
+        IStr::new(s[1..].to_string())
     })]
-    UnterminatedString(&'src str),
+    UnterminatedString(IStr),
     // Format strings - double quoted strings with (var) interpolation
     #[regex(r#""[^"\n]*""#, |lex| {
         let s = lex.slice();
-        &s[1..s.len()-1] // strip the quotes
+        IStr::new(s[1..s.len()-1].to_string())
     })]
-    FormatString(&'src str),
+    FormatString(IStr),
     #[regex(r#""[^"\n]*"#, |lex| {
         let s = lex.slice();
-        &s[1..] // strip opening quote
+        IStr::new(s[1..].to_string())
     })]
-    UnterminatedFormatString(&'src str),
-    #[regex(r"---[^\n]*", callback = |lex| { lex.slice() })]
-    DocComment(&'src str),
-    #[regex(r"--[^\n]*", callback = |lex| { lex.slice() })]
-    Comment(&'src str),
+    UnterminatedFormatString(IStr),
+    #[regex(r"---[^\n]*", |lex| IStr::new(lex.slice().to_string()))]
+    DocComment(IStr),
+    #[regex(r"--[^\n]*", |lex| IStr::new(lex.slice().to_string()))]
+    Comment(IStr),
     #[token("...")]
     Ellipsis,
     #[token("::=")]

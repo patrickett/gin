@@ -28,7 +28,7 @@ fn lower_for_loop<'c>(
     symtab: &mut RuntimeSymbolTable<'c>,
 ) -> Result<Value<'c, 'c>, CodegenSymptom> {
     let loop_var = match &for_loop.pat {
-        Pattern::Ident(name) => name.clone(),
+        Pattern::Ident(name) => *name,
         Pattern::Tuple(_) => {
             return Err(CodegenSymptom::Internal(
                 "Tuple patterns in for loops not yet implemented".to_string(),
@@ -39,7 +39,10 @@ fn lower_for_loop<'c>(
     let (lower, upper) = match &*for_loop.iter {
         Expr::Binary(bin) if matches!(bin.op, BinOp::Range) => {
             let lb = bin.lhs.lower(ctx, block, symtab)?;
-            let ub = bin.rhs.lower(ctx, block, symtab)?;
+            let ub_exclusive = bin.rhs.lower(ctx, block, symtab)?;
+            // Make range inclusive: add 1 since scf.for uses exclusive upper bound
+            let one = block.const_i64(ctx.mlir, 1);
+            let ub = block.append_op(ctx.mlir.build_binop(ArithOps::ADD, ub_exclusive, one));
             (lb, ub)
         }
         _ => {
@@ -67,6 +70,12 @@ fn lower_for_loop<'c>(
                 eprintln!("Error lowering loop body expression: {:?}", e);
             }
         }
+
+        // scf.for body must end with scf.yield
+        let yield_op = OperationBuilder::new("scf.yield", loc)
+            .build()
+            .map_err(|e| CodegenSymptom::Internal(format!("Failed to build scf.yield: {}", e)))?;
+        block_ref.append_operation(yield_op);
     }
 
     let for_op = OperationBuilder::new("scf.for", loc)

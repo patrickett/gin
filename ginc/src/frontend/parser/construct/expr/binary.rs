@@ -1,6 +1,6 @@
 use crate::frontend::prelude::*;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Binary {
     pub lhs: Box<Expr>,
     pub op: BinOp,
@@ -8,7 +8,7 @@ pub struct Binary {
 }
 
 /// Binary operations are defined as `lhs op rhs`
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BinOp {
     /// <=
     LessThanOrEqual,
@@ -36,10 +36,10 @@ pub enum BinOp {
     Range,
 }
 
-pub fn binary_expr<'t, 's: 't, I, P>(expr: P) -> impl Parser<'t, I, Binary, ParserError<'t, 's>>
+pub fn binary_expr<'t, I, P>(expr: P) -> impl Parser<'t, I, Binary, ParserError<'t>>
 where
-    I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
-    P: Parser<'t, I, Expr, ParserError<'t, 's>> + Clone + 't,
+    I: ValueInput<'t, Token = Token, Span = SimpleSpan>,
+    P: Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
 {
     use Token::*;
 

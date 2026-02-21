@@ -33,7 +33,7 @@ impl TypeInfo {
 
 pub struct CodegenContext<'a, 'c> {
     pub mlir: &'c Context,
-    pub type_info: &'a HashMap<String, TypeInfo>,
+    pub type_info: &'a HashMap<IStr, TypeInfo>,
     pub symbol_table: &'a CompileTimeSymbolTable,
     pub string_literals: RefCell<Vec<String>>,
     pub string_symbols: RefCell<HashMap<String, String>>,
@@ -43,7 +43,7 @@ pub struct CodegenContext<'a, 'c> {
 impl<'a, 'c> CodegenContext<'a, 'c> {
     pub fn new(
         mlir: &'c Context,
-        type_info: &'a HashMap<String, TypeInfo>,
+        type_info: &'a HashMap<IStr, TypeInfo>,
         symbol_table: &'a CompileTimeSymbolTable,
     ) -> Self {
         Self {
@@ -223,7 +223,7 @@ fn extract_type_info(ast: &FileAst) -> Result<HashMap<String, TypeInfo>, Codegen
     for (tag_name, documented) in &ast.tags {
         if let TagValue::Range(range) = &documented.item.1 {
             type_info.insert(
-                tag_name.0.clone(),
+                tag_name.0,
                 TypeInfo {
                     min: range.start,
                     max: range.end,

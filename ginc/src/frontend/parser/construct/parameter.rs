@@ -1,15 +1,15 @@
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
 use crate::frontend::prelude::*;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ParameterKind {
     Generic,
     Tagged(Tag),
     Default(Expr),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ParamInfo {
     /// Represents a type tag for the parameter, e.g. `(p Person)`.
     Tag(Tag),
@@ -20,14 +20,14 @@ pub enum ParamInfo {
 // id Tag | Tag2
 // id: expr -- note exprs cannot be | since this is actually an assignment/default value
 // the expr however can return a Tag Union
-pub fn parameter<'t, 's: 't, I>(
-    expr: impl Parser<'t, I, Expr, ParserError<'t, 's>> + Clone + 't,
-    tag: impl Parser<'t, I, Tag, ParserError<'t, 's>> + Clone + 't,
-) -> impl Parser<'t, I, (ParamName, ParameterKind), ParserError<'t, 's>> + Clone
+pub fn parameter<'t, I>(
+    expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
+    tag: impl Parser<'t, I, Tag, ParserError<'t>> + Clone + 't,
+) -> impl Parser<'t, I, (ParamName, ParameterKind), ParserError<'t>> + Clone
 where
-    I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
+    I: ValueInput<'t, Token = Token, Span = SimpleSpan>,
 {
-    let id = select! { Token::Id(name) => name.to_string() };
+    let id = select! { Token::Id(name) => name };
 
     // Parse parameter with explicit handling of Tag tokens vs generic identifiers
     let param_info = choice((
@@ -53,19 +53,20 @@ where
     })
 }
 
-pub type ParamName = String;
-pub type Parameters = HashMap<ParamName, ParameterKind>;
+pub type ParamName = IStr;
+pub type Parameters = IndexMap<ParamName, ParameterKind>;
 
-pub fn params<'t, 's: 't, I>(
-    expr: impl Parser<'t, I, Expr, ParserError<'t, 's>> + Clone + 't,
-    tag: impl Parser<'t, I, Tag, ParserError<'t, 's>> + Clone + 't,
-) -> impl Parser<'t, I, Parameters, ParserError<'t, 's>> + Clone
+pub fn params<'t, I>(
+    expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
+    tag: impl Parser<'t, I, Tag, ParserError<'t>> + Clone + 't,
+) -> impl Parser<'t, I, Parameters, ParserError<'t>> + Clone
 where
-    I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
+    I: ValueInput<'t, Token = Token, Span = SimpleSpan>,
 {
     parameter(expr.clone(), tag.clone())
         .separated_by(just(Token::Comma))
         // .allow_trailing()
-        .collect::<Parameters>()
+        .collect::<Vec<_>>()
         .delimited_by(just(Token::ParenOpen), just(Token::ParenClose))
+        .map(|pairs| pairs.into_iter().collect::<Parameters>())
 }

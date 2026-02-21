@@ -1,11 +1,13 @@
 use crate::frontend::prelude::*;
 use chumsky::{input::ValueInput, prelude::*};
+use std::path::PathBuf;
 
 /// `use` can include several different modules seperated by a `,`
 ///
 /// ex.
 /// ```gin
 /// use http.web, crypto.hash
+/// use './math' as math
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Import(pub Vec<ModuleImport>);
@@ -13,33 +15,61 @@ pub struct Import(pub Vec<ModuleImport>);
 // TODO: Implement import wildcard support (*)
 // `use core.http (...)`
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ImportSource {
+    /// Top level name defined in `flask.json` ex. `use http.*`
+    Package(ModPath),
+    /// Path to a module on disk ex. `use '../http' as http`
+    Local(PathBuf),
+}
+
 /// An import is structured like the following:
 ///
 /// `use {module_name}.path.to_sub_mod (import1, ImportTag)`
-//  The ending (...) syntax is shared across lambda functions
+/// `use './local/folder' as alias`
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ModuleImport {
-    pub path: Path,
-    pub alias: Option<String>,
+    pub source: ImportSource,
+    pub alias: Option<IStr>,
 }
 
 impl ModuleImport {
-    pub fn new(path: Path, alias: Option<String>) -> Self {
-        Self { path, alias }
+    /// Compute the default alias name from the import source.
+    ///
+    /// - `Package(path)` → last segment, or root if no segments
+    /// - `Local(path)` → last component of the folder path
+    pub fn effective_name(&self) -> String {
+        match &self.source {
+            ImportSource::Package(path) => path
+                .segments
+                .last()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| path.root.to_string()),
+            ImportSource::Local(path) => path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string(),
+        }
     }
 }
 
 // Use expressions should be at the top of any module.
-pub fn import<'t, 's: 't, I>() -> impl Parser<'t, I, Import, ParserError<'t, 's>>
+pub fn import<'t, I>() -> impl Parser<'t, I, Import, ParserError<'t>>
 where
-    I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
+    I: ValueInput<'t, Token = Token, Span = SimpleSpan>,
 {
     use Token::*;
     let id = select! { Token::Id(name) => name };
 
+    let source = choice((
+        select! { Token::String(s) => ImportSource::Local(PathBuf::from(&**s)) },
+        path().map(ImportSource::Package),
+    ));
+
     just(Use)
         .ignore_then(
-            path()
+            source
                 .then(just(As).ignore_then(id).or_not())
                 .separated_by(just(Comma))
                 .collect::<Vec<_>>()
@@ -49,10 +79,7 @@ where
             Import(
                 items
                     .into_iter()
-                    .map(|(path, alias)| ModuleImport {
-                        path,
-                        alias: alias.map(|a| a.to_string()),
-                    })
+                    .map(|(source, alias)| ModuleImport { source, alias })
                     .collect::<Vec<ModuleImport>>(),
             )
         })

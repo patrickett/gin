@@ -56,9 +56,10 @@ fn lower_assign_expr<'c>(
 
     if let Expr::FnCall(fn_call) = lhs {
         let var_name = if fn_call.path.segments.is_empty() {
-            fn_call.path.root.clone()
+            fn_call.path.root
         } else {
-            format!("{}.{}", fn_call.path.root, fn_call.path.segments.join("."))
+            let segs: Vec<&str> = fn_call.path.segments.iter().map(|s| s.as_str()).collect();
+            IStr::new(format!("{}.{}", fn_call.path.root, segs.join(".")))
         };
         symtab.insert(var_name, value);
         Ok(value)

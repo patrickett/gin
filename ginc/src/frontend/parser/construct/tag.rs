@@ -1,29 +1,44 @@
 //! Tags are almost synonymous with types in other languages.
 
 use crate::frontend::prelude::*;
+use std::hash::{Hash, Hasher};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Tag {
     Nominal(TagName),
     Generic(TagName, Parameters),
     Union { variants: Vec<Tag> },
 }
 
+impl Hash for Tag {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Self::Nominal(name) => name.hash(state),
+            Self::Generic(name, params) => {
+                name.hash(state);
+                for (k, v) in params {
+                    k.hash(state);
+                    v.hash(state);
+                }
+            }
+            Self::Union { variants } => variants.hash(state),
+        }
+    }
+}
+
 // TagName
 // TagName(id)
 // TagName(id AnotherTag(some_generic_value, num Number) | YetAnother)
-pub fn tag<'t, 's: 't, I>(
-    expr: impl Parser<'t, I, Expr, ParserError<'t, 's>> + Clone + 't,
-) -> impl Parser<'t, I, Tag, ParserError<'t, 's>> + Clone
+pub fn tag<'t, I>(
+    expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
+) -> impl Parser<'t, I, Tag, ParserError<'t>> + Clone
 where
-    I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
+    I: ValueInput<'t, Token = Token, Span = SimpleSpan>,
 {
-    // use Token::*;
     recursive(|tag| {
         // --- parse tag name (capitalized)
-        let tag_name = select! { Token::Tag(name) => TagName(name.to_string()) };
-
-        // --- parse optional parameters inside parens
+        let tag_name = select! { Token::Tag(name) => TagName(name) };
 
         // --- nominal or generic tag
         let nominal_or_generic = tag_name

@@ -8,21 +8,21 @@ pub use def_value::*;
 /// at the root/top level.
 ///
 /// Unlike languages like Python. This is so you cannot have side effects
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Item {
     pub doc_comment: Option<DocComment>,
     pub value: ItemValue,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ItemValue {
     TagValue(TagName, Params<TagValue>),
     DefValue(DefName, Params<DefValue>),
 }
 
-pub fn item<'t, 's: 't, I>() -> impl Parser<'t, I, Item, ParserError<'t, 's>> + Clone
+pub fn item<'t, I>() -> impl Parser<'t, I, Item, ParserError<'t>> + Clone
 where
-    I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
+    I: ValueInput<'t, Token = Token, Span = SimpleSpan>,
 {
     let expr = expression();
     doc_comment()

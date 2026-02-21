@@ -1,11 +1,21 @@
 use crate::frontend::prelude::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
-pub struct DefName(String);
+pub struct DefName(pub IStr);
 
 impl DefName {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(IStr::new(name.into()))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl From<&str> for DefName {
+    fn from(s: &str) -> Self {
+        Self(IStr::new(s.to_string()))
     }
 }
 
@@ -15,22 +25,22 @@ impl std::fmt::Display for DefName {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DefValue {
     Expr(Box<Expr>),
     Body { exprs: Vec<Expr>, ret: Return },
 }
 
-pub fn def_value<'t, 's: 't, I>(
-    expr: impl Parser<'t, I, Expr, ParserError<'t, 's>> + Clone + 't,
-    params: impl Parser<'t, I, Parameters, ParserError<'t, 's>> + Clone + 't,
-) -> impl Parser<'t, I, Bind, ParserError<'t, 's>> + Clone
+pub fn def_value<'t, I>(
+    expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
+    params: impl Parser<'t, I, Parameters, ParserError<'t>> + Clone + 't,
+) -> impl Parser<'t, I, Bind, ParserError<'t>> + Clone
 where
-    I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
+    I: ValueInput<'t, Token = Token, Span = SimpleSpan>,
 {
     use Token::*;
 
-    let lhs = select! { Token::Id(name) => DefName(name.to_string()) }
+    let lhs = select! { Token::Id(name) => DefName(name) }
         .then(params.or_not())
         .then(tag(expr.clone()).or_not())
         .then_ignore(just(Token::Colon));

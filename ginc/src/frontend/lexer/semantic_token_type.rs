@@ -8,7 +8,7 @@ pub trait HasSemanticTokenType {
     fn semantic_token_type_index(&self) -> Option<usize>;
 }
 
-impl<'src> HasSemanticTokenType for Token<'src> {
+impl HasSemanticTokenType for Token {
     fn semantic_token_type(&self) -> SemanticTokenType {
         use Token::*;
 

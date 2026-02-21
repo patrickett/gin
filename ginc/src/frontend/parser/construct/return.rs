@@ -1,14 +1,14 @@
 use crate::frontend::prelude::*;
 use chumsky::{Parser, input::ValueInput, prelude::*, span::SimpleSpan};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Return(pub Option<Box<Expr>>);
 
-pub fn r#return<'t, 's: 't, I>(
-    expr: impl Parser<'t, I, Expr, ParserError<'t, 's>> + Clone + 't,
-) -> impl Parser<'t, I, Return, ParserError<'t, 's>> + Clone
+pub fn r#return<'t, I>(
+    expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
+) -> impl Parser<'t, I, Return, ParserError<'t>> + Clone
 where
-    I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
+    I: ValueInput<'t, Token = Token, Span = SimpleSpan>,
 {
     // try bare return first so it doesn't consume trailing newlines
     let bare = just(Token::Return)

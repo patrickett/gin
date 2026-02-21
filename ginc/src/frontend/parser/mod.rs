@@ -7,16 +7,12 @@ use chumsky::{input::ValueInput, span::SimpleSpan};
 
 pub use parse::*;
 pub type Spanned<T> = (T, SimpleSpan);
-pub type ParserError<'tokens, 'source_code> = extra::Err<Rich<'tokens, Token<'source_code>>>;
-
-// DEV NOTE:
-//     't = 'tokens
-//     's = 'source_code
+pub type ParserError<'tokens> = extra::Err<Rich<'tokens, Token>>;
 
 /// Parses a stream of tokens
-pub fn token_parser<'t, 's: 't, I>() -> impl Parser<'t, I, FileAst, ParserError<'t, 's>>
+pub fn token_parser<'t, I>() -> impl Parser<'t, I, FileAst, ParserError<'t>>
 where
-    I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
+    I: ValueInput<'t, Token = Token, Span = SimpleSpan>,
 {
     use Token::*;
     import()

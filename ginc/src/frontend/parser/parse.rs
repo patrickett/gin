@@ -13,7 +13,7 @@ use crate::diagnostic::io as io_symptom;
 use crate::diagnostic::lex as lex_symptom;
 use crate::diagnostic::parse as parse_symptom;
 use crate::frontend::lexer::{Token, tokenize};
-use crate::frontend::parser::construct::{FileAst, Path as ImportPath};
+use crate::frontend::parser::construct::{FileAst, ImportSource, ModPath as ImportPath};
 use crate::frontend::parser::token_parser;
 
 /// Resolve import paths to File inputs for a parsed file.
@@ -170,12 +170,12 @@ fn resolve_import_path(base: &Path, import_path: &ImportPath) -> PathBuf {
 
     // Add root
     if !import_path.root.is_empty() {
-        path.push(&import_path.root);
+        path.push(import_path.root.as_str());
     }
 
     // Add segments
     for segment in &import_path.segments {
-        path.push(segment);
+        path.push(segment.as_str());
     }
 
     // Add .gin extension if not present

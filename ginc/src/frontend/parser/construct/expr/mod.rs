@@ -15,7 +15,7 @@ pub use binary::*;
 mod for_loop;
 pub use for_loop::*;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Expr {
     CtrlFlow(ControlFlow),
     Binary(Binary),
@@ -28,9 +28,9 @@ pub enum Expr {
 
 /// Create a simple expression parser for for loop headers.
 /// This includes range expressions and arithmetic, but not assignment or nested for loops.
-fn for_loop_header_expr<'t, 's: 't, I>() -> impl Parser<'t, I, Expr, ParserError<'t, 's>> + Clone
+fn for_loop_header_expr<'t, I>() -> impl Parser<'t, I, Expr, ParserError<'t>> + Clone
 where
-    I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
+    I: ValueInput<'t, Token = Token, Span = SimpleSpan>,
 {
     use Token::*;
     use chumsky::pratt::{infix, left};
@@ -75,9 +75,9 @@ where
         .padded_by(comments())
 }
 
-pub fn expression<'t, 's: 't, I>() -> impl Parser<'t, I, Expr, ParserError<'t, 's>> + Clone
+pub fn expression<'t, I>() -> impl Parser<'t, I, Expr, ParserError<'t>> + Clone
 where
-    I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
+    I: ValueInput<'t, Token = Token, Span = SimpleSpan>,
 {
     recursive(|expr| {
         use Token::*;
@@ -157,11 +157,11 @@ where
 }
 
 /// Helper for expression atom that takes a recursive parser as parameter
-fn expression_atom_inner<'t, 's: 't, I>(
-    expr: impl Parser<'t, I, Expr, ParserError<'t, 's>> + Clone + 't,
-) -> impl Parser<'t, I, Expr, ParserError<'t, 's>> + Clone + 't
+fn expression_atom_inner<'t, I>(
+    expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
+) -> impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't
 where
-    I: ValueInput<'t, Token = Token<'s>, Span = SimpleSpan>,
+    I: ValueInput<'t, Token = Token, Span = SimpleSpan>,
 {
     choice((
         literal().boxed().map(Expr::Lit),
