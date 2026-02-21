@@ -100,7 +100,9 @@ fn parse_ast_internal(db: &dyn Db, file: File) -> ParseResult {
     let src = file.contents(db);
 
     let lexer = GinLexer::new(src);
-    let tokens: Vec<_> = lexer.collect();
+    let tokens: Vec<_> = lexer
+        .filter(|(t, _)| !matches!(t, Token::Comment(_)))
+        .collect();
 
     // Collect unterminated string spans — highlight the full token
     let unterminated_strings: Vec<_> = tokens
