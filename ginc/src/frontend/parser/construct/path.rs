@@ -28,9 +28,10 @@ impl ModPath {
 /// Parser that consumes a dotted identifier sequence and produces an owned `Path`.
 pub fn path<'t, I>() -> impl Parser<'t, I, ModPath, ParserError<'t>>
 where
-    I: ValueInput<'t, Token = Token, Span = SimpleSpan>,
+    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
-    let id = select! { Token::Id(name) => name };
+    // Intern the &str from lexer into IStr immediately
+    let id = select! { Token::Id(name) => IStr::new(name.to_string()) };
 
     id.then(
         just(Token::Dot)

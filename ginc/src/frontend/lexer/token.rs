@@ -1,12 +1,86 @@
-use crate::frontend::lexer::{LexContext, handle_newline};
 use crate::intern::IStr;
-use logos::Logos;
+use logos::{Lexer, Logos};
 
-// TODO: can we get away with removing logos and skipping lexing and incremental parsing
-// or go from source -> ast maybe with some incomplete nodes
-#[derive(Logos, Debug, PartialEq, Clone)]
+/// Maximum indentation depth supported by the lexer.
+pub const MAX_INDENT_DEPTH: usize = 16;
+
+/// Indent and Dedent are mutually exclusive branches per newline.
+/// We can exploit this by using `pending_indent` and `pending_dedents`
+#[derive(Debug)]
+pub struct LexContext {
+    pub indent_stack: [u16; MAX_INDENT_DEPTH],
+    pub indent_depth: u8,
+    /// Dedent tokens still to be emitted, decremented one per call.
+    pub pending_dedents: u8,
+    /// Whether a single Indent token is waiting to be emitted.
+    pub pending_indent: bool,
+}
+
+impl Default for LexContext {
+    fn default() -> Self {
+        Self {
+            indent_stack: [0u16; MAX_INDENT_DEPTH],
+            indent_depth: 1,
+            pending_dedents: 0,
+            pending_indent: false,
+        }
+    }
+}
+
+/// Handles newline characters and manages indentation state.
+/// This function is called by logos when a newline is encountered.
+#[inline]
+pub fn handle_newline<'src>(lex: &mut Lexer<'src, Token<'src>>) -> Token<'src> {
+    // `bytes` and `indent` are tracked separately so that a tab (1 byte, 4 columns)
+    // does not cause `lex.bump` to skip real source characters.
+
+    let remainder = lex.remainder().as_bytes();
+    let mut indent = 0u16;
+    let mut bytes = 0usize;
+    for &b in remainder {
+        match b {
+            b' ' => {
+                indent += 1;
+                bytes += 1;
+            }
+            b'\t' => {
+                indent += 4;
+                bytes += 1;
+            }
+            _ => break,
+        }
+    }
+    lex.bump(bytes);
+
+    let extras = &mut lex.extras;
+    let depth = extras.indent_depth as usize;
+    let current = extras.indent_stack[depth - 1];
+
+    if indent > current {
+        if depth < MAX_INDENT_DEPTH {
+            extras.indent_stack[depth] = indent;
+            extras.indent_depth += 1;
+            extras.pending_indent = true;
+        }
+        // Silently cap at MAX_INDENT_DEPTH; parser continues at the deepest
+        // valid level. Callers that need to detect overflow can inspect the
+        // token stream for unexpected structure.
+    } else if indent < current {
+        // Walk the stack with a local, write indent_depth once at the end.
+        let mut d = depth;
+        while extras.indent_stack[d - 1] > indent {
+            d -= 1;
+        }
+        extras.pending_dedents = (depth - d) as u8;
+        extras.indent_depth = d as u8;
+    }
+
+    Token::Newline
+}
+
+#[derive(Logos, Debug, PartialEq, Clone, Copy)]
 #[logos(extras = LexContext)]
-pub enum Token {
+pub enum Token<'src> {
     #[token("optional")]
     Optional,
     #[token("required")]
@@ -75,45 +149,32 @@ pub enum Token {
     Of,
     #[token("or")]
     Or,
-    #[regex(r"\p{Lu}[\p{L}]*", |lex| IStr::new(lex.slice().to_string()))]
-    Tag(IStr),
-    #[regex(r"_?\p{Ll}+(?:_\p{Ll}+)*", |lex| IStr::new(lex.slice().to_string()))]
-    Id(IStr),
+    // String-bearing variants: logos uses lex.slice() by default for &'src str
+    #[regex(r"\p{Lu}[\p{L}]*")]
+    Tag(&'src str),
+    #[regex(r"_?\p{Ll}+(?:_\p{Ll}+)*")]
+    Id(&'src str),
     #[regex(r"[0-9]+\.[0-9]+", |lex| lex.slice().parse::<f64>().unwrap())]
     Float(f64),
     #[regex(r"[0-9]+", |lex| lex.slice().parse::<i64>().unwrap())]
     Int(i64),
-    #[regex(r"'[^'\n]*'", |lex| {
-        let s = lex.slice();
-        IStr::new(s[1..s.len()-1].to_string())
-    })]
-    String(IStr),
-    #[regex(r"'[^'\n]*", |lex| {
-        let s = lex.slice();
-        IStr::new(s[1..].to_string())
-    })]
-    UnterminatedString(IStr),
-    // Format strings - double quoted strings with (var) interpolation
-    #[regex(r#""[^"\n]*""#, |lex| {
-        let s = lex.slice();
-        IStr::new(s[1..s.len()-1].to_string())
-    })]
-    FormatString(IStr),
-    #[regex(r#""[^"\n]*"#, |lex| {
-        let s = lex.slice();
-        IStr::new(s[1..].to_string())
-    })]
-    UnterminatedFormatString(IStr),
-    #[regex(r"---[^\n]*", |lex| IStr::new(lex.slice().to_string()))]
-    DocComment(IStr),
-    #[regex(r"--[^\n]*", |lex| IStr::new(lex.slice().to_string()))]
-    Comment(IStr),
+    #[regex(r"'[^'\n]*'", |lex| { let s = lex.slice(); &s[1..s.len()-1] })]
+    String(&'src str),
+    #[regex(r"'[^'\n]*", |lex| { let s = lex.slice(); &s[1..] })]
+    UnterminatedString(&'src str),
+    // Format strings — double-quoted with (var) interpolation
+    #[regex(r#""[^"\n]*""#, |lex| { let s = lex.slice(); &s[1..s.len()-1] })]
+    FormatString(&'src str),
+    #[regex(r#""[^"\n]*"#, |lex| { let s = lex.slice(); &s[1..] })]
+    UnterminatedFormatString(&'src str),
+    #[regex(r"---[^\n]*")]
+    DocComment(&'src str),
+    #[regex(r"--[^\n]*")]
+    Comment(&'src str),
     #[token("...")]
     Ellipsis,
     #[token("::=")]
     IsReplacedBy,
-    // #[token(":=")]
-    // Assignment,
     #[token("|-")]
     /// https://en.wikipedia.org/wiki/Turnstile_(symbol)
     Turnstile,
@@ -186,11 +247,41 @@ pub enum Token {
     #[regex(r"\n", handle_newline)]
     Newline,
 
-    // Indentation tokens
     Indent,
     Dedent,
 
-    // Inline whitespace (skip, but only non-leading)
     #[regex(r"[ \t]+", logos::skip)]
     Whitespace,
+}
+
+impl<'src> Token<'src> {
+    pub fn to_interned(&self) -> InternedToken {
+        match self {
+            Token::Tag(s) => InternedToken::Tag(IStr::new(s.to_string())),
+            Token::Id(s) => InternedToken::Id(IStr::new(s.to_string())),
+            Token::String(s) => InternedToken::String(IStr::new(s.to_string())),
+            Token::UnterminatedString(s) => {
+                InternedToken::UnterminatedString(IStr::new(s.to_string()))
+            }
+            Token::FormatString(s) => InternedToken::FormatString(IStr::new(s.to_string())),
+            Token::UnterminatedFormatString(s) => {
+                InternedToken::UnterminatedFormatString(IStr::new(s.to_string()))
+            }
+            Token::DocComment(s) => InternedToken::DocComment(IStr::new(s.to_string())),
+            Token::Comment(s) => InternedToken::Comment(IStr::new(s.to_string())),
+            _ => panic!("to_interned only called for string-bearing variants"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum InternedToken {
+    Tag(IStr),
+    Id(IStr),
+    String(IStr),
+    UnterminatedString(IStr),
+    FormatString(IStr),
+    UnterminatedFormatString(IStr),
+    DocComment(IStr),
+    Comment(IStr),
 }

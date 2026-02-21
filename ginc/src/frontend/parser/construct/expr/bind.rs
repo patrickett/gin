@@ -39,7 +39,7 @@ pub fn bind<'t, I>(
     expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
 ) -> impl Parser<'t, I, Bind, ParserError<'t>> + Clone
 where
-    I: ValueInput<'t, Token = Token, Span = SimpleSpan>,
+    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
     let params = params(expr.clone(), tag(expr.clone()));
     let def_parser = def_value(expr.clone(), params.clone());

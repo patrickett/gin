@@ -8,12 +8,12 @@ pub struct ForInLoop {
     pub exprs: Vec<Expr>,
 }
 
-pub fn for_in_loop<'tokens, I>(
-    header_expr: impl Parser<'tokens, I, Expr, ParserError<'tokens>> + Clone + 'tokens,
-    body_expr: impl Parser<'tokens, I, Expr, ParserError<'tokens>> + Clone + 'tokens,
-) -> impl Parser<'tokens, I, ForInLoop, ParserError<'tokens>>
+pub fn for_in_loop<'t, I>(
+    header_expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
+    body_expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
+) -> impl Parser<'t, I, ForInLoop, ParserError<'t>>
 where
-    I: ValueInput<'tokens, Token = Token, Span = SimpleSpan>,
+    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
     use Token::*;
 

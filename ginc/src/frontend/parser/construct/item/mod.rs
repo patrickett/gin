@@ -22,7 +22,7 @@ pub enum ItemValue {
 
 pub fn item<'t, I>() -> impl Parser<'t, I, Item, ParserError<'t>> + Clone
 where
-    I: ValueInput<'t, Token = Token, Span = SimpleSpan>,
+    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
     let expr = expression();
     doc_comment()

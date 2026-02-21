@@ -34,11 +34,11 @@ pub fn tag<'t, I>(
     expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
 ) -> impl Parser<'t, I, Tag, ParserError<'t>> + Clone
 where
-    I: ValueInput<'t, Token = Token, Span = SimpleSpan>,
+    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
     recursive(|tag| {
         // --- parse tag name (capitalized)
-        let tag_name = select! { Token::Tag(name) => TagName(name) };
+        let tag_name = select! { Token::Tag(name) => TagName(IStr::new(name.to_string())) };
 
         // --- nominal or generic tag
         let nominal_or_generic = tag_name

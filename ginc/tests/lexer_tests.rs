@@ -150,10 +150,8 @@ fn test_comments() {
     let mut lexer = GinLexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
-    // Comments should be recognized (note newline between them)
-    assert!(matches!(tokens[0], Token::Comment(_)));
-    assert!(matches!(tokens[1], Token::Newline));
-    assert!(matches!(tokens[2], Token::DocComment(_)));
+    assert_eq!(tokens.len(), 1);
+    assert!(matches!(tokens[0], Token::Newline));
 }
 
 #[test]
@@ -187,14 +185,12 @@ fn test_play() {
 
     let mut lexer = GinLexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
-    println!("{:#?}", tokens);
 
-    assert!(matches!(tokens[0], Token::DocComment(_)));
-    assert!(matches!(tokens[1], Token::Newline));
-    assert!(matches!(tokens[2], Token::Tag(_)));
-    assert!(matches!(tokens[3], Token::Does));
-    assert!(matches!(tokens[4], Token::ParenOpen));
-    assert!(matches!(tokens[5], Token::ParenClose));
+    assert!(matches!(tokens[0], Token::Newline));
+    assert!(matches!(tokens[1], Token::Tag(_)));
+    assert!(matches!(tokens[2], Token::Does));
+    assert!(matches!(tokens[3], Token::ParenOpen));
+    assert!(matches!(tokens[4], Token::ParenClose));
 }
 
 #[test]
@@ -207,7 +203,7 @@ fn test_string_literal() {
     assert!(matches!(tokens[0], Token::String(_)));
     assert_eq!(
         if let Token::String(s) = &tokens[0] {
-            s.as_str()
+            *s
         } else {
             ""
         },
@@ -217,7 +213,7 @@ fn test_string_literal() {
     assert!(matches!(tokens[1], Token::String(_)));
     assert_eq!(
         if let Token::String(s) = &tokens[1] {
-            s.as_str()
+            *s
         } else {
             ""
         },
@@ -227,7 +223,7 @@ fn test_string_literal() {
     assert!(matches!(tokens[2], Token::String(_)));
     assert_eq!(
         if let Token::String(s) = &tokens[2] {
-            s.as_str()
+            *s
         } else {
             ""
         },
@@ -248,7 +244,7 @@ fn test_unterminated_string_with_content() {
     assert!(matches!(tokens[2], Token::UnterminatedString(_)));
     assert_eq!(
         if let Token::UnterminatedString(s) = &tokens[2] {
-            s.as_str()
+            *s
         } else {
             ""
         },
@@ -260,7 +256,7 @@ fn test_unterminated_string_with_content() {
     assert!(matches!(tokens[6], Token::UnterminatedString(_)));
     assert_eq!(
         if let Token::UnterminatedString(s) = &tokens[6] {
-            s.as_str()
+            *s
         } else {
             ""
         },
@@ -278,13 +274,21 @@ fn test_unicode_string_literals() {
 
     assert!(matches!(tokens[0], Token::String(_)));
     assert_eq!(
-        if let Token::String(s) = &tokens[0] { s.as_str() } else { "" },
+        if let Token::String(s) = &tokens[0] {
+            *s
+        } else {
+            ""
+        },
         "héllo"
     );
 
     assert!(matches!(tokens[1], Token::String(_)));
     assert_eq!(
-        if let Token::String(s) = &tokens[1] { s.as_str() } else { "" },
+        if let Token::String(s) = &tokens[1] {
+            *s
+        } else {
+            ""
+        },
         "こんにちは"
     );
 }
@@ -299,30 +303,33 @@ fn test_unicode_format_strings() {
 
     assert!(matches!(tokens[0], Token::FormatString(_)));
     assert_eq!(
-        if let Token::FormatString(s) = &tokens[0] { s.as_str() } else { "" },
+        if let Token::FormatString(s) = &tokens[0] {
+            *s
+        } else {
+            ""
+        },
         "héllo"
     );
 
     assert!(matches!(tokens[1], Token::FormatString(_)));
     assert_eq!(
-        if let Token::FormatString(s) = &tokens[1] { s.as_str() } else { "" },
+        if let Token::FormatString(s) = &tokens[1] {
+            *s
+        } else {
+            ""
+        },
         "こんにちは"
     );
 }
 
 #[test]
 fn test_unicode_comments() {
-    // Comments may contain non-ASCII characters
     let src = "-- héllo wörld";
 
     let mut lexer = GinLexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
-    assert!(matches!(tokens[0], Token::Comment(_)));
-    assert_eq!(
-        if let Token::Comment(s) = &tokens[0] { s.as_str() } else { "" },
-        "-- héllo wörld"
-    );
+    assert!(tokens.is_empty());
 }
 
 #[test]
@@ -335,13 +342,21 @@ fn test_unicode_tags() {
 
     assert!(matches!(tokens[0], Token::Tag(_)));
     assert_eq!(
-        if let Token::Tag(s) = &tokens[0] { s.as_str() } else { "" },
+        if let Token::Tag(s) = &tokens[0] {
+            *s
+        } else {
+            ""
+        },
         "Ångström"
     );
 
     assert!(matches!(tokens[1], Token::Tag(_)));
     assert_eq!(
-        if let Token::Tag(s) = &tokens[1] { s.as_str() } else { "" },
+        if let Token::Tag(s) = &tokens[1] {
+            *s
+        } else {
+            ""
+        },
         "Élève"
     );
 }
@@ -356,13 +371,21 @@ fn test_unicode_identifiers() {
 
     assert!(matches!(tokens[0], Token::Id(_)));
     assert_eq!(
-        if let Token::Id(s) = &tokens[0] { s.as_str() } else { "" },
+        if let Token::Id(s) = &tokens[0] {
+            *s
+        } else {
+            ""
+        },
         "café"
     );
 
     assert!(matches!(tokens[1], Token::Id(_)));
     assert_eq!(
-        if let Token::Id(s) = &tokens[1] { s.as_str() } else { "" },
+        if let Token::Id(s) = &tokens[1] {
+            *s
+        } else {
+            ""
+        },
         "αλφα"
     );
 }
@@ -381,7 +404,11 @@ fn test_unicode_non_letter_not_id() {
     assert_eq!(tokens.len(), 1);
     assert!(matches!(tokens[0], Token::Id(_)));
     assert_eq!(
-        if let Token::Id(s) = &tokens[0] { s.as_str() } else { "" },
+        if let Token::Id(s) = &tokens[0] {
+            *s
+        } else {
+            ""
+        },
         "hello"
     );
 }
@@ -399,9 +426,9 @@ fn test_unterminated_string_lone_quote() {
     assert!(matches!(tokens[2], Token::UnterminatedString(_)));
     assert_eq!(
         if let Token::UnterminatedString(s) = &tokens[2] {
-            s.as_str()
+            *s
         } else {
-            ""
+            "non-empty"
         },
         ""
     );
@@ -411,9 +438,9 @@ fn test_unterminated_string_lone_quote() {
     assert!(matches!(tokens[6], Token::UnterminatedString(_)));
     assert_eq!(
         if let Token::UnterminatedString(s) = &tokens[6] {
-            s.as_str()
+            *s
         } else {
-            ""
+            "non-empty"
         },
         ""
     );

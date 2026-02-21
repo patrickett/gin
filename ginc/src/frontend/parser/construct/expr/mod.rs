@@ -30,7 +30,7 @@ pub enum Expr {
 /// This includes range expressions and arithmetic, but not assignment or nested for loops.
 fn for_loop_header_expr<'t, I>() -> impl Parser<'t, I, Expr, ParserError<'t>> + Clone
 where
-    I: ValueInput<'t, Token = Token, Span = SimpleSpan>,
+    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
     use Token::*;
     use chumsky::pratt::{infix, left};
@@ -77,7 +77,7 @@ where
 
 pub fn expression<'t, I>() -> impl Parser<'t, I, Expr, ParserError<'t>> + Clone
 where
-    I: ValueInput<'t, Token = Token, Span = SimpleSpan>,
+    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
     recursive(|expr| {
         use Token::*;
@@ -161,7 +161,7 @@ fn expression_atom_inner<'t, I>(
     expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
 ) -> impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't
 where
-    I: ValueInput<'t, Token = Token, Span = SimpleSpan>,
+    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
     choice((
         literal().boxed().map(Expr::Lit),

@@ -43,9 +43,9 @@ pub fn tag_value<'t, I>(
     params: impl Parser<'t, I, Parameters, ParserError<'t>> + Clone + 't,
 ) -> impl Parser<'t, I, Bind, ParserError<'t>> + Clone
 where
-    I: ValueInput<'t, Token = Token, Span = SimpleSpan>,
+    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
-    let tag_name = select! { Token::Tag(name) => TagName(name) };
+    let tag_name = select! { Token::Tag(name) => TagName(IStr::new(name.to_string())) };
 
     let lhs = tag_name
         .then(params.clone().or_not())

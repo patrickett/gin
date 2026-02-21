@@ -1,6 +1,5 @@
+use crate::frontend::lexer::Token;
 use lsp_types::SemanticTokenType;
-
-use crate::frontend::Token;
 
 // PERF: Consider caching semantic token type results for repeated tokens
 pub trait HasSemanticTokenType {
@@ -8,7 +7,7 @@ pub trait HasSemanticTokenType {
     fn semantic_token_type_index(&self) -> Option<usize>;
 }
 
-impl HasSemanticTokenType for Token {
+impl<'src> HasSemanticTokenType for Token<'src> {
     fn semantic_token_type(&self) -> SemanticTokenType {
         use Token::*;
 

@@ -36,11 +36,11 @@ pub fn def_value<'t, I>(
     params: impl Parser<'t, I, Parameters, ParserError<'t>> + Clone + 't,
 ) -> impl Parser<'t, I, Bind, ParserError<'t>> + Clone
 where
-    I: ValueInput<'t, Token = Token, Span = SimpleSpan>,
+    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
     use Token::*;
 
-    let lhs = select! { Token::Id(name) => DefName(name) }
+    let lhs = select! { Token::Id(name) => DefName(IStr::new(name.to_string())) }
         .then(params.or_not())
         .then(tag(expr.clone()).or_not())
         .then_ignore(just(Token::Colon));

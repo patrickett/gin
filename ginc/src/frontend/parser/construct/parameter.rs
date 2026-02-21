@@ -25,9 +25,9 @@ pub fn parameter<'t, I>(
     tag: impl Parser<'t, I, Tag, ParserError<'t>> + Clone + 't,
 ) -> impl Parser<'t, I, (ParamName, ParameterKind), ParserError<'t>> + Clone
 where
-    I: ValueInput<'t, Token = Token, Span = SimpleSpan>,
+    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
-    let id = select! { Token::Id(name) => name };
+    let id = select! { Token::Id(name) => IStr::new(name.to_string()) };
 
     // Parse parameter with explicit handling of Tag tokens vs generic identifiers
     let param_info = choice((
@@ -61,7 +61,7 @@ pub fn params<'t, I>(
     tag: impl Parser<'t, I, Tag, ParserError<'t>> + Clone + 't,
 ) -> impl Parser<'t, I, Parameters, ParserError<'t>> + Clone
 where
-    I: ValueInput<'t, Token = Token, Span = SimpleSpan>,
+    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
     parameter(expr.clone(), tag.clone())
         .separated_by(just(Token::Comma))

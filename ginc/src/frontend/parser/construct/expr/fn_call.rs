@@ -6,11 +6,11 @@ pub struct FnCall {
     pub args: Option<Vec<Expr>>,
 }
 
-pub fn fn_call<'tokens, I>(
-    expr: impl Parser<'tokens, I, Expr, ParserError<'tokens>> + Clone + 'tokens,
-) -> impl Parser<'tokens, I, Expr, ParserError<'tokens>>
+pub fn fn_call<'t, I>(
+    expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
+) -> impl Parser<'t, I, Expr, ParserError<'t>>
 where
-    I: ValueInput<'tokens, Token = Token, Span = SimpleSpan>,
+    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
     use Token::*;
 

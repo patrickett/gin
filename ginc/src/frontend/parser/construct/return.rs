@@ -8,7 +8,7 @@ pub fn r#return<'t, I>(
     expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
 ) -> impl Parser<'t, I, Return, ParserError<'t>> + Clone
 where
-    I: ValueInput<'t, Token = Token, Span = SimpleSpan>,
+    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
     // try bare return first so it doesn't consume trailing newlines
     let bare = just(Token::Return)

@@ -3,7 +3,7 @@ use crate::frontend::prelude::*;
 pub fn range<'t, I>(
 ) -> impl Parser<'t, I, std::ops::Range<i64>, ParserError<'t>> + Clone
 where
-    I: ValueInput<'t, Token = Token, Span = SimpleSpan>,
+    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
     let int = select! { Token::Int(int) => int };
 

@@ -10,9 +10,9 @@ pub enum Pattern {
 pub fn pattern<'t, I>(
 ) -> impl Parser<'t, I, Pattern, ParserError<'t>> + Clone
 where
-    I: ValueInput<'t, Token = Token, Span = SimpleSpan>,
+    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
-    let id = select! { Token::Id(s) => s }.map(Pattern::Ident);
+    let id = select! { Token::Id(s) => Pattern::Ident(IStr::new(s.to_string())) };
     let tuple = id
         .repeated()
         .collect::<Vec<_>>()

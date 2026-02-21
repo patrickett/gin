@@ -38,7 +38,7 @@ pub enum BinOp {
 
 pub fn binary_expr<'t, I, P>(expr: P) -> impl Parser<'t, I, Binary, ParserError<'t>>
 where
-    I: ValueInput<'t, Token = Token, Span = SimpleSpan>,
+    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
     P: Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
 {
     use Token::*;

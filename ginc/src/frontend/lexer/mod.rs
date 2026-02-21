@@ -6,90 +6,17 @@
 
 mod semantic_token_type;
 mod token;
-pub mod tokenize;
 
 use chumsky::span::SimpleSpan;
 use logos::{Lexer, Logos};
 
 pub use semantic_token_type::*;
-pub use token::*;
+pub use token::{handle_newline, InternedToken, LexContext, Token, MAX_INDENT_DEPTH};
 
-pub const MAX_INDENT_DEPTH: usize = 16;
-
-/// Indent and Dedent are mutually exclusive branches per newline.
-/// We can exploit this by using `pending_indent` and `pending_dedents`
-#[derive(Debug)]
-pub struct LexContext {
-    indent_stack: [u16; MAX_INDENT_DEPTH],
-    indent_depth: u8,
-    /// Dedent tokens still to be emitted, decremented one per call.
-    pending_dedents: u8,
-    /// Whether a single Indent token is waiting to be emitted.
-    pending_indent: bool,
-}
-
-impl Default for LexContext {
-    fn default() -> Self {
-        Self {
-            indent_stack: [0u16; MAX_INDENT_DEPTH],
-            indent_depth: 1,
-            pending_dedents: 0,
-            pending_indent: false,
-        }
-    }
-}
-
-#[inline]
-fn handle_newline<'src>(lex: &mut Lexer<'src, Token>) -> Token {
-    // `bytes` and `indent` are tracked separately so that a tab (1 byte, 4 columns)
-    // does not cause `lex.bump` to skip real source characters.
-
-    let remainder = lex.remainder().as_bytes();
-    let mut indent = 0u16;
-    let mut bytes = 0usize;
-    for &b in remainder {
-        match b {
-            b' ' => {
-                indent += 1;
-                bytes += 1;
-            }
-            b'\t' => {
-                indent += 4;
-                bytes += 1;
-            }
-            _ => break,
-        }
-    }
-    lex.bump(bytes);
-
-    let extras = &mut lex.extras;
-    let depth = extras.indent_depth as usize;
-    let current = extras.indent_stack[depth - 1];
-
-    if indent > current {
-        if depth < MAX_INDENT_DEPTH {
-            extras.indent_stack[depth] = indent;
-            extras.indent_depth += 1;
-            extras.pending_indent = true;
-        }
-        // Silently cap at MAX_INDENT_DEPTH; parser continues at the deepest
-        // valid level. Callers that need to detect overflow can inspect the
-        // token stream for unexpected structure.
-    } else if indent < current {
-        // Walk the stack with a local, write indent_depth once at the end.
-        let mut d = depth;
-        while extras.indent_stack[d - 1] > indent {
-            d -= 1;
-        }
-        extras.pending_dedents = (depth - d) as u8;
-        extras.indent_depth = d as u8;
-    }
-
-    Token::Newline
-}
-
+/// Zero-allocation lexer that yields [`Token`]s with `&str` slices into source.
+/// Comments are filtered during iteration.
 pub struct GinLexer<'src> {
-    pub inner: Lexer<'src, Token>,
+    pub inner: Lexer<'src, Token<'src>>,
 }
 
 impl<'src> GinLexer<'src> {
@@ -100,13 +27,13 @@ impl<'src> GinLexer<'src> {
     }
 
     #[inline(always)]
-    fn next_with_indent(&mut self) -> Option<(Token, SimpleSpan)> {
+    fn next_with_indent(&mut self) -> Option<(Token<'src>, SimpleSpan)> {
         // Pending synthetic tokens are rare; the CPU branch predictor handles these
         // well after the first few tokens of any real file.
         if self.inner.extras.pending_dedents > 0 {
             self.inner.extras.pending_dedents -= 1;
             let span: SimpleSpan = self.inner.span().into();
-            return Some((Token::Dedent, span));
+            return Some((Token::Indent, span));
         }
         if self.inner.extras.pending_indent {
             self.inner.extras.pending_indent = false;
@@ -139,12 +66,8 @@ impl<'src> GinLexer<'src> {
             }
         }
     }
-}
 
-impl<'src> Iterator for GinLexer<'src> {
-    type Item = (Token, SimpleSpan);
-
-    fn next(&mut self) -> Option<Self::Item> {
+    fn next_raw(&mut self) -> Option<(Token<'src>, SimpleSpan)> {
         if let Some(item) = self.next_with_indent() {
             return Some(item);
         }
@@ -157,6 +80,19 @@ impl<'src> Iterator for GinLexer<'src> {
             self.next_with_indent()
         } else {
             None
+        }
+    }
+}
+
+impl<'src> Iterator for GinLexer<'src> {
+    type Item = (Token<'src>, SimpleSpan);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let item = self.next_raw()?;
+            if !matches!(item.0, Token::Comment(_) | Token::DocComment(_)) {
+                return Some(item);
+            }
         }
     }
 

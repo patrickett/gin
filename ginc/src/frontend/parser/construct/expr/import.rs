@@ -57,25 +57,24 @@ impl ModuleImport {
 // Use expressions should be at the top of any module.
 pub fn import<'t, I>() -> impl Parser<'t, I, Import, ParserError<'t>>
 where
-    I: ValueInput<'t, Token = Token, Span = SimpleSpan>,
+    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
-    use Token::*;
-    let id = select! { Token::Id(name) => name };
+    let id = select! { Token::Id(name) => IStr::new(name.to_string()) };
 
     let source = choice((
-        select! { Token::String(s) => ImportSource::Local(PathBuf::from(&**s)) },
+        select! { Token::String(s) => ImportSource::Local(PathBuf::from(s)) },
         path().map(ImportSource::Package),
     ));
 
-    just(Use)
+    just(Token::Use)
         .ignore_then(
             source
-                .then(just(As).ignore_then(id).or_not())
-                .separated_by(just(Comma))
+                .then(just(Token::As).ignore_then(id).or_not())
+                .separated_by(just(Token::Comma))
                 .collect::<Vec<_>>()
-                .then_ignore(just(Newline).or_not()),
+                .then_ignore(just(Token::Newline).or_not()),
         )
-        .map(|items| {
+        .map(|items: Vec<_>| {
             Import(
                 items
                     .into_iter()

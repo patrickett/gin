@@ -1,13 +1,13 @@
 use crate::frontend::prelude::*;
 use chumsky::{input::ValueInput, prelude::*, Parser};
 
-pub fn block<'tokens, I, Header, Closer, Body>(
-    header: impl Parser<'tokens, I, Header, ParserError<'tokens>> + Clone,
-    body_expr: impl Parser<'tokens, I, Body, ParserError<'tokens>> + Clone,
-    closer: impl Parser<'tokens, I, Closer, ParserError<'tokens>> + Clone,
-) -> impl Parser<'tokens, I, (Header, Vec<Body>, Closer), ParserError<'tokens>> + Clone
+pub fn block<'t, I, Header, Closer, Body>(
+    header: impl Parser<'t, I, Header, ParserError<'t>> + Clone,
+    body_expr: impl Parser<'t, I, Body, ParserError<'t>> + Clone,
+    closer: impl Parser<'t, I, Closer, ParserError<'t>> + Clone,
+) -> impl Parser<'t, I, (Header, Vec<Body>, Closer), ParserError<'t>> + Clone
 where
-    I: ValueInput<'tokens, Token = Token, Span = SimpleSpan>,
+    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
     header
         .then(just(Token::Newline).repeated())
