@@ -48,8 +48,7 @@ where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
     let valid = select! {
-        Token::Nothing => Literal::Nothing,
-        Token::Ellipsis => Literal::Ellipsis,
+        Token::Infer => Literal::Ellipsis,
         Token::Int(n) => Literal::Int(n),
         Token::Float(f) => Literal::Float(f),
         Token::String(s) => Literal::String(s.to_string()),

@@ -15,21 +15,73 @@ where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
     use Token::*;
+    let item_parser = item();
+
     import()
-        .padded_by(comments().or_not())
         .separated_by(just(Newline))
         .collect::<Vec<_>>()
+        .then(item_parser.clone().repeated().collect::<Vec<Item>>())
         .then(
-            item()
-                .padded_by(comments().or_not())
-                .repeated()
-                .collect::<(TagMap, DefMap)>(),
+            just(Private)
+                .padded_by(just(Newline).repeated())
+                .ignore_then(item_parser.repeated().collect::<Vec<Item>>())
+                .or_not(),
         )
-        .map(|(imports, (tags, defs))| FileAst {
-            uses: imports,
-            tags,
-            defs,
+        .map(|((imports, public_items), private_items)| {
+            let mut tags = TagMap::new();
+            let mut defs = DefMap::new();
+            let mut private_defs = std::collections::HashSet::new();
+            let mut private_tags = std::collections::HashSet::new();
+
+            for item in public_items {
+                collect_item(item, &mut tags, &mut defs);
+            }
+
+            if let Some(priv_items) = private_items {
+                for item in priv_items {
+                    match &item.value {
+                        ItemValue::TagValue(name, _) => {
+                            private_tags.insert(name.clone());
+                        }
+                        ItemValue::DefValue(name, _) => {
+                            private_defs.insert(name.clone());
+                        }
+                    }
+                    collect_item(item, &mut tags, &mut defs);
+                }
+            }
+
+            FileAst {
+                uses: imports,
+                tags,
+                defs,
+                private_defs,
+                private_tags,
+            }
         })
+}
+
+fn collect_item(item: Item, tags: &mut TagMap, defs: &mut DefMap) {
+    match item.value {
+        ItemValue::TagValue(name, bind) => {
+            tags.insert(
+                name,
+                Documented {
+                    item: bind,
+                    doc: item.doc_comment,
+                },
+            );
+        }
+        ItemValue::DefValue(name, bind) => {
+            defs.insert(
+                name,
+                Documented {
+                    item: bind,
+                    doc: item.doc_comment,
+                },
+            );
+        }
+    }
 }
 
 impl FromIterator<Item> for (TagMap, DefMap) {

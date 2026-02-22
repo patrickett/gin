@@ -49,8 +49,7 @@ where
 
     let lhs = tag_name
         .then(params.clone().or_not())
-        // TODO: maybe we replace Token::Is with `=`
-        .then_ignore(choice((just(Token::Is), just(Token::IsReplacedBy))));
+        .then_ignore(just(Token::Has));
 
     // RHS: either a union of tags or a record
     let rhs = choice((

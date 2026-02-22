@@ -64,6 +64,7 @@ pub fn handle_newline<'src>(lex: &mut Lexer<'src, Token<'src>>) -> Token<'src> {
         // Silently cap at MAX_INDENT_DEPTH; parser continues at the deepest
         // valid level. Callers that need to detect overflow can inspect the
         // token stream for unexpected structure.
+        // TODO: lex error when max depth
     } else if indent < current {
         // Walk the stack with a local, write indent_depth once at the end.
         let mut d = depth;
@@ -88,14 +89,6 @@ pub enum Token<'src> {
     Return,
     #[token("break")]
     Break,
-    #[token("Nothing")]
-    Nothing,
-    #[token("alias")]
-    Alias,
-    #[token("macro")]
-    Macro,
-    #[token("needs")]
-    Needs,
     #[token("loop")]
     Loop,
     #[token("then")]
@@ -104,10 +97,6 @@ pub enum Token<'src> {
     When,
     #[token("else")]
     Else,
-    #[token("does")]
-    Does,
-    #[token("from")]
-    From,
     #[token("self")]
     SelfInstance,
     #[token("Self")]
@@ -120,8 +109,8 @@ pub enum Token<'src> {
     Has,
     #[token("and")]
     And,
-    #[token("where")]
-    Where,
+    #[token("...")]
+    Infer,
     #[token("as")]
     As,
     #[token("if")]
@@ -135,9 +124,9 @@ pub enum Token<'src> {
     #[token("or")]
     Or,
     // String-bearing variants: logos uses lex.slice() by default for &'src str
-    #[regex(r"\p{Lu}[\p{L}]*")]
+    #[regex(r"[A-Z][a-zA-Z]*")]
     Tag(&'src str),
-    #[regex(r"_?\p{Ll}+(?:_\p{Ll}+)*")]
+    #[regex(r"_?[a-z]+(?:_[a-z]+)*")]
     Id(&'src str),
     #[regex(r"[0-9]+\.[0-9]+", |lex| lex.slice().parse::<f64>().unwrap())]
     Float(f64),
@@ -156,17 +145,10 @@ pub enum Token<'src> {
     DocComment(&'src str),
     #[regex(r"--[^\n]*")]
     Comment(&'src str),
-    #[token("...")]
-    Ellipsis,
-    #[token("::=")]
-    IsReplacedBy,
-    #[token("|-")]
-    /// https://en.wikipedia.org/wiki/Turnstile_(symbol)
-    Turnstile,
     // Operators (longest first)
     #[token("==")]
     EqEq,
-    #[token("!=")]
+    #[token("/=")]
     NotEqual,
     #[token("<=")]
     LessEq,
@@ -192,15 +174,10 @@ pub enum Token<'src> {
     SlashOr,
     #[token("/")]
     Slash,
-    #[token("|")]
-    Bar,
     #[token("^")]
     Caret,
     #[token("~")]
     Tilde,
-    // Punctuation
-    #[token("..")]
-    DotDot,
     #[token(".")]
     Dot,
     #[token("@")]
@@ -227,14 +204,13 @@ pub enum Token<'src> {
     Ampersand,
     #[token(",")]
     Comma,
-
-    // Newline triggers indentation logic
     #[regex(r"\n", handle_newline)]
     Newline,
 
     Indent,
     Dedent,
 
+    // TODO: add an error token for unsupported non-ASCII characters outside strings
     #[regex(r"[ \t]+", logos::skip)]
     Whitespace,
 }

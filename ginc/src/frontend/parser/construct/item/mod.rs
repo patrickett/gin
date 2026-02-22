@@ -28,9 +28,7 @@ where
     doc_comment()
         .or_not()
         .then(
-            bind(expr)
-                .padded_by(just(Token::Newline).repeated()) // ignore newlines around everything
-                .padded_by(comments()),
+            bind(expr).padded_by(just(Token::Newline).repeated()), // ignore newlines around everything
         )
         .map(|(doc_comment, bind)| {
             let doc_comment = doc_comment.and_then(|d| if d.0.is_empty() { None } else { Some(d) });

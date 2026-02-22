@@ -171,15 +171,29 @@ impl SymbolTable {
 
     /// Create a symbol table from a single file's AST.
     pub fn from_file(file: &FileAst, source_path: PathBuf) -> Self {
+        Self::from_file_filtered(file, source_path, false)
+    }
+
+    pub fn from_file_public(file: &FileAst, source_path: PathBuf) -> Self {
+        Self::from_file_filtered(file, source_path, true)
+    }
+
+    fn from_file_filtered(file: &FileAst, source_path: PathBuf, public_only: bool) -> Self {
         let mut table = Self::new();
 
         // Add all tag definitions
         for tag_name in file.tags.keys() {
+            if public_only && file.private_tags.contains(tag_name) {
+                continue;
+            }
             table.insert(Symbol::tag(tag_name.clone(), source_path.to_path_buf()));
         }
 
         // Add all definitions (functions and binds)
         for (def_name, documented) in &file.defs {
+            if public_only && file.private_defs.contains(def_name) {
+                continue;
+            }
             let source_path = source_path.clone();
             let symbol = if documented.item.0.is_some() {
                 // Has parameters - it's a function
@@ -220,16 +234,22 @@ impl Container<Item> for (TagMap, DefMap) {
 #[derive(Debug, Clone, Default)]
 /// Output of parsing a gin file
 pub struct FileAst {
-    pub uses: Vec<Import>, // import specifiers
+    pub uses: Vec<Import>,
+    // TODO: items (TagMap, DefMap)
     pub tags: TagMap,
     pub defs: DefMap,
-    // TODO: pub items: Items
-    // where Items is {tags, defs}
+    // TODO: private_items (TagMap, DefMap)
+    pub private_defs: HashSet<DefName>,
+    pub private_tags: HashSet<TagName>,
 }
 
 impl PartialEq for FileAst {
     fn eq(&self, other: &Self) -> bool {
-        self.uses == other.uses && self.tags == other.tags && self.defs == other.defs
+        self.uses == other.uses
+            && self.tags == other.tags
+            && self.defs == other.defs
+            && self.private_defs == other.private_defs
+            && self.private_tags == other.private_tags
     }
 }
 
@@ -243,12 +263,14 @@ impl Hash for FileAst {
         for k in tag_keys {
             k.hash(state);
             self.tags[k].hash(state);
+            self.private_tags.contains(k).hash(state);
         }
         let mut def_keys: Vec<_> = self.defs.keys().collect();
         def_keys.sort();
         for k in def_keys {
             k.hash(state);
             self.defs[k].hash(state);
+            self.private_defs.contains(k).hash(state);
         }
     }
 }

@@ -1,13 +1,12 @@
 use crate::frontend::prelude::*;
 
-pub fn range<'t, I>(
-) -> impl Parser<'t, I, std::ops::Range<i64>, ParserError<'t>> + Clone
+pub fn range<'t, I>() -> impl Parser<'t, I, std::ops::Range<i64>, ParserError<'t>> + Clone
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
     let int = select! { Token::Int(int) => int };
 
-    int.then_ignore(just(Token::DotDot))
+    int.then_ignore(just(Token::Infer))
         .then(int)
         .map(|(start, end)| std::ops::Range { start, end })
 }

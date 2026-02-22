@@ -43,7 +43,7 @@ where
     });
 
     // Range operator (precedence 2)
-    let range = infix(left(2), just(DotDot), |lhs: Expr, _, rhs: Expr, _| {
+    let range = infix(left(2), just(Infer), |lhs: Expr, _, rhs: Expr, _| {
         Expr::Binary(Binary {
             lhs: Box::new(lhs),
             op: BinOp::Range,
@@ -71,7 +71,6 @@ where
 
     atom.pratt((range, arithmetic))
         .padded_by(just(Newline).repeated())
-        .padded_by(comments())
 }
 
 pub fn expression<'t, I>() -> impl Parser<'t, I, Expr, ParserError<'t>> + Clone
@@ -102,7 +101,7 @@ where
         });
 
         // Range operator (precedence 2) - higher than comparison, lower than arithmetic
-        let range = infix(left(2), just(DotDot), |lhs: Expr, _, rhs: Expr, _| {
+        let range = infix(left(2), just(Infer), |lhs: Expr, _, rhs: Expr, _| {
             Expr::Binary(Binary {
                 lhs: Box::new(lhs),
                 op: BinOp::Range,
@@ -151,7 +150,6 @@ where
         // Build the Pratt parser
         atom.pratt((assignment, comparison, range, arithmetic))
             .padded_by(just(Newline).repeated()) // ignore newlines around everything
-            .padded_by(comments())
     })
 }
 

@@ -61,7 +61,8 @@ impl<'src> GinLexer<'src> {
         }
     }
 
-    fn next_raw(&mut self) -> Option<(Token<'src>, SimpleSpan)> {
+    /// `next_raw` includes comments
+    pub fn next_raw(&mut self) -> Option<(Token<'src>, SimpleSpan)> {
         if let Some(item) = self.next_with_indent() {
             return Some(item);
         }
