@@ -2,41 +2,29 @@ use ginc::frontend::lexer::{GinLexer, Token};
 
 #[test]
 fn test_keywords() {
-    let src = "def use if else for where as do is in of or and has when then does from loop continue break return private public alias macro needs derives optional required";
+    let src = "use if else for as is in of or and has when then loop continue break return private";
 
     let mut lexer = GinLexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
-    assert!(matches!(tokens[0], Token::Def));
-    assert!(matches!(tokens[1], Token::Use));
-    assert!(matches!(tokens[2], Token::If));
-    assert!(matches!(tokens[3], Token::Else));
-    assert!(matches!(tokens[4], Token::For));
-    assert!(matches!(tokens[5], Token::Where));
-    assert!(matches!(tokens[6], Token::As));
-    assert!(matches!(tokens[7], Token::Do));
-    assert!(matches!(tokens[8], Token::Is));
-    assert!(matches!(tokens[9], Token::In));
-    assert!(matches!(tokens[10], Token::Of));
-    assert!(matches!(tokens[11], Token::Or));
-    assert!(matches!(tokens[12], Token::And));
-    assert!(matches!(tokens[13], Token::Has));
-    assert!(matches!(tokens[14], Token::When));
-    assert!(matches!(tokens[15], Token::Then));
-    assert!(matches!(tokens[16], Token::Does));
-    assert!(matches!(tokens[17], Token::From));
-    assert!(matches!(tokens[18], Token::Loop));
-    assert!(matches!(tokens[19], Token::Continue));
-    assert!(matches!(tokens[20], Token::Break));
-    assert!(matches!(tokens[21], Token::Return));
-    assert!(matches!(tokens[22], Token::Private));
-    assert!(matches!(tokens[23], Token::Public));
-    assert!(matches!(tokens[24], Token::Alias));
-    assert!(matches!(tokens[25], Token::Macro));
-    assert!(matches!(tokens[26], Token::Needs));
-    assert!(matches!(tokens[27], Token::Derives));
-    assert!(matches!(tokens[28], Token::Optional));
-    assert!(matches!(tokens[29], Token::Required));
+    assert!(matches!(tokens[0], Token::Use));
+    assert!(matches!(tokens[1], Token::If));
+    assert!(matches!(tokens[2], Token::Else));
+    assert!(matches!(tokens[3], Token::For));
+    assert!(matches!(tokens[4], Token::As));
+    assert!(matches!(tokens[5], Token::Is));
+    assert!(matches!(tokens[6], Token::In));
+    assert!(matches!(tokens[7], Token::Of));
+    assert!(matches!(tokens[8], Token::Or));
+    assert!(matches!(tokens[9], Token::And));
+    assert!(matches!(tokens[10], Token::Has));
+    assert!(matches!(tokens[11], Token::When));
+    assert!(matches!(tokens[12], Token::Then));
+    assert!(matches!(tokens[13], Token::Loop));
+    assert!(matches!(tokens[14], Token::Continue));
+    assert!(matches!(tokens[15], Token::Break));
+    assert!(matches!(tokens[16], Token::Return));
+    assert!(matches!(tokens[17], Token::Private));
 }
 
 #[test]
@@ -99,7 +87,7 @@ fn test_numbers() {
 
 #[test]
 fn test_operators() {
-    let src = "== != <= >= = < > + - * / | ^ ~ ::= \\";
+    let src = "== /= <= >= = < > + - * / ^ ~ \\";
 
     let mut lexer = GinLexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
@@ -115,16 +103,14 @@ fn test_operators() {
     assert!(matches!(tokens[8], Token::Minus));
     assert!(matches!(tokens[9], Token::Star));
     assert!(matches!(tokens[10], Token::Slash));
-    assert!(matches!(tokens[11], Token::Bar));
-    assert!(matches!(tokens[12], Token::Caret));
-    assert!(matches!(tokens[13], Token::Tilde));
-    assert!(matches!(tokens[14], Token::IsReplacedBy));
-    assert!(matches!(tokens[15], Token::SlashOr));
+    assert!(matches!(tokens[11], Token::Caret));
+    assert!(matches!(tokens[12], Token::Tilde));
+    assert!(matches!(tokens[13], Token::SlashOr));
 }
 
 #[test]
 fn test_punctuation() {
-    let src = "( ) [ ] { } , . : ; .. ...";
+    let src = "( ) [ ] { } , . : ; ...";
 
     let mut lexer = GinLexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
@@ -139,8 +125,7 @@ fn test_punctuation() {
     assert!(matches!(tokens[7], Token::Dot));
     assert!(matches!(tokens[8], Token::Colon));
     assert!(matches!(tokens[9], Token::ColonSemi));
-    assert!(matches!(tokens[10], Token::DotDot));
-    assert!(matches!(tokens[11], Token::Ellipsis));
+    assert!(matches!(tokens[10], Token::Infer));
 }
 
 #[test]
@@ -156,17 +141,14 @@ fn test_comments() {
 
 #[test]
 fn test_indentation() {
-    let src = "def foo():\n    bar\n  baz";
+    let src = "foo:\n    bar\n  baz";
 
     let mut lexer = GinLexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
-    // Should have: def, foo, (, ), :, newline, indent, bar, newline, dedent, baz
-    assert!(matches!(tokens[0], Token::Def));
-    assert!(matches!(tokens[1], Token::Id(_)));
-    assert!(matches!(tokens[2], Token::ParenOpen));
-    assert!(matches!(tokens[3], Token::ParenClose));
-    assert!(matches!(tokens[4], Token::Colon));
+    // Should have: foo, does, :, newline, indent, bar, newline, dedent, baz
+    assert!(matches!(tokens[0], Token::Id(_)));
+    assert!(matches!(tokens[1], Token::Colon));
 
     // After newline should come indent
     let mut found_indent = false;
@@ -181,16 +163,15 @@ fn test_indentation() {
 
 #[test]
 fn test_play() {
-    let src = "--- Currently just a marker trait\nSized does ()";
+    let src = "--- Currently just a marker trait\nSized ()";
 
     let mut lexer = GinLexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
     assert!(matches!(tokens[0], Token::Newline));
     assert!(matches!(tokens[1], Token::Tag(_)));
-    assert!(matches!(tokens[2], Token::Does));
-    assert!(matches!(tokens[3], Token::ParenOpen));
-    assert!(matches!(tokens[4], Token::ParenClose));
+    assert!(matches!(tokens[2], Token::ParenOpen));
+    assert!(matches!(tokens[3], Token::ParenClose));
 }
 
 #[test]
@@ -333,61 +314,33 @@ fn test_unicode_comments() {
 }
 
 #[test]
-fn test_unicode_tags() {
-    // Tags starting with a non-ASCII uppercase letter (\p{Lu})
+fn test_unicode_tags_rejected() {
+    // Non-ASCII uppercase letters are no longer valid tag starts (ASCII only)
     let src = "Ångström Élève";
 
     let mut lexer = GinLexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
-    assert!(matches!(tokens[0], Token::Tag(_)));
-    assert_eq!(
-        if let Token::Tag(s) = &tokens[0] {
-            *s
-        } else {
-            ""
-        },
-        "Ångström"
-    );
-
-    assert!(matches!(tokens[1], Token::Tag(_)));
-    assert_eq!(
-        if let Token::Tag(s) = &tokens[1] {
-            *s
-        } else {
-            ""
-        },
-        "Élève"
-    );
+    // Neither should be recognized as tags — only ASCII [A-Z] starts a tag
+    assert!(tokens.iter().all(|t| !matches!(t, Token::Tag(_))));
 }
 
 #[test]
-fn test_unicode_identifiers() {
-    // Identifiers consisting entirely of Unicode lowercase letters (\p{Ll})
+fn test_unicode_identifiers_rejected() {
+    // Non-ASCII lowercase letters are no longer valid identifiers (ASCII only)
     let src = "café αλφα";
 
     let mut lexer = GinLexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
-    assert!(matches!(tokens[0], Token::Id(_)));
-    assert_eq!(
-        if let Token::Id(s) = &tokens[0] {
-            *s
+    // "caf" is a valid ASCII id, but "é" breaks it; "αλφα" is not recognized at all
+    assert!(tokens.iter().all(|t| {
+        if let Token::Id(s) = t {
+            s.is_ascii()
         } else {
-            ""
-        },
-        "café"
-    );
-
-    assert!(matches!(tokens[1], Token::Id(_)));
-    assert_eq!(
-        if let Token::Id(s) = &tokens[1] {
-            *s
-        } else {
-            ""
-        },
-        "αλφα"
-    );
+            true
+        }
+    }));
 }
 
 #[test]

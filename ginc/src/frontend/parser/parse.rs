@@ -104,19 +104,9 @@ fn parse_ast_internal(db: &dyn Db, file: File) -> ParseResult {
         .filter(|(t, _)| !matches!(t, Token::Comment(_)))
         .collect();
 
-    // Collect unterminated string spans — highlight the full token
-    let unterminated_strings: Vec<_> = tokens
-        .iter()
-        .filter(|(t, _)| matches!(t, Token::UnterminatedString(_)))
-        .map(|(_, s)| *s)
-        .collect();
-
-    // Store the real spans from logos before we lose them
-    let real_spans: Vec<_> = tokens.iter().map(|(_, s)| *s).collect();
-
     // Convert to chumsky stream - extract just the token
     // Chumsky will create synthetic spans based on token index (0, 1, 2, ...)
-    let token_stream = Stream::from_iter(tokens.into_iter().map(|(t, _s)| t));
+    let token_stream = Stream::from_iter(tokens.iter().map(|(t, _s)| *t));
 
     // Use existing parser
     let parser = token_parser();

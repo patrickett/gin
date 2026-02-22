@@ -1,4 +1,4 @@
-mod expr;
+pub mod expr;
 pub use expr::*;
 mod item;
 pub use item::*;
@@ -6,8 +6,6 @@ mod ast;
 pub use ast::*;
 
 // sub constructs that are nothing by themself
-mod range;
-pub use range::*;
 mod parameter;
 pub use parameter::*;
 mod path;

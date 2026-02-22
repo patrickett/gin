@@ -6,16 +6,12 @@ pub struct TagName(pub IStr);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TagValue {
-    // Tag2 ::= Tag1
-    // PossibleTags ::= Tag1 | Tag2
     Alias(Tag),
-    // Person ::= (name String, age Number)
     Record(Parameters),
-    // Record(std::iter::Map<&'src str, Box<TagValue<'src>>>),
-    // PersonSet ::= { p : Person }
     Set(/* TODO */),
-    // Degree ::= 0..360
     Range(std::ops::Range<i64>),
+    // DiceThrow is in 1...6 (element of range)
+    InRange(std::ops::Range<i64>),
 }
 
 impl Hash for TagValue {
@@ -30,7 +26,7 @@ impl Hash for TagValue {
                 }
             }
             Self::Set() => {}
-            Self::Range(r) => {
+            Self::Range(r) | Self::InRange(r) => {
                 r.start.hash(state);
                 r.end.hash(state);
             }
@@ -47,17 +43,25 @@ where
 {
     let tag_name = select! { Token::Tag(name) => TagName(IStr::new(name.to_string())) };
 
-    let lhs = tag_name
+    let lhs_has = tag_name
         .then(params.clone().or_not())
         .then_ignore(just(Token::Has));
 
-    // RHS: either a union of tags or a record
-    let rhs = choice((
+    let lhs_is = tag_name
+        .then(params.clone().or_not())
+        .then_ignore(just(Token::Is));
+
+    let rhs_record = choice((
         tag(expr.clone()).map(TagValue::Alias),
         params.map(TagValue::Record),
-        range().map(TagValue::Range),
     ));
 
-    lhs.then(rhs)
+    let rhs_union_or_range = choice((
+        just(Token::In).ignore_then(range()).map(TagValue::InRange),
+        range().map(TagValue::Range),
+        tag(expr.clone()).map(TagValue::Alias),
+    ));
+
+    choice((lhs_has.then(rhs_record), lhs_is.then(rhs_union_or_range)))
         .map(|((tag_name, params), value)| Bind::Tag(tag_name, Params(params, value)))
 }

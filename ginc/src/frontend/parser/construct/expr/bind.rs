@@ -24,11 +24,6 @@ impl<Value: PartialEq + Eq + Hash> Hash for Params<Value> {
     }
 }
 
-// TODO:
-// Ellipsis
-// >>> ... : 'something'
-// # SyntaxError: cannot assign to literal '...' (Ellipsis)
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Bind {
     Tag(TagName, Params<TagValue>),

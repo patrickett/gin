@@ -7,8 +7,7 @@ pub enum Pattern {
     // etc.
 }
 
-pub fn pattern<'t, I>(
-) -> impl Parser<'t, I, Pattern, ParserError<'t>> + Clone
+pub fn pattern<'t, I>() -> impl Parser<'t, I, Pattern, ParserError<'t>> + Clone
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {

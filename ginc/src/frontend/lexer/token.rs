@@ -149,7 +149,7 @@ pub enum Token<'src> {
     #[token("==")]
     EqEq,
     #[token("/=")]
-    NotEqual,
+    NotEq,
     #[token("<=")]
     LessEq,
     #[token("<-")]
@@ -159,7 +159,7 @@ pub enum Token<'src> {
     #[token(">=")]
     GreaterEq,
     #[token("=")]
-    Equals,
+    Eq,
     #[token("<")]
     Less,
     #[token(">")]

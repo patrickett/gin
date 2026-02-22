@@ -29,7 +29,7 @@ impl<'src> GinLexer<'src> {
         if self.inner.extras.pending_dedents > 0 {
             self.inner.extras.pending_dedents -= 1;
             let span: SimpleSpan = self.inner.span().into();
-            return Some((Token::Indent, span));
+            return Some((Token::Dedent, span));
         }
         if self.inner.extras.pending_indent {
             self.inner.extras.pending_indent = false;

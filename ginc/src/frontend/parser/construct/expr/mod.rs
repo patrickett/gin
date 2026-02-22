@@ -2,9 +2,9 @@ use crate::frontend::prelude::*;
 
 mod bind;
 pub use bind::*;
-mod control_flow;
-pub use control_flow::*;
-mod literal;
+pub mod format_string;
+pub use format_string::*;
+pub mod literal;
 pub use literal::*;
 mod import;
 pub use import::*;
@@ -12,15 +12,22 @@ mod fn_call;
 pub use fn_call::*;
 mod binary;
 pub use binary::*;
-mod for_loop;
-pub use for_loop::*;
+pub mod r#loop;
+pub use r#loop::{Loop as LoopEnum, *};
+pub mod r#if;
+pub use r#if::*;
+pub mod range;
+pub use range::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Expr {
-    CtrlFlow(ControlFlow),
+    Loop(Loop),
+    If(IfExpr),
     Binary(Binary),
     FnCall(FnCall),
     Lit(Literal),
+    FormatString(FormatString),
+    Range(Range),
     Bind(Bind),
     Nothing,
 }
@@ -38,16 +45,14 @@ where
         choice((
             literal().boxed().map(Expr::Lit),
             fn_call(expr.clone()).boxed(),
-            bind(expr.clone()).map(Expr::Bind),
         ))
     });
 
     // Range operator (precedence 2)
     let range = infix(left(2), just(Infer), |lhs: Expr, _, rhs: Expr, _| {
-        Expr::Binary(Binary {
-            lhs: Box::new(lhs),
-            op: BinOp::Range,
-            rhs: Box::new(rhs),
+        Expr::Range(Range {
+            start: Box::new(lhs),
+            end: Box::new(rhs),
         })
     });
 
@@ -83,43 +88,18 @@ where
 
         let atom = choice((
             literal().boxed().map(Expr::Lit),
-            fn_call(expression_atom_inner(expr.clone())).boxed(),
+            format_string().boxed().map(Expr::FormatString),
             bind(expression_atom_inner(expr.clone())).map(Expr::Bind),
+            fn_call(expression_atom_inner(expr.clone())).boxed(),
             for_in_loop(for_loop_header_expr(), expr.clone())
                 .boxed()
-                .map(ControlFlow::ForIn)
-                .map(Expr::CtrlFlow),
+                .map(|for_loop| Expr::Loop(LoopEnum::ForIn(for_loop))),
         ));
-
-        // Assignment has lowest precedence (1) - uses Colon token
-        let assignment = infix(left(1), just(Colon), |lhs: Expr, _, rhs: Expr, _| {
-            Expr::Binary(Binary {
-                lhs: Box::new(lhs),
-                op: BinOp::Assign,
-                rhs: Box::new(rhs),
-            })
-        });
-
-        // Range operator (precedence 2) - higher than comparison, lower than arithmetic
-        let range = infix(left(2), just(Infer), |lhs: Expr, _, rhs: Expr, _| {
-            Expr::Binary(Binary {
-                lhs: Box::new(lhs),
-                op: BinOp::Range,
-                rhs: Box::new(rhs),
-            })
-        });
 
         // Comparison operators (precedence 3)
         let comparison = infix(
             left(3),
-            select! {
-                Equals => BinOp::Equal,
-                NotEqual => BinOp::NotEqual,
-                Less => BinOp::LessThan,
-                Greater => BinOp::GreaterThan,
-                LessEq => BinOp::LessThanOrEqual,
-                GreaterEq => BinOp::GreaterThanOrEqual,
-            },
+            comparison_op(),
             |lhs: Expr, op: BinOp, rhs: Expr, _| {
                 Expr::Binary(Binary {
                     lhs: Box::new(lhs),
@@ -132,12 +112,7 @@ where
         // Arithmetic operators (precedence 4)
         let arithmetic = infix(
             left(4),
-            select! {
-                Plus => BinOp::Add,
-                Minus => BinOp::Subtract,
-                Star => BinOp::Multiply,
-                Slash => BinOp::Divide,
-            },
+            arithmetic_op(),
             |lhs: Expr, op: BinOp, rhs: Expr, _| {
                 Expr::Binary(Binary {
                     lhs: Box::new(lhs),
@@ -148,7 +123,7 @@ where
         );
 
         // Build the Pratt parser
-        atom.pratt((assignment, comparison, range, arithmetic))
+        atom.pratt((comparison, arithmetic))
             .padded_by(just(Newline).repeated()) // ignore newlines around everything
     })
 }
@@ -162,6 +137,7 @@ where
 {
     choice((
         literal().boxed().map(Expr::Lit),
+        format_string().boxed().map(Expr::FormatString),
         fn_call(expr.clone()).boxed(),
         bind(expr.clone()).map(Expr::Bind),
         // Note: for loops are NOT included in expression_atom to avoid infinite recursion

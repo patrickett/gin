@@ -1,5 +1,5 @@
 use crate::frontend::prelude::*;
-use chumsky::{input::ValueInput, prelude::*, span::SimpleSpan, Parser};
+use chumsky::{Parser, input::ValueInput, prelude::*, span::SimpleSpan};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Comment(pub String);

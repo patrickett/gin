@@ -50,13 +50,15 @@ where
             })
             .boxed();
 
-        // Separator between middle variants: Slashor + optional Newline + optional Indent
-        let middle_sep = just(Token::SlashOr)
+        // Separator between middle variants: SlashOr or Or + optional Newline + optional Indent
+        let sep_token = choice((just(Token::SlashOr), just(Token::Or)));
+
+        let middle_sep = sep_token
             .then_ignore(just(Token::Newline).or_not())
             .then_ignore(just(Token::Indent).or_not());
 
-        // Trailing separator: optional, can be Bar, Newline, or nothing
-        let trailing_sep = choice((just(Token::SlashOr), just(Token::Newline))).or_not();
+        // Trailing separator: optional, can be Bar, Or, Newline, or nothing
+        let trailing_sep = choice((sep_token, just(Token::Newline))).or_not();
 
         // --- parse first variant + repeated remaining variants separated by `sep`
         nominal_or_generic
