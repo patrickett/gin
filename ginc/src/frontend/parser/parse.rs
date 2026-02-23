@@ -106,14 +106,32 @@ fn parse_ast_internal(db: &dyn Db, file: File) -> ParseResult {
 
     // Convert to chumsky stream - extract just the token
     // Chumsky will create synthetic spans based on token index (0, 1, 2, ...)
+    // TODO: fix synthetic spans make them real
     let token_stream = Stream::from_iter(tokens.iter().map(|(t, _s)| *t));
 
-    // Use existing parser
     let parser = token_parser();
     let result = parser.parse(token_stream);
     let (maybe_ast, errors) = result.into_output_errors();
 
     let ast = maybe_ast.unwrap_or_default();
+
+    // early return if no errors
+    // spans are only needed for error reporting, so we can avoid the overhead
+    if errors.is_empty() {
+        return ParseResult {
+            ast,
+            parse_errors: vec![],
+            unterminated_strings: vec![],
+        };
+    }
+
+    let unterminated_strings: Vec<_> = tokens
+        .iter()
+        .filter(|(t, _)| matches!(t, Token::UnterminatedString(_)))
+        .map(|(_, s)| *s)
+        .collect();
+
+    let real_spans: Vec<_> = tokens.iter().map(|(_, s)| *s).collect();
 
     let parse_errors: Vec<(String, SimpleSpan)> = errors
         .iter()
@@ -123,16 +141,6 @@ fn parse_ast_internal(db: &dyn Db, file: File) -> ParseResult {
             (msg, real_span)
         })
         .collect();
-
-    #[cfg(debug_assertions)]
-    eprintln!(
-        "[ginc:parse] done: {:?} ({:.2?}, {} defs, {} tags, {} errors)",
-        file.path(db),
-        parse_start.elapsed(),
-        ast.defs.len(),
-        ast.tags.len(),
-        parse_errors.len(),
-    );
 
     ParseResult {
         ast,
@@ -144,8 +152,8 @@ fn parse_ast_internal(db: &dyn Db, file: File) -> ParseResult {
 /// Tracked function that computes a hash of the AST for change detection.
 #[salsa::tracked]
 pub fn ast_hash<'db>(db: &'db dyn Db, file: File) -> u64 {
-    let parsed = parse_ast_internal(db, file);
-    parsed.ast.compute_content_hash()
+    let ast = parse(db, file);
+    ast.compute_content_hash()
 }
 
 /// Extract imported File inputs from the imports in an AST.
@@ -154,7 +162,7 @@ fn extract_import_files(db: &dyn Db, ast: &FileAst, current_file: File) -> Vec<F
     let current_path = current_file.path(db);
     let current_dir = current_path.parent().unwrap_or(Path::new(""));
 
-    for import in &ast.uses {
+    for import in ast.uses() {
         for module_import in &import.0 {
             match &module_import.source {
                 ImportSource::Package(path) => {
@@ -162,12 +170,14 @@ fn extract_import_files(db: &dyn Db, ast: &FileAst, current_file: File) -> Vec<F
                     match db.input(import_path) {
                         Ok(imported_file) => files.push(imported_file),
                         Err(_) => {
+                            // TODO: pass real import span once imports carry span info
                             io_symptom::resolution_failed(SimpleSpan::from(0..0)).accumulate(db);
                         }
                     }
                 }
                 ImportSource::Local(path) => {
                     let folder = current_dir.join(path);
+                    // TODO: PERF can we mmap files directly instead of individual read_dirs
                     match std::fs::read_dir(&folder) {
                         Ok(entries) => {
                             for entry in entries.flatten() {
@@ -176,6 +186,7 @@ fn extract_import_files(db: &dyn Db, ast: &FileAst, current_file: File) -> Vec<F
                                     match db.input(p) {
                                         Ok(f) => files.push(f),
                                         Err(_) => {
+                                            // TODO: pass real import span once imports carry span info
                                             io_symptom::resolution_failed(SimpleSpan::from(0..0))
                                                 .accumulate(db);
                                         }
@@ -184,6 +195,7 @@ fn extract_import_files(db: &dyn Db, ast: &FileAst, current_file: File) -> Vec<F
                             }
                         }
                         Err(_) => {
+                            // TODO: pass real import span once imports carry span info
                             io_symptom::resolution_failed(SimpleSpan::from(0..0)).accumulate(db);
                         }
                     }

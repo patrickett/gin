@@ -1,12 +1,5 @@
 use crate::frontend::prelude::*;
-use chumsky::{Parser, input::ValueInput, prelude::*, span::SimpleSpan};
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Documented<Item: PartialEq + Eq + std::hash::Hash> {
-    pub doc: Option<DocComment>,
-    /// Should only ever be a Tag or Def
-    pub item: Item,
-}
+use chumsky::{input::ValueInput, prelude::*, span::SimpleSpan, Parser};
 
 // TODO: Implement doc comment lexer and parser support
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

@@ -1,4 +1,4 @@
-use indexmap::IndexMap;
+use std::collections::HashMap;
 
 use crate::frontend::prelude::*;
 
@@ -23,11 +23,11 @@ pub enum ParamInfo {
 pub fn parameter<'t, I>(
     expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
     tag: impl Parser<'t, I, Tag, ParserError<'t>> + Clone + 't,
-) -> impl Parser<'t, I, (ParamName, ParameterKind), ParserError<'t>> + Clone
+) -> impl Parser<'t, I, (IStr, ParameterKind), ParserError<'t>> + Clone
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
-    let id = select! { Token::Id(name) => IStr::new(name.to_string()) };
+    let id = id_token();
 
     // Parse parameter with explicit handling of Tag tokens vs generic identifiers
     let param_info = choice((
@@ -53,8 +53,7 @@ where
     })
 }
 
-pub type ParamName = IStr;
-pub type Parameters = IndexMap<ParamName, ParameterKind>;
+pub type Parameters = HashMap<IStr, ParameterKind>;
 
 pub fn params<'t, I>(
     expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
@@ -63,10 +62,6 @@ pub fn params<'t, I>(
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
-    parameter(expr.clone(), tag.clone())
-        .separated_by(just(Token::Comma))
-        // .allow_trailing()
-        .collect::<Vec<_>>()
-        .delimited_by(just(Token::ParenOpen), just(Token::ParenClose))
+    delimited_list(Token::ParenOpen, parameter(expr, tag), Token::Comma, Token::ParenClose)
         .map(|pairs| pairs.into_iter().collect::<Parameters>())
 }

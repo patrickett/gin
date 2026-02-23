@@ -1,7 +1,4 @@
-// ginc/src/frontend/parser/construct/path.rs
-use crate::frontend::{lexer::Token, parser::ParserError};
-use crate::intern::IStr;
-use chumsky::{input::ValueInput, prelude::*, select, span::SimpleSpan};
+use crate::frontend::prelude::*;
 
 /// A multi‑segment identifier.
 ///
@@ -30,10 +27,9 @@ pub fn path<'t, I>() -> impl Parser<'t, I, ModPath, ParserError<'t>>
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
-    // Intern the &str from lexer into IStr immediately
-    let id = select! { Token::Id(name) => IStr::new(name.to_string()) };
+    let id = id_token();
 
-    id.then(
+    id.clone().then(
         just(Token::Dot)
             .ignore_then(id)
             .repeated()

@@ -17,7 +17,7 @@ fn test_parse_import_debug() {
 
     let ast = parse_str(src);
 
-    assert_eq!(ast.uses.len(), 1);
-    assert_eq!(ast.defs.len(), 0);
-    assert_eq!(ast.tags.len(), 0);
+    assert_eq!(ast.uses().len(), 1);
+    assert_eq!(ast.defs().len(), 0);
+    assert_eq!(ast.tags().len(), 0);
 }

@@ -7,7 +7,6 @@ pub enum Literal {
     Float(f64),
     Int(i64),
     String(String),
-    Ellipsis,
     Nothing,
 }
 
@@ -18,7 +17,6 @@ impl PartialEq for Literal {
             (Self::Number(a), Self::Number(b)) => a == b,
             (Self::Int(a), Self::Int(b)) => a == b,
             (Self::String(a), Self::String(b)) => a == b,
-            (Self::Ellipsis, Self::Ellipsis) => true,
             (Self::Nothing, Self::Nothing) => true,
             _ => false,
         }
@@ -35,7 +33,7 @@ impl Hash for Literal {
             Self::Number(n) => n.hash(state),
             Self::Int(i) => i.hash(state),
             Self::String(s) => s.hash(state),
-            Self::Ellipsis | Self::Nothing => {}
+            Self::Nothing => {}
         }
     }
 }
@@ -45,7 +43,6 @@ where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
     let valid = select! {
-        Token::Infer => Literal::Ellipsis,
         Token::Int(n) => Literal::Int(n),
         Token::Float(f) => Literal::Float(f),
         Token::String(s) => Literal::String(s.to_string()),

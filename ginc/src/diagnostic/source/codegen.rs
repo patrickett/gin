@@ -27,9 +27,7 @@ impl SymptomDetail for CodegenSymptom {
     fn help(&self) -> Option<String> {
         match self {
             CodegenSymptom::Redefinition => Some("symbol is defined multiple times".into()),
-            CodegenSymptom::Internal(_) => {
-                Some("an internal compiler error occurred".into())
-            }
+            CodegenSymptom::Internal(_) => Some("an internal compiler error occurred".into()),
         }
     }
 }

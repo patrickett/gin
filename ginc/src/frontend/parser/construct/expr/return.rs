@@ -1,5 +1,5 @@
 use crate::frontend::prelude::*;
-use chumsky::{Parser, input::ValueInput, prelude::*, span::SimpleSpan};
+use chumsky::{input::ValueInput, prelude::*, span::SimpleSpan, Parser};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Return(pub Option<Box<Expr>>);

@@ -1,5 +1,5 @@
 use crate::frontend::prelude::*;
-use chumsky::{Parser, input::ValueInput, prelude::*};
+use chumsky::{input::ValueInput, prelude::*, Parser};
 
 pub fn block<'t, I, Header, Closer, Body>(
     header: impl Parser<'t, I, Header, ParserError<'t>> + Clone,
@@ -10,14 +10,10 @@ where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
     header
-        .then(just(Token::Newline).repeated())
-        .then(just(Token::Indent).or_not())
+        .then_ignore(just(Token::Newline).repeated())
+        .then_ignore(just(Token::Indent).or_not())
         .then(body_expr.clone().repeated().collect())
-        .then(just(Token::Dedent).or_not())
+        .then_ignore(just(Token::Dedent).or_not())
         .then(closer.clone())
-        .map(
-            |(((((header, _newlines), _indent_opt), body), _dedent_opt), closer_val)| {
-                (header, body, closer_val)
-            },
-        )
+        .map(|((header, body), closer_val)| (header, body, closer_val))
 }

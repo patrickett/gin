@@ -35,17 +35,22 @@ pub fn compile<'db>(db: &'db dyn Db, file: File) -> CompiledModule<'db> {
 }
 
 /// Compile an entry point and all its dependencies.
-///
-/// This recursively compiles all imported files before compiling
-/// the entry point.
 #[salsa::tracked]
 pub fn compile_entry<'db>(db: &'db dyn Db, entry: File) -> CompiledModule<'db> {
     let imported_files = resolve_imports(db, entry);
 
-    // TODO: parallel/async compile instead of sequential
-    for imported_file in imported_files {
-        compile(db, imported_file);
-    }
+    let tasks: Vec<_> = imported_files
+        .into_iter()
+        .map(|f| (db.clone_for_par(), f))
+        .collect();
+
+    rayon::scope(|s| {
+        for (db_clone, imported_file) in tasks {
+            s.spawn(move |_| {
+                compile(&*db_clone, imported_file);
+            });
+        }
+    });
 
     compile(db, entry)
 }

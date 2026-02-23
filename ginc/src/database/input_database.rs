@@ -15,10 +15,15 @@ use std::{
 #[salsa::db]
 pub trait Db: Database {
     fn input(&self, path: PathBuf) -> Result<File, String>;
+    fn clone_for_par(&self) -> Box<dyn Db>;
 }
 
 #[salsa::db]
 impl Db for InputDatabase {
+    fn clone_for_par(&self) -> Box<dyn Db> {
+        Box::new(self.clone())
+    }
+
     fn input(&self, path: PathBuf) -> Result<File, String> {
         let path = path.canonicalize().unwrap();
         Ok(match self.files.entry(path.clone()) {
@@ -30,7 +35,7 @@ impl Db for InputDatabase {
                     .watch(&path, RecursiveMode::NonRecursive)
                     .unwrap();
                 let contents = std::fs::read_to_string(&path).unwrap();
-                // .wrap_err_with(|| format!("Failed to read {}", path.display()))?;
+                // Files loaded via import are always modules
                 *entry.insert(File::new(self, path, contents))
             }
         })

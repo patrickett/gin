@@ -6,7 +6,22 @@ pub mod frontend;
 pub mod intern;
 
 pub use args::*;
+pub use database::{
+    File,
+    input_database::{Db, InputDatabase},
+};
+pub use diagnostic::{Category, Symptom, SymptomSource};
+pub use frontend::parser::{
+    construct::{DefMap, FileAst, Symbol, SymbolKind, SymbolTable, TagMap},
+    parse,
+};
+
+use crate::backend::cache::{
+    CacheKey, CacheLookup, CacheManifest, ModuleCache, compute_content_hash, compute_interface_hash,
+};
+use crate::backend::compile::compile;
 use crossbeam_channel::unbounded;
+use std::collections::HashMap;
 
 pub const GIN_FILE_EXT: &str = "gin";
 pub const BINARY_ENTRY_FILE_NAME: &str = "main.gin";

@@ -14,7 +14,7 @@ fn test_parse_arithmetic_debug() {
 
     let ast = parse_str(src);
 
-    assert!(ast.uses.is_empty());
-    assert_eq!(ast.defs.len(), 1);
-    assert_eq!(ast.tags.len(), 0);
+    assert!(ast.uses().is_empty());
+    assert_eq!(ast.defs().len(), 1);
+    assert_eq!(ast.tags().len(), 0);
 }

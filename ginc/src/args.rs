@@ -1,19 +1,62 @@
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use std::ffi::OsStr;
 use std::path::PathBuf;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum Profile {
+    #[default]
+    Debug,
+    Release,
+}
+
+impl Profile {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Debug => "debug",
+            Self::Release => "release",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum Emit {
+    /// Produce a native executable (default)
+    #[default]
+    Exe,
+    /// Produce an object file only
+    Obj,
+    /// Print MLIR text to stdout
+    Mlir,
+}
 
 #[derive(Parser, Debug, Default)]
 #[command(version, about)]
 pub struct Args {
     pub input: PathBuf,
-    // /// Write output to <OUTPUT>
-    // // TODO: change OUTPUT to FILENAME
-    // #[arg(short, long)]
-    // output: Option<PathBuf>,
+
+    /// Write output to <OUTPUT>
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
+
+    /// Target triple for cross-compilation
+    // TODO: add a better struct for this
+    #[arg(long)]
+    pub target: Option<String>,
+
+    /// What to emit
+    #[arg(long, default_value = "exe")]
+    pub emit: Emit,
+
+    /// Build profile
+    #[arg(long, default_value = "debug")]
+    pub profile: Profile,
+
+    /// Disable the compilation cache
+    #[arg(long)]
+    pub no_cache: bool,
+
     #[arg(short, long)]
     pub verbose: Option<bool>,
-    // #[arg(short, long)]
-    // target: Option<TargetPlatform>,
 }
 
 impl Args {

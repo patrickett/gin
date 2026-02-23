@@ -27,6 +27,7 @@ internment = "0.8"
 notify-debouncer-mini = "0.4.1"
 crossbeam-channel = "0.5.15"
 dirs = "6"
+rayon = "1"
 
 [dev-dependencies]
 criterion = "0.5"

@@ -7,6 +7,19 @@ pub enum TypeSymptom {
     Mismatch,
     Unknown,
     InferenceFailed,
+    ConstraintViolation {
+        param: String,
+        expected: String,
+        got: String,
+    },
+    UnresolvedTypeParam {
+        name: String,
+    },
+    ArityMismatch {
+        name: String,
+        expected: usize,
+        got: usize,
+    },
 }
 
 impl SymptomDetail for TypeSymptom {
@@ -15,16 +28,35 @@ impl SymptomDetail for TypeSymptom {
             TypeSymptom::Mismatch => 1,
             TypeSymptom::Unknown => 2,
             TypeSymptom::InferenceFailed => 3,
+            TypeSymptom::ConstraintViolation { .. } => 4,
+            TypeSymptom::UnresolvedTypeParam { .. } => 5,
+            TypeSymptom::ArityMismatch { .. } => 6,
         }
     }
 
     fn message(&self) -> String {
         match self {
-            TypeSymptom::Mismatch => "type mismatch",
-            TypeSymptom::Unknown => "unknown type",
-            TypeSymptom::InferenceFailed => "failed to infer type",
+            TypeSymptom::Mismatch => "type mismatch".into(),
+            TypeSymptom::Unknown => "unknown type".into(),
+            TypeSymptom::InferenceFailed => "failed to infer type".into(),
+            TypeSymptom::ConstraintViolation {
+                param,
+                expected,
+                got,
+            } => {
+                format!("type parameter `{param}` requires `{expected}`, got `{got}`")
+            }
+            TypeSymptom::UnresolvedTypeParam { name } => {
+                format!("unresolved type parameter `{name}`")
+            }
+            TypeSymptom::ArityMismatch {
+                name,
+                expected,
+                got,
+            } => {
+                format!("`{name}` expects {expected} type argument(s), got {got}")
+            }
         }
-        .into()
     }
 
     fn help(&self) -> Option<String> {
@@ -32,6 +64,17 @@ impl SymptomDetail for TypeSymptom {
             TypeSymptom::Mismatch => Some("types do not match".into()),
             TypeSymptom::Unknown => Some("type is not defined".into()),
             TypeSymptom::InferenceFailed => Some("could not infer the type".into()),
+            TypeSymptom::ConstraintViolation {
+                param, expected, ..
+            } => Some(format!(
+                "ensure the type argument for `{param}` satisfies the `{expected}` constraint"
+            )),
+            TypeSymptom::UnresolvedTypeParam { name } => Some(format!(
+                "provide a concrete type for `{name}` at the instantiation site"
+            )),
+            TypeSymptom::ArityMismatch { expected, .. } => {
+                Some(format!("provide exactly {expected} type argument(s)"))
+            }
         }
     }
 }
@@ -55,6 +98,43 @@ pub const fn unknown(span: SimpleSpan) -> Symptom {
 pub const fn inference_failed(span: SimpleSpan) -> Symptom {
     Symptom {
         source: SymptomSource::Type(TypeSymptom::InferenceFailed),
+        span,
+        category: Category::Flaw,
+    }
+}
+
+pub fn constraint_violation(
+    span: SimpleSpan,
+    param: String,
+    expected: String,
+    got: String,
+) -> Symptom {
+    Symptom {
+        source: SymptomSource::Type(TypeSymptom::ConstraintViolation {
+            param,
+            expected,
+            got,
+        }),
+        span,
+        category: Category::Flaw,
+    }
+}
+
+pub fn unresolved_type_param(span: SimpleSpan, name: String) -> Symptom {
+    Symptom {
+        source: SymptomSource::Type(TypeSymptom::UnresolvedTypeParam { name }),
+        span,
+        category: Category::Flaw,
+    }
+}
+
+pub fn arity_mismatch(span: SimpleSpan, name: String, expected: usize, got: usize) -> Symptom {
+    Symptom {
+        source: SymptomSource::Type(TypeSymptom::ArityMismatch {
+            name,
+            expected,
+            got,
+        }),
         span,
         category: Category::Flaw,
     }

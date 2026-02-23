@@ -1,23 +1,22 @@
 use crate::frontend::prelude::*;
-use chumsky::container::Container;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     hash::{Hash, Hasher},
     path::PathBuf,
 };
 
-pub type TagMap = HashMap<TagName, Documented<Params<TagValue>>>;
-pub type DefMap = HashMap<DefName, Documented<Params<DefValue>>>;
+pub type TagMap = HashMap<IStr, Declare>;
+pub type DefMap = HashMap<IStr, Bind>;
 
 /// Symbol kind - distinguishes between different types of symbols.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SymbolKind {
     /// A tag/type definition (e.g., `Person ::= ...`)
-    Tag(TagName),
+    Tag(IStr),
     /// A function definition (e.g., `foo : { ... }`)
-    Function(DefName),
+    Function(IStr),
     /// A value binding (e.g., `x : 42`)
-    Bind(DefName),
+    Bind(IStr),
 }
 
 /// Compile-time symbol with source information.
@@ -47,27 +46,27 @@ impl Symbol {
     }
 
     /// Create a tag symbol.
-    pub fn tag(name: TagName, source_file: PathBuf) -> Self {
+    pub fn tag(name: IStr, source_file: PathBuf) -> Self {
         Self {
-            name: name.0,
+            name,
             source_file,
             kind: SymbolKind::Tag(name),
         }
     }
 
     /// Create a function symbol.
-    pub fn function(name: DefName, source_file: PathBuf) -> Self {
+    pub fn function(name: IStr, source_file: PathBuf) -> Self {
         Self {
-            name: name.0,
+            name,
             source_file,
             kind: SymbolKind::Function(name),
         }
     }
 
     /// Create a bind symbol.
-    pub fn bind(name: DefName, source_file: PathBuf) -> Self {
+    pub fn bind(name: IStr, source_file: PathBuf) -> Self {
         Self {
-            name: name.0,
+            name,
             source_file,
             kind: SymbolKind::Bind(name),
         }
@@ -181,26 +180,22 @@ impl SymbolTable {
     fn from_file_filtered(file: &FileAst, source_path: PathBuf, public_only: bool) -> Self {
         let mut table = Self::new();
 
-        // Add all tag definitions
-        for tag_name in file.tags.keys() {
-            if public_only && file.private_tags.contains(tag_name) {
+        for tag_name in file.tags().keys() {
+            if public_only && file.private_tags().contains(tag_name) {
                 continue;
             }
-            table.insert(Symbol::tag(tag_name.clone(), source_path.to_path_buf()));
+            table.insert(Symbol::tag(*tag_name, source_path.to_path_buf()));
         }
 
-        // Add all definitions (functions and binds)
-        for (def_name, documented) in &file.defs {
-            if public_only && file.private_defs.contains(def_name) {
+        for (def_name, bind) in file.defs() {
+            if public_only && file.private_defs().contains(def_name) {
                 continue;
             }
             let source_path = source_path.clone();
-            let symbol = if documented.item.0.is_some() {
-                // Has parameters - it's a function
-                Symbol::function(def_name.clone(), source_path)
+            let symbol = if bind.params().is_some() {
+                Symbol::function(*def_name, source_path)
             } else {
-                // No parameters - it's a bind/value
-                Symbol::bind(def_name.clone(), source_path)
+                Symbol::bind(*def_name, source_path)
             };
             table.insert(symbol);
         }
@@ -209,38 +204,41 @@ impl SymbolTable {
     }
 }
 
-impl Container<Item> for (TagMap, DefMap) {
-    fn push(&mut self, item: Item) {
-        match item.value {
-            ItemValue::TagValue(tag_name, params) => {
-                let doc = Documented {
-                    item: params,
-                    doc: item.doc_comment,
-                };
-
-                self.0.insert(tag_name, doc);
-            }
-            ItemValue::DefValue(def_name, params) => {
-                let doc = Documented {
-                    item: params,
-                    doc: item.doc_comment,
-                };
-                self.1.insert(def_name, doc);
-            }
-        }
-    }
-}
-
+/// Output of parsing a gin file.
 #[derive(Debug, Clone, Default)]
-/// Output of parsing a gin file
 pub struct FileAst {
     pub uses: Vec<Import>,
-    // TODO: items (TagMap, DefMap)
     pub tags: TagMap,
     pub defs: DefMap,
-    // TODO: private_items (TagMap, DefMap)
-    pub private_defs: HashSet<DefName>,
-    pub private_tags: HashSet<TagName>,
+    pub private_defs: HashSet<IStr>,
+    pub private_tags: HashSet<IStr>,
+    pub exprs: Vec<Expr>,
+}
+
+impl FileAst {
+    pub fn uses(&self) -> &[Import] {
+        &self.uses
+    }
+
+    pub fn tags(&self) -> &TagMap {
+        &self.tags
+    }
+
+    pub fn defs(&self) -> &DefMap {
+        &self.defs
+    }
+
+    pub fn private_defs(&self) -> &HashSet<IStr> {
+        &self.private_defs
+    }
+
+    pub fn private_tags(&self) -> &HashSet<IStr> {
+        &self.private_tags
+    }
+
+    pub fn top_level_exprs(&self) -> &[Expr] {
+        &self.exprs
+    }
 }
 
 impl PartialEq for FileAst {
@@ -250,6 +248,7 @@ impl PartialEq for FileAst {
             && self.defs == other.defs
             && self.private_defs == other.private_defs
             && self.private_tags == other.private_tags
+            && self.exprs == other.exprs
     }
 }
 
@@ -258,6 +257,7 @@ impl Eq for FileAst {}
 impl Hash for FileAst {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.uses.hash(state);
+        // Sort keys for deterministic hashing
         let mut tag_keys: Vec<_> = self.tags.keys().collect();
         tag_keys.sort();
         for k in tag_keys {
@@ -272,6 +272,7 @@ impl Hash for FileAst {
             self.defs[k].hash(state);
             self.private_defs.contains(k).hash(state);
         }
+        self.exprs.hash(state);
     }
 }
 

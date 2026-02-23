@@ -5,8 +5,8 @@ use std::hash::{Hash, Hasher};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Tag {
-    Nominal(TagName),
-    Generic(TagName, Parameters),
+    Nominal(IStr),
+    Generic(IStr, Parameters),
     Union { variants: Vec<Tag> },
 }
 
@@ -27,9 +27,6 @@ impl Hash for Tag {
     }
 }
 
-// TagName
-// TagName(id)
-// TagName(id AnotherTag(some_generic_value, num Number) | YetAnother)
 pub fn tag<'t, I>(
     expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
 ) -> impl Parser<'t, I, Tag, ParserError<'t>> + Clone
@@ -38,7 +35,7 @@ where
 {
     recursive(|tag| {
         // --- parse tag name (capitalized)
-        let tag_name = select! { Token::Tag(name) => TagName(IStr::new(name.to_string())) };
+        let tag_name = select! { Token::Tag(name) => IStr::new(name.to_string()) };
 
         // --- nominal or generic tag
         let nominal_or_generic = tag_name
@@ -78,7 +75,7 @@ where
             .then_ignore(just(Token::Dedent).or_not())
             // --- flatten into single union if multiple variants
             .map(|variants| match variants.len() {
-                0 => panic!("Expected at least one tag variant"),
+                0 => unreachable!("tag parser requires at least one variant"),
                 1 => variants.into_iter().next().unwrap(),
                 _ => Tag::Union { variants },
             })

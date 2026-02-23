@@ -93,10 +93,10 @@ fn test_operators() {
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
     assert!(matches!(tokens[0], Token::EqEq));
-    assert!(matches!(tokens[1], Token::NotEqual));
+    assert!(matches!(tokens[1], Token::NotEq));
     assert!(matches!(tokens[2], Token::LessEq));
     assert!(matches!(tokens[3], Token::GreaterEq));
-    assert!(matches!(tokens[4], Token::Equals));
+    assert!(matches!(tokens[4], Token::Eq));
     assert!(matches!(tokens[5], Token::Less));
     assert!(matches!(tokens[6], Token::Greater));
     assert!(matches!(tokens[7], Token::Plus));

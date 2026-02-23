@@ -3,6 +3,8 @@ use crate::command::{
     audit::begin_audit,
     build::begin_build,
     doc::{DocCommand, begin_doc},
+    init::begin_init,
+    new::{NewArgs, begin_new},
     version::{VersionCommand, version},
 };
 use clap::*;
@@ -13,6 +15,8 @@ mod add;
 mod audit;
 mod build;
 mod doc;
+mod init;
+mod new;
 mod version;
 
 #[derive(Subcommand, Debug)]
@@ -45,6 +49,12 @@ pub enum BeginCommand {
     /// Format all the tracked files in the current package with 'ginfmt'
     Format,
 
+    /// Initialise a new Gin project in the current directory
+    Init,
+
+    /// Create a new Gin project in a new directory
+    New(NewArgs),
+
     /// Run the current project, will just compile a library if no entry
     Run,
 
@@ -62,7 +72,28 @@ pub enum BeginCommand {
 }
 
 impl BeginCommand {
-    pub fn run(&self, config: FlaskConfig) {
+    /// Returns true if this command can run without an existing flask.json
+    pub fn needs_config(&self) -> bool {
+        !matches!(self, BeginCommand::Init | BeginCommand::New(_))
+    }
+
+    pub fn run(&self, config: Option<FlaskConfig>) {
+        match &self {
+            BeginCommand::Init => begin_init(),
+            BeginCommand::New(args) => {
+                let name = args.name.clone();
+                begin_new(NewArgs { name })
+            }
+            _ => {
+                let Some(config) = config else {
+                    return;
+                };
+                self.run_with_config(config);
+            }
+        }
+    }
+
+    fn run_with_config(&self, config: FlaskConfig) {
         match &self {
             BeginCommand::Add => {
                 let args = AddArgs::parse_from(std::env::args());

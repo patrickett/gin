@@ -8,6 +8,14 @@ pub struct Binary {
     pub rhs: Box<Expr>,
 }
 
+impl Binary {
+    pub fn new(lhs: Expr, op: BinOp, rhs: Expr) -> Self {
+        let lhs = Box::new(lhs);
+        let rhs = Box::new(rhs);
+        Self { lhs, op, rhs }
+    }
+}
+
 /// Binary operations are defined as `lhs op rhs`
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BinOp {
@@ -45,7 +53,6 @@ where
 pub fn arithmetic_op<'t, I>() -> impl Parser<'t, I, BinOp, ParserError<'t>> + Clone
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
-    P: Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
 {
     use BinOp::*;
     use Token::*;
@@ -58,24 +65,3 @@ where
     }
 }
 
-/// Parser for any binary operator (comparison or arithmetic)
-pub fn bin_op<'t, I>() -> impl Parser<'t, I, BinOp, ParserError<'t>> + Clone
-where
-    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
-{
-    comparison_op().or(arithmetic_op())
-}
-
-pub fn binary_expr<'t, I, P>(expr: P) -> impl Parser<'t, I, Binary, ParserError<'t>>
-where
-    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
-    P: Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
-{
-    expr.clone()
-        .then(bin_op().then(expr))
-        .map(|(lhs, (op, rhs))| Binary {
-            lhs: Box::new(lhs),
-            op,
-            rhs: Box::new(rhs),
-        })
-}

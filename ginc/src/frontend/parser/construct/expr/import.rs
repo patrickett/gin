@@ -12,6 +12,10 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Import(pub Vec<ModuleImport>);
 
+// TODO: for scripts we want to support git urls as if they were in flask.json
+// but in use statements so scripts can use remote depenecies
+// `use 'https://github.com/gin/db_project.git' as db`
+
 // TODO: Implement import wildcard support (*)
 // `use core.http (...)`
 
@@ -59,7 +63,7 @@ pub fn import<'t, I>() -> impl Parser<'t, I, Import, ParserError<'t>>
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
-    let id = select! { Token::Id(name) => IStr::new(name.to_string()) };
+    let id = id_token();
 
     let source = choice((
         select! { Token::String(s) => ImportSource::Local(PathBuf::from(s)) },

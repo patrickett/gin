@@ -1,7 +1,7 @@
 use crossbeam_channel::unbounded;
+use ginc::backend::compile::compile;
 use ginc::database::{File, input_database::InputDatabase};
 use ginc::diagnostic::Symptom;
-use ginc::backend::compile::compile;
 use ginc::frontend::parser::parse;
 use std::path::PathBuf;
 
@@ -59,10 +59,22 @@ fn test_compile_string_literal() {
     assert_eq!(diagnostics.len(), 0, "expected no diagnostics");
 
     let mlir = String::from_utf8_lossy(compiled.bytecode(&db));
-    assert!(mlir.contains("llvm.mlir.global"), "should contain global: {mlir}");
-    assert!(mlir.contains("llvm.mlir.addressof"), "should contain addressof: {mlir}");
-    assert!(mlir.contains("llvm.insertvalue"), "should contain insertvalue: {mlir}");
-    assert!(mlir.contains("llvm.struct"), "should contain struct type: {mlir}");
+    assert!(
+        mlir.contains("llvm.mlir.global"),
+        "should contain global: {mlir}"
+    );
+    assert!(
+        mlir.contains("llvm.mlir.addressof"),
+        "should contain addressof: {mlir}"
+    );
+    assert!(
+        mlir.contains("llvm.insertvalue"),
+        "should contain insertvalue: {mlir}"
+    );
+    assert!(
+        mlir.contains("llvm.struct"),
+        "should contain struct type: {mlir}"
+    );
 }
 
 #[test]

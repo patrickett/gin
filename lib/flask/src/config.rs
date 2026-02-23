@@ -47,6 +47,27 @@ pub struct FlaskConfig {
 }
 
 impl FlaskConfig {
+    pub fn dependency_names(&self) -> Vec<&str> {
+        self.dependencies.keys().map(|s| s.as_str()).collect()
+    }
+
+    pub fn from_directory(dir: &std::path::Path) -> Option<FlaskConfig> {
+        let mut search = dir.to_path_buf();
+        loop {
+            search.push(PACKAGE_CONFIG_NAME);
+            if let Ok(file) = std::fs::File::open(&search) {
+                let reader = BufReader::new(file);
+                if let Ok(config) = serde_json::from_reader::<_, FlaskConfig>(reader) {
+                    return Some(config);
+                }
+            }
+            search.pop(); // remove flask.json
+            if !search.pop() {
+                return None;
+            }
+        }
+    }
+
     pub fn from_current_directory() -> Option<FlaskConfig> {
         let mut path = std::env::current_dir().expect("able to get current_dir");
         path.push(PACKAGE_CONFIG_NAME);

@@ -1,5 +1,4 @@
 mod command;
-mod dep_cache;
 mod tui;
 
 use crate::{command::BeginCommand, tui::Tui};
@@ -9,6 +8,10 @@ use flask::FlaskConfig;
 // TODO: So if a semantic version is of the same major version the interface should
 // be the same which means begin can use an already compiled one of the same
 // major version
+//
+// TODO: automatic semantic versioning, when publishing a flask we want to make
+// sure via the compiler that the interface is compatible with the version
+// via a hash or something similar
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -20,14 +23,22 @@ pub struct BeginArguments {
 }
 
 fn main() {
-    let Some(config) = FlaskConfig::from_current_directory() else {
-        // TODO: create a nice input for asking if they want to init
-        return;
-    };
+    let args = BeginArguments::parse();
 
-    if let Some(cmd) = BeginArguments::parse().command {
+    // TODO: come up with a different pattern for this,
+    // we want to prompt when no flask
+    if let Some(cmd) = &args.command
+        && !cmd.needs_config()
+    {
+        cmd.run(None);
+        return;
+    }
+
+    let config = FlaskConfig::from_current_directory();
+
+    if let Some(cmd) = &args.command {
         cmd.run(config)
-    } else {
+    } else if config.is_some() {
         let terminal = ratatui::init();
         let app_result = Tui::default().run(terminal);
         ratatui::restore();
