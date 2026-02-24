@@ -1,3 +1,13 @@
+mod float;
+mod int;
+mod string;
+mod unclosed_string;
+
+pub use float::*;
+pub use int::*;
+pub use string::*;
+pub use unclosed_string::*;
+
 use crate::frontend::prelude::*;
 use std::hash::Hash;
 
@@ -42,19 +52,5 @@ pub fn literal<'t, I>() -> impl Parser<'t, I, Literal, ParserError<'t>>
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
-    let valid = select! {
-        Token::Int(n) => Literal::Int(n),
-        Token::Float(f) => Literal::Float(f),
-        Token::String(s) => Literal::String(s.to_string()),
-    };
-
-    // Accept unterminated strings for error recovery — the diagnostic
-    // is reported from the tokenization step with the real byte span.
-    let unclosed_string = select! {
-        Token::UnterminatedString(s) => Literal::String(s.to_string()),
-    };
-
-    valid
-        .or(unclosed_string)
-        .then_ignore(just(Token::Newline).or_not())
+    choice((int(), float(), string(), unclosed_string()))
 }

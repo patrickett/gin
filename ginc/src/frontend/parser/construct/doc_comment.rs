@@ -18,8 +18,9 @@ where
             DocComment(
                 c.into_iter()
                     .map(|s| {
-                        s.strip_prefix("--- ")
-                            .expect("removed doc comment prefix")
+                        s.strip_prefix("---")
+                            .map(|s| s.trim_start())
+                            .unwrap_or(s)
                             .to_owned()
                     })
                     .collect::<Vec<String>>()

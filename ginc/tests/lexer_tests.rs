@@ -135,8 +135,9 @@ fn test_comments() {
     let mut lexer = GinLexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
-    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens.len(), 2);
     assert!(matches!(tokens[0], Token::Newline));
+    assert!(matches!(tokens[1], Token::DocComment(_)));
 }
 
 #[test]
@@ -168,10 +169,11 @@ fn test_play() {
     let mut lexer = GinLexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
-    assert!(matches!(tokens[0], Token::Newline));
-    assert!(matches!(tokens[1], Token::Tag(_)));
-    assert!(matches!(tokens[2], Token::ParenOpen));
-    assert!(matches!(tokens[3], Token::ParenClose));
+    assert!(matches!(tokens[0], Token::DocComment(_)));
+    assert!(matches!(tokens[1], Token::Newline));
+    assert!(matches!(tokens[2], Token::Tag(_)));
+    assert!(matches!(tokens[3], Token::ParenOpen));
+    assert!(matches!(tokens[4], Token::ParenClose));
 }
 
 #[test]
@@ -282,25 +284,15 @@ fn test_unicode_format_strings() {
     let mut lexer = GinLexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
-    assert!(matches!(tokens[0], Token::FormatString(_)));
-    assert_eq!(
-        if let Token::FormatString(s) = &tokens[0] {
-            *s
-        } else {
-            ""
-        },
-        "héllo"
-    );
+    // "héllo" → [FormatStringDelim, FormatStringText("héllo"), FormatStringDelim]
+    assert_eq!(tokens[0], Token::FormatStringDelim);
+    assert_eq!(tokens[1], Token::FormatStringText("héllo"));
+    assert_eq!(tokens[2], Token::FormatStringDelim);
 
-    assert!(matches!(tokens[1], Token::FormatString(_)));
-    assert_eq!(
-        if let Token::FormatString(s) = &tokens[1] {
-            *s
-        } else {
-            ""
-        },
-        "こんにちは"
-    );
+    // "こんにちは" → [FormatStringDelim, FormatStringText("こんにちは"), FormatStringDelim]
+    assert_eq!(tokens[3], Token::FormatStringDelim);
+    assert_eq!(tokens[4], Token::FormatStringText("こんにちは"));
+    assert_eq!(tokens[5], Token::FormatStringDelim);
 }
 
 #[test]
@@ -397,4 +389,77 @@ fn test_unterminated_string_lone_quote() {
         },
         ""
     );
+}
+
+#[test]
+fn test_format_string_interpolation() {
+    let src = r#""hello (name)""#;
+    let mut lexer = GinLexer::new(src);
+    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+
+    assert_eq!(
+        tokens,
+        vec![
+            Token::FormatStringDelim,
+            Token::FormatStringText("hello "),
+            Token::FormatInterpStart,
+            Token::Id("name"),
+            Token::FormatInterpEnd,
+            Token::FormatStringDelim,
+        ]
+    );
+    assert!(lexer.errors.is_empty());
+}
+
+#[test]
+fn test_format_string_nested_parens() {
+    let src = r#""result (foo(x, y))""#;
+    let mut lexer = GinLexer::new(src);
+    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+
+    assert_eq!(
+        tokens,
+        vec![
+            Token::FormatStringDelim,
+            Token::FormatStringText("result "),
+            Token::FormatInterpStart,
+            Token::Id("foo"),
+            Token::ParenOpen,
+            Token::Id("x"),
+            Token::Comma,
+            Token::Id("y"),
+            Token::ParenClose,
+            Token::FormatInterpEnd,
+            Token::FormatStringDelim,
+        ]
+    );
+    assert!(lexer.errors.is_empty());
+}
+
+#[test]
+fn test_format_string_unterminated_interp() {
+    let src = r#""hello (name"#;
+    let mut lexer = GinLexer::new(src);
+    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+
+    // Should contain UnterminatedFormatString somewhere
+    assert!(
+        tokens
+            .iter()
+            .any(|t| matches!(t, Token::UnterminatedFormatString))
+    );
+    assert!(!lexer.errors.is_empty());
+}
+
+#[test]
+fn test_format_string_empty() {
+    let src = r#""""#;
+    let mut lexer = GinLexer::new(src);
+    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+
+    assert_eq!(
+        tokens,
+        vec![Token::FormatStringDelim, Token::FormatStringDelim,]
+    );
+    assert!(lexer.errors.is_empty());
 }

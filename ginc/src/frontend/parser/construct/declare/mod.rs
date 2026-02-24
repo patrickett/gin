@@ -1,39 +1,15 @@
 use crate::frontend::prelude::*;
 use std::hash::{Hash, Hasher};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DeclareValue {
-    Alias(Tag),
-    Record(Parameters),
-    Set(/* TODO */),
-    Range(std::ops::Range<i64>),
-    // DiceThrow is in 1...6 (element of range)
-    InRange(std::ops::Range<i64>),
-}
-
-impl Hash for DeclareValue {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        std::mem::discriminant(self).hash(state);
-        match self {
-            Self::Alias(tag) => tag.hash(state),
-            Self::Record(params) => {
-                for (k, v) in params {
-                    k.hash(state);
-                    v.hash(state);
-                }
-            }
-            Self::Set() => {}
-            Self::Range(r) | Self::InRange(r) => {
-                r.start.hash(state);
-                r.end.hash(state);
-            }
-        }
-    }
-}
+mod attributes;
+mod value;
+pub use attributes::*;
+pub use value::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Declare {
     doc_comment: Option<DocComment>,
+    attributes: DeclareAttributes,
     name: IStr,
     params: Option<Parameters>,
     value: DeclareValue,
@@ -43,6 +19,7 @@ impl Declare {
     pub fn new(name: IStr, value: DeclareValue) -> Self {
         Declare {
             doc_comment: None,
+            attributes: DeclareAttributes::default(),
             name,
             params: None,
             value,
@@ -127,11 +104,8 @@ where
     let decl = choice((lhs_has.then(rhs_record), lhs_is.then(rhs_union_or_range)))
         .map(|((tag_name, params), value)| Declare::new(tag_name, value).with_params(params));
 
-    doc_comment()
-        .or_not()
-        .then(decl)
-        .map(|(doc, decl)| {
-            let doc = doc.and_then(|d| if d.0.is_empty() { None } else { Some(d) });
-            decl.with_doc(doc)
-        })
+    doc_comment().or_not().then(decl).map(|(doc, decl)| {
+        let doc = doc.and_then(|d| if d.0.is_empty() { None } else { Some(d) });
+        decl.with_doc(doc)
+    })
 }

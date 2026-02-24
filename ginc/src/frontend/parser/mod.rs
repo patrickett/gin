@@ -3,14 +3,13 @@ pub mod construct;
 pub mod block;
 pub mod delimited_list;
 pub mod parse;
+pub mod unescape;
 
 use crate::frontend::prelude::*;
-use chumsky::{input::ValueInput, span::SimpleSpan};
-
 pub use block::*;
+use chumsky::{input::ValueInput, span::SimpleSpan};
 pub use delimited_list::*;
 pub use parse::*;
-pub type Spanned<T> = (T, SimpleSpan);
 pub type ParserError<'t> = extra::Err<Rich<'t, Token<'t>>>;
 
 // TODO: should we bring back script/entry parser

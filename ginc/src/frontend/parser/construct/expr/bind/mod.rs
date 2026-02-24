@@ -1,15 +1,14 @@
 use crate::frontend::{parser::block, prelude::*};
-use std::hash::Hash;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum BindValue {
-    Expr(Box<Expr>),
-    Body { exprs: Vec<Expr>, ret: Return },
-}
+mod attributes;
+mod value;
+pub use attributes::*;
+pub use value::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bind {
     doc_comment: Option<DocComment>,
+    attributes: BindAttributes,
     name: IStr,
     params: Option<Parameters>,
     value: BindValue,
@@ -18,13 +17,15 @@ pub struct Bind {
 impl Bind {
     pub fn new(name: IStr, value: BindValue) -> Self {
         Bind {
-            name,
-            value,
-            params: None,
             doc_comment: None,
+            attributes: BindAttributes::default(),
+            name,
+            params: None,
+            value,
         }
     }
 
+    // TODO: refactor the with_whatever to just be forced in the new() function
     pub fn with_params(mut self, params: Option<Parameters>) -> Self {
         self.params = params;
         self
@@ -71,6 +72,8 @@ impl std::hash::Hash for Bind {
     }
 }
 
+// TODO: it would be cool if we could just impl Parse on T
+// impl Parse for Bind { ... }
 pub fn bind<'t, I>(
     expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
 ) -> impl Parser<'t, I, Bind, ParserError<'t>> + Clone
@@ -94,23 +97,20 @@ where
             Bind::new(name, BindValue::Expr(Box::new(rhs))).with_params(params)
         });
 
-    let multiple = lhs
-        .then(block(
-            just(Newline),          // header
-            expr.clone(),           // body
-            r#return(expr.clone()), // closer
-        ))
-        .map(|(((name, params), _opt_tag), (_nl, exprs, ret))| {
+    let open = just(Newline);
+    let body = expr.clone();
+    let close = r#return(expr.clone());
+
+    let multiple = lhs.then(block(open, body, close)).map(
+        |(((name, params), _opt_tag), (_nl, exprs, ret))| {
             Bind::new(name, BindValue::Body { exprs, ret }).with_params(params)
-        });
+        },
+    );
 
     let bind = choice((multiple, single));
 
-    doc_comment()
-        .or_not()
-        .then(bind)
-        .map(|(doc, bind)| {
-            let doc = doc.and_then(|d| if d.0.is_empty() { None } else { Some(d) });
-            bind.with_doc(doc)
-        })
+    doc_comment().or_not().then(bind).map(|(doc, bind)| {
+        let doc = doc.and_then(|d| if d.0.is_empty() { None } else { Some(d) });
+        bind.with_doc(doc)
+    })
 }

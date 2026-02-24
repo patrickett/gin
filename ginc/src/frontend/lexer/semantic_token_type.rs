@@ -17,7 +17,8 @@ impl<'src> HasSemanticTokenType for Token<'src> {
             Continue | Private | Return | Break | Then | When | For | Loop | Use | Has | And
             | As | If | In | Is | Of | Or | Else => SemanticTokenType::KEYWORD,
             Int(_) | Float(_) => SemanticTokenType::NUMBER,
-            String(_) | FormatString(_) => SemanticTokenType::STRING,
+            String(_) | FormatStringDelim | FormatStringText(_) => SemanticTokenType::STRING,
+            FormatInterpStart | FormatInterpEnd => SemanticTokenType::OPERATOR,
             _ => SemanticTokenType::OPERATOR,
         }
     }
@@ -31,7 +32,7 @@ impl<'src> HasSemanticTokenType for Token<'src> {
             Continue | Private | Return | Break | Then | When | Else | For | Loop | Use | Has
             | And | As | If | In | Is | Of | Or => Some(3),
             Int(_) | Float(_) => Some(7),
-            String(_) | FormatString(_) => Some(6),
+            String(_) | FormatStringDelim | FormatStringText(_) => Some(6),
             _ => None,
         }
     }

@@ -10,8 +10,8 @@ use salsa::Accumulator;
 use crate::database::{File, input_database::Db};
 use crate::diagnostic::io as io_symptom;
 use crate::diagnostic::lex as lex_symptom;
-use crate::diagnostic::parse as parse_symptom;
 use crate::diagnostic::lex::LexSymptom;
+use crate::diagnostic::parse as parse_symptom;
 use crate::diagnostic::{Category, Symptom, SymptomSource};
 use crate::frontend::lexer::{GinLexer, Token};
 use crate::frontend::parser::construct::{FileAst, ImportSource, ModPath as ImportPath};
@@ -103,11 +103,6 @@ fn format_rich_error(err: &Rich<'_, Token<'_>>) -> String {
 
 /// Internal function to parse the AST (not tracked).
 fn parse_ast_internal(db: &dyn Db, file: File) -> ParseResult {
-    #[cfg(debug_assertions)]
-    let parse_start = std::time::Instant::now();
-    #[cfg(debug_assertions)]
-    eprintln!("[ginc:parse] start: {:?}", file.path(db));
-
     let src = file.contents(db);
 
     let mut lexer = GinLexer::new(src);

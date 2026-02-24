@@ -138,11 +138,12 @@ pub enum Token<'src> {
     String(&'src str),
     #[regex(r"'[^'\n]*", |lex| { let s = lex.slice(); &s[1..] })]
     UnterminatedString(&'src str),
-    // Format strings — double-quoted with (var) interpolation
-    #[regex(r#""[^"\n]*""#, |lex| { let s = lex.slice(); &s[1..s.len()-1] })]
-    FormatString(&'src str),
-    #[regex(r#""[^"\n]*"#, |lex| { let s = lex.slice(); &s[1..] })]
-    UnterminatedFormatString(&'src str),
+    #[token("\"")]
+    FormatStringDelim,
+    FormatStringText(&'src str),
+    FormatInterpStart,
+    FormatInterpEnd,
+    UnterminatedFormatString,
     #[regex(r"---[^\n]*")]
     DocComment(&'src str),
     #[regex(r"--[^\n]*")]

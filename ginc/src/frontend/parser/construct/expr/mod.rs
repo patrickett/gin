@@ -79,7 +79,7 @@ where
 {
     choice((
         literal().map(Expr::Lit).boxed(),
-        format_string().map(Expr::FormatString).boxed(),
+        format_string(expr.clone()).map(Expr::FormatString).boxed(),
         fn_call(expr.clone()).map(Expr::FnCall).boxed(),
         bind(expr.clone()).map(Expr::Bind).boxed(),
     ))
