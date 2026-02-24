@@ -1,3 +1,4 @@
+use crate::diagnostic::lex::LexSymptom;
 use logos::{Lexer, Logos};
 
 /// Maximum indentation depth supported by the lexer.
@@ -80,6 +81,7 @@ pub fn handle_newline<'src>(lex: &mut Lexer<'src, Token<'src>>) -> Token<'src> {
 
 #[derive(Logos, Debug, PartialEq, Clone, Copy)]
 #[logos(extras = LexContext)]
+#[logos(error = LexSymptom)]
 pub enum Token<'src> {
     #[token("continue")]
     Continue,
@@ -128,9 +130,9 @@ pub enum Token<'src> {
     Tag(&'src str),
     #[regex(r"_?[a-z]+(?:_[a-z]+)*")]
     Id(&'src str),
-    #[regex(r"[0-9]+\.[0-9]+", |lex| lex.slice().parse::<f64>().unwrap())]
+    #[regex(r"[0-9]+\.[0-9]+", |lex| lex.slice().parse::<f64>())]
     Float(f64),
-    #[regex(r"[0-9]+", |lex| lex.slice().parse::<i64>().unwrap())]
+    #[regex(r"[0-9]+", |lex| lex.slice().parse::<i64>())]
     Int(i64),
     #[regex(r"'[^'\n]*'", |lex| { let s = lex.slice(); &s[1..s.len()-1] })]
     String(&'src str),

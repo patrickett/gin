@@ -7,20 +7,22 @@
 mod semantic_token_type;
 mod token;
 
+use crate::diagnostic::lex::LexSymptom;
 use chumsky::span::SimpleSpan;
 use logos::{Lexer, Logos};
-
 pub use semantic_token_type::*;
 pub use token::{LexContext, MAX_INDENT_DEPTH, Token, handle_newline};
 
 pub struct GinLexer<'src> {
     pub inner: Lexer<'src, Token<'src>>,
+    pub errors: Vec<(LexSymptom, SimpleSpan)>,
 }
 
 impl<'src> GinLexer<'src> {
     pub fn new(src: &'src str) -> Self {
         Self {
             inner: Token::lexer_with_extras(src, LexContext::default()),
+            errors: Vec::new(),
         }
     }
 
@@ -45,17 +47,23 @@ impl<'src> GinLexer<'src> {
 
             match next {
                 Ok(tok) => return Some((tok, span)),
-                Err(()) => {
-                    // Skip one Unicode scalar value. `leading_ones()` on a
-                    // UTF-8 leading byte gives the byte-width of the sequence.
-                    // If the remainder is empty after a failed match, treat it
-                    // as EOF rather than attempting a zero-length bump.
-                    let skip = match self.inner.remainder().as_bytes().first() {
-                        None => break None,
-                        Some(&b) if b.is_ascii() => 1,
-                        Some(&b) => b.leading_ones() as usize,
-                    };
-                    self.inner.bump(skip);
+                Err(err) => {
+                    self.errors.push((err.clone(), span));
+                    match err {
+                        LexSymptom::UnexpectedCharacter => {
+                            // Skip one Unicode scalar value.
+                            let skip = match self.inner.remainder().as_bytes().first() {
+                                None => break None,
+                                Some(&b) if b.is_ascii() => 1,
+                                Some(&b) => b.leading_ones() as usize,
+                            };
+                            self.inner.bump(skip);
+                        }
+                        _ => {
+                            // InvalidInteger | InvalidFloat - Lexer already consumed the token, nothing to skip
+                            // UnclosedString is handled as a token variant, not a lex error
+                        }
+                    }
                 }
             }
         }

@@ -64,4 +64,3 @@ where
         Slash => Divide,
     }
 }
-

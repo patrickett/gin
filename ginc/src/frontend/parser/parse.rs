@@ -11,6 +11,8 @@ use crate::database::{File, input_database::Db};
 use crate::diagnostic::io as io_symptom;
 use crate::diagnostic::lex as lex_symptom;
 use crate::diagnostic::parse as parse_symptom;
+use crate::diagnostic::lex::LexSymptom;
+use crate::diagnostic::{Category, Symptom, SymptomSource};
 use crate::frontend::lexer::{GinLexer, Token};
 use crate::frontend::parser::construct::{FileAst, ImportSource, ModPath as ImportPath};
 use crate::frontend::parser::token_parser;
@@ -41,12 +43,21 @@ struct ParseResult {
     /// Pre-formatted error messages with their real byte spans.
     parse_errors: Vec<(String, SimpleSpan)>,
     unterminated_strings: Vec<SimpleSpan>,
+    lex_errors: Vec<(LexSymptom, SimpleSpan)>,
 }
 
 /// Accumulate all diagnostics from a parse result into the Salsa accumulator.
 fn accumulate_diagnostics(db: &dyn Db, parsed: &ParseResult) {
     for span in &parsed.unterminated_strings {
         lex_symptom::unclosed_string(*span).accumulate(db);
+    }
+    for (symptom, span) in &parsed.lex_errors {
+        Symptom {
+            source: SymptomSource::Lex(symptom.clone()),
+            span: *span,
+            category: Category::Flaw,
+        }
+        .accumulate(db);
     }
     for (msg, span) in &parsed.parse_errors {
         parse_symptom::custom(msg.clone(), *span).accumulate(db);
@@ -99,10 +110,12 @@ fn parse_ast_internal(db: &dyn Db, file: File) -> ParseResult {
 
     let src = file.contents(db);
 
-    let lexer = GinLexer::new(src);
+    let mut lexer = GinLexer::new(src);
     let tokens: Vec<_> = lexer
+        .by_ref()
         .filter(|(t, _)| !matches!(t, Token::Comment(_)))
         .collect();
+    let lex_errors = lexer.errors;
 
     // Convert to chumsky stream - extract just the token
     // Chumsky will create synthetic spans based on token index (0, 1, 2, ...)
@@ -122,6 +135,7 @@ fn parse_ast_internal(db: &dyn Db, file: File) -> ParseResult {
             ast,
             parse_errors: vec![],
             unterminated_strings: vec![],
+            lex_errors,
         };
     }
 
@@ -146,6 +160,7 @@ fn parse_ast_internal(db: &dyn Db, file: File) -> ParseResult {
         ast,
         parse_errors,
         unterminated_strings,
+        lex_errors,
     }
 }
 
