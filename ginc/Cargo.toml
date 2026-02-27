@@ -6,28 +6,28 @@ edition = "2024"
 [dependencies]
 ariadne = "0.5.1"
 chumsky = { version = "0.10.1", features = ["pratt", "extension"] }
-clap = { version = "4.5.2", features = ["derive"] }
-dashmap = "6.1.0"
-indexmap = "2"
+clap = { workspace = true }
+dashmap = { workspace = true }
+indexmap = { workspace = true }
 logos = "0.15.1"
 merkle_hash = "3.8.0"
 once_cell = "1.21.3"
-serde = { version = "1.0.217", features = ["derive"] }
-serde_json = "1.0.143"
+serde = { workspace = true }
+serde_json = { workspace = true }
 sha2 = "0.10.9"
-thiserror = "2.0.11"
-lsp-types = "0.94.1"
+thiserror = { workspace = true }
+lsp-types = { workspace = true }
 colored = "3.0.0"
-salsa = "0.25.2"
+salsa = { workspace = true }
 melior = "0.26.3"
 mlir-sys = "210.0.1"
-log = "0.4"
+log = { workspace = true }
 eyre = "0.6.12"
 internment = "0.8"
 notify-debouncer-mini = "0.4.1"
-crossbeam-channel = "0.5.15"
-dirs = "6"
-rayon = "1"
+crossbeam-channel = { workspace = true }
+dirs = { workspace = true }
+rayon = { workspace = true }
 
 [dev-dependencies]
 criterion = "0.5"
