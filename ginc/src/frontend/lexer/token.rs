@@ -14,6 +14,8 @@ pub struct LexContext {
     pub pending_dedents: u8,
     /// Whether a single Indent token is waiting to be emitted.
     pub pending_indent: bool,
+    /// Flag set when indentation exceeds MAX_INDENT_DEPTH.
+    pub indent_overflow: bool,
 }
 
 impl Default for LexContext {
@@ -23,6 +25,7 @@ impl Default for LexContext {
             indent_depth: 1,
             pending_dedents: 0,
             pending_indent: false,
+            indent_overflow: false,
         }
     }
 }
@@ -61,11 +64,9 @@ pub fn handle_newline<'src>(lex: &mut Lexer<'src, Token<'src>>) -> Token<'src> {
             extras.indent_stack[depth] = indent;
             extras.indent_depth += 1;
             extras.pending_indent = true;
+        } else {
+            extras.indent_overflow = true;
         }
-        // Silently cap at MAX_INDENT_DEPTH; parser continues at the deepest
-        // valid level. Callers that need to detect overflow can inspect the
-        // token stream for unexpected structure.
-        // TODO: lex error when max depth
     } else if indent < current {
         // Walk the stack with a local, write indent_depth once at the end.
         let mut d = depth;

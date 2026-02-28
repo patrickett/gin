@@ -74,7 +74,13 @@ impl<'src> GinLexer<'src> {
                     self.lex_format_string(span);
                     return self.pending.pop_front();
                 }
-                Ok(tok) => return Some((tok, span)),
+                Ok(tok) => {
+                    if lex.extras.indent_overflow {
+                        lex.extras.indent_overflow = false;
+                        self.errors.push((LexSymptom::OverflowIndent, span));
+                    }
+                    return Some((tok, span));
+                }
                 Err(err) => {
                     self.errors.push((err.clone(), span));
                     let lex = self.lexer_mut();
