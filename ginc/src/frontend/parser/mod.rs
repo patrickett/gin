@@ -23,7 +23,14 @@ where
     use Token::*;
 
     let expr_parser = expression();
+
+    let method_parser = tag(expr_parser.clone())
+        .then_ignore(just(Dot))
+        .then(bind(expr_parser.clone()))
+        .map(|(receiver_type, bind)| bind.with_receiver_type(Some(receiver_type)));
+
     let element = choice((
+        method_parser.map(TopLevelValue::Bind),
         bind(expr_parser.clone()).map(TopLevelValue::Bind),
         declare(expr_parser.clone()).map(TopLevelValue::Tag),
         expr_parser.map(TopLevelValue::Expr),

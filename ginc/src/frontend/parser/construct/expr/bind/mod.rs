@@ -1,9 +1,45 @@
-use crate::frontend::{parser::block, prelude::*};
+use crate::frontend::{parser::block, parser::construct::tag::Tag, prelude::*};
 
 mod attributes;
 mod value;
 pub use attributes::*;
 pub use value::*;
+
+/// Lazily-formatted method name (e.g., "Single(a).method")
+pub struct MethodName<'a> {
+    // TODO: come up with a better name than receiver
+    receiver: &'a Tag,
+    name: IStr,
+}
+
+impl std::fmt::Display for MethodName<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.receiver {
+            Tag::Nominal(type_name) => {
+                write!(f, "{}.{}", type_name.as_str(), self.name.as_str())
+            }
+            Tag::Generic(type_name, params) => {
+                write!(f, "{}(", type_name.as_str())?;
+                for (i, (k, v)) in params.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}: {}", k.as_str(), v)?;
+                }
+                write!(f, ").{}", self.name.as_str())
+            }
+            Tag::Union { variants } => {
+                for (i, variant) in variants.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " | ")?;
+                    }
+                    write!(f, "{}", variant)?;
+                }
+                write!(f, ".{}", self.name.as_str())
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bind {
@@ -12,6 +48,7 @@ pub struct Bind {
     name: IStr,
     params: Option<Parameters>,
     value: BindValue,
+    receiver_type: Option<Tag>,
 }
 
 impl Bind {
@@ -22,12 +59,17 @@ impl Bind {
             name,
             params: None,
             value,
+            receiver_type: None,
         }
     }
 
-    // TODO: refactor the with_whatever to just be forced in the new() function
     pub fn with_params(mut self, params: Option<Parameters>) -> Self {
         self.params = params;
+        self
+    }
+
+    pub fn with_receiver_type(mut self, receiver_type: Option<Tag>) -> Self {
+        self.receiver_type = receiver_type;
         self
     }
 
@@ -51,12 +93,28 @@ impl Bind {
     pub fn value(&self) -> &BindValue {
         &self.value
     }
+
+    pub fn is_method(&self) -> bool {
+        self.receiver_type.is_some()
+    }
+
+    pub fn receiver_type(&self) -> Option<&Tag> {
+        self.receiver_type.as_ref()
+    }
+
+    pub fn method_name(&self) -> Option<MethodName<'_>> {
+        self.receiver_type.as_ref().map(|t| MethodName {
+            receiver: t,
+            name: self.name,
+        })
+    }
 }
 
 impl std::hash::Hash for Bind {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.doc_comment.hash(state);
         self.name.hash(state);
+        self.receiver_type.hash(state);
         // Hash params manually since HashMap doesn't impl Hash
         match &self.params {
             None => 0u8.hash(state),

@@ -10,6 +10,35 @@ pub enum Tag {
     Union { variants: Vec<Tag> },
 }
 
+impl std::fmt::Display for Tag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Tag::Nominal(name) => write!(f, "{}", name.as_str()),
+            Tag::Generic(name, params) => {
+                write!(f, "{}(", name.as_str())?;
+                let mut first = true;
+                for (k, v) in params {
+                    if !first {
+                        write!(f, ", ")?;
+                    }
+                    first = false;
+                    write!(f, "{}: {}", k.as_str(), v)?;
+                }
+                write!(f, ")")
+            }
+            Tag::Union { variants } => {
+                for (i, variant) in variants.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " | ")?;
+                    }
+                    write!(f, "{}", variant)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 impl Hash for Tag {
     fn hash<H: Hasher>(&self, state: &mut H) {
         std::mem::discriminant(self).hash(state);

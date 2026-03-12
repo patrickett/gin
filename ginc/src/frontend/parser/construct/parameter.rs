@@ -9,6 +9,16 @@ pub enum ParameterKind {
     Default(Expr),
 }
 
+impl std::fmt::Display for ParameterKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ParameterKind::Generic => Ok(()),
+            ParameterKind::Tagged(tag) => write!(f, " {}", tag),
+            ParameterKind::Default(expr) => write!(f, ": {:?}", expr),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ParamInfo {
     /// Represents a type tag for the parameter, e.g. `(p Person)`.
