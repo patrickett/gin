@@ -8,6 +8,7 @@ pub enum LexSymptom {
     UnclosedString,
     InvalidInteger,
     InvalidFloat,
+    OverflowIndent,
     #[default]
     UnexpectedCharacter,
 }
@@ -30,6 +31,7 @@ impl SymptomDetail for LexSymptom {
             LexSymptom::UnclosedString => 1,
             LexSymptom::InvalidInteger => 2,
             LexSymptom::InvalidFloat => 3,
+            LexSymptom::OverflowIndent => 5,
             LexSymptom::UnexpectedCharacter => 4,
         }
     }
@@ -39,6 +41,7 @@ impl SymptomDetail for LexSymptom {
             LexSymptom::UnclosedString => "unclosed string literal".into(),
             LexSymptom::InvalidInteger => "integer literal out of range".into(),
             LexSymptom::InvalidFloat => "float literal out of range".into(),
+            LexSymptom::OverflowIndent => "indentation overflow".into(),
             LexSymptom::UnexpectedCharacter => "unexpected character".into(),
         }
     }

@@ -12,8 +12,13 @@ where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
     let id = id_token().map(Pattern::Ident);
-    let tuple =
-        delimited_list(Token::ParenOpen, id.clone(), Token::Comma, Token::ParenClose).map(Pattern::Tuple);
+    let tuple = delimited_list(
+        Token::ParenOpen,
+        id.clone(),
+        Token::Comma,
+        Token::ParenClose,
+    )
+    .map(Pattern::Tuple);
 
     choice((id, tuple))
 }

@@ -11,7 +11,7 @@ impl<'c> Lower<'c> for Bind {
     ) -> Result<Value<'c, 'c>, CodegenSymptom> {
         match &self.value() {
             BindValue::Body { exprs: _, ret: _ } => {
-                let func_op = lower_function(ctx, &self.name(), self, None, false)?;
+                let func_op = lower_function(ctx, &self.name(), self)?;
                 block.append_operation(func_op);
 
                 // Return a placeholder value (TODO: consider returning function reference)
@@ -19,7 +19,7 @@ impl<'c> Lower<'c> for Bind {
             }
             BindValue::Expr(expr) => {
                 let value = expr.lower(ctx, block, symtab)?;
-                symtab.insert(self.name(), value);
+                symtab.insert(self.name().as_str().to_string(), value);
                 Ok(value)
             }
         }

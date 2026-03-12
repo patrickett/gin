@@ -29,11 +29,12 @@ where
 {
     let id = id_token();
 
-    id.clone().then(
-        just(Token::Dot)
-            .ignore_then(id)
-            .repeated()
-            .collect::<Vec<IStr>>(),
-    )
-    .map(|(root, segs)| ModPath::new(root, segs))
+    id.clone()
+        .then(
+            just(Token::Dot)
+                .ignore_then(id)
+                .repeated()
+                .collect::<Vec<IStr>>(),
+        )
+        .map(|(root, segs)| ModPath::new(root, segs))
 }

@@ -28,7 +28,11 @@ where
         .map(|e| FormatPart::Expr(Box::new(e)));
 
     just(Token::FormatStringDelim)
-        .ignore_then(choice((text_part, interp_part)).repeated().collect::<Vec<_>>())
+        .ignore_then(
+            choice((text_part, interp_part))
+                .repeated()
+                .collect::<Vec<_>>(),
+        )
         .then_ignore(just(Token::FormatStringDelim))
         .map(|parts| FormatString { parts })
 }

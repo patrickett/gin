@@ -17,7 +17,6 @@ pub enum Literal {
     Float(f64),
     Int(i64),
     String(String),
-    Nothing,
 }
 
 impl PartialEq for Literal {
@@ -27,7 +26,6 @@ impl PartialEq for Literal {
             (Self::Number(a), Self::Number(b)) => a == b,
             (Self::Int(a), Self::Int(b)) => a == b,
             (Self::String(a), Self::String(b)) => a == b,
-            (Self::Nothing, Self::Nothing) => true,
             _ => false,
         }
     }
@@ -43,7 +41,6 @@ impl Hash for Literal {
             Self::Number(n) => n.hash(state),
             Self::Int(i) => i.hash(state),
             Self::String(s) => s.hash(state),
-            Self::Nothing => {}
         }
     }
 }

@@ -1,6 +1,8 @@
 use crate::backend::prelude::*;
 use crate::diagnostic::codegen::CodegenSymptom;
-use crate::frontend::prelude::{Expr, FileAst, SymbolTable as CompileTimeSymbolTable, TagValue};
+use crate::frontend::prelude::{
+    DeclareValue, Expr, FileAst, SymbolTable as CompileTimeSymbolTable,
+};
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -120,8 +122,8 @@ pub fn generate_mlir(ast: &FileAst) -> Result<String, CodegenSymptom> {
     let module = Module::new(context.unknown_loc());
 
     let mut func_ops = Vec::new();
-    for (def_name, documented) in &ast.defs {
-        let func_op = lower_function(&ctx, def_name, &documented.item)?;
+    for (def_name, bind) in &ast.defs {
+        let func_op = lower_function(&ctx, def_name, bind)?;
         func_ops.push(func_op);
     }
 
@@ -217,13 +219,13 @@ pub fn addressof_string_global<'c>(
         .into())
 }
 
-fn extract_type_info(ast: &FileAst) -> Result<HashMap<String, TypeInfo>, CodegenSymptom> {
+fn extract_type_info(ast: &FileAst) -> Result<HashMap<IStr, TypeInfo>, CodegenSymptom> {
     let mut type_info = HashMap::new();
 
     for (tag_name, documented) in &ast.tags {
-        if let TagValue::Range(range) = &documented.item.1 {
+        if let DeclareValue::Range(range) = &documented.value() {
             type_info.insert(
-                tag_name.0,
+                *tag_name,
                 TypeInfo {
                     min: range.start,
                     max: range.end,

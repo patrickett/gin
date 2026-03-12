@@ -62,6 +62,11 @@ pub fn params<'t, I>(
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
-    delimited_list(Token::ParenOpen, parameter(expr, tag), Token::Comma, Token::ParenClose)
-        .map(|pairs| pairs.into_iter().collect::<Parameters>())
+    delimited_list(
+        Token::ParenOpen,
+        parameter(expr, tag),
+        Token::Comma,
+        Token::ParenClose,
+    )
+    .map(|pairs| pairs.into_iter().collect::<Parameters>())
 }

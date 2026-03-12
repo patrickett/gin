@@ -20,8 +20,7 @@ impl<'c> Lower<'c> for FnCall {
             return self.lower_print_call(ctx, block, symtab);
         }
 
-        let has_args = self.args.is_some() && !self.args.as_ref().unwrap().is_empty();
-        if !has_args && let Some(value) = symtab.get(&func_name) {
+        if let Some(value) = symtab.get(func_name.as_str()) {
             return Ok(*value);
         }
 
