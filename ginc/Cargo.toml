@@ -33,6 +33,6 @@ semver.workspace = true
 [dev-dependencies]
 criterion = "0.5"
 
-[[bench]]
-name = "lexer_bench"
-harness = false
+# [[bench]]
+# name = "lexer_bench"
+# harness = false
