@@ -4,10 +4,10 @@ use std::{collections::HashMap, io::BufReader};
 // Settled on flask.json since we now own flasks.io
 pub const PACKAGE_CONFIG_NAME: &str = "flask.json";
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Feature {}
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct DependencyCommon {
     #[serde(default)]
     pub features: Vec<Feature>,
@@ -15,7 +15,13 @@ pub struct DependencyCommon {
     pub optional: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+pub struct BugInfo {
+    #[serde(default)]
+    url: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum DependencyKind {
     Version { version: String },
@@ -23,7 +29,7 @@ pub enum DependencyKind {
     Git { url: String },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Dependency {
     #[serde(flatten)]
     pub kind: DependencyKind,
@@ -32,23 +38,111 @@ pub struct Dependency {
     pub common: DependencyCommon,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct Author(String); // TODO: author struct
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Author(pub String);
 
-#[derive(Serialize, Deserialize, Debug)]
+impl Author {
+    pub fn new(name: String) -> Self {
+        Self(name)
+    }
+}
+
+impl std::fmt::Display for Author {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FlaskConfig {
-    name: String,
-    description: Option<String>,
-    version: String, // TODO: version struct
+    pub name: String,
+    pub description: Option<String>,
+    pub version: String,
+    #[serde(default)]
+    keywords: Option<Vec<String>>,
     authors: Vec<Author>,
+    #[serde(default)]
+    repository: Option<String>,
+    #[serde(default)]
+    license: Option<Vec<String>>,
+    #[serde(default)]
+    bugs: Option<BugInfo>,
+    #[serde(default)]
+    funding: Option<Vec<String>>,
     targets: Option<Vec<String>>,
-    // TODO: replace HashMap with BTreeMap?
+    #[serde(default)]
     dependencies: HashMap<String, Dependency>,
 }
 
 impl FlaskConfig {
+    pub fn new(name: String, version: String) -> Self {
+        Self {
+            name,
+            description: None,
+            version,
+            keywords: None,
+            authors: vec![],
+            repository: None,
+            license: None,
+            bugs: None,
+            funding: None,
+            targets: None,
+            dependencies: HashMap::new(),
+        }
+    }
+}
+
+impl FlaskConfig {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+
+    pub fn keywords(&self) -> Option<&[String]> {
+        self.keywords.as_deref()
+    }
+
+    pub fn authors(&self) -> &[Author] {
+        &self.authors
+    }
+
+    pub fn repository(&self) -> Option<&str> {
+        self.repository.as_deref()
+    }
+
+    pub fn license(&self) -> Option<&[String]> {
+        self.license.as_deref()
+    }
+
+    pub fn set_name(&mut self, name: String) {
+        self.name = name;
+    }
+
+    pub fn set_version(&mut self, version: String) {
+        self.version = version;
+    }
+
+    pub fn bugs(&self) -> Option<&BugInfo> {
+        self.bugs.as_ref()
+    }
+
+    pub fn funding(&self) -> Option<&[String]> {
+        self.funding.as_deref()
+    }
+
     pub fn dependency_names(&self) -> Vec<&str> {
         self.dependencies.keys().map(|s| s.as_str()).collect()
+    }
+
+    pub fn dependencies(&self) -> &HashMap<String, Dependency> {
+        &self.dependencies
     }
 
     pub fn from_directory(dir: &std::path::Path) -> Option<FlaskConfig> {
