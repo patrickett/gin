@@ -28,8 +28,8 @@ pub fn for_loop_header_expr<'t, I>() -> impl Parser<'t, I, Expr, ParserError<'t>
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
-    use Token::*;
     use chumsky::pratt::{infix, left};
+    use Token::*;
 
     let atom = recursive(|expr| {
         choice((

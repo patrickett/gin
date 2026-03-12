@@ -16,12 +16,8 @@ pub use frontend::parser::{
     parse,
 };
 
-use crate::backend::cache::{
-    CacheKey, CacheLookup, CacheManifest, ModuleCache, compute_content_hash, compute_interface_hash,
-};
 use crate::backend::compile::compile;
 use crossbeam_channel::unbounded;
-use std::collections::HashMap;
 
 pub const GIN_FILE_EXT: &str = "gin";
 pub const BINARY_ENTRY_FILE_NAME: &str = "main.gin";

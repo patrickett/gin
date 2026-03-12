@@ -37,8 +37,8 @@ where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
     recursive(|expr| {
-        use Token::*;
         use chumsky::pratt::{infix, left};
+        use Token::*;
 
         let inner = atom(expr.clone());
 

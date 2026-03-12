@@ -2,8 +2,9 @@ use crate::database::File;
 use crossbeam_channel::Sender;
 use dashmap::{DashMap, Entry};
 use notify_debouncer_mini::{
-    DebounceEventResult, Debouncer, new_debouncer,
+    new_debouncer,
     notify::{RecommendedWatcher, RecursiveMode},
+    DebounceEventResult, Debouncer,
 };
 use salsa::{Database, Storage};
 use std::{

@@ -2,12 +2,12 @@
 
 use chumsky::error::Rich;
 use chumsky::span::SimpleSpan;
-use chumsky::{Parser, input::Stream};
+use chumsky::{input::Stream, Parser};
 use std::path::{Path, PathBuf};
 
 use salsa::Accumulator;
 
-use crate::database::{File, input_database::Db};
+use crate::database::{input_database::Db, File};
 use crate::diagnostic::io as io_symptom;
 use crate::diagnostic::lex as lex_symptom;
 use crate::diagnostic::lex::LexSymptom;

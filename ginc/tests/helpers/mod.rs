@@ -1,5 +1,5 @@
 use crossbeam_channel::unbounded;
-use ginc::database::{File, input_database::InputDatabase};
+use ginc::database::{input_database::InputDatabase, File};
 use ginc::frontend::parser::construct::FileAst;
 use ginc::frontend::parser::parse;
 use std::path::PathBuf;

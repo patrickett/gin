@@ -5,8 +5,8 @@ pub use lexer::{GinLexer, Token};
 pub mod parser;
 
 pub mod prelude {
-    pub use crate::frontend::lexer::{MAX_INDENT_DEPTH, Token};
-    pub use crate::frontend::parser::{ParserError, construct::*, delimited_list::*};
+    pub use crate::frontend::lexer::{Token, MAX_INDENT_DEPTH};
+    pub use crate::frontend::parser::{construct::*, delimited_list::*, ParserError};
     pub use crate::intern::IStr;
     pub use chumsky::{input::ValueInput, prelude::*};
 }

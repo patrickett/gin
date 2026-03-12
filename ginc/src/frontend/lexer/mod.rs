@@ -14,7 +14,7 @@ use format_string::*;
 use logos::{Lexer, Logos};
 pub use semantic_token_type::*;
 use std::collections::VecDeque;
-pub use token::{LexContext, MAX_INDENT_DEPTH, Token, handle_newline};
+pub use token::{handle_newline, LexContext, Token, MAX_INDENT_DEPTH};
 
 pub struct GinLexer<'src> {
     inner: Option<Lexer<'src, Token<'src>>>,

@@ -1,5 +1,5 @@
 use crate::frontend::prelude::*;
-use chumsky::{Parser, input::ValueInput, prelude::*};
+use chumsky::{input::ValueInput, prelude::*, Parser};
 
 /// Parse a delimited, separated list like `(a, b, c)`.
 pub fn delimited_list<'t, I, T>(
