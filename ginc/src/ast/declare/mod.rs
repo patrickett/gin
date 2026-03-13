@@ -82,11 +82,15 @@ where
 
     let lhs_has = tag_name
         .then(params.clone().or_not())
-        .then_ignore(just(Token::Has));
+        .then_ignore(just(Token::Has))
+        .then_ignore(just(Token::Newline).repeated())
+        .then_ignore(just(Token::Indent).or_not());
 
     let lhs_is = tag_name
         .then(params.clone().or_not())
-        .then_ignore(just(Token::Is));
+        .then_ignore(just(Token::Is))
+        .then_ignore(just(Token::Newline).repeated())
+        .then_ignore(just(Token::Indent).or_not());
 
     let rhs_record = choice((
         tag(expr.clone()).map(DeclareValue::Alias),
@@ -104,8 +108,12 @@ where
     let decl = choice((lhs_has.then(rhs_record), lhs_is.then(rhs_union_or_range)))
         .map(|((tag_name, params), value)| Declare::new(tag_name, value).with_params(params));
 
-    doc_comment().or_not().then(decl).map(|(doc, decl)| {
-        let doc = doc.and_then(|d| if d.0.is_empty() { None } else { Some(d) });
-        decl.with_doc(doc)
-    })
+    doc_comment()
+        .or_not()
+        .then_ignore(just(Token::Newline).repeated())
+        .then(decl)
+        .map(|(doc, decl)| {
+            let doc = doc.and_then(|d| if d.0.is_empty() { None } else { Some(d) });
+            decl.with_doc(doc)
+        })
 }
