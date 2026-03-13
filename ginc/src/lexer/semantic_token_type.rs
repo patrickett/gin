@@ -1,0 +1,39 @@
+use crate::lexer::Token;
+use lsp_types::SemanticTokenType;
+
+// PERF: Consider caching semantic token type results for repeated tokens
+pub trait HasSemanticTokenType {
+    fn semantic_token_type(&self) -> SemanticTokenType;
+    fn semantic_token_type_index(&self) -> Option<usize>;
+}
+
+impl<'src> HasSemanticTokenType for Token<'src> {
+    fn semantic_token_type(&self) -> SemanticTokenType {
+        use Token::*;
+
+        match self {
+            Tag(_) => SemanticTokenType::TYPE,
+            Comment(_) | DocComment(_) => SemanticTokenType::COMMENT,
+            Continue | Private | Return | Break | Then | When | For | Loop | Use | Has | And
+            | As | If | In | Is | Of | Or | Else => SemanticTokenType::KEYWORD,
+            Int(_) | Float(_) => SemanticTokenType::NUMBER,
+            String(_) | FormatStringDelim | FormatStringText(_) => SemanticTokenType::STRING,
+            FormatInterpStart | FormatInterpEnd => SemanticTokenType::OPERATOR,
+            _ => SemanticTokenType::OPERATOR,
+        }
+    }
+
+    fn semantic_token_type_index(&self) -> Option<usize> {
+        use Token::*;
+
+        match self {
+            Tag(_) => Some(1),
+            Comment(_) | DocComment(_) => Some(2),
+            Continue | Private | Return | Break | Then | When | Else | For | Loop | Use | Has
+            | And | As | If | In | Is | Of | Or => Some(3),
+            Int(_) | Float(_) => Some(7),
+            String(_) | FormatStringDelim | FormatStringText(_) => Some(6),
+            _ => None,
+        }
+    }
+}
