@@ -16,7 +16,7 @@ fn identical_sources_have_same_hash() {
     let ast1 = parse_str(src);
     let ast2 = parse_str(src);
 
-    let hash_of = |ast: &ginc::frontend::parser::construct::FileAst| -> u64 {
+    let hash_of = |ast: &ginc::ast::FileAst| -> u64 {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         ast.hash(&mut h);
         h.finish()

@@ -3,8 +3,8 @@
 
 use chumsky::Parser;
 use chumsky::input::Stream;
-use ginc::frontend::lexer::GinLexer;
-use ginc::frontend::parser::token_parser;
+use ginc::lexer::GinLexer;
+use ginc::ast::token_parser;
 
 fn main() {
     let source = "x + "; // Incomplete expression

@@ -7,7 +7,7 @@ fn test_parse_arithmetic_debug() {
 
     println!("Source: {}", src);
     println!("Tokens:");
-    use ginc::frontend::lexer::GinLexer;
+    use ginc::lexer::GinLexer;
     for (i, (tok, span)) in GinLexer::new(src).enumerate() {
         println!("  {}: {:?} at {:?}", i, tok, span);
     }

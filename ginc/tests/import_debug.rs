@@ -8,7 +8,7 @@ fn test_parse_import_debug() {
     println!("=== Testing import parsing ===");
     println!("Source: '{}'", src);
 
-    use ginc::frontend::lexer::GinLexer;
+    use ginc::lexer::GinLexer;
     let tokens: Vec<_> = GinLexer::new(src).collect();
     println!("Tokens from lexer:");
     for (i, (token, span)) in tokens.iter().enumerate() {

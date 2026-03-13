@@ -1,8 +1,8 @@
 use crossbeam_channel::unbounded;
-use ginc::backend::compile::compile;
+use ginc::compilation::compile::compile;
 use ginc::database::{File, input_database::InputDatabase};
 use ginc::diagnostic::Symptom;
-use ginc::frontend::parser::parse;
+use ginc::parse::parse::parse;
 use std::path::PathBuf;
 
 #[test]

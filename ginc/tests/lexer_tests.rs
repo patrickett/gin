@@ -1,4 +1,4 @@
-use ginc::frontend::lexer::{GinLexer, Token};
+use ginc::lexer::{GinLexer, Token};
 
 #[test]
 fn test_keywords() {

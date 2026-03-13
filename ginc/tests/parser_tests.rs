@@ -33,7 +33,7 @@ fn test_parse_import() {
     let module = &ast.uses()[0].0[0];
     assert!(matches!(
         &module.source,
-        ginc::frontend::parser::construct::ImportSource::Package(_)
+        ginc::ast::ImportSource::Package(_)
     ));
     assert_eq!(module.alias.as_deref().map(String::as_str), Some("h"));
 }
@@ -49,7 +49,7 @@ fn test_parse_local_import() {
     let module = &ast.uses()[0].0[0];
     assert!(matches!(
         &module.source,
-        ginc::frontend::parser::construct::ImportSource::Local(_)
+        ginc::ast::ImportSource::Local(_)
     ));
     assert_eq!(module.alias.as_deref().map(String::as_str), Some("math"));
     assert_eq!(module.effective_name(), "math");
@@ -63,7 +63,7 @@ fn test_parse_local_import_no_alias() {
     let module = &ast.uses()[0].0[0];
     assert!(matches!(
         &module.source,
-        ginc::frontend::parser::construct::ImportSource::Local(_)
+        ginc::ast::ImportSource::Local(_)
     ));
     assert!(module.alias.is_none());
     assert_eq!(module.effective_name(), "util");
