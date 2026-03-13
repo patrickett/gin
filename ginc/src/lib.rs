@@ -1,9 +1,12 @@
 mod args;
-pub mod backend;
+pub mod ast;
+pub mod codegen;
+pub mod compilation;
 pub mod database;
 pub mod diagnostic;
-pub mod frontend;
 pub mod intern;
+pub mod lexer;
+pub mod parse;
 
 pub use args::*;
 pub use database::{
@@ -11,16 +14,22 @@ pub use database::{
     input_database::{Db, InputDatabase},
 };
 pub use diagnostic::{Category, Symptom, SymptomSource};
-pub use frontend::parser::{
-    construct::{DefMap, FileAst, Symbol, SymbolKind, SymbolTable, TagMap},
-    parse,
-};
+pub use ast::{DefMap, FileAst, Symbol, SymbolKind, SymbolTable, TagMap};
 
-use crate::backend::compile::compile;
+use crate::compilation::compile::compile;
 use crossbeam_channel::unbounded;
 
 pub const GIN_FILE_EXT: &str = "gin";
 pub const BINARY_ENTRY_FILE_NAME: &str = "main.gin";
+
+pub mod prelude {
+    pub use crate::ast::*;
+    pub use crate::codegen::{CodegenContext, Lower, RuntimeSymbolTable};
+    pub use crate::intern::IStr;
+    pub use crate::lexer::{Token, MAX_INDENT_DEPTH};
+    pub use crate::parse::ParserError;
+    pub use chumsky::{input::ValueInput, prelude::*};
+}
 
 /// Analagous to the `ginc` command
 pub struct GinCompiler;
