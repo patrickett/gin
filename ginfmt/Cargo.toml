@@ -5,4 +5,6 @@ edition = "2024"
 
 [dependencies]
 ginc = {workspace = true}
-chumsky = {workspace=true}
+chumsky = {workspace = true}
+tree-sitter-gin = { path = "../tree-sitter-gin" }
+tree-sitter = "0.26"

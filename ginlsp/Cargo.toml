@@ -14,6 +14,7 @@ ropey = "1.5"
 dashmap = { workspace = true }
 ginc = { workspace = true }
 flask = { workspace = true }
+ginfmt = { workspace = true }
 lsp-types = { workspace = true }
 crossbeam-channel = { workspace = true }
 salsa = { workspace = true }

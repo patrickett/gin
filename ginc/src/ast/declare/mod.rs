@@ -92,7 +92,6 @@ where
     let lhs_is = tag_name
         .then(params.clone().or_not())
         .then_ignore(just(Token::Is))
-        .then(doc_comment().or_not()) // Capture doc comment after Is
         .then_ignore(just(Token::Newline).or_not())
         .then_ignore(just(Token::Newline).repeated())
         .then_ignore(just(Token::Indent).or_not());
@@ -188,7 +187,7 @@ where
     .then_ignore(just(Token::Dedent).or_not());
 
     // lhs_has returns (tag_name, params)
-    // lhs_is returns ((tag_name, params), doc_after_is)
+    // lhs_is returns (tag_name, params) - doc comments must be ABOVE declaration
     let decl_has = lhs_has
         .then(rhs_record)
         .map(|((tag_name, params), value)| Declare::new(tag_name, value).with_params(params));
@@ -196,11 +195,10 @@ where
     let decl_is =
         lhs_is
             .then(rhs_union_or_range)
-            .map(|(((tag_name, params), doc_inline), value)| {
-                let doc = doc_inline.and_then(|d| if d.0.is_empty() { None } else { Some(d) });
+            .map(|((tag_name, params), value)| {
                 Declare::new(tag_name, value)
                     .with_params(params)
-                    .with_doc(doc)
+                    // Note: doc is set from the doc_comment() before the declaration (lines 208-219)
             });
 
     let decl = choice((decl_has, decl_is));
