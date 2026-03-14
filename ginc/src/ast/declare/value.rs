@@ -8,6 +8,7 @@ use std::{
 pub enum DeclareValue {
     Alias(Tag),
     Record(Parameters),
+    Union { variants: Vec<Variant> },
     Set(/* TODO */),
     Range(Range<i64>),
     // DiceThrow is in 1...6 (element of range)
@@ -23,6 +24,11 @@ impl Hash for DeclareValue {
                 for (k, v) in params {
                     k.hash(state);
                     v.hash(state);
+                }
+            }
+            Self::Union { variants } => {
+                for variant in variants {
+                    variant.hash(state);
                 }
             }
             Self::Set() => {}

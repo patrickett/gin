@@ -1,3 +1,4 @@
+use crate::ast::tag::Variant;
 use crate::prelude::*;
 use std::hash::{Hash, Hasher};
 
@@ -83,12 +84,16 @@ where
     let lhs_has = tag_name
         .then(params.clone().or_not())
         .then_ignore(just(Token::Has))
+        .then_ignore(just(Token::Newline).or_not()) // Consume optional newline after Has
+        .then_ignore(doc_comment().or_not()) // Consume optional doc comment after Has
         .then_ignore(just(Token::Newline).repeated())
         .then_ignore(just(Token::Indent).or_not());
 
     let lhs_is = tag_name
         .then(params.clone().or_not())
         .then_ignore(just(Token::Is))
+        .then(doc_comment().or_not()) // Capture doc comment after Is
+        .then_ignore(just(Token::Newline).or_not())
         .then_ignore(just(Token::Newline).repeated())
         .then_ignore(just(Token::Indent).or_not());
 
@@ -97,23 +102,119 @@ where
         params.map(DeclareValue::Record),
     ));
 
+    // Parse a variant with optional doc comment BEFORE or AFTER the tag
+    // Syntax: [--- doc] Tag [--- doc]
+    // Doc after tag takes precedence over doc before tag
+    let parse_variant = doc_comment()
+        .or_not()
+        .then_ignore(just(Token::Newline).or_not())
+        .then(tag(expr.clone()))
+        .then(doc_comment().or_not()) // Doc after tag
+        .then_ignore(just(Token::Newline).or_not())
+        .map(|((doc_before, tag), doc_after)| {
+            // Prefer doc_after over doc_before
+            let doc = doc_after.or(doc_before).filter(|d| !d.0.is_empty());
+            if let Some(doc) = doc {
+                Variant::Local {
+                    doc_comment: Some(doc),
+                    tag,
+                }
+            } else {
+                Variant::External(tag)
+            }
+        });
+
+    // Parse: or [--- doc_on_same_line] variant
+    // Doc comment on SAME LINE as `or` belongs to PREVIOUS variant
+    // Doc comment on SEPARATE LINE belongs to NEXT variant (handled by parse_variant)
+    let parse_or_and_variant = just(Token::Or)
+        .then(doc_comment().or_not()) // Doc on same line (no newline consumed yet)
+        .then_ignore(just(Token::Newline).or_not())
+        .then_ignore(just(Token::Indent).or_not())
+        .then(parse_variant.clone())
+        .map(|((_, doc_on_same_line), variant)| (doc_on_same_line, variant));
+
+    // Parse union declarations: A or B or C
+    // Doc comments on same line after `or` belong to the PREVIOUS variant
+    // Doc comments on separate line (before tag) belong to that tag
+    // Syntax: A or --- doc for A
+    //         --- doc for B
+    //         B
+    let rhs_union = parse_variant
+        .clone()
+        .then(
+            parse_or_and_variant
+                .repeated()
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
+        .map(|(first, rest)| {
+            let mut variants = Vec::with_capacity(rest.len() + 1);
+            variants.push(first);
+            for (doc_on_same_line, variant) in rest {
+                // Associate doc on same line as `or` with the PREVIOUS variant
+                if let Some(doc) = doc_on_same_line.filter(|d| !d.is_empty()) {
+                    if let Some(prev) = variants.last_mut() {
+                        // Only add doc to previous if it doesn't already have one
+                        match prev {
+                            Variant::External(tag) => {
+                                let tag = tag.clone();
+                                *prev = Variant::Local {
+                                    doc_comment: Some(doc),
+                                    tag,
+                                };
+                            }
+                            Variant::Local { doc_comment, .. } => {
+                                if doc_comment.is_none() {
+                                    *doc_comment = Some(doc);
+                                }
+                            }
+                        }
+                    }
+                }
+                variants.push(variant);
+            }
+            DeclareValue::Union { variants }
+        });
+
     let rhs_union_or_range = choice((
         just(Token::In)
             .ignore_then(int_range())
             .map(DeclareValue::InRange),
         int_range().map(DeclareValue::Range),
+        rhs_union,
         tag(expr.clone()).map(DeclareValue::Alias),
-    ));
+    ))
+    .then_ignore(just(Token::Dedent).or_not());
 
-    let decl = choice((lhs_has.then(rhs_record), lhs_is.then(rhs_union_or_range)))
+    // lhs_has returns (tag_name, params)
+    // lhs_is returns ((tag_name, params), doc_after_is)
+    let decl_has = lhs_has
+        .then(rhs_record)
         .map(|((tag_name, params), value)| Declare::new(tag_name, value).with_params(params));
+
+    let decl_is =
+        lhs_is
+            .then(rhs_union_or_range)
+            .map(|(((tag_name, params), doc_inline), value)| {
+                let doc = doc_inline.and_then(|d| if d.0.is_empty() { None } else { Some(d) });
+                Declare::new(tag_name, value)
+                    .with_params(params)
+                    .with_doc(doc)
+            });
+
+    let decl = choice((decl_has, decl_is));
 
     doc_comment()
         .or_not()
         .then_ignore(just(Token::Newline).repeated())
         .then(decl)
-        .map(|(doc, decl)| {
-            let doc = doc.and_then(|d| if d.0.is_empty() { None } else { Some(d) });
-            decl.with_doc(doc)
+        .map(|(doc_before, mut decl)| {
+            // Only set doc from before if decl doesn't already have one
+            if decl.doc_comment().is_none() {
+                let doc = doc_before.and_then(|d| if d.0.is_empty() { None } else { Some(d) });
+                decl = decl.with_doc(doc);
+            }
+            decl
         })
 }

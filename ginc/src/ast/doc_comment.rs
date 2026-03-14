@@ -5,6 +5,12 @@ use chumsky::{input::ValueInput, prelude::*, span::SimpleSpan, Parser};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DocComment(pub String);
 
+impl DocComment {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 // A single DocComment can be spread across multiple lines
 pub fn doc_comment<'t, I>() -> impl Parser<'t, I, DocComment, ParserError<'t>> + Clone
 where

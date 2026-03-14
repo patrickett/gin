@@ -5,7 +5,7 @@ mod util;
 
 use capabilities::{
     build_completions, build_hover, build_semantic_tokens_from_ast,
-    build_signature_help, complete_flask_json, find_all_references, find_definition_range,
+    build_signature_help, build_variant_hover, complete_flask_json, find_all_references, find_definition_range,
     is_flask_json_file, should_handle_file, use_completions, LEGEND_TYPE,
 };
 use dashmap::DashMap;
@@ -533,14 +533,43 @@ impl LanguageServer for Backend {
             let module = self.compute_module_path(&file_path, &uri);
 
             if let Some(word) = get_word_at_position(&state.source, position) {
+                // First check if it's a variant within a union
+                use ginc::ast::{DeclareValue, Variant};
+                for (name, decl) in ast.tags() {
+                    if let DeclareValue::Union { variants } = decl.value() {
+                        for variant in variants {
+                            let (tag, doc) = match variant {
+                                Variant::External(tag) => (tag, None),
+                                Variant::Local { tag, doc_comment } => {
+                                    (tag, doc_comment.as_ref())
+                                }
+                            };
+                            if tag.name() == word {
+                                // Found variant within union
+                                let value =
+                                    build_variant_hover(&module, &word, name.as_str(), doc);
+                                return Ok(Some(Hover {
+                                    contents: HoverContents::Markup(MarkupContent {
+                                        kind: MarkupKind::Markdown,
+                                        value,
+                                    }),
+                                    range: None,
+                                }));
+                            }
+                        }
+                    }
+                }
+
+                // Then check top-level tags
                 for (name, decl) in ast.tags() {
                     if name.as_str() == word {
+                        let doc = decl.doc_comment();
                         let value = build_hover(
                             &state.source,
                             &module,
                             &word,
                             true,
-                            &decl.doc_comment().cloned(),
+                            &doc.cloned(),
                         );
                         return Ok(Some(Hover {
                             contents: HoverContents::Markup(MarkupContent {
@@ -552,14 +581,15 @@ impl LanguageServer for Backend {
                     }
                 }
 
-                for (name, bind) in ast.defs() {
+                // Then check bindings
+                for (name, _bind) in ast.defs() {
                     if name.as_str() == word {
                         let value = build_hover(
                             &state.source,
                             &module,
                             &word,
                             false,
-                            &bind.doc_comment().cloned(),
+                            &None,  // Don't show doc comments in hover
                         );
                         return Ok(Some(Hover {
                             contents: HoverContents::Markup(MarkupContent {

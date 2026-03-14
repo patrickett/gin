@@ -4,10 +4,34 @@ use crate::prelude::*;
 use std::hash::{Hash, Hasher};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Variant {
+    /// this comes from somewhere else its just one of the possible values
+    /// holds its own doc comments
+    External(Tag),
+    /// defined within the current declare
+    Local {
+        doc_comment: Option<DocComment>,
+        tag: Tag,
+    },
+}
+
+impl Hash for Variant {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Self::External(tag) => tag.hash(state),
+            Self::Local { doc_comment, tag } => {
+                doc_comment.hash(state);
+                tag.hash(state);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Tag {
     Nominal(IStr),
     Generic(IStr, Parameters),
-    Union { variants: Vec<Tag> },
 }
 
 impl std::fmt::Display for Tag {
@@ -26,15 +50,15 @@ impl std::fmt::Display for Tag {
                 }
                 write!(f, ")")
             }
-            Tag::Union { variants } => {
-                for (i, variant) in variants.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, " | ")?;
-                    }
-                    write!(f, "{}", variant)?;
-                }
-                Ok(())
-            }
+        }
+    }
+}
+
+impl Tag {
+    pub fn name(&self) -> &str {
+        match self {
+            Tag::Nominal(name) => name.as_str(),
+            Tag::Generic(name, _) => name.as_str(),
         }
     }
 }
@@ -51,7 +75,6 @@ impl Hash for Tag {
                     v.hash(state);
                 }
             }
-            Self::Union { variants } => variants.hash(state),
         }
     }
 }
@@ -63,50 +86,16 @@ where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
     recursive(|tag| {
-        // --- parse tag name (capitalized)
+        // Parse tag name (capitalized)
         let tag_name = select! { Token::Tag(name) => IStr::new(name.to_string()) };
 
-        // --- nominal or generic tag
-        let nominal_or_generic = tag_name
+        // Parse nominal or generic tag
+        tag_name
             .then(params(expr.clone(), tag.clone()).or_not())
             .map(|(name, params)| match params {
                 None => Tag::Nominal(name),
                 Some(parameters) if parameters.is_empty() => Tag::Nominal(name),
                 Some(parameters) => Tag::Generic(name, parameters),
-            })
-            .boxed();
-
-        // Separator between middle variants: SlashOr or Or + optional Newline + optional Indent
-        let sep_token = choice((just(Token::SlashOr), just(Token::Or)));
-
-        let middle_sep = sep_token
-            .then_ignore(just(Token::Newline).or_not())
-            .then_ignore(just(Token::Indent).or_not());
-
-        // Trailing separator: optional, can be Bar, Or, Newline, or nothing
-        let trailing_sep = choice((sep_token, just(Token::Newline))).or_not();
-
-        // --- parse first variant + repeated remaining variants separated by `sep`
-        nominal_or_generic
-            .clone()
-            .then(
-                middle_sep
-                    .ignore_then(nominal_or_generic.clone())
-                    .repeated()
-                    .collect::<Vec<_>>(),
-            )
-            .then_ignore(trailing_sep)
-            .map(|(first, mut rest)| {
-                rest.insert(0, first);
-                rest
-            })
-            // --- consume the Dedent at the end of the multi-line union
-            .then_ignore(just(Token::Dedent).or_not())
-            // --- flatten into single union if multiple variants
-            .map(|variants| match variants.len() {
-                0 => unreachable!("tag parser requires at least one variant"),
-                1 => variants.into_iter().next().unwrap(),
-                _ => Tag::Union { variants },
             })
     })
 }

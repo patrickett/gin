@@ -30,15 +30,6 @@ impl std::fmt::Display for MethodName<'_> {
                 }
                 write!(f, ").{}", self.name.as_str())
             }
-            Tag::Union { variants } => {
-                for (i, variant) in variants.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, " | ")?;
-                    }
-                    write!(f, "{}", variant)?;
-                }
-                write!(f, ".{}", self.name.as_str())
-            }
         }
     }
 }
