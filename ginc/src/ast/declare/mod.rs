@@ -152,21 +152,21 @@ where
             variants.push(first);
             for (doc_on_same_line, variant) in rest {
                 // Associate doc on same line as `or` with the PREVIOUS variant
-                if let Some(doc) = doc_on_same_line.filter(|d| !d.is_empty()) {
-                    if let Some(prev) = variants.last_mut() {
-                        // Only add doc to previous if it doesn't already have one
-                        match prev {
-                            Variant::External(tag) => {
-                                let tag = tag.clone();
-                                *prev = Variant::Local {
-                                    doc_comment: Some(doc),
-                                    tag,
-                                };
-                            }
-                            Variant::Local { doc_comment, .. } => {
-                                if doc_comment.is_none() {
-                                    *doc_comment = Some(doc);
-                                }
+                if let Some(doc) = doc_on_same_line.filter(|d| !d.is_empty())
+                    && let Some(prev) = variants.last_mut()
+                {
+                    // Only add doc to previous if it doesn't already have one
+                    match prev {
+                        Variant::External(tag) => {
+                            let tag = tag.clone();
+                            *prev = Variant::Local {
+                                doc_comment: Some(doc),
+                                tag,
+                            };
+                        }
+                        Variant::Local { doc_comment, .. } => {
+                            if doc_comment.is_none() {
+                                *doc_comment = Some(doc);
                             }
                         }
                     }
@@ -192,14 +192,12 @@ where
         .then(rhs_record)
         .map(|((tag_name, params), value)| Declare::new(tag_name, value).with_params(params));
 
-    let decl_is =
-        lhs_is
-            .then(rhs_union_or_range)
-            .map(|((tag_name, params), value)| {
-                Declare::new(tag_name, value)
-                    .with_params(params)
-                    // Note: doc is set from the doc_comment() before the declaration (lines 208-219)
-            });
+    let decl_is = lhs_is
+        .then(rhs_union_or_range)
+        .map(|((tag_name, params), value)| {
+            Declare::new(tag_name, value).with_params(params)
+            // Note: doc is set from the doc_comment() before the declaration (lines 208-219)
+        });
 
     let decl = choice((decl_has, decl_is));
 
