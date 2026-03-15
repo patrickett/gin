@@ -29,7 +29,6 @@ pub enum Expr {
     FormatString(FormatString),
     Range(Range),
     Bind(Bind),
-    Nothing,
 }
 
 pub fn expression<'t, I>() -> impl Parser<'t, I, Expr, ParserError<'t>> + Clone
@@ -80,7 +79,7 @@ where
     choice((
         literal().map(Expr::Lit).boxed(),
         format_string(expr.clone()).map(Expr::FormatString).boxed(),
-        fn_call(expr.clone()).map(Expr::FnCall).boxed(),
         bind(expr.clone()).map(Expr::Bind).boxed(),
+        fn_call(expr.clone()).map(Expr::FnCall).boxed(),
     ))
 }

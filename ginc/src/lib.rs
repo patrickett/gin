@@ -20,7 +20,6 @@ use crate::compilation::compile::compile;
 use crossbeam_channel::unbounded;
 
 pub const GIN_FILE_EXT: &str = "gin";
-pub const BINARY_ENTRY_FILE_NAME: &str = "main.gin";
 
 pub mod prelude {
     pub use crate::ast::*;

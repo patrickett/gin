@@ -33,6 +33,20 @@ pub enum BinOp {
     Equal,
 }
 
+impl BinOp {
+    pub fn is_comparison(&self) -> bool {
+        matches!(
+            self,
+            BinOp::Equal
+                | BinOp::NotEqual
+                | BinOp::LessThan
+                | BinOp::LessThanOrEqual
+                | BinOp::GreaterThan
+                | BinOp::GreaterThanOrEqual
+        )
+    }
+}
+
 /// Parser for comparison operators (==, !=, <, >, <=, >=)
 pub fn comparison_op<'t, I>() -> impl Parser<'t, I, BinOp, ParserError<'t>> + Clone
 where

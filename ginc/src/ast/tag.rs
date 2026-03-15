@@ -15,6 +15,21 @@ pub enum Variant {
     },
 }
 
+impl Variant {
+    pub fn tag(&self) -> &Tag {
+        match self {
+            Variant::External(tag) => tag,
+            Variant::Local { tag, .. } => tag,
+        }
+    }
+}
+
+impl std::fmt::Display for Variant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.tag())
+    }
+}
+
 impl Hash for Variant {
     fn hash<H: Hasher>(&self, state: &mut H) {
         std::mem::discriminant(self).hash(state);
@@ -46,7 +61,7 @@ impl std::fmt::Display for Tag {
                         write!(f, ", ")?;
                     }
                     first = false;
-                    write!(f, "{}: {}", k.as_str(), v)?;
+                    write!(f, "{}{v}", k.as_str())?;
                 }
                 write!(f, ")")
             }

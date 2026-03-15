@@ -54,6 +54,29 @@ impl Declare {
     }
 }
 
+impl std::fmt::Display for Declare {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name.as_str())?;
+        if let Some(params) = &self.params {
+            write!(f, "(")?;
+            let mut first = true;
+            for (k, v) in params {
+                if !first {
+                    write!(f, ", ")?;
+                }
+                first = false;
+                write!(f, "{}{v}", k.as_str())?;
+            }
+            write!(f, ")")?;
+        }
+        let keyword = match &self.value {
+            DeclareValue::Record(_) => " has",
+            _ => " is",
+        };
+        write!(f, "{keyword} {}", self.value)
+    }
+}
+
 impl Hash for Declare {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.doc_comment.hash(state);
@@ -92,6 +115,7 @@ where
     let lhs_is = tag_name
         .then(params.clone().or_not())
         .then_ignore(just(Token::Is))
+        .then(doc_comment().or_not())
         .then_ignore(just(Token::Newline).or_not())
         .then_ignore(just(Token::Newline).repeated())
         .then_ignore(just(Token::Indent).or_not());
@@ -186,18 +210,20 @@ where
     ))
     .then_ignore(just(Token::Dedent).or_not());
 
-    // lhs_has returns (tag_name, params)
-    // lhs_is returns (tag_name, params) - doc comments must be ABOVE declaration
     let decl_has = lhs_has
         .then(rhs_record)
         .map(|((tag_name, params), value)| Declare::new(tag_name, value).with_params(params));
 
-    let decl_is = lhs_is
-        .then(rhs_union_or_range)
-        .map(|((tag_name, params), value)| {
-            Declare::new(tag_name, value).with_params(params)
-            // Note: doc is set from the doc_comment() before the declaration (lines 208-219)
-        });
+    let decl_is = lhs_is.then(rhs_union_or_range).map(
+        |((((tag_name, params), doc_after_is), value), doc_after_value)| {
+            let doc = doc_after_value
+                .or(doc_after_is)
+                .and_then(|d| if d.0.is_empty() { None } else { Some(d) });
+            Declare::new(tag_name, value)
+                .with_params(params)
+                .with_doc(doc)
+        },
+    );
 
     let decl = choice((decl_has, decl_is));
 

@@ -1,43 +1,57 @@
-use super::definition::find_definition_line;
-use ginc::ast::DocComment;
+use crate::util::format_params;
+use ginc::ast::{Bind, Declare, DeclareValue, DocComment};
 
-/// Strip doc comment (--- and everything after) from a line
-fn strip_doc_comment(line: &str) -> &str {
-    if let Some(pos) = line.find("---") {
-        &line[..pos]
-    } else {
-        line
+/// Pretty-print a declaration from the AST for hover display.
+/// Handles multiline formatting for unions with ≥3 variants or >80 chars.
+fn format_declare_hover(decl: &Declare) -> String {
+    // Build the LHS: "Name" or "Name(params)"
+    let mut lhs = decl.name().as_str().to_string();
+    if let Some(params) = decl.params() {
+        lhs.push('(');
+        let mut first = true;
+        for (k, v) in params {
+            if !first {
+                lhs.push_str(", ");
+            }
+            first = false;
+            lhs.push_str(k.as_str());
+            lhs.push_str(&v.to_string());
+        }
+        lhs.push(')');
+    }
+
+    match decl.value() {
+        DeclareValue::Union { variants } => {
+            let single_line = format!("{lhs} is {}", decl.value());
+            if variants.len() <= 2 && single_line.len() <= 80 {
+                single_line
+            } else {
+                let mut lines = vec![format!("{lhs} is")];
+                for (i, v) in variants.iter().enumerate() {
+                    let suffix = if i < variants.len() - 1 { " or" } else { "" };
+                    lines.push(format!("    {v}{suffix}"));
+                }
+                lines.join("\n")
+            }
+        }
+        _ => format!("{decl}"),
     }
 }
 
-fn extract_definition_block(source: &str, start_line: usize) -> String {
-    let lines: Vec<&str> = source.lines().collect();
-    if start_line >= lines.len() {
-        return String::new();
+/// Build hover content for a type declaration using AST pretty-printing.
+pub fn build_declare_hover(
+    module: &str,
+    decl: &Declare,
+    doc: Option<&DocComment>,
+) -> String {
+    let mut md = format!("*{module}*\n\n");
+    let block = format_declare_hover(decl);
+    md.push_str(&format!("```gin\n{block}\n```\n"));
+    if let Some(doc) = doc {
+        md.push_str("\n---\n\n");
+        md.push_str(&doc.0);
     }
-
-    let def_line = strip_doc_comment(lines[start_line]).trim_end();
-    let base_indent = lines[start_line].len() - lines[start_line].trim_start().len();
-
-    let mut block = String::from(def_line.trim_start());
-
-    for line in &lines[start_line + 1..] {
-        let trimmed = line.trim_start();
-        if trimmed.is_empty() {
-            block.push('\n');
-            continue;
-        }
-        let indent = line.len() - trimmed.len();
-        if indent <= base_indent {
-            break;
-        }
-        block.push('\n');
-        // Strip doc comments from nested lines too
-        let relative = strip_doc_comment(&line[base_indent..]).trim_end();
-        block.push_str(relative);
-    }
-
-    block
+    md
 }
 
 /// Build hover content for a variant within a union
@@ -62,24 +76,43 @@ pub fn build_variant_hover(
     result
 }
 
-pub fn build_hover(
-    source: &str,
-    module: &str,
-    word: &str,
-    is_tag: bool,
-    doc: &Option<DocComment>,
-) -> String {
-    let mut md = String::new();
-    md.push_str(&format!("*{module}*\n\n"));
+/// Build hover content for a local binding (no module header).
+pub fn build_local_binding_hover(bind: &Bind) -> String {
+    let mut md = format!("```gin\n{}", bind.name().as_str());
 
-    if let Some(def_line) = find_definition_line(source, word, is_tag) {
-        let block = extract_definition_block(source, def_line);
-        md.push_str(&format!("```gin\n{block}\n```\n"));
-    } else {
-        md.push_str(&format!("```gin\n{word}\n```\n"));
+    if let Some(params) = bind.params() {
+        md.push_str(&format_params(params));
     }
 
-    if let Some(doc) = doc {
+    if let Some(ret_type) = bind.infer_return_type() {
+        md.push_str(&format!(" {ret_type}"));
+    }
+
+    md.push_str("\n```\n");
+
+    if let Some(doc) = bind.doc_comment() {
+        md.push_str("\n---\n\n");
+        md.push_str(&doc.0);
+    }
+
+    md
+}
+
+/// Build hover content for a binding from the AST.
+pub fn build_binding_hover(module: &str, bind: &Bind) -> String {
+    let mut md = format!("*{module}*\n\n```gin\n{}", bind.name().as_str());
+
+    if let Some(params) = bind.params() {
+        md.push_str(&format_params(params));
+    }
+
+    if let Some(ret_type) = bind.infer_return_type() {
+        md.push_str(&format!(" {ret_type}"));
+    }
+
+    md.push_str("\n```\n");
+
+    if let Some(doc) = bind.doc_comment() {
         md.push_str("\n---\n\n");
         md.push_str(&doc.0);
     }

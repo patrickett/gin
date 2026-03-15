@@ -302,7 +302,6 @@ impl<'c> Lower<'c> for Expr {
             Expr::Range(_) => Err(CodegenSymptom::Internal(
                 "Range lowering not yet implemented".to_string(),
             )),
-            Expr::Nothing => Ok(block.unit_value(ctx)),
         }
     }
 }

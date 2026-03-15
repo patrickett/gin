@@ -15,6 +15,40 @@ pub enum DeclareValue {
     InRange(Range<i64>),
 }
 
+impl std::fmt::Display for DeclareValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Alias(tag) => write!(f, "{tag}"),
+            Self::Record(params) => {
+                write!(f, "(")?;
+                let mut first = true;
+                for (k, v) in params {
+                    if !first {
+                        write!(f, ", ")?;
+                    }
+                    first = false;
+                    write!(f, "{}{v}", k.as_str())?;
+                }
+                write!(f, ")")
+            }
+            Self::Union { variants } => {
+                let mut first = true;
+                for v in variants {
+                    if !first {
+                        write!(f, " or ")?;
+                    }
+                    first = false;
+                    write!(f, "{v}")?;
+                }
+                Ok(())
+            }
+            Self::Set() => write!(f, "set"),
+            Self::Range(r) => write!(f, "{}...{}", r.start, r.end),
+            Self::InRange(r) => write!(f, "in {}...{}", r.start, r.end),
+        }
+    }
+}
+
 impl Hash for DeclareValue {
     fn hash<H: Hasher>(&self, state: &mut H) {
         std::mem::discriminant(self).hash(state);

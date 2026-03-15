@@ -71,6 +71,8 @@ pub struct FlaskConfig {
     funding: Option<Vec<String>>,
     targets: Option<Vec<String>>,
     #[serde(default)]
+    entry: Option<String>,
+    #[serde(default)]
     dependencies: HashMap<String, Dependency>,
 }
 
@@ -87,6 +89,7 @@ impl FlaskConfig {
             bugs: None,
             funding: None,
             targets: None,
+            entry: None,
             dependencies: HashMap::new(),
         }
     }
@@ -119,6 +122,10 @@ impl FlaskConfig {
 
     pub fn license(&self) -> Option<&[String]> {
         self.license.as_deref()
+    }
+
+    pub fn entry(&self) -> Option<&str> {
+        self.entry.as_deref()
     }
 
     pub fn set_name(&mut self, name: String) {

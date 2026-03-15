@@ -101,6 +101,40 @@ impl Bind {
             name: self.name,
         })
     }
+
+    pub fn infer_return_type(&self) -> Option<String> {
+        match &self.value {
+            BindValue::Expr(expr) => infer_expr_type(expr, &[]),
+            BindValue::Body { exprs, ret } => match &ret.0 {
+                None => Some("Nothing".to_string()),
+                Some(expr) => infer_expr_type(expr, exprs),
+            },
+        }
+    }
+}
+
+fn infer_expr_type(expr: &Expr, locals: &[Expr]) -> Option<String> {
+    match expr {
+        Expr::Lit(lit) => Some(
+            match lit {
+                Literal::Int(_) | Literal::Number(_) => "Int",
+                Literal::Float(_) => "Float",
+                Literal::String(_) => "String",
+            }
+            .to_string(),
+        ),
+        Expr::FormatString(_) => Some("String".to_string()),
+        Expr::Binary(b) if b.op.is_comparison() => Some("Bool".to_string()),
+        Expr::Binary(b) => infer_expr_type(&b.lhs, locals).or_else(|| infer_expr_type(&b.rhs, locals)),
+        Expr::FnCall(call) if call.args.is_none() && call.path.segments.is_empty() => {
+            let name = call.path.root.as_str();
+            locals.iter().find_map(|e| match e {
+                Expr::Bind(b) if b.name().as_str() == name => b.infer_return_type(),
+                _ => None,
+            })
+        }
+        _ => None,
+    }
 }
 
 impl std::hash::Hash for Bind {

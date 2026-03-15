@@ -141,7 +141,7 @@ fn collect_fn_call_names(expr: &Expr, results: &mut Vec<(String, bool)>) {
             collect_fn_call_names(&range.start, results);
             collect_fn_call_names(&range.end, results);
         }
-        Expr::Lit(_) | Expr::Nothing => {}
+        Expr::Lit(_) => {}
     }
 }
 

@@ -4,9 +4,10 @@ mod state;
 mod util;
 
 use capabilities::{
-    build_completions, build_hover, build_semantic_tokens_from_ast,
-    build_signature_help, build_variant_hover, complete_flask_json, find_all_references, find_definition_range,
-    is_flask_json_file, should_handle_file, use_completions, LEGEND_TYPE,
+    build_binding_hover, build_completions, build_declare_hover, build_local_binding_hover,
+    build_semantic_tokens_from_ast, build_signature_help, build_variant_hover, complete_flask_json,
+    find_all_references, find_definition_range, is_flask_json_file, should_handle_file,
+    use_completions, LEGEND_TYPE,
 };
 use dashmap::DashMap;
 use diagnostics::symptoms_to_diagnostics;
@@ -564,13 +565,10 @@ impl LanguageServer for Backend {
                 // Then check top-level tags
                 for (name, decl) in ast.tags() {
                     if name.as_str() == word {
-                        let doc = decl.doc_comment();
-                        let value = build_hover(
-                            &state.source,
+                        let value = build_declare_hover(
                             &module,
-                            &word,
-                            true,
-                            &doc.cloned(),
+                            decl,
+                            decl.doc_comment(),
                         );
                         return Ok(Some(Hover {
                             contents: HoverContents::Markup(MarkupContent {
@@ -583,14 +581,11 @@ impl LanguageServer for Backend {
                 }
 
                 // Then check bindings
-                for (name, _bind) in ast.defs() {
+                for (name, bind) in ast.defs() {
                     if name.as_str() == word {
-                        let value = build_hover(
-                            &state.source,
+                        let value = build_binding_hover(
                             &module,
-                            &word,
-                            false,
-                            &None,  // Don't show doc comments in hover
+                            bind,
                         );
                         return Ok(Some(Hover {
                             contents: HoverContents::Markup(MarkupContent {
@@ -599,6 +594,27 @@ impl LanguageServer for Backend {
                             }),
                             range: None,
                         }));
+                    }
+                }
+
+                // Then check local bindings inside function bodies
+                use ginc::ast::{BindValue, Expr};
+                for (_name, bind) in ast.defs() {
+                    if let BindValue::Body { exprs, .. } = bind.value() {
+                        for expr in exprs {
+                            if let Expr::Bind(local_bind) = expr {
+                                if local_bind.name().as_str() == word {
+                                    let value = build_local_binding_hover(local_bind);
+                                    return Ok(Some(Hover {
+                                        contents: HoverContents::Markup(MarkupContent {
+                                            kind: MarkupKind::Markdown,
+                                            value,
+                                        }),
+                                        range: None,
+                                    }));
+                                }
+                            }
+                        }
                     }
                 }
             }

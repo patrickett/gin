@@ -12,9 +12,9 @@ pub trait ContextExt {
     fn f64(&self) -> Type<'_>;
     /// String type — `!llvm.struct<(ptr, i64)>` fat pointer (data, len)
     fn string_type(&self) -> Type<'_>;
-    /// Unit/void type for Nothing - currently represented as i64
+    /// Unit/void type - currently represented as i64
     fn unit(&self) -> Type<'_>;
-    /// LLVM void type for Nothing/unit values
+    /// LLVM void type for unit values
     fn llvm_void(&self) -> Type<'_>;
     /// LLVM opaque pointer type
     fn llvm_ptr(&self) -> Type<'_>;
@@ -205,7 +205,7 @@ pub trait BlockExt<'c> {
     /// Create a string constant - returns a fat pointer (ptr, length)
     /// This requires access to CodegenContext to register the string globally
     fn const_string_with_ctx(&self, ctx: &CodegenContext<'_, 'c>, value: &str) -> Value<'c, 'c>;
-    /// Return a unit/void value for Nothing expressions
+    /// Return a unit/void value
     fn unit_value(&self, ctx: &CodegenContext<'_, 'c>) -> Value<'c, 'c>;
     fn ret(&self, ctx: &'c Context, values: &[Value<'c, 'c>]) -> Operation<'c>;
     fn call(&self, ctx: &'c Context, func_name: &str, args: &[Value<'c, 'c>]) -> Value<'c, 'c>;
