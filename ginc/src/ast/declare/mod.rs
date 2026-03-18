@@ -208,6 +208,7 @@ where
         rhs_union,
         tag(expr.clone()).map(DeclareValue::Alias),
     ))
+    .then(doc_comment().or_not())
     .then_ignore(just(Token::Dedent).or_not());
 
     let decl_has = lhs_has
@@ -215,7 +216,7 @@ where
         .map(|((tag_name, params), value)| Declare::new(tag_name, value).with_params(params));
 
     let decl_is = lhs_is.then(rhs_union_or_range).map(
-        |((((tag_name, params), doc_after_is), value), doc_after_value)| {
+        |(((tag_name, params), doc_after_is), (value, doc_after_value))| {
             let doc = doc_after_value
                 .or(doc_after_is)
                 .and_then(|d| if d.0.is_empty() { None } else { Some(d) });
