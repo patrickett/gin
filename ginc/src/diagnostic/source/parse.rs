@@ -6,6 +6,8 @@ use chumsky::span::SimpleSpan;
 pub enum ParseSymptom {
     InvalidSyntax,
     Custom(String),
+    EmptyParens { suggested: String },
+    UnusedValue { value: String },
 }
 
 impl SymptomDetail for ParseSymptom {
@@ -13,6 +15,8 @@ impl SymptomDetail for ParseSymptom {
         match self {
             ParseSymptom::InvalidSyntax => 1,
             ParseSymptom::Custom(_) => 2,
+            ParseSymptom::EmptyParens { .. } => 3,
+            ParseSymptom::UnusedValue { .. } => 4,
         }
     }
 
@@ -20,11 +24,23 @@ impl SymptomDetail for ParseSymptom {
         match self {
             ParseSymptom::InvalidSyntax => "invalid syntax".into(),
             ParseSymptom::Custom(msg) => msg.clone(),
+            ParseSymptom::EmptyParens { .. } => "empty parentheses are not needed".into(),
+            ParseSymptom::UnusedValue { value } => {
+                format!("unused value: `{value}`")
+            }
         }
     }
 
     fn help(&self) -> Option<String> {
-        None
+        match self {
+            ParseSymptom::EmptyParens { suggested } => {
+                Some(format!("remove the parentheses: `{suggested}`"))
+            }
+            ParseSymptom::UnusedValue { .. } => {
+                Some("did you mean to indent this as part of the previous expression?".into())
+            }
+            _ => None,
+        }
     }
 }
 
@@ -41,5 +57,21 @@ pub fn custom(msg: String, span: SimpleSpan) -> Symptom {
         source: SymptomSource::Parse(ParseSymptom::Custom(msg)),
         span,
         category: Category::Flaw,
+    }
+}
+
+pub fn empty_parens_hint(suggested: String, span: SimpleSpan) -> Symptom {
+    Symptom {
+        source: SymptomSource::Parse(ParseSymptom::EmptyParens { suggested }),
+        span,
+        category: Category::Help,
+    }
+}
+
+pub fn unused_value(value: String, span: SimpleSpan) -> Symptom {
+    Symptom {
+        source: SymptomSource::Parse(ParseSymptom::UnusedValue { value }),
+        span,
+        category: Category::Info,
     }
 }

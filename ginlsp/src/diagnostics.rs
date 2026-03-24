@@ -1,5 +1,5 @@
-use ginc::{Category, Symptom};
-use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range};
+use ginc::{Category, Symptom, typeck::FlowAnalysis};
+use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, DiagnosticTag, NumberOrString, Position, Range};
 
 pub fn span_to_range(start: usize, end: usize, source: &str) -> Range {
     let (start_line, start_col) = byte_to_position(start, source);
@@ -60,6 +60,30 @@ pub fn symptoms_to_diagnostics(source: &str, symptoms: &[&Symptom]) -> Vec<Diagn
                 tags: None,
                 data: None,
             }
+        })
+        .collect()
+}
+
+/// Convert flow analysis impossible checks to LSP diagnostics.
+pub fn flow_analysis_to_diagnostics(flow_result: &FlowAnalysis) -> Vec<Diagnostic> {
+    flow_result
+        .impossible_checks
+        .iter()
+        .map(|check| Diagnostic {
+            // TODO: Map expr_index to actual position in source
+            // For now, use a zero-range as placeholder
+            range: Range {
+                start: Position { line: 0, character: 0 },
+                end: Position { line: 0, character: 0 },
+            },
+            severity: Some(DiagnosticSeverity::WARNING),
+            code: Some(NumberOrString::String("FLOW001".to_string())),
+            code_description: None,
+            source: Some("gin-flow".to_string()),
+            message: check.reason.clone(),
+            related_information: None,
+            tags: Some(vec![DiagnosticTag::UNNECESSARY]),
+            data: None,
         })
         .collect()
 }

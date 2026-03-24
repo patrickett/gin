@@ -26,7 +26,7 @@ impl Db for InputDatabase {
     }
 
     fn input(&self, path: PathBuf) -> Result<File, String> {
-        let path = path.canonicalize().unwrap();
+        let path = path.canonicalize().map_err(|e| e.to_string())?;
         Ok(match self.files.entry(path.clone()) {
             Entry::Occupied(entry) => *entry.get(),
             Entry::Vacant(entry) => {

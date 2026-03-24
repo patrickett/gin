@@ -5,6 +5,7 @@ use crate::command::{
     doc::{DocCommand, begin_doc},
     init::begin_init,
     new::{NewArgs, begin_new},
+    run::begin_run,
     version::{VersionCommand, version},
 };
 use clap::*;
@@ -17,6 +18,7 @@ mod build;
 mod doc;
 mod init;
 mod new;
+mod run;
 mod version;
 
 #[derive(Subcommand, Debug)]
@@ -56,7 +58,11 @@ pub enum BeginCommand {
     New(NewArgs),
 
     /// Run the current project, will just compile a library if no entry
-    Run,
+    #[command(alias = "r")]
+    Run {
+        path: Option<PathBuf>,
+        watch: Option<bool>,
+    },
 
     /// Run the tests declared in the current project
     Test,
@@ -80,10 +86,7 @@ impl BeginCommand {
     pub fn run(&self, config: Option<FlaskConfig>) {
         match &self {
             BeginCommand::Init => begin_init(),
-            BeginCommand::New(args) => {
-                let name = args.name.clone();
-                begin_new(NewArgs { name })
-            }
+            BeginCommand::New(args) => begin_new(args.clone()),
             _ => {
                 let Some(config) = config else {
                     return;
@@ -102,6 +105,9 @@ impl BeginCommand {
             BeginCommand::Audit => begin_audit(config),
             BeginCommand::Build { path: input, .. } => begin_build(config, input.to_owned()),
             BeginCommand::Doc(_cmd) => begin_doc(config),
+            BeginCommand::Run { path: input, watch } => {
+                begin_run(config, input.to_owned(), watch.unwrap_or(false))
+            }
             BeginCommand::Version(cmd) => version(cmd),
             _ => todo!(),
         }

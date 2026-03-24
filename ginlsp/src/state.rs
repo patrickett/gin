@@ -1,5 +1,5 @@
 use crossbeam_channel::unbounded;
-use ginc::{Db, File, FileAst, Symptom, parse::parse::parse};
+use ginc::{Db, File, FileAst, Symptom, parse::parse::parse, typeck::FlowAnalysis, compilation::compile::flow_analysis};
 use salsa::Setter;
 
 pub struct DocumentState {
@@ -23,6 +23,10 @@ impl GinSnapshot {
 
     pub fn diagnostics(&self, file: File) -> Vec<&Symptom> {
         parse::accumulated::<Symptom>(&self.db, file)
+    }
+
+    pub fn flow_analysis(&self, file: File) -> FlowAnalysis {
+        flow_analysis(&self.db, file)
     }
 }
 

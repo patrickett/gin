@@ -1,4 +1,5 @@
 use clap::{Parser, ValueEnum};
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::PathBuf;
 
@@ -57,6 +58,11 @@ pub struct Args {
 
     #[arg(short, long)]
     pub verbose: Option<bool>,
+
+    /// Resolved dependency paths: name → directory. Populated by `begin build` from flask.json.
+    /// Not a CLI argument — set programmatically.
+    #[arg(skip)]
+    pub dependencies: HashMap<String, PathBuf>,
 }
 
 impl Args {

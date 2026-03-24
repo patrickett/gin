@@ -18,6 +18,9 @@ pub trait ContextExt {
     fn llvm_void(&self) -> Type<'_>;
     /// LLVM opaque pointer type
     fn llvm_ptr(&self) -> Type<'_>;
+    /// Tagged union type — `!llvm.struct<(i64, i64)>` (discriminant, payload)
+    /// All union values use this uniform layout; unit variants leave the payload slot as zero.
+    fn union_type(&self) -> Type<'_>;
 }
 
 impl ContextExt for Context {
@@ -55,6 +58,10 @@ impl ContextExt for Context {
 
     fn llvm_ptr(&self) -> Type<'_> {
         r#type::pointer(self, 0)
+    }
+
+    fn union_type(&self) -> Type<'_> {
+        r#type::r#struct(self, &[self.i64(), self.i64()], false)
     }
 }
 
@@ -98,8 +105,10 @@ pub trait OperationBuilderExt<'c> {
         name: &'static str,
         lhs: Value<'c, 'c>,
         rhs: Value<'c, 'c>,
+        result_ty: Type<'c>,
     ) -> Operation<'c>;
     fn build_cmpi(&self, predicate: u64, lhs: Value<'c, 'c>, rhs: Value<'c, 'c>) -> Operation<'c>;
+    fn build_cmpf(&self, predicate: u64, lhs: Value<'c, 'c>, rhs: Value<'c, 'c>) -> Operation<'c>;
     /// `llvm.mlir.undef` — produce an undefined value of the given type
     fn llvm_undef(&self, ty: Type<'c>) -> Operation<'c>;
     /// `llvm.insertvalue` — insert a value into an aggregate at `position`
@@ -144,10 +153,11 @@ impl<'c> OperationBuilderExt<'c> for &'c Context {
         name: &'static str,
         lhs: Value<'c, 'c>,
         rhs: Value<'c, 'c>,
+        result_ty: Type<'c>,
     ) -> Operation<'c> {
         OperationBuilder::new(name, self.unknown_loc())
             .add_operands(&[lhs, rhs])
-            .add_results(&[self.i64()])
+            .add_results(&[result_ty])
             .build()
             .unwrap()
     }
@@ -156,6 +166,17 @@ impl<'c> OperationBuilderExt<'c> for &'c Context {
         let pred_attr = self.i64_attr(predicate as i64);
         let pred_id = Identifier::new(self, "predicate");
         OperationBuilder::new("arith.cmpi", self.unknown_loc())
+            .add_attributes(&[(pred_id, pred_attr)])
+            .add_operands(&[lhs, rhs])
+            .add_results(&[self.i1()])
+            .build()
+            .unwrap()
+    }
+
+    fn build_cmpf(&self, predicate: u64, lhs: Value<'c, 'c>, rhs: Value<'c, 'c>) -> Operation<'c> {
+        let pred_attr = self.i64_attr(predicate as i64);
+        let pred_id = Identifier::new(self, "predicate");
+        OperationBuilder::new("arith.cmpf", self.unknown_loc())
             .add_attributes(&[(pred_id, pred_attr)])
             .add_operands(&[lhs, rhs])
             .add_results(&[self.i1()])
@@ -208,7 +229,48 @@ pub trait BlockExt<'c> {
     /// Return a unit/void value
     fn unit_value(&self, ctx: &CodegenContext<'_, 'c>) -> Value<'c, 'c>;
     fn ret(&self, ctx: &'c Context, values: &[Value<'c, 'c>]) -> Operation<'c>;
-    fn call(&self, ctx: &'c Context, func_name: &str, args: &[Value<'c, 'c>]) -> Value<'c, 'c>;
+    fn call_void(&self, ctx: &'c Context, func_name: &str, args: &[Value<'c, 'c>]);
+    fn call(
+        &self,
+        ctx: &'c Context,
+        func_name: &str,
+        args: &[Value<'c, 'c>],
+        return_type: Type<'c>,
+    ) -> Value<'c, 'c>;
+    /// `llvm.getelementptr` with a dynamic byte offset into a `!llvm.ptr`.
+    fn gep_i8(
+        &self,
+        ctx: &'c Context,
+        base: Value<'c, 'c>,
+        idx: Value<'c, 'c>,
+        loc: Location<'c>,
+    ) -> Result<Value<'c, 'c>, crate::diagnostic::codegen::CodegenSymptom>;
+    /// `llvm.intr.memset` — fill `len` bytes starting at `dst` with `val` (i8).
+    fn memset_bytes(
+        &self,
+        ctx: &'c Context,
+        dst: Value<'c, 'c>,
+        val: Value<'c, 'c>,
+        len: Value<'c, 'c>,
+        loc: Location<'c>,
+    ) -> Result<(), crate::diagnostic::codegen::CodegenSymptom>;
+    /// `llvm.alloca 1 x elem_ty` — allocate a single scalar slot on the stack.
+    fn alloca_typed(&self, ctx: &'c Context, elem_ty: Type<'c>, loc: Location<'c>) -> Value<'c, 'c>;
+    /// `llvm.load elem_ty, ptr` — load a typed value from a pointer.
+    fn load_typed(
+        &self,
+        ctx: &'c Context,
+        ptr: Value<'c, 'c>,
+        elem_ty: Type<'c>,
+        loc: Location<'c>,
+    ) -> Result<Value<'c, 'c>, crate::diagnostic::codegen::CodegenSymptom>;
+    /// `llvm.store val, ptr` — store a value through a pointer.
+    fn store_typed(
+        &self,
+        ptr: Value<'c, 'c>,
+        val: Value<'c, 'c>,
+        loc: Location<'c>,
+    ) -> Result<(), crate::diagnostic::codegen::CodegenSymptom>;
 }
 
 impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
@@ -250,17 +312,125 @@ impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
         melior::dialect::func::r#return(values, ctx.unknown_loc())
     }
 
-    fn call(&self, ctx: &'c Context, func_name: &str, args: &[Value<'c, 'c>]) -> Value<'c, 'c> {
+    fn call_void(&self, ctx: &'c Context, func_name: &str, args: &[Value<'c, 'c>]) {
+        let callee_id = Identifier::new(ctx, "callee");
+        let symbol_ref = ctx.symbol_ref_attr(func_name);
+        self.append_operation(
+            OperationBuilder::new("func.call", ctx.unknown_loc())
+                .add_attributes(&[(callee_id, symbol_ref)])
+                .add_operands(args)
+                .build()
+                .unwrap(),
+        );
+    }
+
+    fn call(
+        &self,
+        ctx: &'c Context,
+        func_name: &str,
+        args: &[Value<'c, 'c>],
+        return_type: Type<'c>,
+    ) -> Value<'c, 'c> {
         let callee_id = Identifier::new(ctx, "callee");
         let symbol_ref = ctx.symbol_ref_attr(func_name);
         self.append_op(
             OperationBuilder::new("func.call", ctx.unknown_loc())
                 .add_attributes(&[(callee_id, symbol_ref)])
                 .add_operands(args)
-                .add_results(&[ctx.i64()])
+                .add_results(&[return_type])
                 .build()
                 .unwrap(),
         )
+    }
+
+    fn gep_i8(
+        &self,
+        ctx: &'c Context,
+        base: Value<'c, 'c>,
+        idx: Value<'c, 'c>,
+        loc: Location<'c>,
+    ) -> Result<Value<'c, 'c>, crate::diagnostic::codegen::CodegenSymptom> {
+        let op = OperationBuilder::new("llvm.getelementptr", loc)
+            .add_attributes(&[
+                (
+                    Identifier::new(ctx, "rawConstantIndices"),
+                    DenseI32ArrayAttribute::new(ctx, &[i32::MIN]).into(),
+                ),
+                (
+                    Identifier::new(ctx, "elem_type"),
+                    TypeAttribute::new(IntegerType::new(ctx, 8).into()).into(),
+                ),
+            ])
+            .add_operands(&[base, idx])
+            .add_results(&[ctx.llvm_ptr()])
+            .build()
+            .map_err(|e| crate::diagnostic::codegen::CodegenSymptom::Internal(format!("GEP: {e}")))?;
+        Ok(self.append_op(op))
+    }
+
+    fn memset_bytes(
+        &self,
+        ctx: &'c Context,
+        dst: Value<'c, 'c>,
+        val: Value<'c, 'c>,
+        len: Value<'c, 'c>,
+        loc: Location<'c>,
+    ) -> Result<(), crate::diagnostic::codegen::CodegenSymptom> {
+        let op = OperationBuilder::new("llvm.intr.memset", loc)
+            .add_attributes(&[(
+                Identifier::new(ctx, "isVolatile"),
+                IntegerAttribute::new(IntegerType::new(ctx, 1).into(), 0).into(),
+            )])
+            .add_operands(&[dst, val, len])
+            .build()
+            .map_err(|e| crate::diagnostic::codegen::CodegenSymptom::Internal(format!("memset: {e}")))?;
+        self.append_operation(op);
+        Ok(())
+    }
+
+    fn alloca_typed(&self, ctx: &'c Context, elem_ty: Type<'c>, loc: Location<'c>) -> Value<'c, 'c> {
+        let count_one = self.const_i64(ctx, 1);
+        self.append_op(melior::dialect::llvm::alloca(
+            ctx,
+            count_one,
+            r#type::pointer(ctx, 0),
+            loc,
+            melior::dialect::llvm::AllocaOptions::default()
+                .elem_type(Some(TypeAttribute::new(elem_ty))),
+        ))
+    }
+
+    fn load_typed(
+        &self,
+        ctx: &'c Context,
+        ptr: Value<'c, 'c>,
+        elem_ty: Type<'c>,
+        loc: Location<'c>,
+    ) -> Result<Value<'c, 'c>, crate::diagnostic::codegen::CodegenSymptom> {
+        let op = OperationBuilder::new("llvm.load", loc)
+            .add_attributes(&[(
+                Identifier::new(ctx, "res"),
+                TypeAttribute::new(elem_ty).into(),
+            )])
+            .add_operands(&[ptr])
+            .add_results(&[elem_ty])
+            .build()
+            .map_err(|e| crate::diagnostic::codegen::CodegenSymptom::Internal(format!("llvm.load: {e}")))?;
+        Ok(self.append_op(op))
+    }
+
+    fn store_typed(
+        &self,
+        ptr: Value<'c, 'c>,
+        val: Value<'c, 'c>,
+        loc: Location<'c>,
+    ) -> Result<(), crate::diagnostic::codegen::CodegenSymptom> {
+        let op = OperationBuilder::new("llvm.store", loc)
+            .add_operands(&[val, ptr])
+            .build()
+            .map_err(|e| crate::diagnostic::codegen::CodegenSymptom::Internal(format!("llvm.store: {e}")))?;
+        self.append_operation(op);
+        Ok(())
     }
 }
 
@@ -282,4 +452,26 @@ impl ArithOps {
     pub const SUB: &str = "arith.subi";
     pub const MUL: &str = "arith.muli";
     pub const DIV: &str = "arith.divsi";
+    pub const REM: &str = "arith.remsi";
+    pub const ADDF: &str = "arith.addf";
+    pub const SUBF: &str = "arith.subf";
+    pub const MULF: &str = "arith.mulf";
+    pub const DIVF: &str = "arith.divf";
+    pub const REMF: &str = "arith.remf";
+    pub const ANDI: &str = "arith.andi";
+    pub const ORI:  &str = "arith.ori";
+    pub const XORI: &str = "arith.xori";
+    pub const SHLI: &str = "arith.shli";
+    pub const SHRI: &str = "arith.shrsi";
+}
+
+/// Floating-point comparison predicates for `arith.cmpf`.
+pub struct FPredicates;
+impl FPredicates {
+    pub const OEQ: u64 = 1;
+    pub const OGT: u64 = 2;
+    pub const OGE: u64 = 3;
+    pub const OLT: u64 = 4;
+    pub const OLE: u64 = 5;
+    pub const ONE: u64 = 6;
 }

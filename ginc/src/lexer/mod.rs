@@ -63,10 +63,8 @@ impl<'src> GinLexer<'src> {
 
         loop {
             let lex = self.lexer_mut();
-            let start = lex.span().end;
             let next = lex.next()?;
-            let end = lex.span().end;
-            let span: SimpleSpan = (start..end).into();
+            let span: SimpleSpan = lex.span().into();
 
             match next {
                 Ok(Token::FormatStringDelim) => {

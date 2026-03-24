@@ -38,3 +38,40 @@ where
         )
         .map(|(root, segs)| ModPath::new(root, segs))
 }
+
+/// Parser that consumes a Tag-rooted dotted path (e.g. `Byte.new`, `Int.to_string`).
+///
+/// This enables calling static/impl methods directly on a type name:
+/// `Tag.method` or `Tag.method.sub`
+pub fn tag_path<'t, I>() -> impl Parser<'t, I, ModPath, ParserError<'t>>
+where
+    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
+{
+    select! { Token::Tag(name) => IStr::new(name.to_string()) }
+        .then(
+            just(Token::Dot)
+                .ignore_then(id_token())
+                .repeated()
+                .at_least(1)
+                .collect::<Vec<IStr>>(),
+        )
+        .map(|(root, segs)| ModPath::new(root, segs))
+}
+
+/// Parser for qualified variant constructor paths (e.g. `Maybe.Some`, `Result.Ok`).
+///
+/// Matches `Tag.Tag` patterns where both the root and segments are capitalized Tags.
+pub fn tag_variant_path<'t, I>() -> impl Parser<'t, I, ModPath, ParserError<'t>>
+where
+    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
+{
+    select! { Token::Tag(name) => IStr::new(name.to_string()) }
+        .then(
+            just(Token::Dot)
+                .ignore_then(select! { Token::Tag(name) => IStr::new(name.to_string()) })
+                .repeated()
+                .at_least(1)
+                .collect::<Vec<IStr>>(),
+        )
+        .map(|(root, segs)| ModPath::new(root, segs))
+}

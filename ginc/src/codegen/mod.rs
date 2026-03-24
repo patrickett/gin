@@ -12,11 +12,11 @@ pub mod prelude {
     pub use crate::codegen::{
         CodegenContext, Lower, RuntimeSymbolTable, TypeInfo,
         // Extension traits
-        ArithOps, AttributeExt, BlockExt, ContextExt, OperationBuilderExt, Predicates,
+        ArithOps, AttributeExt, BlockExt, ContextExt, FPredicates, OperationBuilderExt, Predicates,
     };
     pub use melior::{
         Context,
-        dialect::llvm::r#type,
+        dialect::{arith as arith_dialect, llvm::r#type, scf as scf_dialect},
         ir::{
             Attribute, Block, BlockLike, BlockRef, Identifier, Location, Module, Operation, Region,
             RegionLike, Type, Value, ValueLike,

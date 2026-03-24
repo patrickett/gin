@@ -141,7 +141,60 @@ fn collect_fn_call_names(expr: &Expr, results: &mut Vec<(String, bool)>) {
             collect_fn_call_names(&range.start, results);
             collect_fn_call_names(&range.end, results);
         }
-        Expr::Lit(_) => {}
+        Expr::Lit(_) | Expr::SelfRef | Expr::AnonymousTag(_) => {}
+        Expr::TagCall(tc) => {
+            for arg in &tc.args {
+                collect_fn_call_names(arg, results);
+            }
+        }
+        Expr::If(if_expr) => {
+            for expr in &if_expr.body {
+                collect_fn_call_names(expr, results);
+            }
+        }
+        Expr::When(when_expr) => {
+            if let Some(subject) = &when_expr.subject {
+                collect_fn_call_names(subject, results);
+            }
+            for arm in &when_expr.arms {
+                match arm {
+                    ginc::ast::WhenArm::Cond { condition, body } => {
+                        collect_fn_call_names(condition, results);
+                        collect_fn_call_names(body, results);
+                    }
+                    ginc::ast::WhenArm::Is { body, .. } => {
+                        collect_fn_call_names(body, results);
+                    }
+                    ginc::ast::WhenArm::Else(body) => {
+                        collect_fn_call_names(body, results);
+                    }
+                }
+            }
+        }
+        Expr::TupleAlloc { init, .. } => collect_fn_call_names(init, results),
+        Expr::TupleGet { base, .. } => collect_fn_call_names(base, results),
+        Expr::TupleSet { base, value, .. } => {
+            collect_fn_call_names(base, results);
+            collect_fn_call_names(value, results);
+        }
+        Expr::Cast { expr, .. } => collect_fn_call_names(expr, results),
+        Expr::BufGet { buf, index } => {
+            collect_fn_call_names(buf, results);
+            collect_fn_call_names(index, results);
+        }
+        Expr::BufSet { buf, index, value } => {
+            collect_fn_call_names(buf, results);
+            collect_fn_call_names(index, results);
+            collect_fn_call_names(value, results);
+        }
+        Expr::TakePtr(inner) | Expr::TakeRef(inner) | Expr::Deref(inner) | Expr::Negate(inner) => {
+            collect_fn_call_names(inner, results);
+        }
+        Expr::TupleLit(elems) => {
+            for e in elems {
+                collect_fn_call_names(e, results);
+            }
+        }
     }
 }
 
@@ -159,6 +212,7 @@ fn collect_fn_call_names_from_bind_value(
             }
             collect_fn_call_names_from_return(ret, results);
         }
+        BindValue::Extern => {}
     }
 }
 

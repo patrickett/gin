@@ -14,7 +14,7 @@ impl<'src> HasSemanticTokenType for Token<'src> {
         match self {
             Tag(_) => SemanticTokenType::TYPE,
             Comment(_) | DocComment(_) => SemanticTokenType::COMMENT,
-            Continue | Private | Return | Break | Then | When | For | Loop | Use | Has | And
+            Continue | Private | Return | Break | Then | When | For | While | Loop | Use | Has | And
             | As | If | In | Is | Of | Or | Else => SemanticTokenType::KEYWORD,
             Int(_) | Float(_) => SemanticTokenType::NUMBER,
             String(_) | FormatStringDelim | FormatStringText(_) => SemanticTokenType::STRING,
@@ -29,8 +29,8 @@ impl<'src> HasSemanticTokenType for Token<'src> {
         match self {
             Tag(_) => Some(1),
             Comment(_) | DocComment(_) => Some(2),
-            Continue | Private | Return | Break | Then | When | Else | For | Loop | Use | Has
-            | And | As | If | In | Is | Of | Or => Some(3),
+            Continue | Private | Return | Break | Then | When | Else | For | While | Loop | Use
+            | Has | And | As | If | In | Is | Of | Or => Some(3),
             Int(_) | Float(_) => Some(7),
             String(_) | FormatStringDelim | FormatStringText(_) => Some(6),
             _ => None,

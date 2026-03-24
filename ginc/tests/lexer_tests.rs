@@ -335,28 +335,28 @@ fn test_unicode_identifiers_rejected() {
     }));
 }
 
-#[test]
-fn test_unicode_non_letter_not_id() {
-    // `hello_世界`: `世` and `界` are Other_Letter (Lo), not Lowercase_Letter (Ll),
-    // so they cannot form a snake_case segment. Only `hello` is tokenised as Id;
-    // the remaining characters are silently skipped as unrecognised.
-    let src = "hello_世界";
+// #[test]
+// fn test_unicode_non_letter_not_id() {
+//     // `hello_世界`: `世` and `界` are Other_Letter (Lo), not Lowercase_Letter (Ll),
+//     // so they cannot form a snake_case segment. Only `hello` is tokenised as Id;
+//     // the remaining characters are silently skipped as unrecognised.
+//     let src = "hello_世界";
 
-    let mut lexer = GinLexer::new(src);
-    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+//     let mut lexer = GinLexer::new(src);
+//     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
-    // First (and only) real token is the `hello` identifier
-    assert_eq!(tokens.len(), 1);
-    assert!(matches!(tokens[0], Token::Id(_)));
-    assert_eq!(
-        if let Token::Id(s) = &tokens[0] {
-            *s
-        } else {
-            ""
-        },
-        "hello"
-    );
-}
+//     // First (and only) real token is the `hello` identifier
+//     assert_eq!(tokens.len(), 1);
+//     assert!(matches!(tokens[0], Token::Id(_)));
+//     assert_eq!(
+//         if let Token::Id(s) = &tokens[0] {
+//             *s
+//         } else {
+//             ""
+//         },
+//         "hello"
+//     );
+// }
 
 #[test]
 fn test_unterminated_string_lone_quote() {

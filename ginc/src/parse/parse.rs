@@ -1,20 +1,18 @@
 //! Parse query - wraps the existing chumsky parser.
 
-use chumsky::error::Rich;
-use chumsky::span::SimpleSpan;
-use chumsky::{input::Stream, Parser};
-use std::path::{Path, PathBuf};
-
-use salsa::Accumulator;
-
-use crate::database::{input_database::Db, File};
+use crate::ast::{BindValue, Expr, FileAst, FnCall, ImportSource, token_parser};
+use crate::database::{File, input_database::Db};
 use crate::diagnostic::io as io_symptom;
 use crate::diagnostic::lex as lex_symptom;
 use crate::diagnostic::lex::LexSymptom;
 use crate::diagnostic::parse as parse_symptom;
 use crate::diagnostic::{Category, Symptom, SymptomSource};
 use crate::lexer::{GinLexer, Token};
-use crate::ast::{FileAst, ImportSource, ModPath as ImportPath, token_parser};
+use chumsky::error::Rich;
+use chumsky::span::SimpleSpan;
+use chumsky::{Parser, input::Stream};
+use salsa::Accumulator;
+use std::path::Path;
 
 /// Resolve import paths to File inputs for a parsed file.
 ///
@@ -24,6 +22,21 @@ use crate::ast::{FileAst, ImportSource, ModPath as ImportPath, token_parser};
 pub fn resolve_imports<'db>(db: &'db dyn Db, file: File) -> Vec<File> {
     let ast = parse(db, file);
     extract_import_files(db, &ast, file)
+}
+
+/// Parse a Gin source string without the Salsa incremental system.
+///
+/// Used for dependency loading at build time where caching is unnecessary.
+pub fn parse_from_str(src: &str) -> FileAst {
+    let mut lexer = GinLexer::new(src);
+    let tokens: Vec<_> = lexer
+        .by_ref()
+        .filter(|(t, _)| !matches!(t, Token::Comment(_)))
+        .collect();
+    let token_stream = Stream::from_iter(tokens.iter().map(|(t, _s)| *t));
+    let parser = token_parser();
+    let (maybe_ast, _) = parser.parse(token_stream).into_output_errors();
+    maybe_ast.unwrap_or_default()
 }
 
 /// Parse a Gin source file and return the AST as a tracked query.
@@ -43,6 +56,10 @@ struct ParseResult {
     parse_errors: Vec<(String, SimpleSpan)>,
     unterminated_strings: Vec<SimpleSpan>,
     lex_errors: Vec<(LexSymptom, SimpleSpan)>,
+    /// Empty-paren hints: (suggested form, span).
+    help_hints: Vec<(String, SimpleSpan)>,
+    /// Unused value info diagnostics: (value description, span).
+    unused_values: Vec<(String, SimpleSpan)>,
 }
 
 /// Accumulate all diagnostics from a parse result into the Salsa accumulator.
@@ -60,6 +77,12 @@ fn accumulate_diagnostics(db: &dyn Db, parsed: &ParseResult) {
     }
     for (msg, span) in &parsed.parse_errors {
         parse_symptom::custom(msg.clone(), *span).accumulate(db);
+    }
+    for (suggested, span) in &parsed.help_hints {
+        parse_symptom::empty_parens_hint(suggested.clone(), *span).accumulate(db);
+    }
+    for (value, span) in &parsed.unused_values {
+        parse_symptom::unused_value(value.clone(), *span).accumulate(db);
     }
 }
 
@@ -122,6 +145,9 @@ fn parse_ast_internal(db: &dyn Db, file: File) -> ParseResult {
 
     let ast = maybe_ast.unwrap_or_default();
 
+    let help_hints = collect_empty_paren_hints(&ast);
+    let unused_values = collect_unused_values(&ast);
+
     // early return if no errors
     // spans are only needed for error reporting, so we can avoid the overhead
     if errors.is_empty() {
@@ -130,6 +156,8 @@ fn parse_ast_internal(db: &dyn Db, file: File) -> ParseResult {
             parse_errors: vec![],
             unterminated_strings: vec![],
             lex_errors,
+            help_hints,
+            unused_values,
         };
     }
 
@@ -155,6 +183,8 @@ fn parse_ast_internal(db: &dyn Db, file: File) -> ParseResult {
         parse_errors,
         unterminated_strings,
         lex_errors,
+        help_hints,
+        unused_values,
     }
 }
 
@@ -174,15 +204,9 @@ fn extract_import_files(db: &dyn Db, ast: &FileAst, current_file: File) -> Vec<F
     for import in ast.uses() {
         for module_import in &import.0 {
             match &module_import.source {
-                ImportSource::Package(path) => {
-                    let import_path = resolve_import_path(current_dir, path);
-                    match db.input(import_path) {
-                        Ok(imported_file) => files.push(imported_file),
-                        Err(_) => {
-                            // TODO: pass real import span once imports carry span info
-                            io_symptom::resolution_failed(SimpleSpan::from(0..0)).accumulate(db);
-                        }
-                    }
+                ImportSource::Package(_path) => {
+                    // Package imports are resolved by flask.json at native build time
+                    // via load_entry_with_deps — not by the salsa pipeline.
                 }
                 ImportSource::Local(path) => {
                     let folder = current_dir.join(path);
@@ -216,27 +240,115 @@ fn extract_import_files(db: &dyn Db, ast: &FileAst, current_file: File) -> Vec<F
     files
 }
 
-/// Convert an import path to a filesystem path.
+/// Walk every expression in the AST and collect empty-paren call hints.
+fn collect_empty_paren_hints(ast: &FileAst) -> Vec<(String, SimpleSpan)> {
+    let mut hints = Vec::new();
+    for bind in ast.defs().values() {
+        match bind.value() {
+            BindValue::Expr(e) => scan_expr(e, &mut hints),
+            BindValue::Body { exprs, ret } => {
+                for e in exprs {
+                    scan_expr(e, &mut hints);
+                }
+                if let Some(e) = &ret.0 {
+                    scan_expr(e, &mut hints);
+                }
+            }
+            BindValue::Extern => {}
+        }
+    }
+    hints
+}
+
+fn scan_expr(expr: &Expr, hints: &mut Vec<(String, SimpleSpan)>) {
+    match expr {
+        Expr::FnCall(call) => {
+            if let Some(args) = &call.args {
+                if args.is_empty() {
+                    hints.push((fmt_call_without_parens(call), SimpleSpan::from(0..0)));
+                }
+                for arg in args {
+                    scan_expr(arg, hints);
+                }
+            }
+        }
+        Expr::Binary(b) => {
+            scan_expr(&b.lhs, hints);
+            scan_expr(&b.rhs, hints);
+        }
+        Expr::Bind(b) => match b.value() {
+            BindValue::Expr(e) => scan_expr(e, hints),
+            BindValue::Body { exprs, ret } => {
+                for e in exprs {
+                    scan_expr(e, hints);
+                }
+                if let Some(e) = &ret.0 {
+                    scan_expr(e, hints);
+                }
+            }
+            BindValue::Extern => {}
+        },
+        Expr::When(w) => {
+            use crate::ast::when::WhenArm;
+            if let Some(s) = &w.subject {
+                scan_expr(s, hints);
+            }
+            for arm in &w.arms {
+                match arm {
+                    WhenArm::Cond { condition, body } => {
+                        scan_expr(condition, hints);
+                        scan_expr(body, hints);
+                    }
+                    WhenArm::Is { body, .. } | WhenArm::Else(body) => scan_expr(body, hints),
+                }
+            }
+        }
+        Expr::TagCall(tc) => {
+            for arg in &tc.args {
+                scan_expr(arg, hints);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn fmt_call_without_parens(call: &FnCall) -> String {
+    if call.path.segments.is_empty() {
+        call.path.root.as_str().to_string()
+    } else {
+        let segs: Vec<&str> = call.path.segments.iter().map(|s| s.as_str()).collect();
+        format!("{}.{}", call.path.root.as_str(), segs.join("."))
+    }
+}
+
+/// Collect unused top-level expressions as info diagnostics.
 ///
-/// TODO: Look up root in flask.json name mappings if not a local folder.
-/// For now, treat root as a relative folder name.
-fn resolve_import_path(base: &Path, import_path: &ImportPath) -> PathBuf {
-    let mut path = base.to_path_buf();
+/// Top-level expressions that don't have their values used may indicate
+/// accidental multi-line expressions or missing indentation.
+fn collect_unused_values(ast: &FileAst) -> Vec<(String, SimpleSpan)> {
+    let mut unused = Vec::new();
 
-    // Add root
-    if !import_path.root.is_empty() {
-        path.push(import_path.root.as_str());
+    for expr in ast.top_level_exprs() {
+        // Format the expression for display
+        let value_str = match expr {
+            Expr::Lit(lit) => format!("{lit:?}"),
+            Expr::Binary(_b) => "binary expression".to_string(),
+            Expr::FnCall(call) => {
+                if call.path.segments.is_empty() {
+                    call.path.root.as_str().to_string()
+                } else {
+                    let segs: Vec<&str> = call.path.segments.iter().map(|s| s.as_str()).collect();
+                    format!("{}.{}", call.path.root.as_str(), segs.join("."))
+                }
+            }
+            Expr::AnonymousTag(tag) => tag.as_str().to_string(),
+            _ => "expression".to_string(),
+        };
+
+        // Use 0..0 as span since we don't have real span info for top-level exprs
+        // TODO: track real spans for top-level expressions
+        unused.push((value_str, SimpleSpan::from(0..0)));
     }
 
-    // Add segments
-    for segment in &import_path.segments {
-        path.push(segment.as_str());
-    }
-
-    // Add .gin extension if not present
-    if path.extension().is_none() || path.extension().unwrap() != "gin" {
-        path.set_extension("gin");
-    }
-
-    path
+    unused
 }

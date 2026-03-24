@@ -3,6 +3,19 @@
 use crate::diagnostic::{Category, Symptom, SymptomDetail, SymptomSource};
 use chumsky::span::SimpleSpan;
 
+// TODO: if we know that indent means its apart of a scope/item above
+// can we optomize lexing/parsing in batches. where we split on lines and know
+// what lines corrospond to each item based on indent level
+
+// TODO:
+// Support:
+// ```gin
+// Maybe(x) is Some(x) or None
+// v: Maybe.Some(4)
+// ```
+
+// TODO: change indexing syntax to ().(3)
+
 #[derive(Default, Debug, Clone, PartialEq)]
 pub enum LexSymptom {
     UnclosedString,

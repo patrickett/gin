@@ -1,3 +1,5 @@
+use crate::codegen::prelude::*;
+use crate::diagnostic::codegen::CodegenSymptom;
 use crate::{parse::block, prelude::*};
 
 /// For-in loop: iterate over a range or collection
@@ -51,12 +53,81 @@ where
             Minus => BinOp::Subtract,
             Star => BinOp::Multiply,
             Slash => BinOp::Divide,
+            Percent => BinOp::Modulo,
         },
         |lhs: Expr, op: BinOp, rhs: Expr, _| Expr::Binary(Binary::new(lhs, op, rhs)),
     );
 
     atom.pratt((range, arithmetic))
         .padded_by(just(Newline).repeated())
+}
+
+impl<'c> Lower<'c> for ForInLoop {
+    fn lower(
+        &self,
+        ctx: &CodegenContext<'_, 'c>,
+        block: &BlockRef<'c, 'c>,
+        symtab: &mut RuntimeSymbolTable<'c>,
+    ) -> Result<Value<'c, 'c>, CodegenSymptom> {
+        let loc = ctx.location();
+        let index_ty = Type::index(ctx.mlir);
+
+        // Currently only range iterators (start...end) are supported.
+        let (start_expr, end_expr) = match self.iter.as_ref() {
+            Expr::Range(range) => (&range.start, &range.end),
+            _ => {
+                return Err(CodegenSymptom::Internal(
+                    "for-in loops currently only support range iterators (start...end)".to_string(),
+                ))
+            }
+        };
+
+        // Lower bounds to i64, then cast to index for scf.for.
+        let start_i64 = start_expr.lower(ctx, block, symtab)?;
+        let end_i64 = end_expr.lower(ctx, block, symtab)?;
+        let step_i64 = block.const_i64(ctx.mlir, 1);
+
+        let start_idx = block.append_op(arith_dialect::index_cast(start_i64, index_ty, loc));
+        let end_idx = block.append_op(arith_dialect::index_cast(end_i64, index_ty, loc));
+        let step_idx = block.append_op(arith_dialect::index_cast(step_i64, index_ty, loc));
+
+        // Build the loop body region.
+        // scf.for provides an index-typed induction variable as the block argument.
+        let loop_region = Region::new();
+        {
+            let loop_blk = Block::new(&[(index_ty, loc)]);
+            loop_region.append_block(loop_blk);
+            let loop_blk_ref = loop_region.first_block().unwrap();
+
+            // Cast induction variable from index to i64 and bind to the loop pattern.
+            let iv: Value = loop_blk_ref.argument(0).unwrap().into();
+            let iv_i64 = loop_blk_ref.append_op(arith_dialect::index_cast(iv, ctx.mlir.i64(), loc));
+
+            let mut loop_symtab = symtab.clone();
+            match &self.pat {
+                Pattern::Ident(name) => {
+                    loop_symtab.insert(name.as_str().to_string(), iv_i64);
+                }
+                Pattern::Tuple(_) => {
+                    return Err(CodegenSymptom::Internal(
+                        "Tuple patterns in for loops are not yet supported".to_string(),
+                    ));
+                }
+            }
+
+            for expr in &self.exprs {
+                expr.lower(ctx, &loop_blk_ref, &mut loop_symtab)?;
+            }
+
+            loop_blk_ref.append_operation(scf_dialect::r#yield(&[], loc));
+        }
+
+        block.append_operation(scf_dialect::r#for(
+            start_idx, end_idx, step_idx, loop_region, loc,
+        ));
+
+        Ok(block.const_i64(ctx.mlir, 0))
+    }
 }
 
 pub fn for_in_loop<'t, I>(

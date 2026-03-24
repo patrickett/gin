@@ -18,9 +18,13 @@ pub fn int_range<'t, I>() -> impl Parser<'t, I, std::ops::Range<i64>, ParserErro
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
-    let int = select! { Token::Int(int) => int };
+    let signed_int = just(Token::Minus)
+        .or_not()
+        .then(select! { Token::Int(n) => n })
+        .map(|(neg, n)| if neg.is_some() { -(n as i64) } else { n as i64 });
 
-    int.then_ignore(just(Token::Infer))
-        .then(int)
+    signed_int
+        .then_ignore(just(Token::Infer))
+        .then(signed_int)
         .map(|(start, end)| std::ops::Range { start, end })
 }

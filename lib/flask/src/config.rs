@@ -13,6 +13,11 @@ pub struct DependencyCommon {
     pub features: Vec<Feature>,
     #[serde(default)]
     pub optional: bool,
+
+    /// TODO:
+    /// Automatically insert at the top of all files.
+    #[serde(default)]
+    pub auto: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]

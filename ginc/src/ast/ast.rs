@@ -241,6 +241,25 @@ impl FileAst {
     }
 }
 
+impl FileAst {
+    /// Merge defs and tags from `other` into `self`.
+    ///
+    /// Existing entries in `self` take precedence (entry file can shadow dependency symbols).
+    /// Dep binds that don't match the current build platform are skipped, allowing the same
+    /// name (e.g. `SYS_WRITE`) to be defined in separate platform-specific files.
+    /// The dependency's top-level exprs and private symbols are not imported.
+    pub fn merge_from(&mut self, other: FileAst) {
+        for (name, declare) in other.tags {
+            self.tags.entry(name).or_insert(declare);
+        }
+        for (name, bind) in other.defs {
+            if bind.attributes().matches_current_platform() {
+                self.defs.entry(name).or_insert(bind);
+            }
+        }
+    }
+}
+
 impl PartialEq for FileAst {
     fn eq(&self, other: &Self) -> bool {
         self.uses == other.uses

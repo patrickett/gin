@@ -150,7 +150,9 @@ where
     // Parse: or [--- doc_on_same_line] variant
     // Doc comment on SAME LINE as `or` belongs to PREVIOUS variant
     // Doc comment on SEPARATE LINE belongs to NEXT variant (handled by parse_variant)
-    let parse_or_and_variant = just(Token::Or)
+    let parse_or_and_variant = just(Token::Indent)
+        .or_not()
+        .ignore_then(just(Token::Or))
         .then(doc_comment().or_not()) // Doc on same line (no newline consumed yet)
         .then_ignore(just(Token::Newline).or_not())
         .then_ignore(just(Token::Indent).or_not())

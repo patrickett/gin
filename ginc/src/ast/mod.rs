@@ -16,6 +16,8 @@ mod pattern;
 pub use pattern::*;
 mod ident;
 pub use ident::*;
+mod impl_block;
+pub use impl_block::*;
 
 use crate::prelude::*;
 use chumsky::{input::ValueInput, span::SimpleSpan};
@@ -35,6 +37,7 @@ where
         .map(|(receiver_type, bind)| bind.with_receiver_type(Some(receiver_type)));
 
     let element = choice((
+        impl_block(expr_parser.clone()).map(TopLevelValue::ImplBlock),
         method_parser.map(TopLevelValue::Bind),
         bind(expr_parser.clone()).map(TopLevelValue::Bind),
         declare(expr_parser.clone()).map(TopLevelValue::Tag),
@@ -72,11 +75,24 @@ where
                         TopLevelValue::Bind(bind) => {
                             private_defs.insert(bind.name());
                         }
+                        TopLevelValue::ImplBlock(block) => {
+                            for method_name in block.methods.keys() {
+                                let mangled = IStr::new(format!(
+                                    "{}.{}",
+                                    block.type_name.as_str(),
+                                    method_name.as_str()
+                                ));
+                                private_defs.insert(mangled);
+                            }
+                        }
                         TopLevelValue::Expr(_) => {}
                     }
                     collect_top_level(el, &mut tags, &mut defs, &mut exprs);
                 }
             }
+
+            // Generate return type unions from bind return values
+            generate_return_type_unions(&defs, &mut tags, &private_defs);
 
             FileAst {
                 uses: imports,
@@ -92,6 +108,7 @@ where
 enum TopLevelValue {
     Tag(Declare),
     Bind(Bind),
+    ImplBlock(ImplBlock),
     Expr(Expr),
 }
 
@@ -107,11 +124,181 @@ fn collect_top_level(
             tags.insert(name, decl);
         }
         TopLevelValue::Bind(bind) => {
-            let name = bind.name();
+            let name = if let Some(recv) = bind.receiver_type() {
+                IStr::new(format!("{}.{}", recv.name(), bind.name()))
+            } else {
+                bind.name()
+            };
             defs.insert(name, bind);
+        }
+        TopLevelValue::ImplBlock(block) => {
+            let recv_tag = Tag::Nominal(block.type_name);
+            for (method_name, bind) in block.methods {
+                let bind = bind.with_receiver_type(Some(recv_tag.clone()));
+                let mangled =
+                    IStr::new(format!("{}.{}", block.type_name.as_str(), method_name.as_str()));
+                defs.insert(mangled, bind);
+            }
         }
         TopLevelValue::Expr(expr) => {
             exprs.push(expr);
         }
+    }
+}
+
+/// Generate return type unions from anonymous return values in binds.
+///
+/// For example, if a bind `print` has `return PrintSuccess`, this generates
+/// a union type. If the bind has a named return type (e.g., `print() result:`),
+/// the union is inserted into the tags map with that name. Otherwise, the union
+/// is conceptually the return type but not externally referenceable.
+///
+/// Example with named return type:
+///   print(arg) print_result:
+///       if arg = 1 return PrintFail
+///   return PrintSuccess
+///   -> Creates a union `print_result` with variants [PrintFail, PrintSuccess]
+///
+/// Example with anonymous return type:
+///   print(arg):
+///       if arg = 1 return PrintFail
+///   return PrintSuccess
+///   -> Return type is PrintFail or PrintSuccess (not externally referenceable)
+fn generate_return_type_unions(
+    defs: &DefMap,
+    tags: &mut TagMap,
+    _private_defs: &std::collections::HashSet<IStr>,
+) {
+    use crate::ast::declare::DeclareValue;
+    use crate::ast::tag::{Tag, Variant};
+    use std::collections::HashSet;
+
+    for bind in defs.values() {
+        // Extract anonymous tag names from the bind's return value
+        let tag_names = extract_anonymous_tags_from_bind(bind);
+
+        if tag_names.is_empty() {
+            continue;
+        }
+
+        // Deduplicate tag names
+        let unique_tags: HashSet<_> = tag_names.into_iter().collect();
+
+        // Create variants from the unique tag names
+        let variants: Vec<Variant> = unique_tags
+            .into_iter()
+            .map(|name| Variant::External(Tag::Nominal(name)))
+            .collect();
+
+        // Only create a named union declaration if return_type_name is provided
+        if let Some(name) = bind.return_type_name() {
+            // Named return type - the union can be referenced elsewhere
+            let decl = crate::ast::declare::Declare::new(*name, DeclareValue::Union { variants });
+            tags.insert(decl.name(), decl);
+        }
+        // If no name provided, the union IS the return type but has no external declaration
+        // The return type is implicitly: variant1 or variant2 or variant3...
+    }
+}
+
+/// Extract all anonymous tag names from a bind's return value.
+fn extract_anonymous_tags_from_bind(bind: &crate::ast::expr::Bind) -> Vec<IStr> {
+    use crate::ast::expr::BindValue;
+
+    let mut tags = Vec::new();
+
+    match bind.value() {
+        BindValue::Expr(expr) => {
+            extract_anonymous_tags_from_expr(expr, &mut tags);
+        }
+        BindValue::Body { exprs, ret } => {
+            for expr in exprs {
+                extract_anonymous_tags_from_expr(expr, &mut tags);
+            }
+            if let Some(expr) = &ret.0 {
+                extract_anonymous_tags_from_expr(expr, &mut tags);
+            }
+        }
+        BindValue::Extern => {}
+    }
+
+    tags
+}
+
+/// Recursively extract anonymous tag names from an expression.
+fn extract_anonymous_tags_from_expr(expr: &crate::ast::expr::Expr, tags: &mut Vec<IStr>) {
+    use crate::ast::expr::Expr::*;
+
+    match expr {
+        AnonymousTag(name) => {
+            tags.push(*name);
+        }
+        FnCall(call) => {
+            if let Some(args) = &call.args {
+                for arg in args {
+                    extract_anonymous_tags_from_expr(arg, tags);
+                }
+            }
+        }
+        Binary(bin) => {
+            extract_anonymous_tags_from_expr(&bin.lhs, tags);
+            extract_anonymous_tags_from_expr(&bin.rhs, tags);
+        }
+        Loop(loop_expr) => {
+            use crate::ast::expr::Loop;
+            match loop_expr {
+                Loop::ForIn(for_loop) => {
+                    for expr in &for_loop.exprs {
+                        extract_anonymous_tags_from_expr(expr, tags);
+                    }
+                    extract_anonymous_tags_from_expr(&for_loop.iter, tags);
+                }
+                Loop::While(while_loop) => {
+                    for expr in &while_loop.exprs {
+                        extract_anonymous_tags_from_expr(expr, tags);
+                    }
+                    extract_anonymous_tags_from_expr(&while_loop.cond, tags);
+                }
+            }
+        }
+        When(when_expr) => {
+            if let Some(subject) = &when_expr.subject {
+                extract_anonymous_tags_from_expr(subject, tags);
+            }
+            for arm in &when_expr.arms {
+                use crate::ast::expr::when::WhenArm;
+                match arm {
+                    WhenArm::Cond { condition, body } => {
+                        extract_anonymous_tags_from_expr(condition, tags);
+                        extract_anonymous_tags_from_expr(body, tags);
+                    }
+                    WhenArm::Is { body, .. } => {
+                        extract_anonymous_tags_from_expr(body, tags);
+                    }
+                    WhenArm::Else(body) => {
+                        extract_anonymous_tags_from_expr(body, tags);
+                    }
+                }
+            }
+        }
+        Bind(bind) => {
+            // Local binds can also contain anonymous tags
+            use crate::ast::expr::BindValue;
+            match bind.value() {
+                BindValue::Expr(e) => {
+                    extract_anonymous_tags_from_expr(e, tags);
+                }
+                BindValue::Body { exprs, ret } => {
+                    for expr in exprs {
+                        extract_anonymous_tags_from_expr(expr, tags);
+                    }
+                    if let Some(expr) = &ret.0 {
+                        extract_anonymous_tags_from_expr(expr, tags);
+                    }
+                }
+                BindValue::Extern => {}
+            }
+        }
+        _ => {}
     }
 }

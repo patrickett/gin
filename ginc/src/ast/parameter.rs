@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
 use crate::prelude::*;
 use crate::parse::delimited_list;
@@ -43,7 +43,7 @@ where
     // Parse parameter with explicit handling of Tag tokens vs generic identifiers
     let param_info = choice((
         // Handle tag-based parameter typing: (p Person | User)
-        tag.map(ParamInfo::Tag),
+        tag.clone().map(ParamInfo::Tag),
         // Handle default parameter values: (p: 123)
         just(Token::Colon)
             .ignore_then(expr.clone())
@@ -51,7 +51,7 @@ where
     ))
     .or_not();
 
-    id.then(param_info).map(|(name, info)| {
+    let named = id.then(param_info).map(|(name, info)| {
         let kind = match info {
             Some(info) => match info {
                 ParamInfo::Tag(tag) => ParameterKind::Tagged(tag),
@@ -59,12 +59,20 @@ where
             },
             None => ParameterKind::Generic,
         };
-
         (name, kind)
-    })
+    });
+
+    // Positional type argument: bare Tag with no name, e.g. `Ptr(Byte)`.
+    // The tag name itself is used as the parameter key.
+    let positional = tag.clone().map(|t: Tag| {
+        let key = IStr::new(t.name().to_string());
+        (key, ParameterKind::Tagged(t))
+    });
+
+    choice((named, positional))
 }
 
-pub type Parameters = HashMap<IStr, ParameterKind>;
+pub type Parameters = IndexMap<IStr, ParameterKind>;
 
 pub fn params<'t, I>(
     expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,

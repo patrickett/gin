@@ -53,7 +53,14 @@ pub fn handle_newline<'src>(lex: &mut Lexer<'src, Token<'src>>) -> Token<'src> {
             _ => break,
         }
     }
+    // If the next non-whitespace character is a newline (or EOF), this is a blank line.
+    // Don't update the indentation stack for blank lines.
+    let is_blank_line = remainder.get(bytes).is_none_or(|&b| b == b'\n');
     lex.bump(bytes);
+
+    if is_blank_line {
+        return Token::Newline;
+    }
 
     let extras = &mut lex.extras;
     let depth = extras.indent_depth as usize;
@@ -84,6 +91,8 @@ pub fn handle_newline<'src>(lex: &mut Lexer<'src, Token<'src>>) -> Token<'src> {
 #[logos(extras = LexContext)]
 #[logos(error = LexSymptom)]
 pub enum Token<'src> {
+    #[token("extern")]
+    Extern,
     #[token("continue")]
     Continue,
     #[token("private")]
@@ -106,6 +115,8 @@ pub enum Token<'src> {
     SelfTag,
     #[token("for")]
     For,
+    #[token("while")]
+    While,
     #[token("use")]
     Use,
     #[token("has")]
@@ -127,12 +138,15 @@ pub enum Token<'src> {
     #[token("or")]
     Or,
     // String-bearing variants: logos uses lex.slice() by default for &'src str
-    #[regex(r"[A-Z][a-zA-Z]*")]
+    #[regex(r"[A-Z][a-zA-Z0-9]*")]
     Tag(&'src str),
-    #[regex(r"_?[a-z]+(?:_[a-z]+)*")]
+    #[regex(r"_[a-z]*(?:_[a-z]+)*|[a-z]+(?:_[a-z]+)*")]
     Id(&'src str),
     #[regex(r"[0-9]+\.[0-9]+", |lex| lex.slice().parse::<f64>())]
     Float(f64),
+    #[regex(r"0[xX][0-9a-fA-F]+", |lex| {
+        u64::from_str_radix(&lex.slice()[2..], 16).map(|v| v as i64)
+    })]
     #[regex(r"[0-9]+", |lex| lex.slice().parse::<i64>())]
     Int(i64),
     #[regex(r"'[^'\n]*'", |lex| { let s = lex.slice(); &s[1..s.len()-1] })]
@@ -174,12 +188,20 @@ pub enum Token<'src> {
     Minus,
     #[token("*")]
     Star,
+    #[token("%")]
+    Percent,
     #[token("\\")]
     SlashOr,
     #[token("/")]
     Slash,
     #[token("^")]
     Caret,
+    #[token("|")]
+    Pipe,
+    #[token("<<")]
+    ShiftLeft,
+    #[token(">>")]
+    ShiftRight,
     #[token("~")]
     Tilde,
     #[token(".")]
@@ -188,6 +210,8 @@ pub enum Token<'src> {
     At,
     #[token("#")]
     Pound,
+    #[token(":=")]
+    ColonEq,
     #[token(":")]
     Colon,
     #[token(";")]

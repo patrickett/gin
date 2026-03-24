@@ -8,7 +8,10 @@ pub mod signature_help;
 
 pub use completion::{build_completions, use_completions};
 pub use definition::find_definition_range;
-pub use hover::{build_binding_hover, build_declare_hover, build_local_binding_hover, build_variant_hover};
+pub use hover::{
+    build_binding_hover, build_declare_hover, build_keyword_hover,
+    build_local_binding_hover_with_narrowing_and_ast, build_self_hover, build_variant_hover,
+};
 pub use json_completion::{complete_flask_json, is_flask_json_file, should_handle_file};
 pub use references::find_all_references;
 pub use semantic_tokens::{build_semantic_tokens_from_ast, LEGEND_TYPE};
