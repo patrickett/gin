@@ -112,6 +112,8 @@ pub struct FlowAnalysis {
     pub expr_contexts: HashMap<usize, FlowContext>,
     /// Impossible checks detected (for diagnostics).
     pub impossible_checks: Vec<ImpossibleCheck>,
+    /// Index out of bounds accesses detected (for diagnostics).
+    pub bounds_checks: Vec<IndexOutOfBounds>,
     /// The flow context at the end of each function body (after all narrowing).
     pub final_context: FlowContext,
     /// All variants of each union type: union_name → [variant_names].
@@ -136,6 +138,11 @@ impl FlowAnalysis {
     /// Add an impossible check to the diagnostics list.
     pub fn add_impossible_check(&mut self, check: ImpossibleCheck) {
         self.impossible_checks.push(check);
+    }
+
+    /// Add an index out of bounds check to the diagnostics list.
+    pub fn add_bounds_check(&mut self, check: IndexOutOfBounds) {
+        self.bounds_checks.push(check);
     }
 
     /// Get the display string for the narrowed type of `var_name` based on the final context.
@@ -187,4 +194,15 @@ pub struct ImpossibleCheck {
     pub expr_index: usize,
     /// Human-readable reason why this check is impossible.
     pub reason: String,
+}
+
+/// Represents an index out of bounds access detected during analysis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexOutOfBounds {
+    /// The expression index where the out-of-bounds access occurs.
+    pub expr_index: usize,
+    /// The index value being accessed.
+    pub index: i64,
+    /// The size of the buffer.
+    pub size: usize,
 }

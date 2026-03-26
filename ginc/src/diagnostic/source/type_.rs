@@ -20,6 +20,10 @@ pub enum TypeSymptom {
         expected: usize,
         got: usize,
     },
+    IndexOutOfBounds {
+        index: i64,
+        size: usize,
+    },
 }
 
 impl SymptomDetail for TypeSymptom {
@@ -31,6 +35,7 @@ impl SymptomDetail for TypeSymptom {
             TypeSymptom::ConstraintViolation { .. } => 4,
             TypeSymptom::UnresolvedTypeParam { .. } => 5,
             TypeSymptom::ArityMismatch { .. } => 6,
+            TypeSymptom::IndexOutOfBounds { .. } => 7,
         }
     }
 
@@ -56,6 +61,9 @@ impl SymptomDetail for TypeSymptom {
             } => {
                 format!("`{name}` expects {expected} type argument(s), got {got}")
             }
+            TypeSymptom::IndexOutOfBounds { index, size } => {
+                format!("index out of bounds: the len is {size} but the index is {index}")
+            }
         }
     }
 
@@ -74,6 +82,9 @@ impl SymptomDetail for TypeSymptom {
             )),
             TypeSymptom::ArityMismatch { expected, .. } => {
                 Some(format!("provide exactly {expected} type argument(s)"))
+            }
+            TypeSymptom::IndexOutOfBounds { size, .. } => {
+                Some(format!("valid indices are 0..{}", size))
             }
         }
     }
@@ -135,6 +146,14 @@ pub fn arity_mismatch(span: SimpleSpan, name: String, expected: usize, got: usiz
             expected,
             got,
         }),
+        span,
+        category: Category::Flaw,
+    }
+}
+
+pub fn index_out_of_bounds(span: SimpleSpan, index: i64, size: usize) -> Symptom {
+    Symptom {
+        source: SymptomSource::Type(TypeSymptom::IndexOutOfBounds { index, size }),
         span,
         category: Category::Flaw,
     }

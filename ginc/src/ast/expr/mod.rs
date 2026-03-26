@@ -51,9 +51,9 @@ pub enum Expr {
     TupleSet { base: Box<Expr>, index: usize, value: Box<Expr> },
     /// Explicit numeric cast: `expr as Type` — emits trunci/extsi/sitofp/fptosi.
     Cast { expr: Box<Expr>, ty: IStr },
-    /// Dynamic buffer element read: `buf[i]` — emits GEP(i * elem_bytes) + load.
+    /// Dynamic buffer element read: `buf.(i)` — emits GEP(i * elem_bytes) + load.
     BufGet { buf: Box<Expr>, index: Box<Expr> },
-    /// Dynamic buffer element write: `buf[i]: val` — emits GEP(i * elem_bytes) + store.
+    /// Dynamic buffer element write: `buf.(i): val` — emits GEP(i * elem_bytes) + store.
     BufSet { buf: Box<Expr>, index: Box<Expr>, value: Box<Expr> },
     /// Take a raw pointer to a value: `@expr` — emits alloca + spill if needed, returns `!llvm.ptr`.
     TakePtr(Box<Expr>),
@@ -125,12 +125,13 @@ where
             },
         );
 
-        // Postfix dynamic index read: `expr[i]` (precedence 5)
+        // Postfix dynamic index read: `expr.(expr)` (precedence 5)
         let buf_get = postfix(
             5,
-            just(Token::BracketOpen)
+            just(Token::Dot)
+                .ignore_then(just(Token::ParenOpen))
                 .ignore_then(expr.clone())
-                .then_ignore(just(Token::BracketClose)),
+                .then_ignore(just(Token::ParenClose)),
             |base: Expr, index: Expr, _| Expr::BufGet {
                 buf: Box::new(base),
                 index: Box::new(index),
@@ -160,12 +161,13 @@ fn atom<'t, I>(
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
-    // BufSet: `name[index]: value`  (must precede bind/fn_call)
+    // BufSet: `name.(index): value`  (must precede bind/fn_call)
     let buf_set = id_token()
         .then(
-            just(Token::BracketOpen)
+            just(Token::Dot)
+                .ignore_then(just(Token::ParenOpen))
                 .ignore_then(expr.clone())
-                .then_ignore(just(Token::BracketClose)),
+                .then_ignore(just(Token::ParenClose)),
         )
         .then_ignore(just(Token::Colon))
         .then(expr.clone())

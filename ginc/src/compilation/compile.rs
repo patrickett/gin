@@ -3,7 +3,7 @@
 use crate::{
     codegen::generate_mlir,
     database::{CompiledModule, File, input_database::Db},
-    diagnostic::{Symptom, SymptomSource},
+    diagnostic::{Symptom, SymptomSource, type_ as type_symptom},
     parse::{parse, resolve_imports},
     typeck::{TyEnv, flow_analyzer::FlowAnalyzer, FlowAnalysis},
 };
@@ -19,7 +19,16 @@ pub fn flow_analysis<'db>(db: &'db dyn Db, file: File) -> FlowAnalysis {
     let mut analyzer = FlowAnalyzer::new(&ty_env);
     analyzer.analyze_file(&ast);
 
-    analyzer.into_result()
+    let result = analyzer.into_result();
+
+    // Emit symptoms for bounds checks
+    // TODO: Map expression indices to actual spans (currently uses 0..0)
+    for check in &result.bounds_checks {
+        type_symptom::index_out_of_bounds(SimpleSpan::from(0..0), check.index, check.size)
+            .accumulate(db);
+    }
+
+    result
 }
 
 /// Compile a single file to MLIR bytecode.
@@ -60,10 +69,14 @@ pub fn compile_entry<'db>(db: &'db dyn Db, entry: File) -> CompiledModule<'db> {
     rayon::scope(|s| {
         for (db_clone, imported_file) in tasks {
             s.spawn(move |_| {
+                // Run flow analysis to collect bounds checking diagnostics
+                flow_analysis(&*db_clone, imported_file);
                 compile(&*db_clone, imported_file);
             });
         }
     });
 
+    // Run flow analysis on the entry point as well
+    flow_analysis(db, entry);
     compile(db, entry)
 }

@@ -1,10 +1,10 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
     Bind, BindValue, Expr, FileAst, FnCall, IfCondition, IfExpr, Loop, Pattern, WhenArm, WhenExpr,
 };
 use crate::intern::IStr;
-use crate::typeck::{FlowAnalysis, FlowContext, ImpossibleCheck, TyEnv, TypeConstraint};
+use crate::typeck::{FlowAnalysis, FlowContext, ImpossibleCheck, IndexOutOfBounds, TyEnv, TypeConstraint, Ty, LiteralValue};
 
 /// Analyzes control flow to track type narrowing.
 pub struct FlowAnalyzer<'a> {
@@ -18,6 +18,8 @@ pub struct FlowAnalyzer<'a> {
     expr_index: usize,
     /// Track which variables are in scope (parameters, let bindings).
     in_scope: HashSet<IStr>,
+    /// Track types of local variables for bounds checking.
+    locals: HashMap<IStr, Ty>,
 }
 
 impl<'a> FlowAnalyzer<'a> {
@@ -29,6 +31,7 @@ impl<'a> FlowAnalyzer<'a> {
             context_stack: vec![FlowContext::new()],
             expr_index: 0,
             in_scope: HashSet::new(),
+            locals: HashMap::new(),
         }
     }
 
@@ -119,6 +122,13 @@ impl<'a> FlowAnalyzer<'a> {
                     self.current_context_mut().reset(&bind.name());
                     self.reassigned.insert(bind.name());
                 }
+
+                // Track the type of the bound variable for bounds checking
+                if let BindValue::Expr(expr) = bind.value() {
+                    let ty = self.ty_env.infer_expr(expr, &self.locals);
+                    self.locals.insert(bind.name(), ty);
+                }
+
                 self.analyze_bind(bind);
             }
 
@@ -159,11 +169,13 @@ impl<'a> FlowAnalyzer<'a> {
             Expr::BufGet { buf, index } => {
                 self.analyze_expr(buf);
                 self.analyze_expr(index);
+                self.check_bounds(buf, index);
             }
             Expr::BufSet { buf, index, value } => {
                 self.analyze_expr(buf);
                 self.analyze_expr(index);
                 self.analyze_expr(value);
+                self.check_bounds(buf, index);
             }
 
             // Cast and reference operations.
@@ -397,6 +409,39 @@ impl<'a> FlowAnalyzer<'a> {
             for arg in args {
                 self.analyze_expr(arg);
             }
+        }
+    }
+
+    /// Check if a buffer access is out of bounds at compile time.
+    ///
+    /// Only catches literal indices on arrays with known sizes.
+    /// For runtime bounds checking with type narrowing, this is a TODO.
+    fn check_bounds(&mut self, buf: &Expr, index: &Expr) {
+        use crate::typeck::infer_expr_ty;
+
+        // Check if index is a literal
+        let index_val = match infer_expr_ty(index, &self.locals, &self.ty_env.tag_types, &self.ty_env.fn_return_types) {
+            Ty::Literal(LiteralValue::Int(n)) => n,
+            Ty::Int(_) => {
+                // Index is an Int but not a literal - can't check at compile time
+                return;
+            }
+            _ => return, // Not a literal index, can't check at compile time
+        };
+
+        // Check if buffer is an array with known size
+        let buf_size = match infer_expr_ty(buf, &self.locals, &self.ty_env.tag_types, &self.ty_env.fn_return_types) {
+            Ty::Array { size, .. } => size,
+            _ => return, // Not a fixed-size array, can't check at compile time
+        };
+
+        // Check if index is out of bounds (0 <= index < size)
+        if index_val < 0 || index_val as usize >= buf_size {
+            self.result.add_bounds_check(IndexOutOfBounds {
+                expr_index: self.expr_index,
+                index: index_val,
+                size: buf_size,
+            });
         }
     }
 
