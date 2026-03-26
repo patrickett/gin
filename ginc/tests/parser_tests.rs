@@ -1623,17 +1623,76 @@ return 0
 
     assert_eq!(ast.defs().len(), 1);
     let bind = ast.defs().values().next().unwrap();
-    match bind.value() {
-        ginc::ast::BindValue::Body { exprs, ret } => {
-            println!("Total exprs: {}", exprs.len());
-            for (i, expr) in exprs.iter().enumerate() {
-                println!("  Expr[{}]: {:?}", i, expr);
-                if let ginc::ast::Expr::If(if_expr) = expr {
-                    println!("    If ret: {:?}", if_expr.ret);
-                }
+    if let ginc::ast::BindValue::Body { exprs, ret } = bind.value() {
+        println!("Total exprs: {}", exprs.len());
+        for (i, expr) in exprs.iter().enumerate() {
+            println!("  Expr[{}]: {:?}", i, expr);
+            if let ginc::ast::Expr::If(if_expr) = expr {
+                println!("    If ret: {:?}", if_expr.ret);
             }
-            println!("Function Return: {:?}", ret);
         }
-        _ => {}
+        println!("Function Return: {:?}", ret);
+    }
+}
+
+// === Qualified types ===
+
+#[test]
+fn test_parse_qualified_type_in_return_annotation() {
+    // Test that Bool.True parses as a qualified type in return annotation
+    let src = "Bool is
+    True or
+    False
+get_bool() Bool.True:
+    True
+return True";
+    let ast = parse_str(src);
+
+    assert_eq!(ast.defs().len(), 1);
+    let bind = ast.defs().get(&IStr::new("get_bool".to_string())).unwrap();
+    assert_eq!(bind.name().as_str(), "get_bool");
+
+    // Check that the return tag is a qualified type
+    assert!(bind.return_tag.is_some());
+    let return_tag = bind.return_tag.as_ref().unwrap();
+    match return_tag {
+        ginc::ast::Tag::Qualified(path) => {
+            assert_eq!(path.root.as_str(), "Bool");
+            assert_eq!(path.segments.len(), 1);
+            assert_eq!(path.segments[0].as_str(), "True");
+        }
+        other => panic!("Expected Qualified tag, got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_qualified_type_in_parameter() {
+    // Test that Bool.True parses as a qualified type in parameter
+    let src = "Bool is
+    True or
+    False
+check(b Bool.True):
+    True
+return";
+    let ast = parse_str(src);
+
+    assert_eq!(ast.defs().len(), 1);
+    let bind = ast.defs().get(&IStr::new("check".to_string())).unwrap();
+    assert_eq!(bind.name().as_str(), "check");
+
+    // Check that the parameter type is a qualified type
+    let params = bind.params().as_ref().unwrap();
+    assert_eq!(params.len(), 1);
+    let (_, param_kind) = params.iter().next().unwrap();
+    match param_kind {
+        ginc::ast::ParameterKind::Tagged(tag) => match tag {
+            ginc::ast::Tag::Qualified(path) => {
+                assert_eq!(path.root.as_str(), "Bool");
+                assert_eq!(path.segments.len(), 1);
+                assert_eq!(path.segments[0].as_str(), "True");
+            }
+            other => panic!("Expected Qualified tag, got: {:?}", other),
+        },
+        other => panic!("Expected Tagged parameter, got: {:?}", other),
     }
 }

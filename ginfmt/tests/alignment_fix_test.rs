@@ -4,15 +4,17 @@
 //! - Input:  "Area is 0...999\nGroup is 0...99\nSerial is 0...9999"
 //! - Output should be: "Area   is 0...999\nGroup  is 0...99\nSerial is 0...9999"
 //! - NOT: "Area    s 0...999\nGroup   s 0...99\nSerial is 0...9999"
-//! (where "is" becomes "s" - the "i" is incorrectly removed)
+//!   (where "is" becomes "s" - the "i" is incorrectly removed)
 
 use ginfmt::{Config, format_with_config};
 
 #[test]
 fn test_alignment_bug_fix() {
     let source = "Area is 0...999\nGroup is 0...99\nSerial is 0...9999\n";
-    let mut config = Config::default();
-    config.align_binds = false;
+    let config = Config {
+        align_binds: false,
+        ..Default::default()
+    };
     let output = format_with_config(source, config);
 
     // Verify "is" is intact in all lines
@@ -43,8 +45,10 @@ fn test_alignment_bug_fix() {
 #[test]
 fn test_alignment_idempotent() {
     let source = "Area is 0...999\nGroup is 0...99\nSerial is 0...9999\n";
-    let mut config = Config::default();
-    config.align_binds = false;
+    let config = Config {
+        align_binds: false,
+        ..Default::default()
+    };
 
     // Format once
     let output1 = format_with_config(source, config.clone());

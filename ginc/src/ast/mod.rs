@@ -1,5 +1,6 @@
 mod expr;
 pub use expr::*;
+#[allow(clippy::module_inception)]
 mod ast;
 pub use ast::*;
 mod parameter;

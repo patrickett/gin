@@ -31,6 +31,13 @@ impl std::fmt::Display for MethodName<'_> {
                 }
                 write!(f, ").{}", self.name.as_str())
             }
+            Tag::Qualified(path) => {
+                write!(f, "{}", path.root.as_str())?;
+                for seg in &path.segments {
+                    write!(f, ".{}", seg.as_str())?;
+                }
+                write!(f, ".{}", self.name.as_str())
+            }
         }
     }
 }
@@ -569,9 +576,16 @@ where
     // lowercase id        → named union return type  (e.g., `print(a) result:`)
     // Capitalized(expr..) → type annotation with value args  (e.g., `val Maybe(3):`)
     // Capitalized         → explicit type annotation  (e.g., `foo(n Int) Str:`)
+    // Qualified.Capitalized → qualified type annotation (e.g., `foo() Bool.True:`)
     let return_type_part = choice((
         select! { Token::Id(name) => IStr::new(name.to_string()) }
             .map(|n| -> ReturnTypePart { (Some(n), None, None) }),
+        // Qualified type path: Bool.True, Maybe.Some
+        crate::ast::tag_variant_path()
+            .map(|path| -> ReturnTypePart {
+                (None, Some(crate::ast::Tag::Qualified(path)), None)
+            })
+            .boxed(),
         select! { Token::Tag(name) => IStr::new(name.to_string()) }
             .then(
                 crate::parse::delimited_list(

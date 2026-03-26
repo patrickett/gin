@@ -11,9 +11,11 @@ Maybe(thing) is --- Used to represent values that may or may not be present.
 
 do_something: 'hello'";
 
-    let mut config = ginfmt::Config::default();
-    config.align_declarations = true;
-    config.align_binds = false;
+    let config = ginfmt::Config {
+        align_declarations: true,
+        align_binds: false,
+        ..Default::default()
+    };
 
     println!("Original source:");
     println!("{}", source);

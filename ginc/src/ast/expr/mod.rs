@@ -27,6 +27,7 @@ pub mod when;
 pub use when::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[allow(clippy::large_enum_variant)]
 pub enum Expr {
     Loop(Loop),
     Binary(Binary),

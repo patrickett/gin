@@ -468,12 +468,11 @@ impl<'a> FlowAnalyzer<'a> {
         // Restore variables that weren't modified in the loop
         let in_scope = self.in_scope.clone();
         for var in in_scope.iter() {
-            if !self.reassigned.contains(var) {
-                if let Some(entry_constraint) = entry_context.get_constraint(var) {
+            if !self.reassigned.contains(var)
+                && let Some(entry_constraint) = entry_context.get_constraint(var) {
                     self.current_context_mut()
                         .narrow(*var, entry_constraint.clone());
                 }
-            }
         }
     }
 

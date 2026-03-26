@@ -14,8 +14,8 @@
 //!     None           --- has no value
 //! ```
 
-use crate::visitor::FmtVisitor;
 use crate::align_ast::{AlignableNode, DelimiterKind};
+use crate::visitor::FmtVisitor;
 
 /// Collect alignment information for a comment node with `---` separator.
 ///
@@ -43,7 +43,9 @@ pub fn collect_alignable(visitor: &FmtVisitor, node: tree_sitter::Node) -> Optio
         .rfind('\n')
         .map(|p| p + 1)
         .unwrap_or(0);
-    let prefix_display_width = visitor.source[line_start_byte..node.start_byte() + dash_pos].trim_end().len();
+    let prefix_display_width = visitor.source[line_start_byte..node.start_byte() + dash_pos]
+        .trim_end()
+        .len();
 
     // Calculate source line (0-indexed)
     let source_line = visitor.source[..node.start_byte()].matches('\n').count();
@@ -68,13 +70,16 @@ mod tests {
         let source = "--- Used to represent values.\n--- has a value\n";
         let visitor = FmtVisitor::new(source, Config::default());
         let mut parser = tree_sitter::Parser::new();
-        parser.set_language(&tree_sitter_gin::LANGUAGE_FN.into()).unwrap();
+        parser
+            .set_language(&tree_sitter_gin::LANGUAGE_FN.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let root = tree.root_node();
 
         // Find comment nodes (tree-sitter-gin parses --- as comments)
-        let comments: Vec<_> = root.children(&mut root.walk())
+        let comments: Vec<_> = root
+            .children(&mut root.walk())
             .filter(|n| n.kind() == "comment")
             .collect();
 
@@ -86,12 +91,5 @@ mod tests {
             assert_eq!(info.source_line, 0);
         }
         // If tree-sitter-gin doesn't parse --- as comments, the test still passes
-    }
-
-    #[test]
-    fn test_collect_alignable_no_dashes() {
-        // Comments without `---` are not alignable
-        // We can't easily mock tree-sitter nodes, so we rely on the integration test
-        assert!(true); // Placeholder - real testing requires tree-sitter parsing
     }
 }

@@ -45,48 +45,43 @@ pub fn begin_run(config: FlaskConfig, input: Option<PathBuf>, watch: bool) {
     // Determine executable path (same as input but without extension)
     let exe_path = path.with_extension("");
 
-    loop {
-        // Compile to executable
-        eprintln!("Compiling {} v{}", config.name, config.version);
+    // Compile to executable
+    eprintln!("Compiling {} v{}", config.name, config.version);
 
-        let mut args = Args {
-            input: path.clone(),
-            dependencies: dependencies.clone(),
-            emit: Emit::Exe,
-            output: Some(exe_path.clone()),
-            ..Default::default()
-        };
+    let mut args = Args {
+        input: path.clone(),
+        dependencies: dependencies.clone(),
+        emit: Emit::Exe,
+        output: Some(exe_path.clone()),
+        ..Default::default()
+    };
 
-        GinCompiler::compile(&mut args);
+    GinCompiler::compile(&mut args);
 
-        // Check if compilation succeeded
-        if !exe_path.exists() {
-            eprintln!("error: Compilation failed");
+    // Check if compilation succeeded
+    if !exe_path.exists() {
+        eprintln!("error: Compilation failed");
+        return;
+    }
+
+    eprintln!("Running `{}`", exe_path.display());
+
+    let mut cmd = Command::new(&exe_path);
+    // TODO: forward args to executable when args passthrough is implemented
+    let status = match cmd.status() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: Failed to execute: {}", e);
             return;
         }
+    };
 
-        eprintln!("Running `{}`", exe_path.display());
+    if !status.success() {
+        eprintln!("info: Exited with status: {}", status);
+    }
 
-        let mut cmd = Command::new(&exe_path);
-        // TODO: forward args to executable when args passthrough is implemented
-        let status = match cmd.status() {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("error: Failed to execute: {}", e);
-                return;
-            }
-        };
-
-        if !status.success() {
-            eprintln!("info: Exited with status: {}", status);
-        }
-
-        if !watch {
-            break;
-        }
-
-        // TODO: implement file watching for recompile+run loop
+    // TODO: implement watch mode for recompile+run loop
+    if watch {
         eprintln!("warning: Watch mode not yet implemented - run once");
-        break;
     }
 }

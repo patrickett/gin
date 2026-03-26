@@ -66,14 +66,14 @@ fn format_declare_hover(decl: &Declare) -> String {
 fn contains_opaque(ty: &Ty) -> bool {
     match ty {
         Ty::Opaque(_) => true,
-        Ty::Record { fields, .. } => fields.iter().any(|(_, t)| contains_opaque(&**t)),
+        Ty::Record { fields, .. } => fields.iter().any(|(_, t)| contains_opaque(t)),
         Ty::Union { variants, .. } => variants
             .iter()
-            .any(|(_, fields)| fields.iter().any(|(_, t)| contains_opaque(&**t))),
+            .any(|(_, fields)| fields.iter().any(|(_, t)| contains_opaque(t))),
         Ty::Array { elem, .. } | Ty::Ptr { inner: elem } | Ty::Ref { inner: elem } => {
-            contains_opaque(&**elem)
+            contains_opaque(elem)
         }
-        Ty::Tuple(fields) => fields.iter().any(|t| contains_opaque(t)),
+        Ty::Tuple(fields) => fields.iter().any(contains_opaque),
         _ => false,
     }
 }
@@ -222,6 +222,7 @@ fn infer_type_from_bind_with_ast(bind: &Bind, ast: &ginc::ast::FileAst) -> Optio
                                         vparams.keys().map(|k| k.as_str()).collect()
                                     }
                                     Tag::Nominal(_) => vec![],
+                                    Tag::Qualified(_) => vec![],
                                 };
                                 let args: Vec<String> = union_params
                                     .keys()

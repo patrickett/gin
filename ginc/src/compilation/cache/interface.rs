@@ -240,6 +240,7 @@ pub enum ParamKindSig {
 pub enum TagSig {
     Nominal(String),
     Generic(String, Vec<(String, ParamKindSig)>),
+    Qualified(Vec<String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -319,6 +320,13 @@ fn extract_tag_sig(tag: &Tag) -> TagSig {
                 .collect();
             pairs.sort_by(|a, b| a.0.cmp(&b.0));
             TagSig::Generic(name.to_string(), pairs)
+        }
+        Tag::Qualified(path) => {
+            let mut parts = vec![path.root.to_string()];
+            for seg in &path.segments {
+                parts.push(seg.to_string());
+            }
+            TagSig::Qualified(parts)
         }
     }
 }
@@ -433,6 +441,12 @@ fn hash_tag(hasher: &mut Sha256, tag: &Tag) {
                 let _ = write!(hasher, ",");
             }
             let _ = write!(hasher, ")");
+        }
+        Tag::Qualified(path) => {
+            let _ = write!(hasher, "Q:{}", path.root);
+            for seg in &path.segments {
+                let _ = write!(hasher, ".{}", seg);
+            }
         }
     }
 }

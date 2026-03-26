@@ -4,8 +4,10 @@ fn main() {
 Group is 0...99
 Serial is 0...9999";
 
-    let mut config = ginfmt::Config::default();
-    config.align_declarations = true;
+    let config = ginfmt::Config {
+        align_declarations: true,
+        ..Default::default()
+    };
     let output = ginfmt::format_with_config(source, config);
 
     println!("Input:");

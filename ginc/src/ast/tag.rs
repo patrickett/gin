@@ -47,6 +47,7 @@ impl Hash for Variant {
 pub enum Tag {
     Nominal(IStr),
     Generic(IStr, Parameters),
+    Qualified(ModPath),
 }
 
 impl std::fmt::Display for Tag {
@@ -65,6 +66,13 @@ impl std::fmt::Display for Tag {
                 }
                 write!(f, ")")
             }
+            Tag::Qualified(path) => {
+                write!(f, "{}", path.root.as_str())?;
+                for seg in &path.segments {
+                    write!(f, ".{}", seg.as_str())?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -74,6 +82,7 @@ impl Tag {
         match self {
             Tag::Nominal(name) => name.as_str(),
             Tag::Generic(name, _) => name.as_str(),
+            Tag::Qualified(path) => path.segments.last().map(|s| s.as_str()).unwrap_or(path.root.as_str()),
         }
     }
 }
@@ -90,6 +99,10 @@ impl Hash for Tag {
                     v.hash(state);
                 }
             }
+            Self::Qualified(path) => {
+                path.root.hash(state);
+                path.segments.hash(state);
+            }
         }
     }
 }
@@ -101,16 +114,36 @@ where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
     recursive(|tag| {
-        // Parse tag name (capitalized)
+        // Qualified type: Bool.True, Maybe.Some
+        let qualified = super::tag_variant_path()
+            .then(params(expr.clone(), tag.clone()).or_not())
+            .map(|(path, params)| {
+                match params {
+                    None => Tag::Qualified(path),
+                    Some(parameters) if parameters.is_empty() => Tag::Qualified(path),
+                    Some(parameters) => {
+                        // For generics with qualified paths, use the last segment as the name
+                        let name = path.segments.last().copied().unwrap_or(path.root);
+                        Tag::Generic(name, parameters)
+                    }
+                }
+            })
+            .boxed();
+
+        // Simple tag name (capitalized)
         let tag_name = select! { Token::Tag(name) => IStr::new(name.to_string()) };
 
         // Parse nominal or generic tag
-        tag_name
+        let simple = tag_name
             .then(params(expr.clone(), tag.clone()).or_not())
             .map(|(name, params)| match params {
                 None => Tag::Nominal(name),
                 Some(parameters) if parameters.is_empty() => Tag::Nominal(name),
                 Some(parameters) => Tag::Generic(name, parameters),
             })
+            .boxed();
+
+        // Prefer qualified to avoid ambiguity
+        choice((qualified, simple))
     })
 }

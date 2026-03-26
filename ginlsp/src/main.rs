@@ -381,6 +381,7 @@ impl Backend {
                                 .collect();
                             Some(format!("{}({})", variant_name.as_str(), args.join(", ")))
                         }
+                        Tag::Qualified(_) => Some(variant_name.as_str().to_string()),
                     };
                 }
             }

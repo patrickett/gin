@@ -21,7 +21,7 @@ where
     let signed_int = just(Token::Minus)
         .or_not()
         .then(select! { Token::Int(n) => n })
-        .map(|(neg, n)| if neg.is_some() { -(n as i64) } else { n as i64 });
+        .map(|(neg, n)| if neg.is_some() { -n } else { n });
 
     signed_int
         .then_ignore(just(Token::Infer))

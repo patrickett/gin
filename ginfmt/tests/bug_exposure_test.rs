@@ -5,8 +5,10 @@ use ginfmt::{Config, format_with_config};
 fn test_bug_1_idempotency_issue() {
     // After first format, byte positions in AlignableNode become invalid
     let source = "Area is 0...999\nGroup is 0...99\nSerial is 0...9999\n";
-    let mut config = Config::default();
-    config.align_binds = false;
+    let config = Config {
+        align_binds: false,
+        ..Default::default()
+    };
 
     let first = format_with_config(source, config.clone());
     println!("First format:\n{}", first);
@@ -21,8 +23,10 @@ fn test_bug_1_idempotency_issue() {
 fn test_bug_2_blank_line_preservation() {
     // Blank lines should break alignment groups and be preserved
     let source = "Area is 0...999\n\nGroup is 0...99\n";
-    let mut config = Config::default();
-    config.align_binds = false;
+    let config = Config {
+        align_binds: false,
+        ..Default::default()
+    };
 
     let result = format_with_config(source, config.clone());
     println!("Result:\n{}", result);
@@ -42,8 +46,10 @@ fn test_bug_2_blank_line_preservation() {
 fn test_bug_3_multiline_sum_type() {
     // Multi-line sum types should not be corrupted
     let source = "Maybe(thing) is\n    Some(thing)\n    or\n    None\n";
-    let mut config = Config::default();
-    config.align_binds = false;
+    let config = Config {
+        align_binds: false,
+        ..Default::default()
+    };
 
     let result = format_with_config(source, config.clone());
     println!("Result:\n{}", result);

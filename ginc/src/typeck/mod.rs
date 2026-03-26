@@ -40,6 +40,7 @@ pub enum Ty {
     Union {
         name: IStr,
         /// Each variant: (variant_name, [(field_name, field_type)]) in declaration order.
+        #[allow(clippy::type_complexity)]
         variants: Vec<(IStr, Vec<(IStr, Box<Ty>)>)>,
     },
     /// Unresolved / generic type — falls back to `i64` in codegen.
@@ -93,6 +94,23 @@ impl Ty {
     }
 }
 
+/// Type alias for union variant fields: (field_name, field_type)
+#[allow(dead_code)]
+type UnionFields = Vec<(IStr, Box<Ty>)>;
+
+/// Type alias for union variants: (variant_name, fields)
+#[allow(dead_code)]
+type UnionVariants = Vec<(IStr, UnionFields)>;
+
+/// Type alias for variant map entries: (union_name, discriminant, fields)
+type VariantMapEntry = (IStr, usize, Vec<(IStr, Ty)>);
+
+/// Type alias for the variant map: variant_name -> [(union_name, discriminant, fields)]
+type VariantMap = HashMap<IStr, Vec<VariantMapEntry>>;
+
+/// Type alias for variant lookup result: (union_name, discriminant, field_slice)
+type VariantLookupResult<'a> = (IStr, usize, &'a [(IStr, Ty)]);
+
 /// Type environment built from a `FileAst`. Resolves tag names to `Ty` and infers
 /// function parameter / return types.
 pub struct TyEnv {
@@ -100,7 +118,7 @@ pub struct TyEnv {
     fn_return_types: HashMap<IStr, Ty>,
     /// Reverse map: variant name → [(parent_union_name, discriminant_index, payload_fields)]
     /// A variant may appear in multiple unions if names collide; shape-based disambiguation is TODO.
-    variant_map: HashMap<IStr, Vec<(IStr, usize, Vec<(IStr, Ty)>)>>,
+    variant_map: VariantMap,
 }
 
 impl TyEnv {
@@ -122,7 +140,7 @@ impl TyEnv {
         }
 
         // Build variant reverse map from all union types.
-        let mut variant_map: HashMap<IStr, Vec<(IStr, usize, Vec<(IStr, Ty)>)>> = HashMap::new();
+        let mut variant_map: VariantMap = HashMap::new();
         for (union_name, ty) in &tag_types {
             if let Ty::Union { variants, .. } = ty {
                 for (i, (variant_name, fields)) in variants.iter().enumerate() {
@@ -206,7 +224,7 @@ impl TyEnv {
     /// Returns `(union_name, discriminant, [(field_name, field_type)])` in declaration order.
     /// If multiple unions declare a variant with the same name, the first match is returned.
     /// TODO: shape-based disambiguation per spec (answer #6).
-    pub fn lookup_variant(&self, name: IStr) -> Option<(IStr, usize, &[(IStr, Ty)])> {
+    pub fn lookup_variant(&self, name: IStr) -> Option<VariantLookupResult<'_>> {
         let candidates = self.variant_map.get(&name)?;
         candidates
             .first()
@@ -353,6 +371,10 @@ fn resolve_tag_ref(tag: &Tag, raw: &HashMap<IStr, &DeclareValue>, depth: u8) -> 
             }
             _ => Ty::Opaque(*name),
         },
+        Tag::Qualified(path) => {
+            // For qualified types like Bool.True, resolve the union type
+            resolve_name(path.root, raw, depth)
+        }
     }
 }
 
@@ -411,7 +433,7 @@ fn resolve_name(name: IStr, raw: &HashMap<IStr, &DeclareValue>, depth: u8) -> Ty
             }
         }
         Some(DeclareValue::Set()) => Ty::Opaque(name),
-        None => builtin(name).unwrap_or_else(|| Ty::Opaque(name)),
+        None => builtin(name).unwrap_or(Ty::Opaque(name)),
     }
 }
 
@@ -441,6 +463,14 @@ fn resolve_tag_from_map(tag: &Tag, tag_types: &HashMap<IStr, Ty>) -> Ty {
             }
             _ => Ty::Opaque(*name),
         },
+        Tag::Qualified(path) => {
+            // For qualified types like Bool.True, we need to resolve them
+            // to the type of the variant. The type of a variant is the union type itself.
+            // E.g., Bool.True has type Bool (the union type)
+            let union_name = path.root;
+            tag_types.get(&union_name).cloned()
+                .unwrap_or(Ty::Opaque(union_name))
+        }
     }
 }
 

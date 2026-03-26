@@ -4,6 +4,7 @@ use crate::prelude::*;
 use crate::parse::delimited_list;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[allow(clippy::large_enum_variant)]
 pub enum ParameterKind {
     Generic,
     Tagged(Tag),
@@ -21,6 +22,7 @@ impl std::fmt::Display for ParameterKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[allow(clippy::large_enum_variant)]
 pub enum ParamInfo {
     /// Represents a type tag for the parameter, e.g. `(p Person)`.
     Tag(Tag),

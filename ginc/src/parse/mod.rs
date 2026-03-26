@@ -2,6 +2,7 @@
 
 pub mod block;
 pub mod delimited_list;
+#[allow(clippy::module_inception)]
 pub mod parse;
 pub mod unescape;
 

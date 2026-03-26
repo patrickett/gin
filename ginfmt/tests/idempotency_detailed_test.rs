@@ -5,8 +5,10 @@ use ginfmt::{Config, format_with_config};
 fn test_idempotency_with_different_spacing() {
     // Test with already-aligned input
     let source = "Area   is 0...999\nGroup  is 0...99\nSerial is 0...9999\n";
-    let mut config = Config::default();
-    config.align_binds = false;
+    let config = Config {
+        align_binds: false,
+        ..Default::default()
+    };
 
     let first = format_with_config(source, config.clone());
     println!("Input:\n{}", source);
@@ -22,9 +24,11 @@ fn test_idempotency_with_different_spacing() {
 fn test_idempotency_after_alignment() {
     // Test that formatting already-formatted code doesn't change it
     let source = "Area is 0...999\nGroup is 0...99\nSerial is 0...9999\n";
-    let mut config = Config::default();
-    config.align_declarations = true;
-    config.align_binds = false;
+    let config = Config {
+        align_declarations: true,
+        align_binds: false,
+        ..Default::default()
+    };
 
     let first = format_with_config(source, config.clone());
     let second = format_with_config(&first, config.clone());
