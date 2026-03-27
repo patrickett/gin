@@ -751,7 +751,7 @@ impl TyEnv {
                 let name = call.path.root;
                 if let Some(args) = &call.args {
                     if self.fn_return_ty(&name).is_none() && !is_builtin_func(name.as_str()) {
-                        type_symptom::unknown(call.path.span).accumulate(db);
+                        type_symptom::unknown_binding(call.path.span, name.to_string()).accumulate(db);
                     }
                     for arg in args {
                         self.check_expr(arg, db, locals);
@@ -760,7 +760,7 @@ impl TyEnv {
                     && !locals.contains(&name)
                     && self.fn_return_ty(&name).is_none()
                 {
-                    type_symptom::unknown(call.path.span).accumulate(db);
+                    type_symptom::unknown_binding(call.path.span, name.to_string()).accumulate(db);
                 }
             }
             Expr::Bind(bind) => self.check_bind(bind, db, locals),
@@ -860,12 +860,12 @@ impl TyEnv {
         match tag {
             Tag::Nominal(name, span) => {
                 if self.lookup_tag(*name).is_none() && builtin(*name).is_none() {
-                    type_symptom::unknown(*span).accumulate(db);
+                    type_symptom::unknown_type(*span, name.to_string()).accumulate(db);
                 }
             }
             Tag::Generic(name, params, span) => {
                 if self.lookup_tag(*name).is_none() && builtin(*name).is_none() {
-                    type_symptom::unknown(*span).accumulate(db);
+                    type_symptom::unknown_type(*span, name.to_string()).accumulate(db);
                 }
                 for kind in params.values() {
                     if let ParameterKind::Tagged(inner) = kind {
@@ -875,7 +875,7 @@ impl TyEnv {
             }
             Tag::Qualified(path) => {
                 if self.lookup_tag(path.root).is_none() && builtin(path.root).is_none() {
-                    type_symptom::unknown(path.span).accumulate(db);
+                    type_symptom::unknown_type(path.span, path.root.to_string()).accumulate(db);
                 }
             }
         }

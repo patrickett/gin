@@ -5,7 +5,12 @@ use chumsky::span::SimpleSpan;
 
 pub enum TypeSymptom {
     Mismatch,
-    Unknown,
+    UnknownBinding {
+        name: String,
+    },
+    UnknownType {
+        name: String,
+    },
     InferenceFailed,
     ConstraintViolation {
         param: String,
@@ -33,7 +38,8 @@ impl SymptomDetail for TypeSymptom {
     fn id(&self) -> u8 {
         match self {
             TypeSymptom::Mismatch => 1,
-            TypeSymptom::Unknown => 2,
+            TypeSymptom::UnknownBinding { .. } => 2,
+            TypeSymptom::UnknownType { .. } => 9,
             TypeSymptom::InferenceFailed => 3,
             TypeSymptom::ConstraintViolation { .. } => 4,
             TypeSymptom::UnresolvedTypeParam { .. } => 5,
@@ -46,7 +52,8 @@ impl SymptomDetail for TypeSymptom {
     fn message(&self) -> String {
         match self {
             TypeSymptom::Mismatch => "type mismatch".into(),
-            TypeSymptom::Unknown => "unknown type".into(),
+            TypeSymptom::UnknownBinding { name } => format!("use of undefined binding `{name}`"),
+            TypeSymptom::UnknownType { name } => format!("use of undeclared type `{name}`"),
             TypeSymptom::InferenceFailed => "failed to infer type".into(),
             TypeSymptom::ConstraintViolation {
                 param,
@@ -75,7 +82,8 @@ impl SymptomDetail for TypeSymptom {
     fn help(&self) -> Option<String> {
         match self {
             TypeSymptom::Mismatch => Some("types do not match".into()),
-            TypeSymptom::Unknown => Some("type is not defined".into()),
+            TypeSymptom::UnknownBinding { .. } => Some("define bind before using it".into()),
+            TypeSymptom::UnknownType { .. } => Some("declare the type before using it".into()),
             TypeSymptom::InferenceFailed => Some("could not infer the type".into()),
             TypeSymptom::ConstraintViolation {
                 param, expected, ..
@@ -104,9 +112,17 @@ pub const fn mismatch(span: SimpleSpan) -> Symptom {
     }
 }
 
-pub const fn unknown(span: SimpleSpan) -> Symptom {
+pub fn unknown_binding(span: SimpleSpan, name: String) -> Symptom {
     Symptom {
-        source: SymptomSource::Type(TypeSymptom::Unknown),
+        source: SymptomSource::Type(TypeSymptom::UnknownBinding { name }),
+        span,
+        category: Category::Flaw,
+    }
+}
+
+pub fn unknown_type(span: SimpleSpan, name: String) -> Symptom {
+    Symptom {
+        source: SymptomSource::Type(TypeSymptom::UnknownType { name }),
         span,
         category: Category::Flaw,
     }

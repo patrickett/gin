@@ -33,6 +33,10 @@ impl GinSnapshot {
         // Collect all accumulated symptoms from the compilation pipeline
         compile::accumulated::<Symptom>(&self.db, file)
     }
+
+    pub fn hover_at(&self, file: File, byte_pos: usize) -> Option<String> {
+        ginc::compilation::hover::hover_at(&self.db, file, byte_pos)
+    }
 }
 
 pub struct GinHost {
