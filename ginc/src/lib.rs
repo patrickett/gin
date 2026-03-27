@@ -40,10 +40,17 @@ pub struct GinCompiler;
 
 impl GinCompiler {
     pub fn compile(args: &'_ mut Args) {
+        let path = args.input.to_owned();
+
+        // For library builds (directory input), use a simpler compilation path
+        if path.is_dir() {
+            compile_library(args, &path);
+            return;
+        }
+
+        // Regular build: use Salsa database for incremental compilation
         let (tx, _rx) = unbounded();
         let db = InputDatabase::new(tx);
-
-        let path = args.input.to_owned();
 
         let entry = match db.input(path.clone()) {
             Ok(file) => file,
@@ -124,6 +131,58 @@ impl GinCompiler {
     }
 }
 
+/// Compile a library directory (all .gin files) to an object file
+fn compile_library(args: &Args, path: &Path) {
+    let ast = load_gin_dir_recursive(path);
+
+    // Determine output path
+    let obj_path = args
+        .output
+        .clone()
+        .unwrap_or_else(|| {
+            let pkg_name = path.file_name().unwrap_or_default().to_string_lossy();
+            path.join("target").join(format!("{}.o", pkg_name))
+        });
+
+    // Ensure target directory exists
+    if let Some(parent) = obj_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    match native::compile_to_object(&ast, &obj_path, args.profile) {
+        Ok(()) => {
+            println!("Compiled library to {}", obj_path.display());
+        }
+        Err(e) => {
+            eprintln!("Codegen error: {e:?}");
+        }
+    }
+}
+
+/// Recursively load all .gin files in a directory
+fn load_gin_dir_recursive(dir: &Path) -> FileAst {
+    let mut merged = FileAst::default();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return merged;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            // Skip target directory (build artifacts)
+            if path.file_name().map_or(false, |n| n == "target") {
+                continue;
+            }
+            merged.merge_from(load_gin_dir_recursive(&path));
+        } else if path.extension().map_or(false, |ext| ext == "gin") {
+            if let Ok(src) = std::fs::read_to_string(&path) {
+                merged.merge_from(parse_from_str(&src));
+            }
+        }
+    }
+    merged
+}
+
 /// Parse the entry file and merge all matching flask.json dependencies into its AST.
 fn load_entry_with_deps(entry_path: &Path, dependencies: &HashMap<String, PathBuf>) -> FileAst {
     let src = std::fs::read_to_string(entry_path).unwrap_or_default();
@@ -153,25 +212,9 @@ fn load_entry_with_deps(entry_path: &Path, dependencies: &HashMap<String, PathBu
 
     for dep_name in dep_names {
         if let Some(dep_dir) = dependencies.get(&dep_name) {
-            ast.merge_from(load_gin_dir(dep_dir));
+            ast.merge_from(load_gin_dir_recursive(dep_dir));
         }
     }
 
     ast
-}
-
-/// Parse all `.gin` files in `dir` and merge them into a single FileAst.
-fn load_gin_dir(dir: &Path) -> FileAst {
-    let mut merged = FileAst::default();
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.extension().map_or_else(|| false, |e| e == "gin")
-                && let Ok(src) = std::fs::read_to_string(&p)
-            {
-                merged.merge_from(parse_from_str(&src));
-            }
-        }
-    }
-    merged
 }

@@ -1,5 +1,5 @@
 use flask::{DependencyKind, FlaskConfig};
-use ginc::{Args, GinCompiler};
+use ginc::{Args, Emit, GinCompiler};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -7,8 +7,8 @@ use std::path::PathBuf;
 
 /// `begin (b)uild` will build
 pub fn begin_build(config: FlaskConfig, input: Option<PathBuf>) {
-    let path = match input {
-        Some(p) => p,
+    let (path, emit) = match input {
+        Some(p) => (p, Emit::Exe),
         None => {
             let cwd = match std::env::current_dir() {
                 Ok(d) => d,
@@ -17,12 +17,13 @@ pub fn begin_build(config: FlaskConfig, input: Option<PathBuf>) {
                 }
             };
 
-            let Some(entry) = config.entry() else {
-                eprintln!("Error: no \"entry\" field in flask.json");
-                return;
-            };
-
-            cwd.join(entry)
+            if let Some(entry) = config.entry() {
+                // Binary package - use entry file
+                (cwd.join(entry), Emit::Exe)
+            } else {
+                // Library package - use directory as input
+                (cwd, Emit::Obj)
+            }
         }
     };
 
@@ -39,9 +40,19 @@ pub fn begin_build(config: FlaskConfig, input: Option<PathBuf>) {
         }
     }
 
+    // For libraries, use package name as output
+    let output = if emit == Emit::Obj {
+        let pkg_name = format!("{}.o", config.name.replace('-', "_"));
+        Some(config_dir.join("target").join(pkg_name))
+    } else {
+        None
+    };
+
     let mut args = Args {
         input: path,
         dependencies,
+        emit,
+        output,
         ..Default::default()
     };
 
