@@ -199,7 +199,7 @@ impl<'a> FlowAnalyzer<'a> {
             // Tag operations.
             Expr::TagCall(_) => {}
             Expr::AnonymousTag(..) => {}
-            Expr::SelfRef => {}
+            Expr::SelfRef(_) => {}
 
             // Literals and other expressions.
             Expr::Lit(_) => {}
@@ -453,7 +453,7 @@ impl<'a> FlowAnalyzer<'a> {
                     None
                 }
             }
-            Expr::SelfRef => Some(IStr::new("self".to_string())),
+            Expr::SelfRef(_) => Some(IStr::new("self".to_string())),
             _ => None,
         }
     }

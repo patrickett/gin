@@ -581,10 +581,10 @@ impl<'c> Lower<'c> for Expr {
             Expr::Range(_) => Err(CodegenSymptom::Internal(
                 "Range lowering not yet implemented (only valid inside a for-in)".to_string(),
             )),
-            Expr::SelfRef => symtab
+            Expr::SelfRef(span) => symtab
                 .get("self")
                 .copied()
-                .ok_or_else(|| CodegenSymptom::Internal("self used outside method".to_string())),
+                .ok_or_else(|| CodegenSymptom::SelfOutsideMethod { span: *span }),
             Expr::TagCall(tc) => tc.lower(ctx, block, symtab),
             Expr::AnonymousTag(tag_name, _) => {
                 // Bare capitalized tag — treat as a unit variant constructor.

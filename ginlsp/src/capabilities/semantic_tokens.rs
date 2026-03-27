@@ -141,7 +141,7 @@ fn collect_fn_call_names(expr: &Expr, results: &mut Vec<(String, bool)>) {
             collect_fn_call_names(&range.start, results);
             collect_fn_call_names(&range.end, results);
         }
-        Expr::Lit(_) | Expr::SelfRef | Expr::AnonymousTag(..) => {}
+        Expr::Lit(_) | Expr::SelfRef(_) | Expr::AnonymousTag(..) => {}
         Expr::TagCall(tc) => {
             for arg in &tc.args {
                 collect_fn_call_names(arg, results);

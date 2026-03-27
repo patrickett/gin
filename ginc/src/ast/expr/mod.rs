@@ -38,7 +38,7 @@ pub enum Expr {
     Bind(Bind),
     When(WhenExpr),
     If(IfExpr),
-    SelfRef,
+    SelfRef(SimpleSpan),
     /// A capitalized variant constructor with arguments, e.g. `Some(5)`.
     TagCall(TagCall),
     /// A bare capitalized tag in expression position, e.g. `None`, `True`.
@@ -277,7 +277,7 @@ where
                     .or_not(),
             )
             .map_with(|(_, access), e| match access {
-                None => Expr::SelfRef,
+                None => Expr::SelfRef(e.span()),
                 Some((field, args)) => Expr::FnCall(FnCall {
                     path: ModPath::new(IStr::new("self".to_string()), vec![field], e.span()),
                     args,

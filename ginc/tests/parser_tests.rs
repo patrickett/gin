@@ -777,7 +777,7 @@ fn test_parse_when_inline_pattern() {
             ginc::ast::Expr::When(when_expr) => {
                 assert!(when_expr.subject.is_some(), "pattern form has subject");
                 match when_expr.subject.as_deref() {
-                    Some(ginc::ast::Expr::SelfRef) => {}
+                    Some(ginc::ast::Expr::SelfRef(_)) => {}
                     other => panic!("Expected SelfRef subject, got: {:?}", other),
                 }
                 assert_eq!(when_expr.arms.len(), 2);
@@ -845,7 +845,7 @@ fn test_parse_self_expression() {
     match bind.value() {
         ginc::ast::BindValue::Expr(expr) => {
             assert!(
-                matches!(expr.as_ref(), ginc::ast::Expr::SelfRef),
+                matches!(expr.as_ref(), ginc::ast::Expr::SelfRef(_)),
                 "Expected SelfRef, got: {:?}",
                 expr
             );

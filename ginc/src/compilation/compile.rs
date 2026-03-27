@@ -3,7 +3,7 @@
 use crate::{
     codegen::generate_mlir,
     database::{CompiledModule, File, input_database::Db},
-    diagnostic::{Symptom, SymptomSource, type_ as type_symptom},
+    diagnostic::{Symptom, SymptomSource, CodegenSymptom, type_ as type_symptom},
     parse::{parse, resolve_imports},
     typeck::{TyEnv, flow_analyzer::FlowAnalyzer, FlowAnalysis},
 };
@@ -58,10 +58,16 @@ pub fn compile<'db>(db: &'db dyn Db, file: File) -> CompiledModule<'db> {
             CompiledModule::new(db, bytecode)
         }
         Err(e) => {
+            let span = if let CodegenSymptom::SelfOutsideMethod { span } = &e {
+                *span
+            } else {
+                SimpleSpan::new((), 0..0)
+            };
+
             let symptom = Symptom {
                 source: SymptomSource::CodeGen(e),
                 category: crate::diagnostic::Category::Flaw,
-                span: SimpleSpan::new((), 0..0),
+                span,
             };
 
             symptom.accumulate(db);

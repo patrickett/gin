@@ -624,7 +624,7 @@ fn infer_expr_ty(
         }
         Expr::If(_) => Ty::Unit,
         Expr::Range(_) => Ty::Opaque(IStr::new("Range".to_string())),
-        Expr::SelfRef => locals
+        Expr::SelfRef(_) => locals
             .get(&IStr::new("self".to_string()))
             .cloned()
             .unwrap_or_else(|| Ty::Opaque(IStr::new("Self".to_string()))),
@@ -845,7 +845,7 @@ impl TyEnv {
                 self.check_expr(e, db, locals);
             }
             Expr::Lit(_)
-            | Expr::SelfRef
+            | Expr::SelfRef(_)
             | Expr::Range(_)
             | Expr::FormatString(_)
             | Expr::AnonymousTag(..)
@@ -960,7 +960,7 @@ fn expr_references_name(expr: &Expr, name: IStr) -> bool {
         Expr::Range(range) => {
             expr_references_name(&range.start, name) || expr_references_name(&range.end, name)
         }
-        Expr::Lit(_) | Expr::SelfRef | Expr::AnonymousTag(..) | Expr::TagCall(_) => false,
+        Expr::Lit(_) | Expr::SelfRef(_) | Expr::AnonymousTag(..) | Expr::TagCall(_) => false,
     }
 }
 
