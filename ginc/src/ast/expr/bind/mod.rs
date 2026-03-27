@@ -55,6 +55,8 @@ pub struct Bind {
     pub return_tag: Option<Tag>,
     /// Explicit type annotation with value args, e.g. `Maybe(3)` in `val Maybe(3): Some(3)`.
     pub type_annotation: Option<(IStr, Vec<Expr>)>,
+    /// Qualified path for type annotation, e.g. `Maybe.Some` in `val Maybe.Some(3): ...`
+    pub type_annotation_qual: Option<ModPath>,
     /// `true` for `:=` (immutable/const) binds; `false` for `:` (mutable, alloca-backed) binds.
     pub is_const: bool,
 }
@@ -71,6 +73,7 @@ impl Bind {
             return_type_name: None,
             return_tag: None,
             type_annotation: None,
+            type_annotation_qual: None,
             is_const,
         }
     }
@@ -570,6 +573,7 @@ where
         Option<IStr>,
         Option<crate::ast::Tag>,
         Option<(IStr, Vec<Expr>)>,
+        Option<ModPath>,  // Qualified path for type annotation
     );
 
     // Parses optional return-type hint before the colon.
@@ -577,13 +581,30 @@ where
     // Capitalized(expr..) → type annotation with value args  (e.g., `val Maybe(3):`)
     // Capitalized         → explicit type annotation  (e.g., `foo(n Int) Str:`)
     // Qualified.Capitalized → qualified type annotation (e.g., `foo() Bool.True:`)
+    // Qualified.Capitalized(expr..) → qualified type with args (e.g., `val Maybe.Some(3):`)
     let return_type_part = choice((
         select! { Token::Id(name) => IStr::new(name.to_string()) }
-            .map(|n| -> ReturnTypePart { (Some(n), None, None) }),
-        // Qualified type path: Bool.True, Maybe.Some
+            .map(|n| -> ReturnTypePart { (Some(n), None, None, None) }),
+        // Qualified type path with args: Maybe.Some(3), Bool.True
         crate::ast::tag_variant_path()
-            .map(|path| -> ReturnTypePart {
-                (None, Some(crate::ast::Tag::Qualified(path)), None)
+            .then(
+                crate::parse::delimited_list(
+                    Token::ParenOpen,
+                    expr.clone(),
+                    Token::Comma,
+                    Token::ParenClose,
+                )
+                .or_not(),
+            )
+            .map(|(path, args)| -> ReturnTypePart {
+                match args {
+                    Some(args) if !args.is_empty() => {
+                        // For Maybe.Some(3), use the last segment as the name
+                        let variant_name = *path.segments.last().unwrap_or(&path.root);
+                        (None, None, Some((variant_name, args)), Some(path))
+                    }
+                    _ => (None, Some(crate::ast::Tag::Qualified(path)), None, None),
+                }
             })
             .boxed(),
         select! { Token::Tag(name) => IStr::new(name.to_string()) }
@@ -598,13 +619,13 @@ where
             )
             .map(|(name, args)| -> ReturnTypePart {
                 match args {
-                    Some(args) if !args.is_empty() => (None, None, Some((name, args))),
-                    _ => (None, Some(crate::ast::Tag::Nominal(name)), None),
+                    Some(args) if !args.is_empty() => (None, None, Some((name, args)), None),
+                    _ => (None, Some(crate::ast::Tag::Nominal(name)), None, None),
                 }
             }),
     ))
     .or_not()
-    .map(|opt| -> ReturnTypePart { opt.unwrap_or((None, None, None)) });
+    .map(|opt| -> ReturnTypePart { opt.unwrap_or((None, None, None, None)) });
 
     // `:=` → const bind (immutable SSA value)
     // `:`  → mutable bind (alloca-backed)
@@ -637,7 +658,7 @@ where
         .then(choice((extern_value, multi_value, single_value)))
         .map(
             |(
-                (((name, params), (return_type_name, return_tag, type_annotation)), is_const),
+                (((name, params), (return_type_name, return_tag, type_annotation, type_annotation_qual)), is_const),
                 (value, postfix_doc),
             )| {
                 let mut b = Bind::new(name, value, is_const)
@@ -645,6 +666,7 @@ where
                     .with_return_type_name(return_type_name);
                 b.return_tag = return_tag;
                 b.type_annotation = type_annotation;
+                b.type_annotation_qual = type_annotation_qual;
                 if let Some(doc) =
                     postfix_doc.and_then(|d| if d.0.is_empty() { None } else { Some(d) })
                 {

@@ -7,8 +7,8 @@ use capabilities::{
     build_binding_hover, build_completions, build_declare_hover, build_keyword_hover,
     build_local_binding_hover_with_narrowing_and_ast, build_self_hover,
     build_semantic_tokens_from_ast, build_signature_help, build_variant_hover, complete_flask_json,
-    find_all_references, find_definition_range, is_flask_json_file, should_handle_file,
-    use_completions, LEGEND_TYPE,
+    dot_completions, find_all_references, find_definition_range, is_flask_json_file,
+    should_handle_file, use_completions, LEGEND_TYPE,
 };
 use dashmap::DashMap;
 use diagnostics::{flow_analysis_to_diagnostics, symptoms_to_diagnostics};
@@ -776,6 +776,31 @@ impl LanguageServer for Backend {
                 return Ok(Some(CompletionResponse::Array(items)));
             }
 
+            // Check for dot completions (after typing `.`)
+            // The cursor position is after the dot, so we check the character before it
+            let before_dot_position = Position {
+                line: position.line,
+                character: position.character.saturating_sub(1),
+            };
+            if let Some(ch) = get_char_at_position(&state.source, before_dot_position) {
+                if ch == '.' {
+                    let snapshot = self.snapshot();
+                    let ast = snapshot.parse(state.file);
+                    // Use cached AST if the current parse is empty (e.g., due to incomplete syntax)
+                    let ast = if ast.tags().is_empty() && ast.defs().is_empty() {
+                        self.ast_cache
+                            .get(&uri.to_string())
+                            .map(|r| std::sync::Arc::clone(&r))
+                            .unwrap_or_else(|| std::sync::Arc::new(ast))
+                    } else {
+                        std::sync::Arc::new(ast)
+                    };
+                    if let Some(items) = dot_completions(&state.source, position, &ast) {
+                        return Ok(Some(CompletionResponse::Array(items)));
+                    }
+                }
+            }
+
             let snapshot = self.snapshot();
             let ast = snapshot.parse(state.file);
             let items = build_completions(&ast);
@@ -1236,5 +1261,33 @@ mod tests {
         assert_no_unknown_hover(
             "Maybe(x) is Some(x) or None\n\nmain:\n    val Maybe(3): Some(3)\n    if val is Some(v)\n        add_one: v + 1\n    return add_one\n    val\nreturn\n",
         );
+    }
+
+    #[test]
+    fn dot_completion_union_variants() {
+        use capabilities::dot_completions;
+        use tower_lsp::lsp_types::Position;
+
+        // Create AST with Maybe union definition
+        let source = "Maybe(x) is Some(x) or None";
+        let ast = parse_from_str(source);
+
+        // Test completion after `Maybe.` (direct type completion)
+        let source_with_dot = "Maybe.";
+        let position = Position { line: 0, character: 6 }; // `Maybe.|`
+        let completions = dot_completions(source_with_dot, position, &ast);
+
+        assert!(completions.is_some(), "Expected some completions for `Maybe.`");
+
+        let items = completions.unwrap();
+        assert_eq!(items.len(), 2, "Expected 2 variants for Maybe type");
+
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"Some(x)"), "Expected 'Some(x)' variant");
+        assert!(labels.contains(&"None"), "Expected 'None' variant");
+
+        // Check detail text for Some variant (should show the full qualified name with parameter)
+        let some_item = items.iter().find(|i| i.label == "Some(x)").unwrap();
+        assert_eq!(some_item.detail.as_ref().unwrap(), &"Maybe.Some(x)");
     }
 }

@@ -6,7 +6,7 @@ pub mod references;
 pub mod semantic_tokens;
 pub mod signature_help;
 
-pub use completion::{build_completions, use_completions};
+pub use completion::{build_completions, dot_completions, use_completions};
 pub use definition::find_definition_range;
 pub use hover::{
     build_binding_hover, build_declare_hover, build_keyword_hover,

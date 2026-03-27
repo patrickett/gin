@@ -26,8 +26,8 @@ pub fn if_expr<'t, I>(
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
-    use Token::*;
     use crate::ast::expr::r#return::r#return;
+    use Token::*;
 
     // Parse: If <expr> [is <tag>]
     let condition = expr
@@ -50,7 +50,7 @@ where
     // This ensures the if parser only consumes a dedent if it opened one.
     let indented_form = just(Indent)
         .ignore_then(expr.clone().repeated().collect::<Vec<_>>())
-        .then_ignore(just(Dedent))  // REQUIRED when we saw Indent
+        .then_ignore(just(Dedent)) // REQUIRED when we saw Indent
         .then(r#return(expr.clone()))
         .map(|(body, ret)| (body, ret));
 
@@ -58,18 +58,19 @@ where
         .clone()
         .repeated()
         .collect::<Vec<_>>()
-        .then_ignore(just(Dedent).or_not())  // Skip dedent if present (belongs to parent)
+        .then_ignore(just(Dedent).or_not()) // Skip dedent if present (belongs to parent)
         .then(r#return(expr.clone()))
         .map(|(body, ret)| (body, ret));
 
     just(If)
         .ignore_then(condition)
-        .then_ignore(just(Newline).repeated())  // Consume all newlines after condition
-        .then(choice((
-            indented_form,
-            non_indented_form,
-        )))
-        .map(|(condition, (body, ret))| IfExpr { condition, body, ret })
+        .then_ignore(just(Newline).repeated()) // Consume all newlines after condition
+        .then(choice((indented_form, non_indented_form)))
+        .map(|(condition, (body, ret))| IfExpr {
+            condition,
+            body,
+            ret,
+        })
 }
 
 impl<'c> Lower<'c> for IfExpr {
@@ -91,7 +92,7 @@ impl<'c> Lower<'c> for IfExpr {
                         .add_operands(&[cond_i64])
                         .add_results(&[ctx.mlir.i1()])
                         .build()
-                        .map_err(|e| CodegenSymptom::Internal(format!("arith.trunci: {e}")))?
+                        .map_err(|e| CodegenSymptom::Internal(format!("arith.trunci: {e}")))?,
                 )
             }
             IfCondition::Pattern { subject, tag } => {
@@ -112,7 +113,10 @@ impl<'c> Lower<'c> for IfExpr {
         };
 
         // Infer the return type from the if block's return expression
-        let ret_ty = self.ret.0.as_ref()
+        let ret_ty = self
+            .ret
+            .0
+            .as_ref()
             .map(|e| ctx.ty_env.infer_expr(e, &std::collections::HashMap::new()))
             .unwrap_or(Ty::Int(64));
         let result_mlir = ty_to_mlir(&ret_ty, ctx.mlir);
