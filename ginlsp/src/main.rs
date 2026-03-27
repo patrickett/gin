@@ -16,7 +16,10 @@ use std::sync::{Arc, Mutex, RwLock};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
-use util::{get_char_at_position, get_number_at_position, get_word_at_position, is_in_comment, position_to_byte_offset};
+use util::{
+    get_char_at_position, get_number_at_position, get_word_at_position, is_in_comment,
+    position_to_byte_offset,
+};
 
 const INFO: MessageType = MessageType::INFO;
 
@@ -527,11 +530,8 @@ impl LanguageServer for Backend {
                 return Ok(None);
             }
 
-            if let Some(ch) = get_char_at_position(&state.source, position) {
-                match ch {
-                    '(' | ')' | '[' | ']' => return Ok(None),
-                    _ => {}
-                }
+            if let Some('(' | ')' | '[' | ']') = get_char_at_position(&state.source, position) {
+                return Ok(None);
             }
 
             if let Some(num) = get_number_at_position(&state.source, position) {
@@ -645,10 +645,16 @@ mod tests {
 
         // Test completion after `Maybe.` (direct type completion)
         let source_with_dot = "Maybe.";
-        let position = Position { line: 0, character: 6 }; // `Maybe.|`
+        let position = Position {
+            line: 0,
+            character: 6,
+        }; // `Maybe.|`
         let completions = dot_completions(source_with_dot, position, &ast);
 
-        assert!(completions.is_some(), "Expected some completions for `Maybe.`");
+        assert!(
+            completions.is_some(),
+            "Expected some completions for `Maybe.`"
+        );
 
         let items = completions.unwrap();
         assert_eq!(items.len(), 2, "Expected 2 variants for Maybe type");

@@ -136,8 +136,11 @@ fn collect_top_level(
             let recv_tag = Tag::Nominal(block.type_name, block.type_name_span);
             for (method_name, bind) in block.methods {
                 let bind = bind.with_receiver_type(Some(recv_tag.clone()));
-                let mangled =
-                    IStr::new(format!("{}.{}", block.type_name.as_str(), method_name.as_str()));
+                let mangled = IStr::new(format!(
+                    "{}.{}",
+                    block.type_name.as_str(),
+                    method_name.as_str()
+                ));
                 defs.insert(mangled, bind);
             }
         }
@@ -226,7 +229,10 @@ fn extract_anonymous_tags_from_bind(bind: &crate::ast::expr::Bind) -> Vec<(IStr,
 }
 
 /// Recursively extract anonymous tag names from an expression.
-fn extract_anonymous_tags_from_expr(expr: &crate::ast::expr::Expr, tags: &mut Vec<(IStr, SimpleSpan)>) {
+fn extract_anonymous_tags_from_expr(
+    expr: &crate::ast::expr::Expr,
+    tags: &mut Vec<(IStr, SimpleSpan)>,
+) {
     use crate::ast::expr::Expr::*;
 
     match expr {

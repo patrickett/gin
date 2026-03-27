@@ -136,13 +136,10 @@ fn compile_library(args: &Args, path: &Path) {
     let ast = load_gin_dir_recursive(path);
 
     // Determine output path
-    let obj_path = args
-        .output
-        .clone()
-        .unwrap_or_else(|| {
-            let pkg_name = path.file_name().unwrap_or_default().to_string_lossy();
-            path.join("target").join(format!("{}.o", pkg_name))
-        });
+    let obj_path = args.output.clone().unwrap_or_else(|| {
+        let pkg_name = path.file_name().unwrap_or_default().to_string_lossy();
+        path.join("target").join(format!("{}.o", pkg_name))
+    });
 
     // Ensure target directory exists
     if let Some(parent) = obj_path.parent() {
@@ -170,14 +167,14 @@ fn load_gin_dir_recursive(dir: &Path) -> FileAst {
         let path = entry.path();
         if path.is_dir() {
             // Skip target directory (build artifacts)
-            if path.file_name().map_or(false, |n| n == "target") {
+            if path.file_name().is_some_and(|n| n == "target") {
                 continue;
             }
             merged.merge_from(load_gin_dir_recursive(&path));
-        } else if path.extension().map_or(false, |ext| ext == "gin") {
-            if let Ok(src) = std::fs::read_to_string(&path) {
-                merged.merge_from(parse_from_str(&src));
-            }
+        } else if path.extension().is_some_and(|ext| ext == "gin")
+            && let Ok(src) = std::fs::read_to_string(&path)
+        {
+            merged.merge_from(parse_from_str(&src));
         }
     }
     merged

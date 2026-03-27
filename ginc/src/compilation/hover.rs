@@ -1,9 +1,12 @@
 //! Hover information generation for the LSP.
 
-use crate::database::input_database::Db;
+use crate::ast::{
+    Bind, BindValue, Declare, DeclareValue, Expr, FileAst, IfCondition, Literal, ParameterKind,
+    Tag, Variant,
+};
 use crate::database::File;
-use crate::ast::{Bind, BindValue, Declare, DeclareValue, FileAst, Expr, Literal, Tag, IfCondition, ParameterKind, Variant};
-use crate::typeck::{ty_alignment, ty_byte_size_static, Ty, TyEnv};
+use crate::database::input_database::Db;
+use crate::typeck::{Ty, TyEnv, ty_alignment, ty_byte_size_static};
 
 // ── Trait & context ──────────────────────────────────────────────────────────
 
@@ -101,7 +104,9 @@ impl HoverDoc for Declare {
         if !matches!(ty, Ty::Opaque(_)) && !contains_opaque(&ty) {
             let size = ty_byte_size_static(&ty);
             let align = ty_alignment(&ty);
-            md.push_str(&format!("\n---\n\nsize = {size} ({size:#x}), align = {align:#x}\n"));
+            md.push_str(&format!(
+                "\n---\n\nsize = {size} ({size:#x}), align = {align:#x}\n"
+            ));
         }
         if let Some(doc) = self.doc_comment() {
             md.push_str("\n---\n\n");
@@ -129,11 +134,19 @@ impl HoverDoc for Variant {
 impl HoverDoc for Keyword<'_> {
     fn hover_doc(&self, _ctx: &HoverContext<'_>) -> Option<String> {
         let doc = match self.0 {
-            "is" => "Tag declaration keyword.\n\nDeclares a tag as a specific value or union.\n\n```gin\nColor is Red or Green or Blue\n```",
-            "has" => "Struct field declaration keyword.\n\nDeclares that a tag has named fields.\n\n```gin\nPoint has x Float, y Float\n```",
-            "or" => "Union variant separator.\n\nSeparates variants in a union tag declaration.\n\n```gin\nResult is Ok or Err\n```",
+            "is" => {
+                "Tag declaration keyword.\n\nDeclares a tag as a specific value or union.\n\n```gin\nColor is Red or Green or Blue\n```"
+            }
+            "has" => {
+                "Struct field declaration keyword.\n\nDeclares that a tag has named fields.\n\n```gin\nPoint has x Float, y Float\n```"
+            }
+            "or" => {
+                "Union variant separator.\n\nSeparates variants in a union tag declaration.\n\n```gin\nResult is Ok or Err\n```"
+            }
             "return" => "Return a value from a function.",
-            ":" => "Binding operator.\n\nAnnotates a value with a tag or binds a default parameter value.",
+            ":" => {
+                "Binding operator.\n\nAnnotates a value with a tag or binds a default parameter value."
+            }
             "if" => "Conditional expression.",
             "for" => "For-in loop.",
             "while" => "While loop.",
@@ -155,8 +168,7 @@ impl HoverDoc for SelfRef<'_> {
                 if params.is_empty() {
                     self.receiver_name.to_string()
                 } else {
-                    let param_names: Vec<String> =
-                        params.keys().map(|k| k.to_string()).collect();
+                    let param_names: Vec<String> = params.keys().map(|k| k.to_string()).collect();
                     format!("{}({})", self.receiver_name, param_names.join(", "))
                 }
             } else {
@@ -179,9 +191,13 @@ pub fn hover_at(db: &dyn Db, file: File, byte_pos: usize) -> Option<String> {
     let module = module_name_from_path(&path);
     let ast = crate::parse::parse::parse(db, file);
     let ty_env = TyEnv::from_file_ast(&ast);
-    let ctx = HoverContext { module: &module, ast: &ast, ty_env: &ty_env };
-    let word = word_at_byte_pos(&source, byte_pos)?;
-    hover_for_word(&word, &source, byte_pos, &ctx)
+    let ctx = HoverContext {
+        module: &module,
+        ast: &ast,
+        ty_env: &ty_env,
+    };
+    let word = word_at_byte_pos(source, byte_pos)?;
+    hover_for_word(&word, source, byte_pos, &ctx)
 }
 
 // ── Cascade ───────────────────────────────────────────────────────────────────
@@ -198,11 +214,20 @@ fn hover_for_word(
     }
 
     // `self` inside a method body
-    if word == "self" {
-        if let Some(recv_name) = enclosing_method_receiver(source, byte_pos) {
-            let decl = ctx.ast.tags().iter().find(|(k, _)| k.as_str() == recv_name).map(|(_, v)| v);
-            return SelfRef { receiver_name: recv_name, decl }.hover_doc(ctx);
+    if word == "self"
+        && let Some(recv_name) = enclosing_method_receiver(source, byte_pos)
+    {
+        let decl = ctx
+            .ast
+            .tags()
+            .iter()
+            .find(|(k, _)| k.as_str() == recv_name)
+            .map(|(_, v)| v);
+        return SelfRef {
+            receiver_name: recv_name,
+            decl,
         }
+        .hover_doc(ctx);
     }
 
     // Union variants
@@ -235,14 +260,18 @@ fn hover_for_word(
 
     // Local bindings inside function bodies
     for bind in ctx.ast.defs().values() {
-        if let BindValue::Body { exprs, .. } = bind.value() {
-            if let Some(local_bind) = find_local_bind_recursive(exprs, word) {
-                let narrowed_type = match local_bind.value() {
-                    BindValue::Expr(e) => eval_expr_to_literal(e, ctx.ast).map(|v| v.to_string()),
-                    _ => None,
-                };
-                return LocalBind { bind: local_bind, narrowed_type }.hover_doc(ctx);
+        if let BindValue::Body { exprs, .. } = bind.value()
+            && let Some(local_bind) = find_local_bind_recursive(exprs, word)
+        {
+            let narrowed_type = match local_bind.value() {
+                BindValue::Expr(e) => eval_expr_to_literal(e, ctx.ast).map(|v| v.to_string()),
+                _ => None,
+            };
+            return LocalBind {
+                bind: local_bind,
+                narrowed_type,
             }
+            .hover_doc(ctx);
         }
     }
 
@@ -258,13 +287,17 @@ fn hover_for_word(
                     };
                     return Some(format!("```gin\n{ty_str}\n```"));
                 }
-                if let ParameterKind::Tagged(tag) = kind {
-                    if tag.name() == word {
-                        if let Some(decl) = ctx.ast.tags().get(&crate::intern::IStr::new(word.to_string())) {
-                            return decl.hover_doc(ctx);
-                        }
-                        return Some(format!("```gin\n{word}\n```"));
+                if let ParameterKind::Tagged(tag) = kind
+                    && tag.name() == word
+                {
+                    if let Some(decl) = ctx
+                        .ast
+                        .tags()
+                        .get(&crate::intern::IStr::new(word.to_string()))
+                    {
+                        return decl.hover_doc(ctx);
                     }
+                    return Some(format!("```gin\n{word}\n```"));
                 }
             }
         }
@@ -281,7 +314,9 @@ fn hover_for_word(
     }
 
     // Generic type parameters inside tag parens
-    if word.chars().all(|c| c.is_alphabetic() && c.is_lowercase() || c == '_')
+    if word
+        .chars()
+        .all(|c| c.is_alphabetic() && c.is_lowercase() || c == '_')
         && is_in_tag_params(source, byte_pos)
     {
         return Some(format!("```gin\n{word}\n```"));
@@ -326,7 +361,9 @@ fn format_declare(decl: &Declare) -> String {
         lhs.push('(');
         let mut first = true;
         for (k, v) in params {
-            if !first { lhs.push_str(", "); }
+            if !first {
+                lhs.push_str(", ");
+            }
             first = false;
             lhs.push_str(k.as_str());
             lhs.push_str(&v.to_string());
@@ -443,12 +480,11 @@ fn eval_expr_to_literal_with_locals(expr: &Expr, ast: &FileAst, locals: &[&Expr]
         Expr::FnCall(call) if call.args.is_none() && call.path.segments.is_empty() => {
             let var = call.path.root.as_str();
             for local in locals {
-                if let Expr::Bind(b) = local {
-                    if b.name().as_str() == var {
-                        if let BindValue::Expr(e) = b.value() {
-                            return eval_expr_to_literal_with_locals(e, ast, locals);
-                        }
-                    }
+                if let Expr::Bind(b) = local
+                    && b.name().as_str() == var
+                    && let BindValue::Expr(e) = b.value()
+                {
+                    return eval_expr_to_literal_with_locals(e, ast, locals);
                 }
             }
             infer_pattern_var_value(var, ast)?.parse::<i64>().ok()
@@ -476,13 +512,12 @@ fn compute_rich_return_type(bind: &Bind, ast: &FileAst) -> Option<String> {
     };
     let mut types: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    let push = |types: &mut Vec<String>,
-                seen: &mut std::collections::HashSet<String>,
-                val: String| {
-        if seen.insert(val.clone()) {
-            types.push(val);
-        }
-    };
+    let push =
+        |types: &mut Vec<String>, seen: &mut std::collections::HashSet<String>, val: String| {
+            if seen.insert(val.clone()) {
+                types.push(val);
+            }
+        };
     match &ret.0 {
         None => push(&mut types, &mut seen, "Nothing".to_string()),
         Some(expr) => {
@@ -493,12 +528,12 @@ fn compute_rich_return_type(bind: &Bind, ast: &FileAst) -> Option<String> {
         }
     }
     for expr in exprs {
-        if let Expr::If(if_expr) = expr {
-            if let Some(ret_expr) = &if_expr.ret.0 {
-                let combined: Vec<&Expr> = exprs.iter().chain(if_expr.body.iter()).collect();
-                if let Some(v) = eval_expr_to_literal_with_locals(ret_expr, ast, &combined) {
-                    push(&mut types, &mut seen, v.to_string());
-                }
+        if let Expr::If(if_expr) = expr
+            && let Some(ret_expr) = &if_expr.ret.0
+        {
+            let combined: Vec<&Expr> = exprs.iter().chain(if_expr.body.iter()).collect();
+            if let Some(v) = eval_expr_to_literal_with_locals(ret_expr, ast, &combined) {
+                push(&mut types, &mut seen, v.to_string());
             }
         }
     }
@@ -533,7 +568,9 @@ fn infer_pattern_var_value(var_name: &str, ast: &FileAst) -> Option<String> {
             let IfCondition::Pattern { subject, tag } = &if_expr.condition else {
                 return None;
             };
-            let Tag::Generic(_, params, _) = tag else { return None };
+            let Tag::Generic(_, params, _) = tag else {
+                return None;
+            };
             let param_pos = params.keys().position(|k| k.as_str() == var_name)?;
             let subject_name = match subject.as_ref() {
                 Expr::FnCall(c) if c.args.is_none() && c.path.segments.is_empty() => {
@@ -563,8 +600,12 @@ fn infer_pattern_var_value(var_name: &str, ast: &FileAst) -> Option<String> {
         };
         for variant in variants {
             let vtag = variant.tag();
-            if vtag.name() != variant_name { continue; }
-            let Tag::Generic(_, variant_params, _) = vtag else { continue };
+            if vtag.name() != variant_name {
+                continue;
+            }
+            let Tag::Generic(_, variant_params, _) = vtag else {
+                continue;
+            };
             let union_param_name = variant_params.keys().nth(param_pos)?;
             let type_param_pos = union_decl
                 .params()
@@ -589,7 +630,11 @@ fn enclosing_method_receiver(source: &str, cursor_byte: usize) -> Option<&str> {
         let trimmed = line.trim_start();
         if let Some(dot_pos) = trimmed.find('.') {
             let type_part = &trimmed[..dot_pos];
-            if type_part.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+            if type_part
+                .chars()
+                .next()
+                .map(|c| c.is_uppercase())
+                .unwrap_or(false)
                 && type_part.chars().all(|c| c.is_alphanumeric())
             {
                 return Some(type_part);
@@ -617,7 +662,11 @@ fn is_in_tag_params(source: &str, cursor_byte: usize) -> bool {
                         .map(|p| p + 1)
                         .unwrap_or(0);
                     let ident = &before_paren[id_start..id_end];
-                    return ident.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
+                    return ident
+                        .chars()
+                        .next()
+                        .map(|c| c.is_uppercase())
+                        .unwrap_or(false);
                 } else {
                     depth -= 1;
                 }
@@ -635,7 +684,9 @@ fn format_params(params: &crate::ast::Parameters) -> String {
     let mut s = String::from("(");
     let mut first = true;
     for (name, kind) in params {
-        if !first { s.push_str(", "); }
+        if !first {
+            s.push_str(", ");
+        }
         first = false;
         s.push_str(name.as_str());
         match kind {
