@@ -1,6 +1,7 @@
 use crate::codegen::{prelude::*, ty_to_mlir};
 use crate::diagnostic::codegen::CodegenSymptom;
 use crate::prelude::*;
+use chumsky::span::SimpleSpan;
 
 /// Exhaustive conditional expression.
 ///
@@ -72,14 +73,14 @@ where
         });
 
     // <expr> then <expr>
-    let cond_arm = expr
-        .clone()
-        .then_ignore(just(Then))
-        .then(expr.clone())
-        .map(|(condition, body)| WhenArm::Cond {
-            condition: Box::new(condition),
-            body: Box::new(body),
-        });
+    let cond_arm =
+        expr.clone()
+            .then_ignore(just(Then))
+            .then(expr.clone())
+            .map(|(condition, body)| WhenArm::Cond {
+                condition: Box::new(condition),
+                body: Box::new(body),
+            });
 
     // else <expr>
     let else_arm = just(Else)
@@ -107,13 +108,11 @@ where
                 .at_least(1)
                 .ignore_then(just(Indent))
                 .ignore_then(
-                    just(Then)
-                        .ignore_then(expr.clone())
-                        .then(
-                            choice((is_arm.clone(), else_arm.clone()))
-                                .repeated()
-                                .collect::<Vec<_>>(),
-                        ),
+                    just(Then).ignore_then(expr.clone()).then(
+                        choice((is_arm.clone(), else_arm.clone()))
+                            .repeated()
+                            .collect::<Vec<_>>(),
+                    ),
                 )
                 .then_ignore(just(Dedent).or_not())
                 .boxed(),
@@ -197,13 +196,19 @@ impl<'c> Lower<'c> for WhenExpr {
         ctx: &CodegenContext<'_, 'c>,
         block: &BlockRef<'c, 'c>,
         symtab: &mut RuntimeSymbolTable<'c>,
-    ) -> Result<Value<'c, 'c>, CodegenSymptom> {
+    ) -> Option<Value<'c, 'c>> {
         // Infer the result type from the else arm, falling back to the first arm.
         let result_ty = {
             let body = self
                 .arms
                 .iter()
-                .find_map(|a| if let WhenArm::Else(b) = a { Some(b.as_ref()) } else { None })
+                .find_map(|a| {
+                    if let WhenArm::Else(b) = a {
+                        Some(b.as_ref())
+                    } else {
+                        None
+                    }
+                })
                 .or_else(|| {
                     self.arms.first().map(|a| match a {
                         WhenArm::Cond { body, .. }
@@ -240,26 +245,33 @@ fn lower_boolean_when<'c>(
     symtab: &mut RuntimeSymbolTable<'c>,
     arms: &[WhenArm],
     result_ty: Type<'c>,
-) -> Result<Value<'c, 'c>, CodegenSymptom> {
+) -> Option<Value<'c, 'c>> {
     let loc = ctx.location();
 
     let Some((head, tail)) = arms.split_first() else {
-        return Ok(outer_block.const_i64(ctx.mlir, 0));
+        return Some(outer_block.const_i64(ctx.mlir, 0));
     };
 
     match head {
         WhenArm::Else(body) => body.lower(ctx, outer_block, symtab),
 
-        WhenArm::Is { .. } => Err(CodegenSymptom::Internal(
-            "Is arm in boolean when — use 'when subject is ...' form".to_string(),
-        )),
+        WhenArm::Is { .. } => {
+            ctx.emit_symptom(CodegenSymptom::Internal {
+                message: "Is arm in boolean when — use 'when subject is ...' form".to_string(),
+                span: SimpleSpan::new((), 0..0),
+            });
+            None
+        }
 
         WhenArm::Cond { condition, body } => {
             let cond_val = condition.lower(ctx, outer_block, symtab)?;
 
             let value_producing = tail.iter().any(|a| matches!(a, WhenArm::Else(_)));
-            let result_tys: Vec<Type<'c>> =
-                if value_producing { vec![result_ty] } else { vec![] };
+            let result_tys: Vec<Type<'c>> = if value_producing {
+                vec![result_ty]
+            } else {
+                vec![]
+            };
 
             let then_region = Region::new();
             {
@@ -279,8 +291,7 @@ fn lower_boolean_when<'c>(
                 let blk = Block::new(&[]);
                 else_region.append_block(blk);
                 let blk_ref = else_region.first_block().unwrap();
-                let val =
-                    lower_boolean_when(ctx, &blk_ref, &mut symtab.clone(), tail, result_ty)?;
+                let val = lower_boolean_when(ctx, &blk_ref, &mut symtab.clone(), tail, result_ty)?;
                 if value_producing {
                     blk_ref.append_operation(scf_dialect::r#yield(&[val], loc));
                 } else {
@@ -292,9 +303,9 @@ fn lower_boolean_when<'c>(
             let result_op = outer_block.append_operation(if_op);
 
             if value_producing {
-                Ok(result_op.result(0).unwrap().into())
+                Some(result_op.result(0).unwrap().into())
             } else {
-                Ok(outer_block.const_i64(ctx.mlir, 0))
+                Some(outer_block.const_i64(ctx.mlir, 0))
             }
         }
     }
@@ -315,30 +326,38 @@ fn lower_pattern_when<'c>(
     disc: Value<'c, 'c>,
     arms: &[WhenArm],
     result_ty: Type<'c>,
-) -> Result<Value<'c, 'c>, CodegenSymptom> {
+) -> Option<Value<'c, 'c>> {
     use crate::intern::IStr;
     let loc = ctx.location();
 
     let Some((head, tail)) = arms.split_first() else {
-        return Ok(outer_block.const_i64(ctx.mlir, 0));
+        return Some(outer_block.const_i64(ctx.mlir, 0));
     };
 
     match head {
         WhenArm::Else(body) => body.lower(ctx, outer_block, symtab),
 
-        WhenArm::Cond { .. } => Err(CodegenSymptom::Internal(
-            "Cannot mix condition arms in a pattern match (when subject is ...)".to_string(),
-        )),
+        WhenArm::Cond { .. } => {
+            ctx.emit_symptom(CodegenSymptom::Internal {
+                message: "Cannot mix condition arms in a pattern match (when subject is ...)"
+                    .to_string(),
+                span: SimpleSpan::new((), 0..0),
+            });
+            None
+        }
 
         WhenArm::Is { pattern, body } => {
             let variant_name = IStr::new(pattern.name().to_string());
-            let (_, expected_disc, _) =
-                ctx.ty_env.lookup_variant(variant_name).ok_or_else(|| {
-                    CodegenSymptom::Internal(format!(
-                        "Unknown variant '{}' in pattern",
-                        variant_name.as_str()
-                    ))
-                })?;
+            let (_, expected_disc, _) = match ctx.ty_env.lookup_variant(variant_name) {
+                Some(v) => v,
+                None => {
+                    ctx.emit_symptom(CodegenSymptom::Internal {
+                        message: format!("Unknown variant '{}' in pattern", variant_name.as_str()),
+                        span: SimpleSpan::new((), 0..0),
+                    });
+                    return None;
+                }
+            };
 
             let expected_val = outer_block.const_i64(ctx.mlir, expected_disc as i64);
             let cond =
@@ -368,9 +387,11 @@ fn lower_pattern_when<'c>(
                             .get(slot)
                             .map(|(_, ty)| ty_to_mlir(ty, ctx.mlir))
                             .unwrap_or_else(|| ctx.mlir.i64());
-                        let extracted = blk_ref.append_op(
-                            ctx.mlir.llvm_extractvalue(subject, (slot + 1) as i64, field_mlir_ty),
-                        );
+                        let extracted = blk_ref.append_op(ctx.mlir.llvm_extractvalue(
+                            subject,
+                            (slot + 1) as i64,
+                            field_mlir_ty,
+                        ));
                         inner_symtab.insert(param_name.as_str().to_string(), extracted);
                     }
                 }
@@ -386,14 +407,20 @@ fn lower_pattern_when<'c>(
                 else_region.append_block(blk);
                 let blk_ref = else_region.first_block().unwrap();
                 let val = lower_pattern_when(
-                    ctx, &blk_ref, &mut symtab.clone(), subject, disc, tail, result_ty,
+                    ctx,
+                    &blk_ref,
+                    &mut symtab.clone(),
+                    subject,
+                    disc,
+                    tail,
+                    result_ty,
                 )?;
                 blk_ref.append_operation(scf_dialect::r#yield(&[val], loc));
             }
 
             let if_op = scf_dialect::r#if(cond, &result_tys, then_region, else_region, loc);
             let result_op = outer_block.append_operation(if_op);
-            Ok(result_op.result(0).unwrap().into())
+            Some(result_op.result(0).unwrap().into())
         }
     }
 }

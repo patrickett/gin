@@ -1,6 +1,7 @@
 use crate::codegen::prelude::*;
 use crate::diagnostic::codegen::CodegenSymptom;
 use crate::{parse::block, prelude::*};
+use chumsky::span::SimpleSpan;
 
 /// For-in loop: iterate over a range or collection
 ///
@@ -30,8 +31,8 @@ pub fn for_loop_header_expr<'t, I>() -> impl Parser<'t, I, Expr, ParserError<'t>
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
-    use chumsky::pratt::{infix, left};
     use Token::*;
+    use chumsky::pratt::{infix, left};
 
     let atom = recursive(|expr| {
         choice((
@@ -68,7 +69,7 @@ impl<'c> Lower<'c> for ForInLoop {
         ctx: &CodegenContext<'_, 'c>,
         block: &BlockRef<'c, 'c>,
         symtab: &mut RuntimeSymbolTable<'c>,
-    ) -> Result<Value<'c, 'c>, CodegenSymptom> {
+    ) -> Option<Value<'c, 'c>> {
         let loc = ctx.location();
         let index_ty = Type::index(ctx.mlir);
 
@@ -76,9 +77,12 @@ impl<'c> Lower<'c> for ForInLoop {
         let (start_expr, end_expr) = match self.iter.as_ref() {
             Expr::Range(range) => (&range.start, &range.end),
             _ => {
-                return Err(CodegenSymptom::Internal(
-                    "for-in loops currently only support range iterators (start...end)".to_string(),
-                ))
+                ctx.emit_symptom(CodegenSymptom::Internal {
+                    message: "for-in loops currently only support range iterators (start...end)"
+                        .to_string(),
+                    span: SimpleSpan::new((), 0..0),
+                });
+                return None;
             }
         };
 
@@ -109,9 +113,11 @@ impl<'c> Lower<'c> for ForInLoop {
                     loop_symtab.insert(name.as_str().to_string(), iv_i64);
                 }
                 Pattern::Tuple(_) => {
-                    return Err(CodegenSymptom::Internal(
-                        "Tuple patterns in for loops are not yet supported".to_string(),
-                    ));
+                    ctx.emit_symptom(CodegenSymptom::Internal {
+                        message: "Tuple patterns in for loops are not yet supported".to_string(),
+                        span: SimpleSpan::new((), 0..0),
+                    });
+                    return None;
                 }
             }
 
@@ -123,10 +129,14 @@ impl<'c> Lower<'c> for ForInLoop {
         }
 
         block.append_operation(scf_dialect::r#for(
-            start_idx, end_idx, step_idx, loop_region, loc,
+            start_idx,
+            end_idx,
+            step_idx,
+            loop_region,
+            loc,
         ));
 
-        Ok(block.const_i64(ctx.mlir, 0))
+        Some(block.const_i64(ctx.mlir, 0))
     }
 }
 

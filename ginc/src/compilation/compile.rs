@@ -3,11 +3,11 @@
 use crate::{
     codegen::generate_mlir,
     database::{CompiledModule, File, input_database::Db},
-    diagnostic::{Symptom, SymptomSource, CodegenSymptom, type_ as type_symptom},
+    diagnostic::{Symptom, SymptomSource, type_ as type_symptom},
     parse::{parse, resolve_imports},
-    typeck::{TyEnv, flow_analyzer::FlowAnalyzer, FlowAnalysis},
+    typeck::{FlowAnalysis, TyEnv, flow_analyzer::FlowAnalyzer},
 };
-use chumsky::span::{SimpleSpan, Span};
+
 use salsa::Accumulator;
 
 /// Flow analysis result for a file - tracks type narrowing through control flow.
@@ -50,29 +50,24 @@ pub fn compile<'db>(db: &'db dyn Db, file: File) -> CompiledModule<'db> {
     let _flow_result = flow_analysis(db, file);
 
     // Code generation - emits codegen errors
-    let mlir_text = generate_mlir(&ast);
+    let (mlir_text, codegen_symptoms) = generate_mlir(&ast);
+
+    // Accumulate all codegen symptoms
+    for e in codegen_symptoms {
+        Symptom {
+            source: SymptomSource::CodeGen(e.clone()),
+            category: crate::diagnostic::Category::Flaw,
+            span: e.span(),
+        }
+        .accumulate(db);
+    }
 
     match mlir_text {
-        Ok(text) => {
+        Some(text) => {
             let bytecode = text.into_bytes();
             CompiledModule::new(db, bytecode)
         }
-        Err(e) => {
-            let span = if let CodegenSymptom::SelfOutsideMethod { span } = &e {
-                *span
-            } else {
-                SimpleSpan::new((), 0..0)
-            };
-
-            let symptom = Symptom {
-                source: SymptomSource::CodeGen(e),
-                category: crate::diagnostic::Category::Flaw,
-                span,
-            };
-
-            symptom.accumulate(db);
-            CompiledModule::new(db, Vec::new())
-        }
+        None => CompiledModule::new(db, Vec::new()),
     }
 }
 

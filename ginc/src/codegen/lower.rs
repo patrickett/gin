@@ -4,6 +4,7 @@ use crate::ast::{
 use crate::codegen::prelude::*;
 use crate::diagnostic::codegen::CodegenSymptom;
 use crate::typeck::{LiteralValue, Ty, TyEnv};
+use chumsky::span::SimpleSpan;
 
 /// Convert a resolved `Ty` to its MLIR `Type` representation.
 pub fn ty_to_mlir<'c>(ty: &Ty, ctx: &'c Context) -> Type<'c> {
@@ -88,6 +89,8 @@ pub struct CodegenContext<'a, 'c> {
     pub mutable_slots: RefCell<HashSet<String>>,
     /// Element type of global constant arrays (top-level `:=` TupleLit binds), keyed by name.
     pub global_const_elems: RefCell<HashMap<String, Ty>>,
+    /// Accumulated codegen symptoms (errors/warnings).
+    pub symptoms: RefCell<Vec<CodegenSymptom>>,
 }
 
 impl<'a, 'c> CodegenContext<'a, 'c> {
@@ -108,6 +111,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
             var_types: RefCell::new(HashMap::new()),
             mutable_slots: RefCell::new(HashSet::new()),
             global_const_elems: RefCell::new(HashMap::new()),
+            symptoms: RefCell::new(Vec::new()),
         }
     }
 
@@ -135,6 +139,14 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
 
         name
     }
+
+    pub fn emit_symptom(&self, symptom: CodegenSymptom) {
+        self.symptoms.borrow_mut().push(symptom);
+    }
+
+    pub fn drain_symptoms(&self) -> Vec<CodegenSymptom> {
+        self.symptoms.borrow_mut().drain(..).collect()
+    }
 }
 
 pub trait Lower<'c> {
@@ -143,7 +155,7 @@ pub trait Lower<'c> {
         ctx: &CodegenContext<'_, 'c>,
         block: &BlockRef<'c, 'c>,
         symtab: &mut RuntimeSymbolTable<'c>,
-    ) -> Result<Value<'c, 'c>, CodegenSymptom>;
+    ) -> Option<Value<'c, 'c>>;
 }
 
 impl<'c> Lower<'c> for Box<Expr> {
@@ -152,12 +164,12 @@ impl<'c> Lower<'c> for Box<Expr> {
         ctx: &CodegenContext<'_, 'c>,
         block: &BlockRef<'c, 'c>,
         symtab: &mut RuntimeSymbolTable<'c>,
-    ) -> Result<Value<'c, 'c>, CodegenSymptom> {
+    ) -> Option<Value<'c, 'c>> {
         self.as_ref().lower(ctx, block, symtab)
     }
 }
 
-pub fn generate_mlir(ast: &FileAst) -> Result<String, CodegenSymptom> {
+pub fn generate_mlir(ast: &FileAst) -> (Option<String>, Vec<CodegenSymptom>) {
     let context = Context::new();
     melior::dialect::DialectHandle::llvm().register_dialect(&context);
     context.get_or_load_dialect("arith");
@@ -169,7 +181,13 @@ pub fn generate_mlir(ast: &FileAst) -> Result<String, CodegenSymptom> {
     // TODO: Track actual source path instead of using empty path
     let source_path = std::path::PathBuf::new();
     let symbol_table = CompileTimeSymbolTable::from_file(ast, source_path.to_path_buf());
-    let type_info = extract_type_info(ast)?;
+    let type_info = match extract_type_info(ast) {
+        Some(info) => info,
+        None => {
+            // extract_type_info doesn't emit symptoms, so just return empty
+            return (None, Vec::new());
+        }
+    };
     let ty_env = TyEnv::from_file_ast(ast);
     let ctx = CodegenContext::new(&context, &type_info, &symbol_table, &ty_env);
 
@@ -184,14 +202,17 @@ pub fn generate_mlir(ast: &FileAst) -> Result<String, CodegenSymptom> {
         if let BindValue::Expr(boxed) = bind.value() {
             match boxed.as_ref() {
                 Expr::TupleLit(elems) => {
-                    let global_op =
-                        emit_tuple_lit_global(&context, &ctx, def_name.as_str(), elems)?;
-                    global_ops.push(global_op);
+                    let global_op = emit_tuple_lit_global(&context, &ctx, def_name.as_str(), elems);
+                    if let Some(op) = global_op {
+                        global_ops.push(op);
+                    }
                 }
                 Expr::TupleAlloc { init, size } => {
                     let global_op =
-                        emit_tuple_alloc_global(&context, &ctx, def_name.as_str(), init, *size)?;
-                    global_ops.push(global_op);
+                        emit_tuple_alloc_global(&context, &ctx, def_name.as_str(), init, *size);
+                    if let Some(op) = global_op {
+                        global_ops.push(op);
+                    }
                 }
                 _ => {}
             }
@@ -211,8 +232,10 @@ pub fn generate_mlir(ast: &FileAst) -> Result<String, CodegenSymptom> {
         {
             continue;
         }
-        let func_op = lower_function(&ctx, def_name, bind)?;
-        func_ops.push(func_op);
+        let func_op = lower_function(&ctx, def_name, bind);
+        if let Some(op) = func_op {
+            func_ops.push(op);
+        }
     }
 
     // Create string globals (must appear before function ops in the module)
@@ -223,8 +246,10 @@ pub fn generate_mlir(ast: &FileAst) -> Result<String, CodegenSymptom> {
     }
 
     for (value, symbol) in &string_symbols {
-        let global_op = create_string_global(&context, symbol, value)?;
-        module.body().append_operation(global_op);
+        let global_op = create_string_global(&context, symbol, value);
+        if let Some(op) = global_op {
+            module.body().append_operation(op);
+        }
     }
 
     for func_op in func_ops {
@@ -232,7 +257,8 @@ pub fn generate_mlir(ast: &FileAst) -> Result<String, CodegenSymptom> {
     }
 
     // TODO: return Operation
-    Ok(module.as_operation().to_string())
+    let symptoms = ctx.drain_symptoms();
+    (Some(module.as_operation().to_string()), symptoms)
 }
 
 /// Build an MLIR module from the AST with a provided context.
@@ -240,7 +266,7 @@ pub fn generate_mlir(ast: &FileAst) -> Result<String, CodegenSymptom> {
 pub fn build_module_with_context<'c>(
     context: &'c Context,
     ast: &FileAst,
-) -> Result<Module<'c>, CodegenSymptom> {
+) -> (Option<Module<'c>>, Vec<CodegenSymptom>) {
     // Register dialects
     melior::dialect::DialectHandle::llvm().register_dialect(context);
     context.get_or_load_dialect("arith");
@@ -251,7 +277,12 @@ pub fn build_module_with_context<'c>(
     // Build compile-time symbol table from AST
     let source_path = std::path::PathBuf::new();
     let symbol_table = CompileTimeSymbolTable::from_file(ast, source_path.to_path_buf());
-    let type_info = extract_type_info(ast)?;
+    let type_info = match extract_type_info(ast) {
+        Some(info) => info,
+        None => {
+            return (None, Vec::new());
+        }
+    };
     let ty_env = TyEnv::from_file_ast(ast);
     let ctx = CodegenContext::new(context, &type_info, &symbol_table, &ty_env);
 
@@ -266,14 +297,17 @@ pub fn build_module_with_context<'c>(
         if let BindValue::Expr(boxed) = bind.value() {
             match boxed.as_ref() {
                 Expr::TupleLit(elems) => {
-                    let global_op =
-                        emit_tuple_lit_global(context, &ctx, def_name.as_str(), elems)?;
-                    global_ops.push(global_op);
+                    let global_op = emit_tuple_lit_global(context, &ctx, def_name.as_str(), elems);
+                    if let Some(op) = global_op {
+                        global_ops.push(op);
+                    }
                 }
                 Expr::TupleAlloc { init, size } => {
                     let global_op =
-                        emit_tuple_alloc_global(context, &ctx, def_name.as_str(), init, *size)?;
-                    global_ops.push(global_op);
+                        emit_tuple_alloc_global(context, &ctx, def_name.as_str(), init, *size);
+                    if let Some(op) = global_op {
+                        global_ops.push(op);
+                    }
                 }
                 _ => {}
             }
@@ -293,8 +327,10 @@ pub fn build_module_with_context<'c>(
         {
             continue;
         }
-        let func_op = lower_function(&ctx, def_name, bind)?;
-        func_ops.push(func_op);
+        let func_op = lower_function(&ctx, def_name, bind);
+        if let Some(op) = func_op {
+            func_ops.push(op);
+        }
     }
 
     // Create string globals (must appear before function ops in the module)
@@ -305,15 +341,18 @@ pub fn build_module_with_context<'c>(
     }
 
     for (value, symbol) in &string_symbols {
-        let global_op = create_string_global(context, symbol, value)?;
-        module.body().append_operation(global_op);
+        let global_op = create_string_global(context, symbol, value);
+        if let Some(op) = global_op {
+            module.body().append_operation(op);
+        }
     }
 
     for func_op in func_ops {
         module.body().append_operation(func_op);
     }
 
-    Ok(module)
+    let symptoms = ctx.drain_symptoms();
+    (Some(module), symptoms)
 }
 
 /// Create a global string constant operation using LLVM dialect.
@@ -322,15 +361,15 @@ pub fn create_string_global<'c>(
     context: &'c Context,
     name: &str,
     value: &str,
-) -> Result<Operation<'c>, CodegenSymptom> {
+) -> Option<Operation<'c>> {
     let loc = context.unknown_loc();
 
     // Null-terminated string bytes
     let with_nul = format!("{}\0", value);
-    let byte_len: u32 = with_nul
-        .len()
-        .try_into()
-        .map_err(|_| CodegenSymptom::Internal("String too long for u32".to_string()))?;
+    let byte_len: u32 = match with_nul.len().try_into() {
+        Ok(len) => len,
+        Err(_) => return None,
+    };
 
     let i8_type = Type::from(IntegerType::new(context, 8));
     let array_type = r#type::array(i8_type, byte_len);
@@ -365,9 +404,9 @@ pub fn create_string_global<'c>(
         // even when the value is provided as an attribute.
         .add_regions([Region::new()])
         .build()
-        .map_err(|e| CodegenSymptom::Internal(format!("Failed to build string global: {}", e)))?;
+        .ok()?;
 
-    Ok(global)
+    Some(global)
 }
 
 /// Get the address of a global string using llvm.addressof operation.
@@ -376,7 +415,7 @@ pub fn addressof_string_global<'c>(
     context: &'c Context,
     block: &BlockRef<'c, 'c>,
     global_name: &str,
-) -> Result<Value<'c, 'c>, CodegenSymptom> {
+) -> Option<Value<'c, 'c>> {
     let loc = context.unknown_loc();
     let global_name_id = Identifier::new(context, "global_name");
     let symbol_ref = context.symbol_ref_attr(global_name);
@@ -385,14 +424,16 @@ pub fn addressof_string_global<'c>(
         .add_attributes(&[(global_name_id, symbol_ref)])
         .add_results(&[context.llvm_ptr()])
         .build()
-        .map_err(|e| CodegenSymptom::Internal(format!("Failed to build addressof: {}", e)))?;
+        .ok()?;
 
     // Append the operation to the block and return the result
-    Ok(block
-        .append_operation(addressof_op)
-        .result(0)
-        .unwrap()
-        .into())
+    Some(
+        block
+            .append_operation(addressof_op)
+            .result(0)
+            .unwrap()
+            .into(),
+    )
 }
 
 /// Emit `llvm.mlir.global` for a top-level `:=` bind whose value is a `TupleLit`.
@@ -402,7 +443,7 @@ fn emit_tuple_lit_global<'c>(
     ctx: &CodegenContext<'_, 'c>,
     name: &str,
     elems: &[Expr],
-) -> Result<Operation<'c>, CodegenSymptom> {
+) -> Option<Operation<'c>> {
     let loc = context.unknown_loc();
 
     let region = Region::new();
@@ -414,7 +455,7 @@ fn emit_tuple_lit_global<'c>(
     let elem_vals: Vec<Value<'c, 'c>> = elems
         .iter()
         .map(|e| e.lower(ctx, &blk, &mut symtab))
-        .collect::<Result<_, _>>()?;
+        .collect::<Option<Vec<_>>>()?;
 
     let elem_mlir_ty = elem_vals
         .first()
@@ -440,14 +481,14 @@ fn emit_tuple_lit_global<'c>(
             .add_operands(&[current, *val])
             .enable_result_type_inference()
             .build()
-            .map_err(|e| CodegenSymptom::Internal(format!("llvm.insertvalue array: {e}")))?;
+            .ok()?;
         current = blk.append_op(insert_op);
     }
 
     let ret_op = OperationBuilder::new("llvm.return", loc)
         .add_operands(&[current])
         .build()
-        .map_err(|e| CodegenSymptom::Internal(format!("llvm.return: {e}")))?;
+        .ok()?;
     blk.append_operation(ret_op);
 
     let linkage_attr = melior::dialect::llvm::attributes::linkage(
@@ -474,9 +515,9 @@ fn emit_tuple_lit_global<'c>(
         ])
         .add_regions([region])
         .build()
-        .map_err(|e| CodegenSymptom::Internal(format!("tuple global: {e}")))?;
+        .ok()?;
 
-    Ok(global)
+    Some(global)
 }
 
 /// Emit `llvm.mlir.global` for a top-level `:=` bind whose value is a `TupleAlloc`.
@@ -488,7 +529,7 @@ fn emit_tuple_alloc_global<'c>(
     name: &str,
     init: &Expr,
     size: usize,
-) -> Result<Operation<'c>, CodegenSymptom> {
+) -> Option<Operation<'c>> {
     let loc = context.unknown_loc();
 
     let locals: HashMap<IStr, Ty> = HashMap::new();
@@ -508,13 +549,13 @@ fn emit_tuple_alloc_global<'c>(
     let zero_op = OperationBuilder::new("llvm.mlir.zero", loc)
         .add_results(&[array_mlir_ty])
         .build()
-        .map_err(|e| CodegenSymptom::Internal(format!("llvm.mlir.zero: {e}")))?;
+        .ok()?;
     let zero_val = blk.append_op(zero_op);
 
     let ret_op = OperationBuilder::new("llvm.return", loc)
         .add_operands(&[zero_val])
         .build()
-        .map_err(|e| CodegenSymptom::Internal(format!("llvm.return: {e}")))?;
+        .ok()?;
     blk.append_operation(ret_op);
 
     let linkage_attr = melior::dialect::llvm::attributes::linkage(
@@ -537,12 +578,12 @@ fn emit_tuple_alloc_global<'c>(
         ])
         .add_regions([region])
         .build()
-        .map_err(|e| CodegenSymptom::Internal(format!("tuple alloc global: {e}")))?;
+        .ok()?;
 
-    Ok(global)
+    Some(global)
 }
 
-fn extract_type_info(ast: &FileAst) -> Result<HashMap<IStr, TypeInfo>, CodegenSymptom> {
+fn extract_type_info(ast: &FileAst) -> Option<HashMap<IStr, TypeInfo>> {
     let mut type_info = HashMap::new();
 
     for (tag_name, documented) in &ast.tags {
@@ -557,7 +598,7 @@ fn extract_type_info(ast: &FileAst) -> Result<HashMap<IStr, TypeInfo>, CodegenSy
         }
     }
 
-    Ok(type_info)
+    Some(type_info)
 }
 
 // === Expression lowering ===
@@ -568,7 +609,7 @@ impl<'c> Lower<'c> for Expr {
         ctx: &CodegenContext<'_, 'c>,
         block: &BlockRef<'c, 'c>,
         symtab: &mut RuntimeSymbolTable<'c>,
-    ) -> Result<Value<'c, 'c>, CodegenSymptom> {
+    ) -> Option<Value<'c, 'c>> {
         match self {
             Expr::Lit(lit) => lit.lower(ctx, block, symtab),
             Expr::Binary(bin) => bin.lower(ctx, block, symtab),
@@ -578,22 +619,31 @@ impl<'c> Lower<'c> for Expr {
             Expr::When(when_expr) => when_expr.lower(ctx, block, symtab),
             Expr::If(if_expr) => if_expr.lower(ctx, block, symtab),
             Expr::FormatString(fs) => fs.lower(ctx, block, symtab),
-            Expr::Range(_) => Err(CodegenSymptom::Internal(
-                "Range lowering not yet implemented (only valid inside a for-in)".to_string(),
-            )),
-            Expr::SelfRef(span) => symtab
-                .get("self")
-                .copied()
-                .ok_or_else(|| CodegenSymptom::SelfOutsideMethod { span: *span }),
+            Expr::Range(_) => {
+                ctx.emit_symptom(CodegenSymptom::Internal {
+                    message: "Range lowering not yet implemented (only valid inside a for-in)"
+                        .to_string(),
+                    span: SimpleSpan::new((), 0..0),
+                });
+                None
+            }
+            Expr::SelfRef(span) => symtab.get("self").copied().or_else(|| {
+                ctx.emit_symptom(CodegenSymptom::SelfOutsideMethod { span: *span });
+                None
+            }),
             Expr::TagCall(tc) => tc.lower(ctx, block, symtab),
             Expr::AnonymousTag(tag_name, _) => {
                 // Bare capitalized tag — treat as a unit variant constructor.
                 let (union_name, discriminant, _) =
-                    ctx.ty_env.lookup_variant(*tag_name).ok_or_else(|| {
-                        CodegenSymptom::Internal(format!(
-                            "Unknown tag '{}' — not declared in any union",
-                            tag_name.as_str()
-                        ))
+                    ctx.ty_env.lookup_variant(*tag_name).or_else(|| {
+                        ctx.emit_symptom(CodegenSymptom::Internal {
+                            message: format!(
+                                "Unknown tag '{}' — not declared in any union",
+                                tag_name.as_str()
+                            ),
+                            span: SimpleSpan::new((), 0..0),
+                        });
+                        None
                     })?;
                 let union_mlir_ty = ctx
                     .ty_env
@@ -602,20 +652,20 @@ impl<'c> Lower<'c> for Expr {
                     .unwrap_or_else(|| ctx.mlir.union_type());
                 let disc_val = block.const_i64(ctx.mlir, discriminant as i64);
                 let undef = block.append_op(ctx.mlir.llvm_undef(union_mlir_ty));
-                Ok(block.append_op(ctx.mlir.llvm_insertvalue(undef, disc_val, 0)))
+                Some(block.append_op(ctx.mlir.llvm_insertvalue(undef, disc_val, 0)))
             }
             Expr::TupleLit(elems) => {
                 let elem_vals: Vec<Value<'c, 'c>> = elems
                     .iter()
                     .map(|e| e.lower(ctx, block, symtab))
-                    .collect::<Result<_, _>>()?;
+                    .collect::<Option<Vec<_>>>()?;
                 let field_types: Vec<Type<'c>> = elem_vals.iter().map(|v| v.r#type()).collect();
                 let struct_ty = r#type::r#struct(ctx.mlir, &field_types, false);
                 let mut val = block.append_op(ctx.mlir.llvm_undef(struct_ty));
                 for (i, field_val) in elem_vals.iter().enumerate() {
                     val = block.append_op(ctx.mlir.llvm_insertvalue(val, *field_val, i as i64));
                 }
-                Ok(val)
+                Some(val)
             }
             Expr::TupleAlloc { init, size } => lower_tuple_alloc(ctx, block, symtab, init, *size),
             Expr::TupleGet { base, index } => lower_tuple_get(ctx, block, symtab, base, *index),
@@ -639,11 +689,25 @@ impl<'c> Lower<'c> for Expr {
                         ctx.mlir.i64(),
                     ))
                 };
-                let elem_ptr = block.gep_i8(ctx.mlir, ptr, byte_idx, loc)?;
+                let elem_ptr = match block.gep_i8(ctx.mlir, ptr, byte_idx, loc) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        ctx.emit_symptom(e);
+                        return None;
+                    }
+                };
                 let elem_mlir_ty = ty_to_mlir(&elem_ty, ctx.mlir);
-                block.load_typed(ctx.mlir, elem_ptr, elem_mlir_ty, loc)
+                match block.load_typed(ctx.mlir, elem_ptr, elem_mlir_ty, loc) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        ctx.emit_symptom(e);
+                        None
+                    }
+                }
             }
-            Expr::BufSet { buf, index, value, .. } => {
+            Expr::BufSet {
+                buf, index, value, ..
+            } => {
                 let loc = ctx.location();
                 let ptr = buf.lower(ctx, block, symtab)?;
                 let idx = index.lower(ctx, block, symtab)?;
@@ -661,9 +725,21 @@ impl<'c> Lower<'c> for Expr {
                         ctx.mlir.i64(),
                     ))
                 };
-                let elem_ptr = block.gep_i8(ctx.mlir, ptr, byte_idx, loc)?;
-                block.store_typed(elem_ptr, val, loc)?;
-                Ok(block.const_i64(ctx.mlir, 0))
+                let elem_ptr = match block.gep_i8(ctx.mlir, ptr, byte_idx, loc) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        ctx.emit_symptom(e);
+                        return None;
+                    }
+                };
+                match block.store_typed(elem_ptr, val, loc) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        ctx.emit_symptom(e);
+                        return None;
+                    }
+                }
+                Some(block.const_i64(ctx.mlir, 0))
             }
             Expr::Cast { expr, ty } => {
                 let val = expr.lower(ctx, block, symtab)?;
@@ -694,7 +770,13 @@ impl<'c> Lower<'c> for Expr {
                 };
                 let mlir_ty = ty_to_mlir(&pointee_ty, ctx.mlir);
                 let loc = ctx.location();
-                block.load_typed(ctx.mlir, ptr, mlir_ty, loc)
+                match block.load_typed(ctx.mlir, ptr, mlir_ty, loc) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        ctx.emit_symptom(e);
+                        None
+                    }
+                }
             }
             Expr::Negate(inner) => {
                 let val = inner.lower(ctx, block, symtab)?;
@@ -707,16 +789,22 @@ impl<'c> Lower<'c> for Expr {
                     .collect();
                 let ty = ctx.ty_env.infer_expr(inner, &locals);
                 if matches!(ty, Ty::Float | Ty::Literal(LiteralValue::Float(_))) {
-                    Ok(block.append_op(
-                        OperationBuilder::new("arith.negf", loc)
-                            .add_operands(&[val])
-                            .add_results(&[ctx.mlir.f64()])
-                            .build()
-                            .map_err(|e| CodegenSymptom::Internal(format!("arith.negf: {e}")))?,
-                    ))
+                    let neg_op = OperationBuilder::new("arith.negf", loc)
+                        .add_operands(&[val])
+                        .add_results(&[ctx.mlir.f64()])
+                        .build()
+                        .ok()?;
+                    Some(block.append_op(neg_op))
                 } else {
                     let zero = block.const_i64(ctx.mlir, 0);
-                    Ok(block.append_op(ctx.mlir.build_binop(ArithOps::SUB, zero, val, ctx.mlir.i64())))
+                    Some(
+                        block.append_op(ctx.mlir.build_binop(
+                            ArithOps::SUB,
+                            zero,
+                            val,
+                            ctx.mlir.i64(),
+                        )),
+                    )
                 }
             }
         }
@@ -728,7 +816,7 @@ pub fn lower_function<'c>(
     ctx: &CodegenContext<'_, 'c>,
     def_name: &IStr,
     bind: &Bind,
-) -> Result<Operation<'c>, CodegenSymptom> {
+) -> Option<Operation<'c>> {
     let name = def_name.as_str();
     let loc = ctx.location();
 
@@ -770,7 +858,7 @@ pub fn lower_function<'c>(
             ])
             .add_regions([extern_region])
             .build()
-            .map_err(|e| CodegenSymptom::Internal(format!("Failed to build extern func: {}", e)));
+            .ok();
     }
 
     // Clear per-function mutable-slot tracking before lowering the body.
@@ -811,7 +899,7 @@ pub fn lower_function<'c>(
         ])
         .add_regions([region])
         .build()
-        .map_err(|e| CodegenSymptom::Internal(format!("Failed to build func: {}", e)))
+        .ok()
 }
 
 /// Lower `@expr` / `^expr` — produce a pointer to the value.
@@ -823,7 +911,7 @@ fn lower_take_ptr<'c>(
     block: &BlockRef<'c, 'c>,
     symtab: &mut RuntimeSymbolTable<'c>,
     inner: &Expr,
-) -> Result<Value<'c, 'c>, CodegenSymptom> {
+) -> Option<Value<'c, 'c>> {
     // For a bare variable reference, check if it already lives in a mutable slot.
     if let Expr::FnCall(call) = inner
         && call.path.segments.is_empty()
@@ -841,7 +929,7 @@ fn lower_take_ptr<'c>(
                 return inner.lower(ctx, block, symtab);
             }
             if let Some(&ptr) = symtab.get(name) {
-                return Ok(ptr);
+                return Some(ptr);
             }
         }
     }
@@ -857,8 +945,14 @@ fn lower_take_ptr<'c>(
     let mlir_ty = ty_to_mlir(&elem_ty, ctx.mlir);
     let loc = ctx.location();
     let ptr = block.alloca_typed(ctx.mlir, mlir_ty, loc);
-    block.store_typed(ptr, val, loc)?;
-    Ok(ptr)
+    match block.store_typed(ptr, val, loc) {
+        Ok(()) => {}
+        Err(e) => {
+            ctx.emit_symptom(e);
+            return None;
+        }
+    }
+    Some(ptr)
 }
 
 /// Returns the number of bytes an element of type `ty` occupies in memory.
@@ -901,7 +995,7 @@ fn lower_tuple_alloc<'c>(
     symtab: &mut RuntimeSymbolTable<'c>,
     init: &Expr,
     size: usize,
-) -> Result<Value<'c, 'c>, CodegenSymptom> {
+) -> Option<Value<'c, 'c>> {
     let loc = ctx.location();
 
     // Infer element type from init expression.
@@ -925,7 +1019,7 @@ fn lower_tuple_alloc<'c>(
     // The actual initialization of individual elements is done via TupleSet.
     let _ = init.lower(ctx, block, symtab)?;
 
-    Ok(ptr)
+    Some(ptr)
 }
 
 fn lower_tuple_get<'c>(
@@ -934,7 +1028,7 @@ fn lower_tuple_get<'c>(
     symtab: &mut RuntimeSymbolTable<'c>,
     base: &Expr,
     index: usize,
-) -> Result<Value<'c, 'c>, CodegenSymptom> {
+) -> Option<Value<'c, 'c>> {
     let loc = ctx.location();
     let base_val = base.lower(ctx, block, symtab)?;
 
@@ -954,7 +1048,7 @@ fn lower_tuple_get<'c>(
                 .unwrap_or_else(|| ctx.mlir.i64()),
             _ => ctx.mlir.i64(),
         };
-        return Ok(block.append_op(ctx.mlir.llvm_extractvalue(base_val, index as i64, field_ty)));
+        return Some(block.append_op(ctx.mlir.llvm_extractvalue(base_val, index as i64, field_ty)));
     }
 
     // Existing pointer-based path (for TupleAlloc and global arrays).
@@ -962,7 +1056,13 @@ fn lower_tuple_get<'c>(
     let elem_bytes = ty_byte_size(&elem_ty);
     let elem_mlir_ty = ty_to_mlir(&elem_ty, ctx.mlir);
     let byte_offset = block.const_i64(ctx.mlir, (index * elem_bytes) as i64);
-    let elem_ptr = block.gep_i8(ctx.mlir, base_val, byte_offset, loc)?;
+    let elem_ptr = match block.gep_i8(ctx.mlir, base_val, byte_offset, loc) {
+        Ok(p) => p,
+        Err(e) => {
+            ctx.emit_symptom(e);
+            return None;
+        }
+    };
 
     let load_op = OperationBuilder::new("llvm.load", loc)
         .add_attributes(&[(
@@ -972,8 +1072,8 @@ fn lower_tuple_get<'c>(
         .add_operands(&[elem_ptr])
         .add_results(&[elem_mlir_ty])
         .build()
-        .map_err(|e| CodegenSymptom::Internal(format!("llvm.load: {e}")))?;
-    Ok(block.append_op(load_op))
+        .ok()?;
+    Some(block.append_op(load_op))
 }
 
 fn lower_tuple_set<'c>(
@@ -983,7 +1083,7 @@ fn lower_tuple_set<'c>(
     base: &Expr,
     index: usize,
     value: &Expr,
-) -> Result<Value<'c, 'c>, CodegenSymptom> {
+) -> Option<Value<'c, 'c>> {
     let loc = ctx.location();
     let ptr = base.lower(ctx, block, symtab)?;
 
@@ -991,16 +1091,22 @@ fn lower_tuple_set<'c>(
     let elem_bytes = ty_byte_size(&elem_ty);
 
     let byte_offset = block.const_i64(ctx.mlir, (index * elem_bytes) as i64);
-    let elem_ptr = block.gep_i8(ctx.mlir, ptr, byte_offset, loc)?;
+    let elem_ptr = match block.gep_i8(ctx.mlir, ptr, byte_offset, loc) {
+        Ok(p) => p,
+        Err(e) => {
+            ctx.emit_symptom(e);
+            return None;
+        }
+    };
 
     let val = value.lower(ctx, block, symtab)?;
     let store_op = OperationBuilder::new("llvm.store", loc)
         .add_operands(&[val, elem_ptr])
         .build()
-        .map_err(|e| CodegenSymptom::Internal(format!("llvm.store: {e}")))?;
+        .ok()?;
     block.append_operation(store_op);
 
-    Ok(block.const_i64(ctx.mlir, 0))
+    Some(block.const_i64(ctx.mlir, 0))
 }
 
 fn lower_bind_value<'c>(
@@ -1008,20 +1114,26 @@ fn lower_bind_value<'c>(
     block: &BlockRef<'c, 'c>,
     bind_value: &BindValue,
     symtab: &RuntimeSymbolTable<'c>,
-) -> Result<Option<Value<'c, 'c>>, CodegenSymptom> {
+) -> Option<Option<Value<'c, 'c>>> {
     match bind_value {
-        BindValue::Expr(expr) => Ok(Some(expr.lower(ctx, block, &mut symtab.clone())?)),
+        BindValue::Expr(expr) => {
+            let val = expr.lower(ctx, block, &mut symtab.clone())?;
+            Some(Some(val))
+        }
         BindValue::Body { exprs, ret } => {
             let mut local_symtab = symtab.clone();
             for expr in exprs {
                 expr.lower(ctx, block, &mut local_symtab)?;
             }
             match &ret.0 {
-                Some(expr) => Ok(Some(expr.lower(ctx, block, &mut local_symtab)?)),
-                None => Ok(None),
+                Some(expr) => {
+                    let val = expr.lower(ctx, block, &mut local_symtab)?;
+                    Some(Some(val))
+                }
+                None => Some(None),
             }
         }
-        BindValue::Extern => Ok(None),
+        BindValue::Extern => Some(None),
     }
 }
 
@@ -1046,9 +1158,9 @@ fn lower_cast<'c>(
     val: Value<'c, 'c>,
     src_ty: &Ty,
     dst_ty: &Ty,
-) -> Result<Value<'c, 'c>, CodegenSymptom> {
+) -> Option<Value<'c, 'c>> {
     if src_ty == dst_ty {
-        return Ok(val);
+        return Some(val);
     }
     let loc = ctx.location();
     let dst_mlir = ty_to_mlir(dst_ty, ctx.mlir);
@@ -1057,12 +1169,12 @@ fn lower_cast<'c>(
     if matches!(src_ty, Ty::Ptr { .. } | Ty::Ref { .. } | Ty::Array { .. })
         && matches!(dst_ty, Ty::Int(_))
     {
-        return OperationBuilder::new("llvm.ptrtoint", loc)
+        let op = OperationBuilder::new("llvm.ptrtoint", loc)
             .add_operands(&[val])
             .add_results(&[dst_mlir])
             .build()
-            .map(|op| block.append_op(op))
-            .map_err(|e| CodegenSymptom::Internal(format!("llvm.ptrtoint: {e}")));
+            .ok()?;
+        return Some(block.append_op(op));
     }
 
     let op_name = match (src_ty, dst_ty) {
@@ -1071,15 +1183,17 @@ fn lower_cast<'c>(
         (Ty::Int(_), Ty::Float) => "arith.sitofp",
         (Ty::Float, Ty::Int(_)) => "arith.fptosi",
         _ => {
-            return Err(CodegenSymptom::Internal(format!(
-                "unsupported cast: {src_ty:?} → {dst_ty:?}"
-            )));
+            ctx.emit_symptom(CodegenSymptom::Internal {
+                message: format!("unsupported cast: {src_ty:?} → {dst_ty:?}"),
+                span: SimpleSpan::new((), 0..0),
+            });
+            return None;
         }
     };
-    OperationBuilder::new(op_name, loc)
+    let op = OperationBuilder::new(op_name, loc)
         .add_operands(&[val])
         .add_results(&[dst_mlir])
         .build()
-        .map(|op| block.append_op(op))
-        .map_err(|e| CodegenSymptom::Internal(format!("{op_name}: {e}")))
+        .ok()?;
+    Some(block.append_op(op))
 }

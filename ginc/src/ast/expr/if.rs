@@ -4,6 +4,7 @@ use crate::diagnostic::codegen::CodegenSymptom;
 use crate::intern::IStr;
 use crate::prelude::*;
 use crate::typeck::Ty;
+use chumsky::span::SimpleSpan;
 
 use crate::ast::expr::r#return::Return;
 
@@ -79,7 +80,7 @@ impl<'c> Lower<'c> for IfExpr {
         ctx: &CodegenContext<'_, 'c>,
         block: &BlockRef<'c, 'c>,
         symtab: &mut RuntimeSymbolTable<'c>,
-    ) -> Result<Value<'c, 'c>, CodegenSymptom> {
+    ) -> Option<Value<'c, 'c>> {
         let loc = ctx.location();
 
         let cond_val = match &self.condition {
@@ -87,24 +88,35 @@ impl<'c> Lower<'c> for IfExpr {
                 let cond_i64 = expr.lower(ctx, block, symtab)?;
                 let loc = ctx.location();
                 // Truncate i64 to i1 (boolean) for scf.if condition
-                block.append_op(
-                    OperationBuilder::new("arith.trunci", loc)
-                        .add_operands(&[cond_i64])
-                        .add_results(&[ctx.mlir.i1()])
-                        .build()
-                        .map_err(|e| CodegenSymptom::Internal(format!("arith.trunci: {e}")))?,
-                )
+                let op = match OperationBuilder::new("arith.trunci", loc)
+                    .add_operands(&[cond_i64])
+                    .add_results(&[ctx.mlir.i1()])
+                    .build()
+                {
+                    Ok(op) => op,
+                    Err(e) => {
+                        ctx.emit_symptom(CodegenSymptom::Internal {
+                            message: format!("arith.trunci: {e}"),
+                            span: SimpleSpan::new((), 0..0),
+                        });
+                        return None;
+                    }
+                };
+                block.append_op(op)
             }
             IfCondition::Pattern { subject, tag } => {
                 let subject_val = subject.lower(ctx, block, symtab)?;
                 let variant_name = IStr::new(tag.name().to_string());
-                let (_, expected_disc, _) =
-                    ctx.ty_env.lookup_variant(variant_name).ok_or_else(|| {
-                        CodegenSymptom::Internal(format!(
-                            "Unknown variant '{}' in if pattern",
-                            tag.name()
-                        ))
-                    })?;
+                let (_, expected_disc, _) = match ctx.ty_env.lookup_variant(variant_name) {
+                    Some(v) => v,
+                    None => {
+                        ctx.emit_symptom(CodegenSymptom::Internal {
+                            message: format!("Unknown variant '{}' in if pattern", tag.name()),
+                            span: SimpleSpan::new((), 0..0),
+                        });
+                        return None;
+                    }
+                };
                 let disc =
                     block.append_op(ctx.mlir.llvm_extractvalue(subject_val, 0, ctx.mlir.i64()));
                 let expected_val = block.const_i64(ctx.mlir, expected_disc as i64);
@@ -190,6 +202,6 @@ impl<'c> Lower<'c> for IfExpr {
         ));
 
         // Return the produced value from the if expression
-        Ok(if_op.result(0).unwrap().into())
+        Some(if_op.result(0).unwrap().into())
     }
 }

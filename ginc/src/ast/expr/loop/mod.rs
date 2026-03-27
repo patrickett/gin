@@ -1,5 +1,4 @@
 use crate::codegen::prelude::*;
-use crate::diagnostic::codegen::CodegenSymptom;
 use crate::prelude::*;
 
 pub mod r#for;
@@ -20,7 +19,7 @@ impl<'c> Lower<'c> for Loop {
         ctx: &CodegenContext<'_, 'c>,
         block: &BlockRef<'c, 'c>,
         symtab: &mut RuntimeSymbolTable<'c>,
-    ) -> Result<Value<'c, 'c>, CodegenSymptom> {
+    ) -> Option<Value<'c, 'c>> {
         match self {
             Loop::ForIn(for_loop) => for_loop.lower(ctx, block, symtab),
             Loop::While(while_loop) => while_loop.lower(ctx, block, symtab),

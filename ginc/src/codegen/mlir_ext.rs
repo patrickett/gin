@@ -3,6 +3,7 @@
 //! This module provides extension traits that simplify common Melior patterns
 
 use crate::codegen::prelude::*;
+use chumsky::span::SimpleSpan;
 
 /// Extension trait for [`melior::Context`] to simplify common operations.
 pub trait ContextExt {
@@ -255,7 +256,8 @@ pub trait BlockExt<'c> {
         loc: Location<'c>,
     ) -> Result<(), crate::diagnostic::codegen::CodegenSymptom>;
     /// `llvm.alloca 1 x elem_ty` — allocate a single scalar slot on the stack.
-    fn alloca_typed(&self, ctx: &'c Context, elem_ty: Type<'c>, loc: Location<'c>) -> Value<'c, 'c>;
+    fn alloca_typed(&self, ctx: &'c Context, elem_ty: Type<'c>, loc: Location<'c>)
+    -> Value<'c, 'c>;
     /// `llvm.load elem_ty, ptr` — load a typed value from a pointer.
     fn load_typed(
         &self,
@@ -364,7 +366,10 @@ impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
             .add_operands(&[base, idx])
             .add_results(&[ctx.llvm_ptr()])
             .build()
-            .map_err(|e| crate::diagnostic::codegen::CodegenSymptom::Internal(format!("GEP: {e}")))?;
+            .map_err(|e| crate::diagnostic::codegen::CodegenSymptom::Internal {
+                message: format!("GEP: {e}"),
+                span: SimpleSpan::new((), 0..0),
+            })?;
         Ok(self.append_op(op))
     }
 
@@ -383,12 +388,20 @@ impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
             )])
             .add_operands(&[dst, val, len])
             .build()
-            .map_err(|e| crate::diagnostic::codegen::CodegenSymptom::Internal(format!("memset: {e}")))?;
+            .map_err(|e| crate::diagnostic::codegen::CodegenSymptom::Internal {
+                message: format!("memset: {e}"),
+                span: SimpleSpan::new((), 0..0),
+            })?;
         self.append_operation(op);
         Ok(())
     }
 
-    fn alloca_typed(&self, ctx: &'c Context, elem_ty: Type<'c>, loc: Location<'c>) -> Value<'c, 'c> {
+    fn alloca_typed(
+        &self,
+        ctx: &'c Context,
+        elem_ty: Type<'c>,
+        loc: Location<'c>,
+    ) -> Value<'c, 'c> {
         let count_one = self.const_i64(ctx, 1);
         self.append_op(melior::dialect::llvm::alloca(
             ctx,
@@ -415,7 +428,10 @@ impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
             .add_operands(&[ptr])
             .add_results(&[elem_ty])
             .build()
-            .map_err(|e| crate::diagnostic::codegen::CodegenSymptom::Internal(format!("llvm.load: {e}")))?;
+            .map_err(|e| crate::diagnostic::codegen::CodegenSymptom::Internal {
+                message: format!("llvm.load: {e}"),
+                span: SimpleSpan::new((), 0..0),
+            })?;
         Ok(self.append_op(op))
     }
 
@@ -428,7 +444,10 @@ impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
         let op = OperationBuilder::new("llvm.store", loc)
             .add_operands(&[val, ptr])
             .build()
-            .map_err(|e| crate::diagnostic::codegen::CodegenSymptom::Internal(format!("llvm.store: {e}")))?;
+            .map_err(|e| crate::diagnostic::codegen::CodegenSymptom::Internal {
+                message: format!("llvm.store: {e}"),
+                span: SimpleSpan::new((), 0..0),
+            })?;
         self.append_operation(op);
         Ok(())
     }
@@ -459,7 +478,7 @@ impl ArithOps {
     pub const DIVF: &str = "arith.divf";
     pub const REMF: &str = "arith.remf";
     pub const ANDI: &str = "arith.andi";
-    pub const ORI:  &str = "arith.ori";
+    pub const ORI: &str = "arith.ori";
     pub const XORI: &str = "arith.xori";
     pub const SHLI: &str = "arith.shli";
     pub const SHRI: &str = "arith.shrsi";

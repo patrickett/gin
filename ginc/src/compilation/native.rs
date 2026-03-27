@@ -1,9 +1,10 @@
 //! Native compilation: MLIR module → object file → linked executable.
 
 use crate::args::Profile;
+use crate::ast::FileAst;
 use crate::codegen::build_module_with_context;
 use crate::diagnostic::codegen::CodegenSymptom;
-use crate::ast::FileAst;
+use chumsky::span::{SimpleSpan, Span};
 use melior::{Context, dialect::DialectRegistry, ir::Module, pass, utility};
 use std::path::Path;
 use std::process::Command;
@@ -25,7 +26,11 @@ fn create_native_context() -> Context {
 ///
 /// Release: canonicalize (constant folding, dead code) + CSE (common subexpression elimination).
 /// Debug: no-op.
-fn optimize_mlir(context: &Context, module: &mut Module, profile: Profile) -> Result<(), CodegenSymptom> {
+fn optimize_mlir(
+    context: &Context,
+    module: &mut Module,
+    profile: Profile,
+) -> Result<(), CodegenSymptom> {
     if !matches!(profile, Profile::Release) {
         return Ok(());
     }
@@ -34,8 +39,10 @@ fn optimize_mlir(context: &Context, module: &mut Module, profile: Profile) -> Re
     pm.add_pass(pass::transform::create_canonicalizer());
     pm.add_pass(pass::transform::create_cse());
 
-    pm.run(module)
-        .map_err(|e| CodegenSymptom::Internal(format!("Optimization pass failed: {e}")))
+    pm.run(module).map_err(|e| CodegenSymptom::Internal {
+        message: format!("Optimization pass failed: {e}"),
+        span: SimpleSpan::new((), 0..0),
+    })
 }
 
 /// Lower a module in-place: SCF → CF, then everything → LLVM.
@@ -49,8 +56,10 @@ fn lower_to_llvm(context: &Context, module: &mut Module) -> Result<(), CodegenSy
     // Clean up any unrealized casts left over
     pm.add_pass(pass::conversion::create_reconcile_unrealized_casts());
 
-    pm.run(module)
-        .map_err(|e| CodegenSymptom::Internal(format!("MLIR pass pipeline failed: {e}")))
+    pm.run(module).map_err(|e| CodegenSymptom::Internal {
+        message: format!("MLIR pass pipeline failed: {e}"),
+        span: SimpleSpan::new((), 0..0),
+    })
 }
 
 /// Fix `operandSegmentSizes` in MLIR text for `llvm.call` operations.
@@ -103,13 +112,19 @@ fn fix_llvm_call_segments(mlir_text: &str) -> String {
 ///
 /// Pipeline: MLIR text → fix llvm.call → re-parse → optimize (Release)
 /// → lower to LLVM dialect → mlir-translate → LLVM IR → cc -c → object file.
-pub fn native_from_mlir(mlir_text: &str, obj_path: &Path, profile: Profile) -> Result<(), CodegenSymptom> {
+pub fn native_from_mlir(
+    mlir_text: &str,
+    obj_path: &Path,
+    profile: Profile,
+) -> Result<(), CodegenSymptom> {
     let context = create_native_context();
 
     let fixed_text = fix_llvm_call_segments(mlir_text);
-    let mut module = Module::parse(&context, &fixed_text).ok_or_else(|| {
-        CodegenSymptom::Internal("Failed to re-parse MLIR for native compilation".into())
-    })?;
+    let mut module =
+        Module::parse(&context, &fixed_text).ok_or_else(|| CodegenSymptom::Internal {
+            message: "Failed to re-parse MLIR for native compilation".into(),
+            span: SimpleSpan::new((), 0..0),
+        })?;
 
     optimize_mlir(&context, &mut module, profile)?;
     lower_to_llvm(&context, &mut module)?;
@@ -122,10 +137,27 @@ pub fn native_from_mlir(mlir_text: &str, obj_path: &Path, profile: Profile) -> R
 }
 
 /// Build an MLIR module from the AST, lower to LLVM, and compile to an object file.
-pub fn compile_to_object(ast: &FileAst, obj_path: &Path, profile: Profile) -> Result<(), CodegenSymptom> {
+pub fn compile_to_object(
+    ast: &FileAst,
+    obj_path: &Path,
+    profile: Profile,
+) -> Result<(), CodegenSymptom> {
     let context = create_native_context();
 
-    let source_module = build_module_with_context(&context, ast)?;
+    let (source_module, symptoms) = build_module_with_context(&context, ast);
+    let source_module = match source_module {
+        Some(m) => m,
+        None => {
+            // Return the first symptom as the error, or a generic one
+            return Err(symptoms
+                .into_iter()
+                .next()
+                .unwrap_or(CodegenSymptom::Internal {
+                    message: "Codegen failed with no specific symptom".into(),
+                    span: SimpleSpan::new((), 0..0),
+                }));
+        }
+    };
     let mlir_text = source_module.as_operation().to_string();
     drop(source_module);
 
@@ -142,9 +174,10 @@ fn mlir_to_llvm_ir(mlir_text: &str) -> Result<String, CodegenSymptom> {
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| CodegenSymptom::Internal(format!("Failed to run mlir-translate: {e}")))?;
+    let mut child = cmd.spawn().map_err(|e| CodegenSymptom::Internal {
+        message: format!("Failed to run mlir-translate: {e}"),
+        span: SimpleSpan::new((), 0..0),
+    })?;
 
     use std::io::Write;
     child
@@ -152,32 +185,47 @@ fn mlir_to_llvm_ir(mlir_text: &str) -> Result<String, CodegenSymptom> {
         .take()
         .unwrap()
         .write_all(mlir_text.as_bytes())
-        .map_err(|e| {
-            CodegenSymptom::Internal(format!("Failed to write to mlir-translate stdin: {e}"))
+        .map_err(|e| CodegenSymptom::Internal {
+            message: format!("Failed to write to mlir-translate stdin: {e}"),
+            span: SimpleSpan::new((), 0..0),
         })?;
 
     let output = child
         .wait_with_output()
-        .map_err(|e| CodegenSymptom::Internal(format!("mlir-translate failed: {e}")))?;
+        .map_err(|e| CodegenSymptom::Internal {
+            message: format!("mlir-translate failed: {e}"),
+            span: SimpleSpan::new((), 0..0),
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(CodegenSymptom::Internal(format!(
-            "mlir-translate failed (exit {}):\n{stderr}",
-            output.status.code().unwrap_or(-1)
-        )));
+        return Err(CodegenSymptom::Internal {
+            message: format!(
+                "mlir-translate failed (exit {}):\n{stderr}",
+                output.status.code().unwrap_or(-1)
+            ),
+            span: SimpleSpan::new((), 0..0),
+        });
     }
 
-    String::from_utf8(output.stdout)
-        .map_err(|e| CodegenSymptom::Internal(format!("mlir-translate output is not UTF-8: {e}")))
+    String::from_utf8(output.stdout).map_err(|e| CodegenSymptom::Internal {
+        message: format!("mlir-translate output is not UTF-8: {e}"),
+        span: SimpleSpan::new((), 0..0),
+    })
 }
 
 /// Compile LLVM IR text to an object file using `cc -c`.
-fn compile_llvm_ir_to_object(llvm_ir: &str, obj_path: &Path, profile: Profile) -> Result<(), CodegenSymptom> {
+fn compile_llvm_ir_to_object(
+    llvm_ir: &str,
+    obj_path: &Path,
+    profile: Profile,
+) -> Result<(), CodegenSymptom> {
     let ll_path = obj_path.with_extension("ll");
 
-    std::fs::write(&ll_path, llvm_ir)
-        .map_err(|e| CodegenSymptom::Internal(format!("Failed to write LLVM IR: {e}")))?;
+    std::fs::write(&ll_path, llvm_ir).map_err(|e| CodegenSymptom::Internal {
+        message: format!("Failed to write LLVM IR: {e}"),
+        span: SimpleSpan::new((), 0..0),
+    })?;
 
     let cc = find_cc()?;
     let opt_flag = match profile {
@@ -191,25 +239,33 @@ fn compile_llvm_ir_to_object(llvm_ir: &str, obj_path: &Path, profile: Profile) -
         .arg("-o")
         .arg(obj_path)
         .output()
-        .map_err(|e| CodegenSymptom::Internal(format!("Failed to run '{cc}': {e}")))?;
+        .map_err(|e| CodegenSymptom::Internal {
+            message: format!("Failed to run '{cc}': {e}"),
+            span: SimpleSpan::new((), 0..0),
+        })?;
 
     // Clean up the .ll file regardless of success
     let _ = std::fs::remove_file(&ll_path);
 
     if !result.status.success() {
         let stderr = String::from_utf8_lossy(&result.stderr);
-        return Err(CodegenSymptom::Internal(format!(
-            "Compiling LLVM IR failed (exit {}):\n{stderr}",
-            result.status.code().unwrap_or(-1)
-        )));
+        return Err(CodegenSymptom::Internal {
+            message: format!(
+                "Compiling LLVM IR failed (exit {}):\n{stderr}",
+                result.status.code().unwrap_or(-1)
+            ),
+            span: SimpleSpan::new((), 0..0),
+        });
     }
 
     Ok(())
 }
 
 /// Path to gin_core/runtime.c, resolved at compile time relative to this crate.
-const GIN_CORE_RUNTIME_C: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../packages/gin_core/runtime.c");
+const GIN_CORE_RUNTIME_C: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../packages/gin_core/runtime.c"
+);
 
 /// Link an object file into an executable using the system C compiler.
 /// Automatically compiles and links gin_core/runtime.c if it exists.
@@ -224,18 +280,25 @@ pub fn link_executable(
     let runtime_obj = output.with_extension("runtime.o");
     let has_runtime = if runtime_c.exists() {
         let mut compile = Command::new(&cc);
-        compile.arg("-c").arg("-O2").arg(runtime_c).arg("-o").arg(&runtime_obj);
+        compile
+            .arg("-c")
+            .arg("-O2")
+            .arg(runtime_c)
+            .arg("-o")
+            .arg(&runtime_obj);
         if let Some(triple) = target {
             compile.arg(format!("--target={triple}"));
         }
-        let out = compile.output().map_err(|e| {
-            CodegenSymptom::Internal(format!("Failed to compile gin_core runtime: {e}"))
+        let out = compile.output().map_err(|e| CodegenSymptom::Internal {
+            message: format!("Failed to compile gin_core runtime: {e}"),
+            span: SimpleSpan::new((), 0..0),
         })?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
-            return Err(CodegenSymptom::Internal(format!(
-                "gin_core runtime compile failed:\n{stderr}"
-            )));
+            return Err(CodegenSymptom::Internal {
+                message: format!("gin_core runtime compile failed:\n{stderr}"),
+                span: SimpleSpan::new((), 0..0),
+            });
         }
         true
     } else {
@@ -251,9 +314,10 @@ pub fn link_executable(
         cmd.arg(format!("--target={triple}"));
     }
 
-    let result = cmd
-        .output()
-        .map_err(|e| CodegenSymptom::Internal(format!("Failed to run linker '{cc}': {e}")))?;
+    let result = cmd.output().map_err(|e| CodegenSymptom::Internal {
+        message: format!("Failed to run linker '{cc}': {e}"),
+        span: SimpleSpan::new((), 0..0),
+    })?;
 
     if has_runtime {
         let _ = std::fs::remove_file(&runtime_obj);
@@ -261,10 +325,13 @@ pub fn link_executable(
 
     if !result.status.success() {
         let stderr = String::from_utf8_lossy(&result.stderr);
-        return Err(CodegenSymptom::Internal(format!(
-            "Linking failed (exit {}):\n{stderr}",
-            result.status.code().unwrap_or(-1)
-        )));
+        return Err(CodegenSymptom::Internal {
+            message: format!(
+                "Linking failed (exit {}):\n{stderr}",
+                result.status.code().unwrap_or(-1)
+            ),
+            span: SimpleSpan::new((), 0..0),
+        });
     }
 
     Ok(())
@@ -287,9 +354,10 @@ fn find_tool(name: &str) -> Result<String, CodegenSymptom> {
         }
     }
 
-    Err(CodegenSymptom::Internal(format!(
-        "'{name}' not found. Install LLVM or add it to PATH."
-    )))
+    Err(CodegenSymptom::Internal {
+        message: format!("'{name}' not found. Install LLVM or add it to PATH."),
+        span: SimpleSpan::new((), 0..0),
+    })
 }
 
 /// Find a C compiler: check $CC, then prefer Homebrew LLVM clang (same version
@@ -317,8 +385,9 @@ fn find_cc() -> Result<String, CodegenSymptom> {
     // Fall back to system cc.
     match Command::new("cc").arg("--version").output() {
         Ok(output) if output.status.success() => Ok("cc".into()),
-        _ => Err(CodegenSymptom::Internal(
-            "No C compiler found. Install LLVM or set $CC.".into(),
-        )),
+        _ => Err(CodegenSymptom::Internal {
+            message: "No C compiler found. Install LLVM or set $CC.".into(),
+            span: SimpleSpan::new((), 0..0),
+        }),
     }
 }

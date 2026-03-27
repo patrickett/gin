@@ -1,9 +1,10 @@
+use crate::ast::ModPath;
 use crate::codegen::{prelude::*, ty_to_mlir};
 use crate::diagnostic::codegen::CodegenSymptom;
 use crate::parse::delimited_list;
 use crate::prelude::*;
 use crate::typeck::Ty;
-use crate::ast::ModPath;
+use chumsky::span::SimpleSpan;
 
 /// A capitalized variant constructor call, e.g. `Some(5)` or `Maybe.Some(3)`.
 ///
@@ -57,9 +58,11 @@ impl<'c> Lower<'c> for TagCall {
         ctx: &CodegenContext<'_, 'c>,
         block: &BlockRef<'c, 'c>,
         symtab: &mut RuntimeSymbolTable<'c>,
-    ) -> Result<Value<'c, 'c>, CodegenSymptom> {
+    ) -> Option<Value<'c, 'c>> {
         // Try union variant construction first.
-        if let Some((union_name, discriminant, payload_fields)) = ctx.ty_env.lookup_variant(self.name) {
+        if let Some((union_name, discriminant, payload_fields)) =
+            ctx.ty_env.lookup_variant(self.name)
+        {
             let union_mlir_ty = ctx
                 .ty_env
                 .lookup_tag(union_name)
@@ -68,36 +71,50 @@ impl<'c> Lower<'c> for TagCall {
             let disc_val = block.const_i64(ctx.mlir, discriminant as i64);
             let mut val = block.append_op(ctx.mlir.llvm_undef(union_mlir_ty));
             val = block.append_op(ctx.mlir.llvm_insertvalue(val, disc_val, 0));
-            for (slot, (arg, (_, field_ty))) in self.args.iter().zip(payload_fields.iter()).enumerate() {
+            for (slot, (arg, (_, field_ty))) in
+                self.args.iter().zip(payload_fields.iter()).enumerate()
+            {
                 let lowered = arg.lower(ctx, block, symtab)?;
                 let field_mlir_ty = ty_to_mlir(field_ty, ctx.mlir);
                 let coerced = if field_mlir_ty == ctx.mlir.i1() {
                     let loc = ctx.location();
-                    let extend_op = OperationBuilder::new("arith.extui", loc)
+                    let extend_op = match OperationBuilder::new("arith.extui", loc)
                         .add_operands(&[lowered])
                         .add_results(&[ctx.mlir.i64()])
                         .build()
-                        .map_err(|e| CodegenSymptom::Internal(format!("extui build failed: {e}")))?;
+                    {
+                        Ok(op) => op,
+                        Err(e) => {
+                            ctx.emit_symptom(CodegenSymptom::Internal {
+                                message: format!("extui build failed: {e}"),
+                                span: SimpleSpan::new((), 0..0),
+                            });
+                            return None;
+                        }
+                    };
                     block.append_op(extend_op)
                 } else {
                     lowered
                 };
                 val = block.append_op(ctx.mlir.llvm_insertvalue(val, coerced, (slot + 1) as i64));
             }
-            return Ok(val);
+            return Some(val);
         }
 
         // Fall back to record construction.
-        let record_ty = ctx
-            .ty_env
-            .lookup_tag(self.name)
-            .cloned()
-            .ok_or_else(|| {
-                CodegenSymptom::Internal(format!(
-                    "Unknown type '{}' — not declared as a union variant or record",
-                    self.name.as_str()
-                ))
-            })?;
+        let record_ty = match ctx.ty_env.lookup_tag(self.name).cloned() {
+            Some(ty) => ty,
+            None => {
+                ctx.emit_symptom(CodegenSymptom::Internal {
+                    message: format!(
+                        "Unknown type '{}' — not declared as a union variant or record",
+                        self.name.as_str()
+                    ),
+                    span: SimpleSpan::new((), 0..0),
+                });
+                return None;
+            }
+        };
 
         match &record_ty {
             Ty::Record { .. } => {
@@ -110,54 +127,74 @@ impl<'c> Lower<'c> for TagCall {
                 if is_named {
                     for arg in &self.args {
                         let Expr::Bind(bind) = arg else {
-                            return Err(CodegenSymptom::Internal(format!(
-                                "Mixed named/positional args in record '{}' constructor",
-                                self.name.as_str()
-                            )));
+                            ctx.emit_symptom(CodegenSymptom::Internal {
+                                message: format!(
+                                    "Mixed named/positional args in record '{}' constructor",
+                                    self.name.as_str()
+                                ),
+                                span: SimpleSpan::new((), 0..0),
+                            });
+                            return None;
                         };
                         let BindValue::Expr(value_expr) = bind.value() else {
-                            return Err(CodegenSymptom::Internal(
-                                "Named record arg must be a simple expression".to_string(),
-                            ));
+                            ctx.emit_symptom(CodegenSymptom::Internal {
+                                message: "Named record arg must be a simple expression".to_string(),
+                                span: SimpleSpan::new((), 0..0),
+                            });
+                            return None;
                         };
                         let field_name = bind.name();
-                        let idx = fields
-                            .iter()
-                            .position(|(fname, _)| **fname == field_name)
-                            .ok_or_else(|| {
-                                CodegenSymptom::Internal(format!(
-                                    "No field '{}' on record '{}'",
-                                    field_name.as_str(),
-                                    self.name.as_str()
-                                ))
-                            })?;
+                        let idx = match fields.iter().position(|(fname, _)| **fname == field_name) {
+                            Some(i) => i,
+                            None => {
+                                ctx.emit_symptom(CodegenSymptom::Internal {
+                                    message: format!(
+                                        "No field '{}' on record '{}'",
+                                        field_name.as_str(),
+                                        self.name.as_str()
+                                    ),
+                                    span: SimpleSpan::new((), 0..0),
+                                });
+                                return None;
+                            }
+                        };
                         let arg_val = value_expr.lower(ctx, block, symtab)?;
                         val = block.append_op(ctx.mlir.llvm_insertvalue(val, arg_val, idx as i64));
                     }
                 } else {
                     // Positional construction: `Tag(val1, val2, ...)` — args by layout order.
                     for (i, _) in fields.iter().enumerate() {
-                        let arg_val = self
-                            .args
-                            .get(i)
-                            .ok_or_else(|| {
-                                CodegenSymptom::Internal(format!(
-                                    "Not enough args for record '{}': expected {}, got {}",
-                                    self.name.as_str(),
-                                    fields.len(),
-                                    self.args.len()
-                                ))
-                            })?
-                            .lower(ctx, block, symtab)?;
+                        let arg = match self.args.get(i) {
+                            Some(a) => a,
+                            None => {
+                                ctx.emit_symptom(CodegenSymptom::Internal {
+                                    message: format!(
+                                        "Not enough args for record '{}': expected {}, got {}",
+                                        self.name.as_str(),
+                                        fields.len(),
+                                        self.args.len()
+                                    ),
+                                    span: SimpleSpan::new((), 0..0),
+                                });
+                                return None;
+                            }
+                        };
+                        let arg_val = arg.lower(ctx, block, symtab)?;
                         val = block.append_op(ctx.mlir.llvm_insertvalue(val, arg_val, i as i64));
                     }
                 }
-                Ok(val)
+                Some(val)
             }
-            _ => Err(CodegenSymptom::Internal(format!(
-                "Tag '{}' is not a union variant or record constructor",
-                self.name.as_str()
-            ))),
+            _ => {
+                ctx.emit_symptom(CodegenSymptom::Internal {
+                    message: format!(
+                        "Tag '{}' is not a union variant or record constructor",
+                        self.name.as_str()
+                    ),
+                    span: SimpleSpan::new((), 0..0),
+                });
+                None
+            }
         }
     }
 }

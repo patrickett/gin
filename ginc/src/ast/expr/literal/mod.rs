@@ -9,7 +9,6 @@ pub use string::*;
 pub use unclosed_string::*;
 
 use crate::codegen::prelude::*;
-use crate::diagnostic::codegen::CodegenSymptom;
 use crate::prelude::*;
 use std::hash::Hash;
 
@@ -60,8 +59,8 @@ impl<'c> Lower<'c> for Literal {
         ctx: &CodegenContext<'_, 'c>,
         block: &BlockRef<'c, 'c>,
         _symtab: &mut RuntimeSymbolTable<'c>,
-    ) -> Result<Value<'c, 'c>, CodegenSymptom> {
-        Ok(match self {
+    ) -> Option<Value<'c, 'c>> {
+        Some(match self {
             Literal::Int(n) => block.const_i64(ctx.mlir, *n),
             Literal::Number(n) => block.const_i64(ctx.mlir, *n as i64),
             Literal::Float(f) => {

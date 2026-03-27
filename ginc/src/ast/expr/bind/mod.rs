@@ -2,6 +2,7 @@ use crate::codegen::prelude::*;
 use crate::codegen::ty_to_mlir;
 use crate::diagnostic::codegen::CodegenSymptom;
 use crate::{ast::tag::Tag, codegen::lower_function, parse::block, prelude::*};
+use chumsky::span::SimpleSpan;
 
 mod attributes;
 mod value;
@@ -575,7 +576,7 @@ where
         Option<IStr>,
         Option<crate::ast::Tag>,
         Option<(IStr, Vec<Expr>)>,
-        Option<ModPath>,  // Qualified path for type annotation
+        Option<ModPath>, // Qualified path for type annotation
     );
 
     // Parses optional return-type hint before the colon.
@@ -622,7 +623,12 @@ where
             .map_with(|(name, args), e| -> ReturnTypePart {
                 match args {
                     Some(args) if !args.is_empty() => (None, None, Some((name, args)), None),
-                    _ => (None, Some(crate::ast::Tag::Nominal(name, e.span())), None, None),
+                    _ => (
+                        None,
+                        Some(crate::ast::Tag::Nominal(name, e.span())),
+                        None,
+                        None,
+                    ),
                 }
             }),
     ))
@@ -661,7 +667,13 @@ where
         .then(choice((extern_value, multi_value, single_value)))
         .map(
             |(
-                ((((name, name_span), params), (return_type_name, return_tag, type_annotation, type_annotation_qual)), is_const),
+                (
+                    (
+                        ((name, name_span), params),
+                        (return_type_name, return_tag, type_annotation, type_annotation_qual),
+                    ),
+                    is_const,
+                ),
                 (value, postfix_doc),
             )| {
                 let mut b = Bind::new(name, name_span, value, is_const)
@@ -710,14 +722,14 @@ impl<'c> Lower<'c> for Bind {
         ctx: &CodegenContext<'_, 'c>,
         block: &BlockRef<'c, 'c>,
         symtab: &mut RuntimeSymbolTable<'c>,
-    ) -> Result<Value<'c, 'c>, CodegenSymptom> {
+    ) -> Option<Value<'c, 'c>> {
         match &self.value() {
             BindValue::Body { exprs: _, ret: _ } => {
                 let func_op = lower_function(ctx, &self.name(), self)?;
                 block.append_operation(func_op);
 
                 // Return a placeholder value (TODO: consider returning function reference)
-                Ok(block.const_i64(ctx.mlir, 0))
+                Some(block.const_i64(ctx.mlir, 0))
             }
             BindValue::Expr(expr) => {
                 let name_str = self.name().as_str().to_string();
@@ -729,19 +741,35 @@ impl<'c> Lower<'c> for Bind {
                         .ty_env
                         .infer_expr(expr, &std::collections::HashMap::new());
                     ctx.var_types.borrow_mut().insert(name_str, ty);
-                    Ok(value)
+                    Some(value)
                 } else {
                     let loc = ctx.location();
                     if ctx.mutable_slots.borrow().contains(&name_str) {
                         // Rebind (`:`) of an existing mutable variable — store new value.
-                        let ptr = *symtab.get(&name_str).ok_or_else(|| {
-                            CodegenSymptom::Internal(format!(
-                                "mutable slot '{name_str}' not found in symtab"
-                            ))
-                        })?;
+                        let ptr = match symtab.get(&name_str).copied() {
+                            Some(p) => p,
+                            None => {
+                                ctx.emit_symptom(CodegenSymptom::Internal {
+                                    message: format!(
+                                        "mutable slot '{name_str}' not found in symtab"
+                                    ),
+                                    span: SimpleSpan::new((), 0..0),
+                                });
+                                return None;
+                            }
+                        };
                         let new_val = expr.lower(ctx, block, symtab)?;
-                        block.store_typed(ptr, new_val, loc)?;
-                        Ok(block.const_i64(ctx.mlir, 0))
+                        match block.store_typed(ptr, new_val, loc) {
+                            Ok(()) => {}
+                            Err(e) => {
+                                ctx.emit_symptom(CodegenSymptom::Internal {
+                                    message: format!("store_typed in rebind: {e:?}"),
+                                    span: SimpleSpan::new((), 0..0),
+                                });
+                                return None;
+                            }
+                        }
+                        Some(block.const_i64(ctx.mlir, 0))
                     } else {
                         // First mutable bind (`:`) — alloca + store.
                         // Build locals from var_types so infer_expr can resolve base types
@@ -756,18 +784,27 @@ impl<'c> Lower<'c> for Bind {
                         let elem_mlir_ty = ty_to_mlir(&ty, ctx.mlir);
                         let slot = block.alloca_typed(ctx.mlir, elem_mlir_ty, loc);
                         let init_val = expr.lower(ctx, block, symtab)?;
-                        block.store_typed(slot, init_val, loc)?;
+                        match block.store_typed(slot, init_val, loc) {
+                            Ok(()) => {}
+                            Err(e) => {
+                                ctx.emit_symptom(CodegenSymptom::Internal {
+                                    message: format!("store_typed in mutable bind: {e:?}"),
+                                    span: SimpleSpan::new((), 0..0),
+                                });
+                                return None;
+                            }
+                        }
                         symtab.insert(name_str.clone(), slot);
                         ctx.var_types.borrow_mut().insert(name_str.clone(), ty);
                         ctx.mutable_slots.borrow_mut().insert(name_str);
-                        Ok(slot)
+                        Some(slot)
                     }
                 }
             }
             BindValue::Extern => {
                 let func_op = lower_function(ctx, &self.name(), self)?;
                 block.append_operation(func_op);
-                Ok(block.const_i64(ctx.mlir, 0))
+                Some(block.const_i64(ctx.mlir, 0))
             }
         }
     }

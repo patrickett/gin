@@ -1,6 +1,6 @@
 use crate::codegen::prelude::*;
-use crate::diagnostic::codegen::CodegenSymptom;
-use crate::{parse::block, prelude::*};
+use crate::parse::block;
+use crate::prelude::*;
 
 /// While loop: loop while a condition holds.
 ///
@@ -27,7 +27,10 @@ where
         body_expr,
         just(Token::Loop),
     )
-    .map(|(cond, exprs, _)| WhileLoop { cond: Box::new(cond), exprs })
+    .map(|(cond, exprs, _)| WhileLoop {
+        cond: Box::new(cond),
+        exprs,
+    })
 }
 
 impl<'c> Lower<'c> for WhileLoop {
@@ -36,7 +39,7 @@ impl<'c> Lower<'c> for WhileLoop {
         ctx: &CodegenContext<'_, 'c>,
         block: &BlockRef<'c, 'c>,
         symtab: &mut RuntimeSymbolTable<'c>,
-    ) -> Result<Value<'c, 'c>, CodegenSymptom> {
+    ) -> Option<Value<'c, 'c>> {
         let loc = ctx.location();
 
         // scf.while with no loop-carried values: () -> ()
@@ -64,8 +67,14 @@ impl<'c> Lower<'c> for WhileLoop {
             blk_ref.append_operation(scf_dialect::r#yield(&[], loc));
         }
 
-        block.append_operation(scf_dialect::r#while(&[], &[], before_region, after_region, loc));
+        block.append_operation(scf_dialect::r#while(
+            &[],
+            &[],
+            before_region,
+            after_region,
+            loc,
+        ));
 
-        Ok(block.const_i64(ctx.mlir, 0))
+        Some(block.const_i64(ctx.mlir, 0))
     }
 }
