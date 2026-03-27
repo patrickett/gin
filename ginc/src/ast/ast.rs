@@ -212,7 +212,7 @@ pub struct FileAst {
     pub defs: DefMap,
     pub private_defs: HashSet<IStr>,
     pub private_tags: HashSet<IStr>,
-    pub exprs: Vec<Expr>,
+    pub exprs: Vec<(Expr, SimpleSpan)>,
 }
 
 impl FileAst {
@@ -236,7 +236,7 @@ impl FileAst {
         &self.private_tags
     }
 
-    pub fn top_level_exprs(&self) -> &[Expr] {
+    pub fn top_level_exprs(&self) -> &[(Expr, SimpleSpan)] {
         &self.exprs
     }
 }

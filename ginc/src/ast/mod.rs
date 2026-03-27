@@ -42,7 +42,7 @@ where
         method_parser.map(TopLevelValue::Bind),
         bind(expr_parser.clone()).map(TopLevelValue::Bind),
         declare(expr_parser.clone()).map(TopLevelValue::Tag),
-        expr_parser.map(TopLevelValue::Expr),
+        expr_parser.map_with(|e, extra| TopLevelValue::Expr(e, extra.span())),
     ))
     .padded_by(just(Newline).repeated());
 
@@ -86,7 +86,7 @@ where
                                 private_defs.insert(mangled);
                             }
                         }
-                        TopLevelValue::Expr(_) => {}
+                        TopLevelValue::Expr(..) => {}
                     }
                     collect_top_level(el, &mut tags, &mut defs, &mut exprs);
                 }
@@ -110,14 +110,14 @@ enum TopLevelValue {
     Tag(Declare),
     Bind(Bind),
     ImplBlock(ImplBlock),
-    Expr(Expr),
+    Expr(Expr, SimpleSpan),
 }
 
 fn collect_top_level(
     el: TopLevelValue,
     tags: &mut TagMap,
     defs: &mut DefMap,
-    exprs: &mut Vec<Expr>,
+    exprs: &mut Vec<(Expr, SimpleSpan)>,
 ) {
     match el {
         TopLevelValue::Tag(decl) => {
@@ -133,7 +133,7 @@ fn collect_top_level(
             defs.insert(name, bind);
         }
         TopLevelValue::ImplBlock(block) => {
-            let recv_tag = Tag::Nominal(block.type_name);
+            let recv_tag = Tag::Nominal(block.type_name, block.type_name_span);
             for (method_name, bind) in block.methods {
                 let bind = bind.with_receiver_type(Some(recv_tag.clone()));
                 let mangled =
@@ -141,8 +141,8 @@ fn collect_top_level(
                 defs.insert(mangled, bind);
             }
         }
-        TopLevelValue::Expr(expr) => {
-            exprs.push(expr);
+        TopLevelValue::Expr(expr, span) => {
+            exprs.push((expr, span));
         }
     }
 }
@@ -182,13 +182,12 @@ fn generate_return_type_unions(
             continue;
         }
 
-        // Deduplicate tag names
+        // Deduplicate tag names (keep one span per name)
         let unique_tags: HashSet<_> = tag_names.into_iter().collect();
 
-        // Create variants from the unique tag names
         let variants: Vec<Variant> = unique_tags
             .into_iter()
-            .map(|name| Variant::External(Tag::Nominal(name)))
+            .map(|(name, span)| Variant::External(Tag::Nominal(name, span)))
             .collect();
 
         // Only create a named union declaration if return_type_name is provided
@@ -203,7 +202,7 @@ fn generate_return_type_unions(
 }
 
 /// Extract all anonymous tag names from a bind's return value.
-fn extract_anonymous_tags_from_bind(bind: &crate::ast::expr::Bind) -> Vec<IStr> {
+fn extract_anonymous_tags_from_bind(bind: &crate::ast::expr::Bind) -> Vec<(IStr, SimpleSpan)> {
     use crate::ast::expr::BindValue;
 
     let mut tags = Vec::new();
@@ -227,12 +226,12 @@ fn extract_anonymous_tags_from_bind(bind: &crate::ast::expr::Bind) -> Vec<IStr> 
 }
 
 /// Recursively extract anonymous tag names from an expression.
-fn extract_anonymous_tags_from_expr(expr: &crate::ast::expr::Expr, tags: &mut Vec<IStr>) {
+fn extract_anonymous_tags_from_expr(expr: &crate::ast::expr::Expr, tags: &mut Vec<(IStr, SimpleSpan)>) {
     use crate::ast::expr::Expr::*;
 
     match expr {
-        AnonymousTag(name) => {
-            tags.push(*name);
+        AnonymousTag(name, span) => {
+            tags.push((*name, *span));
         }
         FnCall(call) => {
             if let Some(args) = &call.args {

@@ -1,5 +1,5 @@
 use crate::prelude::*;
-use chumsky::{input::ValueInput, prelude::*};
+use chumsky::{input::ValueInput, prelude::*, span::SimpleSpan};
 use std::path::PathBuf;
 
 /// `use` can include several different modules seperated by a `,`
@@ -24,7 +24,7 @@ pub enum ImportSource {
     /// Top level name defined in `flask.json` ex. `use http.*`
     Package(ModPath),
     /// Path to a module on disk ex. `use '../http' as http`
-    Local(PathBuf),
+    Local(PathBuf, SimpleSpan),
 }
 
 /// An import is structured like the following:
@@ -49,7 +49,7 @@ impl ModuleImport {
                 .last()
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| path.root.to_string()),
-            ImportSource::Local(path) => path
+            ImportSource::Local(path, _) => path
                 .file_name()
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
@@ -66,7 +66,8 @@ where
     let id = id_token();
 
     let source = choice((
-        select! { Token::String(s) => ImportSource::Local(PathBuf::from(s)) },
+        select! { Token::String(s) => PathBuf::from(s) }
+            .map_with(|path, e| ImportSource::Local(path, e.span())),
         path().map(ImportSource::Package),
     ));
 

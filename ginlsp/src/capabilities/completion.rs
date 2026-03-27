@@ -1,5 +1,5 @@
 use crate::util::{format_params, is_identifier_char};
-use ginc::{FileAst, ast::Tag, typeck::TyEnv};
+use ginc::{FileAst, ast::Tag, prelude::SimpleSpan, typeck::TyEnv};
 use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, Documentation, MarkupContent, MarkupKind, Position, Url,
 };
@@ -278,7 +278,7 @@ pub fn dot_completions(
     let ident_str = IStr::new(identifier.clone());
 
     // First, try to resolve as a direct type tag (e.g., `Maybe.`, `Bool.`)
-    let initial_ty = ty_env.resolve_tag(&Tag::Nominal(ident_str));
+    let initial_ty = ty_env.resolve_tag(&Tag::Nominal(ident_str, SimpleSpan::from(0..0)));
 
     // If the type is the default (Int(64) for unknown), check if it's a known tag first
     // (e.g., Bool is a union declaration, not a variable binding)
@@ -293,7 +293,7 @@ pub fn dot_completions(
                         let mut variant_vec = Vec::new();
                         for variant in variants {
                             let tag = variant.tag();
-                            if let ginc::ast::Tag::Generic(_, params) = tag {
+                            if let ginc::ast::Tag::Generic(_, params, _) = tag {
                                 let mut fields = Vec::new();
                                 for (name, kind) in params {
                                     use ginc::ast::ParameterKind;
@@ -357,7 +357,7 @@ pub fn dot_completions(
                 if let Some(bind) = found_bind {
                     // Get the type annotation from the binding
                     if let Some((type_name, _)) = &bind.type_annotation {
-                        let type_tag = Tag::Nominal(*type_name);
+                        let type_tag = Tag::Nominal(*type_name, SimpleSpan::from(0..1));
                         ty_env.resolve_tag(&type_tag)
                     } else {
                         return None;

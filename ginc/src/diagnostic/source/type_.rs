@@ -24,6 +24,9 @@ pub enum TypeSymptom {
         index: i64,
         size: usize,
     },
+    UnusedBinding {
+        name: String,
+    },
 }
 
 impl SymptomDetail for TypeSymptom {
@@ -36,6 +39,7 @@ impl SymptomDetail for TypeSymptom {
             TypeSymptom::UnresolvedTypeParam { .. } => 5,
             TypeSymptom::ArityMismatch { .. } => 6,
             TypeSymptom::IndexOutOfBounds { .. } => 7,
+            TypeSymptom::UnusedBinding { .. } => 8,
         }
     }
 
@@ -64,6 +68,7 @@ impl SymptomDetail for TypeSymptom {
             TypeSymptom::IndexOutOfBounds { index, size } => {
                 format!("index out of bounds: the len is {size} but the index is {index}")
             }
+            TypeSymptom::UnusedBinding { name } => format!("unused binding `{name}`"),
         }
     }
 
@@ -86,6 +91,7 @@ impl SymptomDetail for TypeSymptom {
             TypeSymptom::IndexOutOfBounds { size, .. } => {
                 Some(format!("valid indices are 0..{}", size))
             }
+            TypeSymptom::UnusedBinding { .. } => None,
         }
     }
 }
@@ -156,5 +162,13 @@ pub fn index_out_of_bounds(span: SimpleSpan, index: i64, size: usize) -> Symptom
         source: SymptomSource::Type(TypeSymptom::IndexOutOfBounds { index, size }),
         span,
         category: Category::Flaw,
+    }
+}
+
+pub fn unused_binding(span: SimpleSpan, name: String) -> Symptom {
+    Symptom {
+        source: SymptomSource::Type(TypeSymptom::UnusedBinding { name }),
+        span,
+        category: Category::Help,
     }
 }

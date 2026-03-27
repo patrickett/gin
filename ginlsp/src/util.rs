@@ -2,6 +2,22 @@ use ginc::ast::ParameterKind;
 use ropey::Rope;
 use tower_lsp::lsp_types::Position;
 
+pub fn is_in_comment(source: &str, position: Position) -> bool {
+    let rope = Rope::from_str(source);
+    let Ok(line_start) = rope.try_line_to_char(position.line as usize) else {
+        return false;
+    };
+    let col = position.character as usize;
+    let line_end = line_start + col;
+    let Ok(byte_end) = rope.try_char_to_byte(line_end.min(rope.len_chars())) else {
+        return false;
+    };
+    let Ok(byte_start) = rope.try_char_to_byte(line_start) else {
+        return false;
+    };
+    source[byte_start..byte_end].contains("--")
+}
+
 pub fn get_word_at_position(source: &str, position: Position) -> Option<String> {
     let rope = Rope::from_str(source);
     let line = rope.try_line_to_char(position.line as usize).ok()?;

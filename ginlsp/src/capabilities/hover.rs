@@ -218,10 +218,10 @@ fn infer_type_from_bind_with_ast(bind: &Bind, ast: &ginc::ast::FileAst) -> Optio
                             } else {
                                 // Map variant param names → TagCall arg index
                                 let variant_param_order: Vec<&str> = match tag {
-                                    Tag::Generic(_, vparams) => {
+                                    Tag::Generic(_, vparams, _) => {
                                         vparams.keys().map(|k| k.as_str()).collect()
                                     }
-                                    Tag::Nominal(_) => vec![],
+                                    Tag::Nominal(_, _) => vec![],
                                     Tag::Qualified(_) => vec![],
                                 };
                                 let args: Vec<String> = union_params

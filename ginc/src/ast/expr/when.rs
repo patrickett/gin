@@ -354,7 +354,7 @@ fn lower_pattern_when<'c>(
                 let blk_ref = then_region.first_block().unwrap();
                 let mut inner_symtab = symtab.clone();
 
-                if let Tag::Generic(_, params) = pattern {
+                if let Tag::Generic(_, params, _) = pattern {
                     let payload_fields = ctx
                         .ty_env
                         .lookup_variant(variant_name)

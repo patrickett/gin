@@ -312,8 +312,8 @@ fn extract_param_kind(kind: &ParameterKind) -> ParamKindSig {
 
 fn extract_tag_sig(tag: &Tag) -> TagSig {
     match tag {
-        Tag::Nominal(name) => TagSig::Nominal(name.to_string()),
-        Tag::Generic(name, parameters) => {
+        Tag::Nominal(name, _) => TagSig::Nominal(name.to_string()),
+        Tag::Generic(name, parameters, _) => {
             let mut pairs: Vec<_> = parameters
                 .iter()
                 .map(|(n, k)| (n.to_string(), extract_param_kind(k)))
@@ -430,10 +430,10 @@ pub fn apply_bump(version: &str, bump: SemverBump) -> Option<String> {
 /// Hash a Tag type structurally.
 fn hash_tag(hasher: &mut Sha256, tag: &Tag) {
     match tag {
-        Tag::Nominal(name) => {
+        Tag::Nominal(name, _) => {
             let _ = write!(hasher, "N:{}", name);
         }
-        Tag::Generic(name, parameters) => {
+        Tag::Generic(name, parameters, _) => {
             let _ = write!(hasher, "G:{}(", name);
             for (param_name, kind) in parameters {
                 let _ = write!(hasher, "{param_name}:");

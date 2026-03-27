@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use chumsky::span::SimpleSpan;
+
 use crate::intern::IStr;
 
 /// Represents a narrowed type constraint on a variable.
@@ -201,6 +203,8 @@ pub struct ImpossibleCheck {
 pub struct IndexOutOfBounds {
     /// The expression index where the out-of-bounds access occurs.
     pub expr_index: usize,
+    /// The source span of the buffer access expression.
+    pub span: SimpleSpan,
     /// The index value being accessed.
     pub index: i64,
     /// The size of the buffer.

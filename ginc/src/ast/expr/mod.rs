@@ -42,7 +42,7 @@ pub enum Expr {
     /// A capitalized variant constructor with arguments, e.g. `Some(5)`.
     TagCall(TagCall),
     /// A bare capitalized tag in expression position, e.g. `None`, `True`.
-    AnonymousTag(IStr),
+    AnonymousTag(IStr, SimpleSpan),
     /// Stack-allocate an array: `(init_expr; N)` — emits `llvm.alloca N×sizeof(elem)`.
     TupleAlloc { init: Box<Expr>, size: usize },
     /// Positional element read: `arr.N` — emits GEP + load.
@@ -52,9 +52,9 @@ pub enum Expr {
     /// Explicit numeric cast: `expr as Type` — emits trunci/extsi/sitofp/fptosi.
     Cast { expr: Box<Expr>, ty: IStr },
     /// Dynamic buffer element read: `buf.(i)` — emits GEP(i * elem_bytes) + load.
-    BufGet { buf: Box<Expr>, index: Box<Expr> },
+    BufGet { buf: Box<Expr>, index: Box<Expr>, span: SimpleSpan },
     /// Dynamic buffer element write: `buf.(i): val` — emits GEP(i * elem_bytes) + store.
-    BufSet { buf: Box<Expr>, index: Box<Expr>, value: Box<Expr> },
+    BufSet { buf: Box<Expr>, index: Box<Expr>, value: Box<Expr>, span: SimpleSpan },
     /// Take a raw pointer to a value: `@expr` — emits alloca + spill if needed, returns `!llvm.ptr`.
     TakePtr(Box<Expr>),
     /// Take a reference to a value: `^expr` — same layout as TakePtr for now.
@@ -132,9 +132,10 @@ where
                 .ignore_then(just(Token::ParenOpen))
                 .ignore_then(expr.clone())
                 .then_ignore(just(Token::ParenClose)),
-            |base: Expr, index: Expr, _| Expr::BufGet {
+            |base: Expr, index: Expr, extra| Expr::BufGet {
                 buf: Box::new(base),
                 index: Box::new(index),
+                span: extra.span(),
             },
         );
 
@@ -171,13 +172,14 @@ where
         )
         .then_ignore(just(Token::Colon))
         .then(expr.clone())
-        .map(|((name, index), value)| Expr::BufSet {
+        .map_with(|((name, index), value), e| Expr::BufSet {
             buf: Box::new(Expr::FnCall(FnCall {
-                path: ModPath::new(name, vec![]),
+                path: ModPath::new(name, vec![], e.span()),
                 args: None,
             })),
             index: Box::new(index),
             value: Box::new(value),
+            span: e.span(),
         })
         .boxed();
 
@@ -187,9 +189,9 @@ where
         .then(select! { Token::Int(n) => n as usize })
         .then_ignore(just(Token::Colon))
         .then(expr.clone())
-        .map(|((name, idx), val)| Expr::TupleSet {
+        .map_with(|((name, idx), val), e| Expr::TupleSet {
             base: Box::new(Expr::FnCall(FnCall {
-                path: ModPath::new(name, vec![]),
+                path: ModPath::new(name, vec![], e.span()),
                 args: None,
             })),
             index: idx,
@@ -274,10 +276,10 @@ where
                     )
                     .or_not(),
             )
-            .map(|(_, access)| match access {
+            .map_with(|(_, access), e| match access {
                 None => Expr::SelfRef,
                 Some((field, args)) => Expr::FnCall(FnCall {
-                    path: ModPath::new(IStr::new("self".to_string()), vec![field]),
+                    path: ModPath::new(IStr::new("self".to_string()), vec![field], e.span()),
                     args,
                 }),
             })
@@ -287,6 +289,8 @@ where
         // TagCall must come before AnonymousTag: `Some(5)` → TagCall, bare `None` → AnonymousTag.
         tag_call(expr.clone()).map(Expr::TagCall).boxed(),
         // Bare capitalized tag with no args (e.g. `None`, `True`, `False`).
-        select! { Token::Tag(name) => Expr::AnonymousTag(IStr::new(name.to_string())) }.boxed(),
+        select! { Token::Tag(name) => IStr::new(name.to_string()) }
+            .map_with(|name, e| Expr::AnonymousTag(name, e.span()))
+            .boxed(),
     ))
 }

@@ -10,7 +10,7 @@ use crate::diagnostic::{Category, Symptom, SymptomSource};
 use crate::lexer::{GinLexer, Token};
 use chumsky::error::Rich;
 use chumsky::span::SimpleSpan;
-use chumsky::{Parser, input::Stream};
+use chumsky::{Parser, input::{Stream, Input}};
 use salsa::Accumulator;
 use std::path::Path;
 
@@ -33,7 +33,12 @@ pub fn parse_from_str(src: &str) -> FileAst {
         .by_ref()
         .filter(|(t, _)| !matches!(t, Token::Comment(_)))
         .collect();
-    let token_stream = Stream::from_iter(tokens.iter().map(|(t, _s)| *t));
+    let eoi_span = tokens
+        .last()
+        .map(|(_, s)| SimpleSpan::from(s.end..s.end))
+        .unwrap_or_else(|| SimpleSpan::from(src.len()..src.len()));
+    let token_stream = Stream::from_iter(tokens.iter().map(|(t, s)| (*t, *s)))
+        .map(eoi_span, |(t, s)| (t, s));
     let parser = token_parser();
     let (maybe_ast, _) = parser.parse(token_stream).into_output_errors();
     maybe_ast.unwrap_or_default()
@@ -86,19 +91,6 @@ fn accumulate_diagnostics(db: &dyn Db, parsed: &ParseResult) {
     }
 }
 
-/// Map a chumsky synthetic span (token indices) to real byte offsets.
-///
-/// Chumsky's `Stream::from_iter` assigns each token index 0, 1, 2, etc.
-/// The `real_spans` table maps token index → the actual byte span from logos.
-fn resolve_span(synth: &SimpleSpan, real_spans: &[SimpleSpan]) -> SimpleSpan {
-    let start_idx = synth.start;
-    let end_idx = synth.end.saturating_sub(1); // chumsky end is exclusive
-
-    let start = real_spans.get(start_idx).map_or(0, |s| s.start);
-    let end = real_spans.get(end_idx).map_or(start, |s| s.end);
-
-    SimpleSpan::from(start..end)
-}
 
 /// Format a chumsky Rich error into an owned string.
 fn format_rich_error(err: &Rich<'_, Token<'_>>) -> String {
@@ -134,10 +126,12 @@ fn parse_ast_internal(db: &dyn Db, file: File) -> ParseResult {
         .collect();
     let lex_errors = lexer.errors;
 
-    // Convert to chumsky stream - extract just the token
-    // Chumsky will create synthetic spans based on token index (0, 1, 2, ...)
-    // TODO: fix synthetic spans make them real
-    let token_stream = Stream::from_iter(tokens.iter().map(|(t, _s)| *t));
+    let eoi_span = tokens
+        .last()
+        .map(|(_, s)| SimpleSpan::from(s.end..s.end))
+        .unwrap_or_else(|| SimpleSpan::from(src.len()..src.len()));
+    let token_stream = Stream::from_iter(tokens.iter().map(|(t, s)| (*t, *s)))
+        .map(eoi_span, |(t, s)| (t, s));
 
     let parser = token_parser();
     let result = parser.parse(token_stream);
@@ -149,7 +143,6 @@ fn parse_ast_internal(db: &dyn Db, file: File) -> ParseResult {
     let unused_values = collect_unused_values(&ast);
 
     // early return if no errors
-    // spans are only needed for error reporting, so we can avoid the overhead
     if errors.is_empty() {
         return ParseResult {
             ast,
@@ -167,14 +160,11 @@ fn parse_ast_internal(db: &dyn Db, file: File) -> ParseResult {
         .map(|(_, s)| *s)
         .collect();
 
-    let real_spans: Vec<_> = tokens.iter().map(|(_, s)| *s).collect();
-
     let parse_errors: Vec<(String, SimpleSpan)> = errors
         .iter()
         .map(|err| {
-            let real_span = resolve_span(err.span(), &real_spans);
             let msg = format_rich_error(err);
-            (msg, real_span)
+            (msg, *err.span())
         })
         .collect();
 
@@ -208,7 +198,7 @@ fn extract_import_files(db: &dyn Db, ast: &FileAst, current_file: File) -> Vec<F
                     // Package imports are resolved by flask.json at native build time
                     // via load_entry_with_deps — not by the salsa pipeline.
                 }
-                ImportSource::Local(path) => {
+                ImportSource::Local(path, span) => {
                     let folder = current_dir.join(path);
                     // TODO: PERF can we mmap files directly instead of individual read_dirs
                     match std::fs::read_dir(&folder) {
@@ -219,17 +209,14 @@ fn extract_import_files(db: &dyn Db, ast: &FileAst, current_file: File) -> Vec<F
                                     match db.input(p) {
                                         Ok(f) => files.push(f),
                                         Err(_) => {
-                                            // TODO: pass real import span once imports carry span info
-                                            io_symptom::resolution_failed(SimpleSpan::from(0..0))
-                                                .accumulate(db);
+                                            io_symptom::resolution_failed(*span).accumulate(db);
                                         }
                                     }
                                 }
                             }
                         }
                         Err(_) => {
-                            // TODO: pass real import span once imports carry span info
-                            io_symptom::resolution_failed(SimpleSpan::from(0..0)).accumulate(db);
+                            io_symptom::resolution_failed(*span).accumulate(db);
                         }
                     }
                 }
@@ -265,7 +252,7 @@ fn scan_expr(expr: &Expr, hints: &mut Vec<(String, SimpleSpan)>) {
         Expr::FnCall(call) => {
             if let Some(args) = &call.args {
                 if args.is_empty() {
-                    hints.push((fmt_call_without_parens(call), SimpleSpan::from(0..0)));
+                    hints.push((fmt_call_without_parens(call), call.path.span));
                 }
                 for arg in args {
                     scan_expr(arg, hints);
@@ -328,26 +315,24 @@ fn fmt_call_without_parens(call: &FnCall) -> String {
 fn collect_unused_values(ast: &FileAst) -> Vec<(String, SimpleSpan)> {
     let mut unused = Vec::new();
 
-    for expr in ast.top_level_exprs() {
-        // Format the expression for display
-        let value_str = match expr {
-            Expr::Lit(lit) => format!("{lit:?}"),
-            Expr::Binary(_b) => "binary expression".to_string(),
+    for (expr, expr_span) in ast.top_level_exprs() {
+        let (value_str, span) = match expr {
+            Expr::Lit(lit) => (format!("{lit:?}"), *expr_span),
+            Expr::Binary(_b) => ("binary expression".to_string(), *expr_span),
             Expr::FnCall(call) => {
-                if call.path.segments.is_empty() {
+                let name = if call.path.segments.is_empty() {
                     call.path.root.as_str().to_string()
                 } else {
                     let segs: Vec<&str> = call.path.segments.iter().map(|s| s.as_str()).collect();
                     format!("{}.{}", call.path.root.as_str(), segs.join("."))
-                }
+                };
+                (name, call.path.span)
             }
-            Expr::AnonymousTag(tag) => tag.as_str().to_string(),
-            _ => "expression".to_string(),
+            Expr::AnonymousTag(tag, span) => (tag.as_str().to_string(), *span),
+            _ => ("expression".to_string(), *expr_span),
         };
 
-        // Use 0..0 as span since we don't have real span info for top-level exprs
-        // TODO: track real spans for top-level expressions
-        unused.push((value_str, SimpleSpan::from(0..0)));
+        unused.push((value_str, span));
     }
 
     unused

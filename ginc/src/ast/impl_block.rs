@@ -1,10 +1,12 @@
 use crate::prelude::*;
+use chumsky::span::SimpleSpan;
 use std::hash::{Hash, Hasher};
 
 /// A trait implementation block: `Args.Iterator (next: ...)`
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImplBlock {
     pub type_name: IStr,
+    pub type_name_span: SimpleSpan,
     pub trait_name: IStr,
     pub methods: DefMap,
 }
@@ -39,8 +41,9 @@ where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
     let tag_name = select! { Token::Tag(name) => IStr::new(name.to_string()) };
+    let tag_name_with_span = tag_name.map_with(|name, e| (name, e.span()));
 
-    let header = tag_name.then_ignore(just(Token::Dot)).then(tag_name);
+    let header = tag_name_with_span.then_ignore(just(Token::Dot)).then(tag_name);
 
     let body = bind(expr.clone()).padded_by(just(Token::Newline).repeated());
 
@@ -54,10 +57,11 @@ where
 
     header
         .then(methods)
-        .map(|((type_name, trait_name), binds)| {
+        .map(|(((type_name, type_name_span), trait_name), binds)| {
             let methods = binds.into_iter().map(|b| (b.name(), b)).collect();
             ImplBlock {
                 type_name,
+                type_name_span,
                 trait_name,
                 methods,
             }

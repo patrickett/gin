@@ -256,7 +256,7 @@ Maybe(thing) is
                 } => {
                     assert_eq!(doc.0, "has a value");
                     match tag {
-                        ginc::ast::Tag::Generic(name, params) => {
+                        ginc::ast::Tag::Generic(name, params, _) => {
                             assert_eq!(name.as_str(), "Some");
                             assert_eq!(params.len(), 1);
                         }
@@ -269,7 +269,7 @@ Maybe(thing) is
             // Second variant: None without doc comment
             match &variants[1] {
                 ginc::ast::Variant::External(tag) => match tag {
-                    ginc::ast::Tag::Nominal(name) => {
+                    ginc::ast::Tag::Nominal(name, _) => {
                         assert_eq!(name.as_str(), "None");
                     }
                     _ => panic!("Expected Nominal tag for None"),
@@ -306,7 +306,7 @@ fn test_parse_local_import() {
     assert_eq!(ast.tags().len(), 0);
 
     let module = &ast.uses()[0].0[0];
-    assert!(matches!(&module.source, ginc::ast::ImportSource::Local(_)));
+    assert!(matches!(&module.source, ginc::ast::ImportSource::Local(_, _)));
     assert_eq!(module.alias.as_deref().map(String::as_str), Some("math"));
     assert_eq!(module.effective_name(), "math");
 }
@@ -317,7 +317,7 @@ fn test_parse_local_import_no_alias() {
 
     assert_eq!(ast.uses().len(), 1);
     let module = &ast.uses()[0].0[0];
-    assert!(matches!(&module.source, ginc::ast::ImportSource::Local(_)));
+    assert!(matches!(&module.source, ginc::ast::ImportSource::Local(_, _)));
     assert!(module.alias.is_none());
     assert_eq!(module.effective_name(), "util");
 }
@@ -562,7 +562,7 @@ Maybe(thing) is
                     assert_eq!(doc.0, "has a value");
                     // Verify tag is Some(thing)
                     match tag {
-                        ginc::ast::Tag::Generic(name, params) => {
+                        ginc::ast::Tag::Generic(name, params, _) => {
                             assert_eq!(name.as_str(), "Some");
                             assert_eq!(params.len(), 1);
                         }
@@ -585,7 +585,7 @@ Maybe(thing) is
                     assert_eq!(doc.0, "has no value");
                     // Verify tag is None
                     match tag {
-                        ginc::ast::Tag::Nominal(name) => {
+                        ginc::ast::Tag::Nominal(name, _) => {
                             assert_eq!(name.as_str(), "None");
                         }
                         _ => panic!("Expected Nominal tag for None"),
@@ -920,7 +920,7 @@ fn test_parse_anonymous_tag_in_return() {
             // Check that the return expression is an AnonymousTag
             assert!(ret.0.is_some(), "should have a return value");
             match ret.0.as_ref().unwrap().as_ref() {
-                ginc::ast::Expr::AnonymousTag(tag_name) => {
+                ginc::ast::Expr::AnonymousTag(tag_name, _) => {
                     assert_eq!(tag_name.as_str(), "PrintSuccess");
                 }
                 other => panic!("Expected AnonymousTag, got: {:?}", other),
@@ -950,7 +950,7 @@ fn test_parse_anonymous_tag_no_variants() {
 
     match bind.value() {
         ginc::ast::BindValue::Body { ret, .. } => match ret.0.as_ref().unwrap().as_ref() {
-            ginc::ast::Expr::AnonymousTag(tag_name) => {
+            ginc::ast::Expr::AnonymousTag(tag_name, _) => {
                 assert_eq!(tag_name.as_str(), "Unit");
             }
             other => panic!("Expected AnonymousTag, got: {:?}", other),
@@ -1233,7 +1233,7 @@ return x
     assert_eq!(ast.top_level_exprs().len(), 1);
 
     // The top-level expression should be a binary operation (1 + 1), not a function call
-    match &ast.top_level_exprs()[0] {
+    match &ast.top_level_exprs()[0].0 {
         ginc::ast::Expr::Binary(_) => {
             // Good! This is (1 + 1) as a standalone expression
         }
@@ -1244,7 +1244,7 @@ return x
             );
         }
         _ => {
-            panic!("Unexpected expression type: {:?}", ast.top_level_exprs()[0]);
+            panic!("Unexpected expression type: {:?}", ast.top_level_exprs()[0].0);
         }
     }
 }

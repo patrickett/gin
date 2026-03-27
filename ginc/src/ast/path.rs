@@ -13,12 +13,14 @@ pub struct ModPath {
     /// NOTE: If there is a name conflict it will error.
     pub root: IStr,
     pub segments: Vec<IStr>,
+    /// Source location for diagnostic reporting.
+    pub span: SimpleSpan,
 }
 
 impl ModPath {
     /// Construct a new `ModPath` from an owned root and segment list.
-    pub fn new(root: IStr, segments: Vec<IStr>) -> Self {
-        Self { root, segments }
+    pub fn new(root: IStr, segments: Vec<IStr>, span: SimpleSpan) -> Self {
+        Self { root, segments, span }
     }
 }
 
@@ -36,7 +38,7 @@ where
                 .repeated()
                 .collect::<Vec<IStr>>(),
         )
-        .map(|(root, segs)| ModPath::new(root, segs))
+        .map_with(|(root, segs), e| ModPath::new(root, segs, e.span()))
 }
 
 /// Parser that consumes a Tag-rooted dotted path (e.g. `Byte.new`, `Int.to_string`).
@@ -55,7 +57,7 @@ where
                 .at_least(1)
                 .collect::<Vec<IStr>>(),
         )
-        .map(|(root, segs)| ModPath::new(root, segs))
+        .map_with(|(root, segs), e| ModPath::new(root, segs, e.span()))
 }
 
 /// Parser for qualified variant constructor paths (e.g. `Maybe.Some`, `Result.Ok`).
@@ -73,5 +75,5 @@ where
                 .at_least(1)
                 .collect::<Vec<IStr>>(),
         )
-        .map(|(root, segs)| ModPath::new(root, segs))
+        .map_with(|(root, segs), e| ModPath::new(root, segs, e.span()))
 }

@@ -5,7 +5,7 @@ pub use flow_analyzer::*;
 
 use std::collections::HashMap;
 
-use crate::ast::{Bind, BindValue, DeclareValue, Expr, FileAst, Literal, ParameterKind, Tag};
+use crate::ast::{Bind, BindValue, DeclareValue, Expr, FileAst, FormatPart, IfCondition, Literal, Loop, ParameterKind, Tag};
 use crate::prelude::BinOp;
 use crate::intern::IStr;
 use crate::prelude::WhenArm;
@@ -349,8 +349,8 @@ fn range_bit_width(min: i64, max: i64) -> u8 {
 
 fn resolve_tag_ref(tag: &Tag, raw: &HashMap<IStr, &DeclareValue>, depth: u8) -> Ty {
     match tag {
-        Tag::Nominal(name) => resolve_name(*name, raw, depth),
-        Tag::Generic(name, params) => match name.as_str() {
+        Tag::Nominal(name, _) => resolve_name(*name, raw, depth),
+        Tag::Generic(name, params, _) => match name.as_str() {
             "Ptr" | "Ref" => {
                 let inner = params
                     .values()
@@ -408,7 +408,7 @@ fn resolve_name(name: IStr, raw: &HashMap<IStr, &DeclareValue>, depth: u8) -> Ty
                     let tag = v.tag();
                     let variant_name = IStr::new(tag.name().to_string());
                     let fields = match tag {
-                        Tag::Generic(_, params) if !params.is_empty() => params
+                        Tag::Generic(_, params, _) if !params.is_empty() => params
                             .iter()
                             .filter_map(|(field_name, kind)| match kind {
                                 ParameterKind::Tagged(inner) => Some((
@@ -439,10 +439,10 @@ fn resolve_name(name: IStr, raw: &HashMap<IStr, &DeclareValue>, depth: u8) -> Ty
 
 fn resolve_tag_from_map(tag: &Tag, tag_types: &HashMap<IStr, Ty>) -> Ty {
     match tag {
-        Tag::Nominal(name) => tag_types.get(name).cloned()
+        Tag::Nominal(name, _) => tag_types.get(name).cloned()
             .or_else(|| builtin(*name))
             .unwrap_or(Ty::Int(64)),
-        Tag::Generic(name, params) => match name.as_str() {
+        Tag::Generic(name, params, _) => match name.as_str() {
             "Ptr" | "Ref" => {
                 let inner = params
                     .values()
@@ -593,7 +593,7 @@ fn infer_expr_ty(
                 .cloned()
                 .unwrap_or(Ty::Opaque(tc.name))
         }
-        Expr::AnonymousTag(name) => builtin(*name)
+        Expr::AnonymousTag(name, _) => builtin(*name)
             .or_else(|| tag_types.get(name).cloned())
             .unwrap_or(Ty::Opaque(*name)),
         Expr::FormatString(_) => str_record_ty(),
@@ -681,4 +681,289 @@ fn infer_expr_ty(
             }
         }
     }
+}
+
+// ─── Unknown reference checking ──────────────────────────────────────────────
+
+impl TyEnv {
+    pub fn check_unknowns(&self, ast: &FileAst, db: &dyn crate::database::input_database::Db) {
+        for bind in ast.defs.values() {
+            let mut locals = std::collections::HashSet::new();
+            if let Some(params) = bind.params() {
+                for (name, _) in params.iter() {
+                    locals.insert(*name);
+                }
+            }
+            self.check_bind(bind, db, &locals);
+        }
+    }
+
+    fn check_bind(
+        &self,
+        bind: &Bind,
+        db: &dyn crate::database::input_database::Db,
+        locals: &std::collections::HashSet<IStr>,
+    ) {
+        if let Some(tag) = &bind.return_tag {
+            self.check_tag(tag, db);
+        }
+        match bind.value() {
+            BindValue::Expr(expr) => self.check_expr(expr, db, locals),
+            BindValue::Body { exprs, ret } => {
+                use crate::diagnostic::type_ as type_symptom;
+                use salsa::Accumulator;
+
+                let mut body_locals = locals.clone();
+                for (i, expr) in exprs.iter().enumerate() {
+                    if let Expr::Bind(inner) = expr {
+                        self.check_bind(inner, db, &body_locals);
+                        let name = inner.name();
+                        let used = exprs[i + 1..].iter().any(|e| expr_references_name(e, name))
+                            || ret.0.as_ref().is_some_and(|e| expr_references_name(e, name));
+                        if !used {
+                            type_symptom::unused_binding(inner.name_span, name.to_string())
+                                .accumulate(db);
+                        }
+                        body_locals.insert(name);
+                    } else {
+                        self.check_expr(expr, db, &body_locals);
+                    }
+                }
+                if let Some(ret_expr) = &ret.0 {
+                    self.check_expr(ret_expr, db, &body_locals);
+                }
+            }
+            BindValue::Extern => {}
+        }
+    }
+
+    fn check_expr(
+        &self,
+        expr: &Expr,
+        db: &dyn crate::database::input_database::Db,
+        locals: &std::collections::HashSet<IStr>,
+    ) {
+        use crate::diagnostic::type_ as type_symptom;
+        use salsa::Accumulator;
+
+        match expr {
+            Expr::FnCall(call) => {
+                let name = call.path.root;
+                if let Some(args) = &call.args {
+                    if self.fn_return_ty(&name).is_none() && !is_builtin_func(name.as_str()) {
+                        type_symptom::unknown(call.path.span).accumulate(db);
+                    }
+                    for arg in args {
+                        self.check_expr(arg, db, locals);
+                    }
+                } else if call.path.segments.is_empty()
+                    && !locals.contains(&name)
+                    && self.fn_return_ty(&name).is_none()
+                {
+                    type_symptom::unknown(call.path.span).accumulate(db);
+                }
+            }
+            Expr::Bind(bind) => self.check_bind(bind, db, locals),
+            Expr::Binary(bin) => {
+                self.check_expr(&bin.lhs, db, locals);
+                self.check_expr(&bin.rhs, db, locals);
+            }
+            Expr::When(w) => {
+                if let Some(subject) = &w.subject {
+                    self.check_expr(subject, db, locals);
+                }
+                for arm in &w.arms {
+                    match arm {
+                        WhenArm::Cond { condition, body } => {
+                            self.check_expr(condition, db, locals);
+                            self.check_expr(body, db, locals);
+                        }
+                        WhenArm::Is { body, .. } | WhenArm::Else(body) => {
+                            self.check_expr(body, db, locals);
+                        }
+                    }
+                }
+            }
+            Expr::If(if_expr) => match &if_expr.condition {
+                IfCondition::Bool(cond) => {
+                    self.check_expr(cond, db, locals);
+                    for e in &if_expr.body {
+                        self.check_expr(e, db, locals);
+                    }
+                }
+                IfCondition::Pattern { subject, tag } => {
+                    self.check_expr(subject, db, locals);
+                    let mut if_locals = locals.clone();
+                    if let Tag::Generic(_, params, _) = tag {
+                        if_locals.extend(
+                            params
+                                .iter()
+                                .filter_map(|(k, _)| (k.as_str() != "_").then_some(*k)),
+                        );
+                    }
+                    for e in &if_expr.body {
+                        self.check_expr(e, db, &if_locals);
+                    }
+                }
+            },
+            Expr::Loop(loop_expr) => match loop_expr {
+                Loop::While(w) => {
+                    self.check_expr(&w.cond, db, locals);
+                    for e in &w.exprs {
+                        self.check_expr(e, db, locals);
+                    }
+                }
+                Loop::ForIn(f) => {
+                    self.check_expr(&f.iter, db, locals);
+                    for e in &f.exprs {
+                        self.check_expr(e, db, locals);
+                    }
+                }
+            },
+            Expr::TupleLit(elems) => {
+                for e in elems {
+                    self.check_expr(e, db, locals);
+                }
+            }
+            Expr::TupleAlloc { init, .. } => self.check_expr(init, db, locals),
+            Expr::TupleGet { base, .. } => self.check_expr(base, db, locals),
+            Expr::TupleSet { base, value, .. } => {
+                self.check_expr(base, db, locals);
+                self.check_expr(value, db, locals);
+            }
+            Expr::BufGet { buf, index, .. } => {
+                self.check_expr(buf, db, locals);
+                self.check_expr(index, db, locals);
+            }
+            Expr::BufSet { buf, index, value, .. } => {
+                self.check_expr(buf, db, locals);
+                self.check_expr(index, db, locals);
+                self.check_expr(value, db, locals);
+            }
+            Expr::Cast { expr, .. } => self.check_expr(expr, db, locals),
+            Expr::TakePtr(e) | Expr::TakeRef(e) | Expr::Deref(e) | Expr::Negate(e) => {
+                self.check_expr(e, db, locals);
+            }
+            Expr::Lit(_)
+            | Expr::SelfRef
+            | Expr::Range(_)
+            | Expr::FormatString(_)
+            | Expr::AnonymousTag(..)
+            | Expr::TagCall(_) => {}
+        }
+    }
+
+    fn check_tag(&self, tag: &Tag, db: &dyn crate::database::input_database::Db) {
+        use crate::diagnostic::type_ as type_symptom;
+        use salsa::Accumulator;
+
+        match tag {
+            Tag::Nominal(name, span) => {
+                if self.lookup_tag(*name).is_none() && builtin(*name).is_none() {
+                    type_symptom::unknown(*span).accumulate(db);
+                }
+            }
+            Tag::Generic(name, params, span) => {
+                if self.lookup_tag(*name).is_none() && builtin(*name).is_none() {
+                    type_symptom::unknown(*span).accumulate(db);
+                }
+                for kind in params.values() {
+                    if let ParameterKind::Tagged(inner) = kind {
+                        self.check_tag(inner, db);
+                    }
+                }
+            }
+            Tag::Qualified(path) => {
+                if self.lookup_tag(path.root).is_none() && builtin(path.root).is_none() {
+                    type_symptom::unknown(path.span).accumulate(db);
+                }
+            }
+        }
+    }
+}
+
+fn expr_references_name(expr: &Expr, name: IStr) -> bool {
+    match expr {
+        Expr::FnCall(call) => {
+            (call.path.root == name && call.path.segments.is_empty())
+                || call
+                    .args
+                    .as_ref()
+                    .is_some_and(|args| args.iter().any(|a| expr_references_name(a, name)))
+        }
+        Expr::Bind(bind) => match bind.value() {
+            BindValue::Expr(e) => expr_references_name(e, name),
+            BindValue::Body { exprs, ret } => {
+                exprs.iter().any(|e| expr_references_name(e, name))
+                    || ret.0.as_ref().is_some_and(|e| expr_references_name(e, name))
+            }
+            BindValue::Extern => false,
+        },
+        Expr::Binary(bin) => {
+            expr_references_name(&bin.lhs, name) || expr_references_name(&bin.rhs, name)
+        }
+        Expr::When(w) => {
+            w.subject
+                .as_ref()
+                .is_some_and(|s| expr_references_name(s, name))
+                || w.arms.iter().any(|arm| match arm {
+                    WhenArm::Cond { condition, body } => {
+                        expr_references_name(condition, name) || expr_references_name(body, name)
+                    }
+                    WhenArm::Is { body, .. } | WhenArm::Else(body) => {
+                        expr_references_name(body, name)
+                    }
+                })
+        }
+        Expr::If(if_expr) => {
+            let cond_ref = match &if_expr.condition {
+                IfCondition::Bool(c) => expr_references_name(c, name),
+                IfCondition::Pattern { subject, .. } => expr_references_name(subject, name),
+            };
+            cond_ref || if_expr.body.iter().any(|e| expr_references_name(e, name))
+        }
+        Expr::Loop(loop_expr) => match loop_expr {
+            Loop::While(w) => {
+                expr_references_name(&w.cond, name)
+                    || w.exprs.iter().any(|e| expr_references_name(e, name))
+            }
+            Loop::ForIn(f) => {
+                expr_references_name(&f.iter, name)
+                    || f.exprs.iter().any(|e| expr_references_name(e, name))
+            }
+        },
+        Expr::TupleLit(elems) => elems.iter().any(|e| expr_references_name(e, name)),
+        Expr::TupleAlloc { init, .. } => expr_references_name(init, name),
+        Expr::TupleGet { base, .. } => expr_references_name(base, name),
+        Expr::TupleSet { base, value, .. } => {
+            expr_references_name(base, name) || expr_references_name(value, name)
+        }
+        Expr::BufGet { buf, index, .. } => {
+            expr_references_name(buf, name) || expr_references_name(index, name)
+        }
+        Expr::BufSet { buf, index, value, .. } => {
+            expr_references_name(buf, name)
+                || expr_references_name(index, name)
+                || expr_references_name(value, name)
+        }
+        Expr::Cast { expr, .. } => expr_references_name(expr, name),
+        Expr::TakePtr(e) | Expr::TakeRef(e) | Expr::Deref(e) | Expr::Negate(e) => {
+            expr_references_name(e, name)
+        }
+        Expr::FormatString(fs) => fs.parts.iter().any(|p| {
+            if let FormatPart::Expr(e) = p {
+                expr_references_name(e, name)
+            } else {
+                false
+            }
+        }),
+        Expr::Range(range) => {
+            expr_references_name(&range.start, name) || expr_references_name(&range.end, name)
+        }
+        Expr::Lit(_) | Expr::SelfRef | Expr::AnonymousTag(..) | Expr::TagCall(_) => false,
+    }
+}
+
+fn is_builtin_func(name: &str) -> bool {
+    matches!(name, "syscall" | "float_bits" | "print" | "println")
 }

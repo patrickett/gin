@@ -45,16 +45,16 @@ impl Hash for Variant {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Tag {
-    Nominal(IStr),
-    Generic(IStr, Parameters),
+    Nominal(IStr, SimpleSpan),
+    Generic(IStr, Parameters, SimpleSpan),
     Qualified(ModPath),
 }
 
 impl std::fmt::Display for Tag {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Tag::Nominal(name) => write!(f, "{}", name.as_str()),
-            Tag::Generic(name, params) => {
+            Tag::Nominal(name, _) => write!(f, "{}", name.as_str()),
+            Tag::Generic(name, params, _) => {
                 write!(f, "{}(", name.as_str())?;
                 let mut first = true;
                 for (k, v) in params {
@@ -80,9 +80,17 @@ impl std::fmt::Display for Tag {
 impl Tag {
     pub fn name(&self) -> &str {
         match self {
-            Tag::Nominal(name) => name.as_str(),
-            Tag::Generic(name, _) => name.as_str(),
+            Tag::Nominal(name, _) => name.as_str(),
+            Tag::Generic(name, _, _) => name.as_str(),
             Tag::Qualified(path) => path.segments.last().map(|s| s.as_str()).unwrap_or(path.root.as_str()),
+        }
+    }
+
+    pub fn span(&self) -> SimpleSpan {
+        match self {
+            Tag::Nominal(_, span) => *span,
+            Tag::Generic(_, _, span) => *span,
+            Tag::Qualified(path) => path.span,
         }
     }
 }
@@ -91,8 +99,8 @@ impl Hash for Tag {
     fn hash<H: Hasher>(&self, state: &mut H) {
         std::mem::discriminant(self).hash(state);
         match self {
-            Self::Nominal(name) => name.hash(state),
-            Self::Generic(name, params) => {
+            Self::Nominal(name, _) => name.hash(state),
+            Self::Generic(name, params, _) => {
                 name.hash(state);
                 for (k, v) in params {
                     k.hash(state);
@@ -117,14 +125,14 @@ where
         // Qualified type: Bool.True, Maybe.Some
         let qualified = super::tag_variant_path()
             .then(params(expr.clone(), tag.clone()).or_not())
-            .map(|(path, params)| {
+            .map_with(|(path, params), e| {
                 match params {
                     None => Tag::Qualified(path),
                     Some(parameters) if parameters.is_empty() => Tag::Qualified(path),
                     Some(parameters) => {
                         // For generics with qualified paths, use the last segment as the name
                         let name = path.segments.last().copied().unwrap_or(path.root);
-                        Tag::Generic(name, parameters)
+                        Tag::Generic(name, parameters, e.span())
                     }
                 }
             })
@@ -136,10 +144,10 @@ where
         // Parse nominal or generic tag
         let simple = tag_name
             .then(params(expr.clone(), tag.clone()).or_not())
-            .map(|(name, params)| match params {
-                None => Tag::Nominal(name),
-                Some(parameters) if parameters.is_empty() => Tag::Nominal(name),
-                Some(parameters) => Tag::Generic(name, parameters),
+            .map_with(|(name, params), e| match params {
+                None => Tag::Nominal(name, e.span()),
+                Some(parameters) if parameters.is_empty() => Tag::Nominal(name, e.span()),
+                Some(parameters) => Tag::Generic(name, parameters, e.span()),
             })
             .boxed();
 

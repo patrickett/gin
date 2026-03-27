@@ -11,14 +11,14 @@ use capabilities::{
     should_handle_file, use_completions, LEGEND_TYPE,
 };
 use dashmap::DashMap;
-use diagnostics::{flow_analysis_to_diagnostics, symptoms_to_diagnostics};
+use diagnostics::symptoms_to_diagnostics;
 use ginc::{ast::Tag, FileAst, typeck::TyEnv};
 use state::{DocumentState, GinHost, JsonDocumentState};
 use std::sync::{Arc, Mutex, RwLock};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
-use util::{get_char_at_position, get_number_at_position, get_word_at_position};
+use util::{get_char_at_position, get_number_at_position, get_word_at_position, is_in_comment};
 
 const INFO: MessageType = MessageType::INFO;
 
@@ -119,12 +119,7 @@ impl Backend {
             self.ast_cache
                 .insert(uri.to_string(), std::sync::Arc::new(ast));
         }
-        let mut diagnostics = symptoms_to_diagnostics(source, &symptoms[..]);
-
-        // Include flow analysis diagnostics
-        let flow_result = snapshot.flow_analysis(file);
-        let flow_diags = flow_analysis_to_diagnostics(&flow_result);
-        diagnostics.extend(flow_diags);
+        let diagnostics = symptoms_to_diagnostics(source, &symptoms[..]);
 
         self.client
             .publish_diagnostics(uri, diagnostics, None)
@@ -273,7 +268,7 @@ impl Backend {
                 let IfCondition::Pattern { subject, tag } = &if_expr.condition else {
                     return None;
                 };
-                let Tag::Generic(_, params) = tag else {
+                let Tag::Generic(_, params, _) = tag else {
                     return None;
                 };
                 let param_pos = params.keys().position(|k| k.as_str() == var_name)?;
@@ -316,7 +311,7 @@ impl Backend {
                 if vtag.name() != variant_name {
                     continue;
                 }
-                let Tag::Generic(_, variant_params) = vtag else {
+                let Tag::Generic(_, variant_params, _) = vtag else {
                     continue;
                 };
                 // The variant param at param_pos links to a union type param by the same name
@@ -340,6 +335,7 @@ impl Backend {
 
     /// Build a variant display string with literal args substituted from the bind's TagCall.
     /// e.g. val: Maybe.Some(3) with variant=Some → "Some(3)"
+    #[allow(dead_code)]
     fn variant_with_literal_args(
         bind: &ginc::ast::Bind,
         ast: &ginc::ast::FileAst,
@@ -367,8 +363,8 @@ impl Backend {
                 let tag = variant.tag();
                 if tag.name() == variant_name.as_str() {
                     return match tag {
-                        Tag::Nominal(_) => Some(variant_name.as_str().to_string()),
-                        Tag::Generic(_, vparams) => {
+                        Tag::Nominal(_, _) => Some(variant_name.as_str().to_string()),
+                        Tag::Generic(_, vparams, _) => {
                             let args: Vec<String> = vparams
                                 .keys()
                                 .enumerate()
@@ -827,9 +823,12 @@ impl LanguageServer for Backend {
         let position = params.text_document_position_params.position;
 
         if let Some(state) = self.documents.get(&uri.to_string()) {
+            if is_in_comment(&state.source, position) {
+                return Ok(None);
+            }
+
             let snapshot = self.snapshot();
             let ast = snapshot.parse(state.file);
-            let flow_result = snapshot.flow_analysis(state.file);
             // Arc avoids a deep clone on fallback to the last error-free AST.
             let ast = if ast.tags().is_empty() && ast.defs().is_empty() {
                 self.ast_cache
@@ -871,7 +870,7 @@ impl LanguageServer for Backend {
             }
 
             if let Some(word) = get_word_at_position(&state.source, position) {
-                let value = hover_for_word(&word, &state.source, position, &ast, &flow_result, &module);
+                let value = hover_for_word(&word, &state.source, position, &ast, &module);
                 return Ok(Some(Hover {
                     contents: HoverContents::Markup(MarkupContent {
                         kind: MarkupKind::Markdown,
@@ -1015,6 +1014,7 @@ fn is_in_tag_params(source: &str, cursor_byte: usize) -> bool {
     false
 }
 
+#[allow(dead_code)]
 /// Find the narrowed type for a variable based on control-flow analysis.
 pub(crate) fn find_narrowed_type_at_position(
     var_name: &str,
@@ -1074,7 +1074,6 @@ pub(crate) fn hover_for_word(
     source: &str,
     position: Position,
     ast: &ginc::ast::FileAst,
-    flow_result: &ginc::typeck::FlowAnalysis,
     module: &str,
 ) -> String {
     use ginc::ast::{BindValue, DeclareValue, ParameterKind, Variant};
@@ -1111,7 +1110,7 @@ pub(crate) fn hover_for_word(
 
     for (name, decl) in ast.tags() {
         if name.as_str() == word {
-            let ty = ty_env.resolve_tag(&Tag::Nominal(*name));
+            let ty = ty_env.resolve_tag(&Tag::Nominal(*name, ginc::prelude::SimpleSpan::from(0..0)));
             return build_declare_hover(module, decl, decl.doc_comment(), Some(&ty));
         }
     }
@@ -1129,15 +1128,14 @@ pub(crate) fn hover_for_word(
     for bind in ast.defs().values() {
         if let BindValue::Body { exprs, .. } = bind.value() {
             if let Some(local_bind) = Backend::find_local_bind_recursive(exprs, word) {
-                let narrowed_type = find_narrowed_type_at_position(word, position, source, flow_result, ast, Some(local_bind));
-                let narrowed_type = narrowed_type.or_else(|| {
-                    let e = match local_bind.value() {
+                let literal_type = Backend::eval_expr_to_literal(
+                    match local_bind.value() {
                         BindValue::Expr(e) => e.as_ref(),
-                        _ => return None,
-                    };
-                    Backend::eval_expr_to_literal(e, ast).map(|v| v.to_string())
-                });
-                return build_local_binding_hover_with_narrowing_and_ast(local_bind, narrowed_type.as_deref(), Some(ast));
+                        _ => return format!("```gin\n{word}\n```"),
+                    },
+                    ast
+                ).map(|v| v.to_string());
+                return build_local_binding_hover_with_narrowing_and_ast(local_bind, literal_type.as_deref(), Some(ast));
             }
         }
     }
@@ -1159,7 +1157,7 @@ pub(crate) fn hover_for_word(
                     if tag.name() == word {
                         // It's a type reference — look it up as a tag
                         if let Some(decl) = ast.tags().get(&ginc::intern::IStr::new(word.to_string())) {
-                            let ty = ty_env.resolve_tag(&Tag::Nominal(ginc::intern::IStr::new(word.to_string())));
+                            let ty = ty_env.resolve_tag(&Tag::Nominal(ginc::intern::IStr::new(word.to_string()), ginc::prelude::SimpleSpan::from(0..0)));
                             return build_declare_hover(module, decl, decl.doc_comment(), Some(&ty));
                         }
                         return format!("```gin\n{word}\n```");
@@ -1199,7 +1197,7 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ginc::{parse::parse_from_str, typeck::{FlowAnalyzer, TyEnv}};
+    use ginc::parse::parse_from_str;
 
     fn all_words_with_positions(source: &str) -> Vec<(String, Position)> {
         let mut out = Vec::new();
@@ -1226,14 +1224,10 @@ mod tests {
 
     fn assert_no_unknown_hover(source: &str) {
         let ast = parse_from_str(source);
-        let ty_env = TyEnv::from_file_ast(&ast);
-        let mut analyzer = FlowAnalyzer::new(&ty_env);
-        analyzer.analyze_file(&ast);
-        let flow_result = analyzer.into_result();
 
         let mut unknowns = Vec::new();
         for (word, position) in all_words_with_positions(source) {
-            let hover = hover_for_word(&word, source, position, &ast, &flow_result, "test");
+            let hover = hover_for_word(&word, source, position, &ast, "test");
             if hover.contains("error: unknown") {
                 unknowns.push(word);
             }

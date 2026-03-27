@@ -27,7 +27,6 @@ internment = "0.8"
 notify-debouncer-mini = "0.4.1"
 crossbeam-channel = { workspace = true }
 dirs = { workspace = true }
-rayon = { workspace = true }
 semver.workspace = true
 
 [dev-dependencies]

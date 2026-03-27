@@ -141,7 +141,7 @@ fn collect_fn_call_names(expr: &Expr, results: &mut Vec<(String, bool)>) {
             collect_fn_call_names(&range.start, results);
             collect_fn_call_names(&range.end, results);
         }
-        Expr::Lit(_) | Expr::SelfRef | Expr::AnonymousTag(_) => {}
+        Expr::Lit(_) | Expr::SelfRef | Expr::AnonymousTag(..) => {}
         Expr::TagCall(tc) => {
             for arg in &tc.args {
                 collect_fn_call_names(arg, results);
@@ -178,11 +178,11 @@ fn collect_fn_call_names(expr: &Expr, results: &mut Vec<(String, bool)>) {
             collect_fn_call_names(value, results);
         }
         Expr::Cast { expr, .. } => collect_fn_call_names(expr, results),
-        Expr::BufGet { buf, index } => {
+        Expr::BufGet { buf, index, .. } => {
             collect_fn_call_names(buf, results);
             collect_fn_call_names(index, results);
         }
-        Expr::BufSet { buf, index, value } => {
+        Expr::BufSet { buf, index, value, .. } => {
             collect_fn_call_names(buf, results);
             collect_fn_call_names(index, results);
             collect_fn_call_names(value, results);
@@ -244,7 +244,7 @@ pub fn build_semantic_tokens_from_ast(source: &str, ast: &FileAst) -> Vec<Semant
     }
 
     let mut call_names: Vec<(String, bool)> = Vec::new();
-    for expr in ast.top_level_exprs() {
+    for (expr, _) in ast.top_level_exprs() {
         collect_fn_call_names(expr, &mut call_names);
     }
     for bind in ast.defs().values() {

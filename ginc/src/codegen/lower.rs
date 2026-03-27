@@ -586,7 +586,7 @@ impl<'c> Lower<'c> for Expr {
                 .copied()
                 .ok_or_else(|| CodegenSymptom::Internal("self used outside method".to_string())),
             Expr::TagCall(tc) => tc.lower(ctx, block, symtab),
-            Expr::AnonymousTag(tag_name) => {
+            Expr::AnonymousTag(tag_name, _) => {
                 // Bare capitalized tag — treat as a unit variant constructor.
                 let (union_name, discriminant, _) =
                     ctx.ty_env.lookup_variant(*tag_name).ok_or_else(|| {
@@ -622,7 +622,7 @@ impl<'c> Lower<'c> for Expr {
             Expr::TupleSet { base, index, value } => {
                 lower_tuple_set(ctx, block, symtab, base, *index, value)
             }
-            Expr::BufGet { buf, index } => {
+            Expr::BufGet { buf, index, .. } => {
                 let loc = ctx.location();
                 let ptr = buf.lower(ctx, block, symtab)?;
                 let idx = index.lower(ctx, block, symtab)?;
@@ -643,7 +643,7 @@ impl<'c> Lower<'c> for Expr {
                 let elem_mlir_ty = ty_to_mlir(&elem_ty, ctx.mlir);
                 block.load_typed(ctx.mlir, elem_ptr, elem_mlir_ty, loc)
             }
-            Expr::BufSet { buf, index, value } => {
+            Expr::BufSet { buf, index, value, .. } => {
                 let loc = ctx.location();
                 let ptr = buf.lower(ctx, block, symtab)?;
                 let idx = index.lower(ctx, block, symtab)?;

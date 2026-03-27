@@ -4,6 +4,7 @@ use crate::ast::{
     Bind, BindValue, Expr, FileAst, FnCall, IfCondition, IfExpr, Loop, Pattern, WhenArm, WhenExpr,
 };
 use crate::intern::IStr;
+use chumsky::span::SimpleSpan;
 use crate::typeck::{FlowAnalysis, FlowContext, ImpossibleCheck, IndexOutOfBounds, TyEnv, TypeConstraint, Ty, LiteralValue};
 
 /// Analyzes control flow to track type narrowing.
@@ -166,16 +167,16 @@ impl<'a> FlowAnalyzer<'a> {
             }
 
             // Buffer operations.
-            Expr::BufGet { buf, index } => {
+            Expr::BufGet { buf, index, span } => {
                 self.analyze_expr(buf);
                 self.analyze_expr(index);
-                self.check_bounds(buf, index);
+                self.check_bounds(buf, index, *span);
             }
-            Expr::BufSet { buf, index, value } => {
+            Expr::BufSet { buf, index, value, span } => {
                 self.analyze_expr(buf);
                 self.analyze_expr(index);
                 self.analyze_expr(value);
-                self.check_bounds(buf, index);
+                self.check_bounds(buf, index, *span);
             }
 
             // Cast and reference operations.
@@ -197,7 +198,7 @@ impl<'a> FlowAnalyzer<'a> {
 
             // Tag operations.
             Expr::TagCall(_) => {}
-            Expr::AnonymousTag(_) => {}
+            Expr::AnonymousTag(..) => {}
             Expr::SelfRef => {}
 
             // Literals and other expressions.
@@ -416,29 +417,24 @@ impl<'a> FlowAnalyzer<'a> {
     ///
     /// Only catches literal indices on arrays with known sizes.
     /// For runtime bounds checking with type narrowing, this is a TODO.
-    fn check_bounds(&mut self, buf: &Expr, index: &Expr) {
+    fn check_bounds(&mut self, buf: &Expr, index: &Expr, span: SimpleSpan) {
         use crate::typeck::infer_expr_ty;
 
-        // Check if index is a literal
         let index_val = match infer_expr_ty(index, &self.locals, &self.ty_env.tag_types, &self.ty_env.fn_return_types) {
             Ty::Literal(LiteralValue::Int(n)) => n,
-            Ty::Int(_) => {
-                // Index is an Int but not a literal - can't check at compile time
-                return;
-            }
-            _ => return, // Not a literal index, can't check at compile time
+            Ty::Int(_) => return,
+            _ => return,
         };
 
-        // Check if buffer is an array with known size
         let buf_size = match infer_expr_ty(buf, &self.locals, &self.ty_env.tag_types, &self.ty_env.fn_return_types) {
             Ty::Array { size, .. } => size,
-            _ => return, // Not a fixed-size array, can't check at compile time
+            _ => return,
         };
 
-        // Check if index is out of bounds (0 <= index < size)
         if index_val < 0 || index_val as usize >= buf_size {
             self.result.add_bounds_check(IndexOutOfBounds {
                 expr_index: self.expr_index,
+                span,
                 index: index_val,
                 size: buf_size,
             });
@@ -447,7 +443,7 @@ impl<'a> FlowAnalyzer<'a> {
 
     fn extract_var_name(&self, expr: &Expr) -> Option<IStr> {
         match expr {
-            Expr::AnonymousTag(name) if self.in_scope.contains(name) => Some(*name),
+            Expr::AnonymousTag(name, _) if self.in_scope.contains(name) => Some(*name),
             // Lowercase variable references are parsed as FnCall with no args and no path segments.
             Expr::FnCall(call) if call.args.is_none() && call.path.segments.is_empty() => {
                 let name = call.path.root;

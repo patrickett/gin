@@ -18,10 +18,10 @@ pub struct MethodName<'a> {
 impl std::fmt::Display for MethodName<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.receiver {
-            Tag::Nominal(type_name) => {
+            Tag::Nominal(type_name, _) => {
                 write!(f, "{}.{}", type_name.as_str(), self.name.as_str())
             }
-            Tag::Generic(type_name, params) => {
+            Tag::Generic(type_name, params, _) => {
                 write!(f, "{}(", type_name.as_str())?;
                 for (i, (k, v)) in params.iter().enumerate() {
                     if i > 0 {
@@ -47,6 +47,7 @@ pub struct Bind {
     doc_comment: Option<DocComment>,
     attributes: BindAttributes,
     name: IStr,
+    pub name_span: SimpleSpan,
     params: Option<Parameters>,
     value: BindValue,
     receiver_type: Option<Tag>,
@@ -62,11 +63,12 @@ pub struct Bind {
 }
 
 impl Bind {
-    pub fn new(name: IStr, value: BindValue, is_const: bool) -> Self {
+    pub fn new(name: IStr, name_span: SimpleSpan, value: BindValue, is_const: bool) -> Self {
         Bind {
             doc_comment: None,
             attributes: BindAttributes::default(),
             name,
+            name_span,
             params: None,
             value,
             receiver_type: None,
@@ -332,7 +334,7 @@ fn infer_expr_type(
                 })
             })
         }
-        Expr::AnonymousTag(name) => Some(name.to_string()),
+        Expr::AnonymousTag(name, _) => Some(name.to_string()),
         Expr::TagCall(_) => None,
         _ => None,
     }
@@ -344,7 +346,7 @@ fn extract_anonymous_tags_from_expr(expr: &Expr, tags: &mut Vec<IStr>) {
 
     match expr {
         // TagCall returns a union type, not an anonymous tag - don't extract from it
-        Expr::AnonymousTag(name) => {
+        Expr::AnonymousTag(name, _) => {
             tags.push(*name);
         }
         Expr::FnCall(call) => {
@@ -617,10 +619,10 @@ where
                 )
                 .or_not(),
             )
-            .map(|(name, args)| -> ReturnTypePart {
+            .map_with(|(name, args), e| -> ReturnTypePart {
                 match args {
                     Some(args) if !args.is_empty() => (None, None, Some((name, args)), None),
-                    _ => (None, Some(crate::ast::Tag::Nominal(name)), None, None),
+                    _ => (None, Some(crate::ast::Tag::Nominal(name, e.span())), None, None),
                 }
             }),
     ))
@@ -635,6 +637,7 @@ where
     ));
 
     let lhs = id_token()
+        .map_with(|name, e| (name, e.span()))
         .then(params.or_not())
         .then(return_type_part)
         .then(bind_op);
@@ -658,10 +661,10 @@ where
         .then(choice((extern_value, multi_value, single_value)))
         .map(
             |(
-                (((name, params), (return_type_name, return_tag, type_annotation, type_annotation_qual)), is_const),
+                ((((name, name_span), params), (return_type_name, return_tag, type_annotation, type_annotation_qual)), is_const),
                 (value, postfix_doc),
             )| {
-                let mut b = Bind::new(name, value, is_const)
+                let mut b = Bind::new(name, name_span, value, is_const)
                     .with_params(params)
                     .with_return_type_name(return_type_name);
                 b.return_tag = return_tag;

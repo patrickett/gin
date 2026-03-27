@@ -130,7 +130,7 @@ impl<'c> Lower<'c> for IfExpr {
 
             // Bind pattern variables if this is a pattern condition.
             if let IfCondition::Pattern { subject, tag } = &self.condition
-                && let Tag::Generic(_, params) = tag
+                && let Tag::Generic(_, params, _) = tag
             {
                 let subject_val = subject.lower(ctx, block, symtab)?;
                 let variant_name = IStr::new(tag.name().to_string());

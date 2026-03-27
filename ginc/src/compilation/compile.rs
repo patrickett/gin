@@ -21,21 +21,35 @@ pub fn flow_analysis<'db>(db: &'db dyn Db, file: File) -> FlowAnalysis {
 
     let result = analyzer.into_result();
 
-    // Emit symptoms for bounds checks
-    // TODO: Map expression indices to actual spans (currently uses 0..0)
     for check in &result.bounds_checks {
-        type_symptom::index_out_of_bounds(SimpleSpan::from(0..0), check.index, check.size)
-            .accumulate(db);
+        type_symptom::index_out_of_bounds(check.span, check.index, check.size).accumulate(db);
     }
 
     result
 }
 
 /// Compile a single file to MLIR bytecode.
+///
+/// This is the main compilation pipeline. It:
+/// 1. Parses the file (emits parse symptoms)
+/// 2. Type checks (emits unknown type/function/variable symptoms)
+/// 3. Flow analyzes (via `flow_analysis`, emits bounds check symptoms)
+/// 4. Generates MLIR bytecode (emits codegen errors)
+///
+/// All diagnostics are emitted via `.accumulate(db)` and can be retrieved
+/// via `compile::accumulated::<Symptom>(&db, file)`.
 #[salsa::tracked]
 pub fn compile<'db>(db: &'db dyn Db, file: File) -> CompiledModule<'db> {
     let ast = parse(db, file);
+    let ty_env = TyEnv::from_file_ast(&ast);
 
+    // Type checking - emits unknown type/function/variable symptoms
+    ty_env.check_unknowns(&ast, db);
+
+    // Flow analysis - emits bounds check symptoms and returns result for hover
+    let _flow_result = flow_analysis(db, file);
+
+    // Code generation - emits codegen errors
     let mlir_text = generate_mlir(&ast);
 
     match mlir_text {
@@ -47,7 +61,7 @@ pub fn compile<'db>(db: &'db dyn Db, file: File) -> CompiledModule<'db> {
             let symptom = Symptom {
                 source: SymptomSource::CodeGen(e),
                 category: crate::diagnostic::Category::Flaw,
-                span: SimpleSpan::new((), 0..0), // TODO: fix
+                span: SimpleSpan::new((), 0..0),
             };
 
             symptom.accumulate(db);
@@ -57,26 +71,18 @@ pub fn compile<'db>(db: &'db dyn Db, file: File) -> CompiledModule<'db> {
 }
 
 /// Compile an entry point and all its dependencies.
+///
+/// This is the main entry point for compilation. It compiles the entry file
+/// and all imported files. Salsa memoizes results per file.
 #[salsa::tracked]
 pub fn compile_entry<'db>(db: &'db dyn Db, entry: File) -> CompiledModule<'db> {
     let imported_files = resolve_imports(db, entry);
 
-    let tasks: Vec<_> = imported_files
-        .into_iter()
-        .map(|f| (db.clone_for_par(), f))
-        .collect();
+    // Compile all imported files (Salsa memoizes per-file results)
+    for imported_file in imported_files {
+        compile(db, imported_file);
+    }
 
-    rayon::scope(|s| {
-        for (db_clone, imported_file) in tasks {
-            s.spawn(move |_| {
-                // Run flow analysis to collect bounds checking diagnostics
-                flow_analysis(&*db_clone, imported_file);
-                compile(&*db_clone, imported_file);
-            });
-        }
-    });
-
-    // Run flow analysis on the entry point as well
-    flow_analysis(db, entry);
+    // Compile the entry point and return its result
     compile(db, entry)
 }

@@ -21,9 +21,12 @@ where
 
     // return TagName - return creates an anonymous tag
     let anonymous_tag = just(Token::Return)
-        .ignore_then(select! { Token::Tag(name) => IStr::new(name.to_string()) })
+        .ignore_then(
+            select! { Token::Tag(name) => IStr::new(name.to_string()) }
+                .map_with(|name, e| (name, e.span())),
+        )
         .then_ignore(just(Token::Newline).or_not())
-        .map(|name| Return(Some(Box::new(Expr::AnonymousTag(name)))));
+        .map(|(name, span)| Return(Some(Box::new(Expr::AnonymousTag(name, span)))));
 
     // Bare return (no value) - must come last to avoid consuming Return
     // when there are more tokens. Accepts an optional newline (for files
