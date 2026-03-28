@@ -1,6 +1,5 @@
 use crate::codegen::prelude::*;
 use crate::codegen::ty_to_mlir;
-use crate::diagnostic::codegen::CodegenSymptom;
 use crate::{ast::tag::Tag, codegen::lower_function, parse::block, prelude::*};
 use chumsky::span::SimpleSpan;
 
@@ -56,7 +55,7 @@ pub struct Bind {
     /// Explicit capitalized return type annotation, e.g. `Str` in `foo() Str: expr`.
     pub return_tag: Option<Tag>,
     /// Explicit type annotation with value args, e.g. `Maybe(3)` in `val Maybe(3): Some(3)`.
-    pub type_annotation: Option<(IStr, Vec<Expr>)>,
+    pub type_annotation: Option<(IStr, Vec<Spanned<Expr>>)>,
     /// Qualified path for type annotation, e.g. `Maybe.Some` in `val Maybe.Some(3): ...`
     pub type_annotation_qual: Option<ModPath>,
     /// `true` for `:=` (immutable/const) binds; `false` for `:` (mutable, alloca-backed) binds.
@@ -247,7 +246,7 @@ impl Bind {
 /// Collect all return type strings from a function body, including early returns
 /// inside if/when/loop expressions.
 fn collect_all_return_types(
-    exprs: &[Expr],
+    exprs: &[Spanned<Expr>],
     ret: &crate::ast::expr::r#return::Return,
     defs: Option<&crate::DefMap>,
     visited: &mut std::collections::HashSet<IStr>,
@@ -272,7 +271,7 @@ fn collect_all_return_types(
 
 fn collect_early_return_types(
     expr: &Expr,
-    locals: &[Expr],
+    locals: &[Spanned<Expr>],
     defs: Option<&crate::DefMap>,
     visited: &mut std::collections::HashSet<IStr>,
     types: &mut Vec<String>,
@@ -294,7 +293,7 @@ fn collect_early_return_types(
 
 fn infer_expr_type(
     expr: &Expr,
-    locals: &[Expr],
+    locals: &[Spanned<Expr>],
     defs: Option<&crate::DefMap>,
     visited: &mut std::collections::HashSet<IStr>,
 ) -> Option<String> {
@@ -313,7 +312,7 @@ fn infer_expr_type(
             .or_else(|| infer_expr_type(&b.rhs, locals, defs, visited)),
         Expr::FnCall(call) if call.path.segments.is_empty() => {
             let name = call.path.root.as_str();
-            let from_locals = locals.iter().find_map(|e| match e {
+            let from_locals = locals.iter().find_map(|e| match &e.0 {
                 Expr::Bind(b) if b.name().as_str() == name => {
                     b.infer_return_type_inner(defs, visited)
                 }
@@ -563,7 +562,7 @@ where
 }
 
 pub fn bind<'t, I>(
-    expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
+    expr: impl Parser<'t, I, Spanned<Expr>, ParserError<'t>> + Clone + 't,
 ) -> impl Parser<'t, I, Bind, ParserError<'t>> + Clone
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
@@ -575,7 +574,7 @@ where
     type ReturnTypePart = (
         Option<IStr>,
         Option<crate::ast::Tag>,
-        Option<(IStr, Vec<Expr>)>,
+        Option<(IStr, Vec<Spanned<Expr>>)>,
         Option<ModPath>, // Qualified path for type annotation
     );
 
@@ -749,26 +748,14 @@ impl<'c> Lower<'c> for Bind {
                         let ptr = match symtab.get(&name_str).copied() {
                             Some(p) => p,
                             None => {
-                                ctx.emit_symptom(CodegenSymptom::Internal {
-                                    message: format!(
-                                        "mutable slot '{name_str}' not found in symtab"
-                                    ),
-                                    span: SimpleSpan::new((), 0..0),
-                                });
+                                ctx.emit_internal(format!(
+                                    "mutable slot '{name_str}' not found in symtab"
+                                ));
                                 return None;
                             }
                         };
                         let new_val = expr.lower(ctx, block, symtab)?;
-                        match block.store_typed(ptr, new_val, loc) {
-                            Ok(()) => {}
-                            Err(e) => {
-                                ctx.emit_symptom(CodegenSymptom::Internal {
-                                    message: format!("store_typed in rebind: {e:?}"),
-                                    span: SimpleSpan::new((), 0..0),
-                                });
-                                return None;
-                            }
-                        }
+                        block.store_typed(ctx, ptr, new_val, loc)?;
                         Some(block.const_i64(ctx.mlir, 0))
                     } else {
                         // First mutable bind (`:`) — alloca + store.
@@ -784,16 +771,7 @@ impl<'c> Lower<'c> for Bind {
                         let elem_mlir_ty = ty_to_mlir(&ty, ctx.mlir);
                         let slot = block.alloca_typed(ctx.mlir, elem_mlir_ty, loc);
                         let init_val = expr.lower(ctx, block, symtab)?;
-                        match block.store_typed(slot, init_val, loc) {
-                            Ok(()) => {}
-                            Err(e) => {
-                                ctx.emit_symptom(CodegenSymptom::Internal {
-                                    message: format!("store_typed in mutable bind: {e:?}"),
-                                    span: SimpleSpan::new((), 0..0),
-                                });
-                                return None;
-                            }
-                        }
+                        block.store_typed(ctx, slot, init_val, loc)?;
                         symtab.insert(name_str.clone(), slot);
                         ctx.var_types.borrow_mut().insert(name_str.clone(), ty);
                         ctx.mutable_slots.borrow_mut().insert(name_str);

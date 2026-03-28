@@ -3,7 +3,6 @@
 //! This module provides extension traits that simplify common Melior patterns
 
 use crate::codegen::prelude::*;
-use chumsky::span::SimpleSpan;
 
 /// Extension trait for [`melior::Context`] to simplify common operations.
 pub trait ContextExt {
@@ -241,38 +240,39 @@ pub trait BlockExt<'c> {
     /// `llvm.getelementptr` with a dynamic byte offset into a `!llvm.ptr`.
     fn gep_i8(
         &self,
-        ctx: &'c Context,
+        cctx: &CodegenContext<'_, 'c>,
         base: Value<'c, 'c>,
         idx: Value<'c, 'c>,
         loc: Location<'c>,
-    ) -> Result<Value<'c, 'c>, crate::diagnostic::codegen::CodegenSymptom>;
+    ) -> Option<Value<'c, 'c>>;
     /// `llvm.intr.memset` — fill `len` bytes starting at `dst` with `val` (i8).
     fn memset_bytes(
         &self,
-        ctx: &'c Context,
+        cctx: &CodegenContext<'_, 'c>,
         dst: Value<'c, 'c>,
         val: Value<'c, 'c>,
         len: Value<'c, 'c>,
         loc: Location<'c>,
-    ) -> Result<(), crate::diagnostic::codegen::CodegenSymptom>;
+    ) -> Option<()>;
     /// `llvm.alloca 1 x elem_ty` — allocate a single scalar slot on the stack.
     fn alloca_typed(&self, ctx: &'c Context, elem_ty: Type<'c>, loc: Location<'c>)
     -> Value<'c, 'c>;
     /// `llvm.load elem_ty, ptr` — load a typed value from a pointer.
     fn load_typed(
         &self,
-        ctx: &'c Context,
+        cctx: &CodegenContext<'_, 'c>,
         ptr: Value<'c, 'c>,
         elem_ty: Type<'c>,
         loc: Location<'c>,
-    ) -> Result<Value<'c, 'c>, crate::diagnostic::codegen::CodegenSymptom>;
+    ) -> Option<Value<'c, 'c>>;
     /// `llvm.store val, ptr` — store a value through a pointer.
     fn store_typed(
         &self,
+        cctx: &CodegenContext<'_, 'c>,
         ptr: Value<'c, 'c>,
         val: Value<'c, 'c>,
         loc: Location<'c>,
-    ) -> Result<(), crate::diagnostic::codegen::CodegenSymptom>;
+    ) -> Option<()>;
 }
 
 impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
@@ -347,11 +347,12 @@ impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
 
     fn gep_i8(
         &self,
-        ctx: &'c Context,
+        cctx: &CodegenContext<'_, 'c>,
         base: Value<'c, 'c>,
         idx: Value<'c, 'c>,
         loc: Location<'c>,
-    ) -> Result<Value<'c, 'c>, crate::diagnostic::codegen::CodegenSymptom> {
+    ) -> Option<Value<'c, 'c>> {
+        let ctx = cctx.mlir;
         let op = OperationBuilder::new("llvm.getelementptr", loc)
             .add_attributes(&[
                 (
@@ -366,21 +367,20 @@ impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
             .add_operands(&[base, idx])
             .add_results(&[ctx.llvm_ptr()])
             .build()
-            .map_err(|e| crate::diagnostic::codegen::CodegenSymptom::Internal {
-                message: format!("GEP: {e}"),
-                span: SimpleSpan::new((), 0..0),
-            })?;
-        Ok(self.append_op(op))
+            .map_err(|e| cctx.emit_internal(format!("GEP: {e}")))
+            .ok()?;
+        Some(self.append_op(op))
     }
 
     fn memset_bytes(
         &self,
-        ctx: &'c Context,
+        cctx: &CodegenContext<'_, 'c>,
         dst: Value<'c, 'c>,
         val: Value<'c, 'c>,
         len: Value<'c, 'c>,
         loc: Location<'c>,
-    ) -> Result<(), crate::diagnostic::codegen::CodegenSymptom> {
+    ) -> Option<()> {
+        let ctx = cctx.mlir;
         let op = OperationBuilder::new("llvm.intr.memset", loc)
             .add_attributes(&[(
                 Identifier::new(ctx, "isVolatile"),
@@ -388,12 +388,10 @@ impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
             )])
             .add_operands(&[dst, val, len])
             .build()
-            .map_err(|e| crate::diagnostic::codegen::CodegenSymptom::Internal {
-                message: format!("memset: {e}"),
-                span: SimpleSpan::new((), 0..0),
-            })?;
+            .map_err(|e| cctx.emit_internal(format!("memset: {e}")))
+            .ok()?;
         self.append_operation(op);
-        Ok(())
+        Some(())
     }
 
     fn alloca_typed(
@@ -415,11 +413,12 @@ impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
 
     fn load_typed(
         &self,
-        ctx: &'c Context,
+        cctx: &CodegenContext<'_, 'c>,
         ptr: Value<'c, 'c>,
         elem_ty: Type<'c>,
         loc: Location<'c>,
-    ) -> Result<Value<'c, 'c>, crate::diagnostic::codegen::CodegenSymptom> {
+    ) -> Option<Value<'c, 'c>> {
+        let ctx = cctx.mlir;
         let op = OperationBuilder::new("llvm.load", loc)
             .add_attributes(&[(
                 Identifier::new(ctx, "res"),
@@ -428,28 +427,25 @@ impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
             .add_operands(&[ptr])
             .add_results(&[elem_ty])
             .build()
-            .map_err(|e| crate::diagnostic::codegen::CodegenSymptom::Internal {
-                message: format!("llvm.load: {e}"),
-                span: SimpleSpan::new((), 0..0),
-            })?;
-        Ok(self.append_op(op))
+            .map_err(|e| cctx.emit_internal(format!("llvm.load: {e}")))
+            .ok()?;
+        Some(self.append_op(op))
     }
 
     fn store_typed(
         &self,
+        cctx: &CodegenContext<'_, 'c>,
         ptr: Value<'c, 'c>,
         val: Value<'c, 'c>,
         loc: Location<'c>,
-    ) -> Result<(), crate::diagnostic::codegen::CodegenSymptom> {
+    ) -> Option<()> {
         let op = OperationBuilder::new("llvm.store", loc)
             .add_operands(&[val, ptr])
             .build()
-            .map_err(|e| crate::diagnostic::codegen::CodegenSymptom::Internal {
-                message: format!("llvm.store: {e}"),
-                span: SimpleSpan::new((), 0..0),
-            })?;
+            .map_err(|e| cctx.emit_internal(format!("llvm.store: {e}")))
+            .ok()?;
         self.append_operation(op);
-        Ok(())
+        Some(())
     }
 }
 

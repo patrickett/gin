@@ -1,5 +1,4 @@
 use crate::codegen::prelude::*;
-use crate::diagnostic::codegen::CodegenSymptom;
 use crate::{parse::block, prelude::*};
 use chumsky::span::SimpleSpan;
 
@@ -23,11 +22,11 @@ use chumsky::span::SimpleSpan;
 pub struct ForInLoop {
     pub pat: Pattern,
     // TODO: check and make sure it accepts expression that can be iterated
-    pub iter: Box<Expr>,
-    pub exprs: Vec<Expr>,
+    pub iter: Box<Spanned<Expr>>,
+    pub exprs: Vec<Spanned<Expr>>,
 }
 
-pub fn for_loop_header_expr<'t, I>() -> impl Parser<'t, I, Expr, ParserError<'t>> + Clone
+pub fn for_loop_header_expr<'t, I>() -> impl Parser<'t, I, Spanned<Expr>, ParserError<'t>> + Clone
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
@@ -36,15 +35,23 @@ where
 
     let atom = recursive(|expr| {
         choice((
-            literal().map(Expr::Lit).boxed(),
-            fn_call(expr.clone()).map(Expr::FnCall).boxed(),
+            literal()
+                .map_with(|lit, e| Spanned(Expr::Lit(lit), e.span()))
+                .boxed(),
+            fn_call(expr.clone())
+                .map_with(|fc, e| Spanned(Expr::FnCall(fc), e.span()))
+                .boxed(),
         ))
     });
 
     // Range operator (precedence 2)
-    let range = infix(left(2), just(Infer), |lhs: Expr, _, rhs: Expr, _| {
-        Expr::Range(Range::new(lhs, rhs))
-    });
+    let range = infix(
+        left(2),
+        just(Infer),
+        |lhs: Spanned<Expr>, _, rhs: Spanned<Expr>, extra| {
+            Spanned(Expr::Range(Range::new(lhs, rhs)), extra.span())
+        },
+    );
 
     // Arithmetic operators (precedence 3)
     let arithmetic = infix(
@@ -56,7 +63,9 @@ where
             Slash => BinOp::Divide,
             Percent => BinOp::Modulo,
         },
-        |lhs: Expr, op: BinOp, rhs: Expr, _| Expr::Binary(Binary::new(lhs, op, rhs)),
+        |lhs: Spanned<Expr>, op: BinOp, rhs: Spanned<Expr>, extra| {
+            Spanned(Expr::Binary(Binary::new(lhs, op, rhs)), extra.span())
+        },
     );
 
     atom.pratt((range, arithmetic))
@@ -74,14 +83,12 @@ impl<'c> Lower<'c> for ForInLoop {
         let index_ty = Type::index(ctx.mlir);
 
         // Currently only range iterators (start...end) are supported.
-        let (start_expr, end_expr) = match self.iter.as_ref() {
+        let (start_expr, end_expr) = match &self.iter.0 {
             Expr::Range(range) => (&range.start, &range.end),
             _ => {
-                ctx.emit_symptom(CodegenSymptom::Internal {
-                    message: "for-in loops currently only support range iterators (start...end)"
-                        .to_string(),
-                    span: SimpleSpan::new((), 0..0),
-                });
+                ctx.emit_internal(
+                    "for-in loops currently only support range iterators (start...end)",
+                );
                 return None;
             }
         };
@@ -113,10 +120,7 @@ impl<'c> Lower<'c> for ForInLoop {
                     loop_symtab.insert(name.as_str().to_string(), iv_i64);
                 }
                 Pattern::Tuple(_) => {
-                    ctx.emit_symptom(CodegenSymptom::Internal {
-                        message: "Tuple patterns in for loops are not yet supported".to_string(),
-                        span: SimpleSpan::new((), 0..0),
-                    });
+                    ctx.emit_internal("Tuple patterns in for loops are not yet supported");
                     return None;
                 }
             }
@@ -141,8 +145,8 @@ impl<'c> Lower<'c> for ForInLoop {
 }
 
 pub fn for_in_loop<'t, I>(
-    header_expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
-    body_expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
+    header_expr: impl Parser<'t, I, Spanned<Expr>, ParserError<'t>> + Clone + 't,
+    body_expr: impl Parser<'t, I, Spanned<Expr>, ParserError<'t>> + Clone + 't,
 ) -> impl Parser<'t, I, ForInLoop, ParserError<'t>>
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,

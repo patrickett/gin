@@ -1,5 +1,5 @@
 use crate::ast::{
-    Bind, BindValue, DeclareValue, Expr, FileAst, SymbolTable as CompileTimeSymbolTable,
+    Bind, BindValue, DeclareValue, Expr, FileAst, Spanned, SymbolTable as CompileTimeSymbolTable,
 };
 use crate::codegen::prelude::*;
 use crate::diagnostic::codegen::CodegenSymptom;
@@ -74,6 +74,16 @@ impl TypeInfo {
     }
 }
 
+fn compute_line_starts(source: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    for (i, b) in source.bytes().enumerate() {
+        if b == b'\n' {
+            starts.push(i + 1);
+        }
+    }
+    starts
+}
+
 pub struct CodegenContext<'a, 'c> {
     pub mlir: &'c Context,
     pub type_info: &'a HashMap<IStr, TypeInfo>,
@@ -91,6 +101,9 @@ pub struct CodegenContext<'a, 'c> {
     pub global_const_elems: RefCell<HashMap<String, Ty>>,
     /// Accumulated codegen symptoms (errors/warnings).
     pub symptoms: RefCell<Vec<CodegenSymptom>>,
+    pub current_span: Cell<SimpleSpan>,
+    pub source_filename: String,
+    pub line_starts: Vec<usize>,
 }
 
 impl<'a, 'c> CodegenContext<'a, 'c> {
@@ -99,6 +112,8 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         type_info: &'a HashMap<IStr, TypeInfo>,
         symbol_table: &'a CompileTimeSymbolTable,
         ty_env: &'a TyEnv,
+        source: &str,
+        filename: &str,
     ) -> Self {
         Self {
             mlir,
@@ -112,11 +127,24 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
             mutable_slots: RefCell::new(HashSet::new()),
             global_const_elems: RefCell::new(HashMap::new()),
             symptoms: RefCell::new(Vec::new()),
+            current_span: Cell::new(SimpleSpan::new((), 0..0)),
+            source_filename: filename.to_string(),
+            line_starts: compute_line_starts(source),
         }
     }
 
     pub fn location(&self) -> Location<'c> {
-        self.mlir.unknown_loc()
+        let span = self.current_span.get();
+        if span.start == 0 && span.end == 0 {
+            return self.mlir.unknown_loc();
+        }
+        let offset = span.start;
+        let line = match self.line_starts.binary_search(&offset) {
+            Ok(l) => l,
+            Err(l) => l.saturating_sub(1),
+        };
+        let col = offset - self.line_starts[line];
+        Location::new(self.mlir, &self.source_filename, line + 1, col + 1)
     }
 
     pub fn register_string(&self, s: &str) -> String {
@@ -144,6 +172,13 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         self.symptoms.borrow_mut().push(symptom);
     }
 
+    pub fn emit_internal(&self, message: impl Into<String>) {
+        self.emit_symptom(CodegenSymptom::Internal {
+            message: message.into(),
+            span: self.current_span.get(),
+        });
+    }
+
     pub fn drain_symptoms(&self) -> Vec<CodegenSymptom> {
         self.symptoms.borrow_mut().drain(..).collect()
     }
@@ -158,18 +193,11 @@ pub trait Lower<'c> {
     ) -> Option<Value<'c, 'c>>;
 }
 
-impl<'c> Lower<'c> for Box<Expr> {
-    fn lower(
-        &self,
-        ctx: &CodegenContext<'_, 'c>,
-        block: &BlockRef<'c, 'c>,
-        symtab: &mut RuntimeSymbolTable<'c>,
-    ) -> Option<Value<'c, 'c>> {
-        self.as_ref().lower(ctx, block, symtab)
-    }
-}
-
-pub fn generate_mlir(ast: &FileAst) -> (Option<String>, Vec<CodegenSymptom>) {
+pub fn generate_mlir(
+    ast: &FileAst,
+    source: &str,
+    filename: &str,
+) -> (Option<String>, Vec<CodegenSymptom>) {
     let context = Context::new();
     melior::dialect::DialectHandle::llvm().register_dialect(&context);
     context.get_or_load_dialect("arith");
@@ -178,7 +206,6 @@ pub fn generate_mlir(ast: &FileAst) -> (Option<String>, Vec<CodegenSymptom>) {
     context.get_or_load_dialect("llvm");
 
     // Build compile-time symbol table from AST
-    // TODO: Track actual source path instead of using empty path
     let source_path = std::path::PathBuf::new();
     let symbol_table = CompileTimeSymbolTable::from_file(ast, source_path.to_path_buf());
     let type_info = match extract_type_info(ast) {
@@ -189,7 +216,7 @@ pub fn generate_mlir(ast: &FileAst) -> (Option<String>, Vec<CodegenSymptom>) {
         }
     };
     let ty_env = TyEnv::from_file_ast(ast);
-    let ctx = CodegenContext::new(&context, &type_info, &symbol_table, &ty_env);
+    let ctx = CodegenContext::new(&context, &type_info, &symbol_table, &ty_env, source, filename);
 
     let module = Module::new(context.unknown_loc());
 
@@ -200,7 +227,8 @@ pub fn generate_mlir(ast: &FileAst) -> (Option<String>, Vec<CodegenSymptom>) {
             continue;
         }
         if let BindValue::Expr(boxed) = bind.value() {
-            match boxed.as_ref() {
+            let inner: &Expr = boxed;
+            match inner {
                 Expr::TupleLit(elems) => {
                     let global_op = emit_tuple_lit_global(&context, &ctx, def_name.as_str(), elems);
                     if let Some(op) = global_op {
@@ -228,9 +256,11 @@ pub fn generate_mlir(ast: &FileAst) -> (Option<String>, Vec<CodegenSymptom>) {
         // Skip global TupleLit/TupleAlloc constants — already emitted as globals above.
         if bind.is_const
             && let BindValue::Expr(boxed) = bind.value()
-            && matches!(boxed.as_ref(), Expr::TupleLit(_) | Expr::TupleAlloc { .. })
         {
-            continue;
+            let inner: &Expr = boxed;
+            if matches!(inner, Expr::TupleLit(_) | Expr::TupleAlloc { .. }) {
+                continue;
+            }
         }
         let func_op = lower_function(&ctx, def_name, bind);
         if let Some(op) = func_op {
@@ -266,6 +296,8 @@ pub fn generate_mlir(ast: &FileAst) -> (Option<String>, Vec<CodegenSymptom>) {
 pub fn build_module_with_context<'c>(
     context: &'c Context,
     ast: &FileAst,
+    source: &str,
+    filename: &str,
 ) -> (Option<Module<'c>>, Vec<CodegenSymptom>) {
     // Register dialects
     melior::dialect::DialectHandle::llvm().register_dialect(context);
@@ -284,7 +316,7 @@ pub fn build_module_with_context<'c>(
         }
     };
     let ty_env = TyEnv::from_file_ast(ast);
-    let ctx = CodegenContext::new(context, &type_info, &symbol_table, &ty_env);
+    let ctx = CodegenContext::new(context, &type_info, &symbol_table, &ty_env, source, filename);
 
     let module = Module::new(context.unknown_loc());
 
@@ -295,7 +327,8 @@ pub fn build_module_with_context<'c>(
             continue;
         }
         if let BindValue::Expr(boxed) = bind.value() {
-            match boxed.as_ref() {
+            let inner: &Expr = boxed;
+            match inner {
                 Expr::TupleLit(elems) => {
                     let global_op = emit_tuple_lit_global(context, &ctx, def_name.as_str(), elems);
                     if let Some(op) = global_op {
@@ -323,9 +356,11 @@ pub fn build_module_with_context<'c>(
         // Skip global TupleLit/TupleAlloc constants — already emitted as globals above.
         if bind.is_const
             && let BindValue::Expr(boxed) = bind.value()
-            && matches!(boxed.as_ref(), Expr::TupleLit(_) | Expr::TupleAlloc { .. })
         {
-            continue;
+            let inner: &Expr = boxed;
+            if matches!(inner, Expr::TupleLit(_) | Expr::TupleAlloc { .. }) {
+                continue;
+            }
         }
         let func_op = lower_function(&ctx, def_name, bind);
         if let Some(op) = func_op {
@@ -442,7 +477,7 @@ fn emit_tuple_lit_global<'c>(
     context: &'c Context,
     ctx: &CodegenContext<'_, 'c>,
     name: &str,
-    elems: &[Expr],
+    elems: &[Spanned<Expr>],
 ) -> Option<Operation<'c>> {
     let loc = context.unknown_loc();
 
@@ -603,6 +638,18 @@ fn extract_type_info(ast: &FileAst) -> Option<HashMap<IStr, TypeInfo>> {
 
 // === Expression lowering ===
 
+impl<'c> Lower<'c> for Spanned<Expr> {
+    fn lower(
+        &self,
+        ctx: &CodegenContext<'_, 'c>,
+        block: &BlockRef<'c, 'c>,
+        symtab: &mut RuntimeSymbolTable<'c>,
+    ) -> Option<Value<'c, 'c>> {
+        ctx.current_span.set(self.1);
+        self.0.lower(ctx, block, symtab)
+    }
+}
+
 impl<'c> Lower<'c> for Expr {
     fn lower(
         &self,
@@ -620,11 +667,9 @@ impl<'c> Lower<'c> for Expr {
             Expr::If(if_expr) => if_expr.lower(ctx, block, symtab),
             Expr::FormatString(fs) => fs.lower(ctx, block, symtab),
             Expr::Range(_) => {
-                ctx.emit_symptom(CodegenSymptom::Internal {
-                    message: "Range lowering not yet implemented (only valid inside a for-in)"
-                        .to_string(),
-                    span: SimpleSpan::new((), 0..0),
-                });
+                ctx.emit_internal(
+                    "Range lowering not yet implemented (only valid inside a for-in)",
+                );
                 None
             }
             Expr::SelfRef(span) => symtab.get("self").copied().or_else(|| {
@@ -636,13 +681,10 @@ impl<'c> Lower<'c> for Expr {
                 // Bare capitalized tag — treat as a unit variant constructor.
                 let (union_name, discriminant, _) =
                     ctx.ty_env.lookup_variant(*tag_name).or_else(|| {
-                        ctx.emit_symptom(CodegenSymptom::Internal {
-                            message: format!(
-                                "Unknown tag '{}' — not declared in any union",
-                                tag_name.as_str()
-                            ),
-                            span: SimpleSpan::new((), 0..0),
-                        });
+                        ctx.emit_internal(format!(
+                            "Unknown tag '{}' — not declared in any union",
+                            tag_name.as_str()
+                        ));
                         None
                     })?;
                 let union_mlir_ty = ctx
@@ -672,7 +714,7 @@ impl<'c> Lower<'c> for Expr {
             Expr::TupleSet { base, index, value } => {
                 lower_tuple_set(ctx, block, symtab, base, *index, value)
             }
-            Expr::BufGet { buf, index, .. } => {
+            Expr::BufGet { buf, index } => {
                 let loc = ctx.location();
                 let ptr = buf.lower(ctx, block, symtab)?;
                 let idx = index.lower(ctx, block, symtab)?;
@@ -689,25 +731,11 @@ impl<'c> Lower<'c> for Expr {
                         ctx.mlir.i64(),
                     ))
                 };
-                let elem_ptr = match block.gep_i8(ctx.mlir, ptr, byte_idx, loc) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        ctx.emit_symptom(e);
-                        return None;
-                    }
-                };
+                let elem_ptr = block.gep_i8(ctx, ptr, byte_idx, loc)?;
                 let elem_mlir_ty = ty_to_mlir(&elem_ty, ctx.mlir);
-                match block.load_typed(ctx.mlir, elem_ptr, elem_mlir_ty, loc) {
-                    Ok(v) => Some(v),
-                    Err(e) => {
-                        ctx.emit_symptom(e);
-                        None
-                    }
-                }
+                Some(block.load_typed(ctx, elem_ptr, elem_mlir_ty, loc)?)
             }
-            Expr::BufSet {
-                buf, index, value, ..
-            } => {
+            Expr::BufSet { buf, index, value } => {
                 let loc = ctx.location();
                 let ptr = buf.lower(ctx, block, symtab)?;
                 let idx = index.lower(ctx, block, symtab)?;
@@ -725,20 +753,8 @@ impl<'c> Lower<'c> for Expr {
                         ctx.mlir.i64(),
                     ))
                 };
-                let elem_ptr = match block.gep_i8(ctx.mlir, ptr, byte_idx, loc) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        ctx.emit_symptom(e);
-                        return None;
-                    }
-                };
-                match block.store_typed(elem_ptr, val, loc) {
-                    Ok(()) => {}
-                    Err(e) => {
-                        ctx.emit_symptom(e);
-                        return None;
-                    }
-                }
+                let elem_ptr = block.gep_i8(ctx, ptr, byte_idx, loc)?;
+                block.store_typed(ctx, elem_ptr, val, loc)?;
                 Some(block.const_i64(ctx.mlir, 0))
             }
             Expr::Cast { expr, ty } => {
@@ -749,7 +765,7 @@ impl<'c> Lower<'c> for Expr {
                     .iter()
                     .map(|(k, v)| (IStr::new(k.clone()), v.clone()))
                     .collect();
-                let src_ty = ctx.ty_env.infer_expr(expr, &locals);
+                let src_ty = ctx.ty_env.infer_expr(&expr.0, &locals);
                 let dst_ty = tag_name_to_ty(*ty);
                 lower_cast(ctx, block, val, &src_ty, &dst_ty)
             }
@@ -764,19 +780,13 @@ impl<'c> Lower<'c> for Expr {
                     .iter()
                     .map(|(k, v)| (IStr::new(k.clone()), v.clone()))
                     .collect();
-                let pointee_ty = match ctx.ty_env.infer_expr(inner, &locals) {
+                let pointee_ty = match ctx.ty_env.infer_expr(&inner.0, &locals) {
                     Ty::Ptr { inner } | Ty::Ref { inner } => *inner,
                     _ => Ty::Int(64),
                 };
                 let mlir_ty = ty_to_mlir(&pointee_ty, ctx.mlir);
                 let loc = ctx.location();
-                match block.load_typed(ctx.mlir, ptr, mlir_ty, loc) {
-                    Ok(v) => Some(v),
-                    Err(e) => {
-                        ctx.emit_symptom(e);
-                        None
-                    }
-                }
+                Some(block.load_typed(ctx, ptr, mlir_ty, loc)?)
             }
             Expr::Negate(inner) => {
                 let val = inner.lower(ctx, block, symtab)?;
@@ -910,10 +920,10 @@ fn lower_take_ptr<'c>(
     ctx: &CodegenContext<'_, 'c>,
     block: &BlockRef<'c, 'c>,
     symtab: &mut RuntimeSymbolTable<'c>,
-    inner: &Expr,
+    inner: &Spanned<Expr>,
 ) -> Option<Value<'c, 'c>> {
     // For a bare variable reference, check if it already lives in a mutable slot.
-    if let Expr::FnCall(call) = inner
+    if let Expr::FnCall(call) = &inner.0
         && call.path.segments.is_empty()
         && call.args.is_none()
     {
@@ -934,7 +944,7 @@ fn lower_take_ptr<'c>(
         }
     }
     // Otherwise evaluate the inner expression and spill to a fresh alloca.
-    let val = inner.lower(ctx, block, symtab)?;
+    let val = inner.0.lower(ctx, block, symtab)?;
     let locals: HashMap<IStr, Ty> = ctx
         .var_types
         .borrow()
@@ -945,13 +955,7 @@ fn lower_take_ptr<'c>(
     let mlir_ty = ty_to_mlir(&elem_ty, ctx.mlir);
     let loc = ctx.location();
     let ptr = block.alloca_typed(ctx.mlir, mlir_ty, loc);
-    match block.store_typed(ptr, val, loc) {
-        Ok(()) => {}
-        Err(e) => {
-            ctx.emit_symptom(e);
-            return None;
-        }
-    }
+    block.store_typed(ctx, ptr, val, loc)?;
     Some(ptr)
 }
 
@@ -973,7 +977,8 @@ fn ty_byte_size(ty: &Ty) -> usize {
 
 /// Look up the element type of a base expression that should have `Ty::Array`.
 /// Falls back to `Ty::Int(8)` (byte) if the type cannot be determined.
-fn elem_ty_of_array_expr(base: &Expr, ctx: &CodegenContext) -> Ty {
+fn elem_ty_of_array_expr(base: &Spanned<Expr>, ctx: &CodegenContext) -> Ty {
+    let base: &Expr = base;
     if let Expr::FnCall(call) = base
         && call.path.segments.is_empty()
         && call.args.is_none()
@@ -993,7 +998,7 @@ fn lower_tuple_alloc<'c>(
     ctx: &CodegenContext<'_, 'c>,
     block: &BlockRef<'c, 'c>,
     symtab: &mut RuntimeSymbolTable<'c>,
-    init: &Expr,
+    init: &Spanned<Expr>,
     size: usize,
 ) -> Option<Value<'c, 'c>> {
     let loc = ctx.location();
@@ -1026,7 +1031,7 @@ fn lower_tuple_get<'c>(
     ctx: &CodegenContext<'_, 'c>,
     block: &BlockRef<'c, 'c>,
     symtab: &mut RuntimeSymbolTable<'c>,
-    base: &Expr,
+    base: &Spanned<Expr>,
     index: usize,
 ) -> Option<Value<'c, 'c>> {
     let loc = ctx.location();
@@ -1056,13 +1061,7 @@ fn lower_tuple_get<'c>(
     let elem_bytes = ty_byte_size(&elem_ty);
     let elem_mlir_ty = ty_to_mlir(&elem_ty, ctx.mlir);
     let byte_offset = block.const_i64(ctx.mlir, (index * elem_bytes) as i64);
-    let elem_ptr = match block.gep_i8(ctx.mlir, base_val, byte_offset, loc) {
-        Ok(p) => p,
-        Err(e) => {
-            ctx.emit_symptom(e);
-            return None;
-        }
-    };
+    let elem_ptr = block.gep_i8(ctx, base_val, byte_offset, loc)?;
 
     let load_op = OperationBuilder::new("llvm.load", loc)
         .add_attributes(&[(
@@ -1080,9 +1079,9 @@ fn lower_tuple_set<'c>(
     ctx: &CodegenContext<'_, 'c>,
     block: &BlockRef<'c, 'c>,
     symtab: &mut RuntimeSymbolTable<'c>,
-    base: &Expr,
+    base: &Spanned<Expr>,
     index: usize,
-    value: &Expr,
+    value: &Spanned<Expr>,
 ) -> Option<Value<'c, 'c>> {
     let loc = ctx.location();
     let ptr = base.lower(ctx, block, symtab)?;
@@ -1091,13 +1090,7 @@ fn lower_tuple_set<'c>(
     let elem_bytes = ty_byte_size(&elem_ty);
 
     let byte_offset = block.const_i64(ctx.mlir, (index * elem_bytes) as i64);
-    let elem_ptr = match block.gep_i8(ctx.mlir, ptr, byte_offset, loc) {
-        Ok(p) => p,
-        Err(e) => {
-            ctx.emit_symptom(e);
-            return None;
-        }
-    };
+    let elem_ptr = block.gep_i8(ctx, ptr, byte_offset, loc)?;
 
     let val = value.lower(ctx, block, symtab)?;
     let store_op = OperationBuilder::new("llvm.store", loc)
@@ -1183,10 +1176,7 @@ fn lower_cast<'c>(
         (Ty::Int(_), Ty::Float) => "arith.sitofp",
         (Ty::Float, Ty::Int(_)) => "arith.fptosi",
         _ => {
-            ctx.emit_symptom(CodegenSymptom::Internal {
-                message: format!("unsupported cast: {src_ty:?} → {dst_ty:?}"),
-                span: SimpleSpan::new((), 0..0),
-            });
+            ctx.emit_internal(format!("unsupported cast: {src_ty:?} → {dst_ty:?}"));
             return None;
         }
     };

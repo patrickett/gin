@@ -96,7 +96,7 @@ impl Hash for Declare {
 }
 
 pub fn declare<'t, I>(
-    expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
+    expr: impl Parser<'t, I, Spanned<Expr>, ParserError<'t>> + Clone + 't,
 ) -> impl Parser<'t, I, Declare, ParserError<'t>> + Clone
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,

@@ -1,5 +1,4 @@
 use crate::codegen::{addressof_string_global, prelude::*, ty_to_mlir};
-use crate::diagnostic::codegen::CodegenSymptom;
 use crate::parse::delimited_list;
 use crate::prelude::*;
 use crate::typeck::Ty;
@@ -8,11 +7,11 @@ use chumsky::span::SimpleSpan;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FnCall {
     pub path: ModPath,
-    pub args: Option<Vec<Expr>>,
+    pub args: Option<Vec<Spanned<Expr>>>,
 }
 
 pub fn fn_call<'t, I>(
-    expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
+    expr: impl Parser<'t, I, Spanned<Expr>, ParserError<'t>> + Clone + 't,
 ) -> impl Parser<'t, I, FnCall, ParserError<'t>>
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
@@ -84,10 +83,7 @@ impl<'c> Lower<'c> for FnCall {
                         let self_val = match symtab.get(root).copied() {
                             Some(v) => v,
                             None => {
-                                ctx.emit_symptom(CodegenSymptom::Internal {
-                                    message: format!("Unknown variable '{root}'"),
-                                    span: SimpleSpan::new((), 0..0),
-                                });
+                                ctx.emit_internal(format!("Unknown variable '{root}'"));
                                 return None;
                             }
                         };
@@ -119,10 +115,7 @@ impl<'c> Lower<'c> for FnCall {
                         let self_val = match symtab.get(root).copied() {
                             Some(v) => v,
                             None => {
-                                ctx.emit_symptom(CodegenSymptom::Internal {
-                                    message: format!("Unknown variable '{root}'"),
-                                    span: SimpleSpan::new((), 0..0),
-                                });
+                                ctx.emit_internal(format!("Unknown variable '{root}'"));
                                 return None;
                             }
                         };
@@ -159,31 +152,16 @@ impl<'c> Lower<'c> for FnCall {
                                 let ptr = match symtab.get(root).copied() {
                                     Some(v) => v,
                                     None => {
-                                        ctx.emit_symptom(CodegenSymptom::Internal {
-                                            message: format!("Unknown variable '{root}'"),
-                                            span: SimpleSpan::new((), 0..0),
-                                        });
+                                        ctx.emit_internal(format!("Unknown variable '{root}'"));
                                         return None;
                                     }
                                 };
-                                match block.load_typed(ctx.mlir, ptr, elem_mlir_ty, loc) {
-                                    Ok(v) => v,
-                                    Err(e) => {
-                                        ctx.emit_symptom(CodegenSymptom::Internal {
-                                            message: format!("load primitive self '{root}': {e:?}"),
-                                            span: SimpleSpan::new((), 0..0),
-                                        });
-                                        return None;
-                                    }
-                                }
+                                block.load_typed(ctx, ptr, elem_mlir_ty, loc)?
                             } else {
                                 match symtab.get(root).copied() {
                                     Some(v) => v,
                                     None => {
-                                        ctx.emit_symptom(CodegenSymptom::Internal {
-                                            message: format!("Unknown variable '{root}'"),
-                                            span: SimpleSpan::new((), 0..0),
-                                        });
+                                        ctx.emit_internal(format!("Unknown variable '{root}'"));
                                         return None;
                                     }
                                 }
@@ -226,10 +204,7 @@ impl<'c> Lower<'c> for FnCall {
             let arg = match self.args.as_ref().and_then(|a| a.first()) {
                 Some(a) => a,
                 None => {
-                    ctx.emit_symptom(CodegenSymptom::Internal {
-                        message: "float_bits requires one argument".into(),
-                        span: SimpleSpan::new((), 0..0),
-                    });
+                    ctx.emit_internal("float_bits requires one argument");
                     return None;
                 }
             };
@@ -242,10 +217,7 @@ impl<'c> Lower<'c> for FnCall {
             {
                 Ok(op) => op,
                 Err(e) => {
-                    ctx.emit_symptom(CodegenSymptom::Internal {
-                        message: format!("llvm.bitcast: {e}"),
-                        span: SimpleSpan::new((), 0..0),
-                    });
+                    ctx.emit_internal(format!("llvm.bitcast: {e}"));
                     return None;
                 }
             };
@@ -272,19 +244,7 @@ impl<'c> Lower<'c> for FnCall {
                     .unwrap_or(crate::typeck::Ty::Int(64));
                 let elem_mlir_ty = ty_to_mlir(&ty, ctx.mlir);
                 let loc = ctx.location();
-                return match block.load_typed(ctx.mlir, ptr, elem_mlir_ty, loc) {
-                    Ok(v) => Some(v),
-                    Err(e) => {
-                        ctx.emit_symptom(CodegenSymptom::Internal {
-                            message: format!(
-                                "load mutable variable '{}': {e:?}",
-                                func_name.as_str()
-                            ),
-                            span: SimpleSpan::new((), 0..0),
-                        });
-                        None
-                    }
-                };
+                return block.load_typed(ctx, ptr, elem_mlir_ty, loc);
             }
             return Some(ptr);
         }
@@ -295,12 +255,9 @@ impl<'c> Lower<'c> for FnCall {
             && symbol.is_bind()
             && self.args.is_some()
         {
-            ctx.emit_symptom(CodegenSymptom::Internal {
-                message: format!(
-                    "Cannot call '{func_name}': it is a value definition (bind), not a function"
-                ),
-                span: SimpleSpan::new((), 0..0),
-            });
+            ctx.emit_internal(format!(
+                "Cannot call '{func_name}': it is a value definition (bind), not a function"
+            ));
             return None;
         }
 
@@ -334,10 +291,7 @@ fn lower_field_access<'c>(
     let slot = match symtab.get(root).copied() {
         Some(v) => v,
         None => {
-            ctx.emit_symptom(CodegenSymptom::Internal {
-                message: format!("Unknown variable '{root}'"),
-                span: SimpleSpan::new((), 0..0),
-            });
+            ctx.emit_internal(format!("Unknown variable '{root}'"));
             return None;
         }
     };
@@ -348,16 +302,7 @@ fn lower_field_access<'c>(
             let record_ty = *inner;
             let struct_mlir_ty = ty_to_mlir(&record_ty, ctx.mlir);
             let loc = ctx.location();
-            let loaded = match block.load_typed(ctx.mlir, slot, struct_mlir_ty, loc) {
-                Ok(v) => v,
-                Err(e) => {
-                    ctx.emit_symptom(CodegenSymptom::Internal {
-                        message: format!("auto-deref load: {e:?}"),
-                        span: SimpleSpan::new((), 0..0),
-                    });
-                    return None;
-                }
-            };
+            let loaded = block.load_typed(ctx, slot, struct_mlir_ty, loc)?;
             (record_ty, loaded)
         }
         ref record_ty @ Ty::Record { .. } => {
@@ -365,16 +310,7 @@ fn lower_field_access<'c>(
             if ctx.mutable_slots.borrow().contains(root) {
                 let struct_mlir_ty = ty_to_mlir(record_ty, ctx.mlir);
                 let loc = ctx.location();
-                let loaded = match block.load_typed(ctx.mlir, slot, struct_mlir_ty, loc) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        ctx.emit_symptom(CodegenSymptom::Internal {
-                            message: format!("record load: {e:?}"),
-                            span: SimpleSpan::new((), 0..0),
-                        });
-                        return None;
-                    }
-                };
+                let loaded = block.load_typed(ctx, slot, struct_mlir_ty, loc)?;
                 (record_ty.clone(), loaded)
             } else {
                 (record_ty.clone(), slot)
@@ -394,10 +330,7 @@ fn lower_field_access<'c>(
         }) {
             Some(v) => v,
             None => {
-                ctx.emit_symptom(CodegenSymptom::Internal {
-                    message: format!("No field '{}' on record type", seg.as_str()),
-                    span: SimpleSpan::new((), 0..0),
-                });
+                ctx.emit_internal(format!("No field '{}' on record type", seg.as_str()));
                 return None;
             }
         };
@@ -421,7 +354,7 @@ impl FnCall {
     ) -> Option<Value<'c, 'c>> {
         let loc = ctx.location();
         let zero = block.const_i64(ctx.mlir, 0);
-        let empty: Vec<Expr> = Vec::new();
+        let empty: Vec<Spanned<Expr>> = Vec::new();
         let arg_exprs = self.args.as_deref().unwrap_or(&empty);
 
         // Lower up to 6 args, padding missing ones with 0.
@@ -466,10 +399,7 @@ impl FnCall {
         {
             Ok(op) => op,
             Err(e) => {
-                ctx.emit_symptom(CodegenSymptom::Internal {
-                    message: format!("llvm.inline_asm: {e}"),
-                    span: SimpleSpan::new((), 0..0),
-                });
+                ctx.emit_internal(format!("llvm.inline_asm: {e}"));
                 return None;
             }
         };

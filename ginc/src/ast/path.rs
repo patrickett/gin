@@ -17,10 +17,16 @@ pub struct ModPath {
     pub span: SimpleSpan,
 }
 
+// TODO: move SimpleSpan out of ModPath and wrap Spanned<ModPath>
+
 impl ModPath {
     /// Construct a new `ModPath` from an owned root and segment list.
     pub fn new(root: IStr, segments: Vec<IStr>, span: SimpleSpan) -> Self {
-        Self { root, segments, span }
+        Self {
+            root,
+            segments,
+            span,
+        }
     }
 }
 

@@ -5,9 +5,12 @@ pub use flow_analyzer::*;
 
 use std::collections::HashMap;
 
-use crate::ast::{Bind, BindValue, DeclareValue, Expr, FileAst, FormatPart, IfCondition, Literal, Loop, ParameterKind, Tag};
-use crate::prelude::BinOp;
+use crate::ast::{
+    Bind, BindValue, DeclareValue, Expr, FileAst, FormatPart, IfCondition, Literal, Loop,
+    ParameterKind, Tag,
+};
 use crate::intern::IStr;
+use crate::prelude::BinOp;
 use crate::prelude::WhenArm;
 
 /// A concrete compile-time value carried by `Ty::Literal`.
@@ -415,10 +418,9 @@ fn resolve_name(name: IStr, raw: &HashMap<IStr, &DeclareValue>, depth: u8) -> Ty
                                     *field_name,
                                     Box::new(resolve_tag_ref(inner, raw, depth + 1)),
                                 )),
-                                ParameterKind::Generic => Some((
-                                    *field_name,
-                                    Box::new(Ty::Opaque(*field_name)),
-                                )),
+                                ParameterKind::Generic => {
+                                    Some((*field_name, Box::new(Ty::Opaque(*field_name))))
+                                }
                                 _ => None,
                             })
                             .collect(),
@@ -439,7 +441,9 @@ fn resolve_name(name: IStr, raw: &HashMap<IStr, &DeclareValue>, depth: u8) -> Ty
 
 fn resolve_tag_from_map(tag: &Tag, tag_types: &HashMap<IStr, Ty>) -> Ty {
     match tag {
-        Tag::Nominal(name, _) => tag_types.get(name).cloned()
+        Tag::Nominal(name, _) => tag_types
+            .get(name)
+            .cloned()
             .or_else(|| builtin(*name))
             .unwrap_or(Ty::Int(64)),
         Tag::Generic(name, params, _) => match name.as_str() {
@@ -468,7 +472,9 @@ fn resolve_tag_from_map(tag: &Tag, tag_types: &HashMap<IStr, Ty>) -> Ty {
             // to the type of the variant. The type of a variant is the union type itself.
             // E.g., Bool.True has type Bool (the union type)
             let union_name = path.root;
-            tag_types.get(&union_name).cloned()
+            tag_types
+                .get(&union_name)
+                .cloned()
                 .unwrap_or(Ty::Opaque(union_name))
         }
     }
@@ -544,7 +550,9 @@ fn infer_expr_ty(
                         BinOp::Modulo if *b != 0 => Some(a % b),
                         _ => None,
                     };
-                    folded.map(|v| Ty::Literal(LiteralValue::Int(v))).unwrap_or(lhs_ty)
+                    folded
+                        .map(|v| Ty::Literal(LiteralValue::Int(v)))
+                        .unwrap_or(lhs_ty)
                 }
                 (Ty::Literal(LiteralValue::Float(a)), Ty::Literal(LiteralValue::Float(b))) => {
                     let folded = match bin.op {
@@ -554,7 +562,9 @@ fn infer_expr_ty(
                         BinOp::Divide => Some(a / b),
                         _ => None,
                     };
-                    folded.map(|v| Ty::Literal(LiteralValue::Float(v))).unwrap_or(lhs_ty)
+                    folded
+                        .map(|v| Ty::Literal(LiteralValue::Float(v)))
+                        .unwrap_or(lhs_ty)
                 }
                 _ => {
                     if matches!(lhs_ty, Ty::Float | Ty::Literal(LiteralValue::Float(_))) {
@@ -715,11 +725,14 @@ impl TyEnv {
 
                 let mut body_locals = locals.clone();
                 for (i, expr) in exprs.iter().enumerate() {
-                    if let Expr::Bind(inner) = expr {
+                    if let Expr::Bind(inner) = &**expr {
                         self.check_bind(inner, db, &body_locals);
                         let name = inner.name();
                         let used = exprs[i + 1..].iter().any(|e| expr_references_name(e, name))
-                            || ret.0.as_ref().is_some_and(|e| expr_references_name(e, name));
+                            || ret
+                                .0
+                                .as_ref()
+                                .is_some_and(|e| expr_references_name(e, name));
                         if !used {
                             type_symptom::unused_binding(inner.name_span, name.to_string())
                                 .accumulate(db);
@@ -751,7 +764,8 @@ impl TyEnv {
                 let name = call.path.root;
                 if let Some(args) = &call.args {
                     if self.fn_return_ty(&name).is_none() && !is_builtin_func(name.as_str()) {
-                        type_symptom::unknown_binding(call.path.span, name.to_string()).accumulate(db);
+                        type_symptom::unknown_binding(call.path.span, name.to_string())
+                            .accumulate(db);
                     }
                     for arg in args {
                         self.check_expr(arg, db, locals);
@@ -835,7 +849,9 @@ impl TyEnv {
                 self.check_expr(buf, db, locals);
                 self.check_expr(index, db, locals);
             }
-            Expr::BufSet { buf, index, value, .. } => {
+            Expr::BufSet {
+                buf, index, value, ..
+            } => {
                 self.check_expr(buf, db, locals);
                 self.check_expr(index, db, locals);
                 self.check_expr(value, db, locals);
@@ -895,7 +911,10 @@ fn expr_references_name(expr: &Expr, name: IStr) -> bool {
             BindValue::Expr(e) => expr_references_name(e, name),
             BindValue::Body { exprs, ret } => {
                 exprs.iter().any(|e| expr_references_name(e, name))
-                    || ret.0.as_ref().is_some_and(|e| expr_references_name(e, name))
+                    || ret
+                        .0
+                        .as_ref()
+                        .is_some_and(|e| expr_references_name(e, name))
             }
             BindValue::Extern => false,
         },
@@ -941,7 +960,9 @@ fn expr_references_name(expr: &Expr, name: IStr) -> bool {
         Expr::BufGet { buf, index, .. } => {
             expr_references_name(buf, name) || expr_references_name(index, name)
         }
-        Expr::BufSet { buf, index, value, .. } => {
+        Expr::BufSet {
+            buf, index, value, ..
+        } => {
             expr_references_name(buf, name)
                 || expr_references_name(index, name)
                 || expr_references_name(value, name)

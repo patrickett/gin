@@ -2,7 +2,7 @@
 
 use crate::ast::{
     Bind, BindValue, Declare, DeclareValue, Expr, FileAst, IfCondition, Literal, ParameterKind,
-    Tag, Variant,
+    Spanned, Tag, Variant,
 };
 use crate::database::File;
 use crate::database::input_database::Db;
@@ -77,7 +77,7 @@ impl HoverDoc for LocalBind<'_> {
         if let Some(narrowed) = &self.narrowed_type {
             md.push_str(&format!(" {narrowed}"));
         } else if let Some((type_name, args)) = bind.type_annotation.as_ref() {
-            let args_str: Vec<String> = args.iter().map(display_lit_expr).collect();
+            let args_str: Vec<String> = args.iter().map(|a| display_lit_expr(a)).collect();
             md.push_str(&format!(" {}({})", type_name.as_str(), args_str.join(", ")));
         } else if let Some(inferred) = infer_type_from_bind_with_ast(bind, ctx.ast) {
             md.push_str(&format!(" {inferred}"));
@@ -421,7 +421,7 @@ fn infer_type_from_bind_with_ast(bind: &Bind, ast: &FileAst) -> Option<String> {
     };
     let expr = expr?;
 
-    if let Expr::TagCall(tc) = expr {
+    if let Expr::TagCall(tc) = &expr.0 {
         for decl in ast.tags().values() {
             if let DeclareValue::Union { variants } = decl.value() {
                 for variant in variants {
@@ -445,10 +445,13 @@ fn infer_type_from_bind_with_ast(bind: &Bind, ast: &FileAst) -> Option<String> {
                                             .position(|&vp| vp == uparam.as_str());
                                         let arg_expr = idx.and_then(|i| tc.args.get(i));
                                         match arg_expr {
-                                            Some(Expr::Lit(Literal::Int(n))) => n.to_string(),
-                                            Some(Expr::Lit(Literal::Number(n))) => n.to_string(),
-                                            Some(Expr::Lit(Literal::Float(f))) => f.to_string(),
-                                            _ => uparam.to_string(),
+                                            Some(e) => match &**e {
+                                                Expr::Lit(Literal::Int(n)) => n.to_string(),
+                                                Expr::Lit(Literal::Number(n)) => n.to_string(),
+                                                Expr::Lit(Literal::Float(f)) => f.to_string(),
+                                                _ => uparam.to_string(),
+                                            },
+                                            None => uparam.to_string(),
                                         }
                                     })
                                     .collect();
@@ -521,17 +524,21 @@ fn compute_rich_return_type(bind: &Bind, ast: &FileAst) -> Option<String> {
     match &ret.0 {
         None => push(&mut types, &mut seen, "Nothing".to_string()),
         Some(expr) => {
-            let outer_locals: Vec<&Expr> = exprs.iter().collect();
+            let outer_locals: Vec<&Expr> = exprs.iter().map(|e| &**e).collect();
             if let Some(v) = eval_expr_to_literal_with_locals(expr, ast, &outer_locals) {
                 push(&mut types, &mut seen, v.to_string());
             }
         }
     }
-    for expr in exprs {
-        if let Expr::If(if_expr) = expr
-            && let Some(ret_expr) = &if_expr.ret.0
+    for spanned_expr in exprs {
+        if let Expr::If(if_expr) = &**spanned_expr
+            && let Some(ret_expr) = if_expr.ret.0.as_ref()
         {
-            let combined: Vec<&Expr> = exprs.iter().chain(if_expr.body.iter()).collect();
+            let combined: Vec<&Expr> = exprs
+                .iter()
+                .map(|e| &**e)
+                .chain(if_expr.body.iter().map(|e| &**e))
+                .collect();
             if let Some(v) = eval_expr_to_literal_with_locals(ret_expr, ast, &combined) {
                 push(&mut types, &mut seen, v.to_string());
             }
@@ -543,9 +550,9 @@ fn compute_rich_return_type(bind: &Bind, ast: &FileAst) -> Option<String> {
     Some(types.join(" or "))
 }
 
-fn find_local_bind_recursive<'a>(exprs: &'a [Expr], name: &str) -> Option<&'a Bind> {
+fn find_local_bind_recursive<'a>(exprs: &'a [Spanned<Expr>], name: &str) -> Option<&'a Bind> {
     for expr in exprs {
-        match expr {
+        match &**expr {
             Expr::Bind(b) if b.name().as_str() == name => return Some(b),
             Expr::If(if_expr) => {
                 if let Some(found) = find_local_bind_recursive(&if_expr.body, name) {
@@ -564,15 +571,16 @@ fn infer_pattern_var_value(var_name: &str, ast: &FileAst) -> Option<String> {
             continue;
         };
         let pattern_info = exprs.iter().find_map(|e| {
-            let Expr::If(if_expr) = e else { return None };
+            let Expr::If(if_expr) = &**e else { return None };
             let IfCondition::Pattern { subject, tag } = &if_expr.condition else {
                 return None;
             };
-            let Tag::Generic(_, params, _) = tag else {
-                return None;
+            let params = match tag {
+                Tag::Generic(_, params, _) => params,
+                _ => return None,
             };
             let param_pos = params.keys().position(|k| k.as_str() == var_name)?;
-            let subject_name = match subject.as_ref() {
+            let subject_name = match &subject.as_ref().0 {
                 Expr::FnCall(c) if c.args.is_none() && c.path.segments.is_empty() => {
                     c.path.root.as_str()
                 }
@@ -582,7 +590,7 @@ fn infer_pattern_var_value(var_name: &str, ast: &FileAst) -> Option<String> {
         });
         let (subject_name, variant_name, param_pos) = pattern_info?;
         let type_annotation = exprs.iter().find_map(|e| {
-            let Expr::Bind(b) = e else { return None };
+            let Expr::Bind(b) = &**e else { return None };
             if b.name().as_str() == subject_name {
                 b.type_annotation.as_ref()
             } else {
@@ -613,7 +621,7 @@ fn infer_pattern_var_value(var_name: &str, ast: &FileAst) -> Option<String> {
                 .keys()
                 .position(|k| k == union_param_name)?;
             let arg = type_args.get(type_param_pos)?;
-            return Some(match arg {
+            return Some(match &**arg {
                 Expr::Lit(Literal::Int(n)) => n.to_string(),
                 Expr::Lit(Literal::Number(n)) => n.to_string(),
                 Expr::Lit(Literal::Float(f)) => f.to_string(),

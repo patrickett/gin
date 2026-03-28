@@ -2,10 +2,10 @@ use crate::prelude::*;
 use chumsky::{Parser, input::ValueInput, prelude::*, span::SimpleSpan};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Return(pub Option<Box<Expr>>);
+pub struct Return(pub Option<Box<Spanned<Expr>>>);
 
 pub fn r#return<'t, I>(
-    expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
+    expr: impl Parser<'t, I, Spanned<Expr>, ParserError<'t>> + Clone + 't,
 ) -> impl Parser<'t, I, Return, ParserError<'t>> + Clone
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
@@ -26,7 +26,12 @@ where
                 .map_with(|name, e| (name, e.span())),
         )
         .then_ignore(just(Token::Newline).or_not())
-        .map(|(name, span)| Return(Some(Box::new(Expr::AnonymousTag(name, span)))));
+        .map(|(name, span)| {
+            Return(Some(Box::new(Spanned(
+                Expr::AnonymousTag(name, span),
+                span,
+            ))))
+        });
 
     // Bare return (no value) - must come last to avoid consuming Return
     // when there are more tokens. Accepts an optional newline (for files

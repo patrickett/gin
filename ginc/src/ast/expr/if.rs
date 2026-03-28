@@ -1,6 +1,5 @@
 use crate::codegen::prelude::*;
 use crate::codegen::{prelude::scf_dialect, ty_to_mlir};
-use crate::diagnostic::codegen::CodegenSymptom;
 use crate::intern::IStr;
 use crate::prelude::*;
 use crate::typeck::Ty;
@@ -10,19 +9,22 @@ use crate::ast::expr::r#return::Return;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum IfCondition {
-    Bool(Box<Expr>),
-    Pattern { subject: Box<Expr>, tag: Tag },
+    Bool(Box<Spanned<Expr>>),
+    Pattern {
+        subject: Box<Spanned<Expr>>,
+        tag: Tag,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IfExpr {
     pub condition: IfCondition,
-    pub body: Vec<Expr>,
+    pub body: Vec<Spanned<Expr>>,
     pub ret: Return,
 }
 
 pub fn if_expr<'t, I>(
-    expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
+    expr: impl Parser<'t, I, Spanned<Expr>, ParserError<'t>> + Clone + 't,
 ) -> impl Parser<'t, I, IfExpr, ParserError<'t>>
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
@@ -95,10 +97,7 @@ impl<'c> Lower<'c> for IfExpr {
                 {
                     Ok(op) => op,
                     Err(e) => {
-                        ctx.emit_symptom(CodegenSymptom::Internal {
-                            message: format!("arith.trunci: {e}"),
-                            span: SimpleSpan::new((), 0..0),
-                        });
+                        ctx.emit_internal(format!("arith.trunci: {e}"));
                         return None;
                     }
                 };
@@ -110,10 +109,7 @@ impl<'c> Lower<'c> for IfExpr {
                 let (_, expected_disc, _) = match ctx.ty_env.lookup_variant(variant_name) {
                     Some(v) => v,
                     None => {
-                        ctx.emit_symptom(CodegenSymptom::Internal {
-                            message: format!("Unknown variant '{}' in if pattern", tag.name()),
-                            span: SimpleSpan::new((), 0..0),
-                        });
+                        ctx.emit_internal(format!("Unknown variant '{}' in if pattern", tag.name()));
                         return None;
                     }
                 };

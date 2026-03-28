@@ -17,6 +17,8 @@ mod pattern;
 pub use pattern::*;
 mod ident;
 pub use ident::*;
+mod spanned;
+pub use spanned::*;
 mod impl_block;
 pub use impl_block::*;
 
@@ -42,7 +44,7 @@ where
         method_parser.map(TopLevelValue::Bind),
         bind(expr_parser.clone()).map(TopLevelValue::Bind),
         declare(expr_parser.clone()).map(TopLevelValue::Tag),
-        expr_parser.map_with(|e, extra| TopLevelValue::Expr(e, extra.span())),
+        expr_parser.map(|Spanned(expr, span)| TopLevelValue::Expr(expr, span)),
     ))
     .padded_by(just(Newline).repeated());
 

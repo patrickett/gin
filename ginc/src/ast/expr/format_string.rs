@@ -1,5 +1,4 @@
 use crate::codegen::{addressof_string_global, prelude::*};
-use crate::diagnostic::codegen::CodegenSymptom;
 use crate::parse::unescape::unescape;
 use crate::prelude::*;
 use crate::typeck::Ty;
@@ -8,7 +7,7 @@ use chumsky::span::SimpleSpan;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FormatPart {
     Text(String),
-    Expr(Box<Expr>),
+    Expr(Box<Spanned<Expr>>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -19,7 +18,7 @@ pub struct FormatString {
 /// Parse a format string expression from the new token stream:
 /// `FormatStringDelim [FormatStringText | FormatInterpStart expr FormatInterpEnd]* FormatStringDelim`
 pub fn format_string<'t, I>(
-    expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
+    expr: impl Parser<'t, I, Spanned<Expr>, ParserError<'t>> + Clone + 't,
 ) -> impl Parser<'t, I, FormatString, ParserError<'t>> + Clone + 't
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
@@ -95,13 +94,10 @@ impl<'c> Lower<'c> for FormatString {
                     let ptr = match addressof_string_global(ctx.mlir, block, &name) {
                         Some(p) => p,
                         None => {
-                            ctx.emit_symptom(CodegenSymptom::Internal {
-                                message: format!(
-                                    "failed to get address of string global '{}'",
-                                    name
-                                ),
-                                span: SimpleSpan::new((), 0..0),
-                            });
+                            ctx.emit_internal(format!(
+                                "failed to get address of string global '{}'",
+                                name
+                            ));
                             return None;
                         }
                     };
@@ -154,23 +150,11 @@ impl<'c> Lower<'c> for FormatString {
         // 4. Copy each part into the buffer at increasing offsets.
         let mut cur_offset = block.const_i64(ctx.mlir, 0);
         for (src_ptr, len) in &parts {
-            let dst_ptr = match block.gep_i8(ctx.mlir, buf, cur_offset, loc) {
-                Ok(v) => v,
-                Err(e) => {
-                    ctx.emit_symptom(CodegenSymptom::Internal {
-                        message: format!("gep_i8 in format string: {e:?}"),
-                        span: SimpleSpan::new((), 0..0),
-                    });
-                    return None;
-                }
-            };
+            let dst_ptr = block.gep_i8(ctx, buf, cur_offset, loc)?;
             let memcpy_operation = match memcpy_op(ctx.mlir, dst_ptr, *src_ptr, *len, loc) {
                 Some(op) => op,
                 None => {
-                    ctx.emit_symptom(CodegenSymptom::Internal {
-                        message: "memcpy operation failed in format string".into(),
-                        span: SimpleSpan::new((), 0..0),
-                    });
+                    ctx.emit_internal("memcpy operation failed in format string");
                     return None;
                 }
             };

@@ -5,16 +5,18 @@ use chumsky::prelude::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Binary {
-    pub lhs: Box<Expr>,
+    pub lhs: Box<Spanned<Expr>>,
     pub op: BinOp,
-    pub rhs: Box<Expr>,
+    pub rhs: Box<Spanned<Expr>>,
 }
 
 impl Binary {
-    pub fn new(lhs: Expr, op: BinOp, rhs: Expr) -> Self {
-        let lhs = Box::new(lhs);
-        let rhs = Box::new(rhs);
-        Self { lhs, op, rhs }
+    pub fn new(lhs: Spanned<Expr>, op: BinOp, rhs: Spanned<Expr>) -> Self {
+        Self {
+            lhs: Box::new(lhs),
+            op,
+            rhs: Box::new(rhs),
+        }
     }
 }
 

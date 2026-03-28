@@ -2,15 +2,16 @@ use crate::prelude::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Range {
-    pub start: Box<Expr>,
-    pub end: Box<Expr>,
+    pub start: Box<Spanned<Expr>>,
+    pub end: Box<Spanned<Expr>>,
 }
 
 impl Range {
-    pub fn new(start: Expr, end: Expr) -> Self {
-        let start = Box::new(start);
-        let end = Box::new(end);
-        Self { start, end }
+    pub fn new(start: Spanned<Expr>, end: Spanned<Expr>) -> Self {
+        Self {
+            start: Box::new(start),
+            end: Box::new(end),
+        }
     }
 }
 

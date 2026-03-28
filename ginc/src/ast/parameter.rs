@@ -1,14 +1,14 @@
 use indexmap::IndexMap;
 
-use crate::prelude::*;
 use crate::parse::delimited_list;
+use crate::prelude::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[allow(clippy::large_enum_variant)]
 pub enum ParameterKind {
     Generic,
     Tagged(Tag),
-    Default(Expr),
+    Default(Spanned<Expr>),
 }
 
 impl std::fmt::Display for ParameterKind {
@@ -27,14 +27,14 @@ pub enum ParamInfo {
     /// Represents a type tag for the parameter, e.g. `(p Person)`.
     Tag(Tag),
     /// Represents a default value expression for the parameter, e.g. `(p: 123)`.
-    Default(Expr),
+    Default(Spanned<Expr>),
 }
 
 // id Tag | Tag2
 // id: expr -- note exprs cannot be | since this is actually an assignment/default value
 // the expr however can return a Tag Union
 pub fn parameter<'t, I>(
-    expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
+    expr: impl Parser<'t, I, Spanned<Expr>, ParserError<'t>> + Clone + 't,
     tag: impl Parser<'t, I, Tag, ParserError<'t>> + Clone + 't,
 ) -> impl Parser<'t, I, (IStr, ParameterKind), ParserError<'t>> + Clone
 where
@@ -77,7 +77,7 @@ where
 pub type Parameters = IndexMap<IStr, ParameterKind>;
 
 pub fn params<'t, I>(
-    expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
+    expr: impl Parser<'t, I, Spanned<Expr>, ParserError<'t>> + Clone + 't,
     tag: impl Parser<'t, I, Tag, ParserError<'t>> + Clone + 't,
 ) -> impl Parser<'t, I, Parameters, ParserError<'t>> + Clone
 where

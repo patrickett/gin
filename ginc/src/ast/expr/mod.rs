@@ -44,84 +44,127 @@ pub enum Expr {
     /// A bare capitalized tag in expression position, e.g. `None`, `True`.
     AnonymousTag(IStr, SimpleSpan),
     /// Stack-allocate an array: `(init_expr; N)` — emits `llvm.alloca N×sizeof(elem)`.
-    TupleAlloc { init: Box<Expr>, size: usize },
+    TupleAlloc {
+        init: Box<Spanned<Expr>>,
+        size: usize,
+    },
     /// Positional element read: `arr.N` — emits GEP + load.
-    TupleGet { base: Box<Expr>, index: usize },
+    TupleGet {
+        base: Box<Spanned<Expr>>,
+        index: usize,
+    },
     /// Positional element write: `arr.N: val` — emits GEP + store.
-    TupleSet { base: Box<Expr>, index: usize, value: Box<Expr> },
+    TupleSet {
+        base: Box<Spanned<Expr>>,
+        index: usize,
+        value: Box<Spanned<Expr>>,
+    },
     /// Explicit numeric cast: `expr as Type` — emits trunci/extsi/sitofp/fptosi.
-    Cast { expr: Box<Expr>, ty: IStr },
+    Cast {
+        expr: Box<Spanned<Expr>>,
+        ty: IStr,
+    },
     /// Dynamic buffer element read: `buf.(i)` — emits GEP(i * elem_bytes) + load.
-    BufGet { buf: Box<Expr>, index: Box<Expr>, span: SimpleSpan },
+    BufGet {
+        buf: Box<Spanned<Expr>>,
+        index: Box<Spanned<Expr>>,
+    },
     /// Dynamic buffer element write: `buf.(i): val` — emits GEP(i * elem_bytes) + store.
-    BufSet { buf: Box<Expr>, index: Box<Expr>, value: Box<Expr>, span: SimpleSpan },
+    BufSet {
+        buf: Box<Spanned<Expr>>,
+        index: Box<Spanned<Expr>>,
+        value: Box<Spanned<Expr>>,
+    },
     /// Take a raw pointer to a value: `@expr` — emits alloca + spill if needed, returns `!llvm.ptr`.
-    TakePtr(Box<Expr>),
+    TakePtr(Box<Spanned<Expr>>),
     /// Take a reference to a value: `^expr` — same layout as TakePtr for now.
-    TakeRef(Box<Expr>),
+    TakeRef(Box<Spanned<Expr>>),
     /// Dereference a pointer or reference: `*expr` — emits `llvm.load` of the pointed-to value.
-    Deref(Box<Expr>),
+    Deref(Box<Spanned<Expr>>),
     /// Unary negation: `-expr`.
-    Negate(Box<Expr>),
+    Negate(Box<Spanned<Expr>>),
     /// Tuple literal: `(e1, e2, …)` — at least two elements.
-    TupleLit(Vec<Expr>),
+    TupleLit(Vec<Spanned<Expr>>),
 }
 
-pub fn expression<'t, I>() -> impl Parser<'t, I, Expr, ParserError<'t>> + Clone
+pub fn expression<'t, I>() -> impl Parser<'t, I, Spanned<Expr>, ParserError<'t>> + Clone
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
     recursive(|expr| {
-        use chumsky::pratt::{infix, left, postfix, prefix};
         use Token::*;
+        use chumsky::pratt::{infix, left, postfix, prefix};
 
         let inner = atom(expr.clone());
 
         let full_atom = choice((
             inner.boxed(),
-            loop_expr(expr.clone()).map(Expr::Loop).boxed(),
-            when_expr(expr.clone()).map(Expr::When).boxed(),
-            if_expr(expr.clone()).map(Expr::If).boxed(),
+            loop_expr(expr.clone())
+                .map_with(|l, e| Spanned(Expr::Loop(l), e.span()))
+                .boxed(),
+            when_expr(expr.clone())
+                .map_with(|w, e| Spanned(Expr::When(w), e.span()))
+                .boxed(),
+            if_expr(expr.clone())
+                .map_with(|i, e| Spanned(Expr::If(i), e.span()))
+                .boxed(),
         ));
 
         // Comparison operators (precedence 3)
         let comparison = infix(
             left(3),
             comparison_op(),
-            |lhs: Expr, op: BinOp, rhs: Expr, _| Expr::Binary(Binary::new(lhs, op, rhs)),
+            |lhs: Spanned<Expr>, op: BinOp, rhs: Spanned<Expr>, extra| {
+                Spanned(Expr::Binary(Binary::new(lhs, op, rhs)), extra.span())
+            },
         );
 
         // Arithmetic operators (precedence 4)
         let arithmetic = infix(
             left(4),
             arithmetic_op(),
-            |lhs: Expr, op: BinOp, rhs: Expr, _| Expr::Binary(Binary::new(lhs, op, rhs)),
+            |lhs: Spanned<Expr>, op: BinOp, rhs: Spanned<Expr>, extra| {
+                Spanned(Expr::Binary(Binary::new(lhs, op, rhs)), extra.span())
+            },
         );
 
         // Bitwise operators (precedence 3, same level as comparison — use parens to override)
         let bitwise = infix(
             left(3),
             bitwise_op(),
-            |lhs: Expr, op: BinOp, rhs: Expr, _| Expr::Binary(Binary::new(lhs, op, rhs)),
+            |lhs: Spanned<Expr>, op: BinOp, rhs: Spanned<Expr>, extra| {
+                Spanned(Expr::Binary(Binary::new(lhs, op, rhs)), extra.span())
+            },
         );
 
         // Postfix tuple element read: `expr.N` (precedence 5, tightest)
         let tuple_get = postfix(
             5,
             just(Dot).ignore_then(select! { Token::Int(n) => n as usize }),
-            |base: Expr, idx: usize, _| Expr::TupleGet {
-                base: Box::new(base),
-                index: idx,
+            |base: Spanned<Expr>, idx: usize, extra| {
+                Spanned(
+                    Expr::TupleGet {
+                        base: Box::new(base),
+                        index: idx,
+                    },
+                    extra.span(),
+                )
             },
         );
 
         // Postfix cast: `expr as Type` (precedence 5, same as tuple_get)
         let cast = postfix(
             5,
-            just(Token::As).ignore_then(select! { Token::Tag(name) => IStr::new(name.to_string()) }),
-            |expr: Expr, ty: IStr, _| Expr::Cast {
-                expr: Box::new(expr),
-                ty,
+            just(Token::As)
+                .ignore_then(select! { Token::Tag(name) => IStr::new(name.to_string()) }),
+            |expr: Spanned<Expr>, ty: IStr, extra| {
+                Spanned(
+                    Expr::Cast {
+                        expr: Box::new(expr),
+                        ty,
+                    },
+                    extra.span(),
+                )
             },
         );
 
@@ -132,22 +175,26 @@ where
                 .ignore_then(just(Token::ParenOpen))
                 .ignore_then(expr.clone())
                 .then_ignore(just(Token::ParenClose)),
-            |base: Expr, index: Expr, extra| Expr::BufGet {
-                buf: Box::new(base),
-                index: Box::new(index),
-                span: extra.span(),
+            |base: Spanned<Expr>, index: Spanned<Expr>, extra| {
+                Spanned(
+                    Expr::BufGet {
+                        buf: Box::new(base),
+                        index: Box::new(index),
+                    },
+                    extra.span(),
+                )
             },
         );
 
         // Prefix unary negation: `-expr` (higher precedence than arithmetic)
-        let negate = prefix(
-            6,
-            just(Token::Minus),
-            |_, expr: Expr, _| Expr::Negate(Box::new(expr)),
-        );
+        let negate = prefix(6, just(Token::Minus), |_, expr: Spanned<Expr>, extra| {
+            Spanned(Expr::Negate(Box::new(expr)), extra.span())
+        });
 
         full_atom
-            .pratt((comparison, bitwise, arithmetic, tuple_get, cast, buf_get, negate))
+            .pratt((
+                comparison, bitwise, arithmetic, tuple_get, cast, buf_get, negate,
+            ))
             .padded_by(just(Newline).repeated())
     })
 }
@@ -157,8 +204,8 @@ where
 /// Does NOT include loops to prevent infinite recursion when used as the
 /// sub-expression parser for bind and fn_call.
 fn atom<'t, I>(
-    expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
-) -> impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't
+    expr: impl Parser<'t, I, Spanned<Expr>, ParserError<'t>> + Clone + 't,
+) -> impl Parser<'t, I, Spanned<Expr>, ParserError<'t>> + Clone + 't
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
@@ -172,14 +219,21 @@ where
         )
         .then_ignore(just(Token::Colon))
         .then(expr.clone())
-        .map_with(|((name, index), value), e| Expr::BufSet {
-            buf: Box::new(Expr::FnCall(FnCall {
-                path: ModPath::new(name, vec![], e.span()),
-                args: None,
-            })),
-            index: Box::new(index),
-            value: Box::new(value),
-            span: e.span(),
+        .map_with(|((name, index), value), e| {
+            Spanned(
+                Expr::BufSet {
+                    buf: Box::new(Spanned(
+                        Expr::FnCall(FnCall {
+                            path: ModPath::new(name, vec![], e.span()),
+                            args: None,
+                        }),
+                        e.span(),
+                    )),
+                    index: Box::new(index),
+                    value: Box::new(value),
+                },
+                e.span(),
+            )
         })
         .boxed();
 
@@ -189,13 +243,21 @@ where
         .then(select! { Token::Int(n) => n as usize })
         .then_ignore(just(Token::Colon))
         .then(expr.clone())
-        .map_with(|((name, idx), val), e| Expr::TupleSet {
-            base: Box::new(Expr::FnCall(FnCall {
-                path: ModPath::new(name, vec![], e.span()),
-                args: None,
-            })),
-            index: idx,
-            value: Box::new(val),
+        .map_with(|((name, idx), val), e| {
+            Spanned(
+                Expr::TupleSet {
+                    base: Box::new(Spanned(
+                        Expr::FnCall(FnCall {
+                            path: ModPath::new(name, vec![], e.span()),
+                            args: None,
+                        }),
+                        e.span(),
+                    )),
+                    index: idx,
+                    value: Box::new(val),
+                },
+                e.span(),
+            )
         })
         .boxed();
 
@@ -203,15 +265,13 @@ where
     let tuple_lit = just(Token::ParenOpen)
         .ignore_then(
             expr.clone()
-                .separated_by(
-                    just(Token::Comma).then_ignore(just(Token::Newline).repeated()),
-                )
+                .separated_by(just(Token::Comma).then_ignore(just(Token::Newline).repeated()))
                 .allow_trailing()
                 .at_least(2)
                 .collect::<Vec<_>>(),
         )
         .then_ignore(just(Token::ParenClose))
-        .map(Expr::TupleLit)
+        .map_with(|elems, e| Spanned(Expr::TupleLit(elems), e.span()))
         .boxed();
 
     // TupleAlloc: `(init_expr; N)`
@@ -220,9 +280,14 @@ where
         .then_ignore(just(Token::ColonSemi))
         .then(select! { Token::Int(n) => n as usize })
         .then_ignore(just(Token::ParenClose))
-        .map(|(init, size)| Expr::TupleAlloc {
-            init: Box::new(init),
-            size,
+        .map_with(|(init, size), e| {
+            Spanned(
+                Expr::TupleAlloc {
+                    init: Box::new(init),
+                    size,
+                },
+                e.span(),
+            )
         })
         .boxed();
 
@@ -235,19 +300,19 @@ where
     // TakePtr: `@expr`
     let take_ptr = just(Token::At)
         .ignore_then(expr.clone())
-        .map(|e| Expr::TakePtr(Box::new(e)))
+        .map_with(|e, extra| Spanned(Expr::TakePtr(Box::new(e)), extra.span()))
         .boxed();
 
     // TakeRef: `^expr`
     let take_ref = just(Token::Caret)
         .ignore_then(expr.clone())
-        .map(|e| Expr::TakeRef(Box::new(e)))
+        .map_with(|e, extra| Spanned(Expr::TakeRef(Box::new(e)), extra.span()))
         .boxed();
 
     // Deref: `*expr`
     let deref = just(Token::Star)
         .ignore_then(expr.clone())
-        .map(|e| Expr::Deref(Box::new(e)))
+        .map_with(|e, extra| Spanned(Expr::Deref(Box::new(e)), extra.span()))
         .boxed();
 
     choice((
@@ -259,8 +324,12 @@ where
         take_ptr,
         take_ref,
         deref,
-        literal().map(Expr::Lit).boxed(),
-        format_string(expr.clone()).map(Expr::FormatString).boxed(),
+        literal()
+            .map_with(|lit, e| Spanned(Expr::Lit(lit), e.span()))
+            .boxed(),
+        format_string(expr.clone())
+            .map_with(|fs, e| Spanned(Expr::FormatString(fs), e.span()))
+            .boxed(),
         just(Token::SelfInstance)
             .then(
                 just(Token::Dot)
@@ -276,21 +345,36 @@ where
                     )
                     .or_not(),
             )
-            .map_with(|(_, access), e| match access {
-                None => Expr::SelfRef(e.span()),
-                Some((field, args)) => Expr::FnCall(FnCall {
-                    path: ModPath::new(IStr::new("self".to_string()), vec![field], e.span()),
-                    args,
-                }),
+            .map_with(|(_, access), e| {
+                Spanned(
+                    match access {
+                        None => Expr::SelfRef(e.span()),
+                        Some((field, args)) => Expr::FnCall(FnCall {
+                            path: ModPath::new(
+                                IStr::new("self".to_string()),
+                                vec![field],
+                                e.span(),
+                            ),
+                            args,
+                        }),
+                    },
+                    e.span(),
+                )
             })
             .boxed(),
-        bind(expr.clone()).map(Expr::Bind).boxed(),
-        fn_call(expr.clone()).map(Expr::FnCall).boxed(),
+        bind(expr.clone())
+            .map_with(|b, e| Spanned(Expr::Bind(b), e.span()))
+            .boxed(),
+        fn_call(expr.clone())
+            .map_with(|fc, e| Spanned(Expr::FnCall(fc), e.span()))
+            .boxed(),
         // TagCall must come before AnonymousTag: `Some(5)` → TagCall, bare `None` → AnonymousTag.
-        tag_call(expr.clone()).map(Expr::TagCall).boxed(),
+        tag_call(expr.clone())
+            .map_with(|tc, e| Spanned(Expr::TagCall(tc), e.span()))
+            .boxed(),
         // Bare capitalized tag with no args (e.g. `None`, `True`, `False`).
         select! { Token::Tag(name) => IStr::new(name.to_string()) }
-            .map_with(|name, e| Expr::AnonymousTag(name, e.span()))
+            .map_with(|name, e| Spanned(Expr::AnonymousTag(name, e.span()), e.span()))
             .boxed(),
     ))
 }

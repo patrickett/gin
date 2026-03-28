@@ -28,7 +28,7 @@ impl<'c> Lower<'c> for Loop {
 }
 
 pub fn loop_expr<'t, I>(
-    body_expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
+    body_expr: impl Parser<'t, I, Spanned<Expr>, ParserError<'t>> + Clone + 't,
 ) -> impl Parser<'t, I, Loop, ParserError<'t>> + Clone + 't
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,

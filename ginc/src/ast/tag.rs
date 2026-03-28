@@ -82,7 +82,11 @@ impl Tag {
         match self {
             Tag::Nominal(name, _) => name.as_str(),
             Tag::Generic(name, _, _) => name.as_str(),
-            Tag::Qualified(path) => path.segments.last().map(|s| s.as_str()).unwrap_or(path.root.as_str()),
+            Tag::Qualified(path) => path
+                .segments
+                .last()
+                .map(|s| s.as_str())
+                .unwrap_or(path.root.as_str()),
         }
     }
 
@@ -116,7 +120,7 @@ impl Hash for Tag {
 }
 
 pub fn tag<'t, I>(
-    expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
+    expr: impl Parser<'t, I, Spanned<Expr>, ParserError<'t>> + Clone + 't,
 ) -> impl Parser<'t, I, Tag, ParserError<'t>> + Clone
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,

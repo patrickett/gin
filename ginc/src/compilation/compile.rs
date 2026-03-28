@@ -50,7 +50,9 @@ pub fn compile<'db>(db: &'db dyn Db, file: File) -> CompiledModule<'db> {
     let _flow_result = flow_analysis(db, file);
 
     // Code generation - emits codegen errors
-    let (mlir_text, codegen_symptoms) = generate_mlir(&ast);
+    let source = file.contents(db);
+    let filename = file.path(db).to_string_lossy().into_owned();
+    let (mlir_text, codegen_symptoms) = generate_mlir(&ast, source, &filename);
 
     // Accumulate all codegen symptoms
     for e in codegen_symptoms {

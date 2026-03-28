@@ -1,11 +1,15 @@
 use std::collections::{HashMap, HashSet};
 
+use crate::ast::Spanned;
 use crate::ast::{
     Bind, BindValue, Expr, FileAst, FnCall, IfCondition, IfExpr, Loop, Pattern, WhenArm, WhenExpr,
 };
 use crate::intern::IStr;
-use chumsky::span::SimpleSpan;
-use crate::typeck::{FlowAnalysis, FlowContext, ImpossibleCheck, IndexOutOfBounds, TyEnv, TypeConstraint, Ty, LiteralValue};
+use crate::typeck::{
+    FlowAnalysis, FlowContext, ImpossibleCheck, IndexOutOfBounds, LiteralValue, Ty, TyEnv,
+    TypeConstraint,
+};
+use chumsky::span::{SimpleSpan, Span};
 
 /// Analyzes control flow to track type narrowing.
 pub struct FlowAnalyzer<'a> {
@@ -167,16 +171,16 @@ impl<'a> FlowAnalyzer<'a> {
             }
 
             // Buffer operations.
-            Expr::BufGet { buf, index, span } => {
+            Expr::BufGet { buf, index } => {
                 self.analyze_expr(buf);
                 self.analyze_expr(index);
-                self.check_bounds(buf, index, *span);
+                self.check_bounds(buf, index, SimpleSpan::new((), 0..0));
             }
-            Expr::BufSet { buf, index, value, span } => {
+            Expr::BufSet { buf, index, value } => {
                 self.analyze_expr(buf);
                 self.analyze_expr(index);
                 self.analyze_expr(value);
-                self.check_bounds(buf, index, *span);
+                self.check_bounds(buf, index, SimpleSpan::new((), 0..0));
             }
 
             // Cast and reference operations.
@@ -420,13 +424,23 @@ impl<'a> FlowAnalyzer<'a> {
     fn check_bounds(&mut self, buf: &Expr, index: &Expr, span: SimpleSpan) {
         use crate::typeck::infer_expr_ty;
 
-        let index_val = match infer_expr_ty(index, &self.locals, &self.ty_env.tag_types, &self.ty_env.fn_return_types) {
+        let index_val = match infer_expr_ty(
+            index,
+            &self.locals,
+            &self.ty_env.tag_types,
+            &self.ty_env.fn_return_types,
+        ) {
             Ty::Literal(LiteralValue::Int(n)) => n,
             Ty::Int(_) => return,
             _ => return,
         };
 
-        let buf_size = match infer_expr_ty(buf, &self.locals, &self.ty_env.tag_types, &self.ty_env.fn_return_types) {
+        let buf_size = match infer_expr_ty(
+            buf,
+            &self.locals,
+            &self.ty_env.tag_types,
+            &self.ty_env.fn_return_types,
+        ) {
             Ty::Array { size, .. } => size,
             _ => return,
         };
@@ -458,7 +472,7 @@ impl<'a> FlowAnalyzer<'a> {
         }
     }
 
-    fn has_return_in_exprs(&self, exprs: &[Expr]) -> bool {
+    fn has_return_in_exprs(&self, exprs: &[Spanned<Expr>]) -> bool {
         exprs.iter().any(|e| self.has_return(e))
     }
 
@@ -499,10 +513,10 @@ impl<'a> FlowAnalyzer<'a> {
         }
     }
 
-    fn reset_loop_variables(&mut self, exprs: &[Expr], entry_context: FlowContext) {
+    fn reset_loop_variables(&mut self, exprs: &[Spanned<Expr>], entry_context: FlowContext) {
         // Reset narrowing for variables that are assigned in the loop
         for expr in exprs {
-            if let Expr::Bind(bind) = expr {
+            if let Expr::Bind(bind) = &**expr {
                 self.current_context_mut().reset(&bind.name());
             }
         }
@@ -510,10 +524,11 @@ impl<'a> FlowAnalyzer<'a> {
         let in_scope = self.in_scope.clone();
         for var in in_scope.iter() {
             if !self.reassigned.contains(var)
-                && let Some(entry_constraint) = entry_context.get_constraint(var) {
-                    self.current_context_mut()
-                        .narrow(*var, entry_constraint.clone());
-                }
+                && let Some(entry_constraint) = entry_context.get_constraint(var)
+            {
+                self.current_context_mut()
+                    .narrow(*var, entry_constraint.clone());
+            }
         }
     }
 

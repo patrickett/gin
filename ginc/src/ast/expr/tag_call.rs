@@ -1,6 +1,5 @@
 use crate::ast::ModPath;
 use crate::codegen::{prelude::*, ty_to_mlir};
-use crate::diagnostic::codegen::CodegenSymptom;
 use crate::parse::delimited_list;
 use crate::prelude::*;
 use crate::typeck::Ty;
@@ -16,11 +15,11 @@ pub struct TagCall {
     pub name: IStr,
     /// Optional qualified path (e.g., ModPath { root: "Maybe", segments: ["Some"] })
     pub qual_path: Option<ModPath>,
-    pub args: Vec<Expr>,
+    pub args: Vec<Spanned<Expr>>,
 }
 
 pub fn tag_call<'t, I>(
-    expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
+    expr: impl Parser<'t, I, Spanned<Expr>, ParserError<'t>> + Clone + 't,
 ) -> impl Parser<'t, I, TagCall, ParserError<'t>>
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
@@ -85,10 +84,7 @@ impl<'c> Lower<'c> for TagCall {
                     {
                         Ok(op) => op,
                         Err(e) => {
-                            ctx.emit_symptom(CodegenSymptom::Internal {
-                                message: format!("extui build failed: {e}"),
-                                span: SimpleSpan::new((), 0..0),
-                            });
+                            ctx.emit_internal(format!("extui build failed: {e}"));
                             return None;
                         }
                     };
@@ -105,13 +101,10 @@ impl<'c> Lower<'c> for TagCall {
         let record_ty = match ctx.ty_env.lookup_tag(self.name).cloned() {
             Some(ty) => ty,
             None => {
-                ctx.emit_symptom(CodegenSymptom::Internal {
-                    message: format!(
-                        "Unknown type '{}' — not declared as a union variant or record",
-                        self.name.as_str()
-                    ),
-                    span: SimpleSpan::new((), 0..0),
-                });
+                ctx.emit_internal(format!(
+                    "Unknown type '{}' — not declared as a union variant or record",
+                    self.name.as_str()
+                ));
                 return None;
             }
         };
@@ -123,38 +116,29 @@ impl<'c> Lower<'c> for TagCall {
                 let mut val = block.append_op(ctx.mlir.llvm_undef(struct_type));
 
                 // Named construction: `Tag(field: val, ...)` — args parse as Bind expressions.
-                let is_named = self.args.iter().any(|a| matches!(a, Expr::Bind(_)));
+                let is_named = self.args.iter().any(|a| matches!(&a.0, Expr::Bind(_)));
                 if is_named {
                     for arg in &self.args {
-                        let Expr::Bind(bind) = arg else {
-                            ctx.emit_symptom(CodegenSymptom::Internal {
-                                message: format!(
-                                    "Mixed named/positional args in record '{}' constructor",
-                                    self.name.as_str()
-                                ),
-                                span: SimpleSpan::new((), 0..0),
-                            });
+                        let Expr::Bind(bind) = &arg.0 else {
+                            ctx.emit_internal(format!(
+                                "Mixed named/positional args in record '{}' constructor",
+                                self.name.as_str()
+                            ));
                             return None;
                         };
                         let BindValue::Expr(value_expr) = bind.value() else {
-                            ctx.emit_symptom(CodegenSymptom::Internal {
-                                message: "Named record arg must be a simple expression".to_string(),
-                                span: SimpleSpan::new((), 0..0),
-                            });
+                            ctx.emit_internal("Named record arg must be a simple expression");
                             return None;
                         };
                         let field_name = bind.name();
                         let idx = match fields.iter().position(|(fname, _)| **fname == field_name) {
                             Some(i) => i,
                             None => {
-                                ctx.emit_symptom(CodegenSymptom::Internal {
-                                    message: format!(
-                                        "No field '{}' on record '{}'",
-                                        field_name.as_str(),
-                                        self.name.as_str()
-                                    ),
-                                    span: SimpleSpan::new((), 0..0),
-                                });
+                                ctx.emit_internal(format!(
+                                    "No field '{}' on record '{}'",
+                                    field_name.as_str(),
+                                    self.name.as_str()
+                                ));
                                 return None;
                             }
                         };
@@ -167,15 +151,12 @@ impl<'c> Lower<'c> for TagCall {
                         let arg = match self.args.get(i) {
                             Some(a) => a,
                             None => {
-                                ctx.emit_symptom(CodegenSymptom::Internal {
-                                    message: format!(
-                                        "Not enough args for record '{}': expected {}, got {}",
-                                        self.name.as_str(),
-                                        fields.len(),
-                                        self.args.len()
-                                    ),
-                                    span: SimpleSpan::new((), 0..0),
-                                });
+                                ctx.emit_internal(format!(
+                                    "Not enough args for record '{}': expected {}, got {}",
+                                    self.name.as_str(),
+                                    fields.len(),
+                                    self.args.len()
+                                ));
                                 return None;
                             }
                         };
@@ -186,13 +167,10 @@ impl<'c> Lower<'c> for TagCall {
                 Some(val)
             }
             _ => {
-                ctx.emit_symptom(CodegenSymptom::Internal {
-                    message: format!(
-                        "Tag '{}' is not a union variant or record constructor",
-                        self.name.as_str()
-                    ),
-                    span: SimpleSpan::new((), 0..0),
-                });
+                ctx.emit_internal(format!(
+                    "Tag '{}' is not a union variant or record constructor",
+                    self.name.as_str()
+                ));
                 None
             }
         }

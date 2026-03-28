@@ -104,7 +104,9 @@ impl GinCompiler {
                     .clone()
                     .unwrap_or_else(|| path.with_extension("o"));
                 let ast = load_entry_with_deps(&path, &args.dependencies);
-                if let Err(e) = native::compile_to_object(&ast, &obj_path, args.profile) {
+                if let Err(e) =
+                    native::compile_to_object(&ast, &obj_path, args.profile, &source, &filename)
+                {
                     eprintln!("Codegen error: {e:?}");
                 }
             }
@@ -115,7 +117,7 @@ impl GinCompiler {
                     .unwrap_or_else(|| path.with_extension(""));
                 let obj_path = exe_path.with_extension("o");
                 let ast = load_entry_with_deps(&path, &args.dependencies);
-                match native::compile_to_object(&ast, &obj_path, args.profile) {
+                match native::compile_to_object(&ast, &obj_path, args.profile, &source, &filename) {
                     Err(e) => eprintln!("Codegen error: {e:?}"),
                     Ok(()) => {
                         if let Err(e) =
@@ -146,7 +148,8 @@ fn compile_library(args: &Args, path: &Path) {
         let _ = std::fs::create_dir_all(parent);
     }
 
-    match native::compile_to_object(&ast, &obj_path, args.profile) {
+    let dir_name = path.to_string_lossy().into_owned();
+    match native::compile_to_object(&ast, &obj_path, args.profile, "", &dir_name) {
         Ok(()) => {
             println!("Compiled library to {}", obj_path.display());
         }

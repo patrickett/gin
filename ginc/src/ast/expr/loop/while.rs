@@ -12,12 +12,12 @@ use crate::prelude::*;
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WhileLoop {
-    pub cond: Box<Expr>,
-    pub exprs: Vec<Expr>,
+    pub cond: Box<Spanned<Expr>>,
+    pub exprs: Vec<Spanned<Expr>>,
 }
 
 pub fn while_loop<'t, I>(
-    body_expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
+    body_expr: impl Parser<'t, I, Spanned<Expr>, ParserError<'t>> + Clone + 't,
 ) -> impl Parser<'t, I, WhileLoop, ParserError<'t>>
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,

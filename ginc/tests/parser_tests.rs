@@ -306,7 +306,10 @@ fn test_parse_local_import() {
     assert_eq!(ast.tags().len(), 0);
 
     let module = &ast.uses()[0].0[0];
-    assert!(matches!(&module.source, ginc::ast::ImportSource::Local(_, _)));
+    assert!(matches!(
+        &module.source,
+        ginc::ast::ImportSource::Local(_, _)
+    ));
     assert_eq!(module.alias.as_deref().map(String::as_str), Some("math"));
     assert_eq!(module.effective_name(), "math");
 }
@@ -317,7 +320,10 @@ fn test_parse_local_import_no_alias() {
 
     assert_eq!(ast.uses().len(), 1);
     let module = &ast.uses()[0].0[0];
-    assert!(matches!(&module.source, ginc::ast::ImportSource::Local(_, _)));
+    assert!(matches!(
+        &module.source,
+        ginc::ast::ImportSource::Local(_, _)
+    ));
     assert!(module.alias.is_none());
     assert_eq!(module.effective_name(), "util");
 }
@@ -620,7 +626,7 @@ fn test_parse_doc_comment_on_inner_bind() {
             // Find inner binds
             let inner_binds: Vec<&ginc::ast::Bind> = exprs
                 .iter()
-                .filter_map(|e| match e {
+                .filter_map(|e| match &**e {
                     ginc::ast::Expr::Bind(b) => Some(b),
                     _ => None,
                 })
@@ -660,7 +666,7 @@ fn test_parse_postfix_doc_comment_on_inner_bind() {
         ginc::ast::BindValue::Body { exprs, .. } => {
             let inner_binds: Vec<&ginc::ast::Bind> = exprs
                 .iter()
-                .filter_map(|e| match e {
+                .filter_map(|e| match &**e {
                     ginc::ast::Expr::Bind(b) => Some(b),
                     _ => None,
                 })
@@ -707,7 +713,7 @@ fn test_parse_when_inline_boolean() {
     assert_eq!(ast.defs().len(), 1);
     let bind = ast.defs().values().next().unwrap();
     match bind.value() {
-        ginc::ast::BindValue::Expr(expr) => match expr.as_ref() {
+        ginc::ast::BindValue::Expr(expr) => match &***expr {
             ginc::ast::Expr::When(when_expr) => {
                 assert!(when_expr.subject.is_none(), "boolean form has no subject");
                 assert_eq!(when_expr.arms.len(), 2);
@@ -728,7 +734,7 @@ fn test_parse_when_single_boolean_no_else() {
     assert_eq!(ast.defs().len(), 1);
     let bind = ast.defs().values().next().unwrap();
     match bind.value() {
-        ginc::ast::BindValue::Expr(expr) => match expr.as_ref() {
+        ginc::ast::BindValue::Expr(expr) => match &***expr {
             ginc::ast::Expr::When(when_expr) => {
                 assert!(when_expr.subject.is_none());
                 assert_eq!(when_expr.arms.len(), 1);
@@ -749,7 +755,7 @@ fn test_parse_when_multi_arm_boolean() {
     assert_eq!(ast.defs().len(), 1);
     let bind = ast.defs().values().next().unwrap();
     match bind.value() {
-        ginc::ast::BindValue::Expr(expr) => match expr.as_ref() {
+        ginc::ast::BindValue::Expr(expr) => match &***expr {
             ginc::ast::Expr::When(when_expr) => {
                 assert!(when_expr.subject.is_none());
                 assert_eq!(when_expr.arms.len(), 3);
@@ -773,10 +779,10 @@ fn test_parse_when_inline_pattern() {
     assert_eq!(ast.defs().len(), 1);
     let bind = ast.defs().values().next().unwrap();
     match bind.value() {
-        ginc::ast::BindValue::Expr(expr) => match expr.as_ref() {
+        ginc::ast::BindValue::Expr(expr) => match &***expr {
             ginc::ast::Expr::When(when_expr) => {
                 assert!(when_expr.subject.is_some(), "pattern form has subject");
-                match when_expr.subject.as_deref() {
+                match when_expr.subject.as_deref().map(|e| &**e) {
                     Some(ginc::ast::Expr::SelfRef(_)) => {}
                     other => panic!("Expected SelfRef subject, got: {:?}", other),
                 }
@@ -799,7 +805,7 @@ fn test_parse_when_block_pattern() {
     assert_eq!(ast.defs().len(), 1);
     let bind = ast.defs().values().next().unwrap();
     match bind.value() {
-        ginc::ast::BindValue::Expr(expr) => match expr.as_ref() {
+        ginc::ast::BindValue::Expr(expr) => match &***expr {
             ginc::ast::Expr::When(when_expr) => {
                 assert!(when_expr.subject.is_some());
                 assert_eq!(when_expr.arms.len(), 2);
@@ -821,7 +827,7 @@ fn test_parse_when_block_pattern_with_else() {
     assert_eq!(ast.defs().len(), 1);
     let bind = ast.defs().values().next().unwrap();
     match bind.value() {
-        ginc::ast::BindValue::Expr(expr) => match expr.as_ref() {
+        ginc::ast::BindValue::Expr(expr) => match &***expr {
             ginc::ast::Expr::When(when_expr) => {
                 assert!(when_expr.subject.is_some());
                 assert_eq!(when_expr.arms.len(), 2);
@@ -845,7 +851,7 @@ fn test_parse_self_expression() {
     match bind.value() {
         ginc::ast::BindValue::Expr(expr) => {
             assert!(
-                matches!(expr.as_ref(), ginc::ast::Expr::SelfRef(_)),
+                matches!(&***expr, ginc::ast::Expr::SelfRef(_)),
                 "Expected SelfRef, got: {:?}",
                 expr
             );
@@ -878,7 +884,7 @@ fn test_parse_when_indented_then_else() {
     let bind = ast.defs().values().next().unwrap();
     assert!(bind.is_method());
     match bind.value() {
-        ginc::ast::BindValue::Expr(expr) => match expr.as_ref() {
+        ginc::ast::BindValue::Expr(expr) => match &***expr {
             ginc::ast::Expr::When(when_expr) => {
                 assert!(when_expr.subject.is_some());
                 assert_eq!(when_expr.arms.len(), 2);
@@ -919,7 +925,7 @@ fn test_parse_anonymous_tag_in_return() {
         ginc::ast::BindValue::Body { exprs: _, ret } => {
             // Check that the return expression is an AnonymousTag
             assert!(ret.0.is_some(), "should have a return value");
-            match ret.0.as_ref().unwrap().as_ref() {
+            match &**ret.0.as_ref().unwrap().as_ref() {
                 ginc::ast::Expr::AnonymousTag(tag_name, _) => {
                     assert_eq!(tag_name.as_str(), "PrintSuccess");
                 }
@@ -949,7 +955,7 @@ fn test_parse_anonymous_tag_no_variants() {
     assert_eq!(bind.name().as_str(), "noop");
 
     match bind.value() {
-        ginc::ast::BindValue::Body { ret, .. } => match ret.0.as_ref().unwrap().as_ref() {
+        ginc::ast::BindValue::Body { ret, .. } => match &**ret.0.as_ref().unwrap().as_ref() {
             ginc::ast::Expr::AnonymousTag(tag_name, _) => {
                 assert_eq!(tag_name.as_str(), "Unit");
             }
@@ -993,7 +999,7 @@ fn test_parse_normal_return_not_affected() {
 
     match bind.value() {
         ginc::ast::BindValue::Body { ret, .. } => {
-            match ret.0.as_ref().unwrap().as_ref() {
+            match &**ret.0.as_ref().unwrap().as_ref() {
                 ginc::ast::Expr::Binary(_) => {
                     // Expected: a + b is a Binary expression
                 }
@@ -1244,7 +1250,10 @@ return x
             );
         }
         _ => {
-            panic!("Unexpected expression type: {:?}", ast.top_level_exprs()[0].0);
+            panic!(
+                "Unexpected expression type: {:?}",
+                ast.top_level_exprs()[0].0
+            );
         }
     }
 }
@@ -1274,7 +1283,7 @@ return 0
         ginc::ast::BindValue::Body { exprs, ret } => {
             // The body should contain an IfExpr
             assert_eq!(exprs.len(), 1); // just the if block
-            match &exprs[0] {
+            match &*exprs[0] {
                 ginc::ast::Expr::If(if_expr) => {
                     // Verify the if block has body expressions and return
                     assert_eq!(if_expr.body.len(), 1);
@@ -1314,8 +1323,8 @@ return 999
         ginc::ast::BindValue::Body { exprs, ret } => {
             // Should have 2 if blocks in the body
             assert_eq!(exprs.len(), 2);
-            assert!(matches!(&exprs[0], ginc::ast::Expr::If(_)));
-            assert!(matches!(&exprs[1], ginc::ast::Expr::If(_)));
+            assert!(matches!(&*exprs[0], ginc::ast::Expr::If(_)));
+            assert!(matches!(&*exprs[1], ginc::ast::Expr::If(_)));
             // Verify the function has a return statement
             assert!(ret.0.is_some());
         }
@@ -1343,7 +1352,7 @@ return 0
     match bind.value() {
         ginc::ast::BindValue::Body { exprs, ret } => {
             assert_eq!(exprs.len(), 1); // just the if block
-            match &exprs[0] {
+            match &*exprs[0] {
                 ginc::ast::Expr::If(if_expr) => {
                     match &if_expr.condition {
                         ginc::ast::IfCondition::Bool(_) => {}
@@ -1382,7 +1391,7 @@ return 0
     match bind.value() {
         ginc::ast::BindValue::Body { exprs, .. } => {
             assert_eq!(exprs.len(), 1); // just the if block
-            match &exprs[0] {
+            match &*exprs[0] {
                 ginc::ast::Expr::If(if_expr) => {
                     // Body should be empty (just the return)
                     assert_eq!(if_expr.body.len(), 0);
@@ -1429,7 +1438,7 @@ return";
         ginc::ast::BindValue::Body { exprs, ret: _ } => {
             // Body should have just the if expression
             assert_eq!(exprs.len(), 1);
-            match &exprs[0] {
+            match &*exprs[0] {
                 ginc::ast::Expr::If(if_expr) => {
                     // Body should be empty (just the return)
                     assert_eq!(if_expr.body.len(), 0);
@@ -1463,9 +1472,9 @@ return";
         ginc::ast::BindValue::Body { exprs, ret } => {
             assert_eq!(exprs.len(), 2);
             // First expression is the val binding
-            assert!(matches!(&exprs[0], ginc::ast::Expr::Bind(_)));
+            assert!(matches!(&*exprs[0], ginc::ast::Expr::Bind(_)));
             // Second expression is the if
-            assert!(matches!(&exprs[1], ginc::ast::Expr::If(_)));
+            assert!(matches!(&*exprs[1], ginc::ast::Expr::If(_)));
             // Main block has its own return (bare return)
             assert!(ret.0.is_none());
         }
@@ -1489,7 +1498,7 @@ fn test_parse_qualified_variant_call() {
         ginc::ast::BindValue::Body { exprs, ret } => {
             // The body should contain a TagCall expression
             assert_eq!(exprs.len(), 1);
-            match &exprs[0] {
+            match &*exprs[0] {
                 ginc::ast::Expr::TagCall(tag_call) => {
                     assert_eq!(tag_call.name.as_str(), "Some");
                     assert!(tag_call.qual_path.is_some());
@@ -1521,7 +1530,7 @@ fn test_parse_simple_variant_call_still_works() {
     match bind.value() {
         ginc::ast::BindValue::Body { exprs, .. } => {
             assert_eq!(exprs.len(), 1);
-            match &exprs[0] {
+            match &*exprs[0] {
                 ginc::ast::Expr::TagCall(tag_call) => {
                     assert_eq!(tag_call.name.as_str(), "Some");
                     assert!(
@@ -1549,7 +1558,7 @@ fn test_parse_qualified_result_ok() {
     match bind.value() {
         ginc::ast::BindValue::Body { exprs, .. } => {
             assert_eq!(exprs.len(), 1);
-            match &exprs[0] {
+            match &*exprs[0] {
                 ginc::ast::Expr::TagCall(tag_call) => {
                     assert_eq!(tag_call.name.as_str(), "Ok");
                     assert!(tag_call.qual_path.is_some());
@@ -1576,7 +1585,7 @@ fn test_parse_qualified_variant_no_args() {
     match bind.value() {
         ginc::ast::BindValue::Body { exprs, .. } => {
             assert_eq!(exprs.len(), 1);
-            match &exprs[0] {
+            match &*exprs[0] {
                 ginc::ast::Expr::TagCall(tag_call) => {
                     assert_eq!(tag_call.name.as_str(), "None");
                     assert!(tag_call.qual_path.is_some());
@@ -1627,7 +1636,7 @@ return 0
         println!("Total exprs: {}", exprs.len());
         for (i, expr) in exprs.iter().enumerate() {
             println!("  Expr[{}]: {:?}", i, expr);
-            if let ginc::ast::Expr::If(if_expr) = expr {
+            if let ginc::ast::Expr::If(if_expr) = &**expr {
                 println!("    If ret: {:?}", if_expr.ret);
             }
         }

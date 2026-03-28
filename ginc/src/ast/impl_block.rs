@@ -35,7 +35,7 @@ impl Hash for ImplBlock {
 /// )
 /// ```
 pub fn impl_block<'t, I>(
-    expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
+    expr: impl Parser<'t, I, Spanned<Expr>, ParserError<'t>> + Clone + 't,
 ) -> impl Parser<'t, I, ImplBlock, ParserError<'t>> + Clone
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
@@ -43,7 +43,9 @@ where
     let tag_name = select! { Token::Tag(name) => IStr::new(name.to_string()) };
     let tag_name_with_span = tag_name.map_with(|name, e| (name, e.span()));
 
-    let header = tag_name_with_span.then_ignore(just(Token::Dot)).then(tag_name);
+    let header = tag_name_with_span
+        .then_ignore(just(Token::Dot))
+        .then(tag_name);
 
     let body = bind(expr.clone()).padded_by(just(Token::Newline).repeated());
 

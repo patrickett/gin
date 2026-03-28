@@ -1,5 +1,5 @@
 use crate::util::{format_params, is_identifier_char};
-use ginc::{FileAst, ast::Tag, prelude::SimpleSpan, typeck::TyEnv};
+use ginc::{ast::Tag, prelude::SimpleSpan, typeck::TyEnv, FileAst};
 use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, Documentation, MarkupContent, MarkupKind, Position, Url,
 };
@@ -298,10 +298,14 @@ pub fn dot_completions(
                                 for (name, kind) in params {
                                     use ginc::ast::ParameterKind;
                                     let ty = match kind {
-                                        ParameterKind::Generic => ginc::typeck::Ty::Opaque(IStr::new(name.to_string())),
+                                        ParameterKind::Generic => {
+                                            ginc::typeck::Ty::Opaque(IStr::new(name.to_string()))
+                                        }
                                         ParameterKind::Tagged(inner_tag) => {
                                             // For nested tags, just store as opaque for now
-                                            ginc::typeck::Ty::Opaque(IStr::new(inner_tag.to_string()))
+                                            ginc::typeck::Ty::Opaque(IStr::new(
+                                                inner_tag.to_string(),
+                                            ))
                                         }
                                         ParameterKind::Default(_) => ginc::typeck::Ty::Int(64),
                                     };
@@ -328,11 +332,11 @@ pub fn dot_completions(
                 use ginc::ast::BindValue;
 
                 fn find_bind_in_exprs<'a>(
-                    exprs: &'a [ginc::ast::Expr],
+                    exprs: &'a [ginc::ast::Spanned<ginc::ast::Expr>],
                     name: &ginc::intern::IStr,
                 ) -> Option<&'a ginc::ast::Bind> {
                     for expr in exprs {
-                        if let ginc::ast::Expr::Bind(bind) = expr {
+                        if let ginc::ast::Expr::Bind(bind) = &**expr {
                             if bind.name() == *name {
                                 return Some(bind);
                             }
@@ -342,17 +346,20 @@ pub fn dot_completions(
                 }
 
                 // First, look at top-level defs
-                let found_bind = ast.defs().values().find(|b| b.name() == ident_str)
-                    .or_else(|| {
-                        // If not found at top level, search in function bodies
-                        ast.defs().values().find_map(|bind| {
-                            if let BindValue::Body { exprs, .. } = bind.value() {
-                                find_bind_in_exprs(exprs, &ident_str)
-                            } else {
-                                None
-                            }
-                        })
-                    });
+                let found_bind =
+                    ast.defs()
+                        .values()
+                        .find(|b| b.name() == ident_str)
+                        .or_else(|| {
+                            // If not found at top level, search in function bodies
+                            ast.defs().values().find_map(|bind| {
+                                if let BindValue::Body { exprs, .. } = bind.value() {
+                                    find_bind_in_exprs(exprs, &ident_str)
+                                } else {
+                                    None
+                                }
+                            })
+                        });
 
                 if let Some(bind) = found_bind {
                     // Get the type annotation from the binding
@@ -367,7 +374,7 @@ pub fn dot_completions(
                 }
             }
         }
-        _ => initial_ty
+        _ => initial_ty,
     };
 
     // Check if this is a union type and provide variant completions
@@ -379,10 +386,8 @@ pub fn dot_completions(
             let label = if fields.is_empty() {
                 variant_name.to_string()
             } else {
-                let field_names: Vec<String> = fields
-                    .iter()
-                    .map(|(name, _)| name.to_string())
-                    .collect();
+                let field_names: Vec<String> =
+                    fields.iter().map(|(name, _)| name.to_string()).collect();
                 format!("{}({})", variant_name, field_names.join(", "))
             };
 
@@ -394,10 +399,8 @@ pub fn dot_completions(
             let detail = if fields.is_empty() {
                 qualified_name
             } else {
-                let field_names: Vec<String> = fields
-                    .iter()
-                    .map(|(name, _)| name.to_string())
-                    .collect();
+                let field_names: Vec<String> =
+                    fields.iter().map(|(name, _)| name.to_string()).collect();
                 format!("{}({})", qualified_name, field_names.join(", "))
             };
 
@@ -419,4 +422,3 @@ pub fn dot_completions(
 
     None
 }
-

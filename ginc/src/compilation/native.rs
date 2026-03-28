@@ -141,10 +141,12 @@ pub fn compile_to_object(
     ast: &FileAst,
     obj_path: &Path,
     profile: Profile,
+    source: &str,
+    filename: &str,
 ) -> Result<(), CodegenSymptom> {
     let context = create_native_context();
 
-    let (source_module, symptoms) = build_module_with_context(&context, ast);
+    let (source_module, symptoms) = build_module_with_context(&context, ast, source, filename);
     let source_module = match source_module {
         Some(m) => m,
         None => {

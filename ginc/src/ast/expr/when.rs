@@ -1,5 +1,4 @@
 use crate::codegen::{prelude::*, ty_to_mlir};
-use crate::diagnostic::codegen::CodegenSymptom;
 use crate::prelude::*;
 use chumsky::span::SimpleSpan;
 
@@ -23,7 +22,7 @@ use chumsky::span::SimpleSpan;
 pub struct WhenExpr {
     /// Subject expression for pattern matching (e.g., `when self`)
     /// None for condition-based when
-    pub subject: Option<Box<Expr>>,
+    pub subject: Option<Box<Spanned<Expr>>>,
     pub arms: Vec<WhenArm>,
 }
 
@@ -31,13 +30,16 @@ pub struct WhenExpr {
 pub enum WhenArm {
     /// Boolean condition: `<condition> then <body>`
     Cond {
-        condition: Box<Expr>,
-        body: Box<Expr>,
+        condition: Box<Spanned<Expr>>,
+        body: Box<Spanned<Expr>>,
     },
     /// Pattern match: `is <tag> then <body>`
-    Is { pattern: Tag, body: Box<Expr> },
+    Is {
+        pattern: Tag,
+        body: Box<Spanned<Expr>>,
+    },
     /// Fallthrough: `else <body>`
-    Else(Box<Expr>),
+    Else(Box<Spanned<Expr>>),
 }
 
 /// Internal enum for disambiguating the two when forms during parsing.
@@ -45,7 +47,7 @@ pub enum WhenArm {
 enum WhenTail {
     /// Boolean: the initial expr was a condition, here's the result + more arms
     Boolean {
-        first_result: Expr,
+        first_result: Spanned<Expr>,
         rest: Vec<WhenArm>,
     },
     /// Pattern: the initial expr was the subject, here are the is/else arms
@@ -53,7 +55,7 @@ enum WhenTail {
 }
 
 pub fn when_expr<'t, I>(
-    expr: impl Parser<'t, I, Expr, ParserError<'t>> + Clone + 't,
+    expr: impl Parser<'t, I, Spanned<Expr>, ParserError<'t>> + Clone + 't,
 ) -> impl Parser<'t, I, WhenExpr, ParserError<'t>>
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
@@ -256,10 +258,7 @@ fn lower_boolean_when<'c>(
         WhenArm::Else(body) => body.lower(ctx, outer_block, symtab),
 
         WhenArm::Is { .. } => {
-            ctx.emit_symptom(CodegenSymptom::Internal {
-                message: "Is arm in boolean when — use 'when subject is ...' form".to_string(),
-                span: SimpleSpan::new((), 0..0),
-            });
+            ctx.emit_internal("Is arm in boolean when — use 'when subject is ...' form");
             None
         }
 
@@ -338,11 +337,9 @@ fn lower_pattern_when<'c>(
         WhenArm::Else(body) => body.lower(ctx, outer_block, symtab),
 
         WhenArm::Cond { .. } => {
-            ctx.emit_symptom(CodegenSymptom::Internal {
-                message: "Cannot mix condition arms in a pattern match (when subject is ...)"
-                    .to_string(),
-                span: SimpleSpan::new((), 0..0),
-            });
+            ctx.emit_internal(
+                "Cannot mix condition arms in a pattern match (when subject is ...)",
+            );
             None
         }
 
@@ -351,10 +348,10 @@ fn lower_pattern_when<'c>(
             let (_, expected_disc, _) = match ctx.ty_env.lookup_variant(variant_name) {
                 Some(v) => v,
                 None => {
-                    ctx.emit_symptom(CodegenSymptom::Internal {
-                        message: format!("Unknown variant '{}' in pattern", variant_name.as_str()),
-                        span: SimpleSpan::new((), 0..0),
-                    });
+                    ctx.emit_internal(format!(
+                        "Unknown variant '{}' in pattern",
+                        variant_name.as_str()
+                    ));
                     return None;
                 }
             };
