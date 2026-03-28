@@ -376,11 +376,6 @@ pub fn str_record_ty() -> Ty {
     }
 }
 
-fn builtin(_name: IStr) -> Option<Ty> {
-    // Gin does not have compiler-level builtins. All types must come from explicit imports.
-    None
-}
-
 fn range_bit_width(min: i64, max: i64) -> u8 {
     let range = (max as i128) - (min as i128);
     if range <= u8::MAX as i128 + 1 {
@@ -418,7 +413,7 @@ fn resolve_tag_ref(tag: &Tag, raw: &HashMap<IStr, &DeclareValue>, recursion_dept
                     }
                 }
             }
-            _ => Ty::Opaque(*name),
+            _ => resolve_name(*name, raw, recursion_depth + 1),
         },
         Tag::Qualified(path) => {
             // For qualified types like Bool.True, resolve the union type
@@ -500,11 +495,7 @@ fn resolve_name(name: IStr, raw: &HashMap<IStr, &DeclareValue>, recursion_depth:
 
 fn resolve_tag_from_map(tag: &Tag, tag_types: &HashMap<IStr, Ty>) -> Ty {
     match tag {
-        Tag::Nominal(name, _) => tag_types
-            .get(name)
-            .cloned()
-            .or_else(|| builtin(*name))
-            .unwrap_or(Ty::Int(64)),
+        Tag::Nominal(name, _) => tag_types.get(name).cloned().unwrap_or(Ty::Int(64)),
         Tag::Generic(name, params, _) => match name.as_str() {
             "Ptr" | "Ref" => {
                 let inner = params
@@ -524,7 +515,7 @@ fn resolve_tag_from_map(tag: &Tag, tag_types: &HashMap<IStr, Ty>) -> Ty {
                     }
                 }
             }
-            _ => Ty::Opaque(*name),
+            _ => tag_types.get(name).cloned().unwrap_or(Ty::Opaque(*name)),
         },
         Tag::Qualified(path) => {
             // For qualified types like Bool.True, we need to resolve them
@@ -662,9 +653,7 @@ fn infer_expr_ty(
                 .cloned()
                 .unwrap_or(Ty::Opaque(tc.name))
         }
-        Expr::AnonymousTag(name, _) => builtin(*name)
-            .or_else(|| tag_types.get(name).cloned())
-            .unwrap_or(Ty::Opaque(*name)),
+        Expr::AnonymousTag(name, _) => Ty::Opaque(*name),
         Expr::FormatString(_) => str_record_ty(),
         Expr::Loop(_) => Ty::Unit,
         Expr::When(when_expr) => {
@@ -712,7 +701,7 @@ fn infer_expr_ty(
             }
         }
         Expr::TupleSet { .. } => Ty::Unit,
-        Expr::Cast { ty, .. } => builtin(*ty).unwrap_or(Ty::Opaque(*ty)),
+        Expr::Cast { ty, .. } => Ty::Opaque(*ty),
         Expr::BufGet { buf, .. } => match infer_expr_ty(buf, locals, tag_types, fn_return_types) {
             Ty::Array { elem, .. } => *elem,
             _ => Ty::Int(8),
@@ -757,10 +746,15 @@ fn infer_expr_ty(
 impl TyEnv {
     pub fn check_unknowns(&self, ast: &FileAst, db: &dyn crate::database::input_database::Db) {
         for bind in ast.defs.values() {
-            let mut locals = std::collections::HashSet::new();
+            let mut locals = HashMap::new();
             if let Some(params) = bind.params() {
-                for (name, _) in params.iter() {
-                    locals.insert(*name);
+                for (name, kind) in params.iter() {
+                    let ty = match kind {
+                        ParameterKind::Tagged(tag) => self.resolve_tag(tag),
+                        ParameterKind::Generic => Ty::Int(64),
+                        ParameterKind::Default(expr) => self.infer_expr(expr, &HashMap::new()),
+                    };
+                    locals.insert(*name, ty);
                 }
             }
             self.check_bind(bind, db, &locals);
@@ -771,7 +765,7 @@ impl TyEnv {
         &self,
         bind: &Bind,
         db: &dyn crate::database::input_database::Db,
-        locals: &std::collections::HashSet<IStr>,
+        locals: &HashMap<IStr, Ty>,
     ) {
         if let Some(tag) = &bind.return_tag {
             self.check_tag(tag, db);
@@ -796,7 +790,7 @@ impl TyEnv {
                             type_symptom::unused_binding(inner.name_span, name.to_string())
                                 .accumulate(db);
                         }
-                        body_locals.insert(name);
+                        body_locals.insert(name, self.return_ty(inner));
                     } else {
                         self.check_expr(expr, db, &body_locals);
                     }
@@ -813,7 +807,7 @@ impl TyEnv {
         &self,
         expr: &Expr,
         db: &dyn crate::database::input_database::Db,
-        locals: &std::collections::HashSet<IStr>,
+        locals: &HashMap<IStr, Ty>,
     ) {
         use crate::diagnostic::type_ as type_symptom;
         use salsa::Accumulator;
@@ -830,7 +824,7 @@ impl TyEnv {
                         self.check_expr(arg, db, locals);
                     }
                 } else if call.path.segments.is_empty()
-                    && !locals.contains(&name)
+                    && !locals.contains_key(&name)
                     && self.fn_return_ty(&name).is_none()
                 {
                     type_symptom::unknown_binding(call.path.span, name.to_string()).accumulate(db);
@@ -842,6 +836,8 @@ impl TyEnv {
                 self.check_expr(&bin.rhs, db, locals);
             }
             Expr::When(w) => {
+                // Infer subject type once for pattern-variant checking.
+                let subject_ty = w.subject.as_ref().map(|s| self.infer_expr(s, locals));
                 if let Some(subject) = &w.subject {
                     self.check_expr(subject, db, locals);
                 }
@@ -853,12 +849,30 @@ impl TyEnv {
                         }
                         WhenArm::Is { pattern, body } => {
                             let variant_name = IStr::new(pattern.name().to_string());
-                            if self.lookup_variant(variant_name).is_none() {
-                                type_symptom::unknown_tag(
-                                    pattern.span(),
-                                    pattern.name().to_string(),
-                                )
-                                .accumulate(db);
+                            match &subject_ty {
+                                Some(Ty::Union {
+                                    name: union_name,
+                                    variants,
+                                }) => {
+                                    if !variants.iter().any(|(vname, _)| vname == &variant_name) {
+                                        type_symptom::not_a_variant(
+                                            pattern.span(),
+                                            pattern.name().to_string(),
+                                            union_name.to_string(),
+                                        )
+                                        .accumulate(db);
+                                    }
+                                }
+                                _ => {
+                                    // Subject type unknown or not a union — fall back to generic check.
+                                    if self.lookup_variant(variant_name).is_none() {
+                                        type_symptom::unknown_tag(
+                                            pattern.span(),
+                                            pattern.name().to_string(),
+                                        )
+                                        .accumulate(db);
+                                    }
+                                }
                             }
                             self.check_expr(body, db, locals);
                         }
@@ -879,11 +893,13 @@ impl TyEnv {
                     self.check_expr(subject, db, locals);
                     let mut if_locals = locals.clone();
                     if let Tag::Generic(_, params, _) = tag {
-                        if_locals.extend(
-                            params
-                                .iter()
-                                .filter_map(|(k, _)| (k.as_str() != "_").then_some(*k)),
-                        );
+                        if_locals.extend(params.iter().filter_map(|(k, _)| {
+                            if k.as_str() != "_" {
+                                Some((*k, Ty::Opaque(*k)))
+                            } else {
+                                None
+                            }
+                        }));
                     }
                     for e in &if_expr.body {
                         self.check_expr(e, db, &if_locals);

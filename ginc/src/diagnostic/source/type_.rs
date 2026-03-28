@@ -32,6 +32,10 @@ pub enum TypeSymptom {
     UnusedBinding {
         name: String,
     },
+    NotAVariant {
+        name: String,
+        union_name: String,
+    },
 }
 
 impl SymptomDetail for TypeSymptom {
@@ -46,6 +50,7 @@ impl SymptomDetail for TypeSymptom {
             TypeSymptom::ArityMismatch { .. } => 6,
             TypeSymptom::IndexOutOfBounds { .. } => 7,
             TypeSymptom::UnusedBinding { .. } => 8,
+            TypeSymptom::NotAVariant { .. } => 10,
         }
     }
 
@@ -76,6 +81,9 @@ impl SymptomDetail for TypeSymptom {
                 format!("index out of bounds: the len is {size} but the index is {index}")
             }
             TypeSymptom::UnusedBinding { name } => format!("unused binding `{name}`"),
+            TypeSymptom::NotAVariant { name, union_name } => {
+                format!("`{name}` is not a variant of `{union_name}`")
+            }
         }
     }
 
@@ -100,6 +108,9 @@ impl SymptomDetail for TypeSymptom {
                 Some(format!("valid indices are 0..{}", size))
             }
             TypeSymptom::UnusedBinding { .. } => None,
+            TypeSymptom::NotAVariant { union_name, .. } => Some(format!(
+                "expected one of the variants declared in `{union_name}`"
+            )),
         }
     }
 }
@@ -186,5 +197,13 @@ pub fn unused_binding(span: SimpleSpan, name: String) -> Symptom {
         source: SymptomSource::Type(TypeSymptom::UnusedBinding { name }),
         span,
         category: Category::Help,
+    }
+}
+
+pub fn not_a_variant(span: SimpleSpan, name: String, union_name: String) -> Symptom {
+    Symptom {
+        source: SymptomSource::Type(TypeSymptom::NotAVariant { name, union_name }),
+        span,
+        category: Category::Flaw,
     }
 }
