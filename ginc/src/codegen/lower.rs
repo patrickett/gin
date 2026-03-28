@@ -226,6 +226,7 @@ pub fn generate_mlir(
     ast: &FileAst,
     source: &str,
     filename: &str,
+    ty_env: &TyEnv,
 ) -> (Option<String>, Vec<CodegenSymptom>) {
     let context = Context::new();
     melior::dialect::DialectHandle::llvm().register_dialect(&context);
@@ -244,7 +245,6 @@ pub fn generate_mlir(
             return (None, Vec::new());
         }
     };
-    let ty_env = TyEnv::from_file_ast(ast);
     let ctx = CodegenContext::new(
         &context,
         &type_info,
@@ -334,6 +334,7 @@ pub fn build_module_with_context<'c>(
     ast: &FileAst,
     source: &str,
     filename: &str,
+    ty_env: &TyEnv,
 ) -> (Option<Module<'c>>, Vec<CodegenSymptom>) {
     // Register dialects
     melior::dialect::DialectHandle::llvm().register_dialect(context);
@@ -351,7 +352,6 @@ pub fn build_module_with_context<'c>(
             return (None, Vec::new());
         }
     };
-    let ty_env = TyEnv::from_file_ast(ast);
     let ctx = CodegenContext::new(
         context,
         &type_info,
@@ -722,14 +722,8 @@ impl<'c> Lower<'c> for Expr {
             Expr::TagCall(tc) => tc.lower(ctx, block, symtab),
             Expr::AnonymousTag(tag_name, _) => {
                 // Bare capitalized tag — treat as a unit variant constructor.
-                let (union_name, discriminant, _) =
-                    ctx.ty_env.lookup_variant(*tag_name).or_else(|| {
-                        ctx.emit_internal(format!(
-                            "Unknown tag '{}' — not declared in any union",
-                            tag_name.as_str()
-                        ));
-                        None
-                    })?;
+                // Note: unknown tag diagnostics are emitted by typeck; codegen just fails gracefully.
+                let (union_name, discriminant, _) = ctx.ty_env.lookup_variant(*tag_name)?;
                 let union_mlir_ty = ctx
                     .ty_env
                     .lookup_tag(union_name)

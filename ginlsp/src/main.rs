@@ -10,6 +10,7 @@ use capabilities::{
 };
 use dashmap::DashMap;
 use diagnostics::symptoms_to_diagnostics;
+use ginc::compilation::compile::shared_ty_env;
 use ginc::FileAst;
 use state::{DocumentState, GinHost, JsonDocumentState};
 use std::sync::{Arc, Mutex, RwLock};
@@ -494,7 +495,8 @@ impl LanguageServer for Backend {
                     } else {
                         std::sync::Arc::new(ast)
                     };
-                    if let Some(items) = dot_completions(&state.source, position, &ast) {
+                    let ty_env = shared_ty_env(&snapshot.db, state.file);
+                    if let Some(items) = dot_completions(&state.source, position, &ast, &ty_env) {
                         return Ok(Some(CompletionResponse::Array(items)));
                     }
                 }
@@ -633,6 +635,7 @@ async fn main() {
 mod tests {
     use super::*;
     use ginc::parse::parse_from_str;
+    use ginc::typeck::TyEnv;
 
     #[test]
     fn dot_completion_union_variants() {
@@ -642,6 +645,7 @@ mod tests {
         // Create AST with Maybe union definition
         let source = "Maybe(x) is Some(x) or None";
         let ast = parse_from_str(source);
+        let ty_env = TyEnv::from_file_ast(&ast);
 
         // Test completion after `Maybe.` (direct type completion)
         let source_with_dot = "Maybe.";
@@ -649,7 +653,7 @@ mod tests {
             line: 0,
             character: 6,
         }; // `Maybe.|`
-        let completions = dot_completions(source_with_dot, position, &ast);
+        let completions = dot_completions(source_with_dot, position, &ast, &ty_env);
 
         assert!(
             completions.is_some(),

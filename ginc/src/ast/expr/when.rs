@@ -397,16 +397,8 @@ fn lower_pattern_when<'c>(
 
         WhenArm::Is { pattern, body } => {
             let variant_name = IStr::new(pattern.name().to_string());
-            let (_, expected_disc, _) = match ctx.ty_env.lookup_variant(variant_name) {
-                Some(v) => v,
-                None => {
-                    ctx.emit_internal(format!(
-                        "Unknown variant '{}' in pattern",
-                        variant_name.as_str()
-                    ));
-                    return None;
-                }
-            };
+            // Note: unknown variant diagnostics are emitted by typeck; codegen just fails gracefully.
+            let (_, expected_disc, _) = ctx.ty_env.lookup_variant(variant_name)?;
 
             let expected_val = outer_block.const_i64(ctx.mlir, expected_disc as i64);
             let cond =

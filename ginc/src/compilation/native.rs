@@ -4,6 +4,7 @@ use crate::args::Profile;
 use crate::ast::FileAst;
 use crate::codegen::build_module_with_context;
 use crate::diagnostic::codegen::CodegenSymptom;
+use crate::typeck::TyEnv;
 use chumsky::span::{SimpleSpan, Span};
 use melior::{Context, dialect::DialectRegistry, ir::Module, pass, utility};
 use std::path::Path;
@@ -143,10 +144,12 @@ pub fn compile_to_object(
     profile: Profile,
     source: &str,
     filename: &str,
+    ty_env: &TyEnv,
 ) -> Result<(), CodegenSymptom> {
     let context = create_native_context();
 
-    let (source_module, symptoms) = build_module_with_context(&context, ast, source, filename);
+    let (source_module, symptoms) =
+        build_module_with_context(&context, ast, source, filename, ty_env);
     let source_module = match source_module {
         Some(m) => m,
         None => {

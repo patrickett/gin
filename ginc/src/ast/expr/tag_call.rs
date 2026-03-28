@@ -16,6 +16,7 @@ pub struct TagCall {
     /// Optional qualified path (e.g., ModPath { root: "Maybe", segments: ["Some"] })
     pub qual_path: Option<ModPath>,
     pub args: Vec<Spanned<Expr>>,
+    pub span: SimpleSpan,
 }
 
 pub fn tag_call<'t, I>(
@@ -27,24 +28,27 @@ where
     let args = delimited_list(Token::ParenOpen, expr, Token::Comma, Token::ParenClose);
 
     // Qualified form: Maybe.Some(x), Result.Ok(x) — uses Tag.Tag pattern
-    let qualified = crate::ast::tag_variant_path()
-        .then(args.clone())
-        .map(|(path, args)| {
-            let variant_name = *path.segments.last().unwrap_or(&path.root);
-            TagCall {
-                name: variant_name,
-                qual_path: Some(path),
-                args,
-            }
-        });
+    let qualified =
+        crate::ast::tag_variant_path()
+            .then(args.clone())
+            .map_with(|(path, args), e| {
+                let variant_name = *path.segments.last().unwrap_or(&path.root);
+                TagCall {
+                    name: variant_name,
+                    qual_path: Some(path),
+                    args,
+                    span: e.span(),
+                }
+            });
 
     // Simple form: Some(x), None()
     let simple = select! { Token::Tag(name) => IStr::new(name.to_string()) }
         .then(args)
-        .map(|(name, args)| TagCall {
+        .map_with(|(name, args), e| TagCall {
             name,
             qual_path: None,
             args,
+            span: e.span(),
         });
 
     // Prefer qualified to avoid ambiguity
@@ -139,15 +143,10 @@ impl<'c> Lower<'c> for TagCall {
         }
 
         // Fall back to record construction.
+        // Note: unknown tag diagnostics are emitted by typeck; codegen just fails gracefully.
         let record_ty = match ctx.ty_env.lookup_tag(self.name).cloned() {
             Some(ty) => ty,
-            None => {
-                ctx.emit_internal(format!(
-                    "Unknown type '{}' — not declared as a union variant or record",
-                    self.name.as_str()
-                ));
-                return None;
-            }
+            None => return None,
         };
 
         match &record_ty {
@@ -207,13 +206,7 @@ impl<'c> Lower<'c> for TagCall {
                 }
                 Some(val)
             }
-            _ => {
-                ctx.emit_internal(format!(
-                    "Tag '{}' is not a union variant or record constructor",
-                    self.name.as_str()
-                ));
-                None
-            }
+            _ => None,
         }
     }
 }

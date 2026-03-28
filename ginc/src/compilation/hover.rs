@@ -190,7 +190,7 @@ pub fn hover_at(db: &dyn Db, file: File, byte_pos: usize) -> Option<String> {
     let path = file.path(db);
     let module = module_name_from_path(&path);
     let ast = crate::parse::parse::parse(db, file);
-    let ty_env = TyEnv::from_file_ast(&ast);
+    let ty_env = crate::compilation::compile::shared_ty_env(db, file);
     let ctx = HoverContext {
         module: &module,
         ast: &ast,

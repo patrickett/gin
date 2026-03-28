@@ -1,8 +1,8 @@
 use crossbeam_channel::unbounded;
 use ginc::{
-    Db, File, FileAst, Symptom,
+    compilation::compile::{compile, type_check_entry},
     parse::parse::parse,
-    compilation::compile::compile,
+    Db, File, FileAst, Symptom,
 };
 use salsa::Setter;
 
@@ -26,12 +26,20 @@ impl GinSnapshot {
     }
 
     pub fn diagnostics(&self, file: File) -> Vec<&Symptom> {
-        // Trigger compilation - this runs parse, type check, flow analysis, and codegen
-        // All diagnostics are emitted as symptoms and collected here
+        // Type check first — emits unknown type/binding/variable symptoms.
+        // This must run before compile so that type-level diagnostics
+        // (e.g. "undeclared type `Bool`") appear before body-level errors
+        // (e.g. "Unknown tag 'True'").
+        type_check_entry(&self.db, file);
+
+        // Trigger compilation — runs parse, flow analysis, and codegen.
         let _ = compile(&self.db, file);
 
-        // Collect all accumulated symptoms from the compilation pipeline
-        compile::accumulated::<Symptom>(&self.db, file)
+        // Collect all accumulated symptoms from both type checking and compilation.
+        let mut symptoms: Vec<&Symptom> = type_check_entry::accumulated::<Symptom>(&self.db, file);
+        symptoms.extend(compile::accumulated::<Symptom>(&self.db, file));
+
+        symptoms
     }
 
     pub fn hover_at(&self, file: File, byte_pos: usize) -> Option<String> {
@@ -57,7 +65,7 @@ impl GinHost {
         }
     }
 
-    /// thing
+    /// Upsert a file into the database.
     pub fn upsert_file(&mut self, path: std::path::PathBuf, contents: String) -> Option<File> {
         match self.db.input(path) {
             Ok(file) => {

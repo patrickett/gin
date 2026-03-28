@@ -9,6 +9,7 @@ pub mod lexer;
 pub mod parse;
 pub mod typeck;
 
+use crate::typeck::TyEnv;
 pub use args::*;
 pub use ast::{DefMap, FileAst, Symbol, SymbolKind, SymbolTable, TagMap};
 pub use database::{
@@ -104,9 +105,15 @@ impl GinCompiler {
                     .clone()
                     .unwrap_or_else(|| path.with_extension("o"));
                 let ast = load_entry_with_deps(&path, &args.dependencies);
-                if let Err(e) =
-                    native::compile_to_object(&ast, &obj_path, args.profile, &source, &filename)
-                {
+                let ty_env = TyEnv::from_file_ast(&ast);
+                if let Err(e) = native::compile_to_object(
+                    &ast,
+                    &obj_path,
+                    args.profile,
+                    &source,
+                    &filename,
+                    &ty_env,
+                ) {
                     eprintln!("Codegen error: {e:?}");
                 }
             }
@@ -117,7 +124,15 @@ impl GinCompiler {
                     .unwrap_or_else(|| path.with_extension(""));
                 let obj_path = exe_path.with_extension("o");
                 let ast = load_entry_with_deps(&path, &args.dependencies);
-                match native::compile_to_object(&ast, &obj_path, args.profile, &source, &filename) {
+                let ty_env = TyEnv::from_file_ast(&ast);
+                match native::compile_to_object(
+                    &ast,
+                    &obj_path,
+                    args.profile,
+                    &source,
+                    &filename,
+                    &ty_env,
+                ) {
                     Err(e) => eprintln!("Codegen error: {e:?}"),
                     Ok(()) => {
                         if let Err(e) =
@@ -149,7 +164,8 @@ fn compile_library(args: &Args, path: &Path) {
     }
 
     let dir_name = path.to_string_lossy().into_owned();
-    match native::compile_to_object(&ast, &obj_path, args.profile, "", &dir_name) {
+    let ty_env = TyEnv::from_file_ast(&ast);
+    match native::compile_to_object(&ast, &obj_path, args.profile, "", &dir_name, &ty_env) {
         Ok(()) => {
             println!("Compiled library to {}", obj_path.display());
         }

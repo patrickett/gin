@@ -126,20 +126,18 @@ pub struct TyEnv {
 
 impl TyEnv {
     pub fn from_file_ast(ast: &FileAst) -> Self {
-        let raw: HashMap<IStr, &DeclareValue> =
-            ast.tags.iter().map(|(k, v)| (*k, v.value())).collect();
+        Self::from_multiple_file_asts(&[ast.clone()])
+    }
 
+    pub fn from_multiple_file_asts(files: &[FileAst]) -> Self {
         let mut tag_types = HashMap::new();
 
-        // Inject Str as a builtin record before user declarations so TagCall("Str", ...)
-        // can construct it. User declarations of Str will override this.
-        let str_ty = str_record_ty();
-        tag_types.insert(IStr::new("Str".to_string()), str_ty.clone());
-        tag_types.insert(IStr::new("String".to_string()), str_ty);
-
-        for name in ast.tags.keys() {
-            let ty = resolve_name(*name, &raw, 0);
-            tag_types.insert(*name, ty);
+        // Resolve all tag types from all files
+        for ast in files {
+            for name in ast.tags.keys() {
+                let ty = resolve_name_from_files(*name, files, 0);
+                tag_types.insert(*name, ty);
+            }
         }
 
         // Build variant reverse map from all union types.
@@ -157,23 +155,27 @@ impl TyEnv {
             }
         }
 
-        // First pass: seed with explicitly-annotated return types.
+        // First pass: seed with explicitly-annotated return types from all files.
         let mut fn_return_types = HashMap::new();
-        for (name, bind) in &ast.defs {
-            if !bind.attributes().matches_current_platform() {
-                continue;
+        for ast in files {
+            for (name, bind) in &ast.defs {
+                if !bind.attributes().matches_current_platform() {
+                    continue;
+                }
+                let ret = infer_bind_ret(bind, &tag_types, &HashMap::new());
+                fn_return_types.insert(*name, ret);
             }
-            let ret = infer_bind_ret(bind, &tag_types, &HashMap::new());
-            fn_return_types.insert(*name, ret);
         }
         // Second pass: refine with cross-function call resolution now that
         // explicitly-typed functions are in the map.
-        for (name, bind) in &ast.defs {
-            if !bind.attributes().matches_current_platform() {
-                continue;
+        for ast in files {
+            for (name, bind) in &ast.defs {
+                if !bind.attributes().matches_current_platform() {
+                    continue;
+                }
+                let ret = infer_bind_ret(bind, &tag_types, &fn_return_types);
+                fn_return_types.insert(*name, ret);
             }
-            let ret = infer_bind_ret(bind, &tag_types, &fn_return_types);
-            fn_return_types.insert(*name, ret);
         }
 
         TyEnv {
@@ -374,20 +376,9 @@ pub fn str_record_ty() -> Ty {
     }
 }
 
-fn builtin(name: IStr) -> Option<Ty> {
-    match name.as_str() {
-        "Int" | "I64" => Some(Ty::Int(64)),
-        "I128" => Some(Ty::Int(128)),
-        "Byte" | "I8" => Some(Ty::Int(8)),
-        "I16" => Some(Ty::Int(16)),
-        "I32" => Some(Ty::Int(32)),
-        "Float" | "F64" => Some(Ty::Float),
-        "F32" => Some(Ty::Float),
-        "Bool" => Some(Ty::Bool),
-        "Str" | "String" => Some(str_record_ty()),
-        "Nothing" | "Unit" => Some(Ty::Unit),
-        _ => None,
-    }
+fn builtin(_name: IStr) -> Option<Ty> {
+    // Gin does not have compiler-level builtins. All types must come from explicit imports.
+    None
 }
 
 fn range_bit_width(min: i64, max: i64) -> u8 {
@@ -403,15 +394,17 @@ fn range_bit_width(min: i64, max: i64) -> u8 {
     }
 }
 
-fn resolve_tag_ref(tag: &Tag, raw: &HashMap<IStr, &DeclareValue>, depth: u8) -> Ty {
+fn resolve_tag_ref(tag: &Tag, raw: &HashMap<IStr, &DeclareValue>, recursion_depth: usize) -> Ty {
     match tag {
-        Tag::Nominal(name, _) => resolve_name(*name, raw, depth),
+        Tag::Nominal(name, _) => resolve_name(*name, raw, recursion_depth),
         Tag::Generic(name, params, _) => match name.as_str() {
             "Ptr" | "Ref" => {
                 let inner = params
                     .values()
                     .find_map(|kind| match kind {
-                        ParameterKind::Tagged(t) => Some(resolve_tag_ref(t, raw, depth + 1)),
+                        ParameterKind::Tagged(t) => {
+                            Some(resolve_tag_ref(t, raw, recursion_depth + 1))
+                        }
                         _ => None,
                     })
                     .unwrap_or(Ty::Opaque(*name));
@@ -429,18 +422,30 @@ fn resolve_tag_ref(tag: &Tag, raw: &HashMap<IStr, &DeclareValue>, depth: u8) -> 
         },
         Tag::Qualified(path) => {
             // For qualified types like Bool.True, resolve the union type
-            resolve_name(path.root, raw, depth)
+            resolve_name(path.root, raw, recursion_depth)
         }
     }
 }
 
-fn resolve_name(name: IStr, raw: &HashMap<IStr, &DeclareValue>, depth: u8) -> Ty {
-    if depth > 16 {
+fn resolve_name_from_files(name: IStr, files: &[FileAst], recursion_depth: usize) -> Ty {
+    // Build a temporary lookup map for this file set
+    let mut raw: HashMap<IStr, &DeclareValue> = HashMap::new();
+    for ast in files {
+        for (k, v) in ast.tags.iter() {
+            raw.insert(*k, v.value());
+        }
+    }
+
+    resolve_name(name, &raw, recursion_depth)
+}
+
+fn resolve_name(name: IStr, raw: &HashMap<IStr, &DeclareValue>, recursion_depth: usize) -> Ty {
+    if recursion_depth > 16 {
         return Ty::Opaque(name);
     }
     // User declarations override builtins
     match raw.get(&name) {
-        Some(DeclareValue::Alias(tag)) => resolve_tag_ref(tag, raw, depth + 1),
+        Some(DeclareValue::Alias(tag)) => resolve_tag_ref(tag, raw, recursion_depth + 1),
         Some(DeclareValue::Range(range)) => Ty::Int(range_bit_width(range.start, range.end)),
         Some(DeclareValue::InRange(range)) => Ty::Int(range_bit_width(range.start, range.end)),
         Some(DeclareValue::Record(params)) => {
@@ -448,7 +453,9 @@ fn resolve_name(name: IStr, raw: &HashMap<IStr, &DeclareValue>, depth: u8) -> Ty
                 .iter()
                 .map(|(field_name, kind)| {
                     let field_ty = match kind {
-                        ParameterKind::Tagged(tag) => resolve_tag_ref(tag, raw, depth + 1),
+                        ParameterKind::Tagged(tag) => {
+                            resolve_tag_ref(tag, raw, recursion_depth + 1)
+                        }
                         ParameterKind::Generic => Ty::Opaque(*field_name),
                         ParameterKind::Default(_) => Ty::Int(64),
                     };
@@ -469,7 +476,7 @@ fn resolve_name(name: IStr, raw: &HashMap<IStr, &DeclareValue>, depth: u8) -> Ty
                             .filter_map(|(field_name, kind)| match kind {
                                 ParameterKind::Tagged(inner) => Some((
                                     *field_name,
-                                    Box::new(resolve_tag_ref(inner, raw, depth + 1)),
+                                    Box::new(resolve_tag_ref(inner, raw, recursion_depth + 1)),
                                 )),
                                 ParameterKind::Generic => {
                                     Some((*field_name, Box::new(Ty::Opaque(*field_name))))
@@ -487,8 +494,7 @@ fn resolve_name(name: IStr, raw: &HashMap<IStr, &DeclareValue>, depth: u8) -> Ty
                 variants: resolved,
             }
         }
-        Some(DeclareValue::Set()) => Ty::Opaque(name),
-        None => builtin(name).unwrap_or(Ty::Opaque(name)),
+        _ => Ty::Opaque(name),
     }
 }
 
@@ -845,7 +851,18 @@ impl TyEnv {
                             self.check_expr(condition, db, locals);
                             self.check_expr(body, db, locals);
                         }
-                        WhenArm::Is { body, .. } | WhenArm::Else(body) => {
+                        WhenArm::Is { pattern, body } => {
+                            let variant_name = IStr::new(pattern.name().to_string());
+                            if self.lookup_variant(variant_name).is_none() {
+                                type_symptom::unknown_tag(
+                                    pattern.span(),
+                                    pattern.name().to_string(),
+                                )
+                                .accumulate(db);
+                            }
+                            self.check_expr(body, db, locals);
+                        }
+                        WhenArm::Else(body) => {
                             self.check_expr(body, db, locals);
                         }
                     }
@@ -913,12 +930,26 @@ impl TyEnv {
             Expr::TakePtr(e) | Expr::TakeRef(e) | Expr::Deref(e) | Expr::Negate(e) => {
                 self.check_expr(e, db, locals);
             }
-            Expr::Lit(_)
-            | Expr::SelfRef(_)
-            | Expr::Range(_)
-            | Expr::FormatString(_)
-            | Expr::AnonymousTag(..)
-            | Expr::TagCall(_) => {}
+            Expr::AnonymousTag(name, span) => {
+                if self.lookup_variant(*name).is_none() {
+                    type_symptom::unknown_tag(*span, name.to_string()).accumulate(db);
+                }
+            }
+            Expr::TagCall(tc) => {
+                if let Some(path) = &tc.qual_path {
+                    // Qualified form like Maybe.Some(3) — check the root type
+                    if self.lookup_tag(path.root).is_none() {
+                        type_symptom::unknown_tag(path.span, path.root.to_string()).accumulate(db);
+                    }
+                } else if self.lookup_variant(tc.name).is_none() {
+                    // Simple form like Some(3) — check the variant
+                    type_symptom::unknown_tag(tc.span, tc.name.to_string()).accumulate(db);
+                }
+                for arg in &tc.args {
+                    self.check_expr(arg, db, locals);
+                }
+            }
+            Expr::Lit(_) | Expr::SelfRef(_) | Expr::Range(_) | Expr::FormatString(_) => {}
         }
     }
 
@@ -928,13 +959,13 @@ impl TyEnv {
 
         match tag {
             Tag::Nominal(name, span) => {
-                if self.lookup_tag(*name).is_none() && builtin(*name).is_none() {
-                    type_symptom::unknown_type(*span, name.to_string()).accumulate(db);
+                if self.lookup_tag(*name).is_none() {
+                    type_symptom::unknown_tag(*span, name.to_string()).accumulate(db);
                 }
             }
             Tag::Generic(name, params, span) => {
-                if self.lookup_tag(*name).is_none() && builtin(*name).is_none() {
-                    type_symptom::unknown_type(*span, name.to_string()).accumulate(db);
+                if self.lookup_tag(*name).is_none() {
+                    type_symptom::unknown_tag(*span, name.to_string()).accumulate(db);
                 }
                 for kind in params.values() {
                     if let ParameterKind::Tagged(inner) = kind {
@@ -943,8 +974,8 @@ impl TyEnv {
                 }
             }
             Tag::Qualified(path) => {
-                if self.lookup_tag(path.root).is_none() && builtin(path.root).is_none() {
-                    type_symptom::unknown_type(path.span, path.root.to_string()).accumulate(db);
+                if self.lookup_tag(path.root).is_none() {
+                    type_symptom::unknown_tag(path.span, path.root.to_string()).accumulate(db);
                 }
             }
         }

@@ -8,7 +8,7 @@ pub enum TypeSymptom {
     UnknownBinding {
         name: String,
     },
-    UnknownType {
+    UnknownTag {
         name: String,
     },
     InferenceFailed,
@@ -39,7 +39,7 @@ impl SymptomDetail for TypeSymptom {
         match self {
             TypeSymptom::Mismatch => 1,
             TypeSymptom::UnknownBinding { .. } => 2,
-            TypeSymptom::UnknownType { .. } => 9,
+            TypeSymptom::UnknownTag { .. } => 9,
             TypeSymptom::InferenceFailed => 3,
             TypeSymptom::ConstraintViolation { .. } => 4,
             TypeSymptom::UnresolvedTypeParam { .. } => 5,
@@ -53,7 +53,7 @@ impl SymptomDetail for TypeSymptom {
         match self {
             TypeSymptom::Mismatch => "type mismatch".into(),
             TypeSymptom::UnknownBinding { name } => format!("use of undefined binding `{name}`"),
-            TypeSymptom::UnknownType { name } => format!("use of undeclared type `{name}`"),
+            TypeSymptom::UnknownTag { name } => format!("use of undeclared tag `{name}`"),
             TypeSymptom::InferenceFailed => "failed to infer type".into(),
             TypeSymptom::ConstraintViolation {
                 param,
@@ -83,7 +83,7 @@ impl SymptomDetail for TypeSymptom {
         match self {
             TypeSymptom::Mismatch => Some("types do not match".into()),
             TypeSymptom::UnknownBinding { .. } => Some("define bind before using it".into()),
-            TypeSymptom::UnknownType { .. } => Some("declare the type before using it".into()),
+            TypeSymptom::UnknownTag { .. } => Some("declare the tag before using it".into()),
             TypeSymptom::InferenceFailed => Some("could not infer the type".into()),
             TypeSymptom::ConstraintViolation {
                 param, expected, ..
@@ -120,9 +120,9 @@ pub fn unknown_binding(span: SimpleSpan, name: String) -> Symptom {
     }
 }
 
-pub fn unknown_type(span: SimpleSpan, name: String) -> Symptom {
+pub fn unknown_tag(span: SimpleSpan, name: String) -> Symptom {
     Symptom {
-        source: SymptomSource::Type(TypeSymptom::UnknownType { name }),
+        source: SymptomSource::Type(TypeSymptom::UnknownTag { name }),
         span,
         category: Category::Flaw,
     }

@@ -1,5 +1,5 @@
 use crate::util::{format_params, is_identifier_char};
-use ginc::{ast::Tag, prelude::SimpleSpan, typeck::TyEnv, FileAst};
+use ginc::{ast::Tag, prelude::SimpleSpan, FileAst};
 use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, Documentation, MarkupContent, MarkupKind, Position, Url,
 };
@@ -243,6 +243,7 @@ pub fn dot_completions(
     source: &str,
     position: Position,
     ast: &FileAst,
+    ty_env: &ginc::typeck::TyEnv,
 ) -> Option<Vec<CompletionItem>> {
     use ginc::intern::IStr;
 
@@ -274,7 +275,6 @@ pub fn dot_completions(
         return None;
     }
 
-    let ty_env = TyEnv::from_file_ast(ast);
     let ident_str = IStr::new(identifier.clone());
 
     // First, try to resolve as a direct type tag (e.g., `Maybe.`, `Bool.`)
