@@ -62,11 +62,52 @@ impl<'c> Lower<'c> for TagCall {
         if let Some((union_name, discriminant, payload_fields)) =
             ctx.ty_env.lookup_variant(self.name)
         {
-            let union_mlir_ty = ctx
-                .ty_env
-                .lookup_tag(union_name)
+            let union_ty = ctx.ty_env.lookup_tag(union_name);
+            let union_mlir_ty = union_ty
+                .as_ref()
                 .map(|ty| ty_to_mlir(ty, ctx.mlir))
                 .unwrap_or_else(|| ctx.mlir.union_type());
+
+            // Check if this is an optimized union with no fields (like Bool)
+            let is_optimized_simple = union_ty.as_ref().is_some_and(|ty| {
+                matches!(ty, Ty::Union { variants, .. } if variants.iter().all(|(_, fields)| fields.is_empty()))
+            });
+
+            if is_optimized_simple {
+                // For optimized unions (like Bool), create a simple integer constant
+                let variant_count = union_ty
+                    .as_ref()
+                    .and_then(|ty| {
+                        if let Ty::Union { variants, .. } = ty {
+                            Some(variants.len())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(2);
+
+                return if variant_count == 2 {
+                    // Use i1 for 2-variant unions like Bool
+                    let i1_attr = melior::ir::attribute::IntegerAttribute::new(
+                        IntegerType::new(ctx.mlir, 1).into(),
+                        discriminant as i64,
+                    )
+                    .into();
+                    Some(block.append_op(ctx.mlir.const_op(i1_attr, ctx.mlir.i1())))
+                } else if variant_count <= 256 {
+                    // Use i8 for 3-256 variant unions
+                    let i8_ty = IntegerType::new(ctx.mlir, 8).into();
+                    let i8_attr =
+                        melior::ir::attribute::IntegerAttribute::new(i8_ty, discriminant as i64)
+                            .into();
+                    Some(block.append_op(ctx.mlir.const_op(i8_attr, i8_ty)))
+                } else {
+                    // Fall back to i64 for larger unions
+                    Some(block.const_i64(ctx.mlir, discriminant as i64))
+                };
+            }
+
+            // Standard union construction with struct representation
             let disc_val = block.const_i64(ctx.mlir, discriminant as i64);
             let mut val = block.append_op(ctx.mlir.llvm_undef(union_mlir_ty));
             val = block.append_op(ctx.mlir.llvm_insertvalue(val, disc_val, 0));

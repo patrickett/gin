@@ -17,16 +17,45 @@ pub fn ty_to_mlir<'c>(ty: &Ty, ctx: &'c Context) -> Type<'c> {
         Ty::Float => ctx.f64(),
         Ty::Bool => ctx.i1(),
         Ty::Union { variants, .. } => {
-            let max_fields = variants
-                .iter()
-                .map(|(_, fields)| fields.len())
-                .max()
-                .unwrap_or(0);
-            let mut slot_types = vec![ctx.i64()];
-            for _ in 0..max_fields {
-                slot_types.push(ctx.i64());
+            // Check if all variants have no fields
+            let all_empty = variants.iter().all(|(_, fields)| fields.is_empty());
+            if all_empty && variants.len() <= 256 {
+                // For simple enums like Bool (2 variants, no fields), use i1 or i8
+                if variants.len() == 2 {
+                    ctx.i1()
+                } else {
+                    IntegerType::new(ctx, 8).into()
+                }
+            } else if all_empty {
+                // Many variants but no fields - use appropriate discriminant size
+                let discriminant_bits = if variants.len() <= 256 {
+                    8
+                } else if variants.len() <= 65536 {
+                    16
+                } else {
+                    64
+                };
+                IntegerType::new(ctx, discriminant_bits).into()
+            } else {
+                // Calculate discriminant size and max fields
+                let discriminant_bits = if variants.len() <= 256 {
+                    8
+                } else if variants.len() <= 65536 {
+                    16
+                } else {
+                    64
+                };
+                let max_fields = variants
+                    .iter()
+                    .map(|(_, fields)| fields.len())
+                    .max()
+                    .unwrap_or(0);
+                let mut slot_types = vec![IntegerType::new(ctx, discriminant_bits).into()];
+                for _ in 0..max_fields {
+                    slot_types.push(ctx.i64());
+                }
+                r#type::r#struct(ctx, &slot_types, false)
             }
-            r#type::r#struct(ctx, &slot_types, false)
         }
         Ty::Record { .. } => {
             let fields = ty.record_fields_sorted();
@@ -216,7 +245,14 @@ pub fn generate_mlir(
         }
     };
     let ty_env = TyEnv::from_file_ast(ast);
-    let ctx = CodegenContext::new(&context, &type_info, &symbol_table, &ty_env, source, filename);
+    let ctx = CodegenContext::new(
+        &context,
+        &type_info,
+        &symbol_table,
+        &ty_env,
+        source,
+        filename,
+    );
 
     let module = Module::new(context.unknown_loc());
 
@@ -316,7 +352,14 @@ pub fn build_module_with_context<'c>(
         }
     };
     let ty_env = TyEnv::from_file_ast(ast);
-    let ctx = CodegenContext::new(context, &type_info, &symbol_table, &ty_env, source, filename);
+    let ctx = CodegenContext::new(
+        context,
+        &type_info,
+        &symbol_table,
+        &ty_env,
+        source,
+        filename,
+    );
 
     let module = Module::new(context.unknown_loc());
 
@@ -969,7 +1012,32 @@ fn ty_byte_size(ty: &Ty) -> usize {
         Ty::Float => 8,
         Ty::Bool => 1,
         Ty::Array { .. } | Ty::Ptr { .. } | Ty::Ref { .. } => 8,
-        Ty::Unit | Ty::Opaque(_) | Ty::Record { .. } | Ty::Union { .. } => 8,
+        Ty::Unit | Ty::Opaque(_) | Ty::Record { .. } => 8,
+        Ty::Union { variants, .. } => {
+            // Check if all variants have no fields
+            let all_empty = variants.iter().all(|(_, fields)| fields.is_empty());
+            if all_empty && variants.len() <= 256 {
+                1
+            } else if all_empty {
+                // Discriminant size for many variants
+                if variants.len() <= 65536 { 2 } else { 8 }
+            } else {
+                // Discriminant + max field size
+                let discriminant_size = if variants.len() <= 256 {
+                    1
+                } else if variants.len() <= 65536 {
+                    2
+                } else {
+                    8
+                };
+                let max_field_size = variants
+                    .iter()
+                    .flat_map(|(_, fields)| fields.iter().map(|(_, ft)| ty_byte_size(ft)))
+                    .max()
+                    .unwrap_or(0);
+                discriminant_size + max_field_size
+            }
+        }
         Ty::Tuple(fields) => fields.iter().map(ty_byte_size).sum(),
         Ty::Literal(_) => 8,
     }

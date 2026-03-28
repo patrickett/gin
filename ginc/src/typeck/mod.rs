@@ -268,6 +268,30 @@ impl TyEnv {
 // ─── Internals ───────────────────────────────────────────────────────────────
 
 /// Returns the alignment (in bytes) of a type.
+/// Calculate the size needed for a union discriminant based on number of variants.
+/// For 2 variants (like Bool), only 1 byte is needed.
+/// For 3-256 variants, 1 byte is needed.
+/// For 257-65536 variants, 2 bytes are needed.
+/// Otherwise, 8 bytes.
+fn ty_union_discriminant_size(num_variants: usize) -> usize {
+    if num_variants <= 256 {
+        1
+    } else if num_variants <= 65536 {
+        2
+    } else {
+        8
+    }
+}
+
+/// Calculate the maximum field size across all union variants.
+fn ty_union_max_field_size(variants: &[(IStr, Vec<(IStr, Box<Ty>)>)]) -> usize {
+    variants
+        .iter()
+        .flat_map(|(_, fields)| fields.iter().map(|(_, ft)| ty_byte_size_static(ft)))
+        .max()
+        .unwrap_or(0)
+}
+
 pub fn ty_alignment(ty: &Ty) -> usize {
     match ty {
         Ty::Int(8) | Ty::Bool => 1,
@@ -281,7 +305,21 @@ pub fn ty_alignment(ty: &Ty) -> usize {
             .map(|(_, ft)| ty_alignment(ft))
             .max()
             .unwrap_or(1),
-        Ty::Union { .. } => 8,
+        Ty::Union { variants, .. } => {
+            // Check if all variants have no fields
+            let all_empty = variants.iter().all(|(_, fields)| fields.is_empty());
+            if all_empty {
+                // Only discriminant needed, align to 1 byte
+                1
+            } else {
+                // Align to the maximum alignment of all field types
+                variants
+                    .iter()
+                    .flat_map(|(_, fields)| fields.iter().map(|(_, ft)| ty_alignment(ft)))
+                    .max()
+                    .unwrap_or(8)
+            }
+        }
         Ty::Tuple(fields) => fields.iter().map(ty_alignment).max().unwrap_or(1),
         Ty::Literal(_) => 8,
     }
@@ -298,7 +336,22 @@ pub fn ty_byte_size_static(ty: &Ty) -> usize {
         Ty::Array { .. } | Ty::Ptr { .. } | Ty::Ref { .. } => 8,
         Ty::Unit | Ty::Opaque(_) => 8,
         Ty::Record { fields, .. } => fields.iter().map(|(_, ft)| ty_byte_size_static(ft)).sum(),
-        Ty::Union { .. } => 16,
+        Ty::Union { variants, .. } => {
+            // For unions with 2 variants and no fields (like Bool), use 1 byte
+            let all_empty = variants.iter().all(|(_, fields)| fields.is_empty());
+            if all_empty && variants.len() <= 256 {
+                // Only discriminant needed, 1 byte is sufficient for 2-256 variants
+                1
+            } else if all_empty {
+                // Many variants but no fields
+                ty_union_discriminant_size(variants.len())
+            } else {
+                // Calculate: discriminant + max field size
+                let discriminant_size = ty_union_discriminant_size(variants.len());
+                let max_field_size = ty_union_max_field_size(variants);
+                discriminant_size + max_field_size
+            }
+        }
         Ty::Tuple(fields) => fields.iter().map(ty_byte_size_static).sum(),
         Ty::Literal(_) => 8,
     }

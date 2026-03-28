@@ -1,5 +1,6 @@
 use crate::codegen::{prelude::*, ty_to_mlir};
 use crate::prelude::*;
+use crate::typeck::Ty;
 use chumsky::span::SimpleSpan;
 
 /// Exhaustive conditional expression.
@@ -233,7 +234,60 @@ impl<'c> Lower<'c> for WhenExpr {
 
         if let Some(subject_expr) = &self.subject {
             let subject = subject_expr.lower(ctx, block, symtab)?;
-            let disc = block.append_op(ctx.mlir.llvm_extractvalue(subject, 0, ctx.mlir.i64()));
+
+            // Check if this is an optimized union (simple integer representation)
+            let subject_ty = ctx
+                .ty_env
+                .infer_expr(subject_expr, &std::collections::HashMap::new());
+
+            let disc = match &subject_ty {
+                Ty::Union { variants, .. }
+                    if variants.iter().all(|(_, fields)| fields.is_empty()) =>
+                {
+                    // Optimized union: subject IS the discriminant
+                    let variant_count = variants.len();
+
+                    if variant_count == 2 {
+                        // Convert i1 to i64
+                        let loc = ctx.location();
+                        let extend_op = match OperationBuilder::new("arith.extui", loc)
+                            .add_operands(&[subject])
+                            .add_results(&[ctx.mlir.i64()])
+                            .build()
+                        {
+                            Ok(op) => op,
+                            Err(e) => {
+                                ctx.emit_internal(format!("extui build failed: {e}"));
+                                return None;
+                            }
+                        };
+                        block.append_op(extend_op)
+                    } else if variant_count <= 256 {
+                        // Convert i8 to i64
+                        let loc = ctx.location();
+                        let extend_op = match OperationBuilder::new("arith.extsi", loc)
+                            .add_operands(&[subject])
+                            .add_results(&[ctx.mlir.i64()])
+                            .build()
+                        {
+                            Ok(op) => op,
+                            Err(e) => {
+                                ctx.emit_internal(format!("extsi build failed: {e}"));
+                                return None;
+                            }
+                        };
+                        block.append_op(extend_op)
+                    } else {
+                        // Already i64
+                        subject
+                    }
+                }
+                _ => {
+                    // Standard union: extract discriminant from struct at index 0
+                    block.append_op(ctx.mlir.llvm_extractvalue(subject, 0, ctx.mlir.i64()))
+                }
+            };
+
             lower_pattern_when(ctx, block, symtab, subject, disc, &self.arms, result_ty)
         } else {
             lower_boolean_when(ctx, block, symtab, &self.arms, result_ty)
@@ -337,9 +391,7 @@ fn lower_pattern_when<'c>(
         WhenArm::Else(body) => body.lower(ctx, outer_block, symtab),
 
         WhenArm::Cond { .. } => {
-            ctx.emit_internal(
-                "Cannot mix condition arms in a pattern match (when subject is ...)",
-            );
+            ctx.emit_internal("Cannot mix condition arms in a pattern match (when subject is ...)");
             None
         }
 
