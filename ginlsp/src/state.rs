@@ -45,6 +45,10 @@ impl GinSnapshot {
     pub fn hover_at(&self, file: File, byte_pos: usize) -> Option<String> {
         ginc::compilation::hover::hover_at(&self.db, file, byte_pos)
     }
+
+    pub fn dot_type_at(&self, file: File, byte_pos: usize) -> Option<ginc::typeck::Ty> {
+        ginc::compilation::hover::dot_type_at(&self.db, file, byte_pos)
+    }
 }
 
 pub struct GinHost {

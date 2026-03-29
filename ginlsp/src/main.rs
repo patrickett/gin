@@ -10,7 +10,6 @@ use capabilities::{
 };
 use dashmap::DashMap;
 use diagnostics::symptoms_to_diagnostics;
-use ginc::compilation::compile::shared_ty_env;
 use ginc::FileAst;
 use state::{DocumentState, GinHost, JsonDocumentState};
 use std::sync::{Arc, Mutex, RwLock};
@@ -477,26 +476,11 @@ impl LanguageServer for Backend {
             }
 
             // Check for dot completions (after typing `.`)
-            // The cursor position is after the dot, so we check the character before it
-            let before_dot_position = Position {
-                line: position.line,
-                character: position.character.saturating_sub(1),
-            };
-            if let Some(ch) = get_char_at_position(&state.source, before_dot_position) {
-                if ch == '.' {
-                    let snapshot = self.snapshot();
-                    let ast = snapshot.parse(state.file);
-                    // Use cached AST if the current parse is empty (e.g., due to incomplete syntax)
-                    let ast = if ast.tags().is_empty() && ast.defs().is_empty() {
-                        self.ast_cache
-                            .get(&uri.to_string())
-                            .map(|r| std::sync::Arc::clone(&r))
-                            .unwrap_or_else(|| std::sync::Arc::new(ast))
-                    } else {
-                        std::sync::Arc::new(ast)
-                    };
-                    let ty_env = shared_ty_env(&snapshot.db, state.file);
-                    if let Some(items) = dot_completions(&state.source, position, &ast, &ty_env) {
+            if let Some(byte_pos) = position_to_byte_offset(&state.source, position) {
+                let snapshot = self.snapshot();
+                if let Some(ty) = snapshot.dot_type_at(state.file, byte_pos) {
+                    let items = dot_completions(ty);
+                    if !items.is_empty() {
                         return Ok(Some(CompletionResponse::Array(items)));
                     }
                 }
@@ -640,34 +624,23 @@ mod tests {
     #[test]
     fn dot_completion_union_variants() {
         use capabilities::dot_completions;
-        use tower_lsp::lsp_types::Position;
+        use ginc::intern::IStr;
 
-        // Create AST with Maybe union definition
         let source = "Maybe(x) is Some(x) or None";
         let ast = parse_from_str(source);
         let ty_env = TyEnv::from_file_ast(&ast);
 
-        // Test completion after `Maybe.` (direct type completion)
-        let source_with_dot = "Maybe.";
-        let position = Position {
-            line: 0,
-            character: 6,
-        }; // `Maybe.|`
-        let completions = dot_completions(source_with_dot, position, &ast, &ty_env);
+        let ty = ty_env
+            .resolve_dot_type(&ast, IStr::new("Maybe".to_string()))
+            .expect("Expected Maybe to resolve to a union type");
+        let items = dot_completions(ty);
 
-        assert!(
-            completions.is_some(),
-            "Expected some completions for `Maybe.`"
-        );
-
-        let items = completions.unwrap();
         assert_eq!(items.len(), 2, "Expected 2 variants for Maybe type");
 
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&"Some(x)"), "Expected 'Some(x)' variant");
         assert!(labels.contains(&"None"), "Expected 'None' variant");
 
-        // Check detail text for Some variant (should show the full qualified name with parameter)
         let some_item = items.iter().find(|i| i.label == "Some(x)").unwrap();
         assert_eq!(some_item.detail.as_ref().unwrap(), &"Maybe.Some(x)");
     }

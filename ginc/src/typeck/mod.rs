@@ -265,9 +265,47 @@ impl TyEnv {
     pub fn infer_expr(&self, expr: &Expr, locals: &HashMap<IStr, Ty>) -> Ty {
         infer_expr_ty(expr, locals, &self.tag_types, &self.fn_return_types)
     }
+
+    /// Resolve the union type reachable via a dot expression from `name`.
+    ///
+    /// Returns `Some(Ty::Union { .. })` when `name` is either:
+    /// - A union type directly (e.g., `Bool`, `Maybe`)
+    /// - A variable binding whose type annotation names a union type
+    ///
+    /// Returns `None` for non-union types and unresolvable names.
+    pub fn resolve_dot_type(&self, ast: &FileAst, name: IStr) -> Option<Ty> {
+        if let Some(ty) = self.lookup_tag(name) {
+            if matches!(ty, Ty::Union { .. }) {
+                return Some(ty.clone());
+            }
+        }
+        let type_name = binding_type_annotation(ast, name)?;
+        self.lookup_tag(type_name).cloned()
+    }
 }
 
 // ─── Internals ───────────────────────────────────────────────────────────────
+
+/// Find the type annotation name for a binding named `name` in the AST.
+/// Checks top-level defs first, then local bindings inside function bodies.
+fn binding_type_annotation(ast: &FileAst, name: IStr) -> Option<IStr> {
+    if let Some(bind) = ast.defs().values().find(|b| b.name() == name) {
+        return bind.type_annotation.as_ref().map(|(tn, _)| *tn);
+    }
+    ast.defs().values().find_map(|bind| {
+        let BindValue::Body { exprs, .. } = bind.value() else {
+            return None;
+        };
+        exprs.iter().find_map(|expr| {
+            let Expr::Bind(b) = &**expr else { return None };
+            if b.name() == name {
+                b.type_annotation.as_ref().map(|(tn, _)| *tn)
+            } else {
+                None
+            }
+        })
+    })
+}
 
 /// Returns the alignment (in bytes) of a type.
 /// Calculate the size needed for a union discriminant based on number of variants.

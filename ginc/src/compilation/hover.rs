@@ -1,12 +1,14 @@
 //! Hover information generation for the LSP.
 
 use crate::ast::{
-    Bind, BindValue, Declare, DeclareValue, Expr, FileAst, IfCondition, Literal, ParameterKind,
-    Spanned, Tag, Variant,
+    Bind, BindValue, Declare, DeclareValue, Expr, FileAst, ForInLoop, IfCondition, Literal,
+    LoopEnum, ParameterKind, Spanned, Tag, Variant, WhenArm, WhileLoop,
 };
+use crate::compilation::shared_ty_env;
 use crate::database::File;
 use crate::database::input_database::Db;
 use crate::intern::IStr;
+use crate::parse::parse::parse;
 use crate::typeck::{Ty, TyEnv, ty_alignment, ty_byte_size_static};
 
 // ── Trait & context ──────────────────────────────────────────────────────────
@@ -183,6 +185,119 @@ impl HoverDoc for SelfRef<'_> {
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
+
+/// Return the union type reachable via a dot expression at `byte_pos` in `file`.
+///
+/// `byte_pos` is the byte offset of the cursor — the character immediately after
+/// the dot. Returns `None` if there is no dot at `byte_pos - 1` or the identifier
+/// before it does not resolve to a union type.
+pub fn dot_type_at(db: &dyn Db, file: File, byte_pos: usize) -> Option<crate::typeck::Ty> {
+    let dot_pos = byte_pos.checked_sub(1)?;
+    let source = file.contents(db);
+    if source.as_bytes().get(dot_pos) != Some(&b'.') {
+        return None;
+    }
+    let ast = parse(db, file);
+    let name = name_before_dot(&ast, dot_pos)?;
+    let ty_env = shared_ty_env(db, file);
+    ty_env.resolve_dot_type(&ast, name)
+}
+
+/// Walk the parsed AST to find the name of the expression ending at `dot_pos`.
+///
+/// Returns `None` if no leaf expression in the AST ends exactly at `dot_pos`,
+/// in which case the caller should fall back to string scanning.
+fn name_before_dot(ast: &FileAst, dot_pos: usize) -> Option<IStr> {
+    for bind in ast.defs().values() {
+        if let BindValue::Body { exprs, ret } = bind.value() {
+            if let Some(name) = search_exprs_for_dot(exprs, dot_pos) {
+                return Some(name);
+            }
+            if let Some(ret_expr) = ret.0.as_ref()
+                && let Some(name) = expr_name_at_dot(ret_expr, dot_pos)
+            {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+fn search_exprs_for_dot(exprs: &[Spanned<Expr>], dot_pos: usize) -> Option<IStr> {
+    exprs.iter().find_map(|e| expr_name_at_dot(e, dot_pos))
+}
+
+fn expr_name_at_dot(spanned: &Spanned<Expr>, dot_pos: usize) -> Option<IStr> {
+    let span = spanned.1;
+    if span.end < dot_pos || span.start > dot_pos {
+        return None;
+    }
+    match &spanned.0 {
+        Expr::AnonymousTag(name, inner_span) if inner_span.end == dot_pos => Some(*name),
+        Expr::FnCall(call)
+            if call.args.is_none()
+                && call.path.segments.is_empty()
+                && call.path.span.end == dot_pos =>
+        {
+            Some(call.path.root)
+        }
+        Expr::SelfRef(inner_span) if inner_span.end == dot_pos => {
+            Some(IStr::new("self".to_string()))
+        }
+        Expr::If(if_expr) => {
+            if let IfCondition::Bool(cond) = &if_expr.condition
+                && let Some(name) = expr_name_at_dot(cond, dot_pos)
+            {
+                return Some(name);
+            }
+            if let Some(name) = search_exprs_for_dot(&if_expr.body, dot_pos) {
+                return Some(name);
+            }
+            if let Some(ret_expr) = if_expr.ret.0.as_ref() {
+                expr_name_at_dot(ret_expr, dot_pos)
+            } else {
+                None
+            }
+        }
+        Expr::Loop(LoopEnum::While(WhileLoop { cond, exprs })) => {
+            expr_name_at_dot(cond, dot_pos).or_else(|| search_exprs_for_dot(exprs, dot_pos))
+        }
+        Expr::Loop(LoopEnum::ForIn(ForInLoop { iter, exprs, .. })) => {
+            expr_name_at_dot(iter, dot_pos).or_else(|| search_exprs_for_dot(exprs, dot_pos))
+        }
+        Expr::When(when_expr) => {
+            if let Some(subj) = &when_expr.subject
+                && let Some(name) = expr_name_at_dot(subj, dot_pos)
+            {
+                return Some(name);
+            }
+            for arm in &when_expr.arms {
+                let found = match arm {
+                    WhenArm::Cond { condition, body } => expr_name_at_dot(condition, dot_pos)
+                        .or_else(|| expr_name_at_dot(body, dot_pos)),
+                    WhenArm::Is { body, .. } => expr_name_at_dot(body, dot_pos),
+                    WhenArm::Else(body) => expr_name_at_dot(body, dot_pos),
+                };
+                if found.is_some() {
+                    return found;
+                }
+            }
+            None
+        }
+        Expr::Bind(bind) => {
+            if let BindValue::Body { exprs, ret } = bind.value() {
+                if let Some(name) = search_exprs_for_dot(exprs, dot_pos) {
+                    return Some(name);
+                }
+                if let Some(ret_expr) = ret.0.as_ref() {
+                    return expr_name_at_dot(ret_expr, dot_pos);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
 
 /// Return markdown hover text for the word at `byte_pos` in `file`.
 /// Returns `None` if there is nothing hover-able at that position.
