@@ -144,10 +144,7 @@ impl<'c> Lower<'c> for TagCall {
 
         // Fall back to record construction.
         // Note: unknown tag diagnostics are emitted by typeck; codegen just fails gracefully.
-        let record_ty = match ctx.ty_env.lookup_tag(self.name).cloned() {
-            Some(ty) => ty,
-            None => return None,
-        };
+        let record_ty = ctx.ty_env.lookup_tag(self.name).cloned()?;
 
         match &record_ty {
             Ty::Record { .. } => {

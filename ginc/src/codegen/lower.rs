@@ -272,7 +272,7 @@ pub fn generate_mlir(
         &context,
         &type_info,
         &symbol_table,
-        &ty_env,
+        ty_env,
         source,
         filename,
     );
@@ -375,14 +375,7 @@ pub fn build_module_with_context<'c>(
             return (None, Vec::new());
         }
     };
-    let ctx = CodegenContext::new(
-        context,
-        &type_info,
-        &symbol_table,
-        &ty_env,
-        source,
-        filename,
-    );
+    let ctx = CodegenContext::new(context, &type_info, &symbol_table, ty_env, source, filename);
 
     let module = Module::new(context.unknown_loc());
 
