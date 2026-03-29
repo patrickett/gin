@@ -6,6 +6,7 @@ use crate::ast::{
 };
 use crate::database::File;
 use crate::database::input_database::Db;
+use crate::intern::IStr;
 use crate::typeck::{Ty, TyEnv, ty_alignment, ty_byte_size_static};
 
 // ── Trait & context ──────────────────────────────────────────────────────────
@@ -352,6 +353,32 @@ fn word_at_byte_pos(source: &str, byte_pos: usize) -> Option<String> {
 
 fn is_identifier_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
+}
+
+/// Return the byte range of `name` at its definition site, using the parsed AST.
+///
+/// For defs, uses the `name_span` recorded during parsing.
+/// For tags, uses the `name_span` recorded during parsing.
+/// Method defs are matched by their unqualified name (e.g. `"foo"` matches `"Point.foo"`).
+pub fn find_definition_span(
+    ast: &FileAst,
+    name: &str,
+    is_tag: bool,
+) -> Option<std::ops::Range<usize>> {
+    let key = IStr::new(name.to_string());
+    if is_tag {
+        ast.tags()
+            .get(&key)
+            .map(|decl| decl.name_span.start..decl.name_span.end)
+    } else {
+        ast.defs()
+            .iter()
+            .find(|(k, _)| {
+                let s = k.as_str();
+                s == name || (s.contains('.') && s.split('.').next_back() == Some(name))
+            })
+            .map(|(_, bind)| bind.name_span.start..bind.name_span.end)
+    }
 }
 
 /// Pretty-print a declaration for hover. Uses multiline for unions with ≥3 variants or >80 chars.

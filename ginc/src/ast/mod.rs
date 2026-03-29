@@ -24,6 +24,7 @@ pub use impl_block::*;
 
 use crate::prelude::*;
 use chumsky::{input::ValueInput, span::SimpleSpan};
+use std::collections::HashSet;
 
 /// Parses a stream of tokens into a `FileAst`.
 pub fn token_parser<'t, I>() -> impl Parser<'t, I, FileAst, crate::parse::ParserError<'t>>
@@ -175,10 +176,6 @@ fn generate_return_type_unions(
     tags: &mut TagMap,
     _private_defs: &std::collections::HashSet<IStr>,
 ) {
-    use crate::ast::declare::DeclareValue;
-    use crate::ast::tag::{Tag, Variant};
-    use std::collections::HashSet;
-
     for bind in defs.values() {
         // Extract anonymous tag names from the bind's return value
         let tag_names = extract_anonymous_tags_from_bind(bind);
@@ -198,7 +195,11 @@ fn generate_return_type_unions(
         // Only create a named union declaration if return_type_name is provided
         if let Some(name) = bind.return_type_name() {
             // Named return type - the union can be referenced elsewhere
-            let decl = crate::ast::declare::Declare::new(*name, DeclareValue::Union { variants });
+            let decl = Declare::new(
+                *name,
+                SimpleSpan::from(0..0),
+                DeclareValue::Union { variants },
+            );
             tags.insert(decl.name(), decl);
         }
         // If no name provided, the union IS the return type but has no external declaration

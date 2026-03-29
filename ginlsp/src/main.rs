@@ -396,7 +396,7 @@ impl LanguageServer for Backend {
 
             if let Some(word) = get_word_at_position(&state.source, position) {
                 if ast.tags().keys().any(|t| t.as_str() == word) {
-                    let range = find_definition_range(&state.source, &word, true);
+                    let range = find_definition_range(&state.source, &ast, &word, true);
                     return Ok(Some(GotoDefinitionResponse::Scalar(Location {
                         uri,
                         range,
@@ -404,7 +404,7 @@ impl LanguageServer for Backend {
                 }
 
                 if ast.defs().keys().any(|d| d.as_str() == word) {
-                    let range = find_definition_range(&state.source, &word, false);
+                    let range = find_definition_range(&state.source, &ast, &word, false);
                     return Ok(Some(GotoDefinitionResponse::Scalar(Location {
                         uri,
                         range,

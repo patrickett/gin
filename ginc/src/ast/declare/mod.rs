@@ -1,5 +1,6 @@
 use crate::ast::tag::Variant;
 use crate::prelude::*;
+use chumsky::span::SimpleSpan;
 use std::hash::{Hash, Hasher};
 
 mod attributes;
@@ -12,16 +13,18 @@ pub struct Declare {
     doc_comment: Option<DocComment>,
     attributes: DeclareAttributes,
     name: IStr,
+    pub name_span: SimpleSpan,
     params: Option<Parameters>,
     value: DeclareValue,
 }
 
 impl Declare {
-    pub fn new(name: IStr, value: DeclareValue) -> Self {
+    pub fn new(name: IStr, name_span: SimpleSpan, value: DeclareValue) -> Self {
         Declare {
             doc_comment: None,
             attributes: DeclareAttributes::default(),
             name,
+            name_span,
             params: None,
             value,
         }
@@ -81,6 +84,8 @@ impl Hash for Declare {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.doc_comment.hash(state);
         self.name.hash(state);
+        self.name_span.start.hash(state);
+        self.name_span.end.hash(state);
         match &self.params {
             None => 0u8.hash(state),
             Some(params) => {
@@ -102,9 +107,10 @@ where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
     let params = params(expr.clone(), tag(expr.clone()));
-    let tag_name = select! { Token::Tag(name) => IStr::new(name.to_string()) };
+    let tag_name = select! { Token::Tag(name) => IStr::new(name.to_string()) }
+        .map_with(|name, e| (name, e.span()));
 
-    let lhs_has = tag_name
+    let lhs_has = tag_name.clone()
         .then(params.clone().or_not())
         .then_ignore(just(Token::Has))
         .then_ignore(just(Token::Newline).or_not()) // Consume optional newline after Has
@@ -215,14 +221,16 @@ where
 
     let decl_has = lhs_has
         .then(rhs_record)
-        .map(|((tag_name, params), value)| Declare::new(tag_name, value).with_params(params));
+        .map(|((( name, name_span), params), value)| {
+            Declare::new(name, name_span, value).with_params(params)
+        });
 
     let decl_is = lhs_is.then(rhs_union_or_range).map(
-        |(((tag_name, params), doc_after_is), (value, doc_after_value))| {
+        |((((name, name_span), params), doc_after_is), (value, doc_after_value))| {
             let doc = doc_after_value
                 .or(doc_after_is)
                 .and_then(|d| if d.0.is_empty() { None } else { Some(d) });
-            Declare::new(tag_name, value)
+            Declare::new(name, name_span, value)
                 .with_params(params)
                 .with_doc(doc)
         },

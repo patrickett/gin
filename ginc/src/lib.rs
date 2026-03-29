@@ -12,6 +12,7 @@ pub mod typeck;
 use crate::typeck::TyEnv;
 pub use args::*;
 pub use ast::{DefMap, FileAst, Symbol, SymbolKind, SymbolTable, TagMap};
+pub use compilation::hover::find_definition_span;
 pub use database::{
     File,
     input_database::{Db, InputDatabase},
