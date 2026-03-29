@@ -20,6 +20,7 @@ pub use diagnostic::{Category, Symptom, SymptomSource};
 
 use crate::ast::ImportSource;
 use crate::compilation::{compile::compile_entry, native};
+use crate::parse::parse::parse as salsa_parse;
 use crate::parse::parse_from_str;
 use crossbeam_channel::unbounded;
 use std::collections::HashMap;
@@ -104,7 +105,7 @@ impl GinCompiler {
                     .output
                     .clone()
                     .unwrap_or_else(|| path.with_extension("o"));
-                let ast = load_entry_with_deps(&path, &args.dependencies);
+                let ast = build_native_ast(&db, entry, &args.dependencies);
                 let ty_env = TyEnv::from_file_ast(&ast);
                 if let Err(e) = native::compile_to_object(
                     &ast,
@@ -123,7 +124,7 @@ impl GinCompiler {
                     .clone()
                     .unwrap_or_else(|| path.with_extension(""));
                 let obj_path = exe_path.with_extension("o");
-                let ast = load_entry_with_deps(&path, &args.dependencies);
+                let ast = build_native_ast(&db, entry, &args.dependencies);
                 let ty_env = TyEnv::from_file_ast(&ast);
                 match native::compile_to_object(
                     &ast,
@@ -148,9 +149,69 @@ impl GinCompiler {
     }
 }
 
-/// Compile a library directory (all .gin files) to an object file
+/// Compile a library directory (all .gin files) to an object file.
+///
+/// Unlike the binary path which follows imports from a single entry point,
+/// library builds gather ALL `.gin` files in the directory, parse them through
+/// the Salsa pipeline for proper diagnostic gathering, and only proceed to
+/// codegen if there are no parse/lex errors.
 fn compile_library(args: &Args, path: &Path) {
-    let ast = load_gin_dir_recursive(path);
+    // Collect all .gin file paths in the directory
+    let gin_files = collect_gin_files_recursive(path);
+
+    if gin_files.is_empty() {
+        eprintln!("No .gin files found in {}", path.display());
+        return;
+    }
+
+    // Create Salsa database for proper diagnostic gathering
+    let (tx, _rx) = unbounded();
+    let db = InputDatabase::new(tx);
+
+    // Load all files into the database
+    let mut files: Vec<File> = Vec::new();
+    let mut filenames: Vec<String> = Vec::new();
+
+    for file_path in &gin_files {
+        let filename = file_path.to_string_lossy().into_owned();
+        match db.input(file_path.clone()) {
+            Ok(file) => {
+                files.push(file);
+                filenames.push(filename);
+            }
+            Err(err) => {
+                eprintln!("Error loading {}: {}", file_path.display(), err);
+                return;
+            }
+        }
+    }
+
+    // Parse each file through the Salsa pipeline (accumulates parse/lex diagnostics)
+    // and build the merged AST at the same time — Salsa caches the parse result so
+    // the second call per file below is a free cache hit.
+    use crate::parse::parse::parse as salsa_parse;
+    let mut ast = FileAst::default();
+    for &file in &files {
+        ast.merge_from(salsa_parse(&db, file));
+    }
+
+    // Collect and print parse diagnostics per-file with correct source context
+    let mut has_flaws = false;
+    for (i, &file) in files.iter().enumerate() {
+        let source = file.contents(&db);
+        let filename = &filenames[i];
+        let diagnostics = salsa_parse::accumulated::<Symptom>(&db, file);
+        for diagnostic in &diagnostics {
+            diagnostic.print(source, filename);
+            if matches!(diagnostic.category, Category::Flaw) {
+                has_flaws = true;
+            }
+        }
+    }
+
+    if has_flaws {
+        return;
+    }
 
     // Determine output path
     let obj_path = args.output.clone().unwrap_or_else(|| {
@@ -173,6 +234,28 @@ fn compile_library(args: &Args, path: &Path) {
             eprintln!("Codegen error: {e:?}");
         }
     }
+}
+
+/// Collect all .gin file paths in a directory recursively, skipping `target/`.
+fn collect_gin_files_recursive(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return files;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if path.file_name().is_some_and(|n| n == "target") {
+                continue;
+            }
+            files.extend(collect_gin_files_recursive(&path));
+        } else if path.extension().is_some_and(|ext| ext == "gin") {
+            files.push(path);
+        }
+    }
+
+    files
 }
 
 /// Recursively load all .gin files in a directory
@@ -199,16 +282,20 @@ fn load_gin_dir_recursive(dir: &Path) -> FileAst {
     merged
 }
 
-/// Parse the entry file and merge all matching flask.json dependencies into its AST.
-fn load_entry_with_deps(entry_path: &Path, dependencies: &HashMap<String, PathBuf>) -> FileAst {
-    let src = std::fs::read_to_string(entry_path).unwrap_or_default();
-    let mut ast = parse_from_str(&src);
+/// Build the AST for native compilation from the Salsa-cached entry parse result,
+/// then merge in any flask.json package dependencies.
+///
+/// This replaces the old `load_entry_with_deps` which re-read the entry file from
+/// disk and re-parsed it. Now the entry AST is a cache hit from the Salsa pipeline
+/// that already ran for diagnostics. Package deps (not tracked by Salsa) are still
+/// loaded from disk.
+fn build_native_ast(db: &dyn Db, entry: File, dependencies: &HashMap<String, PathBuf>) -> FileAst {
+    let mut ast = salsa_parse(db, entry);
 
     if dependencies.is_empty() {
         return ast;
     }
 
-    // Collect package import names that have a resolved dependency path.
     let dep_names: Vec<String> = ast
         .uses()
         .iter()

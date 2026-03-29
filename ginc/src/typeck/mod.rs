@@ -126,7 +126,7 @@ pub struct TyEnv {
 
 impl TyEnv {
     pub fn from_file_ast(ast: &FileAst) -> Self {
-        Self::from_multiple_file_asts(&[ast.clone()])
+        Self::from_multiple_file_asts(std::slice::from_ref(ast))
     }
 
     pub fn from_multiple_file_asts(files: &[FileAst]) -> Self {
