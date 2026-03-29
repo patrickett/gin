@@ -30,8 +30,8 @@ pub enum ParamSignature {
 pub enum TagValueSignature {
     Alias(Tag),
     Record(Vec<(IStr, ParamSignature)>),
-    Range(i64, i64),
-    InRange(i64, i64),
+    Range(i128, i128),
+    InRange(i128, i128),
 }
 
 impl PartialEq for FunctionSignature {

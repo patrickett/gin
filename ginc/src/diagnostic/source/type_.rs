@@ -26,7 +26,7 @@ pub enum TypeSymptom {
         got: usize,
     },
     IndexOutOfBounds {
-        index: i64,
+        index: i128,
         size: usize,
     },
     UnusedBinding {
@@ -184,7 +184,7 @@ pub fn arity_mismatch(span: SimpleSpan, name: String, expected: usize, got: usiz
     }
 }
 
-pub fn index_out_of_bounds(span: SimpleSpan, index: i64, size: usize) -> Symptom {
+pub fn index_out_of_bounds(span: SimpleSpan, index: i128, size: usize) -> Symptom {
     Symptom {
         source: SymptomSource::Type(TypeSymptom::IndexOutOfBounds { index, size }),
         span,

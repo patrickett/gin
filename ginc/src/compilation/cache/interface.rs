@@ -150,11 +150,7 @@ fn hash_tag_def(hasher: &mut Sha256, name: &IStr, decl: &Declare) {
 }
 
 /// Hash a def signature: name + parameter names/types. Body is excluded.
-fn hash_def_signature(
-    hasher: &mut Sha256,
-    name: &IStr,
-    bind: &crate::ast::Bind,
-) {
+fn hash_def_signature(hasher: &mut Sha256, name: &IStr, bind: &crate::ast::Bind) {
     let _ = write!(hasher, "DEF:{}", name.as_str());
     hash_parameters(hasher, bind.params());
     // Intentionally skip params.1 (BindValue) — that's the body.
@@ -162,10 +158,7 @@ fn hash_def_signature(
 }
 
 /// Hash an optional parameter list.
-fn hash_parameters(
-    hasher: &mut Sha256,
-    params: &Option<crate::ast::Parameters>,
-) {
+fn hash_parameters(hasher: &mut Sha256, params: &Option<crate::ast::Parameters>) {
     match params {
         Some(parameters) => {
             let _ = write!(hasher, "(");
@@ -249,8 +242,8 @@ pub enum TagShapeSig {
     Record(Vec<(String, ParamKindSig)>),
     Union(Vec<TagSig>),
     Set,
-    Range(i64, i64),
-    InRange(i64, i64),
+    Range(i128, i128),
+    InRange(i128, i128),
 }
 
 /// Extract a serializable `InterfaceSignature` from a parsed AST.
@@ -286,9 +279,7 @@ pub fn extract_interface_signature(ast: &FileAst) -> InterfaceSignature {
     InterfaceSignature { defs, tags }
 }
 
-fn extract_params(
-    params: &Option<crate::ast::Parameters>,
-) -> Vec<(String, ParamKindSig)> {
+fn extract_params(params: &Option<crate::ast::Parameters>) -> Vec<(String, ParamKindSig)> {
     match params {
         Some(parameters) => {
             let mut pairs: Vec<_> = parameters
@@ -342,9 +333,12 @@ fn extract_tag_shape(value: &DeclareValue) -> TagShapeSig {
             pairs.sort_by(|a, b| a.0.cmp(&b.0));
             TagShapeSig::Record(pairs)
         }
-        DeclareValue::Union { variants } => {
-            TagShapeSig::Union(variants.iter().map(|v| extract_tag_sig(extract_variant_tag(v))).collect())
-        }
+        DeclareValue::Union { variants } => TagShapeSig::Union(
+            variants
+                .iter()
+                .map(|v| extract_tag_sig(extract_variant_tag(v)))
+                .collect(),
+        ),
         DeclareValue::Set() => TagShapeSig::Set,
         DeclareValue::Range(r) => TagShapeSig::Range(r.start, r.end),
         DeclareValue::InRange(r) => TagShapeSig::InRange(r.start, r.end),

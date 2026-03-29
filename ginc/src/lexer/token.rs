@@ -145,10 +145,10 @@ pub enum Token<'src> {
     #[regex(r"[0-9]+\.[0-9]+", |lex| lex.slice().parse::<f64>())]
     Float(f64),
     #[regex(r"0[xX][0-9a-fA-F]+", |lex| {
-        u64::from_str_radix(&lex.slice()[2..], 16).map(|v| v as i64)
+        i128::from_str_radix(&lex.slice()[2..], 16)
     })]
-    #[regex(r"[0-9]+", |lex| lex.slice().parse::<i64>())]
-    Int(i64),
+    #[regex(r"[0-9]+", |lex| lex.slice().parse::<i128>())]
+    Int(i128),
     #[regex(r"'[^'\n]*'", |lex| { let s = lex.slice(); &s[1..s.len()-1] })]
     String(&'src str),
     #[regex(r"'[^'\n]*", |lex| { let s = lex.slice(); &s[1..] })]

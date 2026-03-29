@@ -206,7 +206,7 @@ pub struct IndexOutOfBounds {
     /// The source span of the buffer access expression.
     pub span: SimpleSpan,
     /// The index value being accessed.
-    pub index: i64,
+    pub index: i128,
     /// The size of the buffer.
     pub size: usize,
 }

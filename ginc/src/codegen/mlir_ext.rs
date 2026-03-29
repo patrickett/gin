@@ -8,6 +8,7 @@ use crate::codegen::prelude::*;
 pub trait ContextExt {
     fn unknown_loc(&self) -> Location<'_>;
     fn i64(&self) -> Type<'_>;
+    fn i128(&self) -> Type<'_>;
     fn i1(&self) -> Type<'_>;
     fn f64(&self) -> Type<'_>;
     /// String type — `!llvm.struct<(ptr, i64)>` fat pointer (data, len)
@@ -30,6 +31,10 @@ impl ContextExt for Context {
 
     fn i64(&self) -> Type<'_> {
         Type::from(IntegerType::new(self, 64))
+    }
+
+    fn i128(&self) -> Type<'_> {
+        Type::from(IntegerType::new(self, 128))
     }
 
     fn i1(&self) -> Type<'_> {
@@ -99,6 +104,11 @@ impl<'c> AttributeExt<'c> for &'c Context {
 /// Extension trait for building MLIR operations.
 pub trait OperationBuilderExt<'c> {
     fn i64_const(&self, value: i64) -> Operation<'c>;
+    /// Create an integer constant of arbitrary bit-width.
+    /// Note: melior's `IntegerAttribute::new` currently takes `i64`, so values
+    /// exceeding 64 bits are truncated. Full i128 constant support requires a
+    /// future melior API update or manual LLVMAPInt construction.
+    fn int_const(&self, ty: Type<'c>, value: i128) -> Operation<'c>;
     fn const_op(&self, attr: Attribute<'c>, ty: Type<'c>) -> Operation<'c>;
     fn build_binop(
         &self,
@@ -134,6 +144,30 @@ impl<'c> OperationBuilderExt<'c> for &'c Context {
         let value_id = Identifier::new(self, "value");
         OperationBuilder::new("arith.constant", self.unknown_loc())
             .add_attributes(&[(value_id, attr.into())])
+            .add_results(&[ty])
+            .build()
+            .unwrap()
+    }
+
+    fn int_const(&self, ty: Type<'c>, value: i128) -> Operation<'c> {
+        let attr: Attribute<'c> = if value >= i64::MIN as i128 && value <= i64::MAX as i128 {
+            // Fast path: value fits in i64, use native IntegerAttribute
+            IntegerAttribute::new(ty, value as i64).into()
+        } else {
+            // Slow path: value exceeds i64 range — use MLIR's attribute parser
+            // which internally constructs an LLVM APInt from the string form.
+            let width = IntegerType::try_from(ty)
+                .map(|it| it.width())
+                .unwrap_or(128);
+            let source = format!("{value} : i{width}");
+            Attribute::parse(self, &source).unwrap_or_else(|| {
+                // Fallback: truncate if parser fails (should not happen for valid i128)
+                IntegerAttribute::new(ty, value as i64).into()
+            })
+        };
+        let value_id = Identifier::new(self, "value");
+        OperationBuilder::new("arith.constant", self.unknown_loc())
+            .add_attributes(&[(value_id, attr)])
             .add_results(&[ty])
             .build()
             .unwrap()
@@ -223,6 +257,8 @@ impl<'c> OperationBuilderExt<'c> for &'c Context {
 pub trait BlockExt<'c> {
     fn append_op(&self, op: Operation<'c>) -> Value<'c, 'c>;
     fn const_i64(&self, ctx: &'c Context, value: i64) -> Value<'c, 'c>;
+    /// Create an integer constant of the given MLIR type.
+    fn const_int(&self, ctx: &'c Context, ty: Type<'c>, value: i128) -> Value<'c, 'c>;
     /// Create a string constant - returns a fat pointer (ptr, length)
     /// This requires access to CodegenContext to register the string globally
     fn const_string_with_ctx(&self, ctx: &CodegenContext<'_, 'c>, value: &str) -> Value<'c, 'c>;
@@ -283,6 +319,10 @@ impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
 
     fn const_i64(&self, ctx: &'c Context, value: i64) -> Value<'c, 'c> {
         self.append_op(ctx.i64_const(value))
+    }
+
+    fn const_int(&self, ctx: &'c Context, ty: Type<'c>, value: i128) -> Value<'c, 'c> {
+        self.append_op(ctx.int_const(ty, value))
     }
 
     fn const_string_with_ctx(&self, ctx: &CodegenContext<'_, 'c>, value: &str) -> Value<'c, 'c> {

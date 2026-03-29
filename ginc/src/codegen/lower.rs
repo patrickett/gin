@@ -51,8 +51,23 @@ pub fn ty_to_mlir<'c>(ty: &Ty, ctx: &'c Context) -> Type<'c> {
                     .max()
                     .unwrap_or(0);
                 let mut slot_types = vec![IntegerType::new(ctx, discriminant_bits).into()];
-                for _ in 0..max_fields {
-                    slot_types.push(ctx.i64());
+                // Size each payload slot by the widest field type across all variants.
+                // This ensures i128 fields get an i128 slot rather than being truncated to i64.
+                for slot_idx in 0..max_fields {
+                    let widest = variants
+                        .iter()
+                        .filter_map(|(_, fields)| fields.get(slot_idx))
+                        .map(|(_, ft)| ty_byte_size(ft))
+                        .max()
+                        .unwrap_or(8);
+                    let slot_ty: Type<'c> = match widest {
+                        0..=1 => IntegerType::new(ctx, 8).into(),
+                        2 => IntegerType::new(ctx, 16).into(),
+                        3..=4 => IntegerType::new(ctx, 32).into(),
+                        5..=8 => ctx.i64(),
+                        _ => ctx.i128(),
+                    };
+                    slot_types.push(slot_ty);
                 }
                 r#type::r#struct(ctx, &slot_types, false)
             }
@@ -64,7 +79,13 @@ pub fn ty_to_mlir<'c>(ty: &Ty, ctx: &'c Context) -> Type<'c> {
             r#type::r#struct(ctx, &field_types, false)
         }
         Ty::Unit | Ty::Opaque(_) => ctx.i64(),
-        Ty::Literal(LiteralValue::Int(_)) => ctx.i64(),
+        Ty::Literal(LiteralValue::Int(n)) => {
+            if *n > i64::MAX as i128 || *n < i64::MIN as i128 {
+                ctx.i128()
+            } else {
+                ctx.i64()
+            }
+        }
         Ty::Literal(LiteralValue::Float(_)) => ctx.f64(),
         Ty::Array { .. } | Ty::Ptr { .. } | Ty::Ref { .. } => ctx.llvm_ptr(),
         Ty::Tuple(fields) => {
@@ -84,21 +105,23 @@ pub type RuntimeSymbolTable<'c> = HashMap<String, Value<'c, 'c>>;
 
 #[derive(Debug, Clone)]
 pub struct TypeInfo {
-    pub min: i64,
-    pub max: i64,
+    pub min: i128,
+    pub max: i128,
 }
 
 impl TypeInfo {
     pub fn bit_width(&self) -> u32 {
         let range = self.max - self.min;
-        if range <= u8::MAX as i64 + 1 {
+        if range <= u8::MAX as i128 + 1 {
             8
-        } else if range <= u16::MAX as i64 + 1 {
+        } else if range <= u16::MAX as i128 + 1 {
             16
-        } else if range <= (i32::MAX as i64 + 1) {
+        } else if range <= u32::MAX as i128 + 1 {
             32
-        } else {
+        } else if range <= u64::MAX as i128 + 1 {
             64
+        } else {
+            128
         }
     }
 }
@@ -843,15 +866,9 @@ impl<'c> Lower<'c> for Expr {
                         .ok()?;
                     Some(block.append_op(neg_op))
                 } else {
-                    let zero = block.const_i64(ctx.mlir, 0);
-                    Some(
-                        block.append_op(ctx.mlir.build_binop(
-                            ArithOps::SUB,
-                            zero,
-                            val,
-                            ctx.mlir.i64(),
-                        )),
-                    )
+                    let val_ty = val.r#type();
+                    let zero = block.const_int(ctx.mlir, val_ty, 0);
+                    Some(block.append_op(ctx.mlir.build_binop(ArithOps::SUB, zero, val, val_ty)))
                 }
             }
         }
@@ -1002,6 +1019,7 @@ fn ty_byte_size(ty: &Ty) -> usize {
         Ty::Int(8) => 1,
         Ty::Int(16) => 2,
         Ty::Int(32) => 4,
+        Ty::Int(128) => 16,
         Ty::Int(_) => 8,
         Ty::Float => 8,
         Ty::Bool => 1,

@@ -471,15 +471,15 @@ fn infer_type_from_bind_with_ast(bind: &Bind, ast: &FileAst) -> Option<String> {
     None
 }
 
-fn eval_expr_to_literal(expr: &Expr, ast: &FileAst) -> Option<i64> {
+fn eval_expr_to_literal(expr: &Expr, ast: &FileAst) -> Option<i128> {
     eval_expr_to_literal_with_locals(expr, ast, &[])
 }
 
-fn eval_expr_to_literal_with_locals(expr: &Expr, ast: &FileAst, locals: &[&Expr]) -> Option<i64> {
+fn eval_expr_to_literal_with_locals(expr: &Expr, ast: &FileAst, locals: &[&Expr]) -> Option<i128> {
     use crate::prelude::BinOp;
     match expr {
         Expr::Lit(Literal::Int(n)) => Some(*n),
-        Expr::Lit(Literal::Number(n)) => Some(*n as i64),
+        Expr::Lit(Literal::Number(n)) => Some(*n as i128),
         Expr::FnCall(call) if call.args.is_none() && call.path.segments.is_empty() => {
             let var = call.path.root.as_str();
             for local in locals {
@@ -490,7 +490,7 @@ fn eval_expr_to_literal_with_locals(expr: &Expr, ast: &FileAst, locals: &[&Expr]
                     return eval_expr_to_literal_with_locals(e, ast, locals);
                 }
             }
-            infer_pattern_var_value(var, ast)?.parse::<i64>().ok()
+            infer_pattern_var_value(var, ast)?.parse::<i128>().ok()
         }
         Expr::Negate(inner) => Some(-eval_expr_to_literal_with_locals(inner, ast, locals)?),
         Expr::Binary(bin) if !bin.op.is_comparison() => {

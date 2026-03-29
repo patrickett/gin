@@ -16,7 +16,7 @@ use crate::prelude::WhenArm;
 /// A concrete compile-time value carried by `Ty::Literal`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LiteralValue {
-    Int(i64),
+    Int(i128),
     Float(f64),
 }
 
@@ -376,16 +376,18 @@ pub fn str_record_ty() -> Ty {
     }
 }
 
-fn range_bit_width(min: i64, max: i64) -> u8 {
-    let range = (max as i128) - (min as i128);
+fn range_bit_width(min: i128, max: i128) -> u8 {
+    let range = max - min;
     if range <= u8::MAX as i128 + 1 {
         8
     } else if range <= u16::MAX as i128 + 1 {
         16
     } else if range <= u32::MAX as i128 + 1 {
         32
-    } else {
+    } else if range <= u64::MAX as i128 + 1 {
         64
+    } else {
+        128
     }
 }
 
@@ -580,7 +582,7 @@ fn infer_expr_ty(
     match expr {
         Expr::Lit(lit) => match lit {
             Literal::Int(n) => Ty::Literal(LiteralValue::Int(*n)),
-            Literal::Number(n) => Ty::Literal(LiteralValue::Int(*n as i64)),
+            Literal::Number(n) => Ty::Literal(LiteralValue::Int(*n as i128)),
             Literal::Float(f) => Ty::Literal(LiteralValue::Float(*f)),
             Literal::String(_) => str_record_ty(),
         },

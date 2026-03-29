@@ -10,9 +10,9 @@ pub enum DeclareValue {
     Record(Parameters),
     Union { variants: Vec<Variant> },
     Set(/* TODO */),
-    Range(Range<i64>),
+    Range(Range<i128>),
     // DiceThrow is in 1...6 (element of range)
-    InRange(Range<i64>),
+    InRange(Range<i128>),
 }
 
 impl std::fmt::Display for DeclareValue {
