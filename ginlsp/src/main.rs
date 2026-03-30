@@ -350,16 +350,8 @@ impl LanguageServer for Backend {
             let ast = snapshot.parse(state.file);
 
             if let Some(word) = get_word_at_position(&state.source, position) {
-                if ast.tags().keys().any(|t| t.as_str() == word) {
-                    let range = find_definition_range(&state.source, &ast, &word, true);
-                    return Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                        uri,
-                        range,
-                    })));
-                }
-
-                if ast.defs().keys().any(|d| d.as_str() == word) {
-                    let range = find_definition_range(&state.source, &ast, &word, false);
+                let range = find_definition_range(&state.source, &ast, &word);
+                if range != Range::default() {
                     return Ok(Some(GotoDefinitionResponse::Scalar(Location {
                         uri,
                         range,

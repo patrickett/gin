@@ -478,22 +478,18 @@ fn is_identifier_char(c: char) -> bool {
 pub fn find_definition_span(
     ast: &FileAst,
     name: &str,
-    is_tag: bool,
 ) -> Option<std::ops::Range<usize>> {
     let key = IStr::new(name.to_string());
-    if is_tag {
-        ast.tags()
-            .get(&key)
-            .map(|decl| decl.name_span.start..decl.name_span.end)
-    } else {
-        ast.defs()
-            .iter()
-            .find(|(k, _)| {
-                let s = k.as_str();
-                s == name || (s.contains('.') && s.split('.').next_back() == Some(name))
-            })
-            .map(|(_, bind)| bind.name_span.start..bind.name_span.end)
+    if let Some(decl) = ast.tags().get(&key) {
+        return Some(decl.name_span.start..decl.name_span.end);
     }
+    ast.defs()
+        .iter()
+        .find(|(k, _)| {
+            let s = k.as_str();
+            s == name || (s.contains('.') && s.split('.').next_back() == Some(name))
+        })
+        .map(|(_, bind)| bind.name_span.start..bind.name_span.end)
 }
 
 /// Pretty-print a declaration for hover. Uses multiline for unions with ≥3 variants or >80 chars.
