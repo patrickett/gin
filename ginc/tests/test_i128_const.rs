@@ -1,18 +1,36 @@
-use ginc::codegen::generate_mlir;
+use ginc::codegen::build_module_with_context;
+use ginc::diagnostic::codegen::CodegenSymptom;
 use ginc::parse::parse_from_str;
 use ginc::typeck::TyEnv;
+use melior::Context;
+
+/// Helper to generate MLIR text from a source string using the single codegen path.
+fn codegen_to_mlir_text(source: &str, filename: &str) -> (String, Vec<CodegenSymptom>) {
+    let ast = parse_from_str(source);
+    let ty_env = TyEnv::from_file_ast(&ast);
+
+    let context = Context::new();
+    melior::dialect::DialectHandle::llvm().register_dialect(&context);
+    context.get_or_load_dialect("arith");
+    context.get_or_load_dialect("func");
+    context.get_or_load_dialect("scf");
+    context.get_or_load_dialect("llvm");
+
+    let (module, symptoms) = build_module_with_context(&context, &ast, source, filename, &ty_env);
+    let mlir_text = module
+        .expect("codegen should succeed")
+        .as_operation()
+        .to_string();
+
+    (mlir_text, symptoms)
+}
 
 #[test]
 fn test_i128_constant_not_truncated() {
     // Value: 170141183460469231731687303715884105727 (2^127 - 1)
     let source = "main: 170141183460469231731687303715884105727\n";
-    let ast = parse_from_str(source);
-    let ty_env = TyEnv::from_file_ast(&ast);
+    let (mlir_text, symptoms) = codegen_to_mlir_text(source, "test.gin");
 
-    let (mlir_text, symptoms) = generate_mlir(&ast, source, "test.gin", &ty_env);
-    let mlir_text = mlir_text.expect("codegen should succeed");
-
-    // If there are codegen symptoms, print them for debugging
     if !symptoms.is_empty() {
         for s in &symptoms {
             eprintln!("codegen symptom: {s:?}");
@@ -32,11 +50,7 @@ fn test_negative_i128_constant() {
     // Note: -2^127 can't be used because the lexer parses the positive literal first,
     // and 2^127 overflows i128 (max is 2^127 - 1).
     let source = "main: -20000000000000000000\n";
-    let ast = parse_from_str(source);
-    let ty_env = TyEnv::from_file_ast(&ast);
-
-    let (mlir_text, symptoms) = generate_mlir(&ast, source, "test.gin", &ty_env);
-    let mlir_text = mlir_text.expect("codegen should succeed");
+    let (mlir_text, symptoms) = codegen_to_mlir_text(source, "test.gin");
 
     if !symptoms.is_empty() {
         for s in &symptoms {
@@ -60,11 +74,7 @@ fn test_negative_i128_constant() {
 fn test_i64_constant_fast_path() {
     // A value that fits in i64 should still work correctly
     let source = "main: 42\n";
-    let ast = parse_from_str(source);
-    let ty_env = TyEnv::from_file_ast(&ast);
-
-    let (mlir_text, symptoms) = generate_mlir(&ast, source, "test.gin", &ty_env);
-    let mlir_text = mlir_text.expect("codegen should succeed");
+    let (mlir_text, symptoms) = codegen_to_mlir_text(source, "test.gin");
 
     if !symptoms.is_empty() {
         for s in &symptoms {

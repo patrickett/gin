@@ -1,12 +1,13 @@
 //! Compile query - compiles parsed AST to MLIR bytecode.
 
 use crate::{
-    codegen::generate_mlir,
+    codegen::build_module_with_context,
     database::{CompiledModule, File, input_database::Db},
     diagnostic::{Symptom, SymptomSource, type_ as type_symptom},
     parse::{parse, resolve_imports},
     typeck::{FlowAnalysis, TyEnv, flow_analyzer::FlowAnalyzer},
 };
+use melior::Context;
 
 use salsa::Accumulator;
 
@@ -73,7 +74,18 @@ pub fn compile<'db>(db: &'db dyn Db, file: File) -> CompiledModule<'db> {
     let source = file.contents(db);
     let filename = file.path(db).to_string_lossy().into_owned();
     let ty_env = shared_ty_env(db, file);
-    let (mlir_text, codegen_symptoms) = generate_mlir(&ast, source, &filename, &ty_env);
+
+    // Create MLIR context and register dialects
+    let context = Context::new();
+    melior::dialect::DialectHandle::llvm().register_dialect(&context);
+    context.get_or_load_dialect("arith");
+    context.get_or_load_dialect("func");
+    context.get_or_load_dialect("scf");
+    context.get_or_load_dialect("llvm");
+
+    let (module, codegen_symptoms) =
+        build_module_with_context(&context, &ast, source, &filename, &ty_env);
+    let mlir_text = module.map(|m| m.as_operation().to_string());
 
     // Accumulate all codegen symptoms
     for e in codegen_symptoms {
