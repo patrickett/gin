@@ -1,8 +1,6 @@
 mod capabilities;
 mod diagnostics;
 mod state;
-mod util;
-
 use capabilities::{
     build_completions, build_signature_help, complete_flask_json, dot_completions,
     find_all_references, find_definition_range, is_flask_json_file, should_handle_file,
@@ -16,7 +14,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
-use util::{
+use ginc::{
     get_char_at_position, get_number_at_position, get_word_at_position, is_in_comment,
     position_to_byte_offset,
 };
@@ -349,7 +347,7 @@ impl LanguageServer for Backend {
             let snapshot = self.snapshot();
             let ast = snapshot.parse(state.file);
 
-            if let Some(word) = get_word_at_position(&state.source, position) {
+            if let Some(word) = get_word_at_position(&state.source, position.line, position.character) {
                 let range = find_definition_range(&state.source, &ast, &word);
                 if range != Range::default() {
                     return Ok(Some(GotoDefinitionResponse::Scalar(Location {
@@ -368,7 +366,7 @@ impl LanguageServer for Backend {
         let position = params.text_document_position.position;
 
         if let Some(state) = self.documents.get(&uri.to_string()) {
-            if let Some(word) = get_word_at_position(&state.source, position) {
+            if let Some(word) = get_word_at_position(&state.source, position.line, position.character) {
                 let snapshot = self.snapshot();
                 let ast = snapshot.parse(state.file);
                 let locations = find_all_references(&state.source, &ast, &word, &uri);
@@ -426,7 +424,7 @@ impl LanguageServer for Backend {
             }
 
             // Check for dot completions (after typing `.`)
-            if let Some(byte_pos) = position_to_byte_offset(&state.source, position) {
+            if let Some(byte_pos) = position_to_byte_offset(&state.source, position.line, position.character) {
                 let snapshot = self.snapshot();
                 if let Some(ty) = snapshot.dot_type_at(state.file, byte_pos) {
                     let items = dot_completions(ty);
@@ -462,15 +460,15 @@ impl LanguageServer for Backend {
         let position = params.text_document_position_params.position;
 
         if let Some(state) = self.documents.get(&uri.to_string()) {
-            if is_in_comment(&state.source, position) {
+            if is_in_comment(&state.source, position.line, position.character) {
                 return Ok(None);
             }
 
-            if let Some('(' | ')' | '[' | ']') = get_char_at_position(&state.source, position) {
+            if let Some('(' | ')' | '[' | ']') = get_char_at_position(&state.source, position.line, position.character) {
                 return Ok(None);
             }
 
-            if let Some(num) = get_number_at_position(&state.source, position) {
+            if let Some(num) = get_number_at_position(&state.source, position.line, position.character) {
                 return Ok(Some(Hover {
                     contents: HoverContents::Markup(MarkupContent {
                         kind: MarkupKind::Markdown,
@@ -481,7 +479,7 @@ impl LanguageServer for Backend {
             }
 
             let snapshot = self.snapshot();
-            if let Some(byte_pos) = position_to_byte_offset(&state.source, position) {
+            if let Some(byte_pos) = position_to_byte_offset(&state.source, position.line, position.character) {
                 if let Some(value) = snapshot.hover_at(state.file, byte_pos) {
                     return Ok(Some(Hover {
                         contents: HoverContents::Markup(MarkupContent {

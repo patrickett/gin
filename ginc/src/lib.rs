@@ -1,5 +1,6 @@
 mod args;
 pub mod ast;
+pub mod source;
 pub mod codegen;
 pub mod compilation;
 pub mod database;
@@ -22,6 +23,11 @@ pub use database::{
     input_database::{Db, InputDatabase},
 };
 pub use diagnostic::{Category, Symptom, SymptomSource};
+pub use lexer::is_comment_at;
+pub use source::{
+    get_char_at_position, get_number_at_position, get_word_at_position, is_identifier_char,
+    is_in_comment, position_to_byte_offset,
+};
 
 use crate::compilation::{compile::compile_entry, native};
 use crossbeam_channel::unbounded;

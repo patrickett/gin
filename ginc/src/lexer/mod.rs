@@ -127,6 +127,20 @@ impl<'src> GinLexer<'src> {
     }
 }
 
+/// Returns true if `byte_pos` falls inside a comment token in `source`.
+///
+/// More accurate than scanning for `--` in source text, which would false-positive
+/// on `--` inside string literals.
+pub fn is_comment_at(source: &str, byte_pos: usize) -> bool {
+    let mut lexer = GinLexer::new(source);
+    while let Some((tok, span)) = lexer.next_raw() {
+        if matches!(tok, Token::Comment(_)) && span.start <= byte_pos && byte_pos <= span.end {
+            return true;
+        }
+    }
+    false
+}
+
 impl<'src> Iterator for GinLexer<'src> {
     type Item = (Token<'src>, SimpleSpan);
 

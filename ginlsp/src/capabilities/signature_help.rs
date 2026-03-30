@@ -1,4 +1,3 @@
-use crate::util::position_to_byte_offset;
 use ginc::FileAst;
 use tower_lsp::lsp_types::{
     Documentation, MarkupContent, MarkupKind, ParameterInformation, ParameterLabel, SignatureHelp,
@@ -10,7 +9,7 @@ pub fn build_signature_help(
     ast: &FileAst,
     position: tower_lsp::lsp_types::Position,
 ) -> Option<SignatureHelp> {
-    let byte_pos = position_to_byte_offset(source, position)?;
+    let byte_pos = ginc::position_to_byte_offset(source, position.line, position.character)?;
     let fn_name = ginc::fn_call_at(ast, byte_pos)?;
     let info = ginc::signature_for_fn(ast, &fn_name)?;
 

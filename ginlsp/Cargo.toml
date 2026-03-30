@@ -10,7 +10,6 @@ tower-lsp = "0.20"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "io-std"] }
-ropey = "1.5"
 dashmap = { workspace = true }
 ginc = { workspace = true }
 flask = { workspace = true }
