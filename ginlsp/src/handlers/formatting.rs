@@ -17,14 +17,25 @@ impl Backend {
             }
 
             let full_range = Range {
-                start: Position { line: 0, character: 0 },
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
                 end: Position {
                     line: state.source.lines().count() as u32,
-                    character: state.source.lines().last().map(|l| l.len() as u32).unwrap_or(0),
+                    character: state
+                        .source
+                        .lines()
+                        .last()
+                        .map(|l| l.len() as u32)
+                        .unwrap_or(0),
                 },
             };
 
-            Ok(Some(vec![TextEdit { range: full_range, new_text: formatted }]))
+            Ok(Some(vec![TextEdit {
+                range: full_range,
+                new_text: formatted,
+            }]))
         } else {
             Ok(None)
         }

@@ -137,6 +137,72 @@ pub fn native_from_mlir(
     Ok(())
 }
 
+/// Compile a pre-built MLIR `Module` to a native object file.
+///
+/// This is the preferred codegen path when you already have a `Module` in hand.
+/// It reuses the caller's context instead of creating a second one.
+///
+/// **Note:** Due to an LLVM 21 limitation where `OperationBuilder` cannot set
+/// `operandSegmentSizes` for `llvm.call`, the module is briefly serialized to
+/// text so `fix_llvm_call_segments` can patch it, then re-parsed into the same
+/// context. This round-trip will be eliminated once the upstream API is fixed.
+///
+/// Pipeline: serialize → fix `llvm.call` segments → re-parse → optimize (Release)
+/// → lower to LLVM dialect → `mlir-translate` → LLVM IR → `cc -c` → object file.
+pub fn native_from_module(
+    context: &Context,
+    module: &Module,
+    obj_path: &Path,
+    profile: Profile,
+) -> Result<(), CodegenSymptom> {
+    let mlir_text = module.as_operation().to_string();
+    let fixed_text = fix_llvm_call_segments(&mlir_text);
+
+    let mut fixed_module =
+        Module::parse(context, &fixed_text).ok_or_else(|| CodegenSymptom::Internal {
+            message: "Failed to re-parse MLIR after fixing llvm.call segments".into(),
+            span: SimpleSpan::new((), 0..0),
+        })?;
+
+    optimize_mlir(context, &mut fixed_module, profile)?;
+    lower_to_llvm(context, &mut fixed_module)?;
+
+    let lowered_mlir = fixed_module.as_operation().to_string();
+    let llvm_ir = mlir_to_llvm_ir(&lowered_mlir)?;
+    compile_llvm_ir_to_object(&llvm_ir, obj_path, profile)?;
+
+    Ok(())
+}
+
+/// Build an MLIR module from the AST and return the MLIR text.
+///
+/// Used for `--emit mlir` and other cases where only the textual IR is needed.
+pub fn build_module_text(
+    ast: &FileAst,
+    source: &str,
+    filename: &str,
+    ty_env: &TyEnv,
+) -> Result<String, CodegenSymptom> {
+    let context = create_native_context();
+
+    let (source_module, symptoms) =
+        build_module_with_context(&context, ast, source, filename, ty_env);
+    let source_module = match source_module {
+        Some(m) => m,
+        None => {
+            return Err(symptoms
+                .into_iter()
+                .next()
+                .unwrap_or(CodegenSymptom::Internal {
+                    message: "Codegen failed with no specific symptom".into(),
+                    span: SimpleSpan::new((), 0..0),
+                }));
+        }
+    };
+
+    Ok(source_module.as_operation().to_string())
+}
+
 /// Build an MLIR module from the AST, lower to LLVM, and compile to an object file.
 pub fn compile_to_object(
     ast: &FileAst,
@@ -163,10 +229,8 @@ pub fn compile_to_object(
                 }));
         }
     };
-    let mlir_text = source_module.as_operation().to_string();
-    drop(source_module);
 
-    native_from_mlir(&mlir_text, obj_path, profile)
+    native_from_module(&context, &source_module, obj_path, profile)
 }
 
 /// Translate LLVM-dialect MLIR text to LLVM IR using `mlir-translate`.

@@ -1,184 +1,88 @@
-//! Compile query - compiles parsed AST to MLIR bytecode.
+//! Analysis pipeline — single entry point for parsing, type checking, and flow analysis.
 
 use crate::ast::FileAst;
-use crate::{
-    codegen::build_module_with_context,
-    database::{CompiledModule, File, input_database::Db},
-    diagnostic::{Symptom, SymptomSource, type_ as type_symptom},
-    parse::{parse, resolve_imports},
-    typeck::{FlowAnalysis, TyEnv, flow_analyzer::FlowAnalyzer},
-};
-use melior::Context;
-
+use crate::database::{File, input_database::Db};
+use crate::diagnostic::type_ as type_symptom;
+use crate::parse::parse;
+use crate::parse::resolve_imports;
+use crate::typeck::{TyEnv, flow_analyzer::FlowAnalyzer};
 use salsa::Accumulator;
 
-/// Get the shared type environment for a file's package.
+/// Build a shared type environment for a file and all its transitive imports.
 ///
-/// This function collects all files in the package (entry + imports),
-/// parses them, and creates a shared type environment that includes
-/// all types from all files. This allows types defined in one file
-/// to be used in another file within the same package.
-///
-/// Note: This is not a Salsa tracked function because TyEnv doesn't
-/// implement Hash (due to containing HashMaps). Instead, this function
-/// is called directly when needed.
-pub fn shared_ty_env(db: &dyn Db, file: File) -> TyEnv {
+/// This is a lightweight helper for callers (e.g. LSP hover) that need a `TyEnv`
+/// without running the full analysis pipeline.
+pub fn ty_env_for_file(db: &dyn Db, file: File) -> TyEnv {
     let imported_files = resolve_imports(db, file);
-
-    // Collect all files (this file + imports)
     let mut all_files: Vec<File> = vec![file];
     all_files.extend(imported_files);
-
-    // Parse all files and collect AST references
-    let all_asts: Vec<crate::ast::FileAst> = all_files.iter().map(|f| parse(db, *f)).collect();
-
-    // Create shared type environment from all files
+    let all_asts: Vec<FileAst> = all_files.iter().map(|&f| parse(db, f)).collect();
     TyEnv::from_multiple_file_asts(&all_asts)
 }
 
-/// Flow analysis result for a file - tracks type narrowing through control flow.
+/// Analyze a single file within a package context.
+///
+/// This per-file tracked function performs type checking and flow analysis
+/// for one file, using a shared type environment built from all files in the
+/// package. This ensures cross-file type visibility (single-compilation-unit
+/// semantics).
+///
+/// All diagnostics are accumulated via Salsa and can be retrieved with:
+/// ```ignore
+/// analyze_file::accumulated::<Symptom>(db, file, all_files)
+/// ```
+///
+/// # Arguments
+/// * `file`      — The file to analyze
+/// * `all_files` — All files in the package (for building the shared type environment)
 #[salsa::tracked]
-pub fn flow_analysis<'db>(db: &'db dyn Db, file: File) -> FlowAnalysis {
-    let ast = parse(db, file);
-    let ty_env = shared_ty_env(db, file);
+pub fn analyze_file<'db>(db: &'db dyn Db, file: File, all_files: Vec<File>) -> FileAst {
+    // Build shared TyEnv from all package files so cross-file types are visible.
+    // The per-file `parse` calls inside are cached by Salsa.
+    let all_asts: Vec<FileAst> = all_files.iter().map(|&f| parse(db, f)).collect();
+    let ty_env = TyEnv::from_multiple_file_asts(&all_asts);
 
+    // Parse this file (cached by Salsa)
+    let ast = parse(db, file);
+
+    // Type check — emits unknown type / binding / variable symptoms
+    ty_env.check_unknowns(&ast, db);
+
+    // Flow analysis — emits bounds-check symptoms
     let mut analyzer = FlowAnalyzer::new(&ty_env);
     analyzer.analyze_file(&ast);
-
     let result = analyzer.into_result();
 
     for check in &result.bounds_checks {
         type_symptom::index_out_of_bounds(check.span, check.index, check.size).accumulate(db);
     }
 
-    result
-}
-
-/// Compile a single file to MLIR bytecode.
-///
-/// This function performs flow analysis and code generation. Type checking
-/// is done separately via `type_check_entry` to enable sharing type information
-/// across all files in a package.
-///
-/// All diagnostics are emitted via `.accumulate(db)` and can be retrieved
-/// via `compile::accumulated::<Symptom>(&db, file)`.
-#[salsa::tracked]
-pub fn compile<'db>(db: &'db dyn Db, file: File) -> CompiledModule<'db> {
-    let ast = parse(db, file);
-
-    // Note: Type checking is done in type_check_entry with shared TyEnv
-
-    // Flow analysis - emits bounds check symptoms and returns result for hover
-    let _flow_result = flow_analysis(db, file);
-
-    // Code generation - emits codegen errors
-    let source = file.contents(db);
-    let filename = file.path(db).to_string_lossy().into_owned();
-    let ty_env = shared_ty_env(db, file);
-
-    // Create MLIR context and register dialects
-    let context = Context::new();
-    melior::dialect::DialectHandle::llvm().register_dialect(&context);
-    context.get_or_load_dialect("arith");
-    context.get_or_load_dialect("func");
-    context.get_or_load_dialect("scf");
-    context.get_or_load_dialect("llvm");
-
-    let (module, codegen_symptoms) =
-        build_module_with_context(&context, &ast, source, &filename, &ty_env);
-    let mlir_text = module.map(|m| m.as_operation().to_string());
-
-    // Accumulate all codegen symptoms
-    for e in codegen_symptoms {
-        Symptom {
-            source: SymptomSource::CodeGen(e.clone()),
-            category: crate::diagnostic::Category::Flaw,
-            span: e.span(),
-        }
-        .accumulate(db);
-    }
-
-    match mlir_text {
-        Some(text) => {
-            let bytecode = text.into_bytes();
-            CompiledModule::new(db, bytecode)
-        }
-        None => CompiledModule::new(db, Vec::new()),
-    }
-}
-
-/// Type check an entry point and all its dependencies with a shared type environment.
-///
-/// This function collects all imported files, creates a shared type environment
-/// that includes all types from all files, and then type checks each file using
-/// that shared environment. This allows types defined in one file to be used
-/// in another file within the same package.
-#[salsa::tracked]
-pub fn type_check_entry<'db>(db: &'db dyn Db, entry: File) {
-    let imported_files = resolve_imports(db, entry);
-
-    // Collect all files (entry + imports)
-    let mut all_files: Vec<File> = vec![entry];
-    all_files.extend(imported_files);
-
-    // Create shared type environment
-    let ty_env = shared_ty_env(db, entry);
-
-    // Type check each file using the shared type environment
-    for file in &all_files {
-        let ast = parse(db, *file);
-        // Type check - emits unknown type/function/variable symptoms
-        ty_env.check_unknowns(&ast, db);
-    }
-}
-
-/// Compile an entry point and all its dependencies.
-///
-/// This is the main entry point for compilation. It:
-/// 1. Type checks all files with a shared type environment
-/// 2. Compiles all imported files (Salsa memoizes per-file results)
-/// 3. Compiles the entry point and returns its result
-#[salsa::tracked]
-pub fn compile_entry<'db>(db: &'db dyn Db, entry: File) -> CompiledModule<'db> {
-    // Type check all files with shared type environment
-    type_check_entry(db, entry);
-
-    let imported_files = resolve_imports(db, entry);
-
-    // Compile all imported files (Salsa memoizes per-file results)
-    for imported_file in imported_files {
-        compile(db, imported_file);
-    }
-
-    // Compile the entry point and return its result
-    compile(db, entry)
-}
-
-/// Analyze a single file within a library context.
-///
-/// Builds a shared type environment from all library files (so types from
-/// any file are visible), then type-checks and flow-analyzes the target file.
-/// This ensures library builds get the same diagnostic coverage as binary builds.
-///
-/// Returns the parsed AST for this file.
-///
-/// All diagnostics are accumulated and can be retrieved via
-/// `analyze_file_in_library::accumulated::<Symptom>(db, file, all_files)`.
-#[salsa::tracked]
-pub fn analyze_file_in_library<'db>(db: &'db dyn Db, file: File, all_files: Vec<File>) -> FileAst {
-    // Build merged TyEnv from all library files so cross-file types are visible
-    let mut merged = FileAst::default();
-    for &f in &all_files {
-        merged.merge_from(parse(db, f));
-    }
-    let ty_env = TyEnv::from_file_ast(&merged);
-
-    // Parse and type check this file
-    let ast = parse(db, file);
-    ty_env.check_unknowns(&ast, db);
-
-    // Flow analysis (bounds checks, narrowing)
-    let _ = flow_analysis(db, file);
-
     ast
+}
+
+/// Analyze a package of Gin source files.
+///
+/// This is the single entry point for the analysis phase of the compilation
+/// pipeline. It delegates to [`analyze_file`] for each file, giving each call
+/// the full file list so that a shared type environment is used throughout.
+///
+/// Returns the parsed ASTs for downstream codegen.
+///
+/// # Usage
+///
+/// - **Binary compilation**: pass the entry file + all resolved imports
+/// - **Library compilation**: pass all `.gin` files in the library directory
+/// - **LSP diagnostics**: call [`analyze_file`] directly for single-file queries
+///
+/// **Note:** This is a regular (non-tracked) function. It doesn't need to be
+/// tracked by Salsa because it just orchestrates calls to the tracked
+/// [`analyze_file`] function, which handles its own caching and diagnostic
+/// accumulation per file.
+pub fn analyze_package(db: &dyn Db, files: Vec<File>) -> Vec<FileAst> {
+    let all_files = files.clone();
+
+    files
+        .iter()
+        .map(|&file| analyze_file(db, file, all_files.clone()))
+        .collect()
 }

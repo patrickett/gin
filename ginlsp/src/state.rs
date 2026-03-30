@@ -1,8 +1,7 @@
 use crossbeam_channel::unbounded;
 use ginc::{
-    compilation::compile::{compile, type_check_entry},
-    parse::parse::parse,
-    Db, File, FileAst, Symptom,
+    compilation::compile::analyze_file, database::input_database::InputDatabase,
+    parse::parse::parse, Db, File, FileAst, Symptom,
 };
 use salsa::Setter;
 
@@ -17,7 +16,7 @@ pub struct JsonDocumentState {
 
 #[derive(Clone)]
 pub struct GinSnapshot {
-    pub db: ginc::InputDatabase,
+    pub db: InputDatabase,
 }
 
 impl GinSnapshot {
@@ -26,20 +25,13 @@ impl GinSnapshot {
     }
 
     pub fn diagnostics(&self, file: File) -> Vec<&Symptom> {
-        // Type check first — emits unknown type/binding/variable symptoms.
-        // This must run before compile so that type-level diagnostics
-        // (e.g. "undeclared type `Bool`") appear before body-level errors
-        // (e.g. "Unknown tag 'True'").
-        type_check_entry(&self.db, file);
+        // Analyze the file with a single-file package context.
+        // This runs type checking and flow analysis, accumulating all symptoms.
+        let all_files = vec![file];
+        let _ = analyze_file(&self.db, file, all_files.clone());
 
-        // Trigger compilation — runs parse, flow analysis, and codegen.
-        let _ = compile(&self.db, file);
-
-        // Collect all accumulated symptoms from both type checking and compilation.
-        let mut symptoms: Vec<&Symptom> = type_check_entry::accumulated::<Symptom>(&self.db, file);
-        symptoms.extend(compile::accumulated::<Symptom>(&self.db, file));
-
-        symptoms
+        // Collect accumulated symptoms.
+        analyze_file::accumulated::<Symptom>(&self.db, file, all_files)
     }
 
     pub fn hover_at(&self, file: File, byte_pos: usize) -> Option<String> {
@@ -52,14 +44,14 @@ impl GinSnapshot {
 }
 
 pub struct GinHost {
-    pub db: ginc::InputDatabase,
+    pub db: InputDatabase,
 }
 
 impl GinHost {
     pub fn new() -> Self {
         let (tx, _rx) = unbounded();
         Self {
-            db: ginc::InputDatabase::new(tx),
+            db: InputDatabase::new(tx),
         }
     }
 

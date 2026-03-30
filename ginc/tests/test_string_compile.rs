@@ -1,138 +1,108 @@
-use crossbeam_channel::unbounded;
-use ginc::compilation::compile::compile;
-use ginc::database::{File, input_database::InputDatabase};
-use ginc::diagnostic::Symptom;
-use ginc::parse::parse::parse;
-use std::path::PathBuf;
+use ginc::codegen::build_module_with_context;
+use ginc::diagnostic::codegen::CodegenSymptom;
+use ginc::parse::parse_from_str;
+use ginc::typeck::TyEnv;
+use melior::Context;
+
+/// Helper to generate MLIR text from a source string.
+fn codegen_to_mlir_text(source: &str, filename: &str) -> (String, Vec<CodegenSymptom>) {
+    let ast = parse_from_str(source);
+    let ty_env = TyEnv::from_file_ast(&ast);
+
+    let context = Context::new();
+    melior::dialect::DialectHandle::llvm().register_dialect(&context);
+    context.get_or_load_dialect("arith");
+    context.get_or_load_dialect("func");
+    context.get_or_load_dialect("scf");
+    context.get_or_load_dialect("llvm");
+
+    let (module, symptoms) = build_module_with_context(&context, &ast, source, filename, &ty_env);
+    let mlir_text = module
+        .expect("codegen should succeed")
+        .as_operation()
+        .to_string();
+    (mlir_text, symptoms)
+}
 
 #[test]
 fn test_parse_string_literal() {
     let src = "hello_text: 'hello'\n";
-
-    let (tx, _rx) = unbounded();
-    let db = InputDatabase::new(tx);
-    let file = File::new(&db, PathBuf::from("test.gin"), src.to_string());
-
-    // Just parse, don't compile
-    let _ast = parse(&db, file);
+    let ast = parse_from_str(src);
+    assert!(
+        ast.defs()
+            .contains_key(&ginc::intern::IStr::new("hello_text".to_string()))
+    );
 }
 
 #[test]
 fn test_compile_number_literal() {
-    let src = "hello_text: 42\n";
-
-    let (tx, _rx) = unbounded();
-    let db = InputDatabase::new(tx);
-    let file = File::new(&db, PathBuf::from("test.gin"), src.to_string());
-
-    // This should compile successfully
-    let _compiled = compile(&db, file);
+    let (mlir_text, symptoms) = codegen_to_mlir_text("hello_text: 42\n", "test.gin");
+    assert!(
+        symptoms.is_empty(),
+        "expected no codegen symptoms: {symptoms:?}"
+    );
+    assert!(!mlir_text.is_empty(), "should produce MLIR output");
 }
 
 #[test]
 fn test_compile_empty_function() {
-    let src = "hello_text: 42\n";
-
-    let (tx, _rx) = unbounded();
-    let db = InputDatabase::new(tx);
-    let file = File::new(&db, PathBuf::from("test.gin"), src.to_string());
-
-    // This should compile successfully
-    let _compiled = compile(&db, file);
-
-    // Collect diagnostics only, don't print
-    let diagnostics = compile::accumulated::<Symptom>(&db, file);
-    println!("Diagnostics count: {}", diagnostics.len());
+    let (mlir_text, symptoms) = codegen_to_mlir_text("hello_text: 42\n", "test.gin");
+    assert!(
+        symptoms.is_empty(),
+        "expected no codegen symptoms: {symptoms:?}"
+    );
+    assert!(!mlir_text.is_empty());
 }
 
 #[test]
 fn test_compile_string_literal() {
-    let src = "hello_text: 'hello'\n";
-
-    let (tx, _rx) = unbounded();
-    let db = InputDatabase::new(tx);
-    let file = File::new(&db, PathBuf::from("test.gin"), src.to_string());
-
-    let compiled = compile(&db, file);
-
-    let diagnostics = compile::accumulated::<Symptom>(&db, file);
-    assert_eq!(diagnostics.len(), 0, "expected no diagnostics");
-
-    let mlir = String::from_utf8_lossy(compiled.bytecode(&db));
+    let (mlir_text, symptoms) = codegen_to_mlir_text("hello_text: 'hello'\n", "test.gin");
     assert!(
-        mlir.contains("llvm.mlir.global"),
-        "should contain global: {mlir}"
+        symptoms.is_empty(),
+        "expected no codegen symptoms: {symptoms:?}"
+    );
+
+    assert!(
+        mlir_text.contains("llvm.mlir.global"),
+        "should contain global: {mlir_text}"
     );
     assert!(
-        mlir.contains("llvm.mlir.addressof"),
-        "should contain addressof: {mlir}"
+        mlir_text.contains("llvm.mlir.addressof"),
+        "should contain addressof: {mlir_text}"
     );
     assert!(
-        mlir.contains("llvm.insertvalue"),
-        "should contain insertvalue: {mlir}"
+        mlir_text.contains("llvm.insertvalue"),
+        "should contain insertvalue: {mlir_text}"
     );
     assert!(
-        mlir.contains("llvm.struct"),
-        "should contain struct type: {mlir}"
+        mlir_text.contains("llvm.struct"),
+        "should contain struct type: {mlir_text}"
     );
 }
 
 #[test]
 fn test_compile_string_literal_with_print() {
-    let src = "hello_text: 'hello'\n";
+    let (mlir_text, symptoms) = codegen_to_mlir_text("hello_text: 'hello'\n", "test.gin");
 
-    let (tx, _rx) = unbounded();
-    let db = InputDatabase::new(tx);
-    let file = File::new(&db, PathBuf::from("test.gin"), src.to_string());
-
-    // This should compile successfully
-    let _compiled = compile(&db, file);
-
-    // Collect and print diagnostics (this is where segfault might occur)
-    let diagnostics = compile::accumulated::<Symptom>(&db, file);
-
-    // Print each diagnostic
-    for diagnostic in &diagnostics {
-        diagnostic.print(src, "test.gin");
+    // Print any diagnostics for debugging
+    for symptom in &symptoms {
+        eprintln!("codegen symptom: {symptom:?}");
     }
+
+    assert!(!mlir_text.is_empty());
 }
 
 #[test]
 fn test_compile_unterminated_string() {
+    // Unterminated strings produce lex errors during parsing.
+    // We just verify parse_from_str doesn't panic and produces an AST
+    // (possibly default/empty).
     let src = "hello_text: 'hello\n";
-
-    let (tx, _rx) = unbounded();
-    let db = InputDatabase::new(tx);
-    let file = File::new(&db, PathBuf::from("test.gin"), src.to_string());
-
-    // This should parse (error is accumulated as diagnostic)
-    let _compiled = compile(&db, file);
-
-    // Collect and print diagnostics
-    let diagnostics = compile::accumulated::<Symptom>(&db, file);
-
-    // Print each diagnostic - this is where segfault might occur
-    for diagnostic in &diagnostics {
-        diagnostic.print(src, "test.gin");
-    }
+    let _ast = parse_from_str(src);
 }
 
 #[test]
 fn test_compile_lone_quote() {
     let src = "y: '\n";
-
-    let (tx, _rx) = unbounded();
-    let db = InputDatabase::new(tx);
-    let file = File::new(&db, PathBuf::from("test.gin"), src.to_string());
-
-    // This should parse (error is accumulated as diagnostic)
-    let _compiled = compile(&db, file);
-
-    // Collect and print diagnostics
-    let diagnostics = compile::accumulated::<Symptom>(&db, file);
-
-    // Print each diagnostic
-    for diagnostic in &diagnostics {
-        diagnostic.print(src, "test.gin");
-    }
+    let _ast = parse_from_str(src);
 }

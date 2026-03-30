@@ -4,7 +4,7 @@ use crate::ast::{
     Bind, BindValue, Declare, DeclareValue, Expr, FileAst, ForInLoop, FormatPart, IfCondition,
     Literal, LoopEnum, ParameterKind, Spanned, Tag, Variant, WhenArm, WhileLoop,
 };
-use crate::compilation::shared_ty_env;
+use crate::compilation::compile::ty_env_for_file;
 use crate::database::File;
 use crate::database::input_database::Db;
 use crate::intern::IStr;
@@ -199,7 +199,7 @@ pub fn dot_type_at(db: &dyn Db, file: File, byte_pos: usize) -> Option<crate::ty
     }
     let ast = parse(db, file);
     let name = name_before_dot(&ast, dot_pos)?;
-    let ty_env = shared_ty_env(db, file);
+    let ty_env = ty_env_for_file(db, file);
     ty_env.resolve_dot_type(&ast, name)
 }
 
@@ -306,7 +306,7 @@ pub fn hover_at(db: &dyn Db, file: File, byte_pos: usize) -> Option<String> {
     let path = file.path(db);
     let module = module_name_from_path(&path);
     let ast = crate::parse::parse::parse(db, file);
-    let ty_env = crate::compilation::compile::shared_ty_env(db, file);
+    let ty_env = ty_env_for_file(db, file);
     let ctx = HoverContext {
         module: &module,
         ast: &ast,
@@ -450,16 +450,12 @@ fn module_name_from_path(path: &std::path::Path) -> String {
         .to_string()
 }
 
-
 /// Return the byte range of `name` at its definition site, using the parsed AST.
 ///
 /// For defs, uses the `name_span` recorded during parsing.
 /// For tags, uses the `name_span` recorded during parsing.
 /// Method defs are matched by their unqualified name (e.g. `"foo"` matches `"Point.foo"`).
-pub fn find_definition_span(
-    ast: &FileAst,
-    name: &str,
-) -> Option<std::ops::Range<usize>> {
+pub fn find_definition_span(ast: &FileAst, name: &str) -> Option<std::ops::Range<usize>> {
     let key = IStr::new(name.to_string());
     if let Some(decl) = ast.tags().get(&key) {
         return Some(decl.name_span.start..decl.name_span.end);
@@ -496,7 +492,12 @@ fn collect_refs_expr(expr: &Expr, name: &str, out: &mut Vec<std::ops::Range<usiz
                     let s = call.path.span.start;
                     out.push(s..s + name.len());
                 }
-            } else if call.path.segments.last().is_some_and(|seg| seg.as_str() == name) {
+            } else if call
+                .path
+                .segments
+                .last()
+                .is_some_and(|seg| seg.as_str() == name)
+            {
                 let e = call.path.span.end;
                 out.push(e - name.len()..e);
             }
@@ -581,7 +582,9 @@ fn collect_refs_expr(expr: &Expr, name: &str, out: &mut Vec<std::ops::Range<usiz
             collect_refs_expr(buf, name, out);
             collect_refs_expr(index, name, out);
         }
-        Expr::BufSet { buf, index, value, .. } => {
+        Expr::BufSet {
+            buf, index, value, ..
+        } => {
             collect_refs_expr(buf, name, out);
             collect_refs_expr(index, name, out);
             collect_refs_expr(value, name, out);
