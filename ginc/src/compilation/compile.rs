@@ -1,5 +1,6 @@
 //! Compile query - compiles parsed AST to MLIR bytecode.
 
+use crate::ast::FileAst;
 use crate::{
     codegen::build_module_with_context,
     database::{CompiledModule, File, input_database::Db},
@@ -151,4 +152,33 @@ pub fn compile_entry<'db>(db: &'db dyn Db, entry: File) -> CompiledModule<'db> {
 
     // Compile the entry point and return its result
     compile(db, entry)
+}
+
+/// Analyze a single file within a library context.
+///
+/// Builds a shared type environment from all library files (so types from
+/// any file are visible), then type-checks and flow-analyzes the target file.
+/// This ensures library builds get the same diagnostic coverage as binary builds.
+///
+/// Returns the parsed AST for this file.
+///
+/// All diagnostics are accumulated and can be retrieved via
+/// `analyze_file_in_library::accumulated::<Symptom>(db, file, all_files)`.
+#[salsa::tracked]
+pub fn analyze_file_in_library<'db>(db: &'db dyn Db, file: File, all_files: Vec<File>) -> FileAst {
+    // Build merged TyEnv from all library files so cross-file types are visible
+    let mut merged = FileAst::default();
+    for &f in &all_files {
+        merged.merge_from(parse(db, f));
+    }
+    let ty_env = TyEnv::from_file_ast(&merged);
+
+    // Parse and type check this file
+    let ast = parse(db, file);
+    ty_env.check_unknowns(&ast, db);
+
+    // Flow analysis (bounds checks, narrowing)
+    let _ = flow_analysis(db, file);
+
+    ast
 }

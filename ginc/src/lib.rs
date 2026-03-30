@@ -1,6 +1,5 @@
 mod args;
 pub mod ast;
-pub mod source;
 pub mod codegen;
 pub mod compilation;
 pub mod database;
@@ -8,14 +7,15 @@ pub mod diagnostic;
 pub mod intern;
 pub mod lexer;
 pub mod parse;
+pub mod source;
 pub mod typeck;
 
 use crate::typeck::TyEnv;
 pub use args::*;
 pub use ast::{DefMap, FileAst, Symbol, SymbolKind, SymbolTable, TagMap};
 pub use compilation::completions::{
-    completions_for_ast, fn_call_at, format_params, signature_for_fn, CompletionCandidate,
-    CompletionKind, SignatureInfo,
+    CompletionCandidate, CompletionKind, SignatureInfo, completions_for_ast, fn_call_at,
+    format_params, signature_for_fn,
 };
 pub use compilation::hover::{find_definition_span, find_references};
 pub use database::{
@@ -48,187 +48,72 @@ pub mod prelude {
 pub struct GinCompiler;
 
 impl GinCompiler {
+    /// Compile a Gin project.
+    ///
+    /// If the input path is a single `.gin` file, it is treated as a binary
+    /// entry point: imports are resolved transitively and the result is linked
+    /// into an executable (or object file / MLIR text, depending on `--emit`).
+    ///
+    /// If the input path is a directory, all `.gin` files within it are treated
+    /// as a single library unit: they are parsed, type-checked, and
+    /// flow-analyzed together with a shared type environment, then compiled
+    /// into one object file.
     pub fn compile(args: &'_ mut Args) {
         let path = args.input.to_owned();
+        let is_library = path.is_dir();
 
-        // For library builds (directory input), use a simpler compilation path
-        if path.is_dir() {
-            compile_library(args, &path);
+        // ── Phase 1: Collect file paths ───────────────────────────────
+        let file_paths = if is_library {
+            collect_gin_files_recursive(&path)
+        } else {
+            vec![path.clone()]
+        };
+
+        if file_paths.is_empty() {
+            eprintln!("No .gin files found in {}", path.display());
             return;
         }
 
-        // Regular build: use Salsa database for incremental compilation
+        // ── Phase 2: Create database and load files ───────────────────
         let (tx, _rx) = unbounded();
         let db = InputDatabase::new(tx);
 
-        let entry = match db.input(path.clone()) {
-            Ok(file) => file,
-            Err(err) => {
-                eprintln!("Error: {}", err);
-                return;
-            }
+        let (db_files, filenames) = match load_files_into_db(&db, &file_paths) {
+            Some(result) => result,
+            None => return,
         };
 
-        // Read the source file for error reporting
-        let source = match std::fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(err) => {
-                eprintln!("Error reading file: {}", err);
-                return;
-            }
-        };
-
-        // Compile entry point and all its imports in parallel.
-        let compiled = compile_entry(&db, entry);
-
-        // Collect diagnostics from the full dependency graph.
-        let filename = path.to_string_lossy().to_string();
-        let diagnostics = compile_entry::accumulated::<Symptom>(&db, entry);
-        let has_flaws = diagnostics
-            .iter()
-            .any(|d| matches!(d.category, diagnostic::Category::Flaw));
-
-        for diagnostic in &diagnostics {
-            diagnostic.print(&source, &filename);
-        }
-
-        if has_flaws {
-            return;
-        }
-
-        let bytecode = compiled.bytecode(&db);
-        if bytecode.is_empty() {
-            eprintln!("Compilation failed or produced no output");
-            return;
-        }
-        let mlir_text = String::from_utf8_lossy(bytecode);
-
-        match args.emit {
-            Emit::Mlir => {
-                println!("\n```mlir\n{mlir_text}```\n");
-            }
-            Emit::Obj | Emit::Exe => {
-                let obj_path = if matches!(args.emit, Emit::Exe) {
-                    let exe_path = args
-                        .output
-                        .clone()
-                        .unwrap_or_else(|| path.with_extension(""));
-                    exe_path.with_extension("o")
-                } else {
-                    args.output
-                        .clone()
-                        .unwrap_or_else(|| path.with_extension("o"))
-                };
-
-                // Pipe the MLIR text already produced by the Salsa pipeline
-                // directly to native compilation instead of regenerating it.
-                if let Err(e) = native::native_from_mlir(&mlir_text, &obj_path, args.profile) {
-                    eprintln!("Codegen error: {e:?}");
-                    return;
-                }
-
-                if matches!(args.emit, Emit::Exe) {
-                    let exe_path = args
-                        .output
-                        .clone()
-                        .unwrap_or_else(|| path.with_extension(""));
-                    if let Err(e) =
-                        native::link_executable(&obj_path, &exe_path, args.target.as_deref())
-                    {
-                        eprintln!("Link error: {e:?}");
-                    }
-                    let _ = std::fs::remove_file(&obj_path);
-                }
-            }
+        // ── Phase 3: Dispatch to mode-specific pipeline ───────────────
+        if is_library {
+            compile_library_pipeline(&db, &db_files, &filenames, args, &path);
+        } else {
+            compile_binary_pipeline(&db, db_files, &filenames, args, &path);
         }
     }
 }
 
-/// Compile a library directory (all .gin files) to an object file.
-///
-/// Unlike the binary path which follows imports from a single entry point,
-/// library builds gather ALL `.gin` files in the directory, parse them through
-/// the Salsa pipeline for proper diagnostic gathering, and only proceed to
-/// codegen if there are no parse/lex errors.
-fn compile_library(args: &Args, path: &Path) {
-    // Collect all .gin file paths in the directory
-    let gin_files = collect_gin_files_recursive(path);
+// ── Shared helpers ──────────────────────────────────────────────────────────
 
-    if gin_files.is_empty() {
-        eprintln!("No .gin files found in {}", path.display());
-        return;
-    }
+/// Load file paths into the Salsa database, returning the handles and display names.
+fn load_files_into_db(db: &InputDatabase, paths: &[PathBuf]) -> Option<(Vec<File>, Vec<String>)> {
+    let mut files = Vec::with_capacity(paths.len());
+    let mut filenames = Vec::with_capacity(paths.len());
 
-    // Create Salsa database for proper diagnostic gathering
-    let (tx, _rx) = unbounded();
-    let db = InputDatabase::new(tx);
-
-    // Load all files into the database
-    let mut files: Vec<File> = Vec::new();
-    let mut filenames: Vec<String> = Vec::new();
-
-    for file_path in &gin_files {
-        let filename = file_path.to_string_lossy().into_owned();
-        match db.input(file_path.clone()) {
+    for path in paths {
+        let filename = path.to_string_lossy().into_owned();
+        match db.input(path.clone()) {
             Ok(file) => {
                 files.push(file);
                 filenames.push(filename);
             }
             Err(err) => {
-                eprintln!("Error loading {}: {}", file_path.display(), err);
-                return;
+                eprintln!("Error loading {}: {}", path.display(), err);
+                return None;
             }
         }
     }
 
-    // Parse each file through the Salsa pipeline (accumulates parse/lex diagnostics)
-    // and build the merged AST at the same time — Salsa caches the parse result so
-    // the second call per file below is a free cache hit.
-    use crate::parse::parse::parse as salsa_parse;
-    let mut ast = FileAst::default();
-    for &file in &files {
-        ast.merge_from(salsa_parse(&db, file));
-    }
-
-    // Collect and print parse diagnostics per-file with correct source context
-    let mut has_flaws = false;
-    for (i, &file) in files.iter().enumerate() {
-        let source = file.contents(&db);
-        let filename = &filenames[i];
-        let diagnostics = salsa_parse::accumulated::<Symptom>(&db, file);
-        for diagnostic in &diagnostics {
-            diagnostic.print(source, filename);
-            if matches!(diagnostic.category, Category::Flaw) {
-                has_flaws = true;
-            }
-        }
-    }
-
-    if has_flaws {
-        return;
-    }
-
-    // Determine output path
-    let obj_path = args.output.clone().unwrap_or_else(|| {
-        let pkg_name = path.file_name().unwrap_or_default().to_string_lossy();
-        path.join("target").join(format!("{}.o", pkg_name))
-    });
-
-    // Ensure target directory exists
-    if let Some(parent) = obj_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-
-    let dir_name = path.to_string_lossy().into_owned();
-    let ty_env = TyEnv::from_file_ast(&ast);
-    match native::compile_to_object(&ast, &obj_path, args.profile, "", &dir_name, &ty_env) {
-        Ok(()) => {
-            println!("Compiled library to {}", obj_path.display());
-        }
-        Err(e) => {
-            eprintln!("Codegen error: {e:?}");
-        }
-    }
+    Some((files, filenames))
 }
 
 /// Collect all .gin file paths in a directory recursively, skipping `target/`.
@@ -251,4 +136,174 @@ fn collect_gin_files_recursive(dir: &Path) -> Vec<PathBuf> {
     }
 
     files
+}
+
+// ── Library pipeline ────────────────────────────────────────────────────────
+
+/// Compile a library directory (all .gin files) to an object file.
+///
+/// Every file is parsed, type-checked, and flow-analyzed through the Salsa
+/// pipeline with a **shared type environment** built from the merged AST of
+/// all files. This means types defined in any file are visible to all other
+/// files — matching the semantics of a single-compilation-unit library.
+fn compile_library_pipeline(
+    db: &InputDatabase,
+    db_files: &[File],
+    filenames: &[String],
+    args: &Args,
+    path: &Path,
+) {
+    let all_files: Vec<File> = db_files.to_vec();
+
+    // Run full analysis (parse + type check + flow analysis) per file.
+    // Each call uses a merged TyEnv so cross-file types are visible.
+    for &file in db_files {
+        crate::compilation::compile::analyze_file_in_library(db, file, all_files.clone());
+    }
+
+    // Collect and print diagnostics per-file with correct source context.
+    let has_flaws = print_library_diagnostics(db, db_files, filenames, &all_files);
+    if has_flaws {
+        return;
+    }
+
+    // Build merged AST for codegen (parse results are cached by Salsa).
+    use crate::parse::parse::parse as salsa_parse;
+    let mut merged_ast = FileAst::default();
+    for &file in db_files {
+        merged_ast.merge_from(salsa_parse(db, file));
+    }
+
+    // Determine output path.
+    let obj_path = args.output.clone().unwrap_or_else(|| {
+        let pkg_name = path.file_name().unwrap_or_default().to_string_lossy();
+        path.join("target").join(format!("{}.o", pkg_name))
+    });
+
+    // Ensure target directory exists.
+    if let Some(parent) = obj_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    // Compile merged AST to object file.
+    let dir_name = path.to_string_lossy().into_owned();
+    let ty_env = TyEnv::from_file_ast(&merged_ast);
+    match native::compile_to_object(&merged_ast, &obj_path, args.profile, "", &dir_name, &ty_env) {
+        Ok(()) => println!("Compiled library to {}", obj_path.display()),
+        Err(e) => eprintln!("Codegen error: {e:?}"),
+    }
+}
+
+/// Print diagnostics for each library file with the correct source context.
+///
+/// Because `analyze_file_in_library` is a per-file tracked function, each
+/// invocation's accumulated symptoms naturally belong to that file.
+fn print_library_diagnostics(
+    db: &InputDatabase,
+    db_files: &[File],
+    filenames: &[String],
+    all_files: &[File],
+) -> bool {
+    let mut has_flaws = false;
+    let all_files_vec: Vec<File> = all_files.to_vec();
+
+    for (i, &file) in db_files.iter().enumerate() {
+        let source = file.contents(db);
+        let filename = &filenames[i];
+
+        let diagnostics = crate::compilation::compile::analyze_file_in_library::accumulated::<
+            Symptom,
+        >(db, file, all_files_vec.clone());
+
+        for diagnostic in &diagnostics {
+            diagnostic.print(source, filename);
+            if matches!(diagnostic.category, Category::Flaw) {
+                has_flaws = true;
+            }
+        }
+    }
+
+    has_flaws
+}
+
+// ── Binary pipeline ─────────────────────────────────────────────────────────
+
+/// Compile a single entry-point file and all its transitive imports.
+///
+/// Uses the Salsa-tracked `compile_entry` query which orchestrates type
+/// checking, flow analysis, and code generation for the full dependency
+/// graph.
+fn compile_binary_pipeline(
+    db: &InputDatabase,
+    db_files: Vec<File>,
+    filenames: &[String],
+    args: &mut Args,
+    path: &Path,
+) {
+    let entry = db_files[0];
+
+    // Compile entry point and all its imports through the Salsa pipeline.
+    let compiled = compile_entry(db, entry);
+
+    // Collect diagnostics from the full dependency graph.
+    let source = entry.contents(db).to_string();
+    let filename = filenames[0].clone();
+    let diagnostics = compile_entry::accumulated::<Symptom>(db, entry);
+    let has_flaws = diagnostics
+        .iter()
+        .any(|d| matches!(d.category, diagnostic::Category::Flaw));
+
+    for diagnostic in &diagnostics {
+        diagnostic.print(&source, &filename);
+    }
+
+    if has_flaws {
+        return;
+    }
+
+    // Retrieve MLIR output from the compiled module.
+    let bytecode = compiled.bytecode(db);
+    if bytecode.is_empty() {
+        eprintln!("Compilation failed or produced no output");
+        return;
+    }
+    let mlir_text = String::from_utf8_lossy(bytecode);
+
+    // Emit according to the requested output kind.
+    match args.emit {
+        Emit::Mlir => {
+            println!("\n```mlir\n{mlir_text}```\n");
+        }
+        Emit::Obj | Emit::Exe => {
+            let obj_path = if matches!(args.emit, Emit::Exe) {
+                let exe_path = args
+                    .output
+                    .clone()
+                    .unwrap_or_else(|| path.with_extension(""));
+                exe_path.with_extension("o")
+            } else {
+                args.output
+                    .clone()
+                    .unwrap_or_else(|| path.with_extension("o"))
+            };
+
+            if let Err(e) = native::native_from_mlir(&mlir_text, &obj_path, args.profile) {
+                eprintln!("Codegen error: {e:?}");
+                return;
+            }
+
+            if matches!(args.emit, Emit::Exe) {
+                let exe_path = args
+                    .output
+                    .clone()
+                    .unwrap_or_else(|| path.with_extension(""));
+                if let Err(e) =
+                    native::link_executable(&obj_path, &exe_path, args.target.as_deref())
+                {
+                    eprintln!("Link error: {e:?}");
+                }
+                let _ = std::fs::remove_file(&obj_path);
+            }
+        }
+    }
 }
