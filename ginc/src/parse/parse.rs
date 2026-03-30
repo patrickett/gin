@@ -10,7 +10,10 @@ use crate::diagnostic::{Category, Symptom, SymptomSource};
 use crate::lexer::{GinLexer, Token};
 use chumsky::error::Rich;
 use chumsky::span::SimpleSpan;
-use chumsky::{Parser, input::{Stream, Input}};
+use chumsky::{
+    Parser,
+    input::{Input, Stream},
+};
 use salsa::Accumulator;
 use std::path::Path;
 
@@ -37,8 +40,8 @@ pub fn parse_from_str(src: &str) -> FileAst {
         .last()
         .map(|(_, s)| SimpleSpan::from(s.end..s.end))
         .unwrap_or_else(|| SimpleSpan::from(src.len()..src.len()));
-    let token_stream = Stream::from_iter(tokens.iter().map(|(t, s)| (*t, *s)))
-        .map(eoi_span, |(t, s)| (t, s));
+    let token_stream =
+        Stream::from_iter(tokens.iter().map(|(t, s)| (*t, *s))).map(eoi_span, |(t, s)| (t, s));
     let parser = token_parser();
     let (maybe_ast, _) = parser.parse(token_stream).into_output_errors();
     maybe_ast.unwrap_or_default()
@@ -91,7 +94,6 @@ fn accumulate_diagnostics(db: &dyn Db, parsed: &ParseResult) {
     }
 }
 
-
 /// Format a chumsky Rich error into an owned string.
 fn format_rich_error(err: &Rich<'_, Token<'_>>) -> String {
     use chumsky::error::RichReason;
@@ -120,18 +122,15 @@ fn parse_ast_internal(db: &dyn Db, file: File) -> ParseResult {
     let src = file.contents(db);
 
     let mut lexer = GinLexer::new(src);
-    let tokens: Vec<_> = lexer
-        .by_ref()
-        .filter(|(t, _)| !matches!(t, Token::Comment(_)))
-        .collect();
-    let lex_errors = lexer.errors;
+    let tokens: Vec<_> = lexer.by_ref().collect();
+    let lex_errors = std::mem::take(&mut lexer.errors);
 
     let eoi_span = tokens
         .last()
         .map(|(_, s)| SimpleSpan::from(s.end..s.end))
         .unwrap_or_else(|| SimpleSpan::from(src.len()..src.len()));
-    let token_stream = Stream::from_iter(tokens.iter().map(|(t, s)| (*t, *s)))
-        .map(eoi_span, |(t, s)| (t, s));
+    let token_stream =
+        Stream::from_iter(tokens.iter().map(|(t, s)| (*t, *s))).map(eoi_span, |(t, s)| (t, s));
 
     let parser = token_parser();
     let result = parser.parse(token_stream);

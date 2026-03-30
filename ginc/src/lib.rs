@@ -18,9 +18,6 @@ pub use database::{
     input_database::{Db, InputDatabase},
 };
 pub use diagnostic::{Category, Symptom, SymptomSource};
-pub use lexer::semantic_tokens::{
-    RawSemanticToken, TOKEN_FUNCTION, TOKEN_METHOD, semantic_tokens_raw,
-};
 
 use crate::compilation::{compile::compile_entry, native};
 use crossbeam_channel::unbounded;

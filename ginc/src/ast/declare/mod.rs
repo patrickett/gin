@@ -110,7 +110,7 @@ where
     let tag_name = select! { Token::Tag(name) => IStr::new(name.to_string()) }
         .map_with(|name, e| (name, e.span()));
 
-    let lhs_has = tag_name.clone()
+    let lhs_has = tag_name
         .then(params.clone().or_not())
         .then_ignore(just(Token::Has))
         .then_ignore(just(Token::Newline).or_not()) // Consume optional newline after Has
@@ -221,7 +221,7 @@ where
 
     let decl_has = lhs_has
         .then(rhs_record)
-        .map(|((( name, name_span), params), value)| {
+        .map(|(((name, name_span), params), value)| {
             Declare::new(name, name_span, value).with_params(params)
         });
 

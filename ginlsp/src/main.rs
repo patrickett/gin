@@ -4,9 +4,9 @@ mod state;
 mod util;
 
 use capabilities::{
-    build_completions, build_semantic_tokens_from_ast, build_signature_help, complete_flask_json,
-    dot_completions, find_all_references, find_definition_range, is_flask_json_file,
-    should_handle_file, use_completions, LEGEND_TYPE,
+    build_completions, build_signature_help, complete_flask_json, dot_completions,
+    find_all_references, find_definition_range, is_flask_json_file, should_handle_file,
+    use_completions,
 };
 use dashmap::DashMap;
 use diagnostics::symptoms_to_diagnostics;
@@ -96,32 +96,7 @@ impl LanguageServer for Backend {
         // Static capabilities don't support document selectors for completion/hover/etc.
         // Dynamic registration via `client/registerCapability` allows per-capability filtering.
         // See: https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#client_registerCapability
-        let gin_file_doc_filter = DocumentFilter {
-            language: Some("gin".to_string()),
-            scheme: Some("file".to_string()),
-            pattern: None,
-        };
-
         let capabilities = ServerCapabilities {
-            semantic_tokens_provider: Some(
-                SemanticTokensServerCapabilities::SemanticTokensRegistrationOptions(
-                    SemanticTokensRegistrationOptions {
-                        text_document_registration_options: TextDocumentRegistrationOptions {
-                            document_selector: Some(vec![gin_file_doc_filter.clone()]),
-                        },
-                        semantic_tokens_options: SemanticTokensOptions {
-                            work_done_progress_options: WorkDoneProgressOptions::default(),
-                            legend: SemanticTokensLegend {
-                                token_types: LEGEND_TYPE.into(),
-                                token_modifiers: vec![],
-                            },
-                            range: Some(true),
-                            full: Some(SemanticTokensFullOptions::Bool(true)),
-                        },
-                        static_registration_options: StaticRegistrationOptions::default(),
-                    },
-                ),
-            ),
             text_document_sync: Some(TextDocumentSyncCapability::Options(
                 TextDocumentSyncOptions {
                     open_close: Some(true),
@@ -319,7 +294,6 @@ impl LanguageServer for Backend {
                         file,
                     },
                 );
-                let _ = self.client.semantic_tokens_refresh().await;
                 self.publish_diagnostics_for(uri_for_diag, file, &text)
                     .await;
             }
@@ -359,24 +333,6 @@ impl LanguageServer for Backend {
         Ok(())
     }
 
-    async fn semantic_tokens_full(
-        &self,
-        params: SemanticTokensParams,
-    ) -> Result<Option<SemanticTokensResult>> {
-        let uri = params.text_document.uri.to_string();
-
-        if let Some(state) = self.documents.get(&uri) {
-            let snapshot = self.snapshot();
-            let ast = snapshot.parse(state.file);
-            let semantic_tokens = build_semantic_tokens_from_ast(&state.source, &ast);
-            return Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
-                result_id: None,
-                data: semantic_tokens,
-            })));
-        }
-
-        Ok(None)
-    }
 
     async fn goto_definition(
         &self,

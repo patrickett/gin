@@ -274,10 +274,10 @@ impl TyEnv {
     ///
     /// Returns `None` for non-union types and unresolvable names.
     pub fn resolve_dot_type(&self, ast: &FileAst, name: IStr) -> Option<Ty> {
-        if let Some(ty) = self.lookup_tag(name) {
-            if matches!(ty, Ty::Union { .. }) {
-                return Some(ty.clone());
-            }
+        if let Some(ty) = self.lookup_tag(name)
+            && matches!(ty, Ty::Union { .. })
+        {
+            return Some(ty.clone());
         }
         let type_name = binding_type_annotation(ast, name)?;
         self.lookup_tag(type_name).cloned()

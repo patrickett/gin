@@ -5,14 +5,12 @@
 // we can assume lowercase word is id and first letter upper is tag
 
 mod format_string;
-mod semantic_token_type;
 mod token;
 
 use crate::diagnostic::lex::LexSymptom;
 use chumsky::span::SimpleSpan;
 use format_string::*;
 use logos::{Lexer, Logos};
-pub use semantic_token_type::*;
 use std::collections::VecDeque;
 pub use token::{handle_newline, LexContext, Token, MAX_INDENT_DEPTH};
 
