@@ -18,13 +18,12 @@ pub use database::{
     input_database::{Db, InputDatabase},
 };
 pub use diagnostic::{Category, Symptom, SymptomSource};
+pub use lexer::semantic_tokens::{
+    RawSemanticToken, TOKEN_FUNCTION, TOKEN_METHOD, semantic_tokens_raw,
+};
 
-use crate::ast::ImportSource;
 use crate::compilation::{compile::compile_entry, native};
-use crate::parse::parse::parse as salsa_parse;
-use crate::parse::parse_from_str;
 use crossbeam_channel::unbounded;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub const GIN_FILE_EXT: &str = "gin";
@@ -101,49 +100,37 @@ impl GinCompiler {
             Emit::Mlir => {
                 println!("\n```mlir\n{mlir_text}```\n");
             }
-            Emit::Obj => {
-                let obj_path = args
-                    .output
-                    .clone()
-                    .unwrap_or_else(|| path.with_extension("o"));
-                let ast = build_native_ast(&db, entry, &args.dependencies);
-                let ty_env = TyEnv::from_file_ast(&ast);
-                if let Err(e) = native::compile_to_object(
-                    &ast,
-                    &obj_path,
-                    args.profile,
-                    &source,
-                    &filename,
-                    &ty_env,
-                ) {
+            Emit::Obj | Emit::Exe => {
+                let obj_path = if matches!(args.emit, Emit::Exe) {
+                    let exe_path = args
+                        .output
+                        .clone()
+                        .unwrap_or_else(|| path.with_extension(""));
+                    exe_path.with_extension("o")
+                } else {
+                    args.output
+                        .clone()
+                        .unwrap_or_else(|| path.with_extension("o"))
+                };
+
+                // Pipe the MLIR text already produced by the Salsa pipeline
+                // directly to native compilation instead of regenerating it.
+                if let Err(e) = native::native_from_mlir(&mlir_text, &obj_path, args.profile) {
                     eprintln!("Codegen error: {e:?}");
+                    return;
                 }
-            }
-            Emit::Exe => {
-                let exe_path = args
-                    .output
-                    .clone()
-                    .unwrap_or_else(|| path.with_extension(""));
-                let obj_path = exe_path.with_extension("o");
-                let ast = build_native_ast(&db, entry, &args.dependencies);
-                let ty_env = TyEnv::from_file_ast(&ast);
-                match native::compile_to_object(
-                    &ast,
-                    &obj_path,
-                    args.profile,
-                    &source,
-                    &filename,
-                    &ty_env,
-                ) {
-                    Err(e) => eprintln!("Codegen error: {e:?}"),
-                    Ok(()) => {
-                        if let Err(e) =
-                            native::link_executable(&obj_path, &exe_path, args.target.as_deref())
-                        {
-                            eprintln!("Link error: {e:?}");
-                        }
-                        let _ = std::fs::remove_file(&obj_path);
+
+                if matches!(args.emit, Emit::Exe) {
+                    let exe_path = args
+                        .output
+                        .clone()
+                        .unwrap_or_else(|| path.with_extension(""));
+                    if let Err(e) =
+                        native::link_executable(&obj_path, &exe_path, args.target.as_deref())
+                    {
+                        eprintln!("Link error: {e:?}");
                     }
+                    let _ = std::fs::remove_file(&obj_path);
                 }
             }
         }
@@ -257,68 +244,4 @@ fn collect_gin_files_recursive(dir: &Path) -> Vec<PathBuf> {
     }
 
     files
-}
-
-/// Recursively load all .gin files in a directory
-fn load_gin_dir_recursive(dir: &Path) -> FileAst {
-    let mut merged = FileAst::default();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return merged;
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            // Skip target directory (build artifacts)
-            if path.file_name().is_some_and(|n| n == "target") {
-                continue;
-            }
-            merged.merge_from(load_gin_dir_recursive(&path));
-        } else if path.extension().is_some_and(|ext| ext == "gin")
-            && let Ok(src) = std::fs::read_to_string(&path)
-        {
-            merged.merge_from(parse_from_str(&src));
-        }
-    }
-    merged
-}
-
-/// Build the AST for native compilation from the Salsa-cached entry parse result,
-/// then merge in any flask.json package dependencies.
-///
-/// This replaces the old `load_entry_with_deps` which re-read the entry file from
-/// disk and re-parsed it. Now the entry AST is a cache hit from the Salsa pipeline
-/// that already ran for diagnostics. Package deps (not tracked by Salsa) are still
-/// loaded from disk.
-fn build_native_ast(db: &dyn Db, entry: File, dependencies: &HashMap<String, PathBuf>) -> FileAst {
-    let mut ast = salsa_parse(db, entry);
-
-    if dependencies.is_empty() {
-        return ast;
-    }
-
-    let dep_names: Vec<String> = ast
-        .uses()
-        .iter()
-        .flat_map(|imp| &imp.0)
-        .filter_map(|mi| {
-            if let ImportSource::Package(path) = &mi.source {
-                let name = path.root.to_string();
-                if dependencies.contains_key(&name) {
-                    return Some(name);
-                }
-            }
-            None
-        })
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
-
-    for dep_name in dep_names {
-        if let Some(dep_dir) = dependencies.get(&dep_name) {
-            ast.merge_from(load_gin_dir_recursive(dep_dir));
-        }
-    }
-
-    ast
 }

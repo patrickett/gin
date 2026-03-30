@@ -195,8 +195,14 @@ fn extract_import_files(db: &dyn Db, ast: &FileAst, current_file: File) -> Vec<F
         for module_import in &import.0 {
             match &module_import.source {
                 ImportSource::Package(_path) => {
-                    // Package imports are resolved by flask.json at native build time
-                    // via load_entry_with_deps — not by the salsa pipeline.
+                    // TODO: Package imports from flask.json dependencies are currently
+                    // not resolved by the Salsa pipeline. Previously `build_native_ast`
+                    // merged these deps outside of Salsa by loading .gin files from the
+                    // dependency directories (via `load_gin_dir_recursive`). That path was
+                    // removed to eliminate double MLIR generation. To restore package dep
+                    // support, the dependency map (name → directory) needs to be accessible
+                    // here (e.g. stored in the database) so that `db.input()` can be called
+                    // for each .gin file in the dependency directory, same as `ImportSource::Local`.
                 }
                 ImportSource::Local(path, span) => {
                     let folder = current_dir.join(path);
