@@ -13,7 +13,8 @@ use crate::typeck::TyEnv;
 pub use args::*;
 pub use ast::{DefMap, FileAst, Symbol, SymbolKind, SymbolTable, TagMap};
 pub use compilation::completions::{
-    completions_for_ast, format_params, CompletionCandidate, CompletionKind,
+    completions_for_ast, fn_call_at, format_params, signature_for_fn, CompletionCandidate,
+    CompletionKind, SignatureInfo,
 };
 pub use compilation::hover::{find_definition_span, find_references};
 pub use database::{

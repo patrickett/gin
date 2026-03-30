@@ -1,4 +1,3 @@
-use crate::util::is_identifier_char;
 use ginc::{typeck::Ty, CompletionKind, FileAst};
 use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, Documentation, MarkupContent, MarkupKind, Position, Url,
@@ -178,25 +177,6 @@ pub fn build_completions(ast: &FileAst) -> Vec<CompletionItem> {
             }
         })
         .collect()
-}
-
-pub fn extract_fn_name_before_paren(line_text: &str) -> Option<String> {
-    if let Some(paren_pos) = line_text.rfind('(') {
-        let before_paren = line_text[..paren_pos].trim_end();
-        let fn_name: String = before_paren
-            .chars()
-            .rev()
-            .take_while(|c| is_identifier_char(*c))
-            .collect::<String>()
-            .chars()
-            .rev()
-            .collect();
-
-        if !fn_name.is_empty() {
-            return Some(fn_name);
-        }
-    }
-    None
 }
 
 /// Build completion items for a dot expression from a resolved union type.
