@@ -1,5 +1,5 @@
-use crate::util::{format_params, is_identifier_char};
-use ginc::{typeck::Ty, FileAst};
+use crate::util::is_identifier_char;
+use ginc::{typeck::Ty, CompletionKind, FileAst};
 use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, Documentation, MarkupContent, MarkupKind, Position, Url,
 };
@@ -154,64 +154,30 @@ fn complete_dependency_names(
 }
 
 pub fn build_completions(ast: &FileAst) -> Vec<CompletionItem> {
-    let mut items: Vec<CompletionItem> = Vec::new();
-
-    for (name, decl) in ast.tags() {
-        let detail = decl
-            .params()
-            .as_ref()
-            .map(|p| format!("tag {}{}", name, format_params(p)));
-        let documentation = decl.doc_comment().map(|dc| {
-            Documentation::MarkupContent(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value: dc.0.clone(),
-            })
-        });
-        items.push(CompletionItem {
-            label: name.to_string(),
-            kind: Some(CompletionItemKind::CLASS),
-            detail,
-            documentation,
-            ..Default::default()
-        });
-    }
-
-    for (name, bind) in ast.defs() {
-        let is_fn = bind.params().is_some();
-        let kind = if is_fn {
-            CompletionItemKind::FUNCTION
-        } else {
-            CompletionItemKind::VARIABLE
-        };
-        let detail = bind
-            .params()
-            .as_ref()
-            .map(|p| format!("{}{}", name.as_str(), format_params(p)));
-        let documentation = bind.doc_comment().map(|dc| {
-            Documentation::MarkupContent(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value: dc.0.clone(),
-            })
-        });
-        items.push(CompletionItem {
-            label: name.as_str().to_string(),
-            kind: Some(kind),
-            detail,
-            documentation,
-            ..Default::default()
-        });
-    }
-
-    let keywords = ["if", "else", "for", "in", "while", "return", "use", "tag"];
-    for kw in keywords {
-        items.push(CompletionItem {
-            label: kw.to_string(),
-            kind: Some(CompletionItemKind::KEYWORD),
-            ..Default::default()
-        });
-    }
-
-    items
+    ginc::completions_for_ast(ast)
+        .into_iter()
+        .map(|c| {
+            let kind = match c.kind {
+                CompletionKind::Function => CompletionItemKind::FUNCTION,
+                CompletionKind::Variable => CompletionItemKind::VARIABLE,
+                CompletionKind::Tag => CompletionItemKind::CLASS,
+                CompletionKind::Keyword => CompletionItemKind::KEYWORD,
+            };
+            let documentation = c.documentation.map(|doc| {
+                Documentation::MarkupContent(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: doc,
+                })
+            });
+            CompletionItem {
+                label: c.label,
+                kind: Some(kind),
+                detail: c.detail,
+                documentation,
+                ..Default::default()
+            }
+        })
+        .collect()
 }
 
 pub fn extract_fn_name_before_paren(line_text: &str) -> Option<String> {

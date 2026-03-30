@@ -12,6 +12,9 @@ pub mod typeck;
 use crate::typeck::TyEnv;
 pub use args::*;
 pub use ast::{DefMap, FileAst, Symbol, SymbolKind, SymbolTable, TagMap};
+pub use compilation::completions::{
+    completions_for_ast, format_params, CompletionCandidate, CompletionKind,
+};
 pub use compilation::hover::{find_definition_span, find_references};
 pub use database::{
     File,

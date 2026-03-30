@@ -1,4 +1,3 @@
-use ginc::ast::ParameterKind;
 use ropey::Rope;
 use tower_lsp::lsp_types::Position;
 
@@ -44,21 +43,6 @@ pub fn get_word_at_position(source: &str, position: Position) -> Option<String> 
 
 pub fn is_identifier_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
-}
-
-pub fn format_params(params: &ginc::ast::Parameters) -> String {
-    if params.is_empty() {
-        return String::new();
-    }
-    let parts: Vec<String> = params
-        .iter()
-        .map(|(name, kind)| match kind {
-            ParameterKind::Generic => name.to_string(),
-            ParameterKind::Tagged(tag) => format!("{name} {tag}"),
-            ParameterKind::Default(expr) => format!("{name}: {expr:?}"),
-        })
-        .collect();
-    format!("({})", parts.join(", "))
 }
 
 /// Extract a full numeric literal at `position`, including an optional leading `-`

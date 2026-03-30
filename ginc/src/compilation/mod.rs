@@ -2,6 +2,7 @@
 
 pub mod cache;
 pub mod compile;
+pub mod completions;
 pub mod hover;
 pub mod native;
 

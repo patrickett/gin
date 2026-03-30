@@ -1,5 +1,5 @@
 use crate::capabilities::completion::extract_fn_name_before_paren;
-use crate::util::format_params;
+use ginc::format_params;
 use ginc::FileAst;
 use ropey::Rope;
 use tower_lsp::lsp_types::{
