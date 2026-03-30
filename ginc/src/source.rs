@@ -28,12 +28,9 @@ pub fn is_identifier_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-pub fn get_word_at_position(source: &str, line: u32, character: u32) -> Option<String> {
-    let byte_idx = position_to_byte_offset(source, line, character)?;
-
-    let mut start = byte_idx;
-    let mut end = byte_idx;
-
+pub fn word_at_byte_offset(source: &str, byte_pos: usize) -> Option<String> {
+    let mut start = byte_pos;
+    let mut end = byte_pos;
     let bytes = source.as_bytes();
     while start > 0 && is_identifier_char(bytes[start - 1] as char) {
         start -= 1;
@@ -41,12 +38,15 @@ pub fn get_word_at_position(source: &str, line: u32, character: u32) -> Option<S
     while end < bytes.len() && is_identifier_char(bytes[end] as char) {
         end += 1;
     }
-
     if start == end {
         return None;
     }
-
     Some(source[start..end].to_string())
+}
+
+pub fn get_word_at_position(source: &str, line: u32, character: u32) -> Option<String> {
+    let byte_idx = position_to_byte_offset(source, line, character)?;
+    word_at_byte_offset(source, byte_idx)
 }
 
 /// Extract a full numeric literal at `(line, character)`, including an optional leading `-`

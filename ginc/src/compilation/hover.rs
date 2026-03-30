@@ -312,7 +312,7 @@ pub fn hover_at(db: &dyn Db, file: File, byte_pos: usize) -> Option<String> {
         ast: &ast,
         ty_env: &ty_env,
     };
-    let word = word_at_byte_pos(source, byte_pos)?;
+    let word = crate::word_at_byte_offset(source, byte_pos)?;
     hover_for_word(&word, source, byte_pos, &ctx)
 }
 
@@ -450,25 +450,6 @@ fn module_name_from_path(path: &std::path::Path) -> String {
         .to_string()
 }
 
-fn word_at_byte_pos(source: &str, byte_pos: usize) -> Option<String> {
-    let mut start = byte_pos;
-    let mut end = byte_pos;
-    let bytes = source.as_bytes();
-    while start > 0 && is_identifier_char(bytes[start - 1] as char) {
-        start -= 1;
-    }
-    while end < bytes.len() && is_identifier_char(bytes[end] as char) {
-        end += 1;
-    }
-    if start == end {
-        return None;
-    }
-    Some(source[start..end].to_string())
-}
-
-fn is_identifier_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
-}
 
 /// Return the byte range of `name` at its definition site, using the parsed AST.
 ///
