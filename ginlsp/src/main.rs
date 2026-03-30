@@ -369,7 +369,9 @@ impl LanguageServer for Backend {
 
         if let Some(state) = self.documents.get(&uri.to_string()) {
             if let Some(word) = get_word_at_position(&state.source, position) {
-                let locations = find_all_references(&state.source, &word, &uri);
+                let snapshot = self.snapshot();
+                let ast = snapshot.parse(state.file);
+                let locations = find_all_references(&state.source, &ast, &word, &uri);
                 if !locations.is_empty() {
                     return Ok(Some(locations));
                 }

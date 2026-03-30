@@ -22,6 +22,7 @@ pub use spanned::*;
 mod impl_block;
 pub use impl_block::*;
 
+pub use expr::FormatPart;
 use crate::prelude::*;
 use chumsky::{input::ValueInput, span::SimpleSpan};
 use std::collections::HashSet;

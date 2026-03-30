@@ -1,8 +1,8 @@
 //! Hover information generation for the LSP.
 
 use crate::ast::{
-    Bind, BindValue, Declare, DeclareValue, Expr, FileAst, ForInLoop, IfCondition, Literal,
-    LoopEnum, ParameterKind, Spanned, Tag, Variant, WhenArm, WhileLoop,
+    Bind, BindValue, Declare, DeclareValue, Expr, FileAst, ForInLoop, FormatPart, IfCondition,
+    Literal, LoopEnum, ParameterKind, Spanned, Tag, Variant, WhenArm, WhileLoop,
 };
 use crate::compilation::shared_ty_env;
 use crate::database::File;
@@ -490,6 +490,146 @@ pub fn find_definition_span(
             s == name || (s.contains('.') && s.split('.').next_back() == Some(name))
         })
         .map(|(_, bind)| bind.name_span.start..bind.name_span.end)
+}
+
+/// Find all use-sites of `name` in the AST, returning byte ranges suitable for LSP locations.
+///
+/// Matches plain function calls, method calls (by last segment), bare tag references,
+/// and tag constructor calls. Does not include the definition site itself.
+pub fn find_references(ast: &FileAst, name: &str) -> Vec<std::ops::Range<usize>> {
+    let mut out = Vec::new();
+    for (expr, _) in ast.top_level_exprs() {
+        collect_refs_expr(expr, name, &mut out);
+    }
+    for bind in ast.defs().values() {
+        collect_refs_bind_value(bind.value(), name, &mut out);
+    }
+    out
+}
+
+fn collect_refs_expr(expr: &Expr, name: &str, out: &mut Vec<std::ops::Range<usize>>) {
+    match expr {
+        Expr::FnCall(call) => {
+            if call.path.segments.is_empty() {
+                if call.path.root.as_str() == name {
+                    let s = call.path.span.start;
+                    out.push(s..s + name.len());
+                }
+            } else if call.path.segments.last().is_some_and(|seg| seg.as_str() == name) {
+                let e = call.path.span.end;
+                out.push(e - name.len()..e);
+            }
+            if let Some(args) = &call.args {
+                for arg in args {
+                    collect_refs_expr(arg, name, out);
+                }
+            }
+        }
+        Expr::AnonymousTag(n, span) => {
+            if n.as_str() == name {
+                out.push(span.start..span.end);
+            }
+        }
+        Expr::TagCall(tc) => {
+            if tc.name.as_str() == name {
+                out.push(tc.span.start..tc.span.start + name.len());
+            }
+            for arg in &tc.args {
+                collect_refs_expr(arg, name, out);
+            }
+        }
+        Expr::Binary(bin) => {
+            collect_refs_expr(&bin.lhs, name, out);
+            collect_refs_expr(&bin.rhs, name, out);
+        }
+        Expr::Bind(bind) => collect_refs_bind_value(bind.value(), name, out),
+        Expr::When(when_expr) => {
+            if let Some(subject) = &when_expr.subject {
+                collect_refs_expr(subject, name, out);
+            }
+            for arm in &when_expr.arms {
+                match arm {
+                    WhenArm::Cond { condition, body } => {
+                        collect_refs_expr(condition, name, out);
+                        collect_refs_expr(body, name, out);
+                    }
+                    WhenArm::Is { body, .. } | WhenArm::Else(body) => {
+                        collect_refs_expr(body, name, out);
+                    }
+                }
+            }
+        }
+        Expr::If(if_expr) => {
+            for e in &if_expr.body {
+                collect_refs_expr(e, name, out);
+            }
+        }
+        Expr::Loop(loop_expr) => match loop_expr {
+            LoopEnum::ForIn(for_loop) => {
+                collect_refs_expr(&for_loop.iter, name, out);
+                for e in &for_loop.exprs {
+                    collect_refs_expr(e, name, out);
+                }
+            }
+            LoopEnum::While(while_loop) => {
+                collect_refs_expr(&while_loop.cond, name, out);
+                for e in &while_loop.exprs {
+                    collect_refs_expr(e, name, out);
+                }
+            }
+        },
+        Expr::FormatString(fs) => {
+            for part in &fs.parts {
+                if let FormatPart::Expr(e) = part {
+                    collect_refs_expr(e, name, out);
+                }
+            }
+        }
+        Expr::Range(range) => {
+            collect_refs_expr(&range.start, name, out);
+            collect_refs_expr(&range.end, name, out);
+        }
+        Expr::TupleAlloc { init, .. } => collect_refs_expr(init, name, out),
+        Expr::TupleGet { base, .. } => collect_refs_expr(base, name, out),
+        Expr::TupleSet { base, value, .. } => {
+            collect_refs_expr(base, name, out);
+            collect_refs_expr(value, name, out);
+        }
+        Expr::Cast { expr, .. } => collect_refs_expr(expr, name, out),
+        Expr::BufGet { buf, index, .. } => {
+            collect_refs_expr(buf, name, out);
+            collect_refs_expr(index, name, out);
+        }
+        Expr::BufSet { buf, index, value, .. } => {
+            collect_refs_expr(buf, name, out);
+            collect_refs_expr(index, name, out);
+            collect_refs_expr(value, name, out);
+        }
+        Expr::TakePtr(inner) | Expr::TakeRef(inner) | Expr::Deref(inner) | Expr::Negate(inner) => {
+            collect_refs_expr(inner, name, out);
+        }
+        Expr::TupleLit(elems) => {
+            for e in elems {
+                collect_refs_expr(e, name, out);
+            }
+        }
+        Expr::Lit(_) | Expr::SelfRef(_) => {}
+    }
+}
+
+fn collect_refs_bind_value(value: &BindValue, name: &str, out: &mut Vec<std::ops::Range<usize>>) {
+    match value {
+        BindValue::Expr(e) => collect_refs_expr(e, name, out),
+        BindValue::Body { exprs, ret } => {
+            for e in exprs {
+                collect_refs_expr(e, name, out);
+            }
+            if let Some(r) = &ret.0 {
+                collect_refs_expr(r, name, out);
+            }
+        }
+        BindValue::Extern => {}
+    }
 }
 
 /// Pretty-print a declaration for hover. Uses multiline for unions with ≥3 variants or >80 chars.

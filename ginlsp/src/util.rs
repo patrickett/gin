@@ -129,13 +129,6 @@ pub fn get_char_at_position(source: &str, position: Position) -> Option<char> {
     source.as_bytes().get(byte_idx).map(|&b| b as char)
 }
 
-pub fn is_word_boundary(line: &str, pos: usize, len: usize) -> bool {
-    let bytes = line.as_bytes();
-    let before_ok = pos == 0 || !is_identifier_char(bytes[pos - 1] as char);
-    let after_ok = pos + len >= bytes.len() || !is_identifier_char(bytes[pos + len] as char);
-    before_ok && after_ok
-}
-
 pub fn position_to_byte_offset(source: &str, position: Position) -> Option<usize> {
     let rope = Rope::from_str(source);
     let char_idx = rope.try_line_to_char(position.line as usize).ok()?
