@@ -1,14 +1,33 @@
+use crate::Backend;
 use ginc::FileAst;
-use tower_lsp::lsp_types::{
-    Documentation, MarkupContent, MarkupKind, ParameterInformation, ParameterLabel, SignatureHelp,
-    SignatureInformation,
-};
+use tower_lsp::jsonrpc::Result;
+use tower_lsp::lsp_types::*;
 
-pub fn build_signature_help(
-    source: &str,
-    ast: &FileAst,
-    position: tower_lsp::lsp_types::Position,
-) -> Option<SignatureHelp> {
+impl Backend {
+    pub(crate) async fn handle_signature_help(
+        &self,
+        params: SignatureHelpParams,
+    ) -> Result<Option<SignatureHelp>> {
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .to_string();
+        let position = params.text_document_position_params.position;
+
+        if let Some(state) = self.documents.get(&uri) {
+            let snapshot = self.snapshot();
+            let ast = snapshot.parse(state.file);
+            if let Some(help) = build_signature_help(&state.source, &ast, position) {
+                return Ok(Some(help));
+            }
+        }
+
+        Ok(None)
+    }
+}
+
+fn build_signature_help(source: &str, ast: &FileAst, position: Position) -> Option<SignatureHelp> {
     let byte_pos = ginc::position_to_byte_offset(source, position.line, position.character)?;
     let fn_name = ginc::fn_call_at(ast, byte_pos)?;
     let info = ginc::signature_for_fn(ast, &fn_name)?;

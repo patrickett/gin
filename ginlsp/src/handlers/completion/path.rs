@@ -1,9 +1,6 @@
-use ginc::{typeck::Ty, CompletionKind, FileAst};
-use tower_lsp::lsp_types::{
-    CompletionItem, CompletionItemKind, Documentation, MarkupContent, MarkupKind, Position, Url,
-};
+use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Position, Url};
 
-pub fn use_completions(
+pub(crate) fn use_completions(
     source: &str,
     position: Position,
     file_uri: &Url,
@@ -94,11 +91,7 @@ fn complete_local_paths(file_uri: &Url, partial: &str) -> Vec<CompletionItem> {
         items.push(CompletionItem {
             label,
             kind: Some(kind),
-            detail: Some(if is_dir {
-                "directory".to_string()
-            } else {
-                "gin module".to_string()
-            }),
+            detail: Some(if is_dir { "directory".to_string() } else { "gin module".to_string() }),
             ..Default::default()
         });
     }
@@ -110,7 +103,6 @@ fn complete_dependency_names(
     file_uri: &Url,
     config: Option<&flask::FlaskConfigHandle>,
 ) -> Vec<CompletionItem> {
-    // Use cached config if available
     if let Some(handle) = config {
         let cfg = handle.read();
         return cfg
@@ -125,7 +117,6 @@ fn complete_dependency_names(
             .collect();
     }
 
-    // Fallback: load fresh (for when config wasn't cached yet)
     let file_path = match file_uri.to_file_path() {
         Ok(p) => p,
         Err(_) => return vec![],
@@ -148,63 +139,6 @@ fn complete_dependency_names(
             kind: Some(CompletionItemKind::MODULE),
             detail: Some("dependency".to_string()),
             ..Default::default()
-        })
-        .collect()
-}
-
-pub fn build_completions(ast: &FileAst) -> Vec<CompletionItem> {
-    ginc::completions_for_ast(ast)
-        .into_iter()
-        .map(|c| {
-            let kind = match c.kind {
-                CompletionKind::Function => CompletionItemKind::FUNCTION,
-                CompletionKind::Variable => CompletionItemKind::VARIABLE,
-                CompletionKind::Tag => CompletionItemKind::CLASS,
-                CompletionKind::Keyword => CompletionItemKind::KEYWORD,
-            };
-            let documentation = c.documentation.map(|doc| {
-                Documentation::MarkupContent(MarkupContent {
-                    kind: MarkupKind::Markdown,
-                    value: doc,
-                })
-            });
-            CompletionItem {
-                label: c.label,
-                kind: Some(kind),
-                detail: c.detail,
-                documentation,
-                ..Default::default()
-            }
-        })
-        .collect()
-}
-
-/// Build completion items for a dot expression from a resolved union type.
-///
-/// Called after the compiler resolves what type is before the dot.
-/// Returns an empty vec for non-union types.
-pub fn dot_completions(ty: Ty) -> Vec<CompletionItem> {
-    let Ty::Union { name, variants } = ty else {
-        return vec![];
-    };
-    let qualifier = name.as_str().to_string();
-    variants
-        .iter()
-        .map(|(variant_name, fields)| {
-            let label = if fields.is_empty() {
-                variant_name.to_string()
-            } else {
-                let names: Vec<String> = fields.iter().map(|(n, _)| n.to_string()).collect();
-                format!("{}({})", variant_name, names.join(", "))
-            };
-            let detail = format!("{}.{}", qualifier, label);
-            CompletionItem {
-                label: label.clone(),
-                insert_text: Some(label),
-                kind: Some(CompletionItemKind::ENUM_MEMBER),
-                detail: Some(detail),
-                ..Default::default()
-            }
         })
         .collect()
 }
