@@ -1,4 +1,4 @@
-use crate::ast::tag::Variant;
+use crate::tag::Variant;
 use crate::prelude::*;
 use chumsky::span::SimpleSpan;
 use std::hash::{Hash, Hasher};

@@ -1,5 +1,5 @@
-use crate::ast::ModPath;
-use crate::parse::delimited_list;
+use crate::ModPath;
+use crate::delimited_list;
 use crate::prelude::*;
 use chumsky::span::SimpleSpan;
 
@@ -27,7 +27,7 @@ where
 
     // Qualified form: Maybe.Some(x), Result.Ok(x) — uses Tag.Tag pattern
     let qualified =
-        crate::ast::tag_variant_path()
+        crate::tag_variant_path()
             .then(args.clone())
             .map_with(|(path, args), e| {
                 let variant_name = *path.segments.last().unwrap_or(&path.root);

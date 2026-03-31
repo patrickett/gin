@@ -1,4 +1,4 @@
-use crate::{parse::block, prelude::*};
+use crate::{block, prelude::*};
 use chumsky::span::SimpleSpan;
 use lexer::Token;
 

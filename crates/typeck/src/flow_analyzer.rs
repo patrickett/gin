@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::flow::{FlowAnalysis, FlowContext, ImpossibleCheck, IndexOutOfBounds, TypeConstraint};
 use crate::r#type::{LiteralValue, Ty, TyEnv};
-use ast::ast::Spanned;
-use ast::ast::{
+use ast::Spanned;
+use ast::{
     Bind, BindValue, Expr, FileAst, FnCall, IfCondition, IfExpr, Loop, Pattern, WhenArm, WhenExpr,
 };
 use chumsky::span::{SimpleSpan, Span};

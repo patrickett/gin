@@ -1,6 +1,6 @@
 use indexmap::IndexMap;
 
-use crate::parse::delimited_list;
+use crate::delimited_list;
 use crate::prelude::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

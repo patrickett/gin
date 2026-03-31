@@ -1,4 +1,4 @@
-use crate::parse::delimited_list;
+use crate::delimited_list;
 use crate::prelude::*;
 use chumsky::span::SimpleSpan;
 use lexer::Token;

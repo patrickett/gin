@@ -1,4 +1,4 @@
-use crate::parse::block;
+use crate::block;
 use crate::prelude::*;
 
 /// While loop: loop while a condition holds.

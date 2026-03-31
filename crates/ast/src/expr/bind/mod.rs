@@ -1,4 +1,4 @@
-use crate::{ast::tag::Tag, parse::block, prelude::*};
+use crate::{block, prelude::*, tag::Tag};
 use chumsky::span::SimpleSpan;
 use internment::Intern;
 use lexer::Token;
@@ -252,7 +252,7 @@ impl Bind {
 /// inside if/when/loop expressions.
 fn collect_all_return_types(
     exprs: &[Spanned<Expr>],
-    ret: &crate::ast::expr::r#return::Return,
+    ret: &crate::expr::r#return::Return,
     defs: Option<&crate::DefMap>,
     visited: &mut std::collections::HashSet<Intern<String>>,
 ) -> Vec<String> {
@@ -347,7 +347,7 @@ fn infer_expr_type(
 
 /// Recursively extract anonymous tag names from an expression.
 fn extract_anonymous_tags_from_expr(expr: &Expr, tags: &mut Vec<Intern<String>>) {
-    use crate::ast::expr::Loop;
+    use crate::expr::Loop;
 
     match expr {
         // TagCall returns a union type, not an anonymous tag - don't extract from it
@@ -384,7 +384,7 @@ fn extract_anonymous_tags_from_expr(expr: &Expr, tags: &mut Vec<Intern<String>>)
                 extract_anonymous_tags_from_expr(subject, tags);
             }
             for arm in &when_expr.arms {
-                use crate::ast::expr::when::WhenArm;
+                use crate::expr::when::WhenArm;
                 match arm {
                     WhenArm::Cond { condition, body } => {
                         extract_anonymous_tags_from_expr(condition, tags);
@@ -578,7 +578,7 @@ where
 
     type ReturnTypePart = (
         Option<Intern<std::string::String>>,
-        Option<crate::ast::Tag>,
+        Option<crate::Tag>,
         Option<(Intern<std::string::String>, Vec<Spanned<Expr>>)>,
         Option<ModPath>, // Qualified path for type annotation
     );
@@ -593,9 +593,9 @@ where
         select! { Token::Id(name) => Intern::<std::string::String>::new(name.to_string()) }
             .map(|n| -> ReturnTypePart { (Some(n), None, None, None) }),
         // Qualified type path with args: Maybe.Some(3), Bool.True
-        crate::ast::tag_variant_path()
+        crate::tag_variant_path()
             .then(
-                crate::parse::delimited_list(
+                crate::delimited_list(
                     Token::ParenOpen,
                     expr.clone(),
                     Token::Comma,
@@ -610,13 +610,13 @@ where
                         let variant_name = *path.segments.last().unwrap_or(&path.root);
                         (None, None, Some((variant_name, args)), Some(path))
                     }
-                    _ => (None, Some(crate::ast::Tag::Qualified(path)), None, None),
+                    _ => (None, Some(crate::Tag::Qualified(path)), None, None),
                 }
             })
             .boxed(),
         select! { Token::Tag(name) => Intern::<std::string::String>::new(name.to_string()) }
             .then(
-                crate::parse::delimited_list(
+                crate::delimited_list(
                     Token::ParenOpen,
                     expr.clone(),
                     Token::Comma,
@@ -627,12 +627,7 @@ where
             .map_with(|(name, args), e| -> ReturnTypePart {
                 match args {
                     Some(args) if !args.is_empty() => (None, None, Some((name, args)), None),
-                    _ => (
-                        None,
-                        Some(crate::ast::Tag::Nominal(name, e.span())),
-                        None,
-                        None,
-                    ),
+                    _ => (None, Some(crate::Tag::Nominal(name, e.span())), None, None),
                 }
             }),
     ))
@@ -652,8 +647,7 @@ where
         .then(return_type_part)
         .then(bind_op);
 
-    let extern_value =
-        just(Token::Extern).map(|_| (BindValue::Extern, None::<crate::ast::DocComment>));
+    let extern_value = just(Token::Extern).map(|_| (BindValue::Extern, None::<crate::DocComment>));
 
     let single_value = expr
         .clone()

@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use ast::ast::BinOp;
-use ast::ast::WhenArm;
-use ast::ast::{
+use ast::BinOp;
+use ast::WhenArm;
+use ast::{
     Bind, BindValue, DeclareValue, Expr, FileAst, FormatPart, IfCondition, Literal, Loop,
     ParameterKind, Tag,
 };

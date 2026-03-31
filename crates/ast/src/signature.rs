@@ -1,4 +1,4 @@
-use crate::{Declare, DeclareValue, FileAst, ParameterKind, Parameters, Tag, Variant, ast::Bind};
+use crate::{Bind, Declare, DeclareValue, FileAst, ParameterKind, Parameters, Tag, Variant};
 use internment::Intern;
 use lexer::GinLexer;
 use serde::{Deserialize, Serialize};

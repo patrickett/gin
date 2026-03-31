@@ -2,7 +2,7 @@ use crate::prelude::*;
 use chumsky::span::SimpleSpan;
 use lexer::Token;
 
-use crate::ast::expr::r#return::Return;
+use crate::expr::r#return::Return;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum IfCondition {
@@ -26,7 +26,7 @@ pub fn if_expr<'t, I>(
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
-    use crate::ast::expr::r#return::r#return;
+    use crate::expr::r#return::r#return;
     use Token::*;
 
     // Parse: If <expr> [is <tag>]
