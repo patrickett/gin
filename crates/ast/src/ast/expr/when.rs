@@ -1,5 +1,6 @@
 use crate::prelude::*;
 use chumsky::span::SimpleSpan;
+use lexer::Token;
 
 /// Exhaustive conditional expression.
 ///

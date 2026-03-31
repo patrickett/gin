@@ -3,6 +3,7 @@
 pub mod block;
 pub mod delimited_list;
 pub mod unescape;
+pub mod query;
 
 pub use block::*;
 pub use delimited_list::*;

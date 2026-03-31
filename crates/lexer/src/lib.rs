@@ -1,7 +1,5 @@
 //! The lexer is handled by [logos](https://github.com/maciejhirsz/logos)
 
-pub use internment::Intern;
-
 // TODO: replace logos lexer with handwritten for better performance
 // PERF: Handwritten lexer can be optimized for specific Gin syntax patterns
 // we can assume lowercase word is id and first letter upper is tag

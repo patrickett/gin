@@ -15,6 +15,7 @@ use ::ast::{
 };
 use crate::prelude::*;
 use diagnostic::codegen::CodegenSymptom;
+use internment::Intern;
 use typeck::{LiteralValue, Ty, TyEnv};
 use chumsky::span::SimpleSpan;
 

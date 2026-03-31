@@ -1,4 +1,5 @@
 use crate::{prelude::*, ty_to_mlir};
+use internment::Intern;
 use typeck::Ty;
 
 impl<'c> Lower<'c> for WhenExpr {

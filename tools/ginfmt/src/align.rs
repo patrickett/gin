@@ -1,4 +1,4 @@
-use ginc::lexer::{GinLexer, Token};
+use lexer::{GinLexer, Token};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DelimiterKind {

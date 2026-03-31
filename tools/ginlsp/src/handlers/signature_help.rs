@@ -1,5 +1,6 @@
 use crate::Backend;
-use ginc::FileAst;
+use lsp::{position_to_byte_offset, fn_call_at, signature_for_fn};
+use ast::FileAst;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 
@@ -28,9 +29,9 @@ impl Backend {
 }
 
 fn build_signature_help(source: &str, ast: &FileAst, position: Position) -> Option<SignatureHelp> {
-    let byte_pos = ginc::position_to_byte_offset(source, position.line, position.character)?;
-    let fn_name = ginc::fn_call_at(ast, byte_pos)?;
-    let info = ginc::signature_for_fn(ast, &fn_name)?;
+    let byte_pos = position_to_byte_offset(source, position.line, position.character)?;
+    let fn_name = fn_call_at(ast, byte_pos)?;
+    let info = signature_for_fn(ast, &fn_name)?;
 
     let param_infos = info
         .params

@@ -4,7 +4,8 @@ mod state;
 
 use dashmap::DashMap;
 use diagnostics::symptoms_to_diagnostics;
-use ginc::FileAst;
+use ast::FileAst;
+use database::File;
 use state::{DocumentState, GinHost, JsonDocumentState};
 use std::sync::{Arc, Mutex, RwLock};
 use tower_lsp::jsonrpc::Result;
@@ -57,7 +58,7 @@ impl Backend {
         None
     }
 
-    async fn publish_diagnostics_for(&self, uri: Url, file: ginc::File, source: &str) {
+    async fn publish_diagnostics_for(&self, uri: Url, file: File, source: &str) {
         let snapshot = self.snapshot();
         let ast = snapshot.parse(file);
         let symptoms = snapshot.diagnostics(file);
@@ -142,13 +143,13 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
-    use ginc::parse::parse_from_str;
-    use ginc::typeck::TyEnv;
+    use ast::parse_from_str;
+    use internment::Intern;
+    use typeck::TyEnv;
 
     #[test]
     fn dot_completion_union_variants() {
         use crate::handlers::completion::dot_completions;
-        use ginc::Intern;
 
         let source = "Maybe(x) is Some(x) or None";
         let ast = parse_from_str(source);

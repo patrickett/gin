@@ -9,6 +9,8 @@ diagnostic = { workspace = true }
 lexer = { workspace = true }
 typeck = { workspace = true }
 codegen = { workspace = true }
+lsp = { workspace = true }
+database = { workspace = true }
 ariadne = "0.5.1"
 chumsky = { version = "0.10.1", features = ["pratt", "extension"] }
 clap = { workspace = true }

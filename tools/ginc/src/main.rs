@@ -1,5 +1,6 @@
 use clap::Parser;
-use ginc::{Args, GinCompiler};
+use ginc::cli::Args;
+use ginc::compile::GinCompiler;
 
 fn main() {
     #[cfg(debug_assertions)]

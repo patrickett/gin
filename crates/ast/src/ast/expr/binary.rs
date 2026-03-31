@@ -1,5 +1,6 @@
 use crate::prelude::*;
 use chumsky::prelude::*;
+use lexer::Token;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Binary {

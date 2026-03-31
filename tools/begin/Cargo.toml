@@ -20,3 +20,9 @@ dirs = { workspace = true }
 tui-input = "0.14"
 crossbeam-channel = { workspace = true }
 dialoguer = "0.11"
+ast = { workspace = true }
+codegen = { workspace = true }
+typeck = { workspace = true }
+database = { workspace = true }
+diagnostic = { workspace = true }
+lexer = { workspace = true }

@@ -8,3 +8,13 @@ lexer = { workspace = true }
 chumsky = { workspace = true }
 indexmap = { workspace = true }
 internment = "0.8"
+sha2 = "0.10"
+serde = { workspace = true }
+semver = { workspace = true }
+database = { workspace = true }
+diagnostic = { workspace = true }
+salsa = { workspace = true }
+
+[dev-dependencies]
+ginc = { workspace = true }
+crossbeam-channel = { workspace = true }

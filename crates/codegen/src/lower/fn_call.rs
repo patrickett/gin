@@ -1,4 +1,5 @@
 use crate::{addressof_string_global, prelude::*, ty_to_mlir};
+use internment::Intern;
 use typeck::Ty;
 
 impl<'c> Lower<'c> for FnCall {

@@ -1,0 +1,10 @@
+[package]
+name = "database"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+salsa = { workspace = true }
+dashmap = { workspace = true }
+crossbeam-channel = { workspace = true }
+notify-debouncer-mini = "0.4.1"

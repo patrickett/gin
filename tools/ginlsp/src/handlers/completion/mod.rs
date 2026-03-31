@@ -2,8 +2,10 @@ pub(crate) mod json;
 mod path;
 
 use crate::Backend;
-use ginc::{CompletionKind, FileAst, Ty};
-use ginc::position_to_byte_offset;
+use ast::parse_file;
+use lsp::{CompletionKind, completions_for_ast, dot_type_at, position_to_byte_offset};
+use ast::FileAst;
+use typeck::{ty_env_for_file, Ty};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 
@@ -56,7 +58,9 @@ impl Backend {
                 position_to_byte_offset(&state.source, position.line, position.character)
             {
                 let snapshot = self.snapshot();
-                if let Some(ty) = snapshot.dot_type_at(state.file, byte_pos) {
+                let ast = parse_file(&snapshot.db, state.file);
+                let ty_env = ty_env_for_file(&snapshot.db, state.file);
+                if let Some(ty) = dot_type_at(&state.source, &ast, &ty_env, byte_pos) {
                     let items = dot_completions(ty);
                     if !items.is_empty() {
                         return Ok(Some(CompletionResponse::Array(items)));
@@ -79,7 +83,7 @@ impl Backend {
 }
 
 pub(crate) fn build_completions(ast: &FileAst) -> Vec<CompletionItem> {
-    ginc::completions_for_ast(ast)
+    completions_for_ast(ast)
         .into_iter()
         .map(|c| {
             let kind = match c.kind {

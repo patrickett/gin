@@ -1,6 +1,6 @@
 use crate::diagnostics::span_to_range;
 use crate::Backend;
-use ginc::get_word_at_position;
+use lsp::{get_word_at_position, find_definition_span};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 
@@ -19,7 +19,7 @@ impl Backend {
             if let Some(word) =
                 get_word_at_position(&state.source, position.line, position.character)
             {
-                let range = ginc::find_definition_span(&ast, &word)
+                let range = find_definition_span(&ast, &word)
                     .map(|span| span_to_range(span.start, span.end, &state.source))
                     .unwrap_or_default();
                 if range != Range::default() {

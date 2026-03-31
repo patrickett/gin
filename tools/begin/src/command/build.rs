@@ -1,5 +1,6 @@
 use flask::{DependencyKind, FlaskConfig};
-use ginc::{Args, Emit, GinCompiler};
+use ginc::cli::{Args, Emit};
+use ginc::compile::GinCompiler;
 use std::collections::HashMap;
 use std::path::PathBuf;
 

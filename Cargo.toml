@@ -7,6 +7,8 @@ members = [
     "crates/lexer",
     "crates/typeck",
     "crates/codegen",
+    "crates/lsp",
+    "crates/database",
     "tools/ginc",
     "tools/ginfmt",
     "tools/ginlsp",
@@ -25,6 +27,8 @@ diagnostic = { path = "crates/diagnostic" }
 lexer = { path = "crates/lexer" }
 typeck = { path = "crates/typeck" }
 codegen = { path = "crates/codegen" }
+lsp = { path = "crates/lsp" }
+database = { path = "crates/database" }
 ginfmt = { path = "tools/ginfmt" }
 dashmap = "6.1.0"
 indexmap = "2"

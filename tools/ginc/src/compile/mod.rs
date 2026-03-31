@@ -1,9 +1,9 @@
 //! Compilation orchestration — the main compiler pipeline.
 
-use crate::analysis::{analyze_file, analyze_package};
+use typeck::{analyze_file, analyze_package};
 use crate::cli::Args;
-use crate::database::{File, input_database::{Db, InputDatabase}};
-use crate::emit::native;
+use database::{File, input_database::{Db, InputDatabase}};
+use codegen::emit::native;
 use ast::FileAst;
 use crossbeam_channel::unbounded;
 use diagnostic::{Category, Symptom};
@@ -150,7 +150,7 @@ fn resolve_all_imports(db: &InputDatabase, entry: File) -> Vec<File> {
 
 /// Resolve imports from a single file.
 fn resolve_imports(db: &InputDatabase, entry: File) -> Vec<File> {
-    use crate::parse::query::resolve_imports;
+    use ast::resolve_imports;
     resolve_imports(db, entry)
 }
 
@@ -160,8 +160,6 @@ fn resolve_imports(db: &InputDatabase, entry: File) -> Vec<File> {
 ///
 /// Returns `true` if any fatal flaws were found.
 fn print_diagnostics(db: &InputDatabase, all_files: &[File]) -> bool {
-    use crate::parse::query::parse as salsa_parse;
-
     let mut has_flaws = false;
     let all_files_vec: Vec<File> = all_files.to_vec();
 
@@ -170,7 +168,7 @@ fn print_diagnostics(db: &InputDatabase, all_files: &[File]) -> bool {
         let filename = file.path(db).to_string_lossy().into_owned();
 
         // Parse symptoms (accumulated per-file by the parse query)
-        for diagnostic in salsa_parse::accumulated::<Symptom>(db, file) {
+        for diagnostic in ast::parse_file::accumulated::<Symptom>(db, file) {
             diagnostic.print(source, &filename);
             if matches!(diagnostic.category, Category::Flaw) {
                 has_flaws = true;
@@ -225,7 +223,8 @@ fn emit_native(merged_ast: &FileAst, ty_env: &TyEnv, args: &Args, path: &Path, i
 
     // Compile merged AST to object file
     let filename = path.to_string_lossy();
-    match native::compile_to_object(merged_ast, &obj_path, args.profile, "", &filename, ty_env) {
+    let profile = args.profile.into();
+    match native::compile_to_object(merged_ast, &obj_path, profile, "", &filename, ty_env) {
         Ok(()) => {}
         Err(e) => {
             eprintln!("Codegen error: {e:?}");

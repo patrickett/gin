@@ -12,3 +12,8 @@ chumsky = { workspace = true }
 melior = "0.26.3"
 mlir-sys = "210.0.1"
 internment = "0.8"
+
+[dev-dependencies]
+database = { workspace = true }
+ginc = { workspace = true }
+crossbeam-channel = { workspace = true }

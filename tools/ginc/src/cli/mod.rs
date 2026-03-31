@@ -1,4 +1,5 @@
 use clap::{Parser, ValueEnum};
+use codegen::emit::Profile as CodegenProfile;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::PathBuf;
@@ -15,6 +16,15 @@ impl Profile {
         match self {
             Self::Debug => "debug",
             Self::Release => "release",
+        }
+    }
+}
+
+impl From<Profile> for CodegenProfile {
+    fn from(profile: Profile) -> CodegenProfile {
+        match profile {
+            Profile::Debug => CodegenProfile::Debug,
+            Profile::Release => CodegenProfile::Release,
         }
     }
 }

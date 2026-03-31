@@ -2,9 +2,11 @@
 
 mod lower;
 mod mlir_ext;
+pub mod emit;
 
 pub use lower::*;
 pub use mlir_ext::*;
+pub use emit::*;
 
 /// Prelude for codegen implementations - includes MLIR types
 pub mod prelude {
@@ -15,8 +17,6 @@ pub mod prelude {
     };
     pub use ::ast::*;
     pub use chumsky::{input::ValueInput, prelude::*};
-    pub use internment::Intern;
-    pub use lexer::{MAX_INDENT_DEPTH, Token};
     pub use melior::{
         Context,
         dialect::{arith as arith_dialect, llvm::r#type, scf as scf_dialect},

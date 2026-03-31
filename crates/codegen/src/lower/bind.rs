@@ -1,4 +1,5 @@
 use crate::{lower_function, prelude::*, ty_to_mlir};
+use internment::Intern;
 
 impl<'c> Lower<'c> for Bind {
     fn lower(

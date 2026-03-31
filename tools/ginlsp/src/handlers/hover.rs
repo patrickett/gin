@@ -1,5 +1,6 @@
 use crate::Backend;
-use ginc::{get_char_at_position, get_number_at_position, is_in_comment, position_to_byte_offset};
+use ast::parse_file;
+use lsp::{get_char_at_position, get_number_at_position, hover_at, is_in_comment, position_to_byte_offset};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 
@@ -34,11 +35,12 @@ impl Backend {
                 }));
             }
 
-            let snapshot = self.snapshot();
             if let Some(byte_pos) =
                 position_to_byte_offset(&state.source, position.line, position.character)
             {
-                if let Some(value) = snapshot.hover_at(state.file, byte_pos) {
+                let snapshot = self.snapshot();
+                let ast = parse_file(&snapshot.db, state.file);
+                if let Some(value) = hover_at(&state.source, &ast, byte_pos) {
                     return Ok(Some(Hover {
                         contents: HoverContents::Markup(MarkupContent {
                             kind: MarkupKind::Markdown,

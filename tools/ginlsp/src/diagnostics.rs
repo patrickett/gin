@@ -1,4 +1,4 @@
-use ginc::{Category, Symptom};
+use diagnostic::{Category, Symptom};
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range};
 
 pub fn span_to_range(start: usize, end: usize, source: &str) -> Range {

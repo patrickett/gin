@@ -1,5 +1,6 @@
 use crate::{parse::block, prelude::*};
 use chumsky::span::SimpleSpan;
+use lexer::Token;
 
 /// For-in loop: iterate over a range or collection
 ///

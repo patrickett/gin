@@ -1,6 +1,6 @@
 use crate::diagnostics::span_to_range;
 use crate::Backend;
-use ginc::get_word_at_position;
+use lsp::{get_word_at_position, find_references};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 
@@ -18,7 +18,7 @@ impl Backend {
             {
                 let snapshot = self.snapshot();
                 let ast = snapshot.parse(state.file);
-                let locations: Vec<Location> = ginc::find_references(&ast, &word)
+                let locations: Vec<Location> = find_references(&ast, &word)
                     .into_iter()
                     .map(|span| Location {
                         uri: uri.clone(),

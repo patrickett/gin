@@ -1,9 +1,10 @@
+use ast::{parse_file, FileAst};
 use crossbeam_channel::unbounded;
-use ginc::{
-    analysis::analyze_file, database::input_database::InputDatabase,
-    lsp::hover, parse::query::parse, Db, File, FileAst, Symptom,
-};
+use database::input_database::InputDatabase;
+use database::{Db, File};
+use diagnostic::Symptom;
 use salsa::Setter;
+use typeck::analyze_file;
 
 pub struct DocumentState {
     pub source: String,
@@ -21,7 +22,7 @@ pub struct GinSnapshot {
 
 impl GinSnapshot {
     pub fn parse(&self, file: File) -> FileAst {
-        parse(&self.db, file)
+        parse_file(&self.db, file)
     }
 
     pub fn diagnostics(&self, file: File) -> Vec<&Symptom> {
@@ -32,14 +33,6 @@ impl GinSnapshot {
 
         // Collect accumulated symptoms.
         analyze_file::accumulated::<Symptom>(&self.db, file, all_files)
-    }
-
-    pub fn hover_at(&self, file: File, byte_pos: usize) -> Option<String> {
-        hover::hover_at(&self.db, file, byte_pos)
-    }
-
-    pub fn dot_type_at(&self, file: File, byte_pos: usize) -> Option<ginc::Ty> {
-        hover::dot_type_at(&self.db, file, byte_pos)
     }
 }
 
