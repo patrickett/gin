@@ -1,0 +1,1 @@
+../../../tree-sitter-gin/queries/outline.scm

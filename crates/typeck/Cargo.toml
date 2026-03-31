@@ -1,0 +1,14 @@
+[package]
+name = "typeck"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ast = { workspace = true }
+lexer = { workspace = true }
+diagnostic = { workspace = true }
+chumsky = { workspace = true }
+salsa = { workspace = true }
+dashmap = { workspace = true }
+indexmap = { workspace = true }
+internment = "0.8"

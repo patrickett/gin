@@ -1,10 +1,15 @@
 [workspace]
 members = [
-    "begin",
-    "lib/flask",
-    "ginc",
-    "ginfmt",
-    "ginlsp",
+    "tools/begin",
+    "crates/flask",
+    "crates/ast",
+    "crates/diagnostic",
+    "crates/lexer",
+    "crates/typeck",
+    "crates/codegen",
+    "tools/ginc",
+    "tools/ginfmt",
+    "tools/ginlsp",
 ]
 resolver = "3"
 
@@ -13,9 +18,14 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 clap = { version = "4.5.2", features = ["derive"] }
 lsp-types = "0.94.1"
-flask = { path = "lib/flask" }
-ginc = { path = "ginc" }
-ginfmt = { path = "ginfmt" }
+flask = { path = "crates/flask" }
+ginc = { path = "tools/ginc" }
+ast = { path = "crates/ast" }
+diagnostic = { path = "crates/diagnostic" }
+lexer = { path = "crates/lexer" }
+typeck = { path = "crates/typeck" }
+codegen = { path = "crates/codegen" }
+ginfmt = { path = "tools/ginfmt" }
 dashmap = "6.1.0"
 indexmap = "2"
 log = "0.4"

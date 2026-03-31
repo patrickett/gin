@@ -1,0 +1,14 @@
+[package]
+name = "codegen"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ast = { workspace = true }
+lexer = { workspace = true }
+diagnostic = { workspace = true }
+typeck = { workspace = true }
+chumsky = { workspace = true }
+melior = "0.26.3"
+mlir-sys = "210.0.1"
+internment = "0.8"

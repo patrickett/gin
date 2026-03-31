@@ -1,0 +1,10 @@
+[package]
+name = "ast"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+lexer = { workspace = true }
+chumsky = { workspace = true }
+indexmap = { workspace = true }
+internment = "0.8"

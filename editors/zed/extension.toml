@@ -1,0 +1,15 @@
+id = "gin"
+name = "Gin"
+version = "0.1.0"
+schema_version = 1
+authors = ["Patrick Trickett"]
+description = "Language support for the Gin programming language"
+repository = "https://github.com/patrickett/gin"
+
+[grammars.gin]
+repository = "file:///Users/pattrickett/Code/language/gin/editors/tree-sitter-gin"
+rev = "6bb462ccd65ca816496c8b6078313a4eb4ab362a"
+
+[language_servers.gin-language-server]
+name = "Gin Language Server"
+languages = ["Gin", "JSON"]

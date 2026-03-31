@@ -1,0 +1,10 @@
+[package]
+name = "lexer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+diagnostic = { workspace = true }
+chumsky = { workspace = true }
+logos = "0.15.1"
+internment = "0.8"
