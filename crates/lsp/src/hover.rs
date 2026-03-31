@@ -92,7 +92,7 @@ fn find_name_in_expr(
 /// For tags, uses the `name_span` recorded during parsing.
 /// Method defs are matched by their unqualified name (e.g. `"foo"` matches `"Point.foo"`).
 pub fn find_definition_span(ast: &ast::FileAst, name: &str) -> Option<std::ops::Range<usize>> {
-    let key = internment::Intern::<::std::string::String>::new(name.to_string());
+    let key = internment::Intern::<String>::new(name.to_string());
     if let Some(decl) = ast.tags().get(&key) {
         return Some(decl.name_span.start..decl.name_span.end);
     }

@@ -10,14 +10,14 @@ mod loop_while;
 mod tag_call;
 mod when;
 
+use crate::prelude::*;
 use ::ast::{
     Bind, BindValue, DeclareValue, Expr, FileAst, Spanned, SymbolTable as CompileTimeSymbolTable,
 };
-use crate::prelude::*;
+use chumsky::span::SimpleSpan;
 use diagnostic::codegen::CodegenSymptom;
 use internment::Intern;
 use typeck::{LiteralValue, Ty, TyEnv};
-use chumsky::span::SimpleSpan;
 
 /// Convert a resolved `Ty` to its MLIR `Type` representation.
 pub fn ty_to_mlir<'c>(ty: &Ty, ctx: &'c Context) -> Type<'c> {
@@ -151,7 +151,7 @@ fn compute_line_starts(source: &str) -> Vec<usize> {
 
 pub struct CodegenContext<'a, 'c> {
     pub mlir: &'c Context,
-    pub type_info: &'a HashMap<Intern::<::std::string::String>, TypeInfo>,
+    pub type_info: &'a HashMap<Intern<String>, TypeInfo>,
     pub symbol_table: &'a CompileTimeSymbolTable,
     pub ty_env: &'a TyEnv,
     pub string_literals: RefCell<Vec<String>>,
@@ -174,7 +174,7 @@ pub struct CodegenContext<'a, 'c> {
 impl<'a, 'c> CodegenContext<'a, 'c> {
     pub fn new(
         mlir: &'c Context,
-        type_info: &'a HashMap<Intern::<::std::string::String>, TypeInfo>,
+        type_info: &'a HashMap<Intern<String>, TypeInfo>,
         symbol_table: &'a CompileTimeSymbolTable,
         ty_env: &'a TyEnv,
         source: &str,
@@ -466,7 +466,7 @@ fn emit_tuple_lit_global<'c>(
     let n = elem_vals.len() as u32;
     let array_mlir_ty = r#type::array(elem_mlir_ty, n);
 
-    let locals: HashMap<Intern::<::std::string::String>, Ty> = HashMap::new();
+    let locals: HashMap<Intern<String>, Ty> = HashMap::new();
     if let Some(first_elem) = elems.first() {
         let elem_ty = ctx.ty_env.infer_expr(first_elem, &locals);
         ctx.global_const_elems
@@ -534,7 +534,7 @@ fn emit_tuple_alloc_global<'c>(
 ) -> Option<Operation<'c>> {
     let loc = context.unknown_loc();
 
-    let locals: HashMap<Intern::<::std::string::String>, Ty> = HashMap::new();
+    let locals: HashMap<Intern<String>, Ty> = HashMap::new();
     let elem_ty = ctx.ty_env.infer_expr(init, &locals);
     let elem_mlir_ty = ty_to_mlir(&elem_ty, context);
     let array_mlir_ty = r#type::array(elem_mlir_ty, size as u32);
@@ -585,7 +585,7 @@ fn emit_tuple_alloc_global<'c>(
     Some(global)
 }
 
-fn extract_type_info(ast: &FileAst) -> Option<HashMap<Intern::<::std::string::String>, TypeInfo>> {
+fn extract_type_info(ast: &FileAst) -> Option<HashMap<Intern<String>, TypeInfo>> {
     let mut type_info = HashMap::new();
 
     for (tag_name, documented) in &ast.tags {
@@ -720,11 +720,11 @@ impl<'c> Lower<'c> for Expr {
             }
             Expr::Cast { expr, ty } => {
                 let val = expr.lower(ctx, block, symtab)?;
-                let locals: HashMap<Intern::<::std::string::String>, Ty> = ctx
+                let locals: HashMap<Intern<String>, Ty> = ctx
                     .var_types
                     .borrow()
                     .iter()
-                    .map(|(k, v)| (Intern::<::std::string::String>::new(k.clone()), v.clone()))
+                    .map(|(k, v)| (Intern::<String>::new(k.clone()), v.clone()))
                     .collect();
                 let src_ty = ctx.ty_env.infer_expr(&expr.0, &locals);
                 let dst_ty = tag_name_to_ty(*ty);
@@ -735,11 +735,11 @@ impl<'c> Lower<'c> for Expr {
             }
             Expr::Deref(inner) => {
                 let ptr = inner.lower(ctx, block, symtab)?;
-                let locals: HashMap<Intern::<::std::string::String>, Ty> = ctx
+                let locals: HashMap<Intern<String>, Ty> = ctx
                     .var_types
                     .borrow()
                     .iter()
-                    .map(|(k, v)| (Intern::<::std::string::String>::new(k.clone()), v.clone()))
+                    .map(|(k, v)| (Intern::<String>::new(k.clone()), v.clone()))
                     .collect();
                 let pointee_ty = match ctx.ty_env.infer_expr(&inner.0, &locals) {
                     Ty::Ptr { inner } | Ty::Ref { inner } => *inner,
@@ -752,11 +752,11 @@ impl<'c> Lower<'c> for Expr {
             Expr::Negate(inner) => {
                 let val = inner.lower(ctx, block, symtab)?;
                 let loc = ctx.location();
-                let locals: HashMap<Intern::<::std::string::String>, Ty> = ctx
+                let locals: HashMap<Intern<String>, Ty> = ctx
                     .var_types
                     .borrow()
                     .iter()
-                    .map(|(k, v)| (Intern::<::std::string::String>::new(k.clone()), v.clone()))
+                    .map(|(k, v)| (Intern::<String>::new(k.clone()), v.clone()))
                     .collect();
                 let ty = ctx.ty_env.infer_expr(inner, &locals);
                 if matches!(ty, Ty::Float | Ty::Literal(LiteralValue::Float(_))) {
@@ -779,7 +779,7 @@ impl<'c> Lower<'c> for Expr {
 /// Lower a function definition to MLIR func.func operation.
 pub fn lower_function<'c>(
     ctx: &CodegenContext<'_, 'c>,
-    def_name: &Intern::<::std::string::String>,
+    def_name: &Intern<String>,
     bind: &Bind,
 ) -> Option<Operation<'c>> {
     let name = def_name.as_str();
@@ -787,11 +787,11 @@ pub fn lower_function<'c>(
 
     // Build owned param list, prepending `self` for methods.
     let param_info_ref = ctx.ty_env.param_types(bind);
-    let mut param_info: Vec<(Intern::<::std::string::String>, Ty)> =
+    let mut param_info: Vec<(Intern<String>, Ty)> =
         param_info_ref.into_iter().map(|(n, t)| (*n, t)).collect();
     if let Some(recv_tag) = bind.receiver_type() {
         let self_ty = ctx.ty_env.resolve_tag(recv_tag);
-        param_info.insert(0, (Intern::<::std::string::String>::new("self".to_string()), self_ty));
+        param_info.insert(0, (Intern::<String>::new("self".to_string()), self_ty));
     }
 
     let input_types: Vec<Type<'c>> = param_info
@@ -900,11 +900,11 @@ fn lower_take_ptr<'c>(
     }
     // Otherwise evaluate the inner expression and spill to a fresh alloca.
     let val = inner.0.lower(ctx, block, symtab)?;
-    let locals: HashMap<Intern::<::std::string::String>, Ty> = ctx
+    let locals: HashMap<Intern<String>, Ty> = ctx
         .var_types
         .borrow()
         .iter()
-        .map(|(k, v)| (Intern::<::std::string::String>::new(k.clone()), v.clone()))
+        .map(|(k, v)| (Intern::<String>::new(k.clone()), v.clone()))
         .collect();
     let elem_ty = ctx.ty_env.infer_expr(inner, &locals);
     let mlir_ty = ty_to_mlir(&elem_ty, ctx.mlir);
@@ -1020,11 +1020,11 @@ fn lower_tuple_get<'c>(
 
     // If the base is a struct value (not a pointer), use extractvalue.
     if base_val.r#type() != ctx.mlir.llvm_ptr() {
-        let locals: HashMap<Intern::<::std::string::String>, Ty> = ctx
+        let locals: HashMap<Intern<String>, Ty> = ctx
             .var_types
             .borrow()
             .iter()
-            .map(|(k, v)| (Intern::<::std::string::String>::new(k.clone()), v.clone()))
+            .map(|(k, v)| (Intern::<String>::new(k.clone()), v.clone()))
             .collect();
         let base_ty = ctx.ty_env.infer_expr(base, &locals);
         let field_ty = match base_ty {
@@ -1112,7 +1112,7 @@ fn lower_bind_value<'c>(
 }
 
 /// Map a capitalized type name to a `Ty` for use in cast lowering.
-fn tag_name_to_ty(name: Intern::<::std::string::String>) -> Ty {
+fn tag_name_to_ty(name: Intern<String>) -> Ty {
     match name.as_str() {
         "Byte" | "I8" => Ty::Int(8),
         "I16" => Ty::Int(16),

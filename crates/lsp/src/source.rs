@@ -2,6 +2,31 @@
 
 use lexer::is_comment_at;
 
+/// Convert a byte offset to (line, column) position.
+///
+/// Column is measured in UTF-8 bytes, not UTF-16 code units.
+pub fn byte_offset_to_position(byte: usize, source: &str) -> (u32, u32) {
+    let mut line = 0u32;
+    let mut col = 0u32;
+    let mut current_byte = 0usize;
+
+    for ch in source.chars() {
+        if current_byte >= byte {
+            break;
+        }
+
+        if ch == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += ch.len_utf8() as u32;
+        }
+        current_byte += ch.len_utf8();
+    }
+
+    (line, col)
+}
+
 pub fn position_to_byte_offset(source: &str, line: u32, character: u32) -> Option<usize> {
     let line_start: usize = source
         .split('\n')

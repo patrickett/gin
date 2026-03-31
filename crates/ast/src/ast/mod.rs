@@ -22,9 +22,9 @@ pub use spanned::*;
 mod impl_block;
 pub use impl_block::*;
 
-pub use expr::FormatPart;
 use crate::prelude::*;
 use chumsky::{input::ValueInput, span::SimpleSpan};
+pub use expr::FormatPart;
 use lexer::Token;
 use std::collections::HashSet;
 
@@ -83,7 +83,7 @@ where
                         }
                         TopLevelValue::ImplBlock(block) => {
                             for method_name in block.methods.keys() {
-                                let mangled = Intern::<::std::string::String>::new(format!(
+                                let mangled = Intern::<std::string::String>::new(format!(
                                     "{}.{}",
                                     block.type_name.as_str(),
                                     method_name.as_str()
@@ -131,7 +131,7 @@ fn collect_top_level(
         }
         TopLevelValue::Bind(bind) => {
             let name = if let Some(recv) = bind.receiver_type() {
-                Intern::<::std::string::String>::new(format!("{}.{}", recv.name(), bind.name()))
+                Intern::<String>::new(format!("{}.{}", recv.name(), bind.name()))
             } else {
                 bind.name()
             };
@@ -141,7 +141,7 @@ fn collect_top_level(
             let recv_tag = Tag::Nominal(block.type_name, block.type_name_span);
             for (method_name, bind) in block.methods {
                 let bind = bind.with_receiver_type(Some(recv_tag.clone()));
-                let mangled = Intern::<::std::string::String>::new(format!(
+                let mangled = Intern::<String>::new(format!(
                     "{}.{}",
                     block.type_name.as_str(),
                     method_name.as_str()
@@ -176,7 +176,7 @@ fn collect_top_level(
 fn generate_return_type_unions(
     defs: &DefMap,
     tags: &mut TagMap,
-    _private_defs: &std::collections::HashSet<Intern::<::std::string::String>>,
+    _private_defs: &std::collections::HashSet<Intern<String>>,
 ) {
     for bind in defs.values() {
         // Extract anonymous tag names from the bind's return value
@@ -210,7 +210,9 @@ fn generate_return_type_unions(
 }
 
 /// Extract all anonymous tag names from a bind's return value.
-fn extract_anonymous_tags_from_bind(bind: &crate::ast::expr::Bind) -> Vec<(Intern::<::std::string::String>, SimpleSpan)> {
+fn extract_anonymous_tags_from_bind(
+    bind: &crate::ast::expr::Bind,
+) -> Vec<(Intern<String>, SimpleSpan)> {
     use crate::ast::expr::BindValue;
 
     let mut tags = Vec::new();
@@ -236,7 +238,7 @@ fn extract_anonymous_tags_from_bind(bind: &crate::ast::expr::Bind) -> Vec<(Inter
 /// Recursively extract anonymous tag names from an expression.
 fn extract_anonymous_tags_from_expr(
     expr: &crate::ast::expr::Expr,
-    tags: &mut Vec<(Intern::<::std::string::String>, SimpleSpan)>,
+    tags: &mut Vec<(Intern<String>, SimpleSpan)>,
 ) {
     use crate::ast::expr::Expr::*;
 

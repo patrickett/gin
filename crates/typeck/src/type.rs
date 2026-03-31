@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 
+use ast::ast::BinOp;
+use ast::ast::WhenArm;
 use ast::ast::{
     Bind, BindValue, DeclareValue, Expr, FileAst, FormatPart, IfCondition, Literal, Loop,
     ParameterKind, Tag,
 };
 use internment::Intern;
-use ast::ast::BinOp;
-use ast::ast::WhenArm;
 
 /// A concrete compile-time value carried by `Ty::Literal`.
 #[derive(Debug, Clone, PartialEq)]
@@ -32,17 +32,17 @@ pub enum Ty {
     Bool,
     Unit,
     Record {
-        name: Intern::<::std::string::String>,
-        fields: Vec<(Intern::<::std::string::String>, Box<Ty>)>,
+        name: Intern<String>,
+        fields: Vec<(Intern<String>, Box<Ty>)>,
     },
     Union {
-        name: Intern::<::std::string::String>,
+        name: Intern<String>,
         /// Each variant: (variant_name, [(field_name, field_type)]) in declaration order.
         #[allow(clippy::type_complexity)]
-        variants: Vec<(Intern::<::std::string::String>, Vec<(Intern::<::std::string::String>, Box<Ty>)>)>,
+        variants: Vec<(Intern<String>, Vec<(Intern<String>, Box<Ty>)>)>,
     },
     /// Unresolved / generic type — falls back to `i64` in codegen.
-    Opaque(Intern::<::std::string::String>),
+    Opaque(Intern<String>),
     /// Fixed-size stack-allocated array (`(T.new; N)`). The value is a `!llvm.ptr`.
     Array {
         elem: Box<Ty>,
@@ -70,9 +70,9 @@ impl Ty {
     /// for ties) so the compiler packs them without padding. The programmer writes fields in
     /// any logical order; the physical layout is determined here.
     /// Empty for non-record types.
-    pub fn record_fields_sorted(&self) -> Vec<(&Intern::<::std::string::String>, &Ty)> {
+    pub fn record_fields_sorted(&self) -> Vec<(&Intern<String>, &Ty)> {
         if let Ty::Record { fields, .. } = self {
-            let mut indexed: Vec<(usize, &Intern::<::std::string::String>, &Ty)> = fields
+            let mut indexed: Vec<(usize, &Intern<String>, &Ty)> = fields
                 .iter()
                 .enumerate()
                 .map(|(i, (k, v))| (i, k, v.as_ref()))
@@ -94,26 +94,26 @@ impl Ty {
 
 /// Type alias for union variant fields: (field_name, field_type)
 #[allow(dead_code)]
-type UnionFields = Vec<(Intern::<::std::string::String>, Box<Ty>)>;
+type UnionFields = Vec<(Intern<String>, Box<Ty>)>;
 
 /// Type alias for union variants: (variant_name, fields)
 #[allow(dead_code)]
-type UnionVariants = Vec<(Intern::<::std::string::String>, UnionFields)>;
+type UnionVariants = Vec<(Intern<String>, UnionFields)>;
 
 /// Type alias for variant map entries: (union_name, discriminant, fields)
-type VariantMapEntry = (Intern::<::std::string::String>, usize, Vec<(Intern::<::std::string::String>, Ty)>);
+type VariantMapEntry = (Intern<String>, usize, Vec<(Intern<String>, Ty)>);
 
 /// Type alias for the variant map: variant_name -> [(union_name, discriminant, fields)]
-type VariantMap = HashMap<Intern::<::std::string::String>, Vec<VariantMapEntry>>;
+type VariantMap = HashMap<Intern<String>, Vec<VariantMapEntry>>;
 
 /// Type alias for variant lookup result: (union_name, discriminant, field_slice)
-type VariantLookupResult<'a> = (Intern::<::std::string::String>, usize, &'a [(Intern::<::std::string::String>, Ty)]);
+type VariantLookupResult<'a> = (Intern<String>, usize, &'a [(Intern<String>, Ty)]);
 
 /// Type environment built from a `FileAst`. Resolves tag names to `Ty` and infers
 /// function parameter / return types.
 pub struct TyEnv {
-    pub tag_types: HashMap<Intern::<::std::string::String>, Ty>,
-    pub fn_return_types: HashMap<Intern::<::std::string::String>, Ty>,
+    pub tag_types: HashMap<Intern<String>, Ty>,
+    pub fn_return_types: HashMap<Intern<String>, Ty>,
     /// Reverse map: variant name → [(parent_union_name, discriminant_index, payload_fields)]
     /// A variant may appear in multiple unions if names collide; shape-based disambiguation is TODO.
     pub variant_map: VariantMap,
@@ -140,7 +140,7 @@ impl TyEnv {
         for (union_name, ty) in &tag_types {
             if let Ty::Union { variants, .. } = ty {
                 for (i, (variant_name, fields)) in variants.iter().enumerate() {
-                    let field_tys: Vec<(Intern::<::std::string::String>, Ty)> =
+                    let field_tys: Vec<(Intern<String>, Ty)> =
                         fields.iter().map(|(n, t)| (*n, *t.clone())).collect();
                     variant_map
                         .entry(*variant_name)
@@ -185,21 +185,25 @@ impl TyEnv {
         resolve_tag_from_map(tag, &self.tag_types)
     }
 
+    /// Resolve a `ParameterKind` to a `Ty`.
+    ///
+    /// This consolidates the common pattern of converting parameters to their types.
+    fn resolve_parameter_kind(&self, kind: &ParameterKind) -> Ty {
+        match kind {
+            ParameterKind::Tagged(tag) => self.resolve_tag(tag),
+            ParameterKind::Generic => Ty::Int(64),
+            ParameterKind::Default(expr) => self.infer_expr(expr, &HashMap::new()),
+        }
+    }
+
     /// Return the typed parameter list for a function binding.
     /// Preserves insertion order of the `Parameters` map.
-    pub fn param_types<'a>(&self, bind: &'a Bind) -> Vec<(&'a Intern::<::std::string::String>, Ty)> {
+    pub fn param_types<'a>(&self, bind: &'a Bind) -> Vec<(&'a Intern<String>, Ty)> {
         match bind.params().as_ref() {
             None => vec![],
             Some(params) => params
                 .iter()
-                .map(|(name, kind)| {
-                    let ty = match kind {
-                        ParameterKind::Tagged(tag) => self.resolve_tag(tag),
-                        ParameterKind::Generic => Ty::Int(64),
-                        ParameterKind::Default(expr) => self.infer_expr(expr, &HashMap::new()),
-                    };
-                    (name, ty)
-                })
+                .map(|(name, kind)| (name, self.resolve_parameter_kind(kind)))
                 .collect(),
         }
     }
@@ -210,12 +214,12 @@ impl TyEnv {
     }
 
     /// Look up the pre-computed return type of a top-level function by name.
-    pub fn fn_return_ty(&self, name: &Intern::<::std::string::String>) -> Option<&Ty> {
+    pub fn fn_return_ty(&self, name: &Intern<String>) -> Option<&Ty> {
         self.fn_return_types.get(name)
     }
 
     /// Look up a declared type by its tag name.
-    pub fn lookup_tag(&self, name: Intern::<::std::string::String>) -> Option<&Ty> {
+    pub fn lookup_tag(&self, name: Intern<String>) -> Option<&Ty> {
         self.tag_types.get(&name)
     }
 
@@ -224,7 +228,7 @@ impl TyEnv {
     /// Returns `(union_name, discriminant, [(field_name, field_type)])` in declaration order.
     /// If multiple unions declare a variant with the same name, the first match is returned.
     /// TODO: shape-based disambiguation per spec (answer #6).
-    pub fn lookup_variant(&self, name: Intern::<::std::string::String>) -> Option<VariantLookupResult<'_>> {
+    pub fn lookup_variant(&self, name: Intern<String>) -> Option<VariantLookupResult<'_>> {
         let candidates = self.variant_map.get(&name)?;
         candidates
             .first()
@@ -232,7 +236,7 @@ impl TyEnv {
     }
 
     /// Return all variant names belonging to `union_name`.
-    pub fn all_variants_of(&self, union_name: Intern::<::std::string::String>) -> Vec<Intern::<::std::string::String>> {
+    pub fn all_variants_of(&self, union_name: Intern<String>) -> Vec<Intern<String>> {
         self.variant_map
             .iter()
             .filter_map(|(variant_name, entries)| {
@@ -246,8 +250,8 @@ impl TyEnv {
     }
 
     /// Build the union→variants reverse map for use in flow analysis display.
-    pub fn build_union_to_variants(&self) -> HashMap<Intern::<::std::string::String>, Vec<Intern::<::std::string::String>>> {
-        let mut map: HashMap<Intern::<::std::string::String>, Vec<Intern::<::std::string::String>>> = HashMap::new();
+    pub fn build_union_to_variants(&self) -> HashMap<Intern<String>, Vec<Intern<String>>> {
+        let mut map: HashMap<Intern<String>, Vec<Intern<String>>> = HashMap::new();
         for (variant_name, entries) in &self.variant_map {
             for (union_name, _, _) in entries {
                 map.entry(*union_name).or_default().push(*variant_name);
@@ -257,7 +261,7 @@ impl TyEnv {
     }
 
     /// Infer the type of an expression given a local variable environment.
-    pub fn infer_expr(&self, expr: &Expr, locals: &HashMap<Intern::<::std::string::String>, Ty>) -> Ty {
+    pub fn infer_expr(&self, expr: &Expr, locals: &HashMap<Intern<String>, Ty>) -> Ty {
         infer_expr_ty(expr, locals, &self.tag_types, &self.fn_return_types)
     }
 
@@ -268,7 +272,7 @@ impl TyEnv {
     /// - A variable binding whose type annotation names a union type
     ///
     /// Returns `None` for non-union types and unresolvable names.
-    pub fn resolve_dot_type(&self, ast: &FileAst, name: Intern::<::std::string::String>) -> Option<Ty> {
+    pub fn resolve_dot_type(&self, ast: &FileAst, name: Intern<String>) -> Option<Ty> {
         if let Some(ty) = self.lookup_tag(name)
             && matches!(ty, Ty::Union { .. })
         {
@@ -283,7 +287,7 @@ impl TyEnv {
 
 /// Find the type annotation name for a binding named `name` in the AST.
 /// Checks top-level defs first, then local bindings inside function bodies.
-fn binding_type_annotation(ast: &FileAst, name: Intern::<::std::string::String>) -> Option<Intern::<::std::string::String>> {
+fn binding_type_annotation(ast: &FileAst, name: Intern<String>) -> Option<Intern<String>> {
     if let Some(bind) = ast.defs().values().find(|b| b.name() == name) {
         return bind.type_annotation.as_ref().map(|(tn, _)| *tn);
     }
@@ -319,7 +323,7 @@ fn ty_union_discriminant_size(num_variants: usize) -> usize {
 }
 
 /// Type alias for union variant fields: (variant_name, [(field_name, field_type)])
-type UnionVariant<'a> = (Intern::<::std::string::String>, Vec<(Intern::<::std::string::String>, Box<Ty>)>);
+type UnionVariant<'a> = (Intern<String>, Vec<(Intern<String>, Box<Ty>)>);
 
 /// Calculate the maximum field size across all union variants.
 fn ty_union_max_field_size(variants: &[UnionVariant<'_>]) -> usize {
@@ -399,15 +403,18 @@ pub fn ty_byte_size_static(ty: &Ty) -> usize {
 /// Single definition used by `builtin()`, `TyEnv` injection, and type inference.
 pub fn str_record_ty() -> Ty {
     Ty::Record {
-        name: Intern::<::std::string::String>::new("Str".to_string()),
+        name: Intern::<String>::new("Str".to_string()),
         fields: vec![
             (
-                Intern::<::std::string::String>::new("pointer".to_string()),
+                Intern::<String>::new("pointer".to_string()),
                 Box::new(Ty::Ptr {
                     inner: Box::new(Ty::Int(8)),
                 }),
             ),
-            (Intern::<::std::string::String>::new("len".to_string()), Box::new(Ty::Int(64))),
+            (
+                Intern::<String>::new("len".to_string()),
+                Box::new(Ty::Int(64)),
+            ),
         ],
     }
 }
@@ -427,7 +434,11 @@ fn range_bit_width(min: i128, max: i128) -> u8 {
     }
 }
 
-fn resolve_tag_ref(tag: &Tag, raw: &HashMap<Intern::<::std::string::String>, &DeclareValue>, recursion_depth: usize) -> Ty {
+fn resolve_tag_ref(
+    tag: &Tag,
+    raw: &HashMap<Intern<String>, &DeclareValue>,
+    recursion_depth: usize,
+) -> Ty {
     match tag {
         Tag::Nominal(name, _) => resolve_name(*name, raw, recursion_depth),
         Tag::Generic(name, params, _) => match name.as_str() {
@@ -460,9 +471,9 @@ fn resolve_tag_ref(tag: &Tag, raw: &HashMap<Intern::<::std::string::String>, &De
     }
 }
 
-fn resolve_name_from_files(name: Intern::<::std::string::String>, files: &[FileAst], recursion_depth: usize) -> Ty {
+fn resolve_name_from_files(name: Intern<String>, files: &[FileAst], recursion_depth: usize) -> Ty {
     // Build a temporary lookup map for this file set
-    let mut raw: HashMap<Intern::<::std::string::String>, &DeclareValue> = HashMap::new();
+    let mut raw: HashMap<Intern<String>, &DeclareValue> = HashMap::new();
     for ast in files {
         for (k, v) in ast.tags.iter() {
             raw.insert(*k, v.value());
@@ -472,7 +483,11 @@ fn resolve_name_from_files(name: Intern::<::std::string::String>, files: &[FileA
     resolve_name(name, &raw, recursion_depth)
 }
 
-fn resolve_name(name: Intern::<::std::string::String>, raw: &HashMap<Intern::<::std::string::String>, &DeclareValue>, recursion_depth: usize) -> Ty {
+fn resolve_name(
+    name: Intern<String>,
+    raw: &HashMap<Intern<String>, &DeclareValue>,
+    recursion_depth: usize,
+) -> Ty {
     if recursion_depth > 16 {
         return Ty::Opaque(name);
     }
@@ -502,7 +517,7 @@ fn resolve_name(name: Intern::<::std::string::String>, raw: &HashMap<Intern::<::
                 .iter()
                 .map(|v| {
                     let tag = v.tag();
-                    let variant_name = Intern::<::std::string::String>::new(tag.name().to_string());
+                    let variant_name = Intern::<String>::new(tag.name().to_string());
                     let fields = match tag {
                         Tag::Generic(_, params, _) if !params.is_empty() => params
                             .iter()
@@ -531,7 +546,7 @@ fn resolve_name(name: Intern::<::std::string::String>, raw: &HashMap<Intern::<::
     }
 }
 
-fn resolve_tag_from_map(tag: &Tag, tag_types: &HashMap<Intern::<::std::string::String>, Ty>) -> Ty {
+fn resolve_tag_from_map(tag: &Tag, tag_types: &HashMap<Intern<String>, Ty>) -> Ty {
     match tag {
         Tag::Nominal(name, _) => tag_types.get(name).cloned().unwrap_or(Ty::Int(64)),
         Tag::Generic(name, params, _) => match name.as_str() {
@@ -568,35 +583,49 @@ fn resolve_tag_from_map(tag: &Tag, tag_types: &HashMap<Intern::<::std::string::S
     }
 }
 
+/// Resolve a `ParameterKind` to a `Ty` for use in standalone functions.
+///
+/// This is the non-method version of `TyEnv::resolve_parameter_kind`,
+/// used when we don't have a `TyEnv` available but have the raw maps.
+fn resolve_parameter_kind_with(
+    kind: &ParameterKind,
+    tag_types: &HashMap<Intern<String>, Ty>,
+    fn_return_types: &HashMap<Intern<String>, Ty>,
+) -> Ty {
+    match kind {
+        ParameterKind::Tagged(tag) => resolve_tag_from_map(tag, tag_types),
+        ParameterKind::Generic => Ty::Int(64),
+        ParameterKind::Default(expr) => {
+            infer_expr_ty(expr, &HashMap::new(), tag_types, fn_return_types)
+        }
+    }
+}
+
 fn infer_bind_ret(
     bind: &Bind,
-    tag_types: &HashMap<Intern::<::std::string::String>, Ty>,
-    fn_return_types: &HashMap<Intern::<::std::string::String>, Ty>,
+    tag_types: &HashMap<Intern<String>, Ty>,
+    fn_return_types: &HashMap<Intern<String>, Ty>,
 ) -> Ty {
     // Explicit annotation wins.
     if let Some(tag) = &bind.return_tag {
         return resolve_tag_from_map(tag, tag_types);
     }
 
-    let mut locals: HashMap<Intern::<::std::string::String>, Ty> = match bind.params().as_ref() {
+    let mut locals: HashMap<Intern<String>, Ty> = match bind.params().as_ref() {
         None => HashMap::new(),
         Some(params) => params
             .iter()
             .map(|(name, kind)| {
-                let ty = match kind {
-                    ParameterKind::Tagged(tag) => resolve_tag_from_map(tag, tag_types),
-                    ParameterKind::Generic => Ty::Int(64),
-                    ParameterKind::Default(expr) => {
-                        infer_expr_ty(expr, &HashMap::new(), tag_types, fn_return_types)
-                    }
-                };
-                (*name, ty)
+                (
+                    *name,
+                    resolve_parameter_kind_with(kind, tag_types, fn_return_types),
+                )
             })
             .collect(),
     };
     if let Some(recv_tag) = bind.receiver_type() {
         let recv_ty = resolve_tag_from_map(recv_tag, tag_types);
-        locals.insert(Intern::<::std::string::String>::new("self".to_string()), recv_ty);
+        locals.insert(Intern::<String>::new("self".to_string()), recv_ty);
     }
 
     match bind.value() {
@@ -611,9 +640,9 @@ fn infer_bind_ret(
 
 pub fn infer_expr_ty(
     expr: &Expr,
-    locals: &HashMap<Intern::<::std::string::String>, Ty>,
-    tag_types: &HashMap<Intern::<::std::string::String>, Ty>,
-    fn_return_types: &HashMap<Intern::<::std::string::String>, Ty>,
+    locals: &HashMap<Intern<String>, Ty>,
+    tag_types: &HashMap<Intern<String>, Ty>,
+    fn_return_types: &HashMap<Intern<String>, Ty>,
 ) -> Ty {
     match expr {
         Expr::Lit(lit) => match lit {
@@ -719,11 +748,11 @@ pub fn infer_expr_ty(
             }
         }
         Expr::If(_) => Ty::Unit,
-        Expr::Range(_) => Ty::Opaque(Intern::<::std::string::String>::new("Range".to_string())),
+        Expr::Range(_) => Ty::Opaque(Intern::<String>::new("Range".to_string())),
         Expr::SelfRef(_) => locals
-            .get(&Intern::<::std::string::String>::new("self".to_string()))
+            .get(&Intern::<String>::new("self".to_string()))
             .cloned()
-            .unwrap_or_else(|| Ty::Opaque(Intern::<::std::string::String>::new("Self".to_string()))),
+            .unwrap_or_else(|| Ty::Opaque(Intern::<String>::new("Self".to_string()))),
         Expr::TupleAlloc { init, size } => {
             let elem = infer_expr_ty(init, locals, tag_types, fn_return_types);
             Ty::Array {
@@ -790,24 +819,14 @@ impl TyEnv {
             let mut locals = HashMap::new();
             if let Some(params) = bind.params() {
                 for (name, kind) in params.iter() {
-                    let ty = match kind {
-                        ParameterKind::Tagged(tag) => self.resolve_tag(tag),
-                        ParameterKind::Generic => Ty::Int(64),
-                        ParameterKind::Default(expr) => self.infer_expr(expr, &HashMap::new()),
-                    };
-                    locals.insert(*name, ty);
+                    locals.insert(*name, self.resolve_parameter_kind(kind));
                 }
             }
             self.check_bind(bind, db, &locals);
         }
     }
 
-    fn check_bind<D>(
-        &self,
-        bind: &Bind,
-        db: &D,
-        locals: &HashMap<Intern::<::std::string::String>, Ty>,
-    )
+    fn check_bind<D>(&self, bind: &Bind, db: &D, locals: &HashMap<Intern<String>, Ty>)
     where
         D: salsa::Database + ?Sized,
     {
@@ -847,12 +866,7 @@ impl TyEnv {
         }
     }
 
-    fn check_expr<D>(
-        &self,
-        expr: &Expr,
-        db: &D,
-        locals: &HashMap<Intern::<::std::string::String>, Ty>,
-    )
+    fn check_expr<D>(&self, expr: &Expr, db: &D, locals: &HashMap<Intern<String>, Ty>)
     where
         D: salsa::Database + ?Sized,
     {
@@ -895,7 +909,7 @@ impl TyEnv {
                             self.check_expr(body, db, locals);
                         }
                         WhenArm::Is { pattern, body } => {
-                            let variant_name = Intern::<::std::string::String>::new(pattern.name().to_string());
+                            let variant_name = Intern::<String>::new(pattern.name().to_string());
                             match &subject_ty {
                                 Some(Ty::Union {
                                     name: union_name,
@@ -1048,7 +1062,7 @@ impl TyEnv {
     }
 }
 
-fn expr_references_name(expr: &Expr, name: Intern::<::std::string::String>) -> bool {
+fn expr_references_name(expr: &Expr, name: Intern<String>) -> bool {
     match expr {
         Expr::FnCall(call) => {
             (call.path.root == name && call.path.segments.is_empty())

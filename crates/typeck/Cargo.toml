@@ -16,5 +16,3 @@ internment = "0.8"
 
 [dev-dependencies]
 database = { workspace = true }
-ginc = { workspace = true }
-crossbeam-channel = { workspace = true }

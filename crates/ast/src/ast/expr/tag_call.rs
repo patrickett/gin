@@ -10,7 +10,7 @@ use chumsky::span::SimpleSpan;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TagCall {
     /// Simple variant name (e.g., "Some") - used for variant lookup
-    pub name: Intern::<::std::string::String>,
+    pub name: Intern<String>,
     /// Optional qualified path (e.g., ModPath { root: "Maybe", segments: ["Some"] })
     pub qual_path: Option<ModPath>,
     pub args: Vec<Spanned<Expr>>,
@@ -40,7 +40,7 @@ where
             });
 
     // Simple form: Some(x), None()
-    let simple = select! { Token::Tag(name) => Intern::<::std::string::String>::new(name.to_string()) }
+    let simple = select! { Token::Tag(name) => Intern::<String>::new(name.to_string()) }
         .then(args)
         .map_with(|(name, args), e| TagCall {
             name,

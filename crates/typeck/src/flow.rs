@@ -8,9 +8,9 @@ use internment::Intern;
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeConstraint {
     /// Variable is definitely a specific variant of a union.
-    IsVariant(Intern::<::std::string::String>, Intern::<::std::string::String>),
+    IsVariant(Intern<String>, Intern<String>),
     /// Variable is definitely NOT a specific variant.
-    IsNotVariant(Intern::<::std::string::String>, Intern::<::std::string::String>),
+    IsNotVariant(Intern<String>, Intern<String>),
 }
 
 impl TypeConstraint {
@@ -31,7 +31,7 @@ impl TypeConstraint {
 #[derive(Debug, Clone)]
 pub struct FlowContext {
     /// Map from variable name to its narrowed type constraints.
-    constraints: HashMap<Intern::<::std::string::String>, TypeConstraint>,
+    constraints: HashMap<Intern<String>, TypeConstraint>,
     /// Parent context for nested scopes (blocks, loops, etc.).
     parent: Option<Box<FlowContext>>,
 }
@@ -58,12 +58,12 @@ impl FlowContext {
     }
 
     /// Narrow a variable based on a pattern match.
-    pub fn narrow(&mut self, var: Intern::<::std::string::String>, constraint: TypeConstraint) {
+    pub fn narrow(&mut self, var: Intern<String>, constraint: TypeConstraint) {
         self.constraints.insert(var, constraint);
     }
 
     /// Check if a narrowing is impossible given current constraints.
-    pub fn is_impossible(&self, var: &Intern::<::std::string::String>, check_constraint: &TypeConstraint) -> bool {
+    pub fn is_impossible(&self, var: &Intern<String>, check_constraint: &TypeConstraint) -> bool {
         if let Some(existing) = self.constraints.get(var)
             && existing.contradicts(check_constraint)
         {
@@ -77,24 +77,24 @@ impl FlowContext {
     }
 
     /// Get the constraint for a variable, if any.
-    pub fn get_constraint(&self, var: &Intern::<::std::string::String>) -> Option<&TypeConstraint> {
+    pub fn get_constraint(&self, var: &Intern<String>) -> Option<&TypeConstraint> {
         self.constraints
             .get(var)
             .or_else(|| self.parent.as_ref().and_then(|p| p.get_constraint(var)))
     }
 
     /// Reset a variable's narrowing (on reassignment).
-    pub fn reset(&mut self, var: &Intern::<::std::string::String>) {
+    pub fn reset(&mut self, var: &Intern<String>) {
         self.constraints.remove(var);
     }
 
     /// Check if this context has a local (non-inherited) constraint for a variable.
-    pub fn has_local_constraint(&self, var: &Intern::<::std::string::String>) -> bool {
+    pub fn has_local_constraint(&self, var: &Intern<String>) -> bool {
         self.constraints.contains_key(var)
     }
 
     /// Get all variables with local constraints.
-    pub fn local_constraints(&self) -> impl Iterator<Item = (&Intern::<::std::string::String>, &TypeConstraint)> {
+    pub fn local_constraints(&self) -> impl Iterator<Item = (&Intern<String>, &TypeConstraint)> {
         self.constraints.iter()
     }
 }
@@ -119,7 +119,7 @@ pub struct FlowAnalysis {
     /// The flow context at the end of each function body (after all narrowing).
     pub final_context: FlowContext,
     /// All variants of each union type: union_name → [variant_names].
-    pub union_to_variants: HashMap<Intern::<::std::string::String>, Vec<Intern::<::std::string::String>>>,
+    pub union_to_variants: HashMap<Intern<String>, Vec<Intern<String>>>,
 }
 
 impl FlowAnalysis {
@@ -151,15 +151,15 @@ impl FlowAnalysis {
     ///
     /// Returns `None` if no narrowing is in effect.
     pub fn narrowed_type_string(&self, var_name: &str) -> Option<String> {
-        let var = Intern::<::std::string::String>::new(var_name.to_string());
+        let var = Intern::<String>::new(var_name.to_string());
         self.constraint_to_display(self.final_context.get_constraint(&var)?)
     }
 
     /// Returns `(union_name, variant_name)` for the positive narrowing inside the if block.
     ///
     /// i.e., for `if val is Some(v)` with an early return, returns `(Maybe, Some)`.
-    pub fn inside_if_variant(&self, var_name: &str) -> Option<(Intern::<::std::string::String>, Intern::<::std::string::String>)> {
-        let var = Intern::<::std::string::String>::new(var_name.to_string());
+    pub fn inside_if_variant(&self, var_name: &str) -> Option<(Intern<String>, Intern<String>)> {
+        let var = Intern::<String>::new(var_name.to_string());
         match self.final_context.get_constraint(&var)? {
             // final_context has IsNotVariant → inside-if the variable IS that variant
             TypeConstraint::IsNotVariant(union, variant) => Some((*union, *variant)),

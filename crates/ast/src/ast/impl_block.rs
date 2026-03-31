@@ -5,9 +5,9 @@ use std::hash::{Hash, Hasher};
 /// A trait implementation block: `Args.Iterator (next: ...)`
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImplBlock {
-    pub type_name: Intern::<::std::string::String>,
+    pub type_name: Intern<String>,
     pub type_name_span: SimpleSpan,
-    pub trait_name: Intern::<::std::string::String>,
+    pub trait_name: Intern<String>,
     pub methods: DefMap,
 }
 
@@ -40,7 +40,7 @@ pub fn impl_block<'t, I>(
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
-    let tag_name = select! { Token::Tag(name) => Intern::<::std::string::String>::new(name.to_string()) };
+    let tag_name = select! { Token::Tag(name) => Intern::<String>::new(name.to_string()) };
     let tag_name_with_span = tag_name.map_with(|name, e| (name, e.span()));
 
     let header = tag_name_with_span

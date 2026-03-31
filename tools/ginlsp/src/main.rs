@@ -2,10 +2,10 @@ mod diagnostics;
 mod handlers;
 mod state;
 
-use dashmap::DashMap;
-use diagnostics::symptoms_to_diagnostics;
 use ast::FileAst;
+use dashmap::DashMap;
 use database::File;
+use diagnostics::symptoms_to_diagnostics;
 use state::{DocumentState, GinHost, JsonDocumentState};
 use std::sync::{Arc, Mutex, RwLock};
 use tower_lsp::jsonrpc::Result;
@@ -63,11 +63,12 @@ impl Backend {
         let ast = snapshot.parse(file);
         let symptoms = snapshot.diagnostics(file);
         if symptoms.is_empty() {
-            self.ast_cache
-                .insert(uri.to_string(), Arc::new(ast));
+            self.ast_cache.insert(uri.to_string(), Arc::new(ast));
         }
         let diagnostics = symptoms_to_diagnostics(source, &symptoms[..]);
-        self.client.publish_diagnostics(uri, diagnostics, None).await;
+        self.client
+            .publish_diagnostics(uri, diagnostics, None)
+            .await;
     }
 }
 
@@ -124,10 +125,7 @@ impl LanguageServer for Backend {
         self.handle_signature_help(params).await
     }
 
-    async fn formatting(
-        &self,
-        params: DocumentFormattingParams,
-    ) -> Result<Option<Vec<TextEdit>>> {
+    async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
         self.handle_formatting(params).await
     }
 }
@@ -156,7 +154,7 @@ mod tests {
         let ty_env = TyEnv::from_file_ast(&ast);
 
         let ty = ty_env
-            .resolve_dot_type(&ast, Intern::<::std::string::String>::new("Maybe".to_string()))
+            .resolve_dot_type(&ast, Intern::<String>::new("Maybe".to_string()))
             .expect("Expected Maybe to resolve to a union type");
         let items = dot_completions(ty);
 

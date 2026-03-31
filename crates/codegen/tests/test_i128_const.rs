@@ -1,8 +1,6 @@
-mod helpers;
-
 use codegen::build_module_with_context;
 use diagnostic::codegen::CodegenSymptom;
-use helpers::parse_str as parse_from_str;
+use ast::parse_from_str;
 use typeck::TyEnv;
 use melior::Context;
 

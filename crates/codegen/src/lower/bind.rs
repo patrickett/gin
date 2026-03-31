@@ -47,11 +47,11 @@ impl<'c> Lower<'c> for Bind {
                         // First mutable bind (`:`) — alloca + store.
                         // Build locals from var_types so infer_expr can resolve base types
                         // (e.g., elem type of arrays in TupleGet expressions).
-                        let locals: std::collections::HashMap<Intern::<::std::string::String>, typeck::Ty> = ctx
+                        let locals: std::collections::HashMap<Intern<String>, typeck::Ty> = ctx
                             .var_types
                             .borrow()
                             .iter()
-                            .map(|(k, v)| (Intern::<::std::string::String>::new(k.clone()), v.clone()))
+                            .map(|(k, v)| (Intern::<String>::new(k.clone()), v.clone()))
                             .collect();
                         let ty = ctx.ty_env.infer_expr(expr, &locals);
                         let elem_mlir_ty = ty_to_mlir(&ty, ctx.mlir);

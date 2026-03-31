@@ -9,8 +9,26 @@ use crate::command::{
     version::{VersionCommand, version},
 };
 use clap::*;
-use flask::FlaskConfig;
-use std::path::PathBuf;
+use flask::{DependencyKind, FlaskConfig};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+/// Resolve path dependencies relative to a config directory.
+///
+/// Takes the FlaskConfig dependencies and resolves all `Path` dependencies
+/// to absolute paths based on the provided config directory.
+pub fn resolve_path_dependencies(
+    config: &FlaskConfig,
+    config_dir: &Path,
+) -> HashMap<String, PathBuf> {
+    let mut dependencies = HashMap::new();
+    for (name, dep) in config.dependencies() {
+        if let DependencyKind::Path { path: dep_path } = &dep.kind {
+            dependencies.insert(name.clone(), config_dir.join(dep_path));
+        }
+    }
+    dependencies
+}
 
 mod add;
 mod audit;

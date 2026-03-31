@@ -1,5 +1,4 @@
-mod helpers;
-use helpers::parse_str;
+use ast::parse_from_str as parse_str;
 
 #[test]
 fn test_parse_import_debug() {

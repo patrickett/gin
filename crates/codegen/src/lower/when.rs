@@ -29,11 +29,11 @@ impl<'c> Lower<'c> for WhenExpr {
                     })
                 });
             body.map(|b| {
-                let locals: std::collections::HashMap<Intern::<::std::string::String>, typeck::Ty> = ctx
+                let locals: std::collections::HashMap<Intern<String>, typeck::Ty> = ctx
                     .var_types
                     .borrow()
                     .iter()
-                    .map(|(k, v)| (Intern::<::std::string::String>::new(k.clone()), v.clone()))
+                    .map(|(k, v)| (Intern::<String>::new(k.clone()), v.clone()))
                     .collect();
                 let ty = ctx.ty_env.infer_expr(b, &locals);
                 ty_to_mlir(&ty, ctx.mlir)
@@ -205,7 +205,7 @@ fn lower_pattern_when<'c>(
         }
 
         WhenArm::Is { pattern, body } => {
-            let variant_name = Intern::<::std::string::String>::new(pattern.name().to_string());
+            let variant_name = Intern::<String>::new(pattern.name().to_string());
             // Note: unknown variant diagnostics are emitted by typeck; codegen just fails gracefully.
             let (_, expected_disc, _) = ctx.ty_env.lookup_variant(variant_name)?;
 

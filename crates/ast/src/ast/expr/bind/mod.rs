@@ -12,7 +12,7 @@ pub use value::*;
 pub struct MethodName<'a> {
     // TODO: come up with a better name than receiver
     receiver: &'a Tag,
-    name: Intern::<::std::string::String>,
+    name: Intern<String>,
 }
 
 impl std::fmt::Display for MethodName<'_> {
@@ -46,16 +46,16 @@ impl std::fmt::Display for MethodName<'_> {
 pub struct Bind {
     doc_comment: Option<DocComment>,
     attributes: BindAttributes,
-    name: Intern::<::std::string::String>,
+    name: Intern<String>,
     pub name_span: SimpleSpan,
     params: Option<Parameters>,
     value: BindValue,
     receiver_type: Option<Tag>,
-    return_type_name: Option<Intern::<::std::string::String>>,
+    return_type_name: Option<Intern<String>>,
     /// Explicit capitalized return type annotation, e.g. `Str` in `foo() Str: expr`.
     pub return_tag: Option<Tag>,
     /// Explicit type annotation with value args, e.g. `Maybe(3)` in `val Maybe(3): Some(3)`.
-    pub type_annotation: Option<(Intern::<::std::string::String>, Vec<Spanned<Expr>>)>,
+    pub type_annotation: Option<(Intern<String>, Vec<Spanned<Expr>>)>,
     /// Qualified path for type annotation, e.g. `Maybe.Some` in `val Maybe.Some(3): ...`
     pub type_annotation_qual: Option<ModPath>,
     /// `true` for `:=` (immutable/const) binds; `false` for `:` (mutable, alloca-backed) binds.
@@ -63,7 +63,12 @@ pub struct Bind {
 }
 
 impl Bind {
-    pub fn new(name: Intern::<::std::string::String>, name_span: SimpleSpan, value: BindValue, is_const: bool) -> Self {
+    pub fn new(
+        name: Intern<String>,
+        name_span: SimpleSpan,
+        value: BindValue,
+        is_const: bool,
+    ) -> Self {
         Bind {
             doc_comment: None,
             attributes: BindAttributes::default(),
@@ -80,12 +85,12 @@ impl Bind {
         }
     }
 
-    pub fn with_return_type_name(mut self, name: Option<Intern::<::std::string::String>>) -> Self {
+    pub fn with_return_type_name(mut self, name: Option<Intern<String>>) -> Self {
         self.return_type_name = name;
         self
     }
 
-    pub fn return_type_name(&self) -> Option<&Intern::<::std::string::String>> {
+    pub fn return_type_name(&self) -> Option<&Intern<String>> {
         self.return_type_name.as_ref()
     }
 
@@ -99,7 +104,7 @@ impl Bind {
         self
     }
 
-    pub fn name(&self) -> Intern::<::std::string::String> {
+    pub fn name(&self) -> Intern<String> {
         self.name
     }
 
@@ -155,7 +160,7 @@ impl Bind {
     fn infer_return_type_inner(
         &self,
         defs: Option<&crate::DefMap>,
-        visited: &mut std::collections::HashSet<Intern::<::std::string::String>>,
+        visited: &mut std::collections::HashSet<Intern<String>>,
     ) -> Option<String> {
         match &self.value {
             BindValue::Expr(expr) => infer_expr_type(expr, &[], defs, visited),
@@ -221,7 +226,7 @@ impl Bind {
     }
 
     /// Extract all anonymous tag names from this bind's return value.
-    fn extract_anonymous_tags(&self) -> Vec<Intern::<::std::string::String>> {
+    fn extract_anonymous_tags(&self) -> Vec<Intern<String>> {
         let mut tags = Vec::new();
 
         match &self.value {
@@ -249,7 +254,7 @@ fn collect_all_return_types(
     exprs: &[Spanned<Expr>],
     ret: &crate::ast::expr::r#return::Return,
     defs: Option<&crate::DefMap>,
-    visited: &mut std::collections::HashSet<Intern::<::std::string::String>>,
+    visited: &mut std::collections::HashSet<Intern<String>>,
 ) -> Vec<String> {
     let mut types = Vec::new();
 
@@ -273,7 +278,7 @@ fn collect_early_return_types(
     expr: &Expr,
     locals: &[Spanned<Expr>],
     defs: Option<&crate::DefMap>,
-    visited: &mut std::collections::HashSet<Intern::<::std::string::String>>,
+    visited: &mut std::collections::HashSet<Intern<String>>,
     types: &mut Vec<String>,
 ) {
     if let Expr::If(if_expr) = expr {
@@ -295,7 +300,7 @@ fn infer_expr_type(
     expr: &Expr,
     locals: &[Spanned<Expr>],
     defs: Option<&crate::DefMap>,
-    visited: &mut std::collections::HashSet<Intern::<::std::string::String>>,
+    visited: &mut std::collections::HashSet<Intern<String>>,
 ) -> Option<String> {
     match expr {
         Expr::Lit(lit) => Some(
@@ -341,7 +346,7 @@ fn infer_expr_type(
 }
 
 /// Recursively extract anonymous tag names from an expression.
-fn extract_anonymous_tags_from_expr(expr: &Expr, tags: &mut Vec<Intern::<::std::string::String>>) {
+fn extract_anonymous_tags_from_expr(expr: &Expr, tags: &mut Vec<Intern<String>>) {
     use crate::ast::expr::Loop;
 
     match expr {
@@ -572,9 +577,9 @@ where
     use Token::*;
 
     type ReturnTypePart = (
-        Option<Intern::<::std::string::String>>,
+        Option<Intern<std::string::String>>,
         Option<crate::ast::Tag>,
-        Option<(Intern::<::std::string::String>, Vec<Spanned<Expr>>)>,
+        Option<(Intern<std::string::String>, Vec<Spanned<Expr>>)>,
         Option<ModPath>, // Qualified path for type annotation
     );
 
@@ -585,7 +590,7 @@ where
     // Qualified.Capitalized → qualified type annotation (e.g., `foo() Bool.True:`)
     // Qualified.Capitalized(expr..) → qualified type with args (e.g., `val Maybe.Some(3):`)
     let return_type_part = choice((
-        select! { Token::Id(name) => Intern::<::std::string::String>::new(name.to_string()) }
+        select! { Token::Id(name) => Intern::<std::string::String>::new(name.to_string()) }
             .map(|n| -> ReturnTypePart { (Some(n), None, None, None) }),
         // Qualified type path with args: Maybe.Some(3), Bool.True
         crate::ast::tag_variant_path()
@@ -609,7 +614,7 @@ where
                 }
             })
             .boxed(),
-        select! { Token::Tag(name) => Intern::<::std::string::String>::new(name.to_string()) }
+        select! { Token::Tag(name) => Intern::<std::string::String>::new(name.to_string()) }
             .then(
                 crate::parse::delimited_list(
                     Token::ParenOpen,

@@ -1,9 +1,9 @@
-use crate::prelude::*;
 use crate::parse::delimited_list;
+use crate::prelude::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Pattern {
-    Ident(Intern::<::std::string::String>),
+    Ident(Intern<String>),
     Tuple(Vec<Pattern>),
     // etc.
 }

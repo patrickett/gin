@@ -43,7 +43,7 @@ pub enum Expr {
     /// A capitalized variant constructor with arguments, e.g. `Some(5)`.
     TagCall(TagCall),
     /// A bare capitalized tag in expression position, e.g. `None`, `True`.
-    AnonymousTag(Intern::<::std::string::String>, SimpleSpan),
+    AnonymousTag(Intern<String>, SimpleSpan),
     /// Stack-allocate an array: `(init_expr; N)` — emits `llvm.alloca N×sizeof(elem)`.
     TupleAlloc {
         init: Box<Spanned<Expr>>,
@@ -63,7 +63,7 @@ pub enum Expr {
     /// Explicit numeric cast: `expr as Type` — emits trunci/extsi/sitofp/fptosi.
     Cast {
         expr: Box<Spanned<Expr>>,
-        ty: Intern::<::std::string::String>,
+        ty: Intern<String>,
     },
     /// Dynamic buffer element read: `buf.(i)` — emits GEP(i * elem_bytes) + load.
     BufGet {
@@ -156,9 +156,10 @@ where
         // Postfix cast: `expr as Type` (precedence 5, same as tuple_get)
         let cast = postfix(
             5,
-            just(Token::As)
-                .ignore_then(select! { Token::Tag(name) => Intern::<::std::string::String>::new(name.to_string()) }),
-            |expr: Spanned<Expr>, ty: Intern::<::std::string::String>, extra| {
+            just(Token::As).ignore_then(
+                select! { Token::Tag(name) => Intern::<std::string::String>::new(name.to_string()) },
+            ),
+            |expr: Spanned<Expr>, ty: Intern<std::string::String>, extra| {
                 Spanned(
                     Expr::Cast {
                         expr: Box::new(expr),
@@ -352,7 +353,7 @@ where
                         None => Expr::SelfRef(e.span()),
                         Some((field, args)) => Expr::FnCall(FnCall {
                             path: ModPath::new(
-                                Intern::<::std::string::String>::new("self".to_string()),
+                                Intern::<String>::new("self".to_string()),
                                 vec![field],
                                 e.span(),
                             ),
@@ -374,7 +375,7 @@ where
             .map_with(|tc, e| Spanned(Expr::TagCall(tc), e.span()))
             .boxed(),
         // Bare capitalized tag with no args (e.g. `None`, `True`, `False`).
-        select! { Token::Tag(name) => Intern::<::std::string::String>::new(name.to_string()) }
+        select! { Token::Tag(name) => Intern::<String>::new(name.to_string()) }
             .map_with(|name, e| Spanned(Expr::AnonymousTag(name, e.span()), e.span()))
             .boxed(),
     ))

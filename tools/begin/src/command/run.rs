@@ -1,7 +1,6 @@
-use flask::{DependencyKind, FlaskConfig};
+use flask::FlaskConfig;
 use ginc::cli::{Args, Emit};
 use ginc::compile::GinCompiler;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -36,12 +35,7 @@ pub fn begin_run(config: FlaskConfig, input: Option<PathBuf>, watch: bool) {
 
     // Resolve path dependencies relative to cwd (where flask.json lives).
     let config_dir = std::env::current_dir().unwrap_or_default();
-    let mut dependencies: HashMap<String, PathBuf> = HashMap::new();
-    for (name, dep) in config.dependencies() {
-        if let DependencyKind::Path { path: dep_path } = &dep.kind {
-            dependencies.insert(name.clone(), config_dir.join(dep_path));
-        }
-    }
+    let dependencies = super::resolve_path_dependencies(&config, &config_dir);
 
     // Determine executable path (same as input but without extension)
     let exe_path = path.with_extension("");

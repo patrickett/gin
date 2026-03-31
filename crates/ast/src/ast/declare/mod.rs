@@ -12,14 +12,14 @@ pub use value::*;
 pub struct Declare {
     doc_comment: Option<DocComment>,
     attributes: DeclareAttributes,
-    name: Intern::<::std::string::String>,
+    name: Intern<String>,
     pub name_span: SimpleSpan,
     params: Option<Parameters>,
     value: DeclareValue,
 }
 
 impl Declare {
-    pub fn new(name: Intern::<::std::string::String>, name_span: SimpleSpan, value: DeclareValue) -> Self {
+    pub fn new(name: Intern<String>, name_span: SimpleSpan, value: DeclareValue) -> Self {
         Declare {
             doc_comment: None,
             attributes: DeclareAttributes::default(),
@@ -44,7 +44,7 @@ impl Declare {
         self.doc_comment.as_ref()
     }
 
-    pub fn name(&self) -> Intern::<::std::string::String> {
+    pub fn name(&self) -> Intern<String> {
         self.name
     }
 
@@ -107,7 +107,7 @@ where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
     let params = params(expr.clone(), tag(expr.clone()));
-    let tag_name = select! { Token::Tag(name) => Intern::<::std::string::String>::new(name.to_string()) }
+    let tag_name = select! { Token::Tag(name) => Intern::<String>::new(name.to_string()) }
         .map_with(|name, e| (name, e.span()));
 
     let lhs_has = tag_name

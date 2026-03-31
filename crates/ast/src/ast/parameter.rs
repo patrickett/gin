@@ -36,7 +36,7 @@ pub enum ParamInfo {
 pub fn parameter<'t, I>(
     expr: impl Parser<'t, I, Spanned<Expr>, ParserError<'t>> + Clone + 't,
     tag: impl Parser<'t, I, Tag, ParserError<'t>> + Clone + 't,
-) -> impl Parser<'t, I, (Intern::<::std::string::String>, ParameterKind), ParserError<'t>> + Clone
+) -> impl Parser<'t, I, (Intern<String>, ParameterKind), ParserError<'t>> + Clone
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
@@ -67,14 +67,14 @@ where
     // Positional type argument: bare Tag with no name, e.g. `Ptr(Byte)`.
     // The tag name itself is used as the parameter key.
     let positional = tag.clone().map(|t: Tag| {
-        let key = Intern::<::std::string::String>::new(t.name().to_string());
+        let key = Intern::<String>::new(t.name().to_string());
         (key, ParameterKind::Tagged(t))
     });
 
     choice((named, positional))
 }
 
-pub type Parameters = IndexMap<Intern::<::std::string::String>, ParameterKind>;
+pub type Parameters = IndexMap<Intern<String>, ParameterKind>;
 
 pub fn params<'t, I>(
     expr: impl Parser<'t, I, Spanned<Expr>, ParserError<'t>> + Clone + 't,

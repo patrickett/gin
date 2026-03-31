@@ -5,18 +5,18 @@ use std::{
     path::PathBuf,
 };
 
-pub type TagMap = HashMap<Intern::<::std::string::String>, Declare>;
-pub type DefMap = HashMap<Intern::<::std::string::String>, Bind>;
+pub type TagMap = HashMap<Intern<String>, Declare>;
+pub type DefMap = HashMap<Intern<String>, Bind>;
 
 /// Symbol kind - distinguishes between different types of symbols.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SymbolKind {
     /// A tag/type definition (e.g., `Person ::= ...`)
-    Tag(Intern::<::std::string::String>),
+    Tag(Intern<String>),
     /// A function definition (e.g., `foo : { ... }`)
-    Function(Intern::<::std::string::String>),
+    Function(Intern<String>),
     /// A value binding (e.g., `x : 42`)
-    Bind(Intern::<::std::string::String>),
+    Bind(Intern<String>),
 }
 
 /// Compile-time symbol with source information.
@@ -26,7 +26,7 @@ pub enum SymbolKind {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Symbol {
     /// The symbol name (e.g., "http.web.handle" or "foo")
-    pub name: Intern::<::std::string::String>,
+    pub name: Intern<String>,
 
     /// Which file defined this symbol
     pub source_file: PathBuf,
@@ -37,7 +37,7 @@ pub struct Symbol {
 
 impl Symbol {
     /// Create a new symbol.
-    pub fn new(name: Intern::<::std::string::String>, source_file: PathBuf, kind: SymbolKind) -> Self {
+    pub fn new(name: Intern<String>, source_file: PathBuf, kind: SymbolKind) -> Self {
         Self {
             name,
             source_file,
@@ -46,7 +46,7 @@ impl Symbol {
     }
 
     /// Create a tag symbol.
-    pub fn tag(name: Intern::<::std::string::String>, source_file: PathBuf) -> Self {
+    pub fn tag(name: Intern<String>, source_file: PathBuf) -> Self {
         Self {
             name,
             source_file,
@@ -55,7 +55,7 @@ impl Symbol {
     }
 
     /// Create a function symbol.
-    pub fn function(name: Intern::<::std::string::String>, source_file: PathBuf) -> Self {
+    pub fn function(name: Intern<String>, source_file: PathBuf) -> Self {
         Self {
             name,
             source_file,
@@ -64,7 +64,7 @@ impl Symbol {
     }
 
     /// Create a bind symbol.
-    pub fn bind(name: Intern::<::std::string::String>, source_file: PathBuf) -> Self {
+    pub fn bind(name: Intern<String>, source_file: PathBuf) -> Self {
         Self {
             name,
             source_file,
@@ -99,7 +99,7 @@ impl Symbol {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SymbolTable {
     /// Map of symbol name to symbol information
-    pub symbols: HashMap<Intern::<::std::string::String>, Symbol>,
+    pub symbols: HashMap<Intern<String>, Symbol>,
 }
 
 impl SymbolTable {
@@ -116,17 +116,17 @@ impl SymbolTable {
     }
 
     /// Look up a symbol by name.
-    pub fn get(&self, name: &Intern::<::std::string::String>) -> Option<&Symbol> {
+    pub fn get(&self, name: &Intern<String>) -> Option<&Symbol> {
         self.symbols.get(name)
     }
 
     /// Check if a symbol exists.
-    pub fn contains(&self, name: &Intern::<::std::string::String>) -> bool {
+    pub fn contains(&self, name: &Intern<String>) -> bool {
         self.symbols.contains_key(name)
     }
 
     /// Get all function names.
-    pub fn function_names(&self) -> Vec<Intern::<::std::string::String>> {
+    pub fn function_names(&self) -> Vec<Intern<String>> {
         self.symbols
             .values()
             .filter(|s| s.is_function())
@@ -135,7 +135,7 @@ impl SymbolTable {
     }
 
     /// Get all bind names.
-    pub fn bind_names(&self) -> Vec<Intern::<::std::string::String>> {
+    pub fn bind_names(&self) -> Vec<Intern<String>> {
         self.symbols
             .values()
             .filter(|s| s.is_bind())
@@ -144,7 +144,7 @@ impl SymbolTable {
     }
 
     /// Get all tag names.
-    pub fn tag_names(&self) -> Vec<Intern::<::std::string::String>> {
+    pub fn tag_names(&self) -> Vec<Intern<String>> {
         self.symbols
             .values()
             .filter(|s| s.is_tag())
@@ -210,8 +210,8 @@ pub struct FileAst {
     pub uses: Vec<Import>,
     pub tags: TagMap,
     pub defs: DefMap,
-    pub private_defs: HashSet<Intern::<::std::string::String>>,
-    pub private_tags: HashSet<Intern::<::std::string::String>>,
+    pub private_defs: HashSet<Intern<String>>,
+    pub private_tags: HashSet<Intern<String>>,
     pub exprs: Vec<(Expr, SimpleSpan)>,
 }
 
@@ -228,16 +228,40 @@ impl FileAst {
         &self.defs
     }
 
-    pub fn private_defs(&self) -> &HashSet<Intern::<::std::string::String>> {
+    pub fn private_defs(&self) -> &HashSet<Intern<String>> {
         &self.private_defs
     }
 
-    pub fn private_tags(&self) -> &HashSet<Intern::<::std::string::String>> {
+    pub fn private_tags(&self) -> &HashSet<Intern<String>> {
         &self.private_tags
     }
 
     pub fn top_level_exprs(&self) -> &[(Expr, SimpleSpan)] {
         &self.exprs
+    }
+
+    /// Return sorted public tag names.
+    pub fn public_tag_names(&self) -> Vec<Intern<String>> {
+        let mut names: Vec<_> = self
+            .tags
+            .keys()
+            .filter(|n| !self.private_tags.contains(n))
+            .copied()
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Return sorted public def names.
+    pub fn public_def_names(&self) -> Vec<Intern<String>> {
+        let mut names: Vec<_> = self
+            .defs
+            .keys()
+            .filter(|n| !self.private_defs.contains(n))
+            .copied()
+            .collect();
+        names.sort();
+        names
     }
 }
 

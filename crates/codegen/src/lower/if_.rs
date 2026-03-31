@@ -1,6 +1,6 @@
 use crate::{prelude::*, ty_to_mlir};
-use typeck::Ty;
 use internment::Intern;
+use typeck::Ty;
 
 impl<'c> Lower<'c> for IfExpr {
     fn lower(
@@ -31,11 +31,14 @@ impl<'c> Lower<'c> for IfExpr {
             }
             IfCondition::Pattern { subject, tag } => {
                 let subject_val = subject.lower(ctx, block, symtab)?;
-                let variant_name = Intern::<::std::string::String>::new(tag.name().to_string());
+                let variant_name = Intern::<String>::new(tag.name().to_string());
                 let (_, expected_disc, _) = match ctx.ty_env.lookup_variant(variant_name) {
                     Some(v) => v,
                     None => {
-                        ctx.emit_internal(format!("Unknown variant '{}' in if pattern", tag.name()));
+                        ctx.emit_internal(format!(
+                            "Unknown variant '{}' in if pattern",
+                            tag.name()
+                        ));
                         return None;
                     }
                 };
@@ -67,7 +70,7 @@ impl<'c> Lower<'c> for IfExpr {
                 && let Tag::Generic(_, params, _) = tag
             {
                 let subject_val = subject.lower(ctx, block, symtab)?;
-                let variant_name = Intern::<::std::string::String>::new(tag.name().to_string());
+                let variant_name = Intern::<String>::new(tag.name().to_string());
                 let payload_fields = ctx
                     .ty_env
                     .lookup_variant(variant_name)

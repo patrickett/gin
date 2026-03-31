@@ -45,8 +45,8 @@ impl Hash for Variant {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Tag {
-    Nominal(Intern::<::std::string::String>, SimpleSpan),
-    Generic(Intern::<::std::string::String>, Parameters, SimpleSpan),
+    Nominal(Intern<String>, SimpleSpan),
+    Generic(Intern<String>, Parameters, SimpleSpan),
     Qualified(ModPath),
 }
 
@@ -143,7 +143,7 @@ where
             .boxed();
 
         // Simple tag name (capitalized)
-        let tag_name = select! { Token::Tag(name) => Intern::<::std::string::String>::new(name.to_string()) };
+        let tag_name = select! { Token::Tag(name) => Intern::<String>::new(name.to_string()) };
 
         // Parse nominal or generic tag
         let simple = tag_name

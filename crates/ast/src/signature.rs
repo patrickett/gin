@@ -1,10 +1,10 @@
-use crate::{ast::Bind, Declare, DeclareValue, FileAst, ParameterKind, Tag, Variant, Parameters};
+use crate::{Declare, DeclareValue, FileAst, ParameterKind, Parameters, Tag, Variant, ast::Bind};
 use internment::Intern;
+use lexer::GinLexer;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::Write;
-use lexer::GinLexer;
 
 /// Compute a SHA-256 hex digest of raw source text.
 ///
@@ -48,31 +48,19 @@ pub fn compute_interface_hash(ast: &FileAst) -> String {
 pub fn compute_lib_interface_hash(ast: &FileAst, exclude_main: bool) -> String {
     let mut hasher = Sha256::new();
 
-    let tags = ast.tags();
-    let defs = ast.defs();
-    // Hash only public tags sorted by name for determinism
-    let mut tag_names: Vec<&Intern::<::std::string::String>> = tags
-        .keys()
-        .filter(|n| !ast.private_tags().contains(n))
-        .collect();
-    tag_names.sort();
-
-    for name in tag_names {
-        let decl = tags.get(name).expect("tag should exist");
-        hash_tag_def(&mut hasher, name, decl);
+    // Hash only public tags (already sorted)
+    for name in ast.public_tag_names() {
+        let decl = ast.tags().get(&name).expect("tag should exist");
+        hash_tag_def(&mut hasher, &name, decl);
     }
 
-    // Hash only public defs sorted by name for determinism
-    let mut def_names: Vec<&Intern::<::std::string::String>> = defs
-        .keys()
-        .filter(|n| !ast.private_defs().contains(n))
-        .filter(|n| !(exclude_main && n.as_str() == "main"))
-        .collect();
-    def_names.sort();
-
-    for name in def_names {
-        let bind = defs.get(name).expect("def should exist");
-        hash_def_signature(&mut hasher, name, bind);
+    // Hash only public defs (already sorted), optionally excluding main
+    for name in ast.public_def_names() {
+        if exclude_main && name.as_str() == "main" {
+            continue;
+        }
+        let bind = ast.defs().get(&name).expect("def should exist");
+        hash_def_signature(&mut hasher, &name, bind);
     }
 
     format!("{:x}", hasher.finalize())
@@ -107,7 +95,7 @@ pub fn compute_aggregated_interface_hash(
 }
 
 /// Hash a tag definition: name + shape + parameter signatures.
-fn hash_tag_def(hasher: &mut Sha256, name: &Intern::<::std::string::String>, decl: &Declare) {
+fn hash_tag_def(hasher: &mut Sha256, name: &Intern<String>, decl: &Declare) {
     let _ = write!(hasher, "TAG:{}", name);
     hash_parameters(hasher, decl.params());
 
@@ -145,7 +133,7 @@ fn hash_tag_def(hasher: &mut Sha256, name: &Intern::<::std::string::String>, dec
 }
 
 /// Hash a def signature: name + parameter names/types. Body is excluded.
-fn hash_def_signature(hasher: &mut Sha256, name: &Intern::<::std::string::String>, bind: &Bind) {
+fn hash_def_signature(hasher: &mut Sha256, name: &Intern<String>, bind: &Bind) {
     let _ = write!(hasher, "DEF:{}", name.as_str());
     hash_parameters(hasher, bind.params());
     // Intentionally skip params.1 (BindValue) — that's the body.
@@ -278,10 +266,8 @@ pub fn extract_interface_signature(ast: &FileAst) -> InterfaceSignature {
     let mut defs = BTreeMap::new();
     let mut tags = BTreeMap::new();
 
-    for (name, decl) in ast.tags() {
-        if ast.private_tags().contains(name) {
-            continue;
-        }
+    for name in ast.public_tag_names() {
+        let decl = ast.tags().get(&name).expect("tag should exist");
         tags.insert(
             name.to_string(),
             TagSignature {
@@ -291,10 +277,8 @@ pub fn extract_interface_signature(ast: &FileAst) -> InterfaceSignature {
         );
     }
 
-    for (name, bind) in ast.defs() {
-        if ast.private_defs().contains(name) {
-            continue;
-        }
+    for name in ast.public_def_names() {
+        let bind = ast.defs().get(&name).expect("def should exist");
         defs.insert(
             name.to_string(),
             DefSignature {

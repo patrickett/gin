@@ -1,7 +1,6 @@
 // Test to verify span preservation in parsing
 
-mod helpers;
-use helpers::parse_str;
+use ast::parse_from_str as parse_str;
 
 fn main() {
     let source = "x + 5";

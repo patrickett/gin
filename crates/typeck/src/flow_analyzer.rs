@@ -1,28 +1,28 @@
 use std::collections::{HashMap, HashSet};
 
+use crate::flow::{FlowAnalysis, FlowContext, ImpossibleCheck, IndexOutOfBounds, TypeConstraint};
+use crate::r#type::{LiteralValue, Ty, TyEnv};
 use ast::ast::Spanned;
 use ast::ast::{
     Bind, BindValue, Expr, FileAst, FnCall, IfCondition, IfExpr, Loop, Pattern, WhenArm, WhenExpr,
 };
-use internment::Intern;
-use crate::flow::{FlowAnalysis, FlowContext, ImpossibleCheck, IndexOutOfBounds, TypeConstraint};
-use crate::r#type::{LiteralValue, Ty, TyEnv};
 use chumsky::span::{SimpleSpan, Span};
+use internment::Intern;
 
 /// Analyzes control flow to track type narrowing.
 pub struct FlowAnalyzer<'a> {
     ty_env: &'a TyEnv,
     result: FlowAnalysis,
     /// Track variables that are reassigned (reset narrowing).
-    reassigned: HashSet<Intern::<::std::string::String>>,
+    reassigned: HashSet<Intern<String>>,
     /// Stack of flow contexts for nested scopes.
     context_stack: Vec<FlowContext>,
     /// Current expression index for context mapping.
     expr_index: usize,
     /// Track which variables are in scope (parameters, let bindings).
-    in_scope: HashSet<Intern::<::std::string::String>>,
+    in_scope: HashSet<Intern<String>>,
     /// Track types of local variables for bounds checking.
-    locals: HashMap<Intern::<::std::string::String>, Ty>,
+    locals: HashMap<Intern<String>, Ty>,
 }
 
 impl<'a> FlowAnalyzer<'a> {
@@ -75,7 +75,8 @@ impl<'a> FlowAnalyzer<'a> {
         }
         // Add self if this is a method
         if bind.receiver_type().is_some() {
-            self.in_scope.insert(Intern::<::std::string::String>::new("self".to_string()));
+            self.in_scope
+                .insert(Intern::<String>::new("self".to_string()));
         }
     }
 
@@ -229,7 +230,7 @@ impl<'a> FlowAnalyzer<'a> {
                 let var_name = self.extract_var_name(subject);
 
                 if let Some(var) = var_name {
-                    let variant_name = Intern::<::std::string::String>::new(tag.name().to_string());
+                    let variant_name = Intern::<String>::new(tag.name().to_string());
 
                     // Look up which union this variant belongs to
                     if let Some((union_name, _, _)) = self.ty_env.lookup_variant(variant_name) {
@@ -296,7 +297,7 @@ impl<'a> FlowAnalyzer<'a> {
             for arm in &when_expr.arms {
                 match arm {
                     WhenArm::Is { pattern, body } => {
-                        let variant_name = Intern::<::std::string::String>::new(pattern.name().to_string());
+                        let variant_name = Intern::<String>::new(pattern.name().to_string());
 
                         if let Some((union_name, _, _)) = self.ty_env.lookup_variant(variant_name) {
                             let constraint = TypeConstraint::IsVariant(union_name, variant_name);
@@ -453,7 +454,7 @@ impl<'a> FlowAnalyzer<'a> {
         }
     }
 
-    fn extract_var_name(&self, expr: &Expr) -> Option<Intern::<::std::string::String>> {
+    fn extract_var_name(&self, expr: &Expr) -> Option<Intern<String>> {
         match expr {
             Expr::AnonymousTag(name, _) if self.in_scope.contains(name) => Some(*name),
             // Lowercase variable references are parsed as FnCall with no args and no path segments.
@@ -465,7 +466,7 @@ impl<'a> FlowAnalyzer<'a> {
                     None
                 }
             }
-            Expr::SelfRef(_) => Some(Intern::<::std::string::String>::new("self".to_string())),
+            Expr::SelfRef(_) => Some(Intern::<String>::new("self".to_string())),
             _ => None,
         }
     }

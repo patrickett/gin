@@ -11,8 +11,8 @@ pub struct ModPath {
     /// a child folder in the current directory.
     ///
     /// NOTE: If there is a name conflict it will error.
-    pub root: Intern::<::std::string::String>,
-    pub segments: Vec<Intern::<::std::string::String>>,
+    pub root: Intern<String>,
+    pub segments: Vec<Intern<String>>,
     /// Source location for diagnostic reporting.
     pub span: SimpleSpan,
 }
@@ -21,7 +21,7 @@ pub struct ModPath {
 
 impl ModPath {
     /// Construct a new `ModPath` from an owned root and segment list.
-    pub fn new(root: Intern::<::std::string::String>, segments: Vec<Intern::<::std::string::String>>, span: SimpleSpan) -> Self {
+    pub fn new(root: Intern<String>, segments: Vec<Intern<String>>, span: SimpleSpan) -> Self {
         Self {
             root,
             segments,
@@ -42,7 +42,7 @@ where
             just(Token::Dot)
                 .ignore_then(id)
                 .repeated()
-                .collect::<Vec<Intern::<::std::string::String>>>(),
+                .collect::<Vec<Intern<String>>>(),
         )
         .map_with(|(root, segs), e| ModPath::new(root, segs, e.span()))
 }
@@ -55,13 +55,13 @@ pub fn tag_path<'t, I>() -> impl Parser<'t, I, ModPath, ParserError<'t>>
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
-    select! { Token::Tag(name) => Intern::<::std::string::String>::new(name.to_string()) }
+    select! { Token::Tag(name) => Intern::<String>::new(name.to_string()) }
         .then(
             just(Token::Dot)
                 .ignore_then(id_token())
                 .repeated()
                 .at_least(1)
-                .collect::<Vec<Intern::<::std::string::String>>>(),
+                .collect::<Vec<Intern<String>>>(),
         )
         .map_with(|(root, segs), e| ModPath::new(root, segs, e.span()))
 }
@@ -73,13 +73,15 @@ pub fn tag_variant_path<'t, I>() -> impl Parser<'t, I, ModPath, ParserError<'t>>
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
-    select! { Token::Tag(name) => Intern::<::std::string::String>::new(name.to_string()) }
+    select! { Token::Tag(name) => Intern::<String>::new(name.to_string()) }
         .then(
             just(Token::Dot)
-                .ignore_then(select! { Token::Tag(name) => Intern::<::std::string::String>::new(name.to_string()) })
+                .ignore_then(
+                    select! { Token::Tag(name) => Intern::<String>::new(name.to_string()) },
+                )
                 .repeated()
                 .at_least(1)
-                .collect::<Vec<Intern::<::std::string::String>>>(),
+                .collect::<Vec<Intern<String>>>(),
         )
         .map_with(|(root, segs), e| ModPath::new(root, segs, e.span()))
 }

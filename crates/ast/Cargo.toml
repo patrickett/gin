@@ -14,7 +14,3 @@ semver = { workspace = true }
 database = { workspace = true }
 diagnostic = { workspace = true }
 salsa = { workspace = true }
-
-[dev-dependencies]
-ginc = { workspace = true }
-crossbeam-channel = { workspace = true }

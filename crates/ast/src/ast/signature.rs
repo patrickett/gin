@@ -5,7 +5,7 @@ use super::{Bind, Declare, DeclareValue, DocComment, ParameterKind, Tag};
 
 #[derive(Clone, Debug)]
 pub struct FunctionSignature {
-    pub name: Intern::<::std::string::String>,
+    pub name: Intern<String>,
     pub params: Vec<ParamSignature>,
     pub doc_comment: Option<DocComment>,
     pub is_private: bool,
@@ -13,7 +13,7 @@ pub struct FunctionSignature {
 
 #[derive(Clone, Debug)]
 pub struct TagSignature {
-    pub name: Intern::<::std::string::String>,
+    pub name: Intern<String>,
     pub value: TagValueSignature,
     pub doc_comment: Option<DocComment>,
     pub is_private: bool,
@@ -29,7 +29,7 @@ pub enum ParamSignature {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum TagValueSignature {
     Alias(Tag),
-    Record(Vec<(Intern::<::std::string::String>, ParamSignature)>),
+    Record(Vec<(Intern<String>, ParamSignature)>),
     Range(i128, i128),
     InRange(i128, i128),
 }
@@ -118,7 +118,7 @@ impl TagSignature {
             DeclareValue::Range(r) => TagValueSignature::Range(r.start, r.end),
             DeclareValue::InRange(r) => TagValueSignature::InRange(r.start, r.end),
             DeclareValue::Set() => {
-                TagValueSignature::Alias(Tag::Nominal(Intern::<::std::string::String>::new("Set".to_string())))
+                TagValueSignature::Alias(Tag::Nominal(Intern::<String>::new("Set".to_string())))
             }
         };
 

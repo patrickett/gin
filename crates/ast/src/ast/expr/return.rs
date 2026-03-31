@@ -22,7 +22,7 @@ where
     // return TagName - return creates an anonymous tag
     let anonymous_tag = just(Token::Return)
         .ignore_then(
-            select! { Token::Tag(name) => Intern::<::std::string::String>::new(name.to_string()) }
+            select! { Token::Tag(name) => Intern::<String>::new(name.to_string()) }
                 .map_with(|name, e| (name, e.span())),
         )
         .then_ignore(just(Token::Newline).or_not())

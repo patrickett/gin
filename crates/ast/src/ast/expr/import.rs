@@ -34,7 +34,7 @@ pub enum ImportSource {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ModuleImport {
     pub source: ImportSource,
-    pub alias: Option<Intern::<::std::string::String>>,
+    pub alias: Option<Intern<String>>,
 }
 
 impl ModuleImport {
