@@ -1,7 +1,7 @@
 //! Formatting for declaration nodes (e.g., `Area is 0...999`).
 
-use crate::visitor::FmtVisitor;
 use crate::align_ast::{AlignableNode, DelimiterKind};
+use crate::visitor::FmtVisitor;
 
 /// Rewrite a declaration node with proper formatting and alignment.
 ///
@@ -32,15 +32,11 @@ pub fn collect_alignable(visitor: &FmtVisitor, node: tree_sitter::Node) -> Optio
 
     for child in node.children(&mut cursor) {
         match child.kind() {
-            "tag" => {
+            "type_identifier" => {
                 // First part of prefix
                 prefix_end = child.end_byte();
             }
-            "params" => {
-                // Includes parameters in prefix
-                prefix_end = child.end_byte();
-            }
-            "type_params" => {
+            "type_parameters" => {
                 // Includes type parameters in prefix
                 prefix_end = child.end_byte();
             }
@@ -78,7 +74,7 @@ mod tests {
 
     #[test]
     fn test_simple_declaration() {
-        let source = "Area is 0...999\n";
+        let source = "Maybe is Some or None\n";
         let mut visitor = FmtVisitor::new(source, Config::default());
         let mut parser = tree_sitter::Parser::new();
         parser.set_language(&tree_sitter_gin::language()).unwrap();
@@ -86,15 +82,15 @@ mod tests {
 
         let root = tree.root_node();
         let decl = root.child(0).unwrap();
-        assert_eq!(decl.kind(), "declaration");
+        assert_eq!(decl.kind(), "declare_statement");
 
         let result = rewrite(&mut visitor, decl);
-        assert_eq!(result, Some("Area is 0...999".to_string()));
+        assert_eq!(result, Some("Maybe is Some or None".to_string()));
     }
 
     #[test]
     fn test_collect_alignable_simple() {
-        let source = "Area is 0...999\n";
+        let source = "Maybe is Some or None\n";
         let visitor = FmtVisitor::new(source, Config::default());
         let mut parser = tree_sitter::Parser::new();
         parser.set_language(&tree_sitter_gin::language()).unwrap();
@@ -107,7 +103,7 @@ mod tests {
         assert!(align_info.is_some());
         let info = align_info.unwrap();
         assert_eq!(info.kind, DelimiterKind::Is);
-        assert_eq!(info.prefix_display_width, 4); // "Area"
+        assert_eq!(info.prefix_display_width, 5); // "Maybe"
         assert_eq!(info.source_line, 0);
     }
 }
