@@ -38,6 +38,8 @@ pub enum Emit {
     Obj,
     /// Print MLIR text to stdout
     Mlir,
+    /// Print debug token listing to stdout
+    Tokens,
 }
 
 #[derive(Parser, Debug, Default)]

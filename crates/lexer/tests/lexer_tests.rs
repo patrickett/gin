@@ -463,3 +463,27 @@ fn test_format_string_empty() {
     );
     assert!(lexer.errors.is_empty());
 }
+
+#[test]
+fn test_debug_tokens_format() {
+    let output = lexer::debug_tokens("print(x + 1)");
+    let lines: Vec<&str> = output.lines().collect();
+
+    assert_eq!(lines[0], r#"[id: "print"] (0..5)"#);
+    assert_eq!(lines[1], "[(] (5..6)");
+    assert_eq!(lines[2], r#"[id: "x"] (6..7)"#);
+    assert_eq!(lines[3], "[+] (8..9)");
+    assert_eq!(lines[4], "[int: 1] (10..11)");
+    assert_eq!(lines[5], "[)] (11..12)");
+    assert!(!output.contains("errors"));
+}
+
+#[test]
+fn test_debug_tokens_with_indentation() {
+    let output = lexer::debug_tokens("foo:\n    bar\n  baz");
+    assert!(output.contains("[indent]"));
+    assert!(output.contains("[dedent]"));
+    assert!(output.contains(r#"[id: "foo"]"#));
+    assert!(output.contains(r#"[id: "bar"]"#));
+    assert!(output.contains(r#"[id: "baz"]"#));
+}

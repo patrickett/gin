@@ -9,6 +9,7 @@ use database::{
     input_database::{Db, InputDatabase},
 };
 use diagnostic::{Category, Symptom};
+use lexer::debug_tokens;
 use std::path::{Path, PathBuf};
 use typeck::TyEnv;
 use typeck::{analyze_file, analyze_package};
@@ -51,6 +52,14 @@ impl GinCompiler {
             None => return,
         };
 
+        if matches!(args.emit, crate::cli::Emit::Tokens) {
+            for file in &db_files {
+                let source = file.contents(&db);
+                print!("{}", debug_tokens(source));
+            }
+            return;
+        }
+
         // ── Phase 3: Resolve imports (binary mode only) ───────────────
         let all_files = if is_library {
             db_files.clone()
@@ -79,6 +88,7 @@ impl GinCompiler {
             crate::cli::Emit::Obj | crate::cli::Emit::Exe => {
                 emit_native(&merged_ast, &ty_env, args, &path, is_library)
             }
+            crate::cli::Emit::Tokens => unreachable!(),
         }
     }
 }

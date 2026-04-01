@@ -4,10 +4,12 @@
 // PERF: Handwritten lexer can be optimized for specific Gin syntax patterns
 // we can assume lowercase word is id and first letter upper is tag
 
+mod debug;
 mod format_string;
 mod token;
 
 use chumsky::span::SimpleSpan;
+pub use debug::{TokenSpanned, debug_tokens};
 use diagnostic::lex::LexSymptom;
 use format_string::*;
 use logos::{Lexer, Logos};
