@@ -1,10 +1,10 @@
 use crate::{addressof_string_global, prelude::*};
-use typeck::Ty;
+use typeck::{Ty, TyInfer};
 
 fn to_string_fn_name(ty: &Ty) -> String {
     match ty {
-        Ty::Int(_) => "Int.to_string".to_string(),
-        Ty::Float => "Float.to_string".to_string(),
+        Ty::Int { .. } => "Int.to_string".to_string(),
+        Ty::Float { .. } => "Float.to_string".to_string(),
         Ty::Bool => "Bool.to_string".to_string(),
         Ty::Unit => "Unit.to_string".to_string(),
         Ty::Opaque(name) | Ty::Record { name, .. } | Ty::Union { name, .. } => {
@@ -12,7 +12,6 @@ fn to_string_fn_name(ty: &Ty) -> String {
         }
         Ty::Array { .. } | Ty::Ptr { .. } | Ty::Ref { .. } => "Ptr.to_string".to_string(),
         Ty::Tuple(_) => "Int.to_string".to_string(),
-        Ty::Literal(_) => "Int.to_string".to_string(),
     }
 }
 
@@ -67,7 +66,7 @@ impl<'c> Lower<'c> for FormatString {
                 }
                 FormatPart::Expr(e) => {
                     let val = e.lower(ctx, block, symtab)?;
-                    let ty = ctx.ty_env.infer_expr(e, &std::collections::HashMap::new());
+                    let ty = e.infer_ty(&ctx.ty_env.infer_env(&std::collections::HashMap::new()));
                     let fn_name = to_string_fn_name(&ty);
                     let str_val = block.call(ctx.mlir, &fn_name, &[val], ctx.mlir.string_type());
                     let ptr = block.append_op(ctx.mlir.llvm_extractvalue(

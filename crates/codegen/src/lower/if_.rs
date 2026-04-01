@@ -1,6 +1,6 @@
 use crate::{prelude::*, ty_to_mlir};
 use internment::Intern;
-use typeck::Ty;
+use typeck::{Ty, TyInfer};
 
 impl<'c> Lower<'c> for IfExpr {
     fn lower(
@@ -54,8 +54,12 @@ impl<'c> Lower<'c> for IfExpr {
             .ret
             .0
             .as_ref()
-            .map(|e| ctx.ty_env.infer_expr(e, &std::collections::HashMap::new()))
-            .unwrap_or(Ty::Int(64));
+            .map(|e| e.infer_ty(&ctx.ty_env.infer_env(&std::collections::HashMap::new())))
+            .unwrap_or(Ty::Int {
+                width: 64,
+                signed: true,
+                value: None,
+            });
         let result_mlir = ty_to_mlir(&ret_ty, ctx.mlir);
 
         let then_region = Region::new();

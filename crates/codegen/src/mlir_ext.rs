@@ -498,6 +498,10 @@ impl Predicates {
     pub const SGT: u64 = 3;
     pub const SLE: u64 = 4;
     pub const SGE: u64 = 5;
+    pub const ULT: u64 = 6;
+    pub const UGT: u64 = 7;
+    pub const ULE: u64 = 8;
+    pub const UGE: u64 = 9;
 }
 
 /// Arithmetic operation names.
@@ -507,7 +511,9 @@ impl ArithOps {
     pub const SUB: &str = "arith.subi";
     pub const MUL: &str = "arith.muli";
     pub const DIV: &str = "arith.divsi";
+    pub const DIVU: &str = "arith.divui";
     pub const REM: &str = "arith.remsi";
+    pub const REMU: &str = "arith.remui";
     pub const ADDF: &str = "arith.addf";
     pub const SUBF: &str = "arith.subf";
     pub const MULF: &str = "arith.mulf";
@@ -518,6 +524,7 @@ impl ArithOps {
     pub const XORI: &str = "arith.xori";
     pub const SHLI: &str = "arith.shli";
     pub const SHRI: &str = "arith.shrsi";
+    pub const SHRUI: &str = "arith.shrui";
 }
 
 /// Floating-point comparison predicates for `arith.cmpf`.

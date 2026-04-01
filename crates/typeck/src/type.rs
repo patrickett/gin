@@ -1,34 +1,39 @@
-use std::collections::HashMap;
+//! Type representation, environment construction, and correctness checking.
+//!
+//! This module owns the "build" and "validate" phases of the type system:
+//!
+//! - **[`Ty`]** — the canonical type representation after resolving AST tag names.
+//! - **[`TyEnv`]** — the owned type environment, built from parsed ASTs. Holds the
+//!   resolved `tag_types` and `fn_return_types` maps, plus a `variant_map` for union
+//!   lookups. Construction happens in [`TyEnv::from_multiple_file_asts`].
+//! - **Check methods** — [`check_unknowns`], [`check_bind`], [`check_expr`], [`check_tag`]
+//!   walk the AST and accumulate diagnostics for unknown names, type mismatches, etc.
+//!
+//! Pure type inference ("given an env, what type does this expression have?") lives in
+//! [`infer.rs`] and is accessed through [`TyInferEnv`] / the [`TyInfer`](crate::TyInfer) trait.
+//! This module provides [`TyEnv::infer_env`] to bridge between the two.
 
-use ast::BinOp;
+use crate::{TyInfer, TyInferEnv, resolve_tag_from_map};
 use ast::WhenArm;
 use ast::{
-    Bind, BindValue, DeclareValue, Expr, FileAst, FormatPart, IfCondition, Literal, Loop,
-    ParameterKind, Tag,
+    Bind, BindValue, DeclareValue, Expr, FileAst, FormatPart, IfCondition, Loop, ParameterKind, Tag,
 };
 use internment::Intern;
-
-/// A concrete compile-time value carried by `Ty::Literal`.
-#[derive(Debug, Clone, PartialEq)]
-pub enum LiteralValue {
-    Int(i128),
-    Float(f64),
-}
-
-impl std::fmt::Display for LiteralValue {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            LiteralValue::Int(n) => write!(f, "{n}"),
-            LiteralValue::Float(n) => write!(f, "{n}"),
-        }
-    }
-}
+use std::collections::HashMap;
 
 /// Resolved type — the canonical representation after resolving `Tag` names against declarations.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ty {
-    Int(u8),
-    Float,
+    Int {
+        width: u8,
+        signed: bool,
+        /// Known compile-time value when constant-folded, otherwise `None`.
+        value: Option<i128>,
+    },
+    Float {
+        /// Known compile-time value when constant-folded, otherwise `None`.
+        value: Option<f64>,
+    },
     Bool,
     Unit,
     Record {
@@ -58,9 +63,6 @@ pub enum Ty {
     },
     /// Positional tuple VALUE — used for tuple literals `(e1, e2, …)`. Maps to an LLVM struct.
     Tuple(Vec<Ty>),
-    /// A known compile-time literal value (e.g. `3`, `1.5`).
-    /// In codegen this maps to the same MLIR type as the equivalent `Int`/`Float`.
-    Literal(LiteralValue),
 }
 
 impl Ty {
@@ -89,6 +91,38 @@ impl Ty {
         } else {
             vec![]
         }
+    }
+
+    pub fn is_int(&self) -> bool {
+        matches!(self, Ty::Int { .. })
+    }
+
+    pub fn is_unsigned_int(&self) -> bool {
+        matches!(self, Ty::Int { signed: false, .. })
+    }
+
+    pub fn is_signed_int(&self) -> bool {
+        matches!(self, Ty::Int { signed: true, .. })
+    }
+
+    pub fn is_float(&self) -> bool {
+        matches!(self, Ty::Float { .. })
+    }
+
+    pub fn is_ptr_or_ref(&self) -> bool {
+        matches!(self, Ty::Ptr { .. } | Ty::Ref { .. })
+    }
+
+    pub fn is_union(&self) -> bool {
+        matches!(self, Ty::Union { .. })
+    }
+
+    pub fn is_record(&self) -> bool {
+        matches!(self, Ty::Record { .. })
+    }
+
+    pub fn is_unit(&self) -> bool {
+        matches!(self, Ty::Unit)
     }
 }
 
@@ -157,7 +191,12 @@ impl TyEnv {
                 if !bind.attributes().matches_current_platform() {
                     continue;
                 }
-                let ret = infer_bind_ret(bind, &tag_types, &HashMap::new());
+                let env = TyInferEnv {
+                    tag_types: &tag_types,
+                    fn_return_types: &HashMap::new(),
+                    locals: &HashMap::new(),
+                };
+                let ret = bind.infer_ty(&env);
                 fn_return_types.insert(*name, ret);
             }
         }
@@ -168,7 +207,12 @@ impl TyEnv {
                 if !bind.attributes().matches_current_platform() {
                     continue;
                 }
-                let ret = infer_bind_ret(bind, &tag_types, &fn_return_types);
+                let env = TyInferEnv {
+                    tag_types: &tag_types,
+                    fn_return_types: &fn_return_types,
+                    locals: &HashMap::new(),
+                };
+                let ret = bind.infer_ty(&env);
                 fn_return_types.insert(*name, ret);
             }
         }
@@ -191,8 +235,15 @@ impl TyEnv {
     fn resolve_parameter_kind(&self, kind: &ParameterKind) -> Ty {
         match kind {
             ParameterKind::Tagged(tag) => self.resolve_tag(tag),
-            ParameterKind::Generic => Ty::Int(64),
-            ParameterKind::Default(expr) => self.infer_expr(expr, &HashMap::new()),
+            ParameterKind::Generic => Ty::Int {
+                width: 64,
+                signed: true,
+                value: None,
+            },
+            ParameterKind::Default(expr) => {
+                let empty: HashMap<Intern<String>, Ty> = HashMap::new();
+                expr.infer_ty(&self.infer_env(&empty))
+            }
         }
     }
 
@@ -206,11 +257,6 @@ impl TyEnv {
                 .map(|(name, kind)| (name, self.resolve_parameter_kind(kind)))
                 .collect(),
         }
-    }
-
-    /// Infer the return type of a binding.
-    pub fn return_ty(&self, bind: &Bind) -> Ty {
-        infer_bind_ret(bind, &self.tag_types, &self.fn_return_types)
     }
 
     /// Look up the pre-computed return type of a top-level function by name.
@@ -260,11 +306,6 @@ impl TyEnv {
         map
     }
 
-    /// Infer the type of an expression given a local variable environment.
-    pub fn infer_expr(&self, expr: &Expr, locals: &HashMap<Intern<String>, Ty>) -> Ty {
-        infer_expr_ty(expr, locals, &self.tag_types, &self.fn_return_types)
-    }
-
     /// Resolve the union type reachable via a dot expression from `name`.
     ///
     /// Returns `Some(Ty::Union { .. })` when `name` is either:
@@ -274,12 +315,24 @@ impl TyEnv {
     /// Returns `None` for non-union types and unresolvable names.
     pub fn resolve_dot_type(&self, ast: &FileAst, name: Intern<String>) -> Option<Ty> {
         if let Some(ty) = self.lookup_tag(name)
-            && matches!(ty, Ty::Union { .. })
+            && ty.is_union()
         {
             return Some(ty.clone());
         }
         let type_name = binding_type_annotation(ast, name)?;
         self.lookup_tag(type_name).cloned()
+    }
+
+    /// Build a `TyInferEnv` from this `TyEnv` and a local variable set.
+    ///
+    /// Callers then use `expr.infer_ty(&ty_env.infer_env(&locals))` directly,
+    /// keeping inference logic in [`infer.rs`](crate::infer).
+    pub fn infer_env<'a>(&'a self, locals: &'a dyn crate::LocalTypes) -> crate::TyInferEnv<'a> {
+        crate::TyInferEnv {
+            tag_types: &self.tag_types,
+            fn_return_types: &self.fn_return_types,
+            locals,
+        }
     }
 }
 
@@ -336,11 +389,11 @@ fn ty_union_max_field_size(variants: &[UnionVariant<'_>]) -> usize {
 
 pub fn ty_alignment(ty: &Ty) -> usize {
     match ty {
-        Ty::Int(8) | Ty::Bool => 1,
-        Ty::Int(16) => 2,
-        Ty::Int(32) => 4,
-        Ty::Int(128) => 16,
-        Ty::Int(_) | Ty::Float | Ty::Array { .. } | Ty::Ptr { .. } | Ty::Ref { .. } => 8,
+        Ty::Int { width: 8, .. } | Ty::Bool => 1,
+        Ty::Int { width: 16, .. } => 2,
+        Ty::Int { width: 32, .. } => 4,
+        Ty::Int { width: 128, .. } => 16,
+        Ty::Int { .. } | Ty::Float { .. } | Ty::Array { .. } | Ty::Ptr { .. } | Ty::Ref { .. } => 8,
         Ty::Unit | Ty::Opaque(_) => 8,
         Ty::Record { fields, .. } => fields
             .iter()
@@ -363,18 +416,17 @@ pub fn ty_alignment(ty: &Ty) -> usize {
             }
         }
         Ty::Tuple(fields) => fields.iter().map(ty_alignment).max().unwrap_or(1),
-        Ty::Literal(_) => 8,
     }
 }
 
 /// Returns the in-memory size (bytes) of a type without recursing into the typeck context.
 pub fn ty_byte_size_static(ty: &Ty) -> usize {
     match ty {
-        Ty::Int(8) | Ty::Bool => 1,
-        Ty::Int(16) => 2,
-        Ty::Int(32) => 4,
-        Ty::Int(128) => 16,
-        Ty::Int(_) | Ty::Float => 8,
+        Ty::Int { width: 8, .. } | Ty::Bool => 1,
+        Ty::Int { width: 16, .. } => 2,
+        Ty::Int { width: 32, .. } => 4,
+        Ty::Int { width: 128, .. } => 16,
+        Ty::Int { .. } | Ty::Float { .. } => 8,
         Ty::Array { .. } | Ty::Ptr { .. } | Ty::Ref { .. } => 8,
         Ty::Unit | Ty::Opaque(_) => 8,
         Ty::Record { fields, .. } => fields.iter().map(|(_, ft)| ty_byte_size_static(ft)).sum(),
@@ -395,12 +447,10 @@ pub fn ty_byte_size_static(ty: &Ty) -> usize {
             }
         }
         Ty::Tuple(fields) => fields.iter().map(ty_byte_size_static).sum(),
-        Ty::Literal(_) => 8,
     }
 }
 
 /// Canonical `Str` record type: `{ pointer: Ptr(Byte), len: Int }`.
-/// Single definition used by `builtin()`, `TyEnv` injection, and type inference.
 pub fn str_record_ty() -> Ty {
     Ty::Record {
         name: Intern::<String>::new("Str".to_string()),
@@ -408,12 +458,20 @@ pub fn str_record_ty() -> Ty {
             (
                 Intern::<String>::new("pointer".to_string()),
                 Box::new(Ty::Ptr {
-                    inner: Box::new(Ty::Int(8)),
+                    inner: Box::new(Ty::Int {
+                        width: 8,
+                        signed: false,
+                        value: None,
+                    }),
                 }),
             ),
             (
                 Intern::<String>::new("len".to_string()),
-                Box::new(Ty::Int(64)),
+                Box::new(Ty::Int {
+                    width: 64,
+                    signed: false,
+                    value: None,
+                }),
             ),
         ],
     }
@@ -491,11 +549,18 @@ fn resolve_name(
     if recursion_depth > 16 {
         return Ty::Opaque(name);
     }
-    // User declarations override builtins
     match raw.get(&name) {
         Some(DeclareValue::Alias(tag)) => resolve_tag_ref(tag, raw, recursion_depth + 1),
-        Some(DeclareValue::Range(range)) => Ty::Int(range_bit_width(range.start, range.end)),
-        Some(DeclareValue::InRange(range)) => Ty::Int(range_bit_width(range.start, range.end)),
+        Some(DeclareValue::Range(range)) => Ty::Int {
+            width: range_bit_width(range.start, range.end),
+            signed: range.start < 0,
+            value: None,
+        },
+        Some(DeclareValue::InRange(range)) => Ty::Int {
+            width: range_bit_width(range.start, range.end),
+            signed: range.start < 0,
+            value: None,
+        },
         Some(DeclareValue::Record(params)) => {
             let fields = params
                 .iter()
@@ -505,7 +570,11 @@ fn resolve_name(
                             resolve_tag_ref(tag, raw, recursion_depth + 1)
                         }
                         ParameterKind::Generic => Ty::Opaque(*field_name),
-                        ParameterKind::Default(_) => Ty::Int(64),
+                        ParameterKind::Default(_) => Ty::Int {
+                            width: 64,
+                            signed: true,
+                            value: None,
+                        },
                     };
                     (*field_name, Box::new(field_ty))
                 })
@@ -543,268 +612,6 @@ fn resolve_name(
             }
         }
         _ => Ty::Opaque(name),
-    }
-}
-
-fn resolve_tag_from_map(tag: &Tag, tag_types: &HashMap<Intern<String>, Ty>) -> Ty {
-    match tag {
-        Tag::Nominal(name, _) => tag_types.get(name).cloned().unwrap_or(Ty::Int(64)),
-        Tag::Generic(name, params, _) => match name.as_str() {
-            "Ptr" | "Ref" => {
-                let inner = params
-                    .values()
-                    .find_map(|kind| match kind {
-                        ParameterKind::Tagged(t) => Some(resolve_tag_from_map(t, tag_types)),
-                        _ => None,
-                    })
-                    .unwrap_or(Ty::Opaque(*name));
-                if name.as_str() == "Ptr" {
-                    Ty::Ptr {
-                        inner: Box::new(inner),
-                    }
-                } else {
-                    Ty::Ref {
-                        inner: Box::new(inner),
-                    }
-                }
-            }
-            _ => tag_types.get(name).cloned().unwrap_or(Ty::Opaque(*name)),
-        },
-        Tag::Qualified(path) => {
-            // For qualified types like Bool.True, we need to resolve them
-            // to the type of the variant. The type of a variant is the union type itself.
-            // E.g., Bool.True has type Bool (the union type)
-            let union_name = path.root;
-            tag_types
-                .get(&union_name)
-                .cloned()
-                .unwrap_or(Ty::Opaque(union_name))
-        }
-    }
-}
-
-/// Resolve a `ParameterKind` to a `Ty` for use in standalone functions.
-///
-/// This is the non-method version of `TyEnv::resolve_parameter_kind`,
-/// used when we don't have a `TyEnv` available but have the raw maps.
-fn resolve_parameter_kind_with(
-    kind: &ParameterKind,
-    tag_types: &HashMap<Intern<String>, Ty>,
-    fn_return_types: &HashMap<Intern<String>, Ty>,
-) -> Ty {
-    match kind {
-        ParameterKind::Tagged(tag) => resolve_tag_from_map(tag, tag_types),
-        ParameterKind::Generic => Ty::Int(64),
-        ParameterKind::Default(expr) => {
-            infer_expr_ty(expr, &HashMap::new(), tag_types, fn_return_types)
-        }
-    }
-}
-
-fn infer_bind_ret(
-    bind: &Bind,
-    tag_types: &HashMap<Intern<String>, Ty>,
-    fn_return_types: &HashMap<Intern<String>, Ty>,
-) -> Ty {
-    // Explicit annotation wins.
-    if let Some(tag) = &bind.return_tag {
-        return resolve_tag_from_map(tag, tag_types);
-    }
-
-    let mut locals: HashMap<Intern<String>, Ty> = match bind.params().as_ref() {
-        None => HashMap::new(),
-        Some(params) => params
-            .iter()
-            .map(|(name, kind)| {
-                (
-                    *name,
-                    resolve_parameter_kind_with(kind, tag_types, fn_return_types),
-                )
-            })
-            .collect(),
-    };
-    if let Some(recv_tag) = bind.receiver_type() {
-        let recv_ty = resolve_tag_from_map(recv_tag, tag_types);
-        locals.insert(Intern::<String>::new("self".to_string()), recv_ty);
-    }
-
-    match bind.value() {
-        BindValue::Expr(expr) => infer_expr_ty(expr, &locals, tag_types, fn_return_types),
-        BindValue::Body { ret, .. } => match &ret.0 {
-            Some(expr) => infer_expr_ty(expr, &locals, tag_types, fn_return_types),
-            None => Ty::Unit,
-        },
-        BindValue::Extern => Ty::Unit,
-    }
-}
-
-pub fn infer_expr_ty(
-    expr: &Expr,
-    locals: &HashMap<Intern<String>, Ty>,
-    tag_types: &HashMap<Intern<String>, Ty>,
-    fn_return_types: &HashMap<Intern<String>, Ty>,
-) -> Ty {
-    match expr {
-        Expr::Lit(lit) => match lit {
-            Literal::Int(n) => Ty::Literal(LiteralValue::Int(*n)),
-            Literal::Number(n) => Ty::Literal(LiteralValue::Int(*n as i128)),
-            Literal::Float(f) => Ty::Literal(LiteralValue::Float(*f)),
-            Literal::String(_) => str_record_ty(),
-        },
-        Expr::Binary(bin) => {
-            if bin.op.is_comparison() {
-                return Ty::Bool;
-            }
-            let lhs_ty = infer_expr_ty(&bin.lhs, locals, tag_types, fn_return_types);
-            let rhs_ty = infer_expr_ty(&bin.rhs, locals, tag_types, fn_return_types);
-            match (&lhs_ty, &rhs_ty) {
-                (Ty::Literal(LiteralValue::Int(a)), Ty::Literal(LiteralValue::Int(b))) => {
-                    let folded = match bin.op {
-                        BinOp::Add => Some(a + b),
-                        BinOp::Subtract => Some(a - b),
-                        BinOp::Multiply => Some(a * b),
-                        BinOp::Divide if *b != 0 => Some(a / b),
-                        BinOp::Modulo if *b != 0 => Some(a % b),
-                        _ => None,
-                    };
-                    folded
-                        .map(|v| Ty::Literal(LiteralValue::Int(v)))
-                        .unwrap_or(lhs_ty)
-                }
-                (Ty::Literal(LiteralValue::Float(a)), Ty::Literal(LiteralValue::Float(b))) => {
-                    let folded = match bin.op {
-                        BinOp::Add => Some(a + b),
-                        BinOp::Subtract => Some(a - b),
-                        BinOp::Multiply => Some(a * b),
-                        BinOp::Divide => Some(a / b),
-                        _ => None,
-                    };
-                    folded
-                        .map(|v| Ty::Literal(LiteralValue::Float(v)))
-                        .unwrap_or(lhs_ty)
-                }
-                _ => {
-                    if matches!(lhs_ty, Ty::Float | Ty::Literal(LiteralValue::Float(_))) {
-                        lhs_ty
-                    } else if matches!(rhs_ty, Ty::Float | Ty::Literal(LiteralValue::Float(_))) {
-                        rhs_ty
-                    } else {
-                        lhs_ty
-                    }
-                }
-            }
-        }
-        Expr::FnCall(call) => {
-            let name = call.path.root;
-            if let Some(local_ty) = locals.get(&name) {
-                return local_ty.clone();
-            }
-            fn_return_types.get(&name).cloned().unwrap_or(Ty::Int(64))
-        }
-        Expr::Bind(bind) => infer_bind_ret(bind, tag_types, fn_return_types),
-        Expr::TagCall(tc) => {
-            // Try union variant first.
-            if let Some(ty) = tag_types.values().find_map(|ty| {
-                if let Ty::Union { variants, .. } = ty
-                    && variants.iter().any(|(vname, _)| *vname == tc.name)
-                {
-                    return Some(ty.clone());
-                }
-                None
-            }) {
-                return ty;
-            }
-            // Fall back to a record type with that name.
-            tag_types
-                .get(&tc.name)
-                .cloned()
-                .unwrap_or(Ty::Opaque(tc.name))
-        }
-        Expr::AnonymousTag(name, _) => Ty::Opaque(*name),
-        Expr::FormatString(_) => str_record_ty(),
-        Expr::Loop(_) => Ty::Unit,
-        Expr::When(when_expr) => {
-            // Prefer the else arm; fall back to the first arm's body.
-            let body = when_expr
-                .arms
-                .iter()
-                .find_map(|a| {
-                    if let WhenArm::Else(b) = a {
-                        Some(b.as_ref())
-                    } else {
-                        None
-                    }
-                })
-                .or_else(|| {
-                    when_expr.arms.first().map(|a| match a {
-                        WhenArm::Cond { body, .. }
-                        | WhenArm::Is { body, .. }
-                        | WhenArm::Else(body) => body.as_ref(),
-                    })
-                });
-            match body {
-                Some(b) => infer_expr_ty(b, locals, tag_types, fn_return_types),
-                None => Ty::Unit,
-            }
-        }
-        Expr::If(_) => Ty::Unit,
-        Expr::Range(_) => Ty::Opaque(Intern::<String>::new("Range".to_string())),
-        Expr::SelfRef(_) => locals
-            .get(&Intern::<String>::new("self".to_string()))
-            .cloned()
-            .unwrap_or_else(|| Ty::Opaque(Intern::<String>::new("Self".to_string()))),
-        Expr::TupleAlloc { init, size } => {
-            let elem = infer_expr_ty(init, locals, tag_types, fn_return_types);
-            Ty::Array {
-                elem: Box::new(elem),
-                size: *size,
-            }
-        }
-        Expr::TupleGet { base, index } => {
-            match infer_expr_ty(base, locals, tag_types, fn_return_types) {
-                Ty::Array { elem, .. } => *elem,
-                Ty::Tuple(fields) => fields.into_iter().nth(*index).unwrap_or(Ty::Int(64)),
-                _ => Ty::Int(8),
-            }
-        }
-        Expr::TupleSet { .. } => Ty::Unit,
-        Expr::Cast { ty, .. } => Ty::Opaque(*ty),
-        Expr::BufGet { buf, .. } => match infer_expr_ty(buf, locals, tag_types, fn_return_types) {
-            Ty::Array { elem, .. } => *elem,
-            _ => Ty::Int(8),
-        },
-        Expr::TupleLit(elems) => {
-            let field_tys = elems
-                .iter()
-                .map(|e| infer_expr_ty(e, locals, tag_types, fn_return_types))
-                .collect();
-            Ty::Tuple(field_tys)
-        }
-        Expr::BufSet { .. } => Ty::Unit,
-        Expr::TakePtr(inner) => {
-            let inner_ty = infer_expr_ty(inner, locals, tag_types, fn_return_types);
-            Ty::Ptr {
-                inner: Box::new(inner_ty),
-            }
-        }
-        Expr::TakeRef(inner) => {
-            let inner_ty = infer_expr_ty(inner, locals, tag_types, fn_return_types);
-            Ty::Ref {
-                inner: Box::new(inner_ty),
-            }
-        }
-        Expr::Deref(inner) => match infer_expr_ty(inner, locals, tag_types, fn_return_types) {
-            Ty::Ptr { inner } | Ty::Ref { inner } => *inner,
-            _ => Ty::Int(64),
-        },
-        Expr::Negate(inner) => {
-            let ty = infer_expr_ty(inner, locals, tag_types, fn_return_types);
-            match ty {
-                Ty::Literal(LiteralValue::Int(n)) => Ty::Literal(LiteralValue::Int(-n)),
-                Ty::Literal(LiteralValue::Float(f)) => Ty::Literal(LiteralValue::Float(-f)),
-                other => other,
-            }
-        }
     }
 }
 
@@ -853,7 +660,14 @@ impl TyEnv {
                             type_symptom::unused_binding(inner.name_span, name.to_string())
                                 .accumulate(db);
                         }
-                        body_locals.insert(name, self.return_ty(inner));
+                        body_locals.insert(name, {
+                            let env = TyInferEnv {
+                                tag_types: &self.tag_types,
+                                fn_return_types: &self.fn_return_types,
+                                locals: &HashMap::new(),
+                            };
+                            inner.infer_ty(&env)
+                        });
                     } else {
                         self.check_expr(expr, db, &body_locals);
                     }
@@ -877,7 +691,7 @@ impl TyEnv {
             Expr::FnCall(call) => {
                 let name = call.path.root;
                 if let Some(args) = &call.args {
-                    if self.fn_return_ty(&name).is_none() && !is_builtin_func(name.as_str()) {
+                    if self.fn_return_ty(&name).is_none() {
                         type_symptom::unknown_binding(call.path.span, name.to_string())
                             .accumulate(db);
                     }
@@ -898,7 +712,10 @@ impl TyEnv {
             }
             Expr::When(w) => {
                 // Infer subject type once for pattern-variant checking.
-                let subject_ty = w.subject.as_ref().map(|s| self.infer_expr(s, locals));
+                let subject_ty = w
+                    .subject
+                    .as_ref()
+                    .map(|s| s.infer_ty(&self.infer_env(locals)));
                 if let Some(subject) = &w.subject {
                     self.check_expr(subject, db, locals);
                 }
@@ -1147,8 +964,4 @@ fn expr_references_name(expr: &Expr, name: Intern<String>) -> bool {
         }
         Expr::Lit(_) | Expr::SelfRef(_) | Expr::AnonymousTag(..) | Expr::TagCall(_) => false,
     }
-}
-
-fn is_builtin_func(name: &str) -> bool {
-    matches!(name, "syscall" | "float_bits" | "print" | "println")
 }

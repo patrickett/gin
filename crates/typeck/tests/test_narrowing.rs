@@ -35,8 +35,12 @@ fn test_inrange_int32_resolves_to_32bit() {
 
     assert_eq!(
         ty,
-        Ty::Int(32),
-        "Int is in -2147483648...2147483647 (i32 range) should resolve to Ty::Int(32), not Int(64)"
+        Ty::Int {
+            width: 32,
+            signed: true,
+            value: None
+        },
+        "Int is in -2147483648...2147483647 (i32 range) should resolve to Ty::Int {{ width: 32, signed: true }}"
     );
 }
 
@@ -53,8 +57,12 @@ fn test_inrange_int8_resolves_to_8bit() {
 
     assert_eq!(
         ty,
-        Ty::Int(8),
-        "SmallInt is in -128...127 (i8 range) should resolve to Ty::Int(8)"
+        Ty::Int {
+            width: 8,
+            signed: true,
+            value: None
+        },
+        "SmallInt is in -128...127 (i8 range) should resolve to Ty::Int {{ width: 8, signed: true }}"
     );
 }
 
@@ -71,8 +79,12 @@ fn test_inrange_int16_resolves_to_16bit() {
 
     assert_eq!(
         ty,
-        Ty::Int(16),
-        "MediumInt is in -32768...32767 (i16 range) should resolve to Ty::Int(16)"
+        Ty::Int {
+            width: 16,
+            signed: true,
+            value: None
+        },
+        "MediumInt is in -32768...32767 (i16 range) should resolve to Ty::Int {{ width: 16, signed: true }}"
     );
 }
 
@@ -89,8 +101,12 @@ fn test_range_type_also_resolves_correctly() {
 
     assert_eq!(
         ty,
-        Ty::Int(8),
-        "Byte is 0...255 (u8 range) should resolve to Ty::Int(8)"
+        Ty::Int {
+            width: 8,
+            signed: false,
+            value: None
+        },
+        "Byte is 0...255 (u8 range) should resolve to Ty::Int {{ width: 8, signed: false }}"
     );
 }
 

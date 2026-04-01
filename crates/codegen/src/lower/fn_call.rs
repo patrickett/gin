@@ -14,9 +14,7 @@ impl<'c> Lower<'c> for FnCall {
             if let Some(ty) = ctx.var_types.borrow().get(root).cloned() {
                 // Unwrap one level of Ptr/Ref for auto-deref field access.
                 let record_ty = match &ty {
-                    Ty::Ptr { inner } | Ty::Ref { inner }
-                        if matches!(inner.as_ref(), Ty::Record { .. }) =>
-                    {
+                    Ty::Ptr { inner } | Ty::Ref { inner } if inner.is_record() => {
                         inner.as_ref().clone()
                     }
                     other => other.clone(),
@@ -104,18 +102,22 @@ impl<'c> Lower<'c> for FnCall {
                         return Some(block.call(ctx.mlir, mangled.as_str(), &args, return_type));
                     }
                     _ => {
-                        // Primitive type method dispatch: Int, I128, Float, Bool, etc.
-                        let prim_name = match &record_ty {
-                            Ty::Int(128) => Some("I128"),
-                            Ty::Int(64) => Some("Int"),
-                            Ty::Int(32) => Some("I32"),
-                            Ty::Int(16) => Some("I16"),
-                            Ty::Int(8) => Some("Byte"),
-                            Ty::Float => Some("Float"),
-                            Ty::Bool => Some("Bool"),
-                            _ => None,
+                        let canonical = match &record_ty {
+                            Ty::Int { width, signed, .. } => Ty::Int {
+                                width: *width,
+                                signed: *signed,
+                                value: None,
+                            },
+                            Ty::Float { .. } => Ty::Float { value: None },
+                            other => other.clone(),
                         };
-                        if let Some(type_name) = prim_name {
+                        if let Some(type_name) = ctx
+                            .ty_env
+                            .tag_types
+                            .iter()
+                            .find(|(_, ty)| **ty == canonical)
+                            .map(|(n, _)| *n)
+                        {
                             let method = self.path.segments.last().unwrap();
                             let mangled =
                                 Intern::<String>::new(format!("{type_name}.{}", method.as_str()));
@@ -215,7 +217,11 @@ impl<'c> Lower<'c> for FnCall {
                     .borrow()
                     .get(func_name.as_str())
                     .cloned()
-                    .unwrap_or(Ty::Int(64));
+                    .unwrap_or(Ty::Int {
+                        width: 64,
+                        signed: true,
+                        value: None,
+                    });
                 let elem_mlir_ty = ty_to_mlir(&ty, ctx.mlir);
                 let loc = ctx.location();
                 return block.load_typed(ctx, ptr, elem_mlir_ty, loc);

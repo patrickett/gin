@@ -1,14 +1,17 @@
 //! Compilation orchestration — the main compiler pipeline.
 
-use typeck::{analyze_file, analyze_package};
 use crate::cli::Args;
-use database::{File, input_database::{Db, InputDatabase}};
-use codegen::emit::native;
 use ast::FileAst;
+use codegen::emit::native;
 use crossbeam_channel::unbounded;
+use database::{
+    File,
+    input_database::{Db, InputDatabase},
+};
 use diagnostic::{Category, Symptom};
 use std::path::{Path, PathBuf};
 use typeck::TyEnv;
+use typeck::{analyze_file, analyze_package};
 
 /// Analogous to the `ginc` command
 pub struct GinCompiler;
@@ -83,7 +86,7 @@ impl GinCompiler {
 // ── File Collection ─────────────────────────────────────────────────────────
 
 /// Collect all .gin file paths in a directory recursively, skipping `target/`.
-fn collect_gin_files_recursive(dir: &Path) -> Vec<PathBuf> {
+pub fn collect_gin_files_recursive(dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return files;

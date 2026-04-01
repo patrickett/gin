@@ -17,17 +17,17 @@ use ::ast::{
 use chumsky::span::SimpleSpan;
 use diagnostic::codegen::CodegenSymptom;
 use internment::Intern;
-use typeck::{LiteralValue, Ty, TyEnv};
+use typeck::{LocalTypes, Ty, TyEnv, TyInfer, TyInferEnv};
 
 /// Convert a resolved `Ty` to its MLIR `Type` representation.
 pub fn ty_to_mlir<'c>(ty: &Ty, ctx: &'c Context) -> Type<'c> {
     match ty {
-        Ty::Int(8) => IntegerType::new(ctx, 8).into(),
-        Ty::Int(16) => IntegerType::new(ctx, 16).into(),
-        Ty::Int(32) => IntegerType::new(ctx, 32).into(),
-        Ty::Int(128) => IntegerType::new(ctx, 128).into(),
-        Ty::Int(_) => ctx.i64(),
-        Ty::Float => ctx.f64(),
+        Ty::Int { width: 8, .. } => IntegerType::new(ctx, 8).into(),
+        Ty::Int { width: 16, .. } => IntegerType::new(ctx, 16).into(),
+        Ty::Int { width: 32, .. } => IntegerType::new(ctx, 32).into(),
+        Ty::Int { width: 128, .. } => IntegerType::new(ctx, 128).into(),
+        Ty::Int { .. } => ctx.i64(),
+        Ty::Float { .. } => ctx.f64(),
         Ty::Bool => ctx.i1(),
         Ty::Union { variants, .. } => {
             // Check if all variants have no fields
@@ -92,14 +92,6 @@ pub fn ty_to_mlir<'c>(ty: &Ty, ctx: &'c Context) -> Type<'c> {
             r#type::r#struct(ctx, &field_types, false)
         }
         Ty::Unit | Ty::Opaque(_) => ctx.i64(),
-        Ty::Literal(LiteralValue::Int(n)) => {
-            if *n > i64::MAX as i128 || *n < i64::MIN as i128 {
-                ctx.i128()
-            } else {
-                ctx.i64()
-            }
-        }
-        Ty::Literal(LiteralValue::Float(_)) => ctx.f64(),
         Ty::Array { .. } | Ty::Ptr { .. } | Ty::Ref { .. } => ctx.llvm_ptr(),
         Ty::Tuple(fields) => {
             let field_types: Vec<Type<'c>> = fields.iter().map(|f| ty_to_mlir(f, ctx)).collect();
@@ -246,6 +238,12 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
 
     pub fn drain_symptoms(&self) -> Vec<CodegenSymptom> {
         self.symptoms.borrow_mut().drain(..).collect()
+    }
+}
+
+impl LocalTypes for CodegenContext<'_, '_> {
+    fn get_type(&self, name: &Intern<String>) -> Option<Ty> {
+        self.var_types.borrow().get(name.as_str()).cloned()
     }
 }
 
@@ -468,7 +466,7 @@ fn emit_tuple_lit_global<'c>(
 
     let locals: HashMap<Intern<String>, Ty> = HashMap::new();
     if let Some(first_elem) = elems.first() {
-        let elem_ty = ctx.ty_env.infer_expr(first_elem, &locals);
+        let elem_ty = first_elem.infer_ty(&ctx.ty_env.infer_env(&locals));
         ctx.global_const_elems
             .borrow_mut()
             .insert(name.to_string(), elem_ty);
@@ -535,7 +533,7 @@ fn emit_tuple_alloc_global<'c>(
     let loc = context.unknown_loc();
 
     let locals: HashMap<Intern<String>, Ty> = HashMap::new();
-    let elem_ty = ctx.ty_env.infer_expr(init, &locals);
+    let elem_ty = init.infer_ty(&ctx.ty_env.infer_env(&locals));
     let elem_mlir_ty = ty_to_mlir(&elem_ty, context);
     let array_mlir_ty = r#type::array(elem_mlir_ty, size as u32);
 
@@ -726,8 +724,12 @@ impl<'c> Lower<'c> for Expr {
                     .iter()
                     .map(|(k, v)| (Intern::<String>::new(k.clone()), v.clone()))
                     .collect();
-                let src_ty = ctx.ty_env.infer_expr(&expr.0, &locals);
-                let dst_ty = tag_name_to_ty(*ty);
+                let src_ty = expr.0.infer_ty(&ctx.ty_env.infer_env(&locals));
+                let dst_ty = ctx.ty_env.lookup_tag(*ty).cloned().unwrap_or(Ty::Int {
+                    width: 64,
+                    signed: true,
+                    value: None,
+                });
                 lower_cast(ctx, block, val, &src_ty, &dst_ty)
             }
             Expr::TakePtr(inner) | Expr::TakeRef(inner) => {
@@ -741,9 +743,13 @@ impl<'c> Lower<'c> for Expr {
                     .iter()
                     .map(|(k, v)| (Intern::<String>::new(k.clone()), v.clone()))
                     .collect();
-                let pointee_ty = match ctx.ty_env.infer_expr(&inner.0, &locals) {
+                let pointee_ty = match inner.0.infer_ty(&ctx.ty_env.infer_env(&locals)) {
                     Ty::Ptr { inner } | Ty::Ref { inner } => *inner,
-                    _ => Ty::Int(64),
+                    _ => Ty::Int {
+                        width: 64,
+                        signed: true,
+                        value: None,
+                    },
                 };
                 let mlir_ty = ty_to_mlir(&pointee_ty, ctx.mlir);
                 let loc = ctx.location();
@@ -758,8 +764,8 @@ impl<'c> Lower<'c> for Expr {
                     .iter()
                     .map(|(k, v)| (Intern::<String>::new(k.clone()), v.clone()))
                     .collect();
-                let ty = ctx.ty_env.infer_expr(inner, &locals);
-                if matches!(ty, Ty::Float | Ty::Literal(LiteralValue::Float(_))) {
+                let ty = inner.infer_ty(&ctx.ty_env.infer_env(&locals));
+                if ty.is_float() {
                     let neg_op = OperationBuilder::new("arith.negf", loc)
                         .add_operands(&[val])
                         .add_results(&[ctx.mlir.f64()])
@@ -799,7 +805,12 @@ pub fn lower_function<'c>(
         .map(|(_, ty)| ty_to_mlir(ty, ctx.mlir))
         .collect();
 
-    let return_ty = ctx.ty_env.return_ty(bind);
+    let env = TyInferEnv {
+        tag_types: &ctx.ty_env.tag_types,
+        fn_return_types: &ctx.ty_env.fn_return_types,
+        locals: &HashMap::new(),
+    };
+    let return_ty = bind.infer_ty(&env);
     let ret_types: Vec<Type<'c>> = match &return_ty {
         Ty::Unit => vec![],
         ty => vec![ty_to_mlir(ty, ctx.mlir)],
@@ -906,7 +917,7 @@ fn lower_take_ptr<'c>(
         .iter()
         .map(|(k, v)| (Intern::<String>::new(k.clone()), v.clone()))
         .collect();
-    let elem_ty = ctx.ty_env.infer_expr(inner, &locals);
+    let elem_ty = inner.infer_ty(&ctx.ty_env.infer_env(&locals));
     let mlir_ty = ty_to_mlir(&elem_ty, ctx.mlir);
     let loc = ctx.location();
     let ptr = block.alloca_typed(ctx.mlir, mlir_ty, loc);
@@ -917,12 +928,12 @@ fn lower_take_ptr<'c>(
 /// Returns the number of bytes an element of type `ty` occupies in memory.
 fn ty_byte_size(ty: &Ty) -> usize {
     match ty {
-        Ty::Int(8) => 1,
-        Ty::Int(16) => 2,
-        Ty::Int(32) => 4,
-        Ty::Int(128) => 16,
-        Ty::Int(_) => 8,
-        Ty::Float => 8,
+        Ty::Int { width: 8, .. } => 1,
+        Ty::Int { width: 16, .. } => 2,
+        Ty::Int { width: 32, .. } => 4,
+        Ty::Int { width: 128, .. } => 16,
+        Ty::Int { .. } => 8,
+        Ty::Float { .. } => 8,
         Ty::Bool => 1,
         Ty::Array { .. } | Ty::Ptr { .. } | Ty::Ref { .. } => 8,
         Ty::Unit | Ty::Opaque(_) | Ty::Record { .. } => 8,
@@ -952,12 +963,11 @@ fn ty_byte_size(ty: &Ty) -> usize {
             }
         }
         Ty::Tuple(fields) => fields.iter().map(ty_byte_size).sum(),
-        Ty::Literal(_) => 8,
     }
 }
 
 /// Look up the element type of a base expression that should have `Ty::Array`.
-/// Falls back to `Ty::Int(8)` (byte) if the type cannot be determined.
+/// Falls back to `Ty::Int { width: 8, signed: false }` (byte) if the type cannot be determined.
 fn elem_ty_of_array_expr(base: &Spanned<Expr>, ctx: &CodegenContext) -> Ty {
     let base: &Expr = base;
     if let Expr::FnCall(call) = base
@@ -972,7 +982,11 @@ fn elem_ty_of_array_expr(base: &Spanned<Expr>, ctx: &CodegenContext) -> Ty {
             return elem_ty;
         }
     }
-    Ty::Int(8)
+    Ty::Int {
+        width: 8,
+        signed: false,
+        value: None,
+    }
 }
 
 fn lower_tuple_alloc<'c>(
@@ -985,7 +999,7 @@ fn lower_tuple_alloc<'c>(
     let loc = ctx.location();
 
     // Infer element type from init expression.
-    let elem_ty = ctx.ty_env.infer_expr(init, &HashMap::new());
+    let elem_ty = init.infer_ty(&ctx.ty_env.infer_env(&HashMap::new()));
     let elem_bytes = ty_byte_size(&elem_ty);
     let total_bytes = size * elem_bytes;
 
@@ -1026,7 +1040,7 @@ fn lower_tuple_get<'c>(
             .iter()
             .map(|(k, v)| (Intern::<String>::new(k.clone()), v.clone()))
             .collect();
-        let base_ty = ctx.ty_env.infer_expr(base, &locals);
+        let base_ty = base.infer_ty(&ctx.ty_env.infer_env(&locals));
         let field_ty = match base_ty {
             Ty::Tuple(ref fields) => fields
                 .get(index)
@@ -1111,20 +1125,6 @@ fn lower_bind_value<'c>(
     }
 }
 
-/// Map a capitalized type name to a `Ty` for use in cast lowering.
-fn tag_name_to_ty(name: Intern<String>) -> Ty {
-    match name.as_str() {
-        "Byte" | "I8" => Ty::Int(8),
-        "I16" => Ty::Int(16),
-        "I32" => Ty::Int(32),
-        "Int" | "I64" => Ty::Int(64),
-        "I128" => Ty::Int(128),
-        "Float" | "F32" | "F64" => Ty::Float,
-        "Bool" => Ty::Bool,
-        _ => Ty::Int(64),
-    }
-}
-
 /// Emit the appropriate MLIR cast op between two numeric types.
 fn lower_cast<'c>(
     ctx: &CodegenContext<'_, 'c>,
@@ -1140,9 +1140,7 @@ fn lower_cast<'c>(
     let dst_mlir = ty_to_mlir(dst_ty, ctx.mlir);
 
     // Pointer-to-integer: `ptr as Int` — emits llvm.ptrtoint.
-    if matches!(src_ty, Ty::Ptr { .. } | Ty::Ref { .. } | Ty::Array { .. })
-        && matches!(dst_ty, Ty::Int(_))
-    {
+    if (src_ty.is_ptr_or_ref() || matches!(src_ty, Ty::Array { .. })) && dst_ty.is_int() {
         let op = OperationBuilder::new("llvm.ptrtoint", loc)
             .add_operands(&[val])
             .add_results(&[dst_mlir])
@@ -1152,10 +1150,36 @@ fn lower_cast<'c>(
     }
 
     let op_name = match (src_ty, dst_ty) {
-        (Ty::Int(s), Ty::Int(d)) if s > d => "arith.trunci",
-        (Ty::Int(s), Ty::Int(d)) if s < d => "arith.extsi",
-        (Ty::Int(_), Ty::Float) => "arith.sitofp",
-        (Ty::Float, Ty::Int(_)) => "arith.fptosi",
+        // Narrowing: always truncate (same for signed/unsigned)
+        (Ty::Int { width: s, .. }, Ty::Int { width: d, .. }) if s > d => "arith.trunci",
+        // Widening signed: sign-extend
+        (
+            Ty::Int {
+                width: s,
+                signed: true,
+                ..
+            },
+            Ty::Int { width: d, .. },
+        ) if s < d => "arith.extsi",
+        // Widening unsigned: zero-extend
+        (
+            Ty::Int {
+                width: s,
+                signed: false,
+                ..
+            },
+            Ty::Int { width: d, .. },
+        ) if s < d => "arith.extui",
+        // Same width, different signedness: no-op (bit pattern is identical)
+        (Ty::Int { .. }, Ty::Int { .. }) => return Some(val),
+        // Signed int → float
+        (Ty::Int { signed: true, .. }, Ty::Float { .. }) => "arith.sitofp",
+        // Unsigned int → float
+        (Ty::Int { signed: false, .. }, Ty::Float { .. }) => "arith.uitofp",
+        // Float → signed int
+        (Ty::Float { .. }, Ty::Int { signed: true, .. }) => "arith.fptosi",
+        // Float → unsigned int
+        (Ty::Float { .. }, Ty::Int { signed: false, .. }) => "arith.fptoui",
         _ => {
             ctx.emit_internal(format!("unsupported cast: {src_ty:?} → {dst_ty:?}"));
             return None;

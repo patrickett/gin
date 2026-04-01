@@ -1,6 +1,6 @@
 use crate::{prelude::*, ty_to_mlir};
 use internment::Intern;
-use typeck::Ty;
+use typeck::{Ty, TyInfer};
 
 impl<'c> Lower<'c> for WhenExpr {
     fn lower(
@@ -35,7 +35,7 @@ impl<'c> Lower<'c> for WhenExpr {
                     .iter()
                     .map(|(k, v)| (Intern::<String>::new(k.clone()), v.clone()))
                     .collect();
-                let ty = ctx.ty_env.infer_expr(b, &locals);
+                let ty = b.infer_ty(&ctx.ty_env.infer_env(&locals));
                 ty_to_mlir(&ty, ctx.mlir)
             })
             .unwrap_or_else(|| ctx.mlir.i64())
@@ -45,9 +45,8 @@ impl<'c> Lower<'c> for WhenExpr {
             let subject = subject_expr.lower(ctx, block, symtab)?;
 
             // Check if this is an optimized union (simple integer representation)
-            let subject_ty = ctx
-                .ty_env
-                .infer_expr(subject_expr, &std::collections::HashMap::new());
+            let subject_ty =
+                subject_expr.infer_ty(&ctx.ty_env.infer_env(&std::collections::HashMap::new()));
 
             let disc = match &subject_ty {
                 Ty::Union { variants, .. }

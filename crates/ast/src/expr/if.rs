@@ -1,3 +1,4 @@
+use crate::expr::r#return::r#return;
 use crate::prelude::*;
 use chumsky::span::SimpleSpan;
 use lexer::Token;
@@ -26,7 +27,6 @@ pub fn if_expr<'t, I>(
 where
     I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
 {
-    use crate::expr::r#return::r#return;
     use Token::*;
 
     // Parse: If <expr> [is <tag>]

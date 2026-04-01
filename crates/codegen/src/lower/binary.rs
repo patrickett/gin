@@ -1,5 +1,6 @@
-use ::ast::{BinOp, Binary};
 use crate::prelude::*;
+use ::ast::{BinOp, Binary};
+use typeck::TyInfer;
 
 impl<'c> Lower<'c> for Binary {
     fn lower(
@@ -13,6 +14,12 @@ impl<'c> Lower<'c> for Binary {
 
         let result_ty = lhs.r#type();
         let is_float = result_ty == ctx.mlir.f64();
+        let unsigned = !is_float
+            && self
+                .lhs
+                .as_ref()
+                .infer_ty(&ctx.ty_env.infer_env(ctx))
+                .is_unsigned_int();
 
         Some(match self.op {
             BinOp::Add => block.append_op(ctx.mlir.build_binop(
@@ -48,6 +55,8 @@ impl<'c> Lower<'c> for Binary {
             BinOp::Divide => block.append_op(ctx.mlir.build_binop(
                 if is_float {
                     ArithOps::DIVF
+                } else if unsigned {
+                    ArithOps::DIVU
                 } else {
                     ArithOps::DIV
                 },
@@ -58,6 +67,8 @@ impl<'c> Lower<'c> for Binary {
             BinOp::Modulo => block.append_op(ctx.mlir.build_binop(
                 if is_float {
                     ArithOps::REMF
+                } else if unsigned {
+                    ArithOps::REMU
                 } else {
                     ArithOps::REM
                 },
@@ -77,21 +88,29 @@ impl<'c> Lower<'c> for Binary {
             }),
             BinOp::LessThan => block.append_op(if is_float {
                 ctx.mlir.build_cmpf(FPredicates::OLT, lhs, rhs)
+            } else if unsigned {
+                ctx.mlir.build_cmpi(Predicates::ULT, lhs, rhs)
             } else {
                 ctx.mlir.build_cmpi(Predicates::SLT, lhs, rhs)
             }),
             BinOp::GreaterThan => block.append_op(if is_float {
                 ctx.mlir.build_cmpf(FPredicates::OGT, lhs, rhs)
+            } else if unsigned {
+                ctx.mlir.build_cmpi(Predicates::UGT, lhs, rhs)
             } else {
                 ctx.mlir.build_cmpi(Predicates::SGT, lhs, rhs)
             }),
             BinOp::LessThanOrEqual => block.append_op(if is_float {
                 ctx.mlir.build_cmpf(FPredicates::OLE, lhs, rhs)
+            } else if unsigned {
+                ctx.mlir.build_cmpi(Predicates::ULE, lhs, rhs)
             } else {
                 ctx.mlir.build_cmpi(Predicates::SLE, lhs, rhs)
             }),
             BinOp::GreaterThanOrEqual => block.append_op(if is_float {
                 ctx.mlir.build_cmpf(FPredicates::OGE, lhs, rhs)
+            } else if unsigned {
+                ctx.mlir.build_cmpi(Predicates::UGE, lhs, rhs)
             } else {
                 ctx.mlir.build_cmpi(Predicates::SGE, lhs, rhs)
             }),
@@ -107,9 +126,16 @@ impl<'c> Lower<'c> for Binary {
             BinOp::ShiftLeft => {
                 block.append_op(ctx.mlir.build_binop(ArithOps::SHLI, lhs, rhs, result_ty))
             }
-            BinOp::ShiftRight => {
-                block.append_op(ctx.mlir.build_binop(ArithOps::SHRI, lhs, rhs, result_ty))
-            }
+            BinOp::ShiftRight => block.append_op(ctx.mlir.build_binop(
+                if unsigned {
+                    ArithOps::SHRUI
+                } else {
+                    ArithOps::SHRI
+                },
+                lhs,
+                rhs,
+                result_ty,
+            )),
         })
     }
 }

@@ -1,13 +1,13 @@
-use std::collections::{HashMap, HashSet};
-
+use crate::TyInfer;
 use crate::flow::{FlowAnalysis, FlowContext, ImpossibleCheck, IndexOutOfBounds, TypeConstraint};
-use crate::r#type::{LiteralValue, Ty, TyEnv};
+use crate::r#type::{Ty, TyEnv};
 use ast::Spanned;
 use ast::{
     Bind, BindValue, Expr, FileAst, FnCall, IfCondition, IfExpr, Loop, Pattern, WhenArm, WhenExpr,
 };
 use chumsky::span::{SimpleSpan, Span};
 use internment::Intern;
+use std::collections::{HashMap, HashSet};
 
 /// Analyzes control flow to track type narrowing.
 pub struct FlowAnalyzer<'a> {
@@ -129,7 +129,7 @@ impl<'a> FlowAnalyzer<'a> {
 
                 // Track the type of the bound variable for bounds checking
                 if let BindValue::Expr(expr) = bind.value() {
-                    let ty = self.ty_env.infer_expr(expr, &self.locals);
+                    let ty = expr.infer_ty(&self.ty_env.infer_env(&self.locals));
                     self.locals.insert(bind.name(), ty);
                 }
 
@@ -421,25 +421,21 @@ impl<'a> FlowAnalyzer<'a> {
     /// Only catches literal indices on arrays with known sizes.
     /// For runtime bounds checking with type narrowing, this is a TODO.
     fn check_bounds(&mut self, buf: &Expr, index: &Expr, span: SimpleSpan) {
-        use crate::r#type::infer_expr_ty;
+        use crate::{TyInfer, TyInferEnv};
 
-        let index_val = match infer_expr_ty(
-            index,
-            &self.locals,
-            &self.ty_env.tag_types,
-            &self.ty_env.fn_return_types,
-        ) {
-            Ty::Literal(LiteralValue::Int(n)) => n,
-            Ty::Int(_) => return,
+        let env = TyInferEnv {
+            tag_types: &self.ty_env.tag_types,
+            fn_return_types: &self.ty_env.fn_return_types,
+            locals: &self.locals,
+        };
+
+        let index_val = match index.infer_ty(&env) {
+            Ty::Int { value: Some(n), .. } => n,
+            Ty::Int { .. } => return,
             _ => return,
         };
 
-        let buf_size = match infer_expr_ty(
-            buf,
-            &self.locals,
-            &self.ty_env.tag_types,
-            &self.ty_env.fn_return_types,
-        ) {
+        let buf_size = match buf.infer_ty(&env) {
             Ty::Array { size, .. } => size,
             _ => return,
         };

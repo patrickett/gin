@@ -1,5 +1,6 @@
 use crate::{lower_function, prelude::*, ty_to_mlir};
 use internment::Intern;
+use typeck::TyInfer;
 
 impl<'c> Lower<'c> for Bind {
     fn lower(
@@ -22,9 +23,8 @@ impl<'c> Lower<'c> for Bind {
                     // Const bind (`:=`): direct SSA value in symtab — no alloca.
                     let value = expr.lower(ctx, block, symtab)?;
                     symtab.insert(name_str.clone(), value);
-                    let ty = ctx
-                        .ty_env
-                        .infer_expr(expr, &std::collections::HashMap::new());
+                    let ty =
+                        expr.infer_ty(&ctx.ty_env.infer_env(&std::collections::HashMap::new()));
                     ctx.var_types.borrow_mut().insert(name_str, ty);
                     Some(value)
                 } else {
@@ -53,7 +53,7 @@ impl<'c> Lower<'c> for Bind {
                             .iter()
                             .map(|(k, v)| (Intern::<String>::new(k.clone()), v.clone()))
                             .collect();
-                        let ty = ctx.ty_env.infer_expr(expr, &locals);
+                        let ty = expr.infer_ty(&ctx.ty_env.infer_env(&locals));
                         let elem_mlir_ty = ty_to_mlir(&ty, ctx.mlir);
                         let slot = block.alloca_typed(ctx.mlir, elem_mlir_ty, loc);
                         let init_val = expr.lower(ctx, block, symtab)?;

@@ -7,5 +7,8 @@ pub use flow_analyzer::*;
 pub mod analysis;
 pub use analysis::*;
 
+pub mod infer;
+pub use infer::*;
+
 mod r#type;
 pub use r#type::*;
