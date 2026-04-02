@@ -43,7 +43,6 @@ pub enum WhenArm {
 }
 
 /// Internal enum for disambiguating the two when forms during parsing.
-#[allow(clippy::large_enum_variant)]
 enum WhenTail {
     /// Boolean: the initial expr was a condition, here's the result + more arms
     Boolean {

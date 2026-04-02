@@ -1,5 +1,5 @@
-use crate::tag::Variant;
 use crate::prelude::*;
+use crate::tag::Variant;
 use chumsky::span::SimpleSpan;
 use std::hash::{Hash, Hasher};
 
@@ -211,8 +211,8 @@ where
     let rhs_union_or_range = choice((
         just(Token::In)
             .ignore_then(int_range())
-            .map(DeclareValue::InRange),
-        int_range().map(DeclareValue::Range),
+            .map(|(a, b)| DeclareValue::InRange(a, b)),
+        int_range().map(|(a, b)| DeclareValue::Range(a, b)),
         rhs_union,
         tag(expr.clone()).map(DeclareValue::Alias),
     ))

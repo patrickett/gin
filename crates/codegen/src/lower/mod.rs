@@ -106,24 +106,26 @@ use std::{
 
 /// Runtime symbol table for MLIR values during codegen.
 /// This is separate from the compile-time SymbolTable which tracks metadata.
+use i256::I256;
+
 pub type RuntimeSymbolTable<'c> = HashMap<String, Value<'c, 'c>>;
 
 #[derive(Debug, Clone)]
 pub struct TypeInfo {
-    pub min: i128,
-    pub max: i128,
+    pub min: I256,
+    pub max: I256,
 }
 
 impl TypeInfo {
     pub fn bit_width(&self) -> u32 {
         let range = self.max - self.min;
-        if range <= u8::MAX as i128 + 1 {
+        if range <= I256::from_i128(u8::MAX as i128 + 1) {
             8
-        } else if range <= u16::MAX as i128 + 1 {
+        } else if range <= I256::from_i128(u16::MAX as i128 + 1) {
             16
         } else if range <= u32::MAX as i128 + 1 {
             32
-        } else if range <= u64::MAX as i128 + 1 {
+        } else if range <= I256::from_i128(u64::MAX as i128 + 1) {
             64
         } else {
             128
@@ -587,12 +589,12 @@ fn extract_type_info(ast: &FileAst) -> Option<HashMap<Intern<String>, TypeInfo>>
     let mut type_info = HashMap::new();
 
     for (tag_name, documented) in &ast.tags {
-        if let DeclareValue::Range(range) = &documented.value() {
+        if let DeclareValue::Range(min, max) = documented.value() {
             type_info.insert(
                 *tag_name,
                 TypeInfo {
-                    min: range.start,
-                    max: range.end,
+                    min: *min,
+                    max: *max,
                 },
             );
         }

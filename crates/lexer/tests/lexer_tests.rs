@@ -86,6 +86,100 @@ fn test_numbers() {
 }
 
 #[test]
+fn test_underscore_int() {
+    let src = "1_000 1_000_000 4_2";
+
+    let mut lexer = GinLexer::new(src);
+    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+
+    assert!(matches!(tokens[0], Token::Int(_)));
+    assert_eq!(
+        if let Token::Int(v) = &tokens[0] {
+            *v
+        } else {
+            0
+        },
+        1_000
+    );
+
+    assert!(matches!(tokens[1], Token::Int(_)));
+    assert_eq!(
+        if let Token::Int(v) = &tokens[1] {
+            *v
+        } else {
+            0
+        },
+        1_000_000
+    );
+
+    assert!(matches!(tokens[2], Token::Int(_)));
+    assert_eq!(
+        if let Token::Int(v) = &tokens[2] {
+            *v
+        } else {
+            0
+        },
+        42
+    );
+}
+
+#[test]
+fn test_underscore_hex() {
+    let src = "0xFF_FF 0xDEAD_BEEF";
+
+    let mut lexer = GinLexer::new(src);
+    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+
+    assert!(matches!(tokens[0], Token::Int(_)));
+    assert_eq!(
+        if let Token::Int(v) = &tokens[0] {
+            *v
+        } else {
+            0
+        },
+        0xFFFF
+    );
+
+    assert!(matches!(tokens[1], Token::Int(_)));
+    assert_eq!(
+        if let Token::Int(v) = &tokens[1] {
+            *v
+        } else {
+            0
+        },
+        0xDEAD_BEEF
+    );
+}
+
+#[test]
+fn test_underscore_float() {
+    let src = "3.14_159 1_000.5_5";
+
+    let mut lexer = GinLexer::new(src);
+    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+
+    assert!(matches!(tokens[0], Token::Float(_)));
+    assert_eq!(
+        if let Token::Float(v) = &tokens[0] {
+            *v
+        } else {
+            0.0
+        },
+        3.14159
+    );
+
+    assert!(matches!(tokens[1], Token::Float(_)));
+    assert_eq!(
+        if let Token::Float(v) = &tokens[1] {
+            *v
+        } else {
+            0.0
+        },
+        1000.55
+    );
+}
+
+#[test]
 fn test_operators() {
     let src = "== /= <= >= = < > + - * / ^ ~ \\";
 

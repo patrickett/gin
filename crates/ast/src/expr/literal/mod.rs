@@ -15,7 +15,7 @@ use std::hash::Hash;
 pub enum Literal {
     Number(usize),
     Float(f64),
-    Int(i128),
+    Int(u128),
     String(String),
 }
 

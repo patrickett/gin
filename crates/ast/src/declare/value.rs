@@ -1,8 +1,6 @@
 use crate::prelude::*;
-use std::{
-    hash::{Hash, Hasher},
-    ops::Range,
-};
+use i256::I256;
+use std::hash::{Hash, Hasher};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeclareValue {
@@ -10,9 +8,9 @@ pub enum DeclareValue {
     Record(Parameters),
     Union { variants: Vec<Variant> },
     Set(/* TODO */),
-    Range(Range<i128>),
+    Range(I256, I256),
     // DiceThrow is in 1...6 (element of range)
-    InRange(Range<i128>),
+    InRange(I256, I256),
 }
 
 impl std::fmt::Display for DeclareValue {
@@ -43,8 +41,8 @@ impl std::fmt::Display for DeclareValue {
                 Ok(())
             }
             Self::Set() => write!(f, "set"),
-            Self::Range(r) => write!(f, "{}...{}", r.start, r.end),
-            Self::InRange(r) => write!(f, "in {}...{}", r.start, r.end),
+            Self::Range(start, end) => write!(f, "{start}...{end}"),
+            Self::InRange(start, end) => write!(f, "in {start}...{end}"),
         }
     }
 }
@@ -66,9 +64,9 @@ impl Hash for DeclareValue {
                 }
             }
             Self::Set() => {}
-            Self::Range(r) | Self::InRange(r) => {
-                r.start.hash(state);
-                r.end.hash(state);
+            Self::Range(start, end) | Self::InRange(start, end) => {
+                start.hash(state);
+                end.hash(state);
             }
         }
     }

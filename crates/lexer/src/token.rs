@@ -142,13 +142,13 @@ pub enum Token<'src> {
     Tag(&'src str),
     #[regex(r"_[a-z]*(?:_[a-z]+)*|[a-z]+(?:_[a-z]+)*")]
     Id(&'src str),
-    #[regex(r"[0-9]+\.[0-9]+", |lex| lex.slice().parse::<f64>())]
+    #[regex(r"[0-9](?:_*[0-9])*\.[0-9](?:_*[0-9])*", |lex| lex.slice().replace('_', "").parse::<f64>())]
     Float(f64),
-    #[regex(r"0[xX][0-9a-fA-F]+", |lex| {
-        i128::from_str_radix(&lex.slice()[2..], 16)
+    #[regex(r"0[xX][0-9a-fA-F](?:_*[0-9a-fA-F])*", |lex| {
+        u128::from_str_radix(&lex.slice()[2..].replace('_', ""), 16)
     })]
-    #[regex(r"[0-9]+", |lex| lex.slice().parse::<i128>())]
-    Int(i128),
+    #[regex(r"[0-9](?:_*[0-9])*", |lex| lex.slice().replace('_', "").parse::<u128>())]
+    Int(u128),
     #[regex(r"'[^'\n]*'", |lex| { let s = lex.slice(); &s[1..s.len()-1] })]
     String(&'src str),
     #[regex(r"'[^'\n]*", |lex| { let s = lex.slice(); &s[1..] })]

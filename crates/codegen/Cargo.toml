@@ -8,6 +8,7 @@ ast = { workspace = true }
 lexer = { workspace = true }
 diagnostic = { workspace = true }
 typeck = { workspace = true }
+i256 = { workspace = true }
 chumsky = { workspace = true }
 melior = "0.26.3"
 mlir-sys = "210.0.1"

@@ -8,6 +8,7 @@ ast = { workspace = true }
 lexer = { workspace = true }
 diagnostic = { workspace = true }
 database = { workspace = true }
+i256 = { workspace = true }
 chumsky = { workspace = true }
 salsa = { workspace = true }
 dashmap = { workspace = true }

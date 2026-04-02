@@ -61,7 +61,7 @@ impl TyInfer for Literal {
             Literal::Int(n) => Ty::Int {
                 width: 64,
                 signed: true,
-                value: Some(*n),
+                value: Some(*n as i128),
             },
             Literal::Number(n) => Ty::Int {
                 width: 64,

@@ -477,15 +477,15 @@ pub fn str_record_ty() -> Ty {
     }
 }
 
-fn range_bit_width(min: i128, max: i128) -> u8 {
+fn range_bit_width(min: I256, max: I256) -> u8 {
     let range = max - min;
-    if range <= u8::MAX as i128 + 1 {
+    if range <= I256::from_i128(u8::MAX as i128 + 1) {
         8
-    } else if range <= u16::MAX as i128 + 1 {
+    } else if range <= I256::from_i128(u16::MAX as i128 + 1) {
         16
-    } else if range <= u32::MAX as i128 + 1 {
+    } else if range <= I256::from_i128(u32::MAX as i128 + 1) {
         32
-    } else if range <= u64::MAX as i128 + 1 {
+    } else if range <= I256::from_i128(u64::MAX as i128 + 1) {
         64
     } else {
         128
@@ -551,14 +551,14 @@ fn resolve_name(
     }
     match raw.get(&name) {
         Some(DeclareValue::Alias(tag)) => resolve_tag_ref(tag, raw, recursion_depth + 1),
-        Some(DeclareValue::Range(range)) => Ty::Int {
-            width: range_bit_width(range.start, range.end),
-            signed: range.start < 0,
+        Some(DeclareValue::Range(start, end)) => Ty::Int {
+            width: range_bit_width(*start, *end),
+            signed: start.is_negative(),
             value: None,
         },
-        Some(DeclareValue::InRange(range)) => Ty::Int {
-            width: range_bit_width(range.start, range.end),
-            signed: range.start < 0,
+        Some(DeclareValue::InRange(start, end)) => Ty::Int {
+            width: range_bit_width(*start, *end),
+            signed: start.is_negative(),
             value: None,
         },
         Some(DeclareValue::Record(params)) => {

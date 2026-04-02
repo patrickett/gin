@@ -12,12 +12,12 @@ impl<'c> Lower<'c> for Literal {
             // Values fitting in i64 use i64; larger values use i128.
             // Note: melior's IntegerAttribute truncates to i64 internally
             Literal::Int(n) => {
-                let mlir_ty = if *n > i64::MAX as i128 || *n < i64::MIN as i128 {
+                let mlir_ty = if *n > i64::MAX as u128 {
                     ctx.mlir.i128()
                 } else {
                     ctx.mlir.i64()
                 };
-                block.const_int(ctx.mlir, mlir_ty, *n)
+                block.const_int(ctx.mlir, mlir_ty, *n as i128)
             }
             Literal::Number(n) => block.const_i64(ctx.mlir, *n as i64),
             Literal::Float(f) => {
