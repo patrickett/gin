@@ -107,8 +107,10 @@ where
 
     let element = choice((
         impl_block(expr_parser.clone()).map(TopLevelValue::ImplBlock),
-        method_parser.map(TopLevelValue::Bind),
-        bind(expr_parser.clone()).map(TopLevelValue::Bind),
+        method_parser.map(Box::new).map(TopLevelValue::Bind),
+        bind(expr_parser.clone())
+            .map(Box::new)
+            .map(TopLevelValue::Bind),
         declare(expr_parser.clone()).map(TopLevelValue::Tag),
         expr_parser.map(|Spanned(expr, span)| TopLevelValue::Expr(expr, span)),
     ))
@@ -176,7 +178,7 @@ where
 
 enum TopLevelValue {
     Tag(Declare),
-    Bind(Bind),
+    Bind(Box<Bind>),
     ImplBlock(ImplBlock),
     Expr(Expr, SimpleSpan),
 }
@@ -198,7 +200,7 @@ fn collect_top_level(
             } else {
                 bind.name()
             };
-            defs.insert(name, bind);
+            defs.insert(name, *bind);
         }
         TopLevelValue::ImplBlock(block) => {
             let recv_tag = Tag::Nominal(block.type_name, block.type_name_span);

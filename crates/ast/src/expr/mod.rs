@@ -28,7 +28,6 @@ pub mod when;
 pub use when::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[allow(clippy::large_enum_variant)]
 pub enum Expr {
     Loop(Loop),
     Binary(Binary),
@@ -36,7 +35,7 @@ pub enum Expr {
     Lit(Literal),
     FormatString(FormatString),
     Range(Range),
-    Bind(Bind),
+    Bind(Box<Bind>),
     When(WhenExpr),
     If(IfExpr),
     SelfRef(SimpleSpan),
@@ -365,7 +364,7 @@ where
             })
             .boxed(),
         bind(expr.clone())
-            .map_with(|b, e| Spanned(Expr::Bind(b), e.span()))
+            .map_with(|b, e| Spanned(Expr::Bind(Box::new(b)), e.span()))
             .boxed(),
         fn_call(expr.clone())
             .map_with(|fc, e| Spanned(Expr::FnCall(fc), e.span()))
