@@ -1,39 +1,22 @@
 use crate::{LexContext, MAX_INDENT_DEPTH, Token};
 use chumsky::span::SimpleSpan;
 use diagnostic::lex::LexSymptom;
-use std::mem::MaybeUninit;
+use memchr::{memchr, memchr2, memchr3};
 
-struct SmallDeque<T, const N: usize> {
-    buf: [MaybeUninit<T>; N],
-    head: usize,
-    len: usize,
+struct FormatStringState<'src> {
+    tokens: Vec<(Token<'src>, SimpleSpan)>,
+    idx: usize,
 }
 
-impl<T, const N: usize> SmallDeque<T, N> {
-    fn new() -> Self {
-        Self {
-            // SAFETY: MaybeUninit does not require initialization.
-            buf: unsafe { MaybeUninit::<[MaybeUninit<T>; N]>::uninit().assume_init() },
-            head: 0,
-            len: 0,
+impl<'src> FormatStringState<'src> {
+    fn next(&mut self) -> Option<(Token<'src>, SimpleSpan)> {
+        if self.idx < self.tokens.len() {
+            let item = self.tokens[self.idx];
+            self.idx += 1;
+            Some(item)
+        } else {
+            None
         }
-    }
-
-    fn push_back(&mut self, val: T) {
-        debug_assert!(self.len < N, "SmallDeque overflow");
-        let idx = (self.head + self.len) % N;
-        self.buf[idx].write(val);
-        self.len += 1;
-    }
-
-    fn pop_front(&mut self) -> Option<T> {
-        if self.len == 0 {
-            return None;
-        }
-        let val = unsafe { self.buf[self.head].assume_init_read() };
-        self.head = (self.head + 1) % N;
-        self.len -= 1;
-        Some(val)
     }
 }
 
@@ -42,19 +25,23 @@ pub struct HandLexer<'src> {
     pos: usize,
     pub errors: Vec<(LexSymptom, SimpleSpan)>,
     indent: LexContext,
-    pending: SmallDeque<(Token<'src>, SimpleSpan), 16>,
     last_indent_span: SimpleSpan,
+    fmt: Option<FormatStringState<'src>>,
+    /// Byte offset of the next `\n`, or `source.len()` if none remains.
+    line_end: usize,
 }
 
 impl<'src> HandLexer<'src> {
     pub fn new(source: &'src str) -> Self {
+        let line_end = memchr(b'\n', source.as_bytes()).unwrap_or(source.len());
         Self {
             source,
             pos: 0,
             errors: Vec::new(),
             indent: LexContext::default(),
-            pending: SmallDeque::new(),
             last_indent_span: SimpleSpan::from(0..0),
+            fmt: None,
+            line_end,
         }
     }
 
@@ -92,38 +79,58 @@ impl<'src> HandLexer<'src> {
         }
     }
 
+    /// Recompute `line_end` if it's stale (pos has moved past it).
+    #[inline]
+    fn ensure_line_end(&mut self) {
+        if self.line_end < self.pos {
+            let bytes = self.source.as_bytes();
+            self.line_end = memchr(b'\n', &bytes[self.pos..]).map_or(bytes.len(), |i| self.pos + i);
+        }
+    }
+
     fn handle_newline(&mut self, newline_start: usize) -> Option<(Token<'src>, SimpleSpan)> {
-        let indent = self.lex_indent();
-        let bytes = self.source.as_bytes();
-        let is_blank_line = bytes.get(self.pos).is_none_or(|&b| b == b'\n');
         let span = self.current_span(newline_start);
         self.last_indent_span = span;
+        let bytes = self.source.as_bytes();
 
-        if is_blank_line {
+        loop {
+            let indent = self.lex_indent();
+
+            // Cheap blank-line check — no memchr needed
+            match bytes.get(self.pos) {
+                None => return Some((Token::Newline, span)),
+                Some(b'\n') => {
+                    self.pos += 1;
+                    continue;
+                }
+                _ => {}
+            }
+
+            // Non-blank line: compute line_end for comment/format-string consumers
+            self.line_end = memchr(b'\n', &bytes[self.pos..]).map_or(bytes.len(), |i| self.pos + i);
+
+            let depth = self.indent.indent_depth as usize;
+            let current = self.indent.indent_stack[depth - 1];
+
+            if indent > current {
+                if depth < MAX_INDENT_DEPTH {
+                    self.indent.indent_stack[depth] = indent;
+                    self.indent.indent_depth += 1;
+                    self.indent.pending_indent = true;
+                } else {
+                    self.indent.indent_overflow = true;
+                }
+            } else if indent < current {
+                let mut d = depth;
+                while self.indent.indent_stack[d - 1] > indent {
+                    d -= 1;
+                }
+                self.indent.pending_dedents = (depth - d) as u8;
+                self.indent.indent_depth = d as u8;
+            }
+
             return Some((Token::Newline, span));
         }
-
-        let depth = self.indent.indent_depth as usize;
-        let current = self.indent.indent_stack[depth - 1];
-
-        if indent > current {
-            if depth < MAX_INDENT_DEPTH {
-                self.indent.indent_stack[depth] = indent;
-                self.indent.indent_depth += 1;
-                self.indent.pending_indent = true;
-            } else {
-                self.indent.indent_overflow = true;
-            }
-        } else if indent < current {
-            let mut d = depth;
-            while self.indent.indent_stack[d - 1] > indent {
-                d -= 1;
-            }
-            self.indent.pending_dedents = (depth - d) as u8;
-            self.indent.indent_depth = d as u8;
-        }
-
-        Some((Token::Newline, span))
     }
 
     fn lex_indent(&mut self) -> u16 {
@@ -233,7 +240,7 @@ impl<'src> HandLexer<'src> {
             buf[len] = b;
             len += 1;
         }
-        std::str::from_utf8(&buf[..len]).ok()?.parse::<f64>().ok()
+        fast_float::parse(&buf[..len]).ok()
     }
 
     fn int_result(
@@ -302,24 +309,16 @@ impl<'src> HandLexer<'src> {
         self.pos += 1;
         let bytes = self.source.as_bytes();
 
-        while self.pos < bytes.len() {
-            match bytes[self.pos] {
-                b'\'' => {
-                    self.pos += 1;
-                    let text = self.slice_from(start);
-                    let span = self.current_span(start);
-                    return (Token::String(&text[1..text.len() - 1]), span);
-                }
-                b'\n' | 0 => {
-                    let text = self.slice_from(start);
-                    let span = self.current_span(start);
-                    self.errors.push((LexSymptom::UnclosedString, span));
-                    return (Token::UnterminatedString(&text[1..]), span);
-                }
-                _ => self.pos += 1,
-            }
+        let end = memchr2(b'\'', b'\n', &bytes[self.pos..]).map_or(bytes.len(), |i| self.pos + i);
+
+        if end < bytes.len() && bytes[end] == b'\'' {
+            self.pos = end + 1;
+            let text = self.slice_from(start);
+            let span = self.current_span(start);
+            return (Token::String(&text[1..text.len() - 1]), span);
         }
 
+        self.pos = end;
         let text = self.slice_from(start);
         let span = self.current_span(start);
         self.errors.push((LexSymptom::UnclosedString, span));
@@ -327,24 +326,37 @@ impl<'src> HandLexer<'src> {
     }
 
     fn lex_format_string(&mut self, open_span: SimpleSpan) {
-        self.pending
-            .push_back((Token::FormatStringDelim, open_span));
+        let mut tokens = match self.fmt.take() {
+            Some(state) => {
+                let mut v = state.tokens;
+                v.clear();
+                v
+            }
+            None => Vec::new(),
+        };
+
+        tokens.push((Token::FormatStringDelim, open_span));
 
         loop {
             let text_start = self.pos;
             let bytes = self.source.as_bytes();
 
-            while self.pos < bytes.len() {
-                match bytes[self.pos] {
-                    b'"' | b'(' | b'\\' | b'\n' => break,
-                    _ => self.pos += 1,
-                }
-            }
+            self.ensure_line_end();
+
+            let special = if self.pos < self.line_end {
+                memchr3(b'"', b'(', b'\\', &bytes[self.pos..self.line_end])
+            } else {
+                None
+            };
+
+            self.pos = match special {
+                Some(i) => self.pos + i,
+                None => self.line_end,
+            };
 
             if self.pos > text_start {
                 let span = SimpleSpan::from(text_start..self.pos);
-                self.pending
-                    .push_back((Token::FormatStringText(self.slice_from(text_start)), span));
+                tokens.push((Token::FormatStringText(self.slice_from(text_start)), span));
             }
 
             match self.peek() {
@@ -352,24 +364,23 @@ impl<'src> HandLexer<'src> {
                     let quote_start = self.pos;
                     self.pos += 1;
                     let span = SimpleSpan::from(quote_start..self.pos);
-                    self.pending.push_back((Token::FormatStringDelim, span));
-                    return;
+                    tokens.push((Token::FormatStringDelim, span));
+                    break;
                 }
                 Some(b'\\') => {
                     let esc_start = self.pos;
                     self.pos += 1;
                     if self.advance().is_some() {
                         let span = SimpleSpan::from(esc_start..self.pos);
-                        self.pending
-                            .push_back((Token::FormatStringText(self.slice_from(esc_start)), span));
+                        tokens.push((Token::FormatStringText(self.slice_from(esc_start)), span));
                     }
                 }
                 Some(b'(') => {
                     let interp_start = self.pos;
                     self.pos += 1;
                     let span = SimpleSpan::from(interp_start..self.pos);
-                    self.pending.push_back((Token::FormatInterpStart, span));
-                    self.lex_format_interp();
+                    tokens.push((Token::FormatInterpStart, span));
+                    self.lex_format_interp(&mut tokens);
                 }
                 _ => {
                     let unterm_start = self.pos;
@@ -377,66 +388,60 @@ impl<'src> HandLexer<'src> {
                         self.pos += 1;
                     }
                     let span = SimpleSpan::from(unterm_start..self.pos);
-                    self.pending
-                        .push_back((Token::UnterminatedFormatString, span));
+                    tokens.push((Token::UnterminatedFormatString, span));
                     self.errors.push((LexSymptom::UnclosedString, open_span));
-                    return;
+                    break;
                 }
             }
         }
+
+        self.fmt = Some(FormatStringState { tokens, idx: 0 });
     }
 
-    fn lex_format_interp(&mut self) {
+    fn lex_format_interp(&mut self, tokens: &mut Vec<(Token<'src>, SimpleSpan)>) {
         let mut paren_depth: u32 = 0;
 
         loop {
             match self.lex_simple_token() {
                 None => {
                     let eof_span = SimpleSpan::from(self.pos..self.pos);
-                    self.pending
-                        .push_back((Token::UnterminatedFormatString, eof_span));
+                    tokens.push((Token::UnterminatedFormatString, eof_span));
                     self.errors.push((LexSymptom::UnclosedString, eof_span));
                     return;
                 }
                 Some((Token::ParenClose, span)) => {
                     if paren_depth == 0 {
-                        self.pending.push_back((Token::FormatInterpEnd, span));
+                        tokens.push((Token::FormatInterpEnd, span));
                         return;
                     }
                     paren_depth -= 1;
-                    self.pending.push_back((Token::ParenClose, span));
+                    tokens.push((Token::ParenClose, span));
                 }
                 Some((Token::FormatStringDelim, span)) => {
-                    self.pending
-                        .push_back((Token::UnterminatedFormatString, span));
+                    tokens.push((Token::UnterminatedFormatString, span));
                     self.errors.push((LexSymptom::UnclosedString, span));
                     return;
                 }
                 Some((Token::Newline | Token::Indent | Token::Dedent, _)) => {}
                 Some((Token::ParenOpen, span)) => {
                     paren_depth += 1;
-                    self.pending.push_back((Token::ParenOpen, span));
+                    tokens.push((Token::ParenOpen, span));
                 }
                 Some(tok) => {
-                    self.pending.push_back(tok);
+                    tokens.push(tok);
                 }
             }
         }
     }
 
     fn lex_comment(&mut self, start: usize, doc: bool) -> (Token<'src>, SimpleSpan) {
-        // pos is at start + 1 (the first - was consumed by advance)
         if doc {
-            self.pos += 2; // skip second - and third -
+            self.pos += 2;
         } else {
-            self.pos += 1; // skip second -
-        }
-
-        let bytes = self.source.as_bytes();
-        while self.pos < bytes.len() && bytes[self.pos] != b'\n' {
             self.pos += 1;
         }
-
+        self.ensure_line_end();
+        self.pos = self.line_end;
         let text = self.slice_from(start);
         let span = self.current_span(start);
 
@@ -447,8 +452,6 @@ impl<'src> HandLexer<'src> {
         }
     }
 
-    /// Lex a single token without processing format strings.
-    /// Returns `Token::FormatStringDelim` for `"` without consuming format string content.
     fn lex_two_char(
         &mut self,
         start: usize,
@@ -464,12 +467,40 @@ impl<'src> HandLexer<'src> {
         }
     }
 
+    fn single_char_token(b: u8) -> Option<Token<'src>> {
+        Some(match b {
+            b'+' => Token::Plus,
+            b'*' => Token::Star,
+            b'%' => Token::Percent,
+            b'\\' => Token::SlashOr,
+            b'^' => Token::Caret,
+            b'|' => Token::Pipe,
+            b'~' => Token::Tilde,
+            b'@' => Token::At,
+            b'#' => Token::Pound,
+            b';' => Token::ColonSemi,
+            b'(' => Token::ParenOpen,
+            b')' => Token::ParenClose,
+            b'[' => Token::BracketOpen,
+            b']' => Token::BracketClose,
+            b'{' => Token::CurlyOpen,
+            b'}' => Token::CurlyClose,
+            b'&' => Token::Ampersand,
+            b',' => Token::Comma,
+            _ => return None,
+        })
+    }
+
     fn lex_simple_token(&mut self) -> Option<(Token<'src>, SimpleSpan)> {
         loop {
             self.skip_inline_whitespace();
 
             let start = self.pos;
             let b = self.advance()?;
+
+            if let Some(tok) = Self::single_char_token(b) {
+                return Some((tok, self.current_span(start)));
+            }
 
             match b {
                 b'\n' => return self.handle_newline(start),
@@ -543,25 +574,6 @@ impl<'src> HandLexer<'src> {
                     };
                 }
 
-                b'+' => return Some((Token::Plus, self.current_span(start))),
-                b'*' => return Some((Token::Star, self.current_span(start))),
-                b'%' => return Some((Token::Percent, self.current_span(start))),
-                b'\\' => return Some((Token::SlashOr, self.current_span(start))),
-                b'^' => return Some((Token::Caret, self.current_span(start))),
-                b'|' => return Some((Token::Pipe, self.current_span(start))),
-                b'~' => return Some((Token::Tilde, self.current_span(start))),
-                b'@' => return Some((Token::At, self.current_span(start))),
-                b'#' => return Some((Token::Pound, self.current_span(start))),
-                b';' => return Some((Token::ColonSemi, self.current_span(start))),
-                b'(' => return Some((Token::ParenOpen, self.current_span(start))),
-                b')' => return Some((Token::ParenClose, self.current_span(start))),
-                b'[' => return Some((Token::BracketOpen, self.current_span(start))),
-                b']' => return Some((Token::BracketClose, self.current_span(start))),
-                b'{' => return Some((Token::CurlyOpen, self.current_span(start))),
-                b'}' => return Some((Token::CurlyClose, self.current_span(start))),
-                b'&' => return Some((Token::Ampersand, self.current_span(start))),
-                b',' => return Some((Token::Comma, self.current_span(start))),
-
                 _ => {
                     let span = self.current_span(start);
                     self.errors.push((LexSymptom::UnexpectedCharacter, span));
@@ -578,14 +590,16 @@ impl<'src> HandLexer<'src> {
         let tok = self.lex_simple_token()?;
         if matches!(tok.0, Token::FormatStringDelim) {
             self.lex_format_string(tok.1);
-            self.pending.pop_front()
+            self.fmt.as_mut().and_then(|s| s.next())
         } else {
             Some(tok)
         }
     }
 
     fn next_with_indent(&mut self) -> Option<(Token<'src>, SimpleSpan)> {
-        if let Some(item) = self.pending.pop_front() {
+        if let Some(ref mut state) = self.fmt
+            && let Some(item) = state.next()
+        {
             return Some(item);
         }
 
