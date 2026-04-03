@@ -1,0 +1,631 @@
+use crate::{LexContext, MAX_INDENT_DEPTH, Token};
+use chumsky::span::SimpleSpan;
+use diagnostic::lex::LexSymptom;
+use std::collections::VecDeque;
+
+pub struct HandLexer<'src> {
+    source: &'src str,
+    pos: usize,
+    pub errors: Vec<(LexSymptom, SimpleSpan)>,
+    indent: LexContext,
+    pending: VecDeque<(Token<'src>, SimpleSpan)>,
+    last_indent_span: SimpleSpan,
+}
+
+impl<'src> HandLexer<'src> {
+    pub fn new(source: &'src str) -> Self {
+        Self {
+            source,
+            pos: 0,
+            errors: Vec::new(),
+            indent: LexContext::default(),
+            pending: VecDeque::new(),
+            last_indent_span: SimpleSpan::from(0..0),
+        }
+    }
+
+    #[inline]
+    fn current_span(&self, start: usize) -> SimpleSpan {
+        SimpleSpan::from(start..self.pos)
+    }
+
+    #[inline]
+    fn peek(&self) -> Option<u8> {
+        self.source.as_bytes().get(self.pos).copied()
+    }
+
+    #[inline]
+    fn peek_at(&self, offset: usize) -> Option<u8> {
+        self.source.as_bytes().get(self.pos + offset).copied()
+    }
+
+    #[inline]
+    fn advance(&mut self) -> Option<u8> {
+        let b = self.source.as_bytes().get(self.pos)?;
+        self.pos += 1;
+        Some(*b)
+    }
+
+    #[inline]
+    fn slice_from(&self, start: usize) -> &'src str {
+        &self.source[start..self.pos]
+    }
+
+    fn skip_inline_whitespace(&mut self) {
+        let bytes = self.source.as_bytes();
+        while self.pos < bytes.len() && matches!(bytes[self.pos], b' ' | b'\t') {
+            self.pos += 1;
+        }
+    }
+
+    fn handle_newline(&mut self, newline_start: usize) -> Option<(Token<'src>, SimpleSpan)> {
+        let indent = self.lex_indent();
+        let bytes = self.source.as_bytes();
+        let is_blank_line = bytes.get(self.pos).is_none_or(|&b| b == b'\n');
+        let span = self.current_span(newline_start);
+        self.last_indent_span = span;
+
+        if is_blank_line {
+            return Some((Token::Newline, span));
+        }
+
+        let depth = self.indent.indent_depth as usize;
+        let current = self.indent.indent_stack[depth - 1];
+
+        if indent > current {
+            if depth < MAX_INDENT_DEPTH {
+                self.indent.indent_stack[depth] = indent;
+                self.indent.indent_depth += 1;
+                self.indent.pending_indent = true;
+            } else {
+                self.indent.indent_overflow = true;
+            }
+        } else if indent < current {
+            let mut d = depth;
+            while self.indent.indent_stack[d - 1] > indent {
+                d -= 1;
+            }
+            self.indent.pending_dedents = (depth - d) as u8;
+            self.indent.indent_depth = d as u8;
+        }
+
+        Some((Token::Newline, span))
+    }
+
+    fn lex_indent(&mut self) -> u16 {
+        let bytes = self.source.as_bytes();
+        let mut indent = 0u16;
+        while self.pos < bytes.len() {
+            match bytes[self.pos] {
+                b' ' => {
+                    indent += 1;
+                    self.pos += 1;
+                }
+                b'\t' => {
+                    indent += 4;
+                    self.pos += 1;
+                }
+                _ => break,
+            }
+        }
+        indent
+    }
+
+    fn lex_keyword_or_id(&mut self, start: usize) -> (Token<'src>, SimpleSpan) {
+        let bytes = self.source.as_bytes();
+        while self.pos < bytes.len() {
+            match bytes[self.pos] {
+                b'a'..=b'z' | b'_' => self.pos += 1,
+                _ => break,
+            }
+        }
+        let text = self.slice_from(start);
+        let span = self.current_span(start);
+
+        let tok = match text {
+            "extern" => Token::Extern,
+            "continue" => Token::Continue,
+            "private" => Token::Private,
+            "return" => Token::Return,
+            "break" => Token::Break,
+            "loop" => Token::Loop,
+            "then" => Token::Then,
+            "when" => Token::When,
+            "else" => Token::Else,
+            "self" => Token::SelfInstance,
+            "for" => Token::For,
+            "while" => Token::While,
+            "use" => Token::Use,
+            "has" => Token::Has,
+            "and" => Token::And,
+            "as" => Token::As,
+            "if" => Token::If,
+            "in" => Token::In,
+            "is" => Token::Is,
+            "of" => Token::Of,
+            "or" => Token::Or,
+            _ => Token::Id(text),
+        };
+
+        (tok, span)
+    }
+
+    fn lex_tag(&mut self, start: usize) -> (Token<'src>, SimpleSpan) {
+        let bytes = self.source.as_bytes();
+        while self.pos < bytes.len() {
+            match bytes[self.pos] {
+                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' => self.pos += 1,
+                _ => break,
+            }
+        }
+        let text = self.slice_from(start);
+        let span = self.current_span(start);
+
+        if text == "Self" {
+            (Token::SelfTag, span)
+        } else {
+            (Token::Tag(text), span)
+        }
+    }
+
+    fn parse_int_bytes(bytes: &[u8], radix: u32) -> Option<u128> {
+        let mut val = 0u128;
+        for &b in bytes {
+            let digit = match b {
+                b'0'..=b'9' => b - b'0',
+                b'a'..=b'f' => b - b'a' + 10,
+                b'A'..=b'F' => b - b'A' + 10,
+                b'_' => continue,
+                _ => return None,
+            } as u128;
+            if digit >= radix as u128 {
+                return None;
+            }
+            val = val.checked_mul(radix as u128)?.checked_add(digit)?;
+        }
+        Some(val)
+    }
+
+    fn parse_float_bytes(bytes: &[u8]) -> Option<f64> {
+        let mut buf = [0u8; 64];
+        let mut len = 0;
+        for &b in bytes {
+            if b == b'_' {
+                continue;
+            }
+            if len >= buf.len() {
+                return None;
+            }
+            buf[len] = b;
+            len += 1;
+        }
+        std::str::from_utf8(&buf[..len]).ok()?.parse::<f64>().ok()
+    }
+
+    fn lex_number(&mut self, start: usize) -> (Token<'src>, SimpleSpan) {
+        if self.source.as_bytes()[start] == b'0'
+            && let Some(b'x' | b'X') = self.peek()
+            && self.peek_at(1).is_some_and(|b| b.is_ascii_hexdigit())
+        {
+            self.pos += 1;
+            return self.lex_hex_int(start);
+        }
+
+        let bytes = self.source.as_bytes();
+        while self.pos < bytes.len() {
+            match bytes[self.pos] {
+                b'0'..=b'9' | b'_' => self.pos += 1,
+                _ => break,
+            }
+        }
+
+        let span = self.current_span(start);
+        match Self::parse_int_bytes(&self.source.as_bytes()[start..self.pos], 10) {
+            Some(v) => (Token::Int(v), span),
+            None => {
+                self.errors.push((LexSymptom::InvalidInteger, span));
+                (Token::Int(0), span)
+            }
+        }
+    }
+
+    fn lex_hex_int(&mut self, start: usize) -> (Token<'src>, SimpleSpan) {
+        let bytes = self.source.as_bytes();
+        while self.pos < bytes.len() {
+            match bytes[self.pos] {
+                b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F' | b'_' => self.pos += 1,
+                _ => break,
+            }
+        }
+
+        let span = self.current_span(start);
+        match Self::parse_int_bytes(&self.source.as_bytes()[start + 2..self.pos], 16) {
+            Some(v) => (Token::Int(v), span),
+            None => {
+                self.errors.push((LexSymptom::InvalidInteger, span));
+                (Token::Int(0), span)
+            }
+        }
+    }
+
+    fn lex_string(&mut self, start: usize) -> (Token<'src>, SimpleSpan) {
+        self.pos += 1;
+        let bytes = self.source.as_bytes();
+
+        while self.pos < bytes.len() {
+            match bytes[self.pos] {
+                b'\'' => {
+                    self.pos += 1;
+                    let text = self.slice_from(start);
+                    let span = self.current_span(start);
+                    return (Token::String(&text[1..text.len() - 1]), span);
+                }
+                b'\n' | 0 => {
+                    let text = self.slice_from(start);
+                    let span = self.current_span(start);
+                    self.errors.push((LexSymptom::UnclosedString, span));
+                    return (Token::UnterminatedString(&text[1..]), span);
+                }
+                _ => self.pos += 1,
+            }
+        }
+
+        let text = self.slice_from(start);
+        let span = self.current_span(start);
+        self.errors.push((LexSymptom::UnclosedString, span));
+        (Token::UnterminatedString(&text[1..]), span)
+    }
+
+    fn lex_format_string(&mut self, open_span: SimpleSpan) {
+        self.pending
+            .push_back((Token::FormatStringDelim, open_span));
+
+        loop {
+            let text_start = self.pos;
+            let bytes = self.source.as_bytes();
+
+            while self.pos < bytes.len() {
+                match bytes[self.pos] {
+                    b'"' | b'(' | b'\\' | b'\n' => break,
+                    _ => self.pos += 1,
+                }
+            }
+
+            if self.pos > text_start {
+                let span = SimpleSpan::from(text_start..self.pos);
+                self.pending
+                    .push_back((Token::FormatStringText(self.slice_from(text_start)), span));
+            }
+
+            match self.peek() {
+                Some(b'"') => {
+                    let quote_start = self.pos;
+                    self.pos += 1;
+                    let span = SimpleSpan::from(quote_start..self.pos);
+                    self.pending.push_back((Token::FormatStringDelim, span));
+                    return;
+                }
+                Some(b'\\') => {
+                    let esc_start = self.pos;
+                    self.pos += 1;
+                    if self.advance().is_some() {
+                        let span = SimpleSpan::from(esc_start..self.pos);
+                        self.pending
+                            .push_back((Token::FormatStringText(self.slice_from(esc_start)), span));
+                    }
+                }
+                Some(b'(') => {
+                    let interp_start = self.pos;
+                    self.pos += 1;
+                    let span = SimpleSpan::from(interp_start..self.pos);
+                    self.pending.push_back((Token::FormatInterpStart, span));
+                    self.lex_format_interp();
+                }
+                _ => {
+                    let unterm_start = self.pos;
+                    if self.peek() == Some(b'\n') {
+                        self.pos += 1;
+                    }
+                    let span = SimpleSpan::from(unterm_start..self.pos);
+                    self.pending
+                        .push_back((Token::UnterminatedFormatString, span));
+                    self.errors.push((LexSymptom::UnclosedString, open_span));
+                    return;
+                }
+            }
+        }
+    }
+
+    fn lex_format_interp(&mut self) {
+        let mut paren_depth: u32 = 0;
+
+        loop {
+            match self.lex_simple_token() {
+                None => {
+                    let eof_span = SimpleSpan::from(self.pos..self.pos);
+                    self.pending
+                        .push_back((Token::UnterminatedFormatString, eof_span));
+                    self.errors.push((LexSymptom::UnclosedString, eof_span));
+                    return;
+                }
+                Some((Token::ParenClose, span)) => {
+                    if paren_depth == 0 {
+                        self.pending.push_back((Token::FormatInterpEnd, span));
+                        return;
+                    }
+                    paren_depth -= 1;
+                    self.pending.push_back((Token::ParenClose, span));
+                }
+                Some((Token::FormatStringDelim, span)) => {
+                    self.pending
+                        .push_back((Token::UnterminatedFormatString, span));
+                    self.errors.push((LexSymptom::UnclosedString, span));
+                    return;
+                }
+                Some((Token::Newline | Token::Indent | Token::Dedent, _)) => {}
+                Some((Token::ParenOpen, span)) => {
+                    paren_depth += 1;
+                    self.pending.push_back((Token::ParenOpen, span));
+                }
+                Some(tok) => {
+                    self.pending.push_back(tok);
+                }
+            }
+        }
+    }
+
+    fn lex_comment(&mut self, start: usize, doc: bool) -> (Token<'src>, SimpleSpan) {
+        // pos is at start + 1 (the first - was consumed by advance)
+        if doc {
+            self.pos += 2; // skip second - and third -
+        } else {
+            self.pos += 1; // skip second -
+        }
+
+        let bytes = self.source.as_bytes();
+        while self.pos < bytes.len() && bytes[self.pos] != b'\n' {
+            self.pos += 1;
+        }
+
+        let text = self.slice_from(start);
+        let span = self.current_span(start);
+
+        if doc {
+            (Token::DocComment(text), span)
+        } else {
+            (Token::Comment(text), span)
+        }
+    }
+
+    /// Lex a single token without processing format strings.
+    /// Returns `Token::FormatStringDelim` for `"` without consuming format string content.
+    fn lex_simple_token(&mut self) -> Option<(Token<'src>, SimpleSpan)> {
+        loop {
+            self.skip_inline_whitespace();
+
+            let start = self.pos;
+            let b = self.advance()?;
+
+            match b {
+                b'\n' => return self.handle_newline(start),
+
+                b'a'..=b'z' | b'_' => return Some(self.lex_keyword_or_id(start)),
+                b'A'..=b'Z' => return Some(self.lex_tag(start)),
+                b'0'..=b'9' => return Some(self.lex_number(start)),
+
+                b'\'' => return Some(self.lex_string(start)),
+                b'"' => {
+                    let span = self.current_span(start);
+                    return Some((Token::FormatStringDelim, span));
+                }
+
+                b'-' => {
+                    return match (self.peek(), self.peek_at(1)) {
+                        (Some(b'-'), Some(b'-')) => Some(self.lex_comment(start, true)),
+                        (Some(b'-'), _) => Some(self.lex_comment(start, false)),
+                        (Some(b'>'), _) => {
+                            self.pos += 1;
+                            Some((Token::ArrowRight, self.current_span(start)))
+                        }
+                        _ => Some((Token::Minus, self.current_span(start))),
+                    };
+                }
+
+                b'<' => {
+                    return match self.peek() {
+                        Some(b'<') => {
+                            self.pos += 1;
+                            Some((Token::ShiftLeft, self.current_span(start)))
+                        }
+                        Some(b'=') => {
+                            self.pos += 1;
+                            Some((Token::LessEq, self.current_span(start)))
+                        }
+                        Some(b'-') => {
+                            self.pos += 1;
+                            Some((Token::ArrowLeft, self.current_span(start)))
+                        }
+                        _ => Some((Token::Less, self.current_span(start))),
+                    };
+                }
+
+                b'>' => {
+                    return match self.peek() {
+                        Some(b'>') => {
+                            self.pos += 1;
+                            Some((Token::ShiftRight, self.current_span(start)))
+                        }
+                        Some(b'=') => {
+                            self.pos += 1;
+                            Some((Token::GreaterEq, self.current_span(start)))
+                        }
+                        _ => Some((Token::Greater, self.current_span(start))),
+                    };
+                }
+
+                b'=' => {
+                    return {
+                        if self.peek() == Some(b'=') {
+                            self.pos += 1;
+                            Some((Token::EqEq, self.current_span(start)))
+                        } else {
+                            Some((Token::Eq, self.current_span(start)))
+                        }
+                    };
+                }
+
+                b'/' => {
+                    return {
+                        if self.peek() == Some(b'=') {
+                            self.pos += 1;
+                            Some((Token::NotEq, self.current_span(start)))
+                        } else {
+                            Some((Token::Slash, self.current_span(start)))
+                        }
+                    };
+                }
+
+                b':' => {
+                    return {
+                        if self.peek() == Some(b'=') {
+                            self.pos += 1;
+                            Some((Token::ColonEq, self.current_span(start)))
+                        } else {
+                            Some((Token::Colon, self.current_span(start)))
+                        }
+                    };
+                }
+
+                b'.' => {
+                    return {
+                        if self.peek() == Some(b'.') && self.peek_at(1) == Some(b'.') {
+                            self.pos += 2;
+                            Some((Token::Infer, self.current_span(start)))
+                        } else {
+                            Some((Token::Dot, self.current_span(start)))
+                        }
+                    };
+                }
+
+                b'+' => return Some((Token::Plus, self.current_span(start))),
+                b'*' => return Some((Token::Star, self.current_span(start))),
+                b'%' => return Some((Token::Percent, self.current_span(start))),
+                b'\\' => return Some((Token::SlashOr, self.current_span(start))),
+                b'^' => return Some((Token::Caret, self.current_span(start))),
+                b'|' => return Some((Token::Pipe, self.current_span(start))),
+                b'~' => return Some((Token::Tilde, self.current_span(start))),
+                b'@' => return Some((Token::At, self.current_span(start))),
+                b'#' => return Some((Token::Pound, self.current_span(start))),
+                b';' => return Some((Token::ColonSemi, self.current_span(start))),
+                b'(' => return Some((Token::ParenOpen, self.current_span(start))),
+                b')' => return Some((Token::ParenClose, self.current_span(start))),
+                b'[' => return Some((Token::BracketOpen, self.current_span(start))),
+                b']' => return Some((Token::BracketClose, self.current_span(start))),
+                b'{' => return Some((Token::CurlyOpen, self.current_span(start))),
+                b'}' => return Some((Token::CurlyClose, self.current_span(start))),
+                b'&' => return Some((Token::Ampersand, self.current_span(start))),
+                b',' => return Some((Token::Comma, self.current_span(start))),
+
+                _ => {
+                    let span = self.current_span(start);
+                    self.errors.push((LexSymptom::UnexpectedCharacter, span));
+                    while self.peek().is_some_and(|b| b & 0xC0 == 0x80) {
+                        self.pos += 1;
+                    }
+                    continue;
+                }
+            }
+        }
+    }
+
+    fn lex_single_token(&mut self) -> Option<(Token<'src>, SimpleSpan)> {
+        let tok = self.lex_simple_token()?;
+        if matches!(tok.0, Token::FormatStringDelim) {
+            self.lex_format_string(tok.1);
+            self.pending.pop_front()
+        } else {
+            Some(tok)
+        }
+    }
+
+    fn next_with_indent(&mut self) -> Option<(Token<'src>, SimpleSpan)> {
+        if let Some(item) = self.pending.pop_front() {
+            return Some(item);
+        }
+
+        if self.indent.pending_dedents > 0 {
+            self.indent.pending_dedents -= 1;
+            return Some((Token::Dedent, self.last_indent_span));
+        }
+        if self.indent.pending_indent {
+            self.indent.pending_indent = false;
+            return Some((Token::Indent, self.last_indent_span));
+        }
+
+        let item = self.lex_single_token()?;
+        if self.indent.indent_overflow {
+            self.indent.indent_overflow = false;
+            self.errors.push((LexSymptom::OverflowIndent, item.1));
+        }
+        Some(item)
+    }
+
+    fn next_token(&mut self) -> Option<(Token<'src>, SimpleSpan)> {
+        if let Some(tok) = self.next_with_indent() {
+            return Some(tok);
+        }
+
+        self.last_indent_span = SimpleSpan::from(self.pos..self.pos);
+        let dedent_count = self.indent.indent_depth as usize - 1;
+        if dedent_count > 0 {
+            self.indent.indent_depth = 1;
+            self.indent.pending_dedents = dedent_count as u8;
+            self.next_with_indent()
+        } else {
+            None
+        }
+    }
+
+    pub fn next_raw(&mut self) -> Option<(Token<'src>, SimpleSpan)> {
+        let first = self.next_token()?;
+
+        if let Token::Int(_) = first.0
+            && let Some(second) = self.next_token()
+        {
+            if let Token::Dot = second.0
+                && let Some(third) = self.next_token()
+            {
+                if let Token::Int(_) = third.0 {
+                    let combined = SimpleSpan::from(first.1.start..third.1.end);
+                    if let Some(v) = Self::parse_float_bytes(
+                        &self.source.as_bytes()[combined.start..combined.end],
+                    ) {
+                        return Some((Token::Float(v), combined));
+                    }
+                }
+                self.pending.push_front(third);
+            }
+            self.pending.push_front(second);
+        }
+
+        Some(first)
+    }
+}
+
+impl<'src> Iterator for HandLexer<'src> {
+    type Item = (Token<'src>, SimpleSpan);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let item = self.next_raw()?;
+            if !matches!(item.0, Token::Comment(_)) {
+                return Some(item);
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.source.len() - self.pos;
+        (remaining / 8, Some(remaining / 2))
+    }
+}

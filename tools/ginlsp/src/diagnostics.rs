@@ -6,10 +6,18 @@ pub fn span_to_range(start: usize, end: usize, source: &str) -> Range {
     let (start_line, start_col) = byte_offset_to_position(start, source);
     let (end_line, end_col) = byte_offset_to_position(end, source);
 
+    // Handle zero-length spans by including the previous character
+    let (start, start_char) = if start == end && start > 0 {
+        let (prev_line, prev_col) = byte_offset_to_position(start - 1, source);
+        (prev_line, prev_col)
+    } else {
+        (start_line, start_col)
+    };
+
     Range {
         start: Position {
-            line: start_line,
-            character: start_col,
+            line: start,
+            character: start_char,
         },
         end: Position {
             line: end_line,
@@ -31,10 +39,10 @@ pub fn symptoms_to_diagnostics(source: &str, symptoms: &[&Symptom]) -> Vec<Diagn
             Diagnostic {
                 range,
                 severity: Some(severity),
-                code: Some(NumberOrString::String(symptom.error_code())),
+                code: Some(NumberOrString::String(symptom.error_code().to_string())),
                 code_description: None,
                 source: Some("ginc".to_string()),
-                message: symptom.message(),
+                message: symptom.message.clone(),
                 related_information: None,
                 tags: None,
                 data: None,
