@@ -1,14 +1,48 @@
 use crate::{LexContext, MAX_INDENT_DEPTH, Token};
 use chumsky::span::SimpleSpan;
 use diagnostic::lex::LexSymptom;
-use std::collections::VecDeque;
+use std::mem::MaybeUninit;
+
+struct SmallDeque<T, const N: usize> {
+    buf: [MaybeUninit<T>; N],
+    head: usize,
+    len: usize,
+}
+
+impl<T, const N: usize> SmallDeque<T, N> {
+    fn new() -> Self {
+        Self {
+            // SAFETY: MaybeUninit does not require initialization.
+            buf: unsafe { MaybeUninit::<[MaybeUninit<T>; N]>::uninit().assume_init() },
+            head: 0,
+            len: 0,
+        }
+    }
+
+    fn push_back(&mut self, val: T) {
+        debug_assert!(self.len < N, "SmallDeque overflow");
+        let idx = (self.head + self.len) % N;
+        self.buf[idx].write(val);
+        self.len += 1;
+    }
+
+    fn pop_front(&mut self) -> Option<T> {
+        if self.len == 0 {
+            return None;
+        }
+        let val = unsafe { self.buf[self.head].assume_init_read() };
+        self.head = (self.head + 1) % N;
+        self.len -= 1;
+        Some(val)
+    }
+}
 
 pub struct HandLexer<'src> {
     source: &'src str,
     pos: usize,
     pub errors: Vec<(LexSymptom, SimpleSpan)>,
     indent: LexContext,
-    pending: VecDeque<(Token<'src>, SimpleSpan)>,
+    pending: SmallDeque<(Token<'src>, SimpleSpan), 16>,
     last_indent_span: SimpleSpan,
 }
 
@@ -19,7 +53,7 @@ impl<'src> HandLexer<'src> {
             pos: 0,
             errors: Vec::new(),
             indent: LexContext::default(),
-            pending: VecDeque::new(),
+            pending: SmallDeque::new(),
             last_indent_span: SimpleSpan::from(0..0),
         }
     }
@@ -202,13 +236,36 @@ impl<'src> HandLexer<'src> {
         std::str::from_utf8(&buf[..len]).ok()?.parse::<f64>().ok()
     }
 
+    fn int_result(
+        &mut self,
+        span: SimpleSpan,
+        bytes: &[u8],
+        radix: u32,
+    ) -> (Token<'src>, SimpleSpan) {
+        match Self::parse_int_bytes(bytes, radix) {
+            Some(v) => (Token::Int(v), span),
+            None => {
+                self.errors.push((LexSymptom::InvalidInteger, span));
+                (Token::Int(0), span)
+            }
+        }
+    }
+
     fn lex_number(&mut self, start: usize) -> (Token<'src>, SimpleSpan) {
         if self.source.as_bytes()[start] == b'0'
             && let Some(b'x' | b'X') = self.peek()
             && self.peek_at(1).is_some_and(|b| b.is_ascii_hexdigit())
         {
             self.pos += 1;
-            return self.lex_hex_int(start);
+            let bytes = self.source.as_bytes();
+            while self.pos < bytes.len() {
+                match bytes[self.pos] {
+                    b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F' | b'_' => self.pos += 1,
+                    _ => break,
+                }
+            }
+            let span = self.current_span(start);
+            return self.int_result(span, &self.source.as_bytes()[start + 2..self.pos], 16);
         }
 
         let bytes = self.source.as_bytes();
@@ -219,33 +276,26 @@ impl<'src> HandLexer<'src> {
             }
         }
 
-        let span = self.current_span(start);
-        match Self::parse_int_bytes(&self.source.as_bytes()[start..self.pos], 10) {
-            Some(v) => (Token::Int(v), span),
-            None => {
-                self.errors.push((LexSymptom::InvalidInteger, span));
-                (Token::Int(0), span)
+        if self.peek() == Some(b'.') && self.peek_at(1).is_some_and(|b| b.is_ascii_digit()) {
+            self.pos += 1;
+            while self.pos < bytes.len() {
+                match bytes[self.pos] {
+                    b'0'..=b'9' | b'_' => self.pos += 1,
+                    _ => break,
+                }
             }
+            let span = self.current_span(start);
+            return match Self::parse_float_bytes(&self.source.as_bytes()[start..self.pos]) {
+                Some(v) => (Token::Float(v), span),
+                None => {
+                    self.errors.push((LexSymptom::InvalidFloat, span));
+                    (Token::Float(0.0), span)
+                }
+            };
         }
-    }
 
-    fn lex_hex_int(&mut self, start: usize) -> (Token<'src>, SimpleSpan) {
-        let bytes = self.source.as_bytes();
-        while self.pos < bytes.len() {
-            match bytes[self.pos] {
-                b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F' | b'_' => self.pos += 1,
-                _ => break,
-            }
-        }
-
         let span = self.current_span(start);
-        match Self::parse_int_bytes(&self.source.as_bytes()[start + 2..self.pos], 16) {
-            Some(v) => (Token::Int(v), span),
-            None => {
-                self.errors.push((LexSymptom::InvalidInteger, span));
-                (Token::Int(0), span)
-            }
-        }
+        self.int_result(span, &self.source.as_bytes()[start..self.pos], 10)
     }
 
     fn lex_string(&mut self, start: usize) -> (Token<'src>, SimpleSpan) {
@@ -399,6 +449,21 @@ impl<'src> HandLexer<'src> {
 
     /// Lex a single token without processing format strings.
     /// Returns `Token::FormatStringDelim` for `"` without consuming format string content.
+    fn lex_two_char(
+        &mut self,
+        start: usize,
+        second: u8,
+        two_char: Token<'src>,
+        fallback: Token<'src>,
+    ) -> Option<(Token<'src>, SimpleSpan)> {
+        if self.peek() == Some(second) {
+            self.pos += 1;
+            Some((two_char, self.current_span(start)))
+        } else {
+            Some((fallback, self.current_span(start)))
+        }
+    }
+
     fn lex_simple_token(&mut self) -> Option<(Token<'src>, SimpleSpan)> {
         loop {
             self.skip_inline_whitespace();
@@ -463,38 +528,9 @@ impl<'src> HandLexer<'src> {
                     };
                 }
 
-                b'=' => {
-                    return {
-                        if self.peek() == Some(b'=') {
-                            self.pos += 1;
-                            Some((Token::EqEq, self.current_span(start)))
-                        } else {
-                            Some((Token::Eq, self.current_span(start)))
-                        }
-                    };
-                }
-
-                b'/' => {
-                    return {
-                        if self.peek() == Some(b'=') {
-                            self.pos += 1;
-                            Some((Token::NotEq, self.current_span(start)))
-                        } else {
-                            Some((Token::Slash, self.current_span(start)))
-                        }
-                    };
-                }
-
-                b':' => {
-                    return {
-                        if self.peek() == Some(b'=') {
-                            self.pos += 1;
-                            Some((Token::ColonEq, self.current_span(start)))
-                        } else {
-                            Some((Token::Colon, self.current_span(start)))
-                        }
-                    };
-                }
+                b'=' => return self.lex_two_char(start, b'=', Token::EqEq, Token::Eq),
+                b'/' => return self.lex_two_char(start, b'=', Token::NotEq, Token::Slash),
+                b':' => return self.lex_two_char(start, b'=', Token::ColonEq, Token::Colon),
 
                 b'.' => {
                     return {
@@ -587,28 +623,7 @@ impl<'src> HandLexer<'src> {
     }
 
     pub fn next_raw(&mut self) -> Option<(Token<'src>, SimpleSpan)> {
-        let first = self.next_token()?;
-
-        if let Token::Int(_) = first.0
-            && let Some(second) = self.next_token()
-        {
-            if let Token::Dot = second.0
-                && let Some(third) = self.next_token()
-            {
-                if let Token::Int(_) = third.0 {
-                    let combined = SimpleSpan::from(first.1.start..third.1.end);
-                    if let Some(v) = Self::parse_float_bytes(
-                        &self.source.as_bytes()[combined.start..combined.end],
-                    ) {
-                        return Some((Token::Float(v), combined));
-                    }
-                }
-                self.pending.push_front(third);
-            }
-            self.pending.push_front(second);
-        }
-
-        Some(first)
+        self.next_token()
     }
 }
 
