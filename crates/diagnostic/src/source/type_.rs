@@ -1,6 +1,4 @@
-//! Type diagnostic variant.
-
-use crate::{Category, Symptom, SymptomDetail, SymptomSource};
+use crate::{Category, Symptom, SymptomLike};
 use chumsky::span::SimpleSpan;
 
 pub enum TypeSymptom {
@@ -36,174 +34,95 @@ pub enum TypeSymptom {
         name: String,
         union_name: String,
     },
+    SelfOutsideMethod,
 }
 
-impl SymptomDetail for TypeSymptom {
-    fn id(&self) -> u8 {
-        match self {
-            TypeSymptom::Mismatch => 1,
-            TypeSymptom::UnknownBinding { .. } => 2,
-            TypeSymptom::UnknownTag { .. } => 9,
-            TypeSymptom::InferenceFailed => 3,
-            TypeSymptom::ConstraintViolation { .. } => 4,
-            TypeSymptom::UnresolvedTypeParam { .. } => 5,
-            TypeSymptom::ArityMismatch { .. } => 6,
-            TypeSymptom::IndexOutOfBounds { .. } => 7,
-            TypeSymptom::UnusedBinding { .. } => 8,
-            TypeSymptom::NotAVariant { .. } => 10,
-        }
-    }
+impl SymptomLike for TypeSymptom {
+    fn into_symptom(self, span: SimpleSpan) -> Symptom {
+        let category = Category::Flaw;
+        let code: &str;
+        let help: Option<String>;
+        let message: String;
 
-    fn message(&self) -> String {
         match self {
-            TypeSymptom::Mismatch => "type mismatch".into(),
-            TypeSymptom::UnknownBinding { name } => format!("use of undefined binding `{name}`"),
-            TypeSymptom::UnknownTag { name } => format!("use of undeclared tag `{name}`"),
-            TypeSymptom::InferenceFailed => "failed to infer type".into(),
-            TypeSymptom::ConstraintViolation {
+            Self::Mismatch => {
+                code = "type-mismatch";
+                message = "type mismatch".into();
+                help = Some("types do not match".into());
+            }
+            Self::UnknownBinding { name } => {
+                code = "type-unknown-binding";
+                message = format!("use of undefined binding `{name}`");
+                help = Some("define bind before using it".into());
+            }
+            Self::UnknownTag { name } => {
+                code = "type-unknown-tag";
+                message = format!("use of undeclared tag `{name}`");
+                help = Some("declare the tag before using it".into());
+            }
+            Self::InferenceFailed => {
+                code = "type-inference-failed";
+                message = "failed to infer type".into();
+                help = Some("could not infer the type".into());
+            }
+            Self::ConstraintViolation {
                 param,
                 expected,
                 got,
             } => {
-                format!("type parameter `{param}` requires `{expected}`, got `{got}`")
+                code = "type-constraint-violation";
+                message = format!("type parameter `{param}` requires `{expected}`, got `{got}`");
+                help = Some(format!(
+                    "ensure the type argument for `{param}` satisfies the `{expected}` constraint"
+                ));
             }
-            TypeSymptom::UnresolvedTypeParam { name } => {
-                format!("unresolved type parameter `{name}`")
+            Self::UnresolvedTypeParam { name } => {
+                code = "type-unresolved-type-param";
+                message = format!("unresolved type parameter `{name}`");
+                help = Some(format!(
+                    "provide a concrete type for `{name}` at the instantiation site"
+                ));
             }
-            TypeSymptom::ArityMismatch {
+            Self::ArityMismatch {
                 name,
                 expected,
                 got,
             } => {
-                format!("`{name}` expects {expected} type argument(s), got {got}")
+                code = "type-arity-mismatch";
+                message = format!("`{name}` expects {expected} type argument(s), got {got}");
+                help = Some(format!("provide exactly {expected} type argument(s)"));
             }
-            TypeSymptom::IndexOutOfBounds { index, size } => {
-                format!("index out of bounds: the len is {size} but the index is {index}")
+            Self::IndexOutOfBounds { index, size } => {
+                code = "type-index-out-of-bounds";
+                message =
+                    format!("index out of bounds: the len is {size} but the index is {index}");
+                help = Some(format!("valid indices are 0..{size}"));
             }
-            TypeSymptom::UnusedBinding { name } => format!("unused binding `{name}`"),
-            TypeSymptom::NotAVariant { name, union_name } => {
-                format!("`{name}` is not a variant of `{union_name}`")
+            Self::UnusedBinding { name } => {
+                code = "type-unused-binding";
+                message = format!("unused binding `{name}`");
+                help = None;
+            }
+            Self::NotAVariant { name, union_name } => {
+                code = "type-not-a-variant";
+                message = format!("`{name}` is not a variant of `{union_name}`");
+                help = Some(format!(
+                    "expected one of the variants declared in `{union_name}`"
+                ));
+            }
+            Self::SelfOutsideMethod => {
+                code = "type-self-outside-method";
+                message = "self used outside method".into();
+                help = Some("self can only be used inside methods".into());
             }
         }
-    }
 
-    fn help(&self) -> Option<String> {
-        match self {
-            TypeSymptom::Mismatch => Some("types do not match".into()),
-            TypeSymptom::UnknownBinding { .. } => Some("define bind before using it".into()),
-            TypeSymptom::UnknownTag { .. } => Some("declare the tag before using it".into()),
-            TypeSymptom::InferenceFailed => Some("could not infer the type".into()),
-            TypeSymptom::ConstraintViolation {
-                param, expected, ..
-            } => Some(format!(
-                "ensure the type argument for `{param}` satisfies the `{expected}` constraint"
-            )),
-            TypeSymptom::UnresolvedTypeParam { name } => Some(format!(
-                "provide a concrete type for `{name}` at the instantiation site"
-            )),
-            TypeSymptom::ArityMismatch { expected, .. } => {
-                Some(format!("provide exactly {expected} type argument(s)"))
-            }
-            TypeSymptom::IndexOutOfBounds { size, .. } => {
-                Some(format!("valid indices are 0..{}", size))
-            }
-            TypeSymptom::UnusedBinding { .. } => None,
-            TypeSymptom::NotAVariant { union_name, .. } => Some(format!(
-                "expected one of the variants declared in `{union_name}`"
-            )),
+        Symptom {
+            code,
+            message,
+            help,
+            span,
+            category,
         }
-    }
-}
-
-pub const fn mismatch(span: SimpleSpan) -> Symptom {
-    Symptom {
-        source: SymptomSource::Type(TypeSymptom::Mismatch),
-        span,
-        category: Category::Flaw,
-    }
-}
-
-pub fn unknown_binding(span: SimpleSpan, name: String) -> Symptom {
-    Symptom {
-        source: SymptomSource::Type(TypeSymptom::UnknownBinding { name }),
-        span,
-        category: Category::Flaw,
-    }
-}
-
-pub fn unknown_tag(span: SimpleSpan, name: String) -> Symptom {
-    Symptom {
-        source: SymptomSource::Type(TypeSymptom::UnknownTag { name }),
-        span,
-        category: Category::Flaw,
-    }
-}
-
-pub const fn inference_failed(span: SimpleSpan) -> Symptom {
-    Symptom {
-        source: SymptomSource::Type(TypeSymptom::InferenceFailed),
-        span,
-        category: Category::Flaw,
-    }
-}
-
-pub fn constraint_violation(
-    span: SimpleSpan,
-    param: String,
-    expected: String,
-    got: String,
-) -> Symptom {
-    Symptom {
-        source: SymptomSource::Type(TypeSymptom::ConstraintViolation {
-            param,
-            expected,
-            got,
-        }),
-        span,
-        category: Category::Flaw,
-    }
-}
-
-pub fn unresolved_type_param(span: SimpleSpan, name: String) -> Symptom {
-    Symptom {
-        source: SymptomSource::Type(TypeSymptom::UnresolvedTypeParam { name }),
-        span,
-        category: Category::Flaw,
-    }
-}
-
-pub fn arity_mismatch(span: SimpleSpan, name: String, expected: usize, got: usize) -> Symptom {
-    Symptom {
-        source: SymptomSource::Type(TypeSymptom::ArityMismatch {
-            name,
-            expected,
-            got,
-        }),
-        span,
-        category: Category::Flaw,
-    }
-}
-
-pub fn index_out_of_bounds(span: SimpleSpan, index: i128, size: usize) -> Symptom {
-    Symptom {
-        source: SymptomSource::Type(TypeSymptom::IndexOutOfBounds { index, size }),
-        span,
-        category: Category::Flaw,
-    }
-}
-
-pub fn unused_binding(span: SimpleSpan, name: String) -> Symptom {
-    Symptom {
-        source: SymptomSource::Type(TypeSymptom::UnusedBinding { name }),
-        span,
-        category: Category::Help,
-    }
-}
-
-pub fn not_a_variant(span: SimpleSpan, name: String, union_name: String) -> Symptom {
-    Symptom {
-        source: SymptomSource::Type(TypeSymptom::NotAVariant { name, union_name }),
-        span,
-        category: Category::Flaw,
     }
 }

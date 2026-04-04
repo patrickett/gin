@@ -1,6 +1,4 @@
-//! IO diagnostic variant.
-
-use crate::{Category, Symptom, SymptomDetail, SymptomSource};
+use crate::{Category, Symptom, SymptomLike};
 use chumsky::span::SimpleSpan;
 
 pub enum IoSymptom {
@@ -9,57 +7,37 @@ pub enum IoSymptom {
     ResolutionFailed,
 }
 
-impl SymptomDetail for IoSymptom {
-    fn id(&self) -> u8 {
-        match self {
-            IoSymptom::ReadFailed => 1,
-            IoSymptom::WriteFailed => 2,
-            IoSymptom::ResolutionFailed => 3,
-        }
-    }
+impl SymptomLike for IoSymptom {
+    fn into_symptom(self, span: SimpleSpan) -> Symptom {
+        let category = Category::Flaw;
+        let code: &str;
+        let help: Option<String>;
+        let message: String;
 
-    fn message(&self) -> String {
         match self {
-            IoSymptom::ReadFailed => "failed to read file",
-            IoSymptom::WriteFailed => "failed to write file",
-            IoSymptom::ResolutionFailed => "failed to resolve import",
-        }
-        .into()
-    }
-
-    fn help(&self) -> Option<String> {
-        match self {
-            IoSymptom::ReadFailed => {
-                Some("check if the file exists and you have permission to read it".into())
+            Self::ReadFailed => {
+                code = "io-read-failed";
+                message = "failed to read file".into();
+                help = Some("check if the file exists and you have permission to read it".into());
             }
-            IoSymptom::WriteFailed => {
-                Some("check if you have permission to write to this location".into())
+            Self::WriteFailed => {
+                code = "io-write-failed";
+                message = "failed to write file".into();
+                help = Some("check if you have permission to write to this location".into());
             }
-            IoSymptom::ResolutionFailed => Some("check if the import path is correct".into()),
+            Self::ResolutionFailed => {
+                code = "io-resolution-failed";
+                message = "failed to resolve import".into();
+                help = Some("check if the import path is correct".into());
+            }
         }
-    }
-}
 
-pub const fn read_failed(span: SimpleSpan) -> Symptom {
-    Symptom {
-        source: SymptomSource::Io(IoSymptom::ReadFailed),
-        span,
-        category: Category::Flaw,
-    }
-}
-
-pub const fn write_failed(span: SimpleSpan) -> Symptom {
-    Symptom {
-        source: SymptomSource::Io(IoSymptom::WriteFailed),
-        span,
-        category: Category::Flaw,
-    }
-}
-
-pub const fn resolution_failed(span: SimpleSpan) -> Symptom {
-    Symptom {
-        source: SymptomSource::Io(IoSymptom::ResolutionFailed),
-        span,
-        category: Category::Flaw,
+        Symptom {
+            code,
+            message,
+            help,
+            span,
+            category,
+        }
     }
 }

@@ -1,77 +1,54 @@
-//! Parse diagnostic variant.
-
-use crate::{Category, Symptom, SymptomDetail, SymptomSource};
+use crate::{Category, Symptom, SymptomLike};
 use chumsky::span::SimpleSpan;
 
 pub enum ParseSymptom {
-    InvalidSyntax,
+    UnexpectedToken,
     Custom(String),
     EmptyParens { suggested: String },
     UnusedValue { value: String },
 }
 
-impl SymptomDetail for ParseSymptom {
-    fn id(&self) -> u8 {
-        match self {
-            ParseSymptom::InvalidSyntax => 1,
-            ParseSymptom::Custom(_) => 2,
-            ParseSymptom::EmptyParens { .. } => 3,
-            ParseSymptom::UnusedValue { .. } => 4,
-        }
-    }
+impl SymptomLike for ParseSymptom {
+    fn into_symptom(self, span: SimpleSpan) -> Symptom {
+        let category: Category;
+        let code: &str;
+        let help: Option<String>;
+        let message: String;
 
-    fn message(&self) -> String {
         match self {
-            ParseSymptom::InvalidSyntax => "invalid syntax".into(),
-            ParseSymptom::Custom(msg) => msg.clone(),
-            ParseSymptom::EmptyParens { .. } => "empty parentheses are not needed".into(),
-            ParseSymptom::UnusedValue { value } => {
-                format!("unused value: `{value}`")
+            Self::UnexpectedToken => {
+                category = Category::Flaw;
+                code = "parse-unexpected-token";
+                message = "invalid syntax".into();
+                help = None;
+            }
+            Self::Custom(msg) => {
+                category = Category::Flaw;
+                code = "parse-custom";
+                message = msg;
+                help = None;
+            }
+            Self::EmptyParens { suggested } => {
+                category = Category::Help;
+                code = "parse-empty-parens";
+                message = "empty parentheses are not needed".into();
+                help = Some(format!("remove the parentheses: `{suggested}`"));
+            }
+            Self::UnusedValue { value } => {
+                category = Category::Info;
+                code = "parse-unused-value";
+                message = format!("unused value: `{value}`");
+                help =
+                    Some("did you mean to indent this as part of the previous expression?".into());
             }
         }
-    }
 
-    fn help(&self) -> Option<String> {
-        match self {
-            ParseSymptom::EmptyParens { suggested } => {
-                Some(format!("remove the parentheses: `{suggested}`"))
-            }
-            ParseSymptom::UnusedValue { .. } => {
-                Some("did you mean to indent this as part of the previous expression?".into())
-            }
-            _ => None,
+        Symptom {
+            code,
+            message,
+            help,
+            span,
+            category,
         }
-    }
-}
-
-pub const fn unexpected_token(span: SimpleSpan) -> Symptom {
-    Symptom {
-        source: SymptomSource::Parse(ParseSymptom::InvalidSyntax),
-        span,
-        category: Category::Flaw,
-    }
-}
-
-pub fn custom(msg: String, span: SimpleSpan) -> Symptom {
-    Symptom {
-        source: SymptomSource::Parse(ParseSymptom::Custom(msg)),
-        span,
-        category: Category::Flaw,
-    }
-}
-
-pub fn empty_parens_hint(suggested: String, span: SimpleSpan) -> Symptom {
-    Symptom {
-        source: SymptomSource::Parse(ParseSymptom::EmptyParens { suggested }),
-        span,
-        category: Category::Help,
-    }
-}
-
-pub fn unused_value(value: String, span: SimpleSpan) -> Symptom {
-    Symptom {
-        source: SymptomSource::Parse(ParseSymptom::UnusedValue { value }),
-        span,
-        category: Category::Info,
     }
 }
