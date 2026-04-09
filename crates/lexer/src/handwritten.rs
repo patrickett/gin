@@ -3,6 +3,7 @@ use chumsky::span::SimpleSpan;
 use diagnostic::lex::LexSymptom;
 use memchr::{memchr, memchr2, memchr3};
 
+// TODO: move to SpanId instead of (Token, SimpleSpan)
 struct FormatStringState<'src> {
     tokens: Vec<(Token<'src>, SimpleSpan)>,
     idx: usize,
@@ -20,7 +21,7 @@ impl<'src> FormatStringState<'src> {
     }
 }
 
-pub struct HandLexer<'src> {
+pub struct Lexer<'src> {
     source: &'src str,
     pos: usize,
     pub errors: Vec<(LexSymptom, SimpleSpan)>,
@@ -31,7 +32,7 @@ pub struct HandLexer<'src> {
     line_end: usize,
 }
 
-impl<'src> HandLexer<'src> {
+impl<'src> Lexer<'src> {
     pub fn new(source: &'src str) -> Self {
         let line_end = memchr(b'\n', source.as_bytes()).unwrap_or(source.len());
         Self {
@@ -641,7 +642,7 @@ impl<'src> HandLexer<'src> {
     }
 }
 
-impl<'src> Iterator for HandLexer<'src> {
+impl<'src> Iterator for Lexer<'src> {
     type Item = (Token<'src>, SimpleSpan);
 
     fn next(&mut self) -> Option<Self::Item> {

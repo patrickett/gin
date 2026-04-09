@@ -2,7 +2,7 @@ use std::fmt;
 
 use chumsky::span::SimpleSpan;
 
-use crate::{GinLexer, Token};
+use crate::{Lexer, Token};
 
 impl<'src> fmt::Display for Token<'src> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -114,7 +114,7 @@ impl<'src> fmt::Display for TokenSpanned<'src> {
 /// // [)] (11..12)
 /// ```
 pub fn debug_tokens(source: &str) -> String {
-    let mut lexer = GinLexer::new(source);
+    let mut lexer = Lexer::new(source);
     let tokens: Vec<_> = lexer.by_ref().collect();
     let mut out = String::new();
     for (tok, span) in &tokens {

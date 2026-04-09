@@ -7,8 +7,8 @@ fn test_parse_import_debug() {
     println!("=== Testing import parsing ===");
     println!("Source: '{}'", src);
 
-    use lexer::GinLexer;
-    let tokens: Vec<_> = GinLexer::new(src).collect();
+    use lexer::Lexer;
+    let tokens: Vec<_> = Lexer::new(src).collect();
     println!("Tokens from lexer:");
     for (i, (token, span)) in tokens.iter().enumerate() {
         println!("  [{}] {:?} at {:?}", i, token, span);

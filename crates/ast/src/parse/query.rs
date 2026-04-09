@@ -8,13 +8,11 @@ use chumsky::{
     input::{Input, Stream},
 };
 use database::{Db, File};
-use diagnostic::io as io_symptom;
-use diagnostic::lex as lex_symptom;
+use diagnostic::SymptomLike;
+use diagnostic::io::IoSymptom;
 use diagnostic::lex::LexSymptom;
-use diagnostic::parse as parse_symptom;
-use diagnostic::{Category, Symptom, SymptomSource};
-use lexer::{GinLexer, Token};
-use salsa::Accumulator;
+use diagnostic::parse::ParseSymptom;
+use lexer::{Lexer, Token};
 use std::path::Path;
 
 /// Resolve import paths to File inputs for a parsed file.
@@ -31,7 +29,7 @@ pub fn resolve_imports<'db>(db: &'db dyn Db, file: File) -> Vec<File> {
 ///
 /// Used for dependency loading at build time where caching is unnecessary.
 pub fn parse_from_str(src: &str) -> FileAst {
-    let mut lexer = GinLexer::new(src);
+    let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer
         .by_ref()
         .filter(|(t, _)| !matches!(t, Token::Comment(_)))

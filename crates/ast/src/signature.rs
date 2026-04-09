@@ -1,6 +1,7 @@
 use crate::{Bind, Declare, DeclareValue, FileAst, ParameterKind, Parameters, Tag, Variant};
+use i256::I256;
 use internment::Intern;
-use lexer::GinLexer;
+use lexer::Lexer;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -16,7 +17,7 @@ pub fn compute_content_hash(source: &str) -> String {
 
     // Lex the source and hash only non-comment tokens
     // The lexer's Iterator impl already filters out comments
-    let lexer = GinLexer::new(source);
+    let lexer = Lexer::new(source);
     for (token, _span) in lexer {
         // Hash the token discriminant and payload
         // This is stable across runs because we use the token's Debug representation

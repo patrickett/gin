@@ -1,10 +1,10 @@
-use lexer::{GinLexer, Token};
+use lexer::{Lexer, Token};
 
 #[test]
 fn test_keywords() {
     let src = "use if else for as is in of or and has when then loop continue break return private";
 
-    let mut lexer = GinLexer::new(src);
+    let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
     assert!(matches!(tokens[0], Token::Use));
@@ -31,7 +31,7 @@ fn test_keywords() {
 fn test_identifiers() {
     let src = "foo bar baz hello_world";
 
-    let mut lexer = GinLexer::new(src);
+    let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
     assert!(matches!(tokens[0], Token::Id(_)));
@@ -44,7 +44,7 @@ fn test_identifiers() {
 fn test_tags() {
     let src = "User Error HTTPRequest ServerState";
 
-    let mut lexer = GinLexer::new(src);
+    let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
     assert!(matches!(tokens[0], Token::Tag(_)));
@@ -57,7 +57,7 @@ fn test_tags() {
 fn test_numbers() {
     let src = "42 3.14 0 999";
 
-    let mut lexer = GinLexer::new(src);
+    let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
     assert!(matches!(tokens[0], Token::Int(_)));
@@ -89,7 +89,7 @@ fn test_numbers() {
 fn test_underscore_int() {
     let src = "1_000 1_000_000 4_2";
 
-    let mut lexer = GinLexer::new(src);
+    let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
     assert!(matches!(tokens[0], Token::Int(_)));
@@ -127,7 +127,7 @@ fn test_underscore_int() {
 fn test_underscore_hex() {
     let src = "0xFF_FF 0xDEAD_BEEF";
 
-    let mut lexer = GinLexer::new(src);
+    let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
     assert!(matches!(tokens[0], Token::Int(_)));
@@ -155,7 +155,7 @@ fn test_underscore_hex() {
 fn test_underscore_float() {
     let src = "3.14_159 1_000.5_5";
 
-    let mut lexer = GinLexer::new(src);
+    let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
     assert!(matches!(tokens[0], Token::Float(_)));
@@ -165,7 +165,7 @@ fn test_underscore_float() {
         } else {
             0.0
         },
-        3.14159
+        3.14159,
     );
 
     assert!(matches!(tokens[1], Token::Float(_)));
@@ -183,7 +183,7 @@ fn test_underscore_float() {
 fn test_operators() {
     let src = "== /= <= >= = < > + - * / ^ ~ \\";
 
-    let mut lexer = GinLexer::new(src);
+    let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
     assert!(matches!(tokens[0], Token::EqEq));
@@ -206,7 +206,7 @@ fn test_operators() {
 fn test_punctuation() {
     let src = "( ) [ ] { } , . : ; ...";
 
-    let mut lexer = GinLexer::new(src);
+    let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
     assert!(matches!(tokens[0], Token::ParenOpen));
@@ -226,7 +226,7 @@ fn test_punctuation() {
 fn test_comments() {
     let src = "-- this is a comment\n--- this is a doc comment";
 
-    let mut lexer = GinLexer::new(src);
+    let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
     assert_eq!(tokens.len(), 2);
@@ -238,7 +238,7 @@ fn test_comments() {
 fn test_indentation() {
     let src = "foo:\n    bar\n  baz";
 
-    let mut lexer = GinLexer::new(src);
+    let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
     // Should have: foo, does, :, newline, indent, bar, newline, dedent, baz
@@ -260,7 +260,7 @@ fn test_indentation() {
 fn test_play() {
     let src = "--- Currently just a marker trait\nSized ()";
 
-    let mut lexer = GinLexer::new(src);
+    let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
     assert!(matches!(tokens[0], Token::DocComment(_)));
@@ -274,7 +274,7 @@ fn test_play() {
 fn test_string_literal() {
     let src = "'foo' 'bar' 'baz'";
 
-    let mut lexer = GinLexer::new(src);
+    let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
     assert!(matches!(tokens[0], Token::String(_)));
@@ -312,7 +312,7 @@ fn test_string_literal() {
 fn test_unterminated_string_with_content() {
     let src = "x: 'bar\nz: 'baz";
 
-    let mut lexer = GinLexer::new(src);
+    let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
     // x : UnterminatedString("bar") Newline z : UnterminatedString("baz")
@@ -346,7 +346,7 @@ fn test_unicode_string_literals() {
     // Multi-byte UTF-8 characters inside single-quoted strings
     let src = "'héllo' 'こんにちは'";
 
-    let mut lexer = GinLexer::new(src);
+    let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
     assert!(matches!(tokens[0], Token::String(_)));
@@ -375,7 +375,7 @@ fn test_unicode_format_strings() {
     // Multi-byte UTF-8 characters inside double-quoted format strings
     let src = r#""héllo" "こんにちは""#;
 
-    let mut lexer = GinLexer::new(src);
+    let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
     // "héllo" → [FormatStringDelim, FormatStringText("héllo"), FormatStringDelim]
@@ -393,7 +393,7 @@ fn test_unicode_format_strings() {
 fn test_unicode_comments() {
     let src = "-- héllo wörld";
 
-    let mut lexer = GinLexer::new(src);
+    let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
     assert!(tokens.is_empty());
@@ -404,7 +404,7 @@ fn test_unicode_tags_rejected() {
     // Non-ASCII uppercase letters are no longer valid tag starts (ASCII only)
     let src = "Ångström Élève";
 
-    let mut lexer = GinLexer::new(src);
+    let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
     // Neither should be recognized as tags — only ASCII [A-Z] starts a tag
@@ -416,7 +416,7 @@ fn test_unicode_identifiers_rejected() {
     // Non-ASCII lowercase letters are no longer valid identifiers (ASCII only)
     let src = "café αλφα";
 
-    let mut lexer = GinLexer::new(src);
+    let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
     // "caf" is a valid ASCII id, but "é" breaks it; "αλφα" is not recognized at all
@@ -429,34 +429,11 @@ fn test_unicode_identifiers_rejected() {
     }));
 }
 
-// #[test]
-// fn test_unicode_non_letter_not_id() {
-//     // `hello_世界`: `世` and `界` are Other_Letter (Lo), not Lowercase_Letter (Ll),
-//     // so they cannot form a snake_case segment. Only `hello` is tokenised as Id;
-//     // the remaining characters are silently skipped as unrecognised.
-//     let src = "hello_世界";
-
-//     let mut lexer = GinLexer::new(src);
-//     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
-
-//     // First (and only) real token is the `hello` identifier
-//     assert_eq!(tokens.len(), 1);
-//     assert!(matches!(tokens[0], Token::Id(_)));
-//     assert_eq!(
-//         if let Token::Id(s) = &tokens[0] {
-//             *s
-//         } else {
-//             ""
-//         },
-//         "hello"
-//     );
-// }
-
 #[test]
 fn test_unterminated_string_lone_quote() {
     let src = "y: '\nx: '";
 
-    let mut lexer = GinLexer::new(src);
+    let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
     // y : UnterminatedString("") Newline x : UnterminatedString("")
@@ -488,7 +465,7 @@ fn test_unterminated_string_lone_quote() {
 #[test]
 fn test_format_string_interpolation() {
     let src = r#""hello (name)""#;
-    let mut lexer = GinLexer::new(src);
+    let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
     assert_eq!(
@@ -508,7 +485,7 @@ fn test_format_string_interpolation() {
 #[test]
 fn test_format_string_nested_parens() {
     let src = r#""result (foo(x, y))""#;
-    let mut lexer = GinLexer::new(src);
+    let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
     assert_eq!(
@@ -533,7 +510,7 @@ fn test_format_string_nested_parens() {
 #[test]
 fn test_format_string_unterminated_interp() {
     let src = r#""hello (name"#;
-    let mut lexer = GinLexer::new(src);
+    let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
     // Should contain UnterminatedFormatString somewhere
@@ -548,7 +525,7 @@ fn test_format_string_unterminated_interp() {
 #[test]
 fn test_format_string_empty() {
     let src = r#""""#;
-    let mut lexer = GinLexer::new(src);
+    let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
     assert_eq!(
@@ -580,4 +557,37 @@ fn test_debug_tokens_with_indentation() {
     assert!(output.contains(r#"[id: "foo"]"#));
     assert!(output.contains(r#"[id: "bar"]"#));
     assert!(output.contains(r#"[id: "baz"]"#));
+}
+
+#[test]
+fn test_range_tokens() {
+    let src = "TinyInt is 0...255";
+    let mut lexer = Lexer::new(src);
+    let tokens: Vec<_> = lexer.by_ref().collect();
+    let errors = std::mem::take(&mut lexer.errors);
+
+    eprintln!("Tokens:");
+    for (tok, span) in &tokens {
+        eprintln!("  {:?} at {}..{}", tok, span.start, span.end);
+    }
+    eprintln!("Errors: {:?}", errors);
+
+    assert!(
+        errors.is_empty(),
+        "Expected no lex errors, got: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn test_debug_float_coalesce() {
+    let src = "42 3.14 0 999";
+    let mut lexer = Lexer::new(src);
+    let tokens: Vec<_> = lexer.by_ref().collect();
+    eprintln!("Tokens for {:?}:", src);
+    for (tok, span) in &tokens {
+        eprintln!("  {:?} at {}..{}", tok, span.start, span.end);
+    }
+    let errors = std::mem::take(&mut lexer.errors);
+    eprintln!("Errors: {:?}", errors);
 }

@@ -6,8 +6,8 @@ fn test_parse_arithmetic_debug() {
 
     println!("Source: {}", src);
     println!("Tokens:");
-    use lexer::GinLexer;
-    for (i, (tok, span)) in GinLexer::new(src).enumerate() {
+    use lexer::Lexer;
+    for (i, (tok, span)) in Lexer::new(src).enumerate() {
         println!("  {}: {:?} at {:?}", i, tok, span);
     }
 

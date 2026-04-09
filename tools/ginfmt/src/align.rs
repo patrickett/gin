@@ -1,4 +1,4 @@
-use lexer::{GinLexer, Token};
+use lexer::{Lexer, Token};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DelimiterKind {
@@ -32,7 +32,7 @@ pub fn format(source: &str) -> String {
 
 /// Scan the token stream and find lines that have an alignable pattern.
 fn find_alignable_lines(source: &str) -> Vec<AlignableLine> {
-    let lexer = GinLexer::new(source);
+    let lexer = Lexer::new(source);
     let tokens: Vec<(Token<'_>, chumsky::span::SimpleSpan)> = lexer.collect();
 
     let mut result = Vec::new();

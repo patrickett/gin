@@ -16,7 +16,7 @@ chumsky = { version = "0.10.1", features = ["pratt", "extension"] }
 clap = { workspace = true }
 dashmap = { workspace = true }
 indexmap = { workspace = true }
-logos = "0.15.1"
+
 merkle_hash = "3.8.0"
 once_cell = "1.21.3"
 serde = { workspace = true }
