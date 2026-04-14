@@ -51,7 +51,7 @@ impl<'c> Lower<'c> for Bind {
                             .var_types
                             .borrow()
                             .iter()
-                            .map(|(k, v)| (Intern::<String>::new(k.clone()), v.clone()))
+                            .map(|(k, v)| (Intern::<String>::from_ref(k), v.clone()))
                             .collect();
                         let ty = expr.infer_ty(&ctx.ty_env.infer_env(&locals));
                         let elem_mlir_ty = ty_to_mlir(&ty, ctx.mlir);

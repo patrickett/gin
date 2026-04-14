@@ -1,5 +1,3 @@
-use diagnostic::lex::LexSymptom;
-
 /// Maximum indentation depth supported by the lexer.
 pub const MAX_INDENT_DEPTH: usize = 16;
 

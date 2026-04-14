@@ -1,7 +1,7 @@
+use ast::SpanId;
 use ast::Tag;
-use ast::parse_from_str;
-use chumsky::prelude::SimpleSpan;
 use internment::Intern;
+use parser::parse_from_str;
 use typeck::{Ty, TyEnv, flow_analyzer::FlowAnalyzer, ty_alignment, ty_byte_size_static};
 
 #[test]
@@ -29,8 +29,8 @@ fn test_inrange_int32_resolves_to_32bit() {
     let ast = parse_from_str(src);
     let ty_env = TyEnv::from_file_ast(&ast);
     let ty = ty_env.resolve_tag(&Tag::Nominal(
-        Intern::<String>::new("Int".to_string()),
-        SimpleSpan::from(0..0),
+        Intern::<String>::from_ref("Int"),
+        SpanId::INVALID,
     ));
 
     assert_eq!(
@@ -51,8 +51,8 @@ fn test_inrange_int8_resolves_to_8bit() {
     let ast = parse_from_str(src);
     let ty_env = TyEnv::from_file_ast(&ast);
     let ty = ty_env.resolve_tag(&Tag::Nominal(
-        Intern::<String>::new("SmallInt".to_string()),
-        SimpleSpan::from(0..0),
+        Intern::<String>::from_ref("SmallInt"),
+        SpanId::INVALID,
     ));
 
     assert_eq!(
@@ -73,8 +73,8 @@ fn test_inrange_int16_resolves_to_16bit() {
     let ast = parse_from_str(src);
     let ty_env = TyEnv::from_file_ast(&ast);
     let ty = ty_env.resolve_tag(&Tag::Nominal(
-        Intern::<String>::new("MediumInt".to_string()),
-        SimpleSpan::from(0..0),
+        Intern::<String>::from_ref("MediumInt"),
+        SpanId::INVALID,
     ));
 
     assert_eq!(
@@ -95,8 +95,8 @@ fn test_range_type_also_resolves_correctly() {
     let ast = parse_from_str(src);
     let ty_env = TyEnv::from_file_ast(&ast);
     let ty = ty_env.resolve_tag(&Tag::Nominal(
-        Intern::<String>::new("Byte".to_string()),
-        SimpleSpan::from(0..0),
+        Intern::<String>::from_ref("Byte"),
+        SpanId::INVALID,
     ));
 
     assert_eq!(
@@ -117,8 +117,8 @@ fn test_bool_union_optimization() {
     let ast = parse_from_str(src);
     let ty_env = TyEnv::from_file_ast(&ast);
     let ty = ty_env.resolve_tag(&Tag::Nominal(
-        Intern::<String>::new("Bool".to_string()),
-        SimpleSpan::from(0..0),
+        Intern::<String>::from_ref("Bool"),
+        SpanId::INVALID,
     ));
 
     let size = ty_byte_size_static(&ty);
@@ -141,8 +141,8 @@ fn test_three_variant_union_optimization() {
     let ast = parse_from_str(src);
     let ty_env = TyEnv::from_file_ast(&ast);
     let ty = ty_env.resolve_tag(&Tag::Nominal(
-        Intern::<String>::new("Color".to_string()),
-        SimpleSpan::from(0..0),
+        Intern::<String>::from_ref("Color"),
+        SpanId::INVALID,
     ));
 
     let size = ty_byte_size_static(&ty);
@@ -165,8 +165,8 @@ fn test_union_with_fields_not_optimized() {
     let ast = parse_from_str(src);
     let ty_env = TyEnv::from_file_ast(&ast);
     let ty = ty_env.resolve_tag(&Tag::Nominal(
-        Intern::<String>::new("Maybe".to_string()),
-        SimpleSpan::from(0..0),
+        Intern::<String>::from_ref("Maybe"),
+        SpanId::INVALID,
     ));
 
     let size = ty_byte_size_static(&ty);

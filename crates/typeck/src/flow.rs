@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use chumsky::span::SimpleSpan;
+use ast::SpanId;
 
 use internment::Intern;
 
@@ -151,7 +151,7 @@ impl FlowAnalysis {
     ///
     /// Returns `None` if no narrowing is in effect.
     pub fn narrowed_type_string(&self, var_name: &str) -> Option<String> {
-        let var = Intern::<String>::new(var_name.to_string());
+        let var = Intern::<String>::from_ref(var_name);
         self.constraint_to_display(self.final_context.get_constraint(&var)?)
     }
 
@@ -159,7 +159,7 @@ impl FlowAnalysis {
     ///
     /// i.e., for `if val is Some(v)` with an early return, returns `(Maybe, Some)`.
     pub fn inside_if_variant(&self, var_name: &str) -> Option<(Intern<String>, Intern<String>)> {
-        let var = Intern::<String>::new(var_name.to_string());
+        let var = Intern::<String>::from_ref(var_name);
         match self.final_context.get_constraint(&var)? {
             // final_context has IsNotVariant → inside-if the variable IS that variant
             TypeConstraint::IsNotVariant(union, variant) => Some((*union, *variant)),
@@ -204,7 +204,7 @@ pub struct IndexOutOfBounds {
     /// The expression index where the out-of-bounds access occurs.
     pub expr_index: usize,
     /// The source span of the buffer access expression.
-    pub span: SimpleSpan,
+    pub span: SpanId,
     /// The index value being accessed.
     pub index: i128,
     /// The size of the buffer.

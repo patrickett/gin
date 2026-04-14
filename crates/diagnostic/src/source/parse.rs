@@ -1,5 +1,5 @@
+use crate::SpanId;
 use crate::{Category, Symptom, SymptomLike};
-use chumsky::span::SimpleSpan;
 
 pub enum ParseSymptom {
     UnexpectedToken,
@@ -9,7 +9,7 @@ pub enum ParseSymptom {
 }
 
 impl SymptomLike for ParseSymptom {
-    fn into_symptom(self, span: SimpleSpan) -> Symptom {
+    fn into_symptom(self, span_id: SpanId) -> Symptom {
         let category: Category;
         let code: &str;
         let help: Option<String>;
@@ -47,7 +47,7 @@ impl SymptomLike for ParseSymptom {
             code,
             message,
             help,
-            span,
+            span_id,
             category,
         }
     }

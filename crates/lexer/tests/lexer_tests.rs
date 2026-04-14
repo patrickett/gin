@@ -567,7 +567,8 @@ fn test_range_tokens() {
     let errors = std::mem::take(&mut lexer.errors);
 
     eprintln!("Tokens:");
-    for (tok, span) in &tokens {
+    for (tok, span_id) in &tokens {
+        let span = lexer.get_span(*span_id);
         eprintln!("  {:?} at {}..{}", tok, span.start, span.end);
     }
     eprintln!("Errors: {:?}", errors);
@@ -585,7 +586,8 @@ fn test_debug_float_coalesce() {
     let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().collect();
     eprintln!("Tokens for {:?}:", src);
-    for (tok, span) in &tokens {
+    for (tok, span_id) in &tokens {
+        let span = lexer.get_span(*span_id);
         eprintln!("  {:?} at {}..{}", tok, span.start, span.end);
     }
     let errors = std::mem::take(&mut lexer.errors);

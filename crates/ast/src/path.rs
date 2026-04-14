@@ -1,4 +1,6 @@
-use crate::prelude::*;
+use internment::Intern;
+
+use crate::span::SpanId;
 
 /// A multi‑segment identifier.
 ///
@@ -14,74 +16,18 @@ pub struct ModPath {
     pub root: Intern<String>,
     pub segments: Vec<Intern<String>>,
     /// Source location for diagnostic reporting.
-    pub span: SimpleSpan,
+    pub span: SpanId,
 }
 
 // TODO: move SimpleSpan out of ModPath and wrap Spanned<ModPath>
 
 impl ModPath {
     /// Construct a new `ModPath` from an owned root and segment list.
-    pub fn new(root: Intern<String>, segments: Vec<Intern<String>>, span: SimpleSpan) -> Self {
+    pub fn new(root: Intern<String>, segments: Vec<Intern<String>>, span: SpanId) -> Self {
         Self {
             root,
             segments,
             span,
         }
     }
-}
-
-/// Parser that consumes a dotted identifier sequence and produces an owned `Path`.
-pub fn path<'t, I>() -> impl Parser<'t, I, ModPath, ParserError<'t>>
-where
-    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
-{
-    let id = id_token();
-
-    id.clone()
-        .then(
-            just(Token::Dot)
-                .ignore_then(id)
-                .repeated()
-                .collect::<Vec<Intern<String>>>(),
-        )
-        .map_with(|(root, segs), e| ModPath::new(root, segs, e.span()))
-}
-
-/// Parser that consumes a Tag-rooted dotted path (e.g. `Byte.new`, `Int.to_string`).
-///
-/// This enables calling static/impl methods directly on a type name:
-/// `Tag.method` or `Tag.method.sub`
-pub fn tag_path<'t, I>() -> impl Parser<'t, I, ModPath, ParserError<'t>>
-where
-    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
-{
-    select! { Token::Tag(name) => Intern::<String>::new(name.to_string()) }
-        .then(
-            just(Token::Dot)
-                .ignore_then(id_token())
-                .repeated()
-                .at_least(1)
-                .collect::<Vec<Intern<String>>>(),
-        )
-        .map_with(|(root, segs), e| ModPath::new(root, segs, e.span()))
-}
-
-/// Parser for qualified variant constructor paths (e.g. `Maybe.Some`, `Result.Ok`).
-///
-/// Matches `Tag.Tag` patterns where both the root and segments are capitalized Tags.
-pub fn tag_variant_path<'t, I>() -> impl Parser<'t, I, ModPath, ParserError<'t>>
-where
-    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
-{
-    select! { Token::Tag(name) => Intern::<String>::new(name.to_string()) }
-        .then(
-            just(Token::Dot)
-                .ignore_then(
-                    select! { Token::Tag(name) => Intern::<String>::new(name.to_string()) },
-                )
-                .repeated()
-                .at_least(1)
-                .collect::<Vec<Intern<String>>>(),
-        )
-        .map_with(|(root, segs), e| ModPath::new(root, segs, e.span()))
 }

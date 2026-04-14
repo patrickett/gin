@@ -1,5 +1,5 @@
+use crate::SpanId;
 use crate::{Category, Symptom, SymptomLike};
-use chumsky::span::SimpleSpan;
 
 pub enum TypeSymptom {
     Mismatch,
@@ -35,10 +35,13 @@ pub enum TypeSymptom {
         union_name: String,
     },
     SelfOutsideMethod,
+    EmptyReturn {
+        expected_type: String,
+    },
 }
 
 impl SymptomLike for TypeSymptom {
-    fn into_symptom(self, span: SimpleSpan) -> Symptom {
+    fn into_symptom(self, span_id: SpanId) -> Symptom {
         let category = Category::Flaw;
         let code: &str;
         let help: Option<String>;
@@ -115,13 +118,18 @@ impl SymptomLike for TypeSymptom {
                 message = "self used outside method".into();
                 help = Some("self can only be used inside methods".into());
             }
+            Self::EmptyReturn { expected_type } => {
+                code = "type-empty-return";
+                message = format!("empty return in function declared to return `{expected_type}`");
+                help = Some(format!("expected a variant of `{expected_type}`"));
+            }
         }
 
         Symptom {
             code,
             message,
             help,
-            span,
+            span_id,
             category,
         }
     }

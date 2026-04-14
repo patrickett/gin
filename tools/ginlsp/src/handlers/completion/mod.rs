@@ -2,18 +2,21 @@ pub(crate) mod json;
 mod path;
 
 use crate::Backend;
-use ast::parse_file;
-use lsp::{CompletionKind, completions_for_ast, dot_type_at, position_to_byte_offset};
 use ast::FileAst;
-use typeck::{ty_env_for_file, Ty};
+use lsp::{completions_for_ast, dot_type_at, position_to_byte_offset, CompletionKind};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
+use typeck::{Ty, TyEnv};
 
 impl Backend {
     pub(crate) async fn handle_completion(
         &self,
         params: CompletionParams,
     ) -> Result<Option<CompletionResponse>> {
+        if self.is_shutdown() {
+            return Ok(None);
+        }
+
         let uri = params.text_document_position.text_document.uri.to_string();
         let position = params.text_document_position.position;
 
@@ -42,8 +45,7 @@ impl Backend {
         }
 
         if let Some(state) = self.documents.get(&uri) {
-            let config =
-                self.get_or_load_config(&params.text_document_position.text_document.uri);
+            let config = self.get_or_load_config(&params.text_document_position.text_document.uri);
 
             if let Some(items) = path::use_completions(
                 &state.source,
@@ -58,8 +60,8 @@ impl Backend {
                 position_to_byte_offset(&state.source, position.line, position.character)
             {
                 let snapshot = self.snapshot();
-                let ast = parse_file(&snapshot.db, state.file);
-                let ty_env = ty_env_for_file(&snapshot.db, state.file);
+                let ast = snapshot.parse(state.file);
+                let ty_env = TyEnv::from_file_ast(&ast);
                 if let Some(ty) = dot_type_at(&state.source, &ast, &ty_env, byte_pos) {
                     let items = dot_completions(ty);
                     if !items.is_empty() {
@@ -75,7 +77,10 @@ impl Backend {
 
         #[cfg(debug_assertions)]
         self.client
-            .log_message(MessageType::INFO, format!("No document found for URI: {}", uri))
+            .log_message(
+                MessageType::INFO,
+                format!("No document found for URI: {}", uri),
+            )
             .await;
 
         Ok(None)

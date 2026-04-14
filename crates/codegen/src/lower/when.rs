@@ -33,7 +33,7 @@ impl<'c> Lower<'c> for WhenExpr {
                     .var_types
                     .borrow()
                     .iter()
-                    .map(|(k, v)| (Intern::<String>::new(k.clone()), v.clone()))
+                    .map(|(k, v)| (Intern::<String>::from_ref(k), v.clone()))
                     .collect();
                 let ty = b.infer_ty(&ctx.ty_env.infer_env(&locals));
                 ty_to_mlir(&ty, ctx.mlir)
@@ -204,7 +204,7 @@ fn lower_pattern_when<'c>(
         }
 
         WhenArm::Is { pattern, body } => {
-            let variant_name = Intern::<String>::new(pattern.name().to_string());
+            let variant_name = Intern::<String>::from_ref(pattern.name());
             // Note: unknown variant diagnostics are emitted by typeck; codegen just fails gracefully.
             let (_, expected_disc, _) = ctx.ty_env.lookup_variant(variant_name)?;
 

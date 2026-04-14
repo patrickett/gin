@@ -31,7 +31,7 @@ impl<'c> Lower<'c> for IfExpr {
             }
             IfCondition::Pattern { subject, tag } => {
                 let subject_val = subject.lower(ctx, block, symtab)?;
-                let variant_name = Intern::<String>::new(tag.name().to_string());
+                let variant_name = Intern::<String>::from_ref(tag.name());
                 let (_, expected_disc, _) = match ctx.ty_env.lookup_variant(variant_name) {
                     Some(v) => v,
                     None => {
@@ -74,7 +74,7 @@ impl<'c> Lower<'c> for IfExpr {
                 && let Tag::Generic(_, params, _) = tag
             {
                 let subject_val = subject.lower(ctx, block, symtab)?;
-                let variant_name = Intern::<String>::new(tag.name().to_string());
+                let variant_name = Intern::<String>::from_ref(tag.name());
                 let payload_fields = ctx
                     .ty_env
                     .lookup_variant(variant_name)

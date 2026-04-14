@@ -4,7 +4,7 @@ use lexer::is_comment_at;
 
 /// Convert a byte offset to (line, column) position.
 ///
-/// Column is measured in UTF-8 bytes, not UTF-16 code units.
+/// Column is measured in UTF-16 code units (LSP specification requirement).
 pub fn byte_offset_to_position(byte: usize, source: &str) -> (u32, u32) {
     let mut line = 0u32;
     let mut col = 0u32;
@@ -19,7 +19,7 @@ pub fn byte_offset_to_position(byte: usize, source: &str) -> (u32, u32) {
             line += 1;
             col = 0;
         } else {
-            col += ch.len_utf8() as u32;
+            col += ch.len_utf16() as u32;
         }
         current_byte += ch.len_utf8();
     }

@@ -1,15 +1,22 @@
 use crate::Backend;
-use ast::parse_file;
-use lsp::{get_char_at_position, get_number_at_position, hover_at, is_in_comment, position_to_byte_offset};
+use lsp::{
+    get_char_at_position, get_number_at_position, hover_at, is_in_comment, position_to_byte_offset,
+};
+
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 
 impl Backend {
-    pub(crate) async fn handle_hover(
-        &self,
-        params: HoverParams,
-    ) -> Result<Option<Hover>> {
-        let uri = params.text_document_position_params.text_document.uri.clone();
+    pub(crate) async fn handle_hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        if self.is_shutdown() {
+            return Ok(None);
+        }
+
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .clone();
         let position = params.text_document_position_params.position;
 
         if let Some(state) = self.documents.get(&uri.to_string()) {
@@ -39,7 +46,7 @@ impl Backend {
                 position_to_byte_offset(&state.source, position.line, position.character)
             {
                 let snapshot = self.snapshot();
-                let ast = parse_file(&snapshot.db, state.file);
+                let ast = snapshot.parse(state.file);
                 if let Some(value) = hover_at(&state.source, &ast, byte_pos) {
                     return Ok(Some(Hover {
                         contents: HoverContents::Markup(MarkupContent {
@@ -51,7 +58,6 @@ impl Backend {
                 }
             }
         }
-
         Ok(None)
     }
 }

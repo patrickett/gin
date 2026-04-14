@@ -9,6 +9,10 @@ impl Backend {
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
+        if self.is_shutdown() {
+            return Ok(None);
+        }
+
         let uri = params.text_document_position_params.text_document.uri.clone();
         let position = params.text_document_position_params.position;
 

@@ -1,5 +1,5 @@
 [package]
-name = "gin-language-server"
+name = "ginlsp"
 version = "0.1.0"
 edition = "2021"
 
@@ -19,6 +19,9 @@ ast = { workspace = true }
 typeck = { workspace = true }
 diagnostic = { workspace = true }
 lsp-types = { workspace = true }
+parser = { workspace = true }
+span = { workspace = true }
 crossbeam-channel = { workspace = true }
 salsa = { workspace = true }
 internment = "0.8"
+futures = "0.3"

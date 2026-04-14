@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 diagnostic = { workspace = true }
-chumsky = { workspace = true }
+span = { workspace = true }
 
 internment = "0.8"
 i256 = { workspace = true }

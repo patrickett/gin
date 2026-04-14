@@ -1,4 +1,5 @@
 use crate::prelude::*;
+use crate::span::{SpanId, SpanTable};
 use std::{
     collections::{HashMap, HashSet},
     hash::{Hash, Hasher},
@@ -212,7 +213,10 @@ pub struct FileAst {
     pub defs: DefMap,
     pub private_defs: HashSet<Intern<String>>,
     pub private_tags: HashSet<Intern<String>>,
-    pub exprs: Vec<(Expr, SimpleSpan)>,
+    pub exprs: Vec<(Expr, SpanId)>,
+    /// Span table mapping SpanId → Span (byte ranges).
+    /// Populated during parsing; excluded from Hash/Eq.
+    pub span_table: SpanTable,
 }
 
 impl FileAst {
@@ -228,6 +232,11 @@ impl FileAst {
         &self.defs
     }
 
+    /// Access the span table for resolving SpanId → byte ranges.
+    pub fn span_table(&self) -> &SpanTable {
+        &self.span_table
+    }
+
     pub fn private_defs(&self) -> &HashSet<Intern<String>> {
         &self.private_defs
     }
@@ -236,7 +245,7 @@ impl FileAst {
         &self.private_tags
     }
 
-    pub fn top_level_exprs(&self) -> &[(Expr, SimpleSpan)] {
+    pub fn top_level_exprs(&self) -> &[(Expr, SpanId)] {
         &self.exprs
     }
 

@@ -3,16 +3,26 @@
 use crate::cli::Args;
 use ast::FileAst;
 use codegen::emit::native;
-use crossbeam_channel::unbounded;
-use database::{
-    File,
-    input_database::{Db, InputDatabase},
-};
-use diagnostic::{Category, Symptom};
+use diagnostic::lex::LexSymptom;
+use diagnostic::parse::ParseSymptom;
+use diagnostic::{Category, Symptom, SymptomLike};
 use lexer::debug_tokens;
+use parser::{ParseOutput, extract_local_import_paths, parse_source_full};
 use std::path::{Path, PathBuf};
-use typeck::TyEnv;
-use typeck::{analyze_file, analyze_package};
+use typeck::{TyEnv, analyze_file};
+
+/// Holds parsed file data alongside its source for diagnostic reporting.
+struct ParsedFile {
+    path: PathBuf,
+    source: String,
+    output: ParseOutput,
+}
+
+impl ParsedFile {
+    fn filename(&self) -> String {
+        self.path.to_string_lossy().into_owned()
+    }
+}
 
 /// Analogous to the `ginc` command
 pub struct GinCompiler;
@@ -21,7 +31,7 @@ impl GinCompiler {
     /// Compile a Gin project through a unified pipeline.
     ///
     /// **Binary mode** (input is a `.gin` file):
-    /// Imports are resolved transitively and the result is linked into an
+    /// Imports are resolved and the result is linked into an
     /// executable (or object file / MLIR text, depending on `--emit`).
     ///
     /// **Library mode** (input is a directory):
@@ -43,41 +53,71 @@ impl GinCompiler {
             return;
         }
 
-        // ── Phase 2: Create database and load files ───────────────────
-        let (tx, _rx) = unbounded();
-        let db = InputDatabase::new(tx);
-
-        let (db_files, _filenames) = match load_files_into_db(&db, &file_paths) {
-            Some(result) => result,
-            None => return,
-        };
+        // ── Phase 2: Read and parse all files ─────────────────────────
+        let mut parsed_files: Vec<ParsedFile> = Vec::with_capacity(file_paths.len());
+        for fp in &file_paths {
+            let source = match std::fs::read_to_string(fp) {
+                Ok(s) => s,
+                Err(err) => {
+                    eprintln!("Error reading {}: {}", fp.display(), err);
+                    return;
+                }
+            };
+            let output = parse_source_full(&source);
+            parsed_files.push(ParsedFile {
+                path: fp.clone(),
+                source,
+                output,
+            });
+        }
 
         if matches!(args.emit, crate::cli::Emit::Tokens) {
-            for file in &db_files {
-                let source = file.contents(&db);
-                print!("{}", debug_tokens(source));
+            for parsed in &parsed_files {
+                print!("{}", debug_tokens(&parsed.source));
             }
             return;
         }
 
-        // ── Phase 3: Resolve imports (binary mode only) ───────────────
-        let all_files = if is_library {
-            db_files.clone()
-        } else {
-            resolve_all_imports(&db, db_files[0])
-        };
+        // ── Phase 3: Resolve imports (binary mode only) ──────────────
+        if !is_library && !parsed_files.is_empty() {
+            let entry = &parsed_files[0];
+            let base_dir = entry.path.parent().unwrap_or(Path::new(""));
+            let import_paths = extract_local_import_paths(&entry.output.ast, base_dir);
 
-        // ── Phase 4: Analyze (parse + type check + flow analysis) ─────
-        let asts = analyze_package(&db, all_files.clone());
+            for (import_path, _span) in &import_paths {
+                // Skip if already included
+                if parsed_files.iter().any(|p| p.path == *import_path) {
+                    continue;
+                }
+
+                let source = match std::fs::read_to_string(import_path) {
+                    Ok(s) => s,
+                    Err(err) => {
+                        eprintln!("Error reading import {}: {}", import_path.display(), err);
+                        continue;
+                    }
+                };
+                let output = parse_source_full(&source);
+                parsed_files.push(ParsedFile {
+                    path: import_path.clone(),
+                    source,
+                    output,
+                });
+            }
+        }
+
+        // ── Phase 4: Build shared AST list for analysis ──────────────
+        let all_asts: Vec<FileAst> = parsed_files.iter().map(|p| p.output.ast.clone()).collect();
 
         // ── Phase 5: Print diagnostics ────────────────────────────────
-        if print_diagnostics(&db, &all_files) {
+        let has_flaws = print_diagnostics(&parsed_files, &all_asts);
+        if has_flaws {
             return;
         }
 
         // ── Phase 6: Build merged AST for codegen ─────────────────────
         let mut merged_ast = FileAst::default();
-        for ast in &asts {
+        for ast in &all_asts {
             merged_ast.merge_from(ast.clone());
         }
         let ty_env = TyEnv::from_file_ast(&merged_ast);
@@ -117,81 +157,61 @@ pub fn collect_gin_files_recursive(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
-// ── Database Loading ────────────────────────────────────────────────────────
-
-/// Load file paths into the Salsa database, returning the handles and display names.
-fn load_files_into_db(db: &InputDatabase, paths: &[PathBuf]) -> Option<(Vec<File>, Vec<String>)> {
-    let mut files = Vec::with_capacity(paths.len());
-    let mut filenames = Vec::with_capacity(paths.len());
-
-    for path in paths {
-        let filename = path.to_string_lossy().into_owned();
-        match db.input(path.clone()) {
-            Ok(file) => {
-                files.push(file);
-                filenames.push(filename);
-            }
-            Err(err) => {
-                eprintln!("Error loading {}: {}", path.display(), err);
-                return None;
-            }
-        }
-    }
-
-    Some((files, filenames))
-}
-
-// ── Import Resolution ───────────────────────────────────────────────────────
-
-/// Resolve transitive imports starting from an entry file.
-fn resolve_all_imports(db: &InputDatabase, entry: File) -> Vec<File> {
-    let imported = resolve_imports(db, entry);
-
-    let mut all_files = vec![entry];
-    let mut seen = vec![entry.path(db)];
-
-    for file in imported {
-        let path = file.path(db);
-        if !seen.contains(&path) {
-            seen.push(path);
-            all_files.push(file);
-        }
-    }
-
-    all_files
-}
-
-/// Resolve imports from a single file.
-fn resolve_imports(db: &InputDatabase, entry: File) -> Vec<File> {
-    use ast::resolve_imports;
-    resolve_imports(db, entry)
-}
-
 // ── Diagnostics ─────────────────────────────────────────────────────────────
 
-/// Print diagnostics for all files with correct per-file source context.
+/// Print diagnostics for all files — parse errors, lex errors, and type/flow analysis.
 ///
 /// Returns `true` if any fatal flaws were found.
-fn print_diagnostics(db: &InputDatabase, all_files: &[File]) -> bool {
+fn print_diagnostics(parsed_files: &[ParsedFile], all_asts: &[FileAst]) -> bool {
     let mut has_flaws = false;
-    let all_files_vec: Vec<File> = all_files.to_vec();
 
-    for &file in all_files {
-        let source = file.contents(db);
-        let filename = file.path(db).to_string_lossy().into_owned();
+    for (i, parsed) in parsed_files.iter().enumerate() {
+        let filename = parsed.filename();
+        let span_table = &parsed.output.span_table;
+        let mut symptoms: Vec<Symptom> = Vec::new();
 
-        // Parse symptoms (accumulated per-file by the parse query)
-        for diagnostic in ast::parse_file::accumulated::<Symptom>(db, file) {
-            diagnostic.print(source, &filename);
-            if matches!(diagnostic.category, Category::Flaw) {
-                has_flaws = true;
-            }
+        // Unterminated strings
+        for &span_id in &parsed.output.unterminated_strings {
+            symptoms.push(LexSymptom::UnclosedString.into_symptom(span_id));
         }
 
-        // Analysis symptoms (type check + flow analysis, per-file)
-        for diagnostic in analyze_file::accumulated::<Symptom>(db, file, all_files_vec.clone()) {
-            diagnostic.print(source, &filename);
-            if matches!(diagnostic.category, Category::Flaw) {
+        // Lex errors
+        for (symptom, span_id) in &parsed.output.lex_errors {
+            symptoms.push(symptom.clone().into_symptom(*span_id));
+        }
+
+        // Parse errors
+        for err in &parsed.output.parse_errors {
+            symptoms.push(ParseSymptom::Custom(err.message.clone()).into_symptom(err.span));
+        }
+
+        // Help hints (empty-paren suggestions)
+        for (suggested, span_id) in &parsed.output.help_hints {
+            symptoms.push(
+                ParseSymptom::EmptyParens {
+                    suggested: suggested.clone(),
+                }
+                .into_symptom(*span_id),
+            );
+        }
+
+        // Unused value info diagnostics
+        for (value, span_id) in &parsed.output.unused_values {
+            symptoms.push(
+                ParseSymptom::UnusedValue {
+                    value: value.clone(),
+                }
+                .into_symptom(*span_id),
+            );
+        }
+
+        // Type-check and flow-analysis symptoms
+        symptoms.extend(analyze_file(&all_asts[i], all_asts));
+
+        // Print all symptoms for this file
+        for symptom in &symptoms {
+            symptom.print(span_table, &parsed.source, &filename);
+            if matches!(symptom.category, Category::Flaw) {
                 has_flaws = true;
             }
         }
@@ -204,9 +224,19 @@ fn print_diagnostics(db: &InputDatabase, all_files: &[File]) -> bool {
 
 /// Print MLIR text to stdout.
 fn emit_mlir(merged_ast: &FileAst, ty_env: &TyEnv) {
-    match native::build_module_text(merged_ast, "", "<stdin>", ty_env) {
-        Ok(mlir_text) => println!("\n```mlir\n{mlir_text}```\n"),
-        Err(e) => eprintln!("Codegen error: {e:?}"),
+    let (result, symptoms) = native::build_module_text(merged_ast, "", "<stdin>", ty_env);
+    match result {
+        Some(mlir_text) => {
+            for s in &symptoms {
+                eprintln!("Codegen warning: [{}] {}", s.code, s.message);
+            }
+            println!("\n```mlir\n{mlir_text}```\n");
+        }
+        None => {
+            for s in &symptoms {
+                eprintln!("Codegen error: [{}] {}", s.code, s.message);
+            }
+        }
     }
 }
 
@@ -234,28 +264,34 @@ fn emit_native(merged_ast: &FileAst, ty_env: &TyEnv, args: &Args, path: &Path, i
         let _ = std::fs::create_dir_all(parent);
     }
 
-    // Compile merged AST to object file
     let filename = path.to_string_lossy();
     let profile = args.profile.into();
-    match native::compile_to_object(merged_ast, &obj_path, profile, "", &filename, ty_env) {
-        Ok(()) => {}
-        Err(e) => {
-            eprintln!("Codegen error: {e:?}");
-            return;
+    let (ok, symptoms) =
+        native::compile_to_object(merged_ast, &obj_path, profile, "", &filename, ty_env);
+    if !ok {
+        for s in &symptoms {
+            eprintln!("Codegen error: [{}] {}", s.code, s.message);
         }
+        return;
     }
 
-    // Link into executable if requested
     if matches!(args.emit, crate::cli::Emit::Exe) {
         let exe_path = args
             .output
             .clone()
             .unwrap_or_else(|| path.with_extension(""));
-        if let Err(e) = native::link_executable(&obj_path, &exe_path, args.target.as_deref()) {
-            eprintln!("Link error: {e:?}");
+        let (linked, link_symptoms) =
+            native::link_executable(&obj_path, &exe_path, args.target.as_deref());
+        if !linked {
+            for s in &link_symptoms {
+                eprintln!("Link error: [{}] {}", s.code, s.message);
+            }
         }
         let _ = std::fs::remove_file(&obj_path);
     } else {
+        for s in &symptoms {
+            eprintln!("Codegen warning: [{}] {}", s.code, s.message);
+        }
         println!("Compiled to {}", obj_path.display());
     }
 }

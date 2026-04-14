@@ -1,5 +1,5 @@
-use crate::prelude::*;
-use i256::I256;
+use crate::expr::Expr;
+use crate::span::Spanned;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Range {
@@ -14,22 +14,4 @@ impl Range {
             end: Box::new(end),
         }
     }
-}
-
-pub fn int_range<'t, I>() -> impl Parser<'t, I, (I256, I256), ParserError<'t>> + Clone
-where
-    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
-{
-    let signed_int = just(Token::Minus)
-        .or_not()
-        .then(select! { Token::Int(n) => n })
-        .map(|(neg, n)| {
-            if neg.is_some() {
-                -I256::from_u128(n)
-            } else {
-                I256::from_u128(n)
-            }
-        });
-
-    signed_int.then_ignore(just(Token::Infer)).then(signed_int)
 }

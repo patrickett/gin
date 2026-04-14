@@ -1,8 +1,7 @@
 use ast::{
     BindValue, Expr, FileAst, FormatPart, IfCondition, LoopEnum, ParameterKind, Parameters,
-    WhenArm,
+    SpanTable, WhenArm,
 };
-use chumsky::span::SimpleSpan;
 
 #[derive(Debug, Clone)]
 pub enum CompletionKind {
@@ -77,7 +76,10 @@ pub struct SignatureInfo {
 }
 
 pub fn signature_for_fn(ast: &FileAst, fn_name: &str) -> Option<SignatureInfo> {
-    let (_, bind) = ast.defs().iter().find(|(name, _)| name.as_str() == fn_name)?;
+    let (_, bind) = ast
+        .defs()
+        .iter()
+        .find(|(name, _)| name.as_str() == fn_name)?;
     let params = bind.params().as_ref()?;
     Some(SignatureInfo {
         label: format!("{}{}", fn_name, format_params(params)),
@@ -91,28 +93,32 @@ pub fn signature_for_fn(ast: &FileAst, fn_name: &str) -> Option<SignatureInfo> {
 /// Used by LSP signature help: given a cursor position, returns the function name
 /// so the caller can look up its signature.
 pub fn fn_call_at(ast: &FileAst, byte_pos: usize) -> Option<String> {
+    let span_table = ast.span_table();
     let mut best: Option<(String, usize)> = None;
-    for (expr, span) in ast.top_level_exprs() {
-        find_call_in_expr(expr, *span, byte_pos, &mut best);
+    for (expr, span_id) in ast.top_level_exprs() {
+        find_call_in_expr(expr, *span_id, span_table, byte_pos, &mut best);
     }
     for bind in ast.defs().values() {
-        find_call_in_bind_value(bind.value(), byte_pos, &mut best);
+        find_call_in_bind_value(bind.value(), span_table, byte_pos, &mut best);
     }
     best.map(|(name, _)| name)
 }
 
 fn find_call_in_expr(
     expr: &Expr,
-    span: SimpleSpan,
+    span_id: ast::SpanId,
+    span_table: &SpanTable,
     byte_pos: usize,
     best: &mut Option<(String, usize)>,
 ) {
+    let span = span_table.get(span_id);
     if byte_pos < span.start || byte_pos > span.end {
         return;
     }
     match expr {
         Expr::FnCall(call) if call.args.is_some() => {
-            if call.path.span.end <= byte_pos {
+            let call_span = span_table.get(call.path.span);
+            if call_span.end <= byte_pos {
                 let len = span.end - span.start;
                 if best.as_ref().is_none_or(|(_, bl)| len < *bl) {
                     *best = Some((call.path.root.as_str().to_string(), len));
@@ -120,101 +126,107 @@ fn find_call_in_expr(
             }
             if let Some(args) = &call.args {
                 for arg in args {
-                    find_call_in_expr(&arg.0, arg.1, byte_pos, best);
+                    find_call_in_expr(&arg.0, arg.1, span_table, byte_pos, best);
                 }
             }
         }
         Expr::FnCall(call) => {
             if let Some(args) = &call.args {
                 for arg in args {
-                    find_call_in_expr(&arg.0, arg.1, byte_pos, best);
+                    find_call_in_expr(&arg.0, arg.1, span_table, byte_pos, best);
                 }
             }
         }
         Expr::Binary(bin) => {
-            find_call_in_expr(&bin.lhs.0, bin.lhs.1, byte_pos, best);
-            find_call_in_expr(&bin.rhs.0, bin.rhs.1, byte_pos, best);
+            find_call_in_expr(&bin.lhs.0, bin.lhs.1, span_table, byte_pos, best);
+            find_call_in_expr(&bin.rhs.0, bin.rhs.1, span_table, byte_pos, best);
         }
-        Expr::Bind(bind) => find_call_in_bind_value(bind.value(), byte_pos, best),
+        Expr::Bind(bind) => find_call_in_bind_value(bind.value(), span_table, byte_pos, best),
         Expr::When(w) => {
             if let Some(s) = &w.subject {
-                find_call_in_expr(&s.0, s.1, byte_pos, best);
+                find_call_in_expr(&s.0, s.1, span_table, byte_pos, best);
             }
             for arm in &w.arms {
                 match arm {
                     WhenArm::Cond { condition, body } => {
-                        find_call_in_expr(&condition.0, condition.1, byte_pos, best);
-                        find_call_in_expr(&body.0, body.1, byte_pos, best);
+                        find_call_in_expr(&condition.0, condition.1, span_table, byte_pos, best);
+                        find_call_in_expr(&body.0, body.1, span_table, byte_pos, best);
                     }
                     WhenArm::Is { body, .. } | WhenArm::Else(body) => {
-                        find_call_in_expr(&body.0, body.1, byte_pos, best);
+                        find_call_in_expr(&body.0, body.1, span_table, byte_pos, best);
                     }
                 }
             }
         }
         Expr::If(if_expr) => {
             match &if_expr.condition {
-                IfCondition::Bool(e) => find_call_in_expr(&e.0, e.1, byte_pos, best),
+                IfCondition::Bool(e) => find_call_in_expr(&e.0, e.1, span_table, byte_pos, best),
                 IfCondition::Pattern { subject, .. } => {
-                    find_call_in_expr(&subject.0, subject.1, byte_pos, best)
+                    find_call_in_expr(&subject.0, subject.1, span_table, byte_pos, best)
                 }
             }
             for e in &if_expr.body {
-                find_call_in_expr(&e.0, e.1, byte_pos, best);
+                find_call_in_expr(&e.0, e.1, span_table, byte_pos, best);
             }
         }
         Expr::Loop(loop_expr) => match loop_expr {
             LoopEnum::ForIn(fl) => {
-                find_call_in_expr(&fl.iter.0, fl.iter.1, byte_pos, best);
+                find_call_in_expr(&fl.iter.0, fl.iter.1, span_table, byte_pos, best);
                 for e in &fl.exprs {
-                    find_call_in_expr(&e.0, e.1, byte_pos, best);
+                    find_call_in_expr(&e.0, e.1, span_table, byte_pos, best);
                 }
             }
             LoopEnum::While(wl) => {
-                find_call_in_expr(&wl.cond.0, wl.cond.1, byte_pos, best);
+                find_call_in_expr(&wl.cond.0, wl.cond.1, span_table, byte_pos, best);
                 for e in &wl.exprs {
-                    find_call_in_expr(&e.0, e.1, byte_pos, best);
+                    find_call_in_expr(&e.0, e.1, span_table, byte_pos, best);
                 }
             }
         },
         Expr::FormatString(fs) => {
             for part in &fs.parts {
                 if let FormatPart::Expr(e) = part {
-                    find_call_in_expr(&e.0, e.1, byte_pos, best);
+                    find_call_in_expr(&e.0, e.1, span_table, byte_pos, best);
                 }
             }
         }
         Expr::TagCall(tc) => {
             for arg in &tc.args {
-                find_call_in_expr(&arg.0, arg.1, byte_pos, best);
+                find_call_in_expr(&arg.0, arg.1, span_table, byte_pos, best);
             }
         }
         Expr::Range(r) => {
-            find_call_in_expr(&r.start.0, r.start.1, byte_pos, best);
-            find_call_in_expr(&r.end.0, r.end.1, byte_pos, best);
+            find_call_in_expr(&r.start.0, r.start.1, span_table, byte_pos, best);
+            find_call_in_expr(&r.end.0, r.end.1, span_table, byte_pos, best);
         }
-        Expr::TupleAlloc { init, .. } => find_call_in_expr(&init.0, init.1, byte_pos, best),
-        Expr::TupleGet { base, .. } => find_call_in_expr(&base.0, base.1, byte_pos, best),
+        Expr::TupleAlloc { init, .. } => {
+            find_call_in_expr(&init.0, init.1, span_table, byte_pos, best)
+        }
+        Expr::TupleGet { base, .. } => {
+            find_call_in_expr(&base.0, base.1, span_table, byte_pos, best)
+        }
         Expr::TupleSet { base, value, .. } => {
-            find_call_in_expr(&base.0, base.1, byte_pos, best);
-            find_call_in_expr(&value.0, value.1, byte_pos, best);
+            find_call_in_expr(&base.0, base.1, span_table, byte_pos, best);
+            find_call_in_expr(&value.0, value.1, span_table, byte_pos, best);
         }
-        Expr::Cast { expr, .. } => find_call_in_expr(&expr.0, expr.1, byte_pos, best),
+        Expr::Cast { expr, .. } => find_call_in_expr(&expr.0, expr.1, span_table, byte_pos, best),
         Expr::BufGet { buf, index, .. } => {
-            find_call_in_expr(&buf.0, buf.1, byte_pos, best);
-            find_call_in_expr(&index.0, index.1, byte_pos, best);
+            find_call_in_expr(&buf.0, buf.1, span_table, byte_pos, best);
+            find_call_in_expr(&index.0, index.1, span_table, byte_pos, best);
         }
-        Expr::BufSet { buf, index, value, .. } => {
-            find_call_in_expr(&buf.0, buf.1, byte_pos, best);
-            find_call_in_expr(&index.0, index.1, byte_pos, best);
-            find_call_in_expr(&value.0, value.1, byte_pos, best);
+        Expr::BufSet {
+            buf, index, value, ..
+        } => {
+            find_call_in_expr(&buf.0, buf.1, span_table, byte_pos, best);
+            find_call_in_expr(&index.0, index.1, span_table, byte_pos, best);
+            find_call_in_expr(&value.0, value.1, span_table, byte_pos, best);
         }
         Expr::TakePtr(e) | Expr::TakeRef(e) | Expr::Deref(e) | Expr::Negate(e) => {
-            find_call_in_expr(&e.0, e.1, byte_pos, best);
+            find_call_in_expr(&e.0, e.1, span_table, byte_pos, best);
         }
         Expr::TupleLit(elems) => {
             for e in elems {
-                find_call_in_expr(&e.0, e.1, byte_pos, best);
+                find_call_in_expr(&e.0, e.1, span_table, byte_pos, best);
             }
         }
         Expr::Lit(_) | Expr::SelfRef(_) | Expr::AnonymousTag(..) => {}
@@ -223,17 +235,18 @@ fn find_call_in_expr(
 
 fn find_call_in_bind_value(
     value: &BindValue,
+    span_table: &SpanTable,
     byte_pos: usize,
     best: &mut Option<(String, usize)>,
 ) {
     match value {
-        BindValue::Expr(e) => find_call_in_expr(&e.0, e.1, byte_pos, best),
+        BindValue::Expr(e) => find_call_in_expr(&e.0, e.1, span_table, byte_pos, best),
         BindValue::Body { exprs, ret } => {
             for e in exprs {
-                find_call_in_expr(&e.0, e.1, byte_pos, best);
+                find_call_in_expr(&e.0, e.1, span_table, byte_pos, best);
             }
             if let Some(r) = &ret.0 {
-                find_call_in_expr(&r.0, r.1, byte_pos, best);
+                find_call_in_expr(&r.0, r.1, span_table, byte_pos, best);
             }
         }
         BindValue::Extern => {}

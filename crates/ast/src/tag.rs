@@ -1,7 +1,12 @@
 //! Tags are almost synonymous with types in other languages.
 
-use crate::prelude::*;
+use internment::Intern;
 use std::hash::{Hash, Hasher};
+
+use crate::doc_comment::DocComment;
+use crate::parameter::Parameters;
+use crate::path::ModPath;
+use crate::span::SpanId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Variant {
@@ -45,8 +50,8 @@ impl Hash for Variant {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Tag {
-    Nominal(Intern<String>, SimpleSpan),
-    Generic(Intern<String>, Parameters, SimpleSpan),
+    Nominal(Intern<String>, SpanId),
+    Generic(Intern<String>, Parameters, SpanId),
     Qualified(ModPath),
 }
 
@@ -90,7 +95,7 @@ impl Tag {
         }
     }
 
-    pub fn span(&self) -> SimpleSpan {
+    pub fn span(&self) -> SpanId {
         match self {
             Tag::Nominal(_, span) => *span,
             Tag::Generic(_, _, span) => *span,
@@ -117,45 +122,4 @@ impl Hash for Tag {
             }
         }
     }
-}
-
-pub fn tag<'t, I>(
-    expr: impl Parser<'t, I, Spanned<Expr>, ParserError<'t>> + Clone + 't,
-) -> impl Parser<'t, I, Tag, ParserError<'t>> + Clone
-where
-    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
-{
-    recursive(|tag| {
-        // Qualified type: Bool.True, Maybe.Some
-        let qualified = super::tag_variant_path()
-            .then(params(expr.clone(), tag.clone()).or_not())
-            .map_with(|(path, params), e| {
-                match params {
-                    None => Tag::Qualified(path),
-                    Some(parameters) if parameters.is_empty() => Tag::Qualified(path),
-                    Some(parameters) => {
-                        // For generics with qualified paths, use the last segment as the name
-                        let name = path.segments.last().copied().unwrap_or(path.root);
-                        Tag::Generic(name, parameters, e.span())
-                    }
-                }
-            })
-            .boxed();
-
-        // Simple tag name (capitalized)
-        let tag_name = select! { Token::Tag(name) => Intern::<String>::new(name.to_string()) };
-
-        // Parse nominal or generic tag
-        let simple = tag_name
-            .then(params(expr.clone(), tag.clone()).or_not())
-            .map_with(|(name, params), e| match params {
-                None => Tag::Nominal(name, e.span()),
-                Some(parameters) if parameters.is_empty() => Tag::Nominal(name, e.span()),
-                Some(parameters) => Tag::Generic(name, parameters, e.span()),
-            })
-            .boxed();
-
-        // Prefer qualified to avoid ambiguity
-        choice((qualified, simple))
-    })
 }

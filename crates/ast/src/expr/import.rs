@@ -1,6 +1,8 @@
-use crate::prelude::*;
-use chumsky::{input::ValueInput, prelude::*, span::SimpleSpan};
+use crate::span::SpanId;
+use internment::Intern;
 use std::path::PathBuf;
+
+use crate::path::ModPath;
 
 /// `use` can include several different modules seperated by a `,`
 ///
@@ -24,7 +26,7 @@ pub enum ImportSource {
     /// Top level name defined in `flask.json` ex. `use http.*`
     Package(ModPath),
     /// Path to a module on disk ex. `use '../http' as http`
-    Local(PathBuf, SimpleSpan),
+    Local(PathBuf, SpanId),
 }
 
 /// An import is structured like the following:
@@ -56,35 +58,4 @@ impl ModuleImport {
                 .to_string(),
         }
     }
-}
-
-// Use expressions should be at the top of any module.
-pub fn import<'t, I>() -> impl Parser<'t, I, Import, ParserError<'t>>
-where
-    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
-{
-    let id = id_token();
-
-    let source = choice((
-        select! { Token::String(s) => PathBuf::from(s) }
-            .map_with(|path, e| ImportSource::Local(path, e.span())),
-        path().map(ImportSource::Package),
-    ));
-
-    just(Token::Use)
-        .ignore_then(
-            source
-                .then(just(Token::As).ignore_then(id).or_not())
-                .separated_by(just(Token::Comma))
-                .collect::<Vec<_>>()
-                .then_ignore(just(Token::Newline).or_not()),
-        )
-        .map(|items: Vec<_>| {
-            Import(
-                items
-                    .into_iter()
-                    .map(|(source, alias)| ModuleImport { source, alias })
-                    .collect::<Vec<ModuleImport>>(),
-            )
-        })
 }

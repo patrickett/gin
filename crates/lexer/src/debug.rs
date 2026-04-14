@@ -1,6 +1,6 @@
 use std::fmt;
 
-use chumsky::span::SimpleSpan;
+use span::Span;
 
 use crate::{Lexer, Token};
 
@@ -92,7 +92,7 @@ impl<'src> fmt::Display for Token<'src> {
 /// A token paired with its source span, with a human-readable [`Display`](fmt::Display) format.
 ///
 /// Renders as `[id: "print"] (0..4)` — the token display followed by the byte span.
-pub struct TokenSpanned<'src>(pub Token<'src>, pub SimpleSpan);
+pub struct TokenSpanned<'src>(pub Token<'src>, pub Span);
 
 impl<'src> fmt::Display for TokenSpanned<'src> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -117,12 +117,14 @@ pub fn debug_tokens(source: &str) -> String {
     let mut lexer = Lexer::new(source);
     let tokens: Vec<_> = lexer.by_ref().collect();
     let mut out = String::new();
-    for (tok, span) in &tokens {
-        out.push_str(&format!("{}\n", TokenSpanned(*tok, *span)));
+    for (tok, span_id) in &tokens {
+        let span = lexer.get_span(*span_id);
+        out.push_str(&format!("{}\n", TokenSpanned(*tok, span)));
     }
     if !lexer.errors.is_empty() {
         out.push_str("\nerrors:\n");
-        for (err, span) in &lexer.errors {
+        for (err, span_id) in &lexer.errors {
+            let span = lexer.get_span(*span_id);
             out.push_str(&format!("  {err:?} ({}..{})\n", span.start, span.end));
         }
     }

@@ -1,11 +1,11 @@
 use crate::TyInfer;
 use crate::flow::{FlowAnalysis, FlowContext, ImpossibleCheck, IndexOutOfBounds, TypeConstraint};
 use crate::r#type::{Ty, TyEnv};
+use ast::SpanId;
 use ast::Spanned;
 use ast::{
     Bind, BindValue, Expr, FileAst, FnCall, IfCondition, IfExpr, Loop, Pattern, WhenArm, WhenExpr,
 };
-use chumsky::span::{SimpleSpan, Span};
 use internment::Intern;
 use std::collections::{HashMap, HashSet};
 
@@ -75,8 +75,7 @@ impl<'a> FlowAnalyzer<'a> {
         }
         // Add self if this is a method
         if bind.receiver_type().is_some() {
-            self.in_scope
-                .insert(Intern::<String>::new("self".to_string()));
+            self.in_scope.insert(Intern::<String>::from_ref("self"));
         }
     }
 
@@ -173,13 +172,13 @@ impl<'a> FlowAnalyzer<'a> {
             Expr::BufGet { buf, index } => {
                 self.analyze_expr(buf);
                 self.analyze_expr(index);
-                self.check_bounds(buf, index, SimpleSpan::new((), 0..0));
+                self.check_bounds(buf, index, SpanId::INVALID);
             }
             Expr::BufSet { buf, index, value } => {
                 self.analyze_expr(buf);
                 self.analyze_expr(index);
                 self.analyze_expr(value);
-                self.check_bounds(buf, index, SimpleSpan::new((), 0..0));
+                self.check_bounds(buf, index, SpanId::INVALID);
             }
 
             // Cast and reference operations.
@@ -230,7 +229,7 @@ impl<'a> FlowAnalyzer<'a> {
                 let var_name = self.extract_var_name(subject);
 
                 if let Some(var) = var_name {
-                    let variant_name = Intern::<String>::new(tag.name().to_string());
+                    let variant_name = Intern::<String>::from_ref(tag.name());
 
                     // Look up which union this variant belongs to
                     if let Some((union_name, _, _)) = self.ty_env.lookup_variant(variant_name) {
@@ -297,7 +296,7 @@ impl<'a> FlowAnalyzer<'a> {
             for arm in &when_expr.arms {
                 match arm {
                     WhenArm::Is { pattern, body } => {
-                        let variant_name = Intern::<String>::new(pattern.name().to_string());
+                        let variant_name = Intern::<String>::from_ref(pattern.name());
 
                         if let Some((union_name, _, _)) = self.ty_env.lookup_variant(variant_name) {
                             let constraint = TypeConstraint::IsVariant(union_name, variant_name);
@@ -420,7 +419,7 @@ impl<'a> FlowAnalyzer<'a> {
     ///
     /// Only catches literal indices on arrays with known sizes.
     /// For runtime bounds checking with type narrowing, this is a TODO.
-    fn check_bounds(&mut self, buf: &Expr, index: &Expr, span: SimpleSpan) {
+    fn check_bounds(&mut self, buf: &Expr, index: &Expr, span: SpanId) {
         use crate::{TyInfer, TyInferEnv};
 
         let env = TyInferEnv {
@@ -462,7 +461,7 @@ impl<'a> FlowAnalyzer<'a> {
                     None
                 }
             }
-            Expr::SelfRef(_) => Some(Intern::<String>::new("self".to_string())),
+            Expr::SelfRef(_) => Some(Intern::<String>::from_ref("self")),
             _ => None,
         }
     }

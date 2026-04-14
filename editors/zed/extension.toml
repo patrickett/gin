@@ -7,9 +7,8 @@ description = "Language support for the Gin programming language"
 repository = "https://github.com/patrickett/gin"
 
 [grammars.gin]
-repository = "file:///Users/pattrickett/Code/language/gin/editors/tree-sitter-gin"
-rev = "6bb462ccd65ca816496c8b6078313a4eb4ab362a"
+wasm_path = "grammars/gin.wasm"
 
-[language_servers.gin-language-server]
+[language_servers.ginlsp]
 name = "Gin Language Server"
 languages = ["Gin", "JSON"]

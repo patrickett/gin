@@ -4,6 +4,5 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+span = { workspace = true }
 ariadne = "0.5.1"
-chumsky = { workspace = true }
-salsa = { workspace = true }

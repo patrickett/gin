@@ -1,12 +1,12 @@
 use codegen::build_module_with_context;
-use diagnostic::codegen::CodegenSymptom;
-use ast::parse_from_str;
-use typeck::TyEnv;
+use diagnostic::Symptom;
 use internment::Intern;
 use melior::Context;
+use parser::parse_from_str;
+use typeck::TyEnv;
 
 /// Helper to generate MLIR text from a source string.
-fn codegen_to_mlir_text(source: &str, filename: &str) -> (String, Vec<CodegenSymptom>) {
+fn codegen_to_mlir_text(source: &str, filename: &str) -> (String, Vec<Symptom>) {
     let ast = parse_from_str(source);
     let ty_env = TyEnv::from_file_ast(&ast);
 
@@ -29,10 +29,7 @@ fn codegen_to_mlir_text(source: &str, filename: &str) -> (String, Vec<CodegenSym
 fn test_parse_string_literal() {
     let src = "hello_text: 'hello'\n";
     let ast = parse_from_str(src);
-    assert!(
-        ast.defs()
-            .contains_key(&Intern::new("hello_text".to_string()))
-    );
+    assert!(ast.defs().contains_key(&Intern::from_ref("hello_text")));
 }
 
 #[test]

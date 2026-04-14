@@ -8,27 +8,20 @@
 
 mod category;
 mod source;
-
 pub use category::Category;
-use chumsky::span::SimpleSpan;
 pub use source::*;
+pub use span::{Span, SpanId, SpanTable, Spanned};
 
 pub trait SymptomLike: Sized {
-    fn into_symptom(self, span: SimpleSpan) -> Symptom;
-
-    fn emit<D: salsa::Database + ?Sized>(self, db: &D, span: SimpleSpan) {
-        use salsa::Accumulator;
-        self.into_symptom(span).accumulate(db);
-    }
+    fn into_symptom(self, span_id: SpanId) -> Symptom;
 }
 
-#[salsa::accumulator]
 #[derive(Debug, Clone)]
 pub struct Symptom {
     pub code: &'static str,
     pub message: String,
     pub help: Option<String>,
-    pub span: SimpleSpan,
+    pub span_id: SpanId,
     pub category: Category,
 }
 
@@ -38,12 +31,13 @@ impl Symptom {
     }
 
     /// Pretty-print this symptom using ariadne with source context.
-    pub fn print(&self, source: &str, filename: &str) {
+    pub fn print(&self, span_table: &SpanTable, source: &str, filename: &str) {
         use ariadne::{Label, Report, ReportKind, Source};
         use std::ops::Range;
 
-        let start = self.span.start;
-        let end = self.span.end;
+        let span = span_table.get(self.span_id);
+        let start = span.start;
+        let end = span.end;
 
         // Clamp span to source bounds
         let len = source.len();

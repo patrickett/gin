@@ -1,6 +1,5 @@
-use crate::prelude::*;
-use chumsky::prelude::*;
-use lexer::Token;
+use crate::expr::Expr;
+use crate::span::Spanned;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Binary {
@@ -53,53 +52,3 @@ impl BinOp {
         )
     }
 }
-
-/// Parser for comparison operators (==, !=, <, >, <=, >=)
-pub fn comparison_op<'t, I>() -> impl Parser<'t, I, BinOp, ParserError<'t>> + Clone
-where
-    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
-{
-    use BinOp::*;
-    use Token::*;
-
-    select! {
-        Eq => Equal,
-        NotEq => NotEqual,
-        Less => LessThan,
-        Greater => GreaterThan,
-        LessEq => LessThanOrEqual,
-        GreaterEq => GreaterThanOrEqual,
-    }
-}
-
-/// Parser for arithmetic operators (+, -, *, /, %)
-pub fn arithmetic_op<'t, I>() -> impl Parser<'t, I, BinOp, ParserError<'t>> + Clone
-where
-    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
-{
-    use BinOp::*;
-    use Token::*;
-
-    select! {
-        Plus => Add,
-        Minus => Subtract,
-        Star => Multiply,
-        Slash => Divide,
-        Percent => Modulo,
-    }
-}
-
-/// Parser for bitwise operators (&, |, ^, <<, >>)
-pub fn bitwise_op<'t, I>() -> impl Parser<'t, I, BinOp, ParserError<'t>> + Clone
-where
-    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
-{
-    select! {
-        Token::Ampersand  => BinOp::BitAnd,
-        Token::Pipe       => BinOp::BitOr,
-        Token::Caret      => BinOp::BitXor,
-        Token::ShiftLeft  => BinOp::ShiftLeft,
-        Token::ShiftRight => BinOp::ShiftRight,
-    }
-}
-

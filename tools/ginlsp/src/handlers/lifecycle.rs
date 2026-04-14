@@ -3,10 +3,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 
 impl Backend {
-    pub(crate) async fn handle_initialize(
-        &self,
-        _: InitializeParams,
-    ) -> Result<InitializeResult> {
+    pub(crate) async fn handle_initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
         let capabilities = ServerCapabilities {
             text_document_sync: Some(TextDocumentSyncCapability::Options(
                 TextDocumentSyncOptions {
@@ -43,7 +40,7 @@ impl Backend {
                 retrigger_characters: Some(vec![",".to_string()]),
                 work_done_progress_options: WorkDoneProgressOptions::default(),
             }),
-            document_formatting_provider: Some(OneOf::Left(true)),
+            document_formatting_provider: None,
             ..Default::default()
         };
 
@@ -53,16 +50,14 @@ impl Backend {
         })
     }
 
-    pub(crate) async fn handle_initialized(&self, _: InitializedParams) {
-        self.client
-            .log_message(MessageType::INFO, "gin language server initialized!")
-            .await;
-    }
+    pub(crate) async fn handle_initialized(&self, _: InitializedParams) {}
 
     pub(crate) async fn handle_shutdown(&self) -> Result<()> {
-        self.client
-            .log_message(MessageType::INFO, "gin language server shutting down!")
-            .await;
+        self.shutdown
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.documents.clear();
+        self.json_documents.clear();
+        self.ast_cache.clear();
         Ok(())
     }
 }

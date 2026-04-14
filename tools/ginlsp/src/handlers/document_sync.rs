@@ -24,7 +24,7 @@ impl Backend {
         }
 
         let file = {
-            let mut host = self.host.lock().unwrap();
+            let mut host = self.lock_host();
             host.upsert_file(path, text.clone())
         };
 
@@ -70,7 +70,7 @@ impl Backend {
         if let Some(change) = params.content_changes.first() {
             let text = change.text.clone();
             let file = {
-                let mut host = self.host.lock().unwrap();
+                let mut host = self.lock_host();
                 host.upsert_file(path, text.clone())
             };
 
@@ -116,7 +116,7 @@ impl Backend {
 
         if let Some(ref text) = params.text {
             let file = {
-                let mut host = self.host.lock().unwrap();
+                let mut host = self.lock_host();
                 host.upsert_file(path, text.clone())
             };
 

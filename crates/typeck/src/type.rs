@@ -16,8 +16,10 @@
 use crate::{TyInfer, TyInferEnv, resolve_tag_from_map};
 use ast::WhenArm;
 use ast::{
-    Bind, BindValue, DeclareValue, Expr, FileAst, FormatPart, IfCondition, Loop, ParameterKind, Tag,
+    Bind, BindValue, DeclareValue, Expr, FileAst, FormatPart, IfCondition, Loop, ParameterKind,
+    Spanned, Tag,
 };
+use i256::I256;
 use internment::Intern;
 use std::collections::HashMap;
 
@@ -453,10 +455,10 @@ pub fn ty_byte_size_static(ty: &Ty) -> usize {
 /// Canonical `Str` record type: `{ pointer: Ptr(Byte), len: Int }`.
 pub fn str_record_ty() -> Ty {
     Ty::Record {
-        name: Intern::<String>::new("Str".to_string()),
+        name: Intern::<String>::from_ref("Str"),
         fields: vec![
             (
-                Intern::<String>::new("pointer".to_string()),
+                Intern::<String>::from_ref("pointer"),
                 Box::new(Ty::Ptr {
                     inner: Box::new(Ty::Int {
                         width: 8,
@@ -466,7 +468,7 @@ pub fn str_record_ty() -> Ty {
                 }),
             ),
             (
-                Intern::<String>::new("len".to_string()),
+                Intern::<String>::from_ref("len"),
                 Box::new(Ty::Int {
                     width: 64,
                     signed: false,
@@ -586,7 +588,7 @@ fn resolve_name(
                 .iter()
                 .map(|v| {
                     let tag = v.tag();
-                    let variant_name = Intern::<String>::new(tag.name().to_string());
+                    let variant_name = Intern::<String>::from_ref(tag.name());
                     let fields = match tag {
                         Tag::Generic(_, params, _) if !params.is_empty() => params
                             .iter()
@@ -618,10 +620,7 @@ fn resolve_name(
 // ─── Unknown reference checking ──────────────────────────────────────────────
 
 impl TyEnv {
-    pub fn check_unknowns<D>(&self, ast: &FileAst, db: &D)
-    where
-        D: salsa::Database + ?Sized,
-    {
+    pub fn check_unknowns(&self, ast: &FileAst, symptoms: &mut Vec<diagnostic::Symptom>) {
         for bind in ast.defs.values() {
             let mut locals = HashMap::new();
             if let Some(params) = bind.params() {
@@ -629,27 +628,38 @@ impl TyEnv {
                     locals.insert(*name, self.resolve_parameter_kind(kind));
                 }
             }
-            self.check_bind(bind, db, &locals);
+            self.check_bind(bind, symptoms, &locals);
         }
     }
 
-    fn check_bind<D>(&self, bind: &Bind, db: &D, locals: &HashMap<Intern<String>, Ty>)
-    where
-        D: salsa::Database + ?Sized,
-    {
+    fn check_bind(
+        &self,
+        bind: &Bind,
+        symptoms: &mut Vec<diagnostic::Symptom>,
+        locals: &HashMap<Intern<String>, Ty>,
+    ) {
         if let Some(tag) = &bind.return_tag {
-            self.check_tag(tag, db);
+            self.check_tag(tag, symptoms);
+            if let Some(Ty::Union {
+                name: union_name,
+                variants,
+            }) = self.lookup_tag(Intern::<String>::from_ref(tag.name()))
+            {
+                let valid_variants: Vec<Intern<String>> =
+                    variants.iter().map(|(vname, _)| *vname).collect();
+                check_return_variants(bind, &valid_variants, *union_name, symptoms);
+            }
         }
         match bind.value() {
-            BindValue::Expr(expr) => self.check_expr(expr, db, locals),
+            BindValue::Expr(expr) => self.check_expr(expr, symptoms, locals),
             BindValue::Body { exprs, ret } => {
-                use diagnostic::type_ as type_symptom;
-                use salsa::Accumulator;
+                use diagnostic::SymptomLike;
+                use diagnostic::type_::TypeSymptom;
 
                 let mut body_locals = locals.clone();
                 for (i, expr) in exprs.iter().enumerate() {
                     if let Expr::Bind(inner) = &**expr {
-                        self.check_bind(inner, db, &body_locals);
+                        self.check_bind(inner, symptoms, &body_locals);
                         let name = inner.name();
                         let used = exprs[i + 1..].iter().any(|e| expr_references_name(e, name))
                             || ret
@@ -657,8 +667,12 @@ impl TyEnv {
                                 .as_ref()
                                 .is_some_and(|e| expr_references_name(e, name));
                         if !used {
-                            type_symptom::unused_binding(inner.name_span, name.to_string())
-                                .accumulate(db);
+                            symptoms.push(
+                                TypeSymptom::UnusedBinding {
+                                    name: name.to_string(),
+                                }
+                                .into_symptom(inner.name_span),
+                            );
                         }
                         body_locals.insert(name, {
                             let env = TyInferEnv {
@@ -669,46 +683,57 @@ impl TyEnv {
                             inner.infer_ty(&env)
                         });
                     } else {
-                        self.check_expr(expr, db, &body_locals);
+                        self.check_expr(expr, symptoms, &body_locals);
                     }
                 }
                 if let Some(ret_expr) = &ret.0 {
-                    self.check_expr(ret_expr, db, &body_locals);
+                    self.check_expr(ret_expr, symptoms, &body_locals);
                 }
             }
             BindValue::Extern => {}
         }
     }
 
-    fn check_expr<D>(&self, expr: &Expr, db: &D, locals: &HashMap<Intern<String>, Ty>)
-    where
-        D: salsa::Database + ?Sized,
-    {
-        use diagnostic::type_ as type_symptom;
-        use salsa::Accumulator;
+    fn check_expr(
+        &self,
+        expr: &Expr,
+        symptoms: &mut Vec<diagnostic::Symptom>,
+        locals: &HashMap<Intern<String>, Ty>,
+    ) {
+        use diagnostic::SymptomLike;
+        use diagnostic::type_::TypeSymptom;
 
         match expr {
             Expr::FnCall(call) => {
                 let name = call.path.root;
                 if let Some(args) = &call.args {
                     if self.fn_return_ty(&name).is_none() {
-                        type_symptom::unknown_binding(call.path.span, name.to_string())
-                            .accumulate(db);
+                        symptoms.push(
+                            TypeSymptom::UnknownBinding {
+                                name: name.to_string(),
+                            }
+                            .into_symptom(call.path.span),
+                        );
                     }
                     for arg in args {
-                        self.check_expr(arg, db, locals);
+                        self.check_expr(arg, symptoms, locals);
                     }
                 } else if call.path.segments.is_empty()
                     && !locals.contains_key(&name)
                     && self.fn_return_ty(&name).is_none()
                 {
-                    type_symptom::unknown_binding(call.path.span, name.to_string()).accumulate(db);
+                    symptoms.push(
+                        TypeSymptom::UnknownBinding {
+                            name: name.to_string(),
+                        }
+                        .into_symptom(call.path.span),
+                    );
                 }
             }
-            Expr::Bind(bind) => self.check_bind(bind, db, locals),
+            Expr::Bind(bind) => self.check_bind(bind, symptoms, locals),
             Expr::Binary(bin) => {
-                self.check_expr(&bin.lhs, db, locals);
-                self.check_expr(&bin.rhs, db, locals);
+                self.check_expr(&bin.lhs, symptoms, locals);
+                self.check_expr(&bin.rhs, symptoms, locals);
             }
             Expr::When(w) => {
                 // Infer subject type once for pattern-variant checking.
@@ -717,58 +742,59 @@ impl TyEnv {
                     .as_ref()
                     .map(|s| s.infer_ty(&self.infer_env(locals)));
                 if let Some(subject) = &w.subject {
-                    self.check_expr(subject, db, locals);
+                    self.check_expr(subject, symptoms, locals);
                 }
                 for arm in &w.arms {
                     match arm {
                         WhenArm::Cond { condition, body } => {
-                            self.check_expr(condition, db, locals);
-                            self.check_expr(body, db, locals);
+                            self.check_expr(condition, symptoms, locals);
+                            self.check_expr(body, symptoms, locals);
                         }
                         WhenArm::Is { pattern, body } => {
-                            let variant_name = Intern::<String>::new(pattern.name().to_string());
+                            let variant_name = Intern::<String>::from_ref(pattern.name());
                             match &subject_ty {
                                 Some(Ty::Union {
                                     name: union_name,
                                     variants,
                                 }) => {
                                     if !variants.iter().any(|(vname, _)| vname == &variant_name) {
-                                        type_symptom::not_a_variant(
-                                            pattern.span(),
-                                            pattern.name().to_string(),
-                                            union_name.to_string(),
-                                        )
-                                        .accumulate(db);
+                                        symptoms.push(
+                                            TypeSymptom::NotAVariant {
+                                                name: pattern.name().to_string(),
+                                                union_name: union_name.to_string(),
+                                            }
+                                            .into_symptom(pattern.span()),
+                                        );
                                     }
                                 }
                                 _ => {
-                                    // Subject type unknown or not a union — fall back to generic check.
                                     if self.lookup_variant(variant_name).is_none() {
-                                        type_symptom::unknown_tag(
-                                            pattern.span(),
-                                            pattern.name().to_string(),
-                                        )
-                                        .accumulate(db);
+                                        symptoms.push(
+                                            TypeSymptom::UnknownTag {
+                                                name: pattern.name().to_string(),
+                                            }
+                                            .into_symptom(pattern.span()),
+                                        );
                                     }
                                 }
                             }
-                            self.check_expr(body, db, locals);
+                            self.check_expr(body, symptoms, locals);
                         }
                         WhenArm::Else(body) => {
-                            self.check_expr(body, db, locals);
+                            self.check_expr(body, symptoms, locals);
                         }
                     }
                 }
             }
             Expr::If(if_expr) => match &if_expr.condition {
                 IfCondition::Bool(cond) => {
-                    self.check_expr(cond, db, locals);
+                    self.check_expr(cond, symptoms, locals);
                     for e in &if_expr.body {
-                        self.check_expr(e, db, locals);
+                        self.check_expr(e, symptoms, locals);
                     }
                 }
                 IfCondition::Pattern { subject, tag } => {
-                    self.check_expr(subject, db, locals);
+                    self.check_expr(subject, symptoms, locals);
                     let mut if_locals = locals.clone();
                     if let Tag::Generic(_, params, _) = tag {
                         if_locals.extend(params.iter().filter_map(|(k, _)| {
@@ -780,99 +806,124 @@ impl TyEnv {
                         }));
                     }
                     for e in &if_expr.body {
-                        self.check_expr(e, db, &if_locals);
+                        self.check_expr(e, symptoms, &if_locals);
                     }
                 }
             },
             Expr::Loop(loop_expr) => match loop_expr {
                 Loop::While(w) => {
-                    self.check_expr(&w.cond, db, locals);
+                    self.check_expr(&w.cond, symptoms, locals);
                     for e in &w.exprs {
-                        self.check_expr(e, db, locals);
+                        self.check_expr(e, symptoms, locals);
                     }
                 }
                 Loop::ForIn(f) => {
-                    self.check_expr(&f.iter, db, locals);
+                    self.check_expr(&f.iter, symptoms, locals);
                     for e in &f.exprs {
-                        self.check_expr(e, db, locals);
+                        self.check_expr(e, symptoms, locals);
                     }
                 }
             },
             Expr::TupleLit(elems) => {
                 for e in elems {
-                    self.check_expr(e, db, locals);
+                    self.check_expr(e, symptoms, locals);
                 }
             }
-            Expr::TupleAlloc { init, .. } => self.check_expr(init, db, locals),
-            Expr::TupleGet { base, .. } => self.check_expr(base, db, locals),
+            Expr::TupleAlloc { init, .. } => self.check_expr(init, symptoms, locals),
+            Expr::TupleGet { base, .. } => self.check_expr(base, symptoms, locals),
             Expr::TupleSet { base, value, .. } => {
-                self.check_expr(base, db, locals);
-                self.check_expr(value, db, locals);
+                self.check_expr(base, symptoms, locals);
+                self.check_expr(value, symptoms, locals);
             }
             Expr::BufGet { buf, index, .. } => {
-                self.check_expr(buf, db, locals);
-                self.check_expr(index, db, locals);
+                self.check_expr(buf, symptoms, locals);
+                self.check_expr(index, symptoms, locals);
             }
             Expr::BufSet {
                 buf, index, value, ..
             } => {
-                self.check_expr(buf, db, locals);
-                self.check_expr(index, db, locals);
-                self.check_expr(value, db, locals);
+                self.check_expr(buf, symptoms, locals);
+                self.check_expr(index, symptoms, locals);
+                self.check_expr(value, symptoms, locals);
             }
-            Expr::Cast { expr, .. } => self.check_expr(expr, db, locals),
+            Expr::Cast { expr, .. } => self.check_expr(expr, symptoms, locals),
             Expr::TakePtr(e) | Expr::TakeRef(e) | Expr::Deref(e) | Expr::Negate(e) => {
-                self.check_expr(e, db, locals);
+                self.check_expr(e, symptoms, locals);
             }
             Expr::AnonymousTag(name, span) => {
                 if self.lookup_variant(*name).is_none() {
-                    type_symptom::unknown_tag(*span, name.to_string()).accumulate(db);
+                    symptoms.push(
+                        TypeSymptom::UnknownTag {
+                            name: name.to_string(),
+                        }
+                        .into_symptom(*span),
+                    );
                 }
             }
             Expr::TagCall(tc) => {
                 if let Some(path) = &tc.qual_path {
-                    // Qualified form like Maybe.Some(3) — check the root type
                     if self.lookup_tag(path.root).is_none() {
-                        type_symptom::unknown_tag(path.span, path.root.to_string()).accumulate(db);
+                        symptoms.push(
+                            TypeSymptom::UnknownTag {
+                                name: path.root.to_string(),
+                            }
+                            .into_symptom(path.span),
+                        );
                     }
                 } else if self.lookup_variant(tc.name).is_none() {
-                    // Simple form like Some(3) — check the variant
-                    type_symptom::unknown_tag(tc.span, tc.name.to_string()).accumulate(db);
+                    symptoms.push(
+                        TypeSymptom::UnknownTag {
+                            name: tc.name.to_string(),
+                        }
+                        .into_symptom(tc.span),
+                    );
                 }
                 for arg in &tc.args {
-                    self.check_expr(arg, db, locals);
+                    self.check_expr(arg, symptoms, locals);
                 }
             }
             Expr::Lit(_) | Expr::SelfRef(_) | Expr::Range(_) | Expr::FormatString(_) => {}
         }
     }
 
-    fn check_tag<D>(&self, tag: &Tag, db: &D)
-    where
-        D: salsa::Database + ?Sized,
-    {
-        use diagnostic::type_ as type_symptom;
-        use salsa::Accumulator;
+    fn check_tag(&self, tag: &Tag, symptoms: &mut Vec<diagnostic::Symptom>) {
+        use diagnostic::SymptomLike;
+        use diagnostic::type_::TypeSymptom;
 
         match tag {
             Tag::Nominal(name, span) => {
                 if self.lookup_tag(*name).is_none() {
-                    type_symptom::unknown_tag(*span, name.to_string()).accumulate(db);
+                    symptoms.push(
+                        TypeSymptom::UnknownTag {
+                            name: name.to_string(),
+                        }
+                        .into_symptom(*span),
+                    );
                 }
             }
             Tag::Generic(name, params, span) => {
                 if self.lookup_tag(*name).is_none() {
-                    type_symptom::unknown_tag(*span, name.to_string()).accumulate(db);
+                    symptoms.push(
+                        TypeSymptom::UnknownTag {
+                            name: name.to_string(),
+                        }
+                        .into_symptom(*span),
+                    );
                 }
                 for kind in params.values() {
                     if let ParameterKind::Tagged(inner) = kind {
-                        self.check_tag(inner, db);
+                        self.check_tag(inner, symptoms);
                     }
                 }
             }
             Tag::Qualified(path) => {
                 if self.lookup_tag(path.root).is_none() {
-                    type_symptom::unknown_tag(path.span, path.root.to_string()).accumulate(db);
+                    symptoms.push(
+                        TypeSymptom::UnknownTag {
+                            name: path.root.to_string(),
+                        }
+                        .into_symptom(path.span),
+                    );
                 }
             }
         }
@@ -963,5 +1014,119 @@ fn expr_references_name(expr: &Expr, name: Intern<String>) -> bool {
             expr_references_name(&range.start, name) || expr_references_name(&range.end, name)
         }
         Expr::Lit(_) | Expr::SelfRef(_) | Expr::AnonymousTag(..) | Expr::TagCall(_) => false,
+    }
+}
+
+fn check_return_variants(
+    bind: &Bind,
+    valid_variants: &[Intern<String>],
+    union_name: Intern<String>,
+    symptoms: &mut Vec<diagnostic::Symptom>,
+) {
+    use diagnostic::SymptomLike;
+    use diagnostic::type_::TypeSymptom;
+
+    fn check_expr(
+        expr: &Spanned<Expr>,
+        valid_variants: &[Intern<String>],
+        union_name: Intern<String>,
+        symptoms: &mut Vec<diagnostic::Symptom>,
+    ) {
+        match &expr.0 {
+            Expr::AnonymousTag(name, span)
+                if !valid_variants.iter().any(|v| v.as_str() == name.as_str()) =>
+            {
+                symptoms.push(
+                    TypeSymptom::NotAVariant {
+                        name: name.to_string(),
+                        union_name: union_name.to_string(),
+                    }
+                    .into_symptom(*span),
+                );
+            }
+            Expr::TagCall(tc)
+                if !valid_variants
+                    .iter()
+                    .any(|v| v.as_str() == tc.name.as_str()) =>
+            {
+                symptoms.push(
+                    TypeSymptom::NotAVariant {
+                        name: tc.name.to_string(),
+                        union_name: union_name.to_string(),
+                    }
+                    .into_symptom(tc.span),
+                );
+            }
+            Expr::If(if_expr) => {
+                for e in &if_expr.body {
+                    check_expr(e, valid_variants, union_name, symptoms);
+                }
+                if let Some(ret_expr) = &if_expr.ret.0 {
+                    check_expr(ret_expr, valid_variants, union_name, symptoms);
+                } else {
+                    symptoms.push(
+                        TypeSymptom::EmptyReturn {
+                            expected_type: union_name.to_string(),
+                        }
+                        .into_symptom(expr.1),
+                    );
+                }
+            }
+            Expr::When(w) => {
+                for arm in &w.arms {
+                    match arm {
+                        WhenArm::Cond { body, .. } => {
+                            check_expr(body, valid_variants, union_name, symptoms)
+                        }
+                        WhenArm::Is { body, .. } => {
+                            check_expr(body, valid_variants, union_name, symptoms)
+                        }
+                        WhenArm::Else(body) => {
+                            check_expr(body, valid_variants, union_name, symptoms)
+                        }
+                    }
+                }
+            }
+            Expr::Bind(inner) => match inner.value() {
+                BindValue::Expr(e) => check_expr(e, valid_variants, union_name, symptoms),
+                BindValue::Body { exprs, ret } => {
+                    for e in exprs {
+                        check_expr(e, valid_variants, union_name, symptoms);
+                    }
+                    if let Some(r) = &ret.0 {
+                        check_expr(r, valid_variants, union_name, symptoms);
+                    } else {
+                        symptoms.push(
+                            TypeSymptom::EmptyReturn {
+                                expected_type: union_name.to_string(),
+                            }
+                            .into_symptom(inner.name_span),
+                        );
+                    }
+                }
+                BindValue::Extern => {}
+            },
+            _ => {}
+        }
+    }
+
+    match bind.value() {
+        BindValue::Expr(expr) => check_expr(expr, valid_variants, union_name, symptoms),
+        BindValue::Body { exprs, ret } => {
+            for expr in exprs {
+                check_expr(expr, valid_variants, union_name, symptoms);
+            }
+            if let Some(ret_expr) = &ret.0 {
+                check_expr(ret_expr, valid_variants, union_name, symptoms);
+            } else {
+                symptoms.push(
+                    TypeSymptom::EmptyReturn {
+                        expected_type: union_name.to_string(),
+                    }
+                    .into_symptom(bind.name_span),
+                );
+            }
+        }
+        BindValue::Extern => {}
     }
 }

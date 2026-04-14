@@ -18,8 +18,8 @@ impl zed::Extension for GinExtension {
             .as_ref()
             .and_then(|s| s.binary.as_ref())
             .and_then(|b| b.path.clone())
-            .or_else(|| worktree.which("gin-language-server"))
-            .ok_or_else(|| "gin-language-server not found in PATH".to_string())?;
+            .or_else(|| worktree.which("ginlsp"))
+            .ok_or_else(|| "ginlsp not found in PATH".to_string())?;
 
         Ok(zed::Command {
             command: binary,

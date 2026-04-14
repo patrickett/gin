@@ -158,7 +158,7 @@ impl TyInfer for Bind {
         };
         if let Some(recv_tag) = self.receiver_type() {
             let recv_ty = resolve_tag_from_map(recv_tag, env.tag_types);
-            locals.insert(Intern::<String>::new("self".to_string()), recv_ty);
+            locals.insert(Intern::<String>::from_ref("self"), recv_ty);
         }
 
         let bind_env = TyInferEnv {
@@ -241,15 +241,15 @@ impl TyInfer for Expr {
             Expr::FormatString(_) => str_record_ty(),
             Expr::Loop(_) => Ty::Unit,
             Expr::If(_) => Ty::Unit,
-            Expr::Range(_) => Ty::Opaque(Intern::<String>::new("Range".to_string())),
+            Expr::Range(_) => Ty::Opaque(Intern::<String>::from_ref("Range")),
             Expr::TupleSet { .. } | Expr::BufSet { .. } => Ty::Unit,
             Expr::Cast { ty, .. } => Ty::Opaque(*ty),
 
             // Arms with recursive sub-expression inference
             Expr::SelfRef(_) => env
                 .locals
-                .get_type(&Intern::<String>::new("self".to_string()))
-                .unwrap_or_else(|| Ty::Opaque(Intern::<String>::new("Self".to_string()))),
+                .get_type(&Intern::<String>::from_ref("self"))
+                .unwrap_or_else(|| Ty::Opaque(Intern::<String>::from_ref("Self"))),
 
             Expr::TupleAlloc { init, size } => {
                 let elem = init.infer_ty(env);

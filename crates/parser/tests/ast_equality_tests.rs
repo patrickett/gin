@@ -1,4 +1,4 @@
-use ast::parse_from_str as parse_str;
+use parser::parse_from_str as parse_str;
 
 #[test]
 fn identical_sources_are_equal() {

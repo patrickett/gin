@@ -1,16 +1,15 @@
 use crate::{LexContext, MAX_INDENT_DEPTH, Token};
-use chumsky::span::SimpleSpan;
 use diagnostic::lex::LexSymptom;
 use memchr::{memchr, memchr2, memchr3};
+use span::{Span, SpanId, SpanTable};
 
-// TODO: move to SpanId instead of (Token, SimpleSpan)
 struct FormatStringState<'src> {
-    tokens: Vec<(Token<'src>, SimpleSpan)>,
+    tokens: Vec<(Token<'src>, SpanId)>,
     idx: usize,
 }
 
 impl<'src> FormatStringState<'src> {
-    fn next(&mut self) -> Option<(Token<'src>, SimpleSpan)> {
+    fn next(&mut self) -> Option<(Token<'src>, SpanId)> {
         if self.idx < self.tokens.len() {
             let item = self.tokens[self.idx];
             self.idx += 1;
@@ -24,10 +23,11 @@ impl<'src> FormatStringState<'src> {
 pub struct Lexer<'src> {
     source: &'src str,
     pos: usize,
-    pub errors: Vec<(LexSymptom, SimpleSpan)>,
+    pub errors: Vec<(LexSymptom, SpanId)>,
     indent: LexContext,
-    last_indent_span: SimpleSpan,
+    last_indent_span: SpanId,
     fmt: Option<FormatStringState<'src>>,
+    span_table: SpanTable,
     /// Byte offset of the next `\n`, or `source.len()` if none remains.
     line_end: usize,
 }
@@ -40,15 +40,49 @@ impl<'src> Lexer<'src> {
             pos: 0,
             errors: Vec::new(),
             indent: LexContext::default(),
-            last_indent_span: SimpleSpan::from(0..0),
+            last_indent_span: SpanId::INVALID,
             fmt: None,
+            span_table: SpanTable::new(),
             line_end,
         }
     }
 
     #[inline]
-    fn current_span(&self, start: usize) -> SimpleSpan {
-        SimpleSpan::from(start..self.pos)
+    fn current_span(&self, start: usize) -> std::ops::Range<usize> {
+        start..self.pos
+    }
+
+    #[inline]
+    fn insert_span(&mut self, range: std::ops::Range<usize>) -> SpanId {
+        self.span_table.insert(Span {
+            start: range.start,
+            end: range.end,
+        })
+    }
+
+    /// Get the span data for a given SpanId.
+    pub fn get_span(&self, id: SpanId) -> Span {
+        self.span_table.get(id)
+    }
+
+    /// Get a reference to the span table for resolving SpanIds.
+    pub fn span_table(&self) -> &SpanTable {
+        &self.span_table
+    }
+
+    /// Get a mutable reference to the span table.
+    pub fn span_table_mut(&mut self) -> &mut SpanTable {
+        &mut self.span_table
+    }
+
+    /// Consume the lexer and return the span table.
+    pub fn into_span_table(self) -> SpanTable {
+        self.span_table
+    }
+
+    /// Take the span table, leaving an empty one in its place.
+    pub fn take_span_table(&mut self) -> SpanTable {
+        std::mem::take(&mut self.span_table)
     }
 
     #[inline]
@@ -89,8 +123,9 @@ impl<'src> Lexer<'src> {
         }
     }
 
-    fn handle_newline(&mut self, newline_start: usize) -> Option<(Token<'src>, SimpleSpan)> {
-        let span = self.current_span(newline_start);
+    fn handle_newline(&mut self, newline_start: usize) -> Option<(Token<'src>, SpanId)> {
+        let range = self.current_span(newline_start);
+        let span = self.insert_span(range);
         self.last_indent_span = span;
         let bytes = self.source.as_bytes();
 
@@ -153,7 +188,7 @@ impl<'src> Lexer<'src> {
         indent
     }
 
-    fn lex_keyword_or_id(&mut self, start: usize) -> (Token<'src>, SimpleSpan) {
+    fn lex_keyword_or_id(&mut self, start: usize) -> (Token<'src>, SpanId) {
         let bytes = self.source.as_bytes();
         while self.pos < bytes.len() {
             match bytes[self.pos] {
@@ -162,7 +197,8 @@ impl<'src> Lexer<'src> {
             }
         }
         let text = self.slice_from(start);
-        let span = self.current_span(start);
+        let range = self.current_span(start);
+        let span = self.insert_span(range);
 
         let tok = match text {
             "extern" => Token::Extern,
@@ -192,7 +228,7 @@ impl<'src> Lexer<'src> {
         (tok, span)
     }
 
-    fn lex_tag(&mut self, start: usize) -> (Token<'src>, SimpleSpan) {
+    fn lex_tag(&mut self, start: usize) -> (Token<'src>, SpanId) {
         let bytes = self.source.as_bytes();
         while self.pos < bytes.len() {
             match bytes[self.pos] {
@@ -201,7 +237,8 @@ impl<'src> Lexer<'src> {
             }
         }
         let text = self.slice_from(start);
-        let span = self.current_span(start);
+        let range = self.current_span(start);
+        let span = self.insert_span(range);
 
         if text == "Self" {
             (Token::SelfTag, span)
@@ -244,12 +281,7 @@ impl<'src> Lexer<'src> {
         fast_float::parse(&buf[..len]).ok()
     }
 
-    fn int_result(
-        &mut self,
-        span: SimpleSpan,
-        bytes: &[u8],
-        radix: u32,
-    ) -> (Token<'src>, SimpleSpan) {
+    fn int_result(&mut self, span: SpanId, bytes: &[u8], radix: u32) -> (Token<'src>, SpanId) {
         match Self::parse_int_bytes(bytes, radix) {
             Some(v) => (Token::Int(v), span),
             None => {
@@ -259,7 +291,7 @@ impl<'src> Lexer<'src> {
         }
     }
 
-    fn lex_number(&mut self, start: usize) -> (Token<'src>, SimpleSpan) {
+    fn lex_number(&mut self, start: usize) -> (Token<'src>, SpanId) {
         if self.source.as_bytes()[start] == b'0'
             && let Some(b'x' | b'X') = self.peek()
             && self.peek_at(1).is_some_and(|b| b.is_ascii_hexdigit())
@@ -272,7 +304,8 @@ impl<'src> Lexer<'src> {
                     _ => break,
                 }
             }
-            let span = self.current_span(start);
+            let range = self.current_span(start);
+            let span = self.insert_span(range);
             return self.int_result(span, &self.source.as_bytes()[start + 2..self.pos], 16);
         }
 
@@ -292,7 +325,8 @@ impl<'src> Lexer<'src> {
                     _ => break,
                 }
             }
-            let span = self.current_span(start);
+            let range = self.current_span(start);
+            let span = self.insert_span(range);
             return match Self::parse_float_bytes(&self.source.as_bytes()[start..self.pos]) {
                 Some(v) => (Token::Float(v), span),
                 None => {
@@ -302,11 +336,12 @@ impl<'src> Lexer<'src> {
             };
         }
 
-        let span = self.current_span(start);
+        let range = self.current_span(start);
+        let span = self.insert_span(range);
         self.int_result(span, &self.source.as_bytes()[start..self.pos], 10)
     }
 
-    fn lex_string(&mut self, start: usize) -> (Token<'src>, SimpleSpan) {
+    fn lex_string(&mut self, start: usize) -> (Token<'src>, SpanId) {
         self.pos += 1;
         let bytes = self.source.as_bytes();
 
@@ -315,18 +350,20 @@ impl<'src> Lexer<'src> {
         if end < bytes.len() && bytes[end] == b'\'' {
             self.pos = end + 1;
             let text = self.slice_from(start);
-            let span = self.current_span(start);
+            let range = self.current_span(start);
+            let span = self.insert_span(range);
             return (Token::String(&text[1..text.len() - 1]), span);
         }
 
         self.pos = end;
         let text = self.slice_from(start);
-        let span = self.current_span(start);
+        let range = self.current_span(start);
+        let span = self.insert_span(range);
         self.errors.push((LexSymptom::UnclosedString, span));
         (Token::UnterminatedString(&text[1..]), span)
     }
 
-    fn lex_format_string(&mut self, open_span: SimpleSpan) {
+    fn lex_format_string(&mut self, open_span: SpanId) {
         let mut tokens = match self.fmt.take() {
             Some(state) => {
                 let mut v = state.tokens;
@@ -356,7 +393,7 @@ impl<'src> Lexer<'src> {
             };
 
             if self.pos > text_start {
-                let span = SimpleSpan::from(text_start..self.pos);
+                let span = self.insert_span(text_start..self.pos);
                 tokens.push((Token::FormatStringText(self.slice_from(text_start)), span));
             }
 
@@ -364,7 +401,7 @@ impl<'src> Lexer<'src> {
                 Some(b'"') => {
                     let quote_start = self.pos;
                     self.pos += 1;
-                    let span = SimpleSpan::from(quote_start..self.pos);
+                    let span = self.insert_span(quote_start..self.pos);
                     tokens.push((Token::FormatStringDelim, span));
                     break;
                 }
@@ -372,14 +409,14 @@ impl<'src> Lexer<'src> {
                     let esc_start = self.pos;
                     self.pos += 1;
                     if self.advance().is_some() {
-                        let span = SimpleSpan::from(esc_start..self.pos);
+                        let span = self.insert_span(esc_start..self.pos);
                         tokens.push((Token::FormatStringText(self.slice_from(esc_start)), span));
                     }
                 }
                 Some(b'(') => {
                     let interp_start = self.pos;
                     self.pos += 1;
-                    let span = SimpleSpan::from(interp_start..self.pos);
+                    let span = self.insert_span(interp_start..self.pos);
                     tokens.push((Token::FormatInterpStart, span));
                     self.lex_format_interp(&mut tokens);
                 }
@@ -388,7 +425,7 @@ impl<'src> Lexer<'src> {
                     if self.peek() == Some(b'\n') {
                         self.pos += 1;
                     }
-                    let span = SimpleSpan::from(unterm_start..self.pos);
+                    let span = self.insert_span(unterm_start..self.pos);
                     tokens.push((Token::UnterminatedFormatString, span));
                     self.errors.push((LexSymptom::UnclosedString, open_span));
                     break;
@@ -399,13 +436,13 @@ impl<'src> Lexer<'src> {
         self.fmt = Some(FormatStringState { tokens, idx: 0 });
     }
 
-    fn lex_format_interp(&mut self, tokens: &mut Vec<(Token<'src>, SimpleSpan)>) {
+    fn lex_format_interp(&mut self, tokens: &mut Vec<(Token<'src>, SpanId)>) {
         let mut paren_depth: u32 = 0;
 
         loop {
             match self.lex_simple_token() {
                 None => {
-                    let eof_span = SimpleSpan::from(self.pos..self.pos);
+                    let eof_span = self.insert_span(self.pos..self.pos);
                     tokens.push((Token::UnterminatedFormatString, eof_span));
                     self.errors.push((LexSymptom::UnclosedString, eof_span));
                     return;
@@ -435,7 +472,7 @@ impl<'src> Lexer<'src> {
         }
     }
 
-    fn lex_comment(&mut self, start: usize, doc: bool) -> (Token<'src>, SimpleSpan) {
+    fn lex_comment(&mut self, start: usize, doc: bool) -> (Token<'src>, SpanId) {
         if doc {
             self.pos += 2;
         } else {
@@ -444,7 +481,8 @@ impl<'src> Lexer<'src> {
         self.ensure_line_end();
         self.pos = self.line_end;
         let text = self.slice_from(start);
-        let span = self.current_span(start);
+        let range = self.current_span(start);
+        let span = self.insert_span(range);
 
         if doc {
             (Token::DocComment(text), span)
@@ -459,12 +497,12 @@ impl<'src> Lexer<'src> {
         second: u8,
         two_char: Token<'src>,
         fallback: Token<'src>,
-    ) -> Option<(Token<'src>, SimpleSpan)> {
+    ) -> Option<(Token<'src>, SpanId)> {
         if self.peek() == Some(second) {
             self.pos += 1;
-            Some((two_char, self.current_span(start)))
+            Some((two_char, self.insert_span(self.current_span(start))))
         } else {
-            Some((fallback, self.current_span(start)))
+            Some((fallback, self.insert_span(self.current_span(start))))
         }
     }
 
@@ -492,7 +530,7 @@ impl<'src> Lexer<'src> {
         })
     }
 
-    fn lex_simple_token(&mut self) -> Option<(Token<'src>, SimpleSpan)> {
+    fn lex_simple_token(&mut self) -> Option<(Token<'src>, SpanId)> {
         loop {
             self.skip_inline_whitespace();
 
@@ -500,7 +538,7 @@ impl<'src> Lexer<'src> {
             let b = self.advance()?;
 
             if let Some(tok) = Self::single_char_token(b) {
-                return Some((tok, self.current_span(start)));
+                return Some((tok, self.insert_span(self.current_span(start))));
             }
 
             match b {
@@ -512,7 +550,7 @@ impl<'src> Lexer<'src> {
 
                 b'\'' => return Some(self.lex_string(start)),
                 b'"' => {
-                    let span = self.current_span(start);
+                    let span = self.insert_span(self.current_span(start));
                     return Some((Token::FormatStringDelim, span));
                 }
 
@@ -522,9 +560,12 @@ impl<'src> Lexer<'src> {
                         (Some(b'-'), _) => Some(self.lex_comment(start, false)),
                         (Some(b'>'), _) => {
                             self.pos += 1;
-                            Some((Token::ArrowRight, self.current_span(start)))
+                            Some((
+                                Token::ArrowRight,
+                                self.insert_span(self.current_span(start)),
+                            ))
                         }
-                        _ => Some((Token::Minus, self.current_span(start))),
+                        _ => Some((Token::Minus, self.insert_span(self.current_span(start)))),
                     };
                 }
 
@@ -532,17 +573,17 @@ impl<'src> Lexer<'src> {
                     return match self.peek() {
                         Some(b'<') => {
                             self.pos += 1;
-                            Some((Token::ShiftLeft, self.current_span(start)))
+                            Some((Token::ShiftLeft, self.insert_span(self.current_span(start))))
                         }
                         Some(b'=') => {
                             self.pos += 1;
-                            Some((Token::LessEq, self.current_span(start)))
+                            Some((Token::LessEq, self.insert_span(self.current_span(start))))
                         }
                         Some(b'-') => {
                             self.pos += 1;
-                            Some((Token::ArrowLeft, self.current_span(start)))
+                            Some((Token::ArrowLeft, self.insert_span(self.current_span(start))))
                         }
-                        _ => Some((Token::Less, self.current_span(start))),
+                        _ => Some((Token::Less, self.insert_span(self.current_span(start)))),
                     };
                 }
 
@@ -550,13 +591,16 @@ impl<'src> Lexer<'src> {
                     return match self.peek() {
                         Some(b'>') => {
                             self.pos += 1;
-                            Some((Token::ShiftRight, self.current_span(start)))
+                            Some((
+                                Token::ShiftRight,
+                                self.insert_span(self.current_span(start)),
+                            ))
                         }
                         Some(b'=') => {
                             self.pos += 1;
-                            Some((Token::GreaterEq, self.current_span(start)))
+                            Some((Token::GreaterEq, self.insert_span(self.current_span(start))))
                         }
-                        _ => Some((Token::Greater, self.current_span(start))),
+                        _ => Some((Token::Greater, self.insert_span(self.current_span(start)))),
                     };
                 }
 
@@ -568,15 +612,16 @@ impl<'src> Lexer<'src> {
                     return {
                         if self.peek() == Some(b'.') && self.peek_at(1) == Some(b'.') {
                             self.pos += 2;
-                            Some((Token::Infer, self.current_span(start)))
+                            Some((Token::Infer, self.insert_span(self.current_span(start))))
                         } else {
-                            Some((Token::Dot, self.current_span(start)))
+                            Some((Token::Dot, self.insert_span(self.current_span(start))))
                         }
                     };
                 }
 
                 _ => {
-                    let span = self.current_span(start);
+                    let range = self.current_span(start);
+                    let span = self.insert_span(range);
                     self.errors.push((LexSymptom::UnexpectedCharacter, span));
                     while self.peek().is_some_and(|b| b & 0xC0 == 0x80) {
                         self.pos += 1;
@@ -587,7 +632,7 @@ impl<'src> Lexer<'src> {
         }
     }
 
-    fn lex_single_token(&mut self) -> Option<(Token<'src>, SimpleSpan)> {
+    fn lex_single_token(&mut self) -> Option<(Token<'src>, SpanId)> {
         let tok = self.lex_simple_token()?;
         if matches!(tok.0, Token::FormatStringDelim) {
             self.lex_format_string(tok.1);
@@ -597,7 +642,7 @@ impl<'src> Lexer<'src> {
         }
     }
 
-    fn next_with_indent(&mut self) -> Option<(Token<'src>, SimpleSpan)> {
+    fn next_with_indent(&mut self) -> Option<(Token<'src>, SpanId)> {
         if let Some(ref mut state) = self.fmt
             && let Some(item) = state.next()
         {
@@ -621,12 +666,12 @@ impl<'src> Lexer<'src> {
         Some(item)
     }
 
-    fn next_token(&mut self) -> Option<(Token<'src>, SimpleSpan)> {
+    fn next_token(&mut self) -> Option<(Token<'src>, SpanId)> {
         if let Some(tok) = self.next_with_indent() {
             return Some(tok);
         }
 
-        self.last_indent_span = SimpleSpan::from(self.pos..self.pos);
+        self.last_indent_span = self.insert_span(self.pos..self.pos);
         let dedent_count = self.indent.indent_depth as usize - 1;
         if dedent_count > 0 {
             self.indent.indent_depth = 1;
@@ -637,13 +682,13 @@ impl<'src> Lexer<'src> {
         }
     }
 
-    pub fn next_raw(&mut self) -> Option<(Token<'src>, SimpleSpan)> {
+    pub fn next_raw(&mut self) -> Option<(Token<'src>, SpanId)> {
         self.next_token()
     }
 }
 
 impl<'src> Iterator for Lexer<'src> {
-    type Item = (Token<'src>, SimpleSpan);
+    type Item = (Token<'src>, SpanId);
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {

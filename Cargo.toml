@@ -3,12 +3,14 @@ members = [
     "tools/begin",
     "crates/flask",
     "crates/ast",
+    "crates/span",
     "crates/diagnostic",
     "crates/lexer",
     "crates/typeck",
     "crates/codegen",
     "crates/lsp",
     "crates/database",
+    "crates/parser",
     "tools/ginc",
     "tools/ginfmt",
     "tools/ginlsp",
@@ -23,12 +25,14 @@ lsp-types = "0.94.1"
 flask = { path = "crates/flask" }
 ginc = { path = "tools/ginc" }
 ast = { path = "crates/ast" }
+span = { path = "crates/span" }
 diagnostic = { path = "crates/diagnostic" }
 lexer = { path = "crates/lexer" }
 typeck = { path = "crates/typeck" }
 codegen = { path = "crates/codegen" }
 lsp = { path = "crates/lsp" }
 database = { path = "crates/database" }
+parser = { path = "crates/parser" }
 ginfmt = { path = "tools/ginfmt" }
 dashmap = "6.1.0"
 indexmap = "2"
@@ -39,6 +43,6 @@ crossbeam-channel = "0.5.15"
 dirs = "6"
 rayon = "1"
 sha2 = "0.10"
-chumsky = { version = "0.10.1", features = ["pratt", "extension"] }
+
 i256 = "0.2"
 semver = "1"

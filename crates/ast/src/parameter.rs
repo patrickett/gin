@@ -1,7 +1,9 @@
 use indexmap::IndexMap;
+use internment::Intern;
 
-use crate::delimited_list;
-use crate::prelude::*;
+use crate::expr::Expr;
+use crate::span::Spanned;
+use crate::tag::Tag;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ParameterKind {
@@ -28,64 +30,4 @@ pub enum ParamInfo {
     Default(Spanned<Expr>),
 }
 
-// id Tag | Tag2
-// id: expr -- note exprs cannot be | since this is actually an assignment/default value
-// the expr however can return a Tag Union
-pub fn parameter<'t, I>(
-    expr: impl Parser<'t, I, Spanned<Expr>, ParserError<'t>> + Clone + 't,
-    tag: impl Parser<'t, I, Tag, ParserError<'t>> + Clone + 't,
-) -> impl Parser<'t, I, (Intern<String>, ParameterKind), ParserError<'t>> + Clone
-where
-    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
-{
-    let id = id_token();
-
-    // Parse parameter with explicit handling of Tag tokens vs generic identifiers
-    let param_info = choice((
-        // Handle tag-based parameter typing: (p Person | User)
-        tag.clone().map(ParamInfo::Tag),
-        // Handle default parameter values: (p: 123)
-        just(Token::Colon)
-            .ignore_then(expr.clone())
-            .map(ParamInfo::Default),
-    ))
-    .or_not();
-
-    let named = id.then(param_info).map(|(name, info)| {
-        let kind = match info {
-            Some(info) => match info {
-                ParamInfo::Tag(tag) => ParameterKind::Tagged(tag),
-                ParamInfo::Default(expr) => ParameterKind::Default(expr),
-            },
-            None => ParameterKind::Generic,
-        };
-        (name, kind)
-    });
-
-    // Positional type argument: bare Tag with no name, e.g. `Ptr(Byte)`.
-    // The tag name itself is used as the parameter key.
-    let positional = tag.clone().map(|t: Tag| {
-        let key = Intern::<String>::new(t.name().to_string());
-        (key, ParameterKind::Tagged(t))
-    });
-
-    choice((named, positional))
-}
-
 pub type Parameters = IndexMap<Intern<String>, ParameterKind>;
-
-pub fn params<'t, I>(
-    expr: impl Parser<'t, I, Spanned<Expr>, ParserError<'t>> + Clone + 't,
-    tag: impl Parser<'t, I, Tag, ParserError<'t>> + Clone + 't,
-) -> impl Parser<'t, I, Parameters, ParserError<'t>> + Clone
-where
-    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
-{
-    delimited_list(
-        Token::ParenOpen,
-        parameter(expr, tag),
-        Token::Comma,
-        Token::ParenClose,
-    )
-    .map(|pairs| pairs.into_iter().collect::<Parameters>())
-}

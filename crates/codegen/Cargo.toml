@@ -5,11 +5,11 @@ edition = "2024"
 
 [dependencies]
 ast = { workspace = true }
-lexer = { workspace = true }
+parser = { workspace = true }
 diagnostic = { workspace = true }
+span = { workspace = true }
 typeck = { workspace = true }
 i256 = { workspace = true }
-chumsky = { workspace = true }
 melior = "0.26.3"
 mlir-sys = "210.0.1"
 internment = "0.8"

@@ -5,15 +5,10 @@ edition = "2024"
 
 [dependencies]
 ast = { workspace = true }
-lexer = { workspace = true }
 diagnostic = { workspace = true }
-database = { workspace = true }
 i256 = { workspace = true }
-chumsky = { workspace = true }
-salsa = { workspace = true }
-dashmap = { workspace = true }
 indexmap = { workspace = true }
 internment = "0.8"
 
 [dev-dependencies]
-database = { workspace = true }
+parser = { workspace = true }

@@ -1,7 +1,9 @@
-use crate::ModPath;
-use crate::delimited_list;
-use crate::prelude::*;
-use chumsky::span::SimpleSpan;
+use internment::Intern;
+
+use crate::expr::Expr;
+use crate::path::ModPath;
+use crate::span::SpanId;
+use crate::span::Spanned;
 
 /// A capitalized variant constructor call, e.g. `Some(5)` or `Maybe.Some(3)`.
 ///
@@ -14,41 +16,5 @@ pub struct TagCall {
     /// Optional qualified path (e.g., ModPath { root: "Maybe", segments: ["Some"] })
     pub qual_path: Option<ModPath>,
     pub args: Vec<Spanned<Expr>>,
-    pub span: SimpleSpan,
-}
-
-pub fn tag_call<'t, I>(
-    expr: impl Parser<'t, I, Spanned<Expr>, ParserError<'t>> + Clone + 't,
-) -> impl Parser<'t, I, TagCall, ParserError<'t>>
-where
-    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
-{
-    let args = delimited_list(Token::ParenOpen, expr, Token::Comma, Token::ParenClose);
-
-    // Qualified form: Maybe.Some(x), Result.Ok(x) — uses Tag.Tag pattern
-    let qualified =
-        crate::tag_variant_path()
-            .then(args.clone())
-            .map_with(|(path, args), e| {
-                let variant_name = *path.segments.last().unwrap_or(&path.root);
-                TagCall {
-                    name: variant_name,
-                    qual_path: Some(path),
-                    args,
-                    span: e.span(),
-                }
-            });
-
-    // Simple form: Some(x), None()
-    let simple = select! { Token::Tag(name) => Intern::<String>::new(name.to_string()) }
-        .then(args)
-        .map_with(|(name, args), e| TagCall {
-            name,
-            qual_path: None,
-            args,
-            span: e.span(),
-        });
-
-    // Prefer qualified to avoid ambiguity
-    choice((qualified, simple))
+    pub span: SpanId,
 }

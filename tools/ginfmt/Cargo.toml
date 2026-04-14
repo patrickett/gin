@@ -5,7 +5,9 @@ edition = "2024"
 
 [dependencies]
 ginc = {workspace = true}
-chumsky = {workspace = true}
+
 tree-sitter-gin = { path = "../../editors/tree-sitter-gin" }
 tree-sitter = "0.26"
 lexer = { workspace = true }
+diagnostic = { workspace = true }
+span = { workspace = true }

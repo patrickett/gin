@@ -9,6 +9,10 @@ impl Backend {
         &self,
         params: ReferenceParams,
     ) -> Result<Option<Vec<Location>>> {
+        if self.is_shutdown() {
+            return Ok(None);
+        }
+
         let uri = params.text_document_position.text_document.uri.clone();
         let position = params.text_document_position.position;
 

@@ -14,8 +14,9 @@ use crate::prelude::*;
 use ::ast::{
     Bind, BindValue, DeclareValue, Expr, FileAst, Spanned, SymbolTable as CompileTimeSymbolTable,
 };
-use chumsky::span::SimpleSpan;
+use ::span::SpanId;
 use diagnostic::codegen::CodegenSymptom;
+use diagnostic::{Symptom, SymptomLike, TypeSymptom};
 use internment::Intern;
 use typeck::{LocalTypes, Ty, TyEnv, TyInfer, TyInferEnv};
 
@@ -123,7 +124,7 @@ impl TypeInfo {
             8
         } else if range <= I256::from_i128(u16::MAX as i128 + 1) {
             16
-        } else if range <= u32::MAX as i128 + 1 {
+        } else if range <= I256::from_i128(u32::MAX as i128 + 1) {
             32
         } else if range <= I256::from_i128(u64::MAX as i128 + 1) {
             64
@@ -158,9 +159,8 @@ pub struct CodegenContext<'a, 'c> {
     pub mutable_slots: RefCell<HashSet<String>>,
     /// Element type of global constant arrays (top-level `:=` TupleLit binds), keyed by name.
     pub global_const_elems: RefCell<HashMap<String, Ty>>,
-    /// Accumulated codegen symptoms (errors/warnings).
-    pub symptoms: RefCell<Vec<CodegenSymptom>>,
-    pub current_span: Cell<SimpleSpan>,
+    symptoms: RefCell<Vec<Symptom>>,
+    pub current_span: Cell<SpanId>,
     pub source_filename: String,
     pub line_starts: Vec<usize>,
 }
@@ -186,24 +186,16 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
             mutable_slots: RefCell::new(HashSet::new()),
             global_const_elems: RefCell::new(HashMap::new()),
             symptoms: RefCell::new(Vec::new()),
-            current_span: Cell::new(SimpleSpan::new((), 0..0)),
+            current_span: Cell::new(SpanId::INVALID),
             source_filename: filename.to_string(),
             line_starts: compute_line_starts(source),
         }
     }
 
     pub fn location(&self) -> Location<'c> {
-        let span = self.current_span.get();
-        if span.start == 0 && span.end == 0 {
-            return self.mlir.unknown_loc();
-        }
-        let offset = span.start;
-        let line = match self.line_starts.binary_search(&offset) {
-            Ok(l) => l,
-            Err(l) => l.saturating_sub(1),
-        };
-        let col = offset - self.line_starts[line];
-        Location::new(self.mlir, &self.source_filename, line + 1, col + 1)
+        // With SpanId we can't resolve byte offsets without a SpanTable.
+        // For now, use unknown_loc for all generated MLIR locations.
+        self.mlir.unknown_loc()
     }
 
     pub fn register_string(&self, s: &str) -> String {
@@ -227,18 +219,22 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         name
     }
 
-    pub fn emit_symptom(&self, symptom: CodegenSymptom) {
-        self.symptoms.borrow_mut().push(symptom);
+    pub fn emit_symptom<S: SymptomLike>(&self, symptom: S) {
+        self.symptoms
+            .borrow_mut()
+            .push(symptom.into_symptom(self.current_span.get()));
     }
 
     pub fn emit_internal(&self, message: impl Into<String>) {
-        self.emit_symptom(CodegenSymptom::Internal {
-            message: message.into(),
-            span: self.current_span.get(),
-        });
+        self.symptoms.borrow_mut().push(
+            CodegenSymptom::Internal {
+                message: message.into(),
+            }
+            .into_symptom(self.current_span.get()),
+        );
     }
 
-    pub fn drain_symptoms(&self) -> Vec<CodegenSymptom> {
+    pub fn drain_symptoms(&self) -> Vec<Symptom> {
         self.symptoms.borrow_mut().drain(..).collect()
     }
 }
@@ -266,7 +262,7 @@ pub fn build_module_with_context<'c>(
     source: &str,
     filename: &str,
     ty_env: &TyEnv,
-) -> (Option<Module<'c>>, Vec<CodegenSymptom>) {
+) -> (Option<Module<'c>>, Vec<Symptom>) {
     // Register dialects
     melior::dialect::DialectHandle::llvm().register_dialect(context);
     context.get_or_load_dialect("arith");
@@ -640,7 +636,8 @@ impl<'c> Lower<'c> for Expr {
                 None
             }
             Expr::SelfRef(span) => symtab.get("self").copied().or_else(|| {
-                ctx.emit_symptom(CodegenSymptom::SelfOutsideMethod { span: *span });
+                ctx.current_span.set(*span);
+                ctx.emit_symptom(TypeSymptom::SelfOutsideMethod);
                 None
             }),
             Expr::TagCall(tc) => tc.lower(ctx, block, symtab),
@@ -724,7 +721,7 @@ impl<'c> Lower<'c> for Expr {
                     .var_types
                     .borrow()
                     .iter()
-                    .map(|(k, v)| (Intern::<String>::new(k.clone()), v.clone()))
+                    .map(|(k, v)| (Intern::<String>::from_ref(k), v.clone()))
                     .collect();
                 let src_ty = expr.0.infer_ty(&ctx.ty_env.infer_env(&locals));
                 let dst_ty = ctx.ty_env.lookup_tag(*ty).cloned().unwrap_or(Ty::Int {
@@ -743,7 +740,7 @@ impl<'c> Lower<'c> for Expr {
                     .var_types
                     .borrow()
                     .iter()
-                    .map(|(k, v)| (Intern::<String>::new(k.clone()), v.clone()))
+                    .map(|(k, v)| (Intern::<String>::from_ref(k), v.clone()))
                     .collect();
                 let pointee_ty = match inner.0.infer_ty(&ctx.ty_env.infer_env(&locals)) {
                     Ty::Ptr { inner } | Ty::Ref { inner } => *inner,
@@ -764,7 +761,7 @@ impl<'c> Lower<'c> for Expr {
                     .var_types
                     .borrow()
                     .iter()
-                    .map(|(k, v)| (Intern::<String>::new(k.clone()), v.clone()))
+                    .map(|(k, v)| (Intern::<String>::from_ref(k), v.clone()))
                     .collect();
                 let ty = inner.infer_ty(&ctx.ty_env.infer_env(&locals));
                 if ty.is_float() {
@@ -799,7 +796,7 @@ pub fn lower_function<'c>(
         param_info_ref.into_iter().map(|(n, t)| (*n, t)).collect();
     if let Some(recv_tag) = bind.receiver_type() {
         let self_ty = ctx.ty_env.resolve_tag(recv_tag);
-        param_info.insert(0, (Intern::<String>::new("self".to_string()), self_ty));
+        param_info.insert(0, (Intern::<String>::from_ref("self"), self_ty));
     }
 
     let input_types: Vec<Type<'c>> = param_info
@@ -917,7 +914,7 @@ fn lower_take_ptr<'c>(
         .var_types
         .borrow()
         .iter()
-        .map(|(k, v)| (Intern::<String>::new(k.clone()), v.clone()))
+        .map(|(k, v)| (Intern::<String>::from_ref(k), v.clone()))
         .collect();
     let elem_ty = inner.infer_ty(&ctx.ty_env.infer_env(&locals));
     let mlir_ty = ty_to_mlir(&elem_ty, ctx.mlir);
@@ -1040,7 +1037,7 @@ fn lower_tuple_get<'c>(
             .var_types
             .borrow()
             .iter()
-            .map(|(k, v)| (Intern::<String>::new(k.clone()), v.clone()))
+            .map(|(k, v)| (Intern::<String>::from_ref(k), v.clone()))
             .collect();
         let base_ty = base.infer_ty(&ctx.ty_env.infer_env(&locals));
         let field_ty = match base_ty {

@@ -1,0 +1,22 @@
+[package]
+name = "parser"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ast = { workspace = true }
+span = { workspace = true }
+lexer = { workspace = true }
+diagnostic = { workspace = true }
+indexmap = { workspace = true }
+internment = "0.8"
+i256 = { workspace = true }
+sha2 = "0.10"
+serde = { workspace = true }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "parser_bench"
+harness = false

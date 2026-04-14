@@ -1,22 +1,30 @@
 //! MLIR code generation infrastructure.
 
+pub mod emit;
 mod lower;
 mod mlir_ext;
-pub mod emit;
 
+pub use emit::*;
 pub use lower::*;
 pub use mlir_ext::*;
-pub use emit::*;
 
 /// Prelude for codegen implementations - includes MLIR types
 pub mod prelude {
     pub use crate::{
-        CodegenContext, Lower, RuntimeSymbolTable, TypeInfo,
         // Extension traits
-        ArithOps, AttributeExt, BlockExt, ContextExt, FPredicates, OperationBuilderExt, Predicates,
+        ArithOps,
+        AttributeExt,
+        BlockExt,
+        CodegenContext,
+        ContextExt,
+        FPredicates,
+        Lower,
+        OperationBuilderExt,
+        Predicates,
+        RuntimeSymbolTable,
+        TypeInfo,
     };
     pub use ::ast::*;
-    pub use chumsky::{input::ValueInput, prelude::*};
     pub use melior::{
         Context,
         dialect::{arith as arith_dialect, llvm::r#type, scf as scf_dialect},
@@ -28,7 +36,7 @@ pub mod prelude {
                 FloatAttribute, IntegerAttribute, StringAttribute, TypeAttribute,
             },
             operation::OperationBuilder,
-            r#type::{id::*, IntegerType},
+            r#type::{IntegerType, id::*},
         },
     };
 }

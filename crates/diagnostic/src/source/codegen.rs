@@ -1,5 +1,5 @@
+use crate::SpanId;
 use crate::{Category, Symptom, SymptomLike};
-use chumsky::span::SimpleSpan;
 
 #[derive(Debug, Clone)]
 pub enum CodegenSymptom {
@@ -7,7 +7,7 @@ pub enum CodegenSymptom {
 }
 
 impl SymptomLike for CodegenSymptom {
-    fn into_symptom(self, span: SimpleSpan) -> Symptom {
+    fn into_symptom(self, span_id: SpanId) -> Symptom {
         let (code, message, help) = match self {
             Self::Internal { message: msg } => (
                 "codegen-internal",
@@ -20,7 +20,7 @@ impl SymptomLike for CodegenSymptom {
             code,
             message,
             help,
-            span,
+            span_id,
             category: Category::Flaw,
         }
     }

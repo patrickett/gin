@@ -1,5 +1,7 @@
-use diagnostic::{Category, Symptom};
+use database::Symptoms;
+use diagnostic::Category;
 use lsp::source::byte_offset_to_position;
+use span::SpanTable;
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range};
 
 pub fn span_to_range(start: usize, end: usize, source: &str) -> Range {
@@ -26,11 +28,16 @@ pub fn span_to_range(start: usize, end: usize, source: &str) -> Range {
     }
 }
 
-pub fn symptoms_to_diagnostics(source: &str, symptoms: &[&Symptom]) -> Vec<Diagnostic> {
+pub fn symptoms_to_diagnostics(
+    source: &str,
+    span_table: &SpanTable,
+    symptoms: &[&Symptoms],
+) -> Vec<Diagnostic> {
     symptoms
         .iter()
         .map(|symptom| {
-            let range = span_to_range(symptom.span.start, symptom.span.end, source);
+            let span = span_table.get(symptom.span_id);
+            let range = span_to_range(span.start, span.end, source);
             let severity = match symptom.category {
                 Category::Flaw => DiagnosticSeverity::ERROR,
                 Category::Help => DiagnosticSeverity::HINT,

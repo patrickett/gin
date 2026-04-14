@@ -1,7 +1,13 @@
-use crate::{block, prelude::*, tag::Tag};
-use chumsky::span::SimpleSpan;
+use crate::span::SpanId;
 use internment::Intern;
-use lexer::Token;
+
+use crate::doc_comment::DocComment;
+use crate::parameter::Parameters;
+use crate::path::ModPath;
+use crate::span::Spanned;
+use crate::tag::Tag;
+
+use crate::expr::Expr;
 
 mod attributes;
 mod value;
@@ -47,7 +53,7 @@ pub struct Bind {
     doc_comment: Option<DocComment>,
     attributes: BindAttributes,
     name: Intern<String>,
-    pub name_span: SimpleSpan,
+    pub name_span: SpanId,
     params: Option<Parameters>,
     value: BindValue,
     receiver_type: Option<Tag>,
@@ -63,12 +69,7 @@ pub struct Bind {
 }
 
 impl Bind {
-    pub fn new(
-        name: Intern<String>,
-        name_span: SimpleSpan,
-        value: BindValue,
-        is_const: bool,
-    ) -> Self {
+    pub fn new(name: Intern<String>, name_span: SpanId, value: BindValue, is_const: bool) -> Self {
         Bind {
             doc_comment: None,
             attributes: BindAttributes::default(),
@@ -170,265 +171,4 @@ impl std::hash::Hash for Bind {
         }
         self.value.hash(state);
     }
-}
-
-// TODO: it would be cool if we could just impl Parse on T
-// impl Parse for Bind { ... }
-/// Parse a `#[attr, attr, ...]` attribute block.
-///
-/// Each attribute item is one of:
-/// - `os({ linux, macos, windows, unknown })` — OS filter
-/// - `arch({ x86_64, arm64, wasm32 })` — arch filter
-/// - `debug` — strip in release builds
-/// - `test` — only compiled / run in test mode
-/// - `inline` — hint to always inline
-fn bind_attributes<'t, I>() -> impl Parser<'t, I, BindAttributes, ParserError<'t>> + Clone
-where
-    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
-{
-    let os_name = select! {
-        Token::Id("linux")   => OsTarget::Linux,
-        Token::Id("macos")   => OsTarget::MacOS,
-        Token::Id("windows") => OsTarget::Windows,
-        Token::Id("unknown") => OsTarget::Unknown,
-    };
-
-    let arch_name = select! {
-        Token::Id("x86_64") => ArchTarget::X86_64,
-        Token::Id("arm64")  => ArchTarget::Arm64,
-        Token::Id("wasm32") => ArchTarget::Wasm32,
-    };
-
-    let os_set = just(Token::CurlyOpen)
-        .ignore_then(
-            os_name
-                .separated_by(just(Token::Comma))
-                .allow_trailing()
-                .collect::<Vec<_>>(),
-        )
-        .then_ignore(just(Token::CurlyClose));
-
-    let arch_set = just(Token::CurlyOpen)
-        .ignore_then(
-            arch_name
-                .separated_by(just(Token::Comma))
-                .allow_trailing()
-                .collect::<Vec<_>>(),
-        )
-        .then_ignore(just(Token::CurlyClose));
-
-    let os_attr = just(Token::Id("os"))
-        .ignore_then(just(Token::ParenOpen))
-        .ignore_then(os_set)
-        .then_ignore(just(Token::ParenClose))
-        .map(|targets| BindAttributes {
-            os: Some(targets),
-            ..Default::default()
-        });
-
-    let arch_attr = just(Token::Id("arch"))
-        .ignore_then(just(Token::ParenOpen))
-        .ignore_then(arch_set)
-        .then_ignore(just(Token::ParenClose))
-        .map(|targets| BindAttributes {
-            arch: Some(targets),
-            ..Default::default()
-        });
-
-    let debug_attr = just(Token::Id("debug")).map(|_| BindAttributes {
-        debug_only: true,
-        ..Default::default()
-    });
-
-    let test_attr = just(Token::Id("test")).map(|_| BindAttributes {
-        test: true,
-        ..Default::default()
-    });
-
-    let inline_attr = just(Token::Id("inline")).map(|_| BindAttributes {
-        inline_always: true,
-        ..Default::default()
-    });
-
-    let attr_item = choice((os_attr, arch_attr, debug_attr, test_attr, inline_attr));
-
-    just(Token::Pound)
-        .ignore_then(just(Token::BracketOpen))
-        .ignore_then(
-            attr_item
-                .separated_by(just(Token::Comma))
-                .allow_trailing()
-                .collect::<Vec<_>>(),
-        )
-        .then_ignore(just(Token::BracketClose))
-        .map(|items| {
-            items
-                .into_iter()
-                .fold(BindAttributes::default(), |mut acc, item| {
-                    if item.os.is_some() {
-                        acc.os = item.os;
-                    }
-                    if item.arch.is_some() {
-                        acc.arch = item.arch;
-                    }
-                    if item.debug_only {
-                        acc.debug_only = true;
-                    }
-                    if item.test {
-                        acc.test = true;
-                    }
-                    if item.inline_always {
-                        acc.inline_always = true;
-                    }
-                    acc
-                })
-        })
-}
-
-pub fn bind<'t, I>(
-    expr: impl Parser<'t, I, Spanned<Expr>, ParserError<'t>> + Clone + 't,
-) -> impl Parser<'t, I, Bind, ParserError<'t>> + Clone
-where
-    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
-{
-    let params = params(expr.clone(), tag(expr.clone()));
-
-    use Token::*;
-
-    type ReturnTypePart = (
-        Option<Intern<std::string::String>>,
-        Option<crate::Tag>,
-        Option<(Intern<std::string::String>, Vec<Spanned<Expr>>)>,
-        Option<ModPath>, // Qualified path for type annotation
-    );
-
-    // Parses optional return-type hint before the colon.
-    // lowercase id        → named union return type  (e.g., `print(a) result:`)
-    // Capitalized(expr..) → type annotation with value args  (e.g., `val Maybe(3):`)
-    // Capitalized         → explicit type annotation  (e.g., `foo(n Int) Str:`)
-    // Qualified.Capitalized → qualified type annotation (e.g., `foo() Bool.True:`)
-    // Qualified.Capitalized(expr..) → qualified type with args (e.g., `val Maybe.Some(3):`)
-    let return_type_part = choice((
-        select! { Token::Id(name) => Intern::<std::string::String>::new(name.to_string()) }
-            .map(|n| -> ReturnTypePart { (Some(n), None, None, None) }),
-        // Qualified type path with args: Maybe.Some(3), Bool.True
-        crate::tag_variant_path()
-            .then(
-                crate::delimited_list(
-                    Token::ParenOpen,
-                    expr.clone(),
-                    Token::Comma,
-                    Token::ParenClose,
-                )
-                .or_not(),
-            )
-            .map(|(path, args)| -> ReturnTypePart {
-                match args {
-                    Some(args) if !args.is_empty() => {
-                        // For Maybe.Some(3), use the last segment as the name
-                        let variant_name = *path.segments.last().unwrap_or(&path.root);
-                        (None, None, Some((variant_name, args)), Some(path))
-                    }
-                    _ => (None, Some(crate::Tag::Qualified(path)), None, None),
-                }
-            })
-            .boxed(),
-        select! { Token::Tag(name) => Intern::<std::string::String>::new(name.to_string()) }
-            .then(
-                crate::delimited_list(
-                    Token::ParenOpen,
-                    expr.clone(),
-                    Token::Comma,
-                    Token::ParenClose,
-                )
-                .or_not(),
-            )
-            .map_with(|(name, args), e| -> ReturnTypePart {
-                match args {
-                    Some(args) if !args.is_empty() => (None, None, Some((name, args)), None),
-                    _ => (None, Some(crate::Tag::Nominal(name, e.span())), None, None),
-                }
-            }),
-    ))
-    .or_not()
-    .map(|opt| -> ReturnTypePart { opt.unwrap_or((None, None, None, None)) });
-
-    // `:=` → const bind (immutable SSA value)
-    // `:`  → mutable bind (alloca-backed)
-    let bind_op = choice((
-        just(Token::ColonEq).map(|_| true),
-        just(Token::Colon).map(|_| false),
-    ));
-
-    let lhs = id_token()
-        .map_with(|name, e| (name, e.span()))
-        .then(params.or_not())
-        .then(return_type_part)
-        .then(bind_op);
-
-    let extern_value = just(Token::Extern).map(|_| (BindValue::Extern, None::<crate::DocComment>));
-
-    let single_value = expr
-        .clone()
-        .then(doc_comment().or_not())
-        .map(|(e, doc)| (BindValue::Expr(Box::new(e)), doc));
-
-    let open = just(Newline);
-    let body = expr.clone();
-    let close = r#return(expr.clone());
-
-    let multi_value =
-        block(open, body, close).map(|(_nl, exprs, ret)| (BindValue::Body { exprs, ret }, None));
-
-    let bind = lhs
-        .then(choice((extern_value, multi_value, single_value)))
-        .map(
-            |(
-                (
-                    (
-                        ((name, name_span), params),
-                        (return_type_name, return_tag, type_annotation, type_annotation_qual),
-                    ),
-                    is_const,
-                ),
-                (value, postfix_doc),
-            )| {
-                let mut b = Bind::new(name, name_span, value, is_const)
-                    .with_params(params)
-                    .with_return_type_name(return_type_name);
-                b.return_tag = return_tag;
-                b.type_annotation = type_annotation;
-                b.type_annotation_qual = type_annotation_qual;
-                if let Some(doc) =
-                    postfix_doc.and_then(|d| if d.0.is_empty() { None } else { Some(d) })
-                {
-                    b = b.with_doc(Some(doc));
-                }
-                b
-            },
-        );
-
-    bind_attributes()
-        .then_ignore(just(Token::Newline).repeated())
-        .or_not()
-        .then(
-            doc_comment()
-                .or_not()
-                .then_ignore(just(Token::Newline).repeated())
-                .then_ignore(just(Token::Indent).or_not())
-                .then(bind),
-        )
-        .map(|(attrs, (doc_before, bind))| {
-            let bind = if bind.doc_comment().is_none() {
-                let doc = doc_before.and_then(|d| if d.0.is_empty() { None } else { Some(d) });
-                bind.with_doc(doc)
-            } else {
-                bind
-            };
-            if let Some(attrs) = attrs {
-                bind.with_attributes(attrs)
-            } else {
-                bind
-            }
-        })
 }

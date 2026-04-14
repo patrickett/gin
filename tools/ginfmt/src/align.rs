@@ -1,4 +1,5 @@
 use lexer::{Lexer, Token};
+use span::SpanId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DelimiterKind {
@@ -32,8 +33,9 @@ pub fn format(source: &str) -> String {
 
 /// Scan the token stream and find lines that have an alignable pattern.
 fn find_alignable_lines(source: &str) -> Vec<AlignableLine> {
-    let lexer = Lexer::new(source);
-    let tokens: Vec<(Token<'_>, chumsky::span::SimpleSpan)> = lexer.collect();
+    let mut lexer = Lexer::new(source);
+    let tokens: Vec<(Token<'_>, SpanId)> = lexer.by_ref().collect();
+    let span_table = lexer.span_table();
 
     let mut result = Vec::new();
     let mut i = 0;
@@ -47,7 +49,8 @@ fn find_alignable_lines(source: &str) -> Vec<AlignableLine> {
     let mut paren_depth: usize = 0;
 
     while i < tokens.len() {
-        let (tok, span) = &tokens[i];
+        let (tok, span_id) = &tokens[i];
+        let span = span_table.get(*span_id);
         let end = span.end;
 
         match tok {
@@ -149,7 +152,7 @@ fn find_alignable_lines(source: &str) -> Vec<AlignableLine> {
                             if i < tokens.len() {
                                 match &tokens[i].0 {
                                     Token::Id(_) | Token::Tag(_) | Token::SelfInstance => {
-                                        first_token_end = Some(tokens[i].1.end);
+                                        first_token_end = Some(span_table.get(tokens[i].1).end);
                                         i += 1;
                                     }
                                     _ => break,
@@ -174,7 +177,7 @@ fn find_alignable_lines(source: &str) -> Vec<AlignableLine> {
     result
 }
 
-fn skip_to_newline(tokens: &[(Token<'_>, chumsky::span::SimpleSpan)], i: &mut usize) {
+fn skip_to_newline(tokens: &[(Token<'_>, SpanId)], i: &mut usize) {
     while *i < tokens.len() {
         if let Token::Newline = tokens[*i].0 {
             return; // Don't consume the newline itself

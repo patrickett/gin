@@ -1,5 +1,5 @@
+use crate::SpanId;
 use crate::{Category, Symptom, SymptomLike};
-use chumsky::span::SimpleSpan;
 
 pub enum IoSymptom {
     ReadFailed,
@@ -8,7 +8,7 @@ pub enum IoSymptom {
 }
 
 impl SymptomLike for IoSymptom {
-    fn into_symptom(self, span: SimpleSpan) -> Symptom {
+    fn into_symptom(self, span_id: SpanId) -> Symptom {
         let category = Category::Flaw;
         let code: &str;
         let help: Option<String>;
@@ -36,7 +36,7 @@ impl SymptomLike for IoSymptom {
             code,
             message,
             help,
-            span,
+            span_id,
             category,
         }
     }

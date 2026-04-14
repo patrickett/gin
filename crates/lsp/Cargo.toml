@@ -7,9 +7,10 @@ edition = "2024"
 ast = { workspace = true }
 diagnostic = { workspace = true }
 lexer = { workspace = true }
+parser = { workspace = true }
 typeck = { workspace = true }
 database = { path = "../database" }
-chumsky = { workspace = true }
+
 lsp-types = { workspace = true }
 indexmap = { workspace = true }
 internment = "0.8"

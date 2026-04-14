@@ -1,33 +1,11 @@
 use crate::{Bind, Declare, DeclareValue, FileAst, ParameterKind, Parameters, Tag, Variant};
 use i256::I256;
 use internment::Intern;
-use lexer::Lexer;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::Write;
-
-/// Compute a SHA-256 hex digest of raw source text.
-///
-/// This performs semantic hashing by lexing the source and hashing
-/// only the non-comment tokens. This means that adding/removing comments does not
-/// invalidate the cache, significantly improving incremental compilation performance.
-pub fn compute_content_hash(source: &str) -> String {
-    let mut hasher = Sha256::new();
-
-    // Lex the source and hash only non-comment tokens
-    // The lexer's Iterator impl already filters out comments
-    let lexer = Lexer::new(source);
-    for (token, _span) in lexer {
-        // Hash the token discriminant and payload
-        // This is stable across runs because we use the token's Debug representation
-        // which includes both the variant and any associated data
-        let token_str = format!("{:?}", token);
-        hasher.update(token_str.as_bytes());
-    }
-
-    format!("{:x}", hasher.finalize())
-}
 
 /// Compute a SHA-256 hex digest of a `FileAst`'s public API surface.
 ///
@@ -123,11 +101,11 @@ fn hash_tag_def(hasher: &mut Sha256, name: &Intern<String>, decl: &Declare) {
         DeclareValue::Set() => {
             let _ = write!(hasher, ":SET");
         }
-        DeclareValue::Range(range) => {
-            let _ = write!(hasher, ":RANGE:{}..{}", range.start, range.end);
+        DeclareValue::Range(start, end) => {
+            let _ = write!(hasher, ":RANGE:{start}..{end}");
         }
-        DeclareValue::InRange(range) => {
-            let _ = write!(hasher, ":INRANGE:{}..{}", range.start, range.end);
+        DeclareValue::InRange(start, end) => {
+            let _ = write!(hasher, ":INRANGE:{start}..{end}");
         }
     }
     let _ = write!(hasher, ";");
@@ -253,13 +231,50 @@ pub enum TagSig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(into = "TagShapeSigRepr", from = "TagShapeSigRepr")]
 pub enum TagShapeSig {
+    Alias(TagSig),
+    Record(Vec<(String, ParamKindSig)>),
+    Union(Vec<TagSig>),
+    Set,
+    Range(I256, I256),
+    InRange(I256, I256),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+enum TagShapeSigRepr {
     Alias(TagSig),
     Record(Vec<(String, ParamKindSig)>),
     Union(Vec<TagSig>),
     Set,
     Range(i128, i128),
     InRange(i128, i128),
+}
+
+impl From<TagShapeSig> for TagShapeSigRepr {
+    fn from(sig: TagShapeSig) -> Self {
+        match sig {
+            TagShapeSig::Alias(t) => Self::Alias(t),
+            TagShapeSig::Record(v) => Self::Record(v),
+            TagShapeSig::Union(v) => Self::Union(v),
+            TagShapeSig::Set => Self::Set,
+            TagShapeSig::Range(a, b) => Self::Range(a.as_i128(), b.as_i128()),
+            TagShapeSig::InRange(a, b) => Self::InRange(a.as_i128(), b.as_i128()),
+        }
+    }
+}
+
+impl From<TagShapeSigRepr> for TagShapeSig {
+    fn from(repr: TagShapeSigRepr) -> Self {
+        match repr {
+            TagShapeSigRepr::Alias(t) => Self::Alias(t),
+            TagShapeSigRepr::Record(v) => Self::Record(v),
+            TagShapeSigRepr::Union(v) => Self::Union(v),
+            TagShapeSigRepr::Set => Self::Set,
+            TagShapeSigRepr::Range(a, b) => Self::Range(I256::from(a), I256::from(b)),
+            TagShapeSigRepr::InRange(a, b) => Self::InRange(I256::from(a), I256::from(b)),
+        }
+    }
 }
 
 /// Extract a serializable `InterfaceSignature` from a parsed AST.
@@ -352,8 +367,8 @@ fn extract_tag_shape(value: &DeclareValue) -> TagShapeSig {
                 .collect(),
         ),
         DeclareValue::Set() => TagShapeSig::Set,
-        DeclareValue::Range(r) => TagShapeSig::Range(r.start, r.end),
-        DeclareValue::InRange(r) => TagShapeSig::InRange(r.start, r.end),
+        DeclareValue::Range(start, end) => TagShapeSig::Range(*start, *end),
+        DeclareValue::InRange(start, end) => TagShapeSig::InRange(*start, *end),
     }
 }
 

@@ -1,5 +1,5 @@
+use crate::SpanId;
 use crate::{Category, Symptom, SymptomLike};
-use chumsky::span::SimpleSpan;
 
 #[derive(Default, Debug, Clone, PartialEq)]
 pub enum LexSymptom {
@@ -24,7 +24,7 @@ impl From<std::num::ParseFloatError> for LexSymptom {
 }
 
 impl SymptomLike for LexSymptom {
-    fn into_symptom(self, span: SimpleSpan) -> Symptom {
+    fn into_symptom(self, span_id: SpanId) -> Symptom {
         let category = Category::Flaw;
         let code: &str;
         let help: Option<String> = None;
@@ -57,7 +57,7 @@ impl SymptomLike for LexSymptom {
             code,
             message,
             help,
-            span,
+            span_id,
             category,
         }
     }

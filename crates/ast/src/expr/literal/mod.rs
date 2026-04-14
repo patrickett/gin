@@ -1,14 +1,3 @@
-mod float;
-mod int;
-mod string;
-mod unclosed_string;
-
-pub use float::*;
-pub use int::*;
-pub use string::*;
-pub use unclosed_string::*;
-
-use crate::prelude::*;
 use std::hash::Hash;
 
 #[derive(Debug, Clone)]
@@ -43,11 +32,4 @@ impl Hash for Literal {
             Self::String(s) => s.hash(state),
         }
     }
-}
-
-pub fn literal<'t, I>() -> impl Parser<'t, I, Literal, ParserError<'t>>
-where
-    I: ValueInput<'t, Token = Token<'t>, Span = SimpleSpan>,
-{
-    choice((int(), float(), string(), unclosed_string()))
 }

@@ -9,6 +9,10 @@ impl Backend {
         &self,
         params: SignatureHelpParams,
     ) -> Result<Option<SignatureHelp>> {
+        if self.is_shutdown() {
+            return Ok(None);
+        }
+
         let uri = params
             .text_document_position_params
             .text_document
