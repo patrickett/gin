@@ -666,7 +666,7 @@ impl TyEnv {
                                 .0
                                 .as_ref()
                                 .is_some_and(|e| expr_references_name(e, name));
-                        if !used {
+                        if !used && !name.starts_with('_') {
                             symptoms.push(
                                 TypeSymptom::UnusedBinding {
                                     name: name.to_string(),

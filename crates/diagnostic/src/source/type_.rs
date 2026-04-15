@@ -42,7 +42,7 @@ pub enum TypeSymptom {
 
 impl SymptomLike for TypeSymptom {
     fn into_symptom(self, span_id: SpanId) -> Symptom {
-        let category = Category::Flaw;
+        let mut category = Category::Flaw;
         let code: &str;
         let help: Option<String>;
         let message: String;
@@ -102,9 +102,13 @@ impl SymptomLike for TypeSymptom {
                 help = Some(format!("valid indices are 0..{size}"));
             }
             Self::UnusedBinding { name } => {
+                category = Category::Help;
                 code = "type-unused-binding";
                 message = format!("unused binding `{name}`");
-                help = None;
+                help = Some(
+                    "if this is intentional, prefix the name with `_` to suppress this warning"
+                        .into(),
+                );
             }
             Self::NotAVariant { name, union_name } => {
                 code = "type-not-a-variant";
