@@ -2,8 +2,8 @@ use internment::Intern;
 use lexer::Token;
 
 use ast::{
-    ArchTarget, Bind, BindAttributes, BindValue, DocComment, Expr, ModPath, OsTarget,
-    ParameterKind, Parameters, Return, Spanned, Tag,
+    ArchTarget, Bind, BindAttributes, BindValue, Complexity, ComplexityExpr, DocComment, Expr,
+    ModPath, OsTarget, ParameterKind, Parameters, Return, Spanned, Tag,
 };
 
 use super::ExprFn;
@@ -20,9 +20,10 @@ type ReturnTypePart = (
 );
 
 pub fn parse_bind(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Bind> {
+    // Doc comments may appear before or after attributes; try both positions.
+    let doc_before_attrs = parse_doc_comment(cursor);
     let attrs = parse_bind_attributes(cursor);
-
-    let doc_before = parse_doc_comment(cursor);
+    let doc_before = parse_doc_comment(cursor).or(doc_before_attrs);
 
     cursor.eat(&Token::Indent);
 
@@ -105,6 +106,9 @@ pub fn parse_bind_attributes(cursor: &mut TokenCursor) -> Option<BindAttributes>
             }
             if attr.inline_always {
                 attrs.inline_always = true;
+            }
+            if attr.complexity.is_some() {
+                attrs.complexity = attr.complexity;
             }
         }
 
@@ -196,6 +200,61 @@ fn parse_one_attribute(cursor: &mut TokenCursor) -> Option<BindAttributes> {
             cursor.advance();
             Some(BindAttributes {
                 inline_always: true,
+                ..Default::default()
+            })
+        }
+        Token::Id("complexity") => {
+            cursor.advance();
+            cursor.expect(&Token::ParenOpen)?;
+
+            let variant_ident = match cursor.peek() {
+                Some(Token::Id(n)) => {
+                    let id = cursor.intern(n);
+                    cursor.advance();
+                    id
+                }
+                Some(Token::Tag(n)) => {
+                    let id = cursor.intern(n);
+                    cursor.advance();
+                    id
+                }
+                _ => {
+                    cursor.error("expected complexity variant", cursor.current_span());
+                    return None;
+                }
+            };
+
+            let complexity = match variant_ident.as_str() {
+                "Constant" => Complexity::Constant,
+                "Logarithmic" | "Linear" | "LogLinear" | "Quadratic" | "Cubic" | "Exponential"
+                | "Factorial" => {
+                    cursor.expect(&Token::ParenOpen)?;
+                    let expr = parse_complexity_expr(cursor)?;
+                    cursor.expect(&Token::ParenClose)?;
+                    match variant_ident.as_str() {
+                        "Logarithmic" => Complexity::Logarithmic(expr),
+                        "Linear" => Complexity::Linear(expr),
+                        "LogLinear" => Complexity::LogLinear(expr),
+                        "Quadratic" => Complexity::Quadratic(expr),
+                        "Cubic" => Complexity::Cubic(expr),
+                        "Exponential" => Complexity::Exponential(expr),
+                        "Factorial" => Complexity::Factorial(expr),
+                        _ => unreachable!(),
+                    }
+                }
+                other => {
+                    cursor.error(
+                        format!("unknown complexity variant: {}", other),
+                        cursor.current_span(),
+                    );
+                    return None;
+                }
+            };
+
+            cursor.expect(&Token::ParenClose)?;
+
+            Some(BindAttributes {
+                complexity: Some(complexity),
                 ..Default::default()
             })
         }
@@ -511,4 +570,45 @@ fn can_start_expr(token: &Token) -> bool {
             | Token::While
             | Token::FormatStringDelim
     )
+}
+
+fn parse_complexity_expr(cursor: &mut TokenCursor) -> Option<ComplexityExpr> {
+    let first = parse_complexity_var(cursor)?;
+
+    match cursor.peek() {
+        Some(Token::Star) => {
+            let mut vars = vec![first];
+            while cursor.eat(&Token::Star) {
+                vars.push(parse_complexity_var(cursor)?);
+            }
+            Some(ComplexityExpr::Product(vars))
+        }
+        Some(Token::Plus) => {
+            let mut vars = vec![first];
+            while cursor.eat(&Token::Plus) {
+                vars.push(parse_complexity_var(cursor)?);
+            }
+            Some(ComplexityExpr::Sum(vars))
+        }
+        _ => Some(ComplexityExpr::Var(first)),
+    }
+}
+
+fn parse_complexity_var(cursor: &mut TokenCursor) -> Option<Intern<String>> {
+    match cursor.peek() {
+        Some(Token::Id(n)) => {
+            let id = cursor.intern(n);
+            cursor.advance();
+            Some(id)
+        }
+        Some(Token::Tag(n)) => {
+            let id = cursor.intern(n);
+            cursor.advance();
+            Some(id)
+        }
+        _ => {
+            cursor.error("expected parameter name", cursor.current_span());
+            None
+        }
+    }
 }

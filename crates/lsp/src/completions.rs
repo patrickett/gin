@@ -38,10 +38,17 @@ pub fn completions_for_ast(ast: &FileAst) -> Vec<CompletionCandidate> {
 
     for (name, bind) in ast.defs() {
         let is_fn = bind.params().is_some();
-        let detail = bind
+        let mut detail = bind
             .params()
             .as_ref()
             .map(|p| format!("{}{}", name.as_str(), format_params(p)));
+        if let Some(complexity) = bind.attributes().complexity.as_ref() {
+            let complexity_str = format!("complexity = {}", complexity.display_big_o());
+            detail = Some(match detail {
+                Some(d) => format!("{}\n{}", d, complexity_str),
+                None => complexity_str,
+            });
+        }
         let documentation = bind.doc_comment().map(|dc| dc.0.clone());
         items.push(CompletionCandidate {
             label: name.as_str().to_string(),

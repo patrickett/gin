@@ -116,6 +116,9 @@ fn hash_def_signature(hasher: &mut Sha256, name: &Intern<String>, bind: &Bind) {
     let _ = write!(hasher, "DEF:{}", name.as_str());
     hash_parameters(hasher, bind.params());
     // Intentionally skip params.1 (BindValue) — that's the body.
+    if let Some(complexity) = bind.attributes().complexity.as_ref() {
+        let _ = write!(hasher, ":COMPLEXITY:{}", complexity.display_label());
+    }
     let _ = write!(hasher, ";");
 }
 
@@ -204,10 +207,62 @@ pub struct InterfaceSignature {
     pub tags: BTreeMap<String, TagSignature>,
 }
 
+/// Serializable representation of a complexity expression.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ComplexityExprSig {
+    Var(String),
+    Product(Vec<String>),
+    Sum(Vec<String>),
+}
+
+/// Serializable representation of a complexity variant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ComplexitySig {
+    Constant,
+    Logarithmic(ComplexityExprSig),
+    Linear(ComplexityExprSig),
+    LogLinear(ComplexityExprSig),
+    Quadratic(ComplexityExprSig),
+    Cubic(ComplexityExprSig),
+    Exponential(ComplexityExprSig),
+    Factorial(ComplexityExprSig),
+}
+
+impl From<&crate::ComplexityExpr> for ComplexityExprSig {
+    fn from(expr: &crate::ComplexityExpr) -> Self {
+        match expr {
+            crate::ComplexityExpr::Var(v) => ComplexityExprSig::Var(v.as_str().to_string()),
+            crate::ComplexityExpr::Product(vars) => {
+                ComplexityExprSig::Product(vars.iter().map(|v| v.as_str().to_string()).collect())
+            }
+            crate::ComplexityExpr::Sum(vars) => {
+                ComplexityExprSig::Sum(vars.iter().map(|v| v.as_str().to_string()).collect())
+            }
+        }
+    }
+}
+
+impl From<&crate::Complexity> for ComplexitySig {
+    fn from(c: &crate::Complexity) -> Self {
+        match c {
+            crate::Complexity::Constant => ComplexitySig::Constant,
+            crate::Complexity::Logarithmic(expr) => ComplexitySig::Logarithmic(expr.into()),
+            crate::Complexity::Linear(expr) => ComplexitySig::Linear(expr.into()),
+            crate::Complexity::LogLinear(expr) => ComplexitySig::LogLinear(expr.into()),
+            crate::Complexity::Quadratic(expr) => ComplexitySig::Quadratic(expr.into()),
+            crate::Complexity::Cubic(expr) => ComplexitySig::Cubic(expr.into()),
+            crate::Complexity::Exponential(expr) => ComplexitySig::Exponential(expr.into()),
+            crate::Complexity::Factorial(expr) => ComplexitySig::Factorial(expr.into()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DefSignature {
     /// Sorted list of (param_name, kind) pairs
     pub params: Vec<(String, ParamKindSig)>,
+    /// Time complexity annotation, if present
+    pub complexity: Option<ComplexitySig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -299,6 +354,11 @@ pub fn extract_interface_signature(ast: &FileAst) -> InterfaceSignature {
             name.to_string(),
             DefSignature {
                 params: extract_params(bind.params()),
+                complexity: bind
+                    .attributes()
+                    .complexity
+                    .as_ref()
+                    .map(ComplexitySig::from),
             },
         );
     }
