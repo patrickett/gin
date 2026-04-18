@@ -161,7 +161,7 @@ impl Backend {
             // edits) over the on-disk copy stored in the database.
             let source = if f == trigger_file {
                 trigger_source.to_string()
-            } else if let Some(doc_uri) = Url::from_file_path(f.path(&snapshot.db)).ok() {
+            } else if let Ok(doc_uri) = Url::from_file_path(f.path(&snapshot.db)) {
                 if let Some(doc) = self.documents.get(&doc_uri.to_string()) {
                     doc.source.clone()
                 } else {
