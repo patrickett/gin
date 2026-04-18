@@ -1,4 +1,5 @@
 use crate::{prelude::*, ty_to_mlir};
+use ast::is_pattern_as_tag;
 use internment::Intern;
 use typeck::{Ty, TyInfer};
 
@@ -29,7 +30,8 @@ impl<'c> Lower<'c> for IfExpr {
                 };
                 block.append_op(op)
             }
-            IfCondition::Pattern { subject, tag } => {
+            IfCondition::Pattern { subject, pattern } => {
+                let tag = is_pattern_as_tag(&pattern.0).expect("if pattern is IsPattern");
                 let subject_val = subject.lower(ctx, block, symtab)?;
                 let variant_name = Intern::<String>::from_ref(tag.name());
                 let (_, expected_disc, _) = match ctx.ty_env.lookup_variant(variant_name) {
@@ -70,7 +72,8 @@ impl<'c> Lower<'c> for IfExpr {
             let mut inner_symtab = symtab.clone();
 
             // Bind pattern variables if this is a pattern condition.
-            if let IfCondition::Pattern { subject, tag } = &self.condition
+            if let IfCondition::Pattern { subject, pattern } = &self.condition
+                && let Some(tag) = is_pattern_as_tag(&pattern.0)
                 && let Tag::Generic(_, params, _) = tag
             {
                 let subject_val = subject.lower(ctx, block, symtab)?;

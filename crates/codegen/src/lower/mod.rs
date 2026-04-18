@@ -779,6 +779,12 @@ impl<'c> Lower<'c> for Expr {
                     Some(block.append_op(ctx.mlir.build_binop(ArithOps::SUB, zero, val, val_ty)))
                 }
             }
+            Expr::IsPattern(_) | Expr::TypeTag(_) => {
+                ctx.emit_internal(
+                    "IsPattern/TypeTag may only appear in pattern or type positions, not as a value",
+                );
+                None
+            }
         }
     }
 }

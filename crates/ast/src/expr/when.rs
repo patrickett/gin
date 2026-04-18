@@ -1,6 +1,5 @@
 use crate::expr::Expr;
 use crate::span::Spanned;
-use crate::tag::Tag;
 
 /// Exhaustive conditional expression.
 ///
@@ -33,9 +32,9 @@ pub enum WhenArm {
         condition: Box<Spanned<Expr>>,
         body: Box<Spanned<Expr>>,
     },
-    /// Pattern match: `is <tag> then <body>`
+    /// Pattern match: `is <tag> then <body>` — [`Expr::IsPattern`] on the pattern field.
     Is {
-        pattern: Tag,
+        pattern: Box<Spanned<Expr>>,
         body: Box<Spanned<Expr>>,
     },
     /// Fallthrough: `else <body>`

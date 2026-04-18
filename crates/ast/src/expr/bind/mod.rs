@@ -6,6 +6,7 @@ use crate::parameter::Parameters;
 use crate::path::ModPath;
 use crate::span::Spanned;
 use crate::tag::Tag;
+use crate::type_tag_as_tag;
 
 use crate::expr::Expr;
 
@@ -56,10 +57,12 @@ pub struct Bind {
     pub name_span: SpanId,
     params: Option<Parameters>,
     value: BindValue,
-    receiver_type: Option<Tag>,
+    /// Method receiver — [`Expr::TypeTag`] (`type_tag_expr_from_tag`).
+    receiver_type: Option<Box<Spanned<Expr>>>,
     return_type_name: Option<Intern<String>>,
     /// Explicit capitalized return type annotation, e.g. `Str` in `foo() Str: expr`.
-    pub return_tag: Option<Tag>,
+    /// [`Expr::TypeTag`] (`type_tag_expr_from_tag`).
+    pub return_tag: Option<Box<Spanned<Expr>>>,
     /// Explicit type annotation with value args, e.g. `Maybe(3)` in `val Maybe(3): Some(3)`.
     pub type_annotation: Option<(Intern<String>, Vec<Spanned<Expr>>)>,
     /// Qualified path for type annotation, e.g. `Maybe.Some` in `val Maybe.Some(3): ...`
@@ -100,7 +103,7 @@ impl Bind {
         self
     }
 
-    pub fn with_receiver_type(mut self, receiver_type: Option<Tag>) -> Self {
+    pub fn with_receiver_type(mut self, receiver_type: Option<Box<Spanned<Expr>>>) -> Self {
         self.receiver_type = receiver_type;
         self
     }
@@ -140,11 +143,13 @@ impl Bind {
     }
 
     pub fn receiver_type(&self) -> Option<&Tag> {
-        self.receiver_type.as_ref()
+        self.receiver_type
+            .as_ref()
+            .and_then(|b| type_tag_as_tag(&b.0))
     }
 
     pub fn method_name(&self) -> Option<MethodName<'_>> {
-        self.receiver_type.as_ref().map(|t| MethodName {
+        self.receiver_type().map(|t| MethodName {
             receiver: t,
             name: self.name,
         })
@@ -157,6 +162,7 @@ impl std::hash::Hash for Bind {
         self.name.hash(state);
         self.is_const.hash(state);
         self.receiver_type.hash(state);
+        self.return_tag.hash(state);
         self.return_type_name.hash(state);
         // Hash params manually since HashMap doesn't impl Hash
         match &self.params {

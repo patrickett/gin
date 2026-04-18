@@ -1,4 +1,5 @@
 use crate::{prelude::*, ty_to_mlir};
+use ast::is_pattern_as_tag;
 use internment::Intern;
 use typeck::{Ty, TyInfer};
 
@@ -204,7 +205,8 @@ fn lower_pattern_when<'c>(
         }
 
         WhenArm::Is { pattern, body } => {
-            let variant_name = Intern::<String>::from_ref(pattern.name());
+            let tag = is_pattern_as_tag(&pattern.0)?;
+            let variant_name = Intern::<String>::from_ref(tag.name());
             // Note: unknown variant diagnostics are emitted by typeck; codegen just fails gracefully.
             let (_, expected_disc, _) = ctx.ty_env.lookup_variant(variant_name)?;
 
@@ -222,7 +224,7 @@ fn lower_pattern_when<'c>(
                 let blk_ref = then_region.first_block().unwrap();
                 let mut inner_symtab = symtab.clone();
 
-                if let Tag::Generic(_, params, _) = pattern {
+                if let Tag::Generic(_, params, _) = tag {
                     let payload_fields = ctx
                         .ty_env
                         .lookup_variant(variant_name)

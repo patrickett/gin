@@ -40,8 +40,10 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
             if let Some(params) = bind.params() {
                 result.push_str(&crate::format_params(params));
             }
-            if let Some(tag) = &bind.return_tag {
-                result.push_str(&format!(" {tag}"));
+            if let Some(sp) = &bind.return_tag {
+                if let Some(tag) = ast::type_tag_as_tag(&sp.0) {
+                    result.push_str(&format!(" {tag}"));
+                }
             }
             result.push_str("\n```");
             if let Some(doc) = bind.doc_comment() {
@@ -326,6 +328,25 @@ pub fn find_references(ast: &ast::FileAst, name: &str) -> Vec<std::ops::Range<us
     out
 }
 
+fn collect_refs_tag_pattern(
+    tag: &ast::Tag,
+    name: &str,
+    span_table: &ast::SpanTable,
+    out: &mut Vec<std::ops::Range<usize>>,
+) {
+    use ast::{ParameterKind, Tag};
+    let Tag::Generic(_, params, _) = tag else {
+        return;
+    };
+    for pk in params.values() {
+        match pk {
+            ParameterKind::Default(e) => collect_refs_expr(&e.0, name, span_table, out),
+            ParameterKind::Tagged(inner) => collect_refs_tag_pattern(inner, name, span_table, out),
+            ParameterKind::Generic => {}
+        }
+    }
+}
+
 fn collect_refs_expr(
     expr: &ast::Expr,
     name: &str,
@@ -386,13 +407,26 @@ fn collect_refs_expr(
                         collect_refs_expr(condition, name, span_table, out);
                         collect_refs_expr(body, name, span_table, out);
                     }
-                    ast::WhenArm::Is { body, .. } | ast::WhenArm::Else(body) => {
+                    ast::WhenArm::Is { pattern, body } => {
+                        collect_refs_expr(&pattern.0, name, span_table, out);
+                        collect_refs_expr(body, name, span_table, out);
+                    }
+                    ast::WhenArm::Else(body) => {
                         collect_refs_expr(body, name, span_table, out);
                     }
                 }
             }
         }
         Expr::If(if_expr) => {
+            match &if_expr.condition {
+                ast::IfCondition::Bool(e) => collect_refs_expr(&e.0, name, span_table, out),
+                ast::IfCondition::Pattern { subject, pattern } => {
+                    collect_refs_expr(&subject.0, name, span_table, out);
+                    if let Some(t) = ast::is_pattern_as_tag(&pattern.0) {
+                        collect_refs_tag_pattern(t, name, span_table, out);
+                    }
+                }
+            }
             for e in &if_expr.body {
                 collect_refs_expr(e, name, span_table, out);
             }
@@ -448,6 +482,7 @@ fn collect_refs_expr(
                 collect_refs_expr(e, name, span_table, out);
             }
         }
+        Expr::IsPattern(t) | Expr::TypeTag(t) => collect_refs_tag_pattern(t, name, span_table, out),
         Expr::Lit(_) | Expr::SelfRef(_) | Expr::Asm(_) => {}
     }
 }

@@ -1,4 +1,5 @@
 use crate::span::SpanId;
+use crate::tag::Tag;
 use internment::Intern;
 
 use crate::span::Spanned;
@@ -53,6 +54,12 @@ pub enum Expr {
     TagCall(TagCall),
     /// A bare capitalized tag in expression position, e.g. `None`, `True`.
     AnonymousTag(Intern<String>, SpanId),
+    /// Tag tree after `is` in `if` / `when` pattern arms. Wraps [`Tag`] until typeck can treat
+    /// this as ordinary expression surface syntax end-to-end.
+    IsPattern(Box<Tag>),
+    /// Tag-shaped return type or method receiver (e.g. `foo() Str:` or `Type.method`). Same
+    /// surface grammar as types; stored as [`Expr`] for AST unification with patterns and values.
+    TypeTag(Box<Tag>),
     /// Stack-allocate an array: `(init_expr; N)` — emits `llvm.alloca N×sizeof(elem)`.
     TupleAlloc {
         init: Box<Spanned<Expr>>,

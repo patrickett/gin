@@ -16,8 +16,8 @@
 use crate::{TyInfer, TyInferEnv, resolve_tag_from_map};
 use ast::WhenArm;
 use ast::{
-    Bind, BindValue, DeclareValue, Expr, FileAst, FormatPart, IfCondition, Loop, ParameterKind,
-    Spanned, Tag,
+    is_pattern_as_tag, type_tag_as_tag, Bind, BindValue, DeclareValue, Expr, FileAst, FormatPart,
+    IfCondition, Loop, ParameterKind, Spanned, Tag,
 };
 use i256::I256;
 use internment::Intern;
@@ -643,16 +643,18 @@ impl TyEnv {
         symptoms: &mut Vec<diagnostic::Symptom>,
         locals: &HashMap<Intern<String>, Ty>,
     ) {
-        if let Some(tag) = &bind.return_tag {
-            self.check_tag(tag, symptoms);
-            if let Some(Ty::Union {
-                name: union_name,
-                variants,
-            }) = self.lookup_tag(Intern::<String>::from_ref(tag.name()))
-            {
-                let valid_variants: Vec<Intern<String>> =
-                    variants.iter().map(|(vname, _)| *vname).collect();
-                check_return_variants(bind, &valid_variants, *union_name, symptoms);
+        if let Some(sp) = &bind.return_tag {
+            if let Some(tag) = type_tag_as_tag(&sp.0) {
+                self.check_tag(tag, symptoms);
+                if let Some(Ty::Union {
+                    name: union_name,
+                    variants,
+                }) = self.lookup_tag(Intern::<String>::from_ref(tag.name()))
+                {
+                    let valid_variants: Vec<Intern<String>> =
+                        variants.iter().map(|(vname, _)| *vname).collect();
+                    check_return_variants(bind, &valid_variants, *union_name, symptoms);
+                }
             }
         }
         match bind.value() {
@@ -756,32 +758,44 @@ impl TyEnv {
                             self.check_expr(body, symptoms, locals);
                         }
                         WhenArm::Is { pattern, body } => {
-                            let variant_name = Intern::<String>::from_ref(pattern.name());
-                            match &subject_ty {
-                                Some(Ty::Union {
-                                    name: union_name,
-                                    variants,
-                                }) => {
-                                    if !variants.iter().any(|(vname, _)| vname == &variant_name) {
-                                        symptoms.push(
-                                            TypeSymptom::NotAVariant {
-                                                name: pattern.name().to_string(),
-                                                union_name: union_name.to_string(),
-                                            }
-                                            .into_symptom(pattern.span()),
-                                        );
+                            if let Some(tag) = is_pattern_as_tag(&pattern.0) {
+                                let variant_name = Intern::<String>::from_ref(tag.name());
+                                match &subject_ty {
+                                    Some(Ty::Union {
+                                        name: union_name,
+                                        variants,
+                                    }) => {
+                                        if !variants.iter().any(|(vname, _)| vname == &variant_name) {
+                                            symptoms.push(
+                                                TypeSymptom::NotAVariant {
+                                                    name: tag.name().to_string(),
+                                                    union_name: union_name.to_string(),
+                                                }
+                                                .into_symptom(pattern.1),
+                                            );
+                                        }
+                                    }
+                                    _ => {
+                                        if self.lookup_variant(variant_name).is_none() {
+                                            symptoms.push(
+                                                TypeSymptom::UnknownTag {
+                                                    name: tag.name().to_string(),
+                                                }
+                                                .into_symptom(pattern.1),
+                                            );
+                                        }
                                     }
                                 }
-                                _ => {
-                                    if self.lookup_variant(variant_name).is_none() {
-                                        symptoms.push(
-                                            TypeSymptom::UnknownTag {
-                                                name: pattern.name().to_string(),
-                                            }
-                                            .into_symptom(pattern.span()),
-                                        );
+                                check_tag_pattern_default_exprs(tag, &mut |e| {
+                                    self.check_expr(e, symptoms, locals);
+                                });
+                            } else {
+                                symptoms.push(
+                                    TypeSymptom::UnknownTag {
+                                        name: "invalid is-pattern".to_string(),
                                     }
-                                }
+                                    .into_symptom(pattern.1),
+                                );
                             }
                             self.check_expr(body, symptoms, locals);
                         }
@@ -798,17 +812,29 @@ impl TyEnv {
                         self.check_expr(e, symptoms, locals);
                     }
                 }
-                IfCondition::Pattern { subject, tag } => {
+                IfCondition::Pattern { subject, pattern } => {
                     self.check_expr(subject, symptoms, locals);
                     let mut if_locals = locals.clone();
-                    if let Tag::Generic(_, params, _) = tag {
-                        if_locals.extend(params.iter().filter_map(|(k, _)| {
-                            if k.as_str() != "_" {
-                                Some((*k, Ty::Opaque(*k)))
-                            } else {
-                                None
+                    if let Some(tag) = is_pattern_as_tag(&pattern.0) {
+                        if let Tag::Generic(_, params, _) = tag {
+                            if_locals.extend(params.iter().filter_map(|(k, _)| {
+                                if k.as_str() != "_" {
+                                    Some((*k, Ty::Opaque(*k)))
+                                } else {
+                                    None
+                                }
+                            }));
+                        }
+                        check_tag_pattern_default_exprs(tag, &mut |e| {
+                            self.check_expr(e, symptoms, locals);
+                        });
+                    } else {
+                        symptoms.push(
+                            TypeSymptom::UnknownTag {
+                                name: "invalid is-pattern".to_string(),
                             }
-                        }));
+                            .into_symptom(pattern.1),
+                        );
                     }
                     for e in &if_expr.body {
                         self.check_expr(e, symptoms, &if_locals);
@@ -887,6 +913,9 @@ impl TyEnv {
                     self.check_expr(arg, symptoms, locals);
                 }
             }
+            Expr::IsPattern(t) | Expr::TypeTag(t) => {
+                check_tag_pattern_default_exprs(t, &mut |e| self.check_expr(e, symptoms, locals));
+            }
             Expr::Lit(_)
             | Expr::SelfRef(_)
             | Expr::Range(_)
@@ -939,6 +968,33 @@ impl TyEnv {
     }
 }
 
+fn check_tag_pattern_default_exprs(
+    tag: &Tag,
+    check: &mut impl FnMut(&Spanned<Expr>),
+) {
+    let Tag::Generic(_, params, _) = tag else {
+        return;
+    };
+    for pk in params.values() {
+        match pk {
+            ParameterKind::Default(e) => check(e),
+            ParameterKind::Tagged(inner) => check_tag_pattern_default_exprs(inner, check),
+            ParameterKind::Generic => {}
+        }
+    }
+}
+
+fn tag_references_name(tag: &Tag, name: Intern<String>) -> bool {
+    let Tag::Generic(_, params, _) = tag else {
+        return false;
+    };
+    params.values().any(|pk| match pk {
+        ParameterKind::Default(e) => expr_references_name(&e.0, name),
+        ParameterKind::Tagged(inner) => tag_references_name(inner, name),
+        ParameterKind::Generic => false,
+    })
+}
+
 fn expr_references_name(expr: &Expr, name: Intern<String>) -> bool {
     match expr {
         Expr::FnCall(call) => {
@@ -970,15 +1026,22 @@ fn expr_references_name(expr: &Expr, name: Intern<String>) -> bool {
                     WhenArm::Cond { condition, body } => {
                         expr_references_name(condition, name) || expr_references_name(body, name)
                     }
-                    WhenArm::Is { body, .. } | WhenArm::Else(body) => {
-                        expr_references_name(body, name)
+                    WhenArm::Is { pattern, body } => {
+                        is_pattern_as_tag(&pattern.0)
+                            .is_some_and(|t| tag_references_name(t, name))
+                            || expr_references_name(&body.0, name)
                     }
+                    WhenArm::Else(body) => expr_references_name(body, name),
                 })
         }
         Expr::If(if_expr) => {
             let cond_ref = match &if_expr.condition {
                 IfCondition::Bool(c) => expr_references_name(c, name),
-                IfCondition::Pattern { subject, .. } => expr_references_name(subject, name),
+                IfCondition::Pattern { subject, pattern } => {
+                    expr_references_name(subject, name)
+                        || is_pattern_as_tag(&pattern.0)
+                            .is_some_and(|t| tag_references_name(t, name))
+                }
             };
             cond_ref || if_expr.body.iter().any(|e| expr_references_name(e, name))
         }
@@ -1022,6 +1085,7 @@ fn expr_references_name(expr: &Expr, name: Intern<String>) -> bool {
         Expr::Range(range) => {
             expr_references_name(&range.start, name) || expr_references_name(&range.end, name)
         }
+        Expr::IsPattern(t) | Expr::TypeTag(t) => tag_references_name(t, name),
         Expr::Lit(_)
         | Expr::SelfRef(_)
         | Expr::AnonymousTag(..)

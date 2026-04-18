@@ -1,6 +1,5 @@
 use crate::expr::r#return::Return;
 use crate::span::Spanned;
-use crate::tag::Tag;
 
 use crate::expr::Expr;
 
@@ -9,7 +8,8 @@ pub enum IfCondition {
     Bool(Box<Spanned<Expr>>),
     Pattern {
         subject: Box<Spanned<Expr>>,
-        tag: Tag,
+        /// Parsed `is …` pattern — [`Expr::IsPattern`] (see [`is_pattern_as_tag`](crate::is_pattern_as_tag)).
+        pattern: Box<Spanned<Expr>>,
     },
 }
 

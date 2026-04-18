@@ -310,7 +310,7 @@ impl Default for FlowContext {
 // NOTE: Constant propagation is implemented in FlowAnalyzer via eval_const /
 // extract_pattern_constants / extract_comparisons.
 // - `val Maybe(3): Some(3)` → val is Some(3)
-// - `is Some(v)` pattern extraction → v = 3
+// - `if val is Some(v)` / `when val is Some(v) then …` pattern extraction → v = 3
 // - `four: v + 1` → four = 4 via constant folding
 // - `if num < 10` / `while i < len` → comparison narrowing inside body, negated after
 // TODO: constant propagation through reassignment in loops (i: i + 1 where i = 0)

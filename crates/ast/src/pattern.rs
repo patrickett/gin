@@ -1,27 +1,21 @@
-// TODO: investigate unifying patterns, types (Tag), and expressions (Expr) into a single syntactic category.
+// Unified surface (patterns, type-shaped positions, values) — **done for AST boundaries**:
 //
-// Design: Currently Gin has three separate grammatical categories:
-//   - Expr (crates/ast/src/expr/mod.rs) — runtime expressions
-//   - Tag (crates/ast/src/tag.rs) — type annotations (Nominal, Generic, Qualified)
-//   - For-loop binders (this file) — parsed as Expr and validated here / in typeck
+// - **Values** — [`Expr`] in `crates/ast/src/expr/mod.rs`.
+// - **For binders** — [`Expr`] on [`crate::expr::ForInLoop`] (`for_loop_pattern_names`).
+// - **`if` / `when` `is` patterns** — [`Expr::IsPattern`] (`is_pattern_expr_from_tag`).
+// - **Bind return / receiver tags** — [`Expr::TypeTag`] (`type_tag_expr_from_tag`).
 //
-// Zig's approach is to use the same surface syntax for all three, categorizing
-// during semantic analysis rather than parsing. This:
-//   1. Reduces combinatorial syntax explosion (types, values, and patterns have
-//      the same general tree shape)
-//   2. Enables using `if`/`when` in type positions (e.g., `if (true) T else U`)
-//   3. Makes generic instantiation look like a plain function call: `Maybe(Int)`
-//   4. Simplifies the parser by removing the need for separate parse_tag(),
-//      parse_pattern(), and parse_expression() dispatch
+// [`Tag`] remains the *payload* inside `IsPattern` / `TypeTag` and for declare bodies,
+// `ParameterKind::Tagged`, etc., until generic type parameters are fully expression-shaped
+// (then `Tag` can shrink toward a pure typeck IR).
 //
-// Progress: `for` loop headers now store `Spanned<Expr>` (see `ForInLoop`).
-// Next steps: type positions as Expr, then fold Tag into Expr with a classifier.
 // Ref: https://matklad.github.io/2025/08/09/zigs-lovely-syntax.html#Everything-Is-an-Expression
 
 use internment::Intern;
 
 use crate::expr::{Expr, FnCall};
 use crate::span::Spanned;
+use crate::tag::Tag;
 
 /// `for` loop patterns are a subset of expressions:
 /// - a simple identifier (`x` → `Expr::FnCall` with an empty path tail), or
@@ -56,11 +50,62 @@ pub fn for_loop_single_binding(pat: &Expr) -> Option<Intern<String>> {
     (names.len() == 1).then_some(names[0])
 }
 
+/// Wrap a parsed `is`-pattern [`Tag`] as the unified [`Expr`] surface ([`Expr::IsPattern`]).
+#[inline]
+pub fn is_pattern_expr_from_tag(tag: Tag) -> Spanned<Expr> {
+    let span = tag.span();
+    Spanned(Expr::IsPattern(Box::new(tag)), span)
+}
+
+/// If `expr` is [`Expr::IsPattern`], return the inner tag.
+#[inline]
+pub fn is_pattern_as_tag(expr: &Expr) -> Option<&Tag> {
+    match expr {
+        Expr::IsPattern(t) => Some(t),
+        _ => None,
+    }
+}
+
+/// Wrap a tag from a **type** position (return type, receiver) as [`Expr::TypeTag`].
+#[inline]
+pub fn type_tag_expr_from_tag(tag: Tag) -> Spanned<Expr> {
+    let span = tag.span();
+    Spanned(Expr::TypeTag(Box::new(tag)), span)
+}
+
+#[inline]
+pub fn type_tag_as_tag(expr: &Expr) -> Option<&Tag> {
+    match expr {
+        Expr::TypeTag(t) => Some(t),
+        _ => None,
+    }
+}
+
+/// [`Expr::IsPattern`] or [`Expr::TypeTag`] — both wrap a [`Tag`] on the unified `Expr` surface.
+#[inline]
+pub fn tag_surface_as_tag(expr: &Expr) -> Option<&Tag> {
+    match expr {
+        Expr::IsPattern(t) | Expr::TypeTag(t) => Some(t),
+        _ => None,
+    }
+}
+
+/// Names bound by an `is <tag>` pattern ([`Tag::Generic`] parameter keys), e.g. `Some(v)` → `[v]`.
+/// [`Tag::Nominal`] and [`Tag::Qualified`] bind no names.
+pub fn tag_pattern_binding_names(tag: &Tag) -> Vec<Intern<String>> {
+    match tag {
+        Tag::Generic(_, params, _) => params.keys().copied().collect(),
+        Tag::Nominal(_, _) | Tag::Qualified(_) => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parameter::ParameterKind;
     use crate::path::ModPath;
     use crate::span::SpanId;
+    use indexmap::IndexMap;
 
     fn intern(s: &str) -> Intern<String> {
         Intern::new(s.to_owned())
@@ -102,5 +147,46 @@ mod tests {
             args: Some(vec![]),
         });
         assert_eq!(for_loop_pattern_names(&e), None);
+    }
+
+    #[test]
+    fn tag_pattern_binding_names_generic() {
+        let mut params = IndexMap::new();
+        params.insert(intern("payload"), ParameterKind::Generic);
+        let tag = Tag::Generic(intern("Some"), params, SpanId::new(0));
+        assert_eq!(tag_pattern_binding_names(&tag), vec![intern("payload")]);
+    }
+
+    #[test]
+    fn tag_pattern_binding_names_nominal_empty() {
+        let tag = Tag::Nominal(intern("None"), SpanId::new(0));
+        assert!(tag_pattern_binding_names(&tag).is_empty());
+    }
+
+    #[test]
+    fn is_pattern_roundtrips_tag() {
+        let tag = Tag::Nominal(intern("None"), SpanId::new(7));
+        let Spanned(e, sp) = is_pattern_expr_from_tag(tag);
+        assert_eq!(sp, SpanId::new(7));
+        assert!(matches!(
+            is_pattern_as_tag(&e),
+            Some(Tag::Nominal(n, s)) if *n == intern("None") && *s == SpanId::new(7)
+        ));
+    }
+
+    #[test]
+    fn type_tag_roundtrips_tag() {
+        let tag = Tag::Nominal(intern("Str"), SpanId::new(3));
+        let Spanned(e, sp) = type_tag_expr_from_tag(tag);
+        assert_eq!(sp, SpanId::new(3));
+        assert!(matches!(
+            type_tag_as_tag(&e),
+            Some(Tag::Nominal(n, s)) if *n == intern("Str") && *s == SpanId::new(3)
+        ));
+        assert!(is_pattern_as_tag(&e).is_none());
+        assert!(matches!(
+            tag_surface_as_tag(&e),
+            Some(Tag::Nominal(n, s)) if *n == intern("Str") && *s == SpanId::new(3)
+        ));
     }
 }

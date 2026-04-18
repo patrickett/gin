@@ -18,7 +18,7 @@ use std::collections::HashMap;
 
 use ast::{
     BinOp, Binary, Bind, BindValue, Expr, FnCall, Literal, ParameterKind, Spanned, Tag, TagCall,
-    WhenArm, WhenExpr,
+    WhenArm, WhenExpr, type_tag_as_tag,
 };
 use internment::Intern;
 
@@ -164,8 +164,10 @@ impl TyInfer for FnCall {
 
 impl TyInfer for Bind {
     fn infer_ty(&self, env: &TyInferEnv) -> Ty {
-        if let Some(tag) = &self.return_tag {
-            return resolve_tag_from_map(tag, env.tag_types);
+        if let Some(sp) = &self.return_tag {
+            if let Some(tag) = type_tag_as_tag(&sp.0) {
+                return resolve_tag_from_map(tag, env.tag_types);
+            }
         }
 
         let mut locals: HashMap<Intern<String>, Ty> = match self.params().as_ref() {
@@ -343,6 +345,9 @@ impl TyInfer for Expr {
             },
 
             Expr::TupleLit(elems) => Ty::Tuple(elems.iter().map(|e| e.infer_ty(env)).collect()),
+
+            // Only stored as `if` / `when` pattern payload or bind type position, not as a value.
+            Expr::IsPattern(_) | Expr::TypeTag(_) => Ty::Unit,
         }
     }
 }

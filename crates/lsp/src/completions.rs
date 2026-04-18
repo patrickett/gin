@@ -1,6 +1,6 @@
 use ast::{
     BindValue, Expr, FileAst, FormatPart, IfCondition, LoopEnum, ParameterKind, Parameters,
-    SpanTable, WhenArm,
+    SpanTable, Tag, WhenArm,
 };
 
 #[derive(Debug, Clone)]
@@ -111,6 +111,28 @@ pub fn fn_call_at(ast: &FileAst, byte_pos: usize) -> Option<String> {
     best.map(|(name, _)| name)
 }
 
+fn find_call_in_tag_pattern(
+    tag: &Tag,
+    span_table: &SpanTable,
+    byte_pos: usize,
+    best: &mut Option<(String, usize)>,
+) {
+    let Tag::Generic(_, params, _) = tag else {
+        return;
+    };
+    for pk in params.values() {
+        match pk {
+            ParameterKind::Default(e) => {
+                find_call_in_expr(&e.0, e.1, span_table, byte_pos, best);
+            }
+            ParameterKind::Tagged(inner) => {
+                find_call_in_tag_pattern(inner, span_table, byte_pos, best);
+            }
+            ParameterKind::Generic => {}
+        }
+    }
+}
+
 fn find_call_in_expr(
     expr: &Expr,
     span_id: ast::SpanId,
@@ -159,7 +181,11 @@ fn find_call_in_expr(
                         find_call_in_expr(&condition.0, condition.1, span_table, byte_pos, best);
                         find_call_in_expr(&body.0, body.1, span_table, byte_pos, best);
                     }
-                    WhenArm::Is { body, .. } | WhenArm::Else(body) => {
+                    WhenArm::Is { pattern, body } => {
+                        find_call_in_expr(&pattern.0, pattern.1, span_table, byte_pos, best);
+                        find_call_in_expr(&body.0, body.1, span_table, byte_pos, best);
+                    }
+                    WhenArm::Else(body) => {
                         find_call_in_expr(&body.0, body.1, span_table, byte_pos, best);
                     }
                 }
@@ -168,8 +194,9 @@ fn find_call_in_expr(
         Expr::If(if_expr) => {
             match &if_expr.condition {
                 IfCondition::Bool(e) => find_call_in_expr(&e.0, e.1, span_table, byte_pos, best),
-                IfCondition::Pattern { subject, .. } => {
-                    find_call_in_expr(&subject.0, subject.1, span_table, byte_pos, best)
+                IfCondition::Pattern { subject, pattern } => {
+                    find_call_in_expr(&subject.0, subject.1, span_table, byte_pos, best);
+                    find_call_in_expr(&pattern.0, pattern.1, span_table, byte_pos, best);
                 }
             }
             for e in &if_expr.body {
@@ -235,6 +262,9 @@ fn find_call_in_expr(
             for e in elems {
                 find_call_in_expr(&e.0, e.1, span_table, byte_pos, best);
             }
+        }
+        Expr::IsPattern(t) | Expr::TypeTag(t) => {
+            find_call_in_tag_pattern(t, span_table, byte_pos, best);
         }
         Expr::Lit(_) | Expr::SelfRef(_) | Expr::AnonymousTag(..) | Expr::Asm(_) => {}
     }

@@ -8,6 +8,15 @@ use crate::cursor::TokenCursor;
 use crate::expr::ExprFn;
 use crate::path::parse_tag_variant_path;
 
+/// Tag written after `is` in `if … is …` and `when … is …` pattern arms.
+///
+/// Today this delegates to [`parse_tag`]; keeping a dedicated entry point documents
+/// the surface-syntax unification direction without changing the hot-path implementation.
+#[inline]
+pub fn parse_is_pattern_tag(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Tag> {
+    parse_tag(cursor, expr_parser)
+}
+
 pub fn parse_tag(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Tag> {
     let start_span = cursor.current_span();
 

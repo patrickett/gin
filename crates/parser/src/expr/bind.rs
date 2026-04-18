@@ -3,7 +3,7 @@ use lexer::Token;
 
 use ast::{
     ArchTarget, Bind, BindAttributes, BindValue, Complexity, ComplexityExpr, DocComment, Expr,
-    ModPath, OsTarget, ParameterKind, Parameters, Return, Spanned, Tag,
+    ModPath, OsTarget, ParameterKind, Parameters, Return, Spanned, Tag, type_tag_expr_from_tag,
 };
 
 use super::ExprFn;
@@ -14,7 +14,7 @@ use crate::tag::parse_tag;
 
 type ReturnTypePart = (
     Option<Intern<String>>,
-    Option<Tag>,
+    Option<Box<Spanned<Expr>>>,
     Option<(Intern<String>, Vec<Spanned<Expr>>)>,
     Option<ModPath>,
 );
@@ -328,7 +328,12 @@ fn parse_return_type_part(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Retu
                     return (None, None, Some((variant_name, args)), Some(path));
                 }
             }
-            return (None, Some(Tag::Qualified(path)), None, None);
+            return (
+                None,
+                Some(Box::new(type_tag_expr_from_tag(Tag::Qualified(path)))),
+                None,
+                None,
+            );
         }
         cursor.rewind(checkpoint);
     }
@@ -351,7 +356,12 @@ fn parse_return_type_part(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Retu
         }
     }
 
-    (None, Some(Tag::Nominal(name, name_span)), None, None)
+    (
+        None,
+        Some(Box::new(type_tag_expr_from_tag(Tag::Nominal(name, name_span)))),
+        None,
+        None,
+    )
 }
 
 fn parse_type_annotation_args(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Vec<Spanned<Expr>> {

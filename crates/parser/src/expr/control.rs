@@ -2,7 +2,7 @@ use lexer::Token;
 
 use ast::{
     Expr, FnCall, ForInLoop, IfCondition, IfExpr, Loop, ModPath, Return, Spanned, WhenArm,
-    WhenExpr, WhileLoop,
+    WhenExpr, WhileLoop, is_pattern_expr_from_tag,
 };
 
 use super::ExprFn;
@@ -145,10 +145,10 @@ pub fn parse_if_expr(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<If
     let cond_expr = expr_parser(cursor);
 
     let condition = if cursor.eat(&Token::Is) {
-        let tag = crate::tag::parse_tag(cursor, expr_parser)?;
+        let tag = crate::tag::parse_is_pattern_tag(cursor, expr_parser)?;
         IfCondition::Pattern {
             subject: Box::new(cond_expr),
-            tag,
+            pattern: Box::new(is_pattern_expr_from_tag(tag)),
         }
     } else {
         IfCondition::Bool(Box::new(cond_expr))
@@ -274,7 +274,7 @@ fn parse_when_is_arms(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<V
             break;
         }
 
-        let tag = crate::tag::parse_tag(cursor, expr_parser)?;
+        let tag = crate::tag::parse_is_pattern_tag(cursor, expr_parser)?;
 
         let indented = cursor.eat(&Token::Indent);
 
@@ -285,7 +285,7 @@ fn parse_when_is_arms(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<V
 
         let body = expr_parser(cursor);
         arms.push(WhenArm::Is {
-            pattern: tag,
+            pattern: Box::new(is_pattern_expr_from_tag(tag)),
             body: Box::new(body),
         });
 

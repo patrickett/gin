@@ -6,7 +6,10 @@ use crate::flow::{
 use crate::r#type::{Ty, TyEnv};
 use ast::SpanId;
 use ast::Spanned;
-use ast::{for_loop_pattern_names, Bind, BindValue, Expr, FileAst, FnCall, IfCondition, IfExpr, Loop, Tag, WhenArm, WhenExpr};
+use ast::{
+    for_loop_pattern_names, is_pattern_as_tag, tag_pattern_binding_names, Bind, BindValue, Expr,
+    FileAst, FnCall, IfCondition, IfExpr, Loop, Tag, WhenArm, WhenExpr,
+};
 use internment::Intern;
 use std::collections::{HashMap, HashSet};
 
@@ -155,6 +158,7 @@ impl<'a> FlowAnalyzer<'a> {
     /// Extract constant values from pattern variables when the subject's value is known.
     ///
     /// e.g., if `val` holds `Some(3)` and the pattern is `Some(v)`, sets `v = 3`.
+    /// Used for `if val is …` and `when val is … then …` pattern arms.
     fn extract_pattern_constants(&mut self, subject_var: Intern<String>, pattern: &Tag) {
         let tag_name = Intern::<String>::from_ref(pattern.name());
         let params = match pattern {
@@ -177,8 +181,23 @@ impl<'a> FlowAnalyzer<'a> {
             for (i, (param_name, _)) in params.iter().enumerate() {
                 self.current_context_mut()
                     .set_constant(*param_name, val_args[i].clone());
-                self.in_scope.insert(*param_name);
             }
+        }
+    }
+
+    /// Register names from `ast::tag_pattern_binding_names` in `in_scope`; pass the returned
+    /// list to `pop_tag_pattern_bindings` after analyzing the pattern arm body.
+    fn push_tag_pattern_bindings(&mut self, tag: &Tag) -> Vec<Intern<String>> {
+        let names = tag_pattern_binding_names(tag);
+        for n in &names {
+            self.in_scope.insert(*n);
+        }
+        names
+    }
+
+    fn pop_tag_pattern_bindings(&mut self, names: &[Intern<String>]) {
+        for n in names {
+            self.in_scope.remove(n);
         }
     }
 
@@ -327,6 +346,9 @@ impl<'a> FlowAnalyzer<'a> {
             Expr::AnonymousTag(..) => {}
             Expr::SelfRef(_) => {}
 
+            // Only appears as `if`/`when` pattern or bind type payload (parsed separately).
+            Expr::IsPattern(_) | Expr::TypeTag(_) => {}
+
             // Literals and other expressions.
             Expr::Lit(_) => {}
             Expr::FormatString(_) => {}
@@ -359,8 +381,17 @@ impl<'a> FlowAnalyzer<'a> {
                 let narrowed_context = self.context_stack.pop().unwrap();
                 self.merge_narrowing_from_branch(&narrowed_context);
             }
-            IfCondition::Pattern { subject, tag } => {
+            IfCondition::Pattern { subject, pattern } => {
                 self.analyze_spanned_expr(subject);
+
+                let Some(tag) = is_pattern_as_tag(&pattern.0) else {
+                    self.push_context();
+                    for expr in &if_expr.body {
+                        self.analyze_spanned_expr(expr);
+                    }
+                    self.pop_context();
+                    return;
+                };
 
                 // Extract variable name from subject if it's a simple variable reference
                 let var_name = self.extract_var_name(subject);
@@ -387,6 +418,7 @@ impl<'a> FlowAnalyzer<'a> {
                         self.push_context();
                         self.current_context_mut().narrow(var, constraint.clone());
 
+                        let pat_bindings = self.push_tag_pattern_bindings(tag);
                         // Extract pattern variables from known constant value
                         self.extract_pattern_constants(var, tag);
 
@@ -399,6 +431,8 @@ impl<'a> FlowAnalyzer<'a> {
                             self.analyze_spanned_expr(expr);
                         }
 
+                        self.pop_tag_pattern_bindings(&pat_bindings);
+
                         let narrowed_context = self.context_stack.pop().unwrap();
 
                         // If the branch has an early return, merge the narrowing back to parent
@@ -408,17 +442,21 @@ impl<'a> FlowAnalyzer<'a> {
                     } else {
                         // Unknown variant, analyze body without narrowing
                         self.push_context();
+                        let pat_bindings = self.push_tag_pattern_bindings(tag);
                         for expr in &if_expr.body {
                             self.analyze_spanned_expr(expr);
                         }
+                        self.pop_tag_pattern_bindings(&pat_bindings);
                         self.pop_context();
                     }
                 } else {
                     // Complex subject, analyze body without narrowing
                     self.push_context();
+                    let pat_bindings = self.push_tag_pattern_bindings(tag);
                     for expr in &if_expr.body {
                         self.analyze_spanned_expr(expr);
                     }
+                    self.pop_tag_pattern_bindings(&pat_bindings);
                     self.pop_context();
                 }
             }
@@ -436,7 +474,13 @@ impl<'a> FlowAnalyzer<'a> {
             for arm in &when_expr.arms {
                 match arm {
                     WhenArm::Is { pattern, body } => {
-                        let variant_name = Intern::<String>::from_ref(pattern.name());
+                        let Some(tag) = is_pattern_as_tag(&pattern.0) else {
+                            self.push_context();
+                            self.analyze_spanned_expr(body);
+                            self.pop_context();
+                            continue;
+                        };
+                        let variant_name = Intern::<String>::from_ref(tag.name());
 
                         if let Some((union_name, _, _)) = self.ty_env.lookup_variant(variant_name) {
                             let constraint = TypeConstraint::IsVariant(union_name, variant_name);
@@ -459,12 +503,22 @@ impl<'a> FlowAnalyzer<'a> {
                             if let Some(var) = var_name {
                                 self.current_context_mut().narrow(var, constraint);
                             }
+                            let pat_bindings = self.push_tag_pattern_bindings(tag);
+                            if let Some(var) = var_name {
+                                self.extract_pattern_constants(var, tag);
+                            }
                             self.analyze_spanned_expr(body);
+                            self.pop_tag_pattern_bindings(&pat_bindings);
                             self.pop_context();
                         } else {
                             // Unknown variant, analyze without narrowing
                             self.push_context();
+                            let pat_bindings = self.push_tag_pattern_bindings(tag);
+                            if let Some(var) = var_name {
+                                self.extract_pattern_constants(var, tag);
+                            }
                             self.analyze_spanned_expr(body);
+                            self.pop_tag_pattern_bindings(&pat_bindings);
                             self.pop_context();
                         }
                     }

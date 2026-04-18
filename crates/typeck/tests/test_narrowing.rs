@@ -2,7 +2,31 @@ use ast::SpanId;
 use ast::Tag;
 use internment::Intern;
 use parser::parse_from_str;
-use typeck::{Ty, TyEnv, flow_analyzer::FlowAnalyzer, ty_alignment, ty_byte_size_static};
+use typeck::{
+    flow::ConstValue, Ty, TyEnv, flow_analyzer::FlowAnalyzer, ty_alignment, ty_byte_size_static,
+};
+
+#[test]
+fn test_when_pattern_constant_propagation() {
+    let src = "Maybe(x) is Some(x) or None\n\nmain:\n    val: Maybe.Some(3)\n    out: when val is Some(v) then v else 0\n    return out\nreturn\n";
+
+    let ast = parse_from_str(src);
+    let ty_env = TyEnv::from_file_ast(&ast);
+    let mut analyzer = FlowAnalyzer::new(&ty_env);
+    analyzer.analyze_file(&ast);
+    let result = analyzer.into_result();
+
+    let v_is_three = result.expr_contexts.values().any(|ctx| {
+        matches!(
+            ctx.get_constant(&Intern::<String>::from_ref("v")),
+            Some(ConstValue::Int(3))
+        )
+    });
+    assert!(
+        v_is_three,
+        "`when val is Some(v)` should propagate val's payload so v = 3 inside the arm"
+    );
+}
 
 #[test]
 fn test_narrowing_after_if_early_return() {
