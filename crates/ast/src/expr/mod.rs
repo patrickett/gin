@@ -1,5 +1,6 @@
+use crate::parameter::ParameterKind;
+use crate::path::ModPath;
 use crate::span::SpanId;
-use crate::tag::Tag;
 use internment::Intern;
 
 use crate::span::Spanned;
@@ -54,12 +55,18 @@ pub enum Expr {
     TagCall(TagCall),
     /// A bare capitalized tag in expression position, e.g. `None`, `True`.
     AnonymousTag(Intern<String>, SpanId),
-    /// Tag tree after `is` in `if` / `when` pattern arms. Wraps [`Tag`] until typeck can treat
-    /// this as ordinary expression surface syntax end-to-end.
-    IsPattern(Box<Tag>),
-    /// Tag-shaped return type or method receiver (e.g. `foo() Str:` or `Type.method`). Same
-    /// surface grammar as types; stored as [`Expr`] for AST unification with patterns and values.
-    TypeTag(Box<Tag>),
+    /// Type position: bare `Tag` (e.g. `Str` in `(x Str)`).
+    TypeNominal(Intern<String>, SpanId),
+    /// Type position: qualified path `Tag.Tag…`.
+    TypeQualified(ModPath),
+    /// Type position: `Tag(...)` with generic / named parameters.
+    /// Stored as a vector (declaration order) so [`Hash`] can be derived despite the
+    /// `ParameterKind` ↔ `Expr` recursion.
+    TypeGeneric {
+        name: Intern<String>,
+        params: Vec<(Intern<String>, ParameterKind)>,
+        span: SpanId,
+    },
     /// Stack-allocate an array: `(init_expr; N)` — emits `llvm.alloca N×sizeof(elem)`.
     TupleAlloc {
         init: Box<Spanned<Expr>>,

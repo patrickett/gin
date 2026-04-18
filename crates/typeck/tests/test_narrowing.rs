@@ -1,5 +1,4 @@
-use ast::SpanId;
-use ast::Tag;
+use ast::{Expr, SpanId};
 use internment::Intern;
 use parser::parse_from_str;
 use typeck::{
@@ -52,7 +51,7 @@ fn test_inrange_int32_resolves_to_32bit() {
 
     let ast = parse_from_str(src);
     let ty_env = TyEnv::from_file_ast(&ast);
-    let ty = ty_env.resolve_tag(&Tag::Nominal(
+    let ty = ty_env.resolve_type_expr(&Expr::TypeNominal(
         Intern::<String>::from_ref("Int"),
         SpanId::INVALID,
     ));
@@ -74,7 +73,7 @@ fn test_inrange_int8_resolves_to_8bit() {
 
     let ast = parse_from_str(src);
     let ty_env = TyEnv::from_file_ast(&ast);
-    let ty = ty_env.resolve_tag(&Tag::Nominal(
+    let ty = ty_env.resolve_type_expr(&Expr::TypeNominal(
         Intern::<String>::from_ref("SmallInt"),
         SpanId::INVALID,
     ));
@@ -96,7 +95,7 @@ fn test_inrange_int16_resolves_to_16bit() {
 
     let ast = parse_from_str(src);
     let ty_env = TyEnv::from_file_ast(&ast);
-    let ty = ty_env.resolve_tag(&Tag::Nominal(
+    let ty = ty_env.resolve_type_expr(&Expr::TypeNominal(
         Intern::<String>::from_ref("MediumInt"),
         SpanId::INVALID,
     ));
@@ -118,7 +117,7 @@ fn test_range_type_also_resolves_correctly() {
 
     let ast = parse_from_str(src);
     let ty_env = TyEnv::from_file_ast(&ast);
-    let ty = ty_env.resolve_tag(&Tag::Nominal(
+    let ty = ty_env.resolve_type_expr(&Expr::TypeNominal(
         Intern::<String>::from_ref("Byte"),
         SpanId::INVALID,
     ));
@@ -140,7 +139,7 @@ fn test_bool_union_optimization() {
 
     let ast = parse_from_str(src);
     let ty_env = TyEnv::from_file_ast(&ast);
-    let ty = ty_env.resolve_tag(&Tag::Nominal(
+    let ty = ty_env.resolve_type_expr(&Expr::TypeNominal(
         Intern::<String>::from_ref("Bool"),
         SpanId::INVALID,
     ));
@@ -164,7 +163,7 @@ fn test_three_variant_union_optimization() {
 
     let ast = parse_from_str(src);
     let ty_env = TyEnv::from_file_ast(&ast);
-    let ty = ty_env.resolve_tag(&Tag::Nominal(
+    let ty = ty_env.resolve_type_expr(&Expr::TypeNominal(
         Intern::<String>::from_ref("Color"),
         SpanId::INVALID,
     ));
@@ -188,7 +187,7 @@ fn test_union_with_fields_not_optimized() {
 
     let ast = parse_from_str(src);
     let ty_env = TyEnv::from_file_ast(&ast);
-    let ty = ty_env.resolve_tag(&Tag::Nominal(
+    let ty = ty_env.resolve_type_expr(&Expr::TypeNominal(
         Intern::<String>::from_ref("Maybe"),
         SpanId::INVALID,
     ));

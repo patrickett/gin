@@ -1,9 +1,11 @@
 use crate::cursor::TokenCursor;
 use crate::expr::ExprFn;
-use crate::tag::parse_tag;
-use ast::Tag;
+use ast::expr::Expr;
 use ast::span::SpanId;
 use ast::{Declare, DeclareValue, DocComment, ParameterKind, Parameters, Variant};
+use ast::{Spanned, type_surface_mangle_name};
+
+use crate::tag::parse_type_expr;
 use i256::I256;
 use internment::Intern;
 use lexer::Token;
@@ -97,8 +99,8 @@ fn parse_has_rhs(cursor: &mut TokenCursor, expr_parser: ExprFn) -> DeclareValue 
         return DeclareValue::Record(params);
     }
 
-    if let Some(tag) = parse_tag(cursor, expr_parser) {
-        return DeclareValue::Alias(tag);
+    if let Some(sp) = parse_type_expr(cursor, expr_parser) {
+        return DeclareValue::Alias(Box::new(sp));
     }
 
     cursor.error(
@@ -137,13 +139,13 @@ fn parse_is_rhs(
     let checkpoint = cursor.checkpoint();
     let first_doc = parse_doc_comment(cursor);
 
-    if let Some(first_tag) = parse_tag(cursor, expr_parser)
+    if let Some(first_shape) = parse_type_expr(cursor, expr_parser)
         && cursor.is_at(&Token::Or)
     {
         // Union: Tag (or Tag)+
         let first_post_doc = parse_doc_comment(cursor);
 
-        let first_variant = make_variant(first_doc, first_tag, first_post_doc);
+        let first_variant = make_variant(first_doc, first_shape, first_post_doc);
         let mut variants = vec![first_variant];
 
         while cursor.eat(&Token::Or) {
@@ -169,9 +171,9 @@ fn parse_is_rhs(
     // Not a union — rewind to before any doc comment and try as alias
     cursor.rewind(checkpoint);
 
-    if let Some(tag) = parse_tag(cursor, expr_parser) {
+    if let Some(sp) = parse_type_expr(cursor, expr_parser) {
         let doc = parse_doc_comment(cursor);
-        return (DeclareValue::Alias(tag), doc);
+        return (DeclareValue::Alias(Box::new(sp)), doc);
     }
 
     cursor.error(
@@ -179,10 +181,10 @@ fn parse_is_rhs(
         cursor.current_span(),
     );
     (
-        DeclareValue::Alias(Tag::Nominal(
-            Intern::new(String::new()),
+        DeclareValue::Alias(Box::new(Spanned(
+            Expr::TypeNominal(Intern::new(String::new()), cursor.current_span()),
             cursor.current_span(),
-        )),
+        ))),
         None,
     )
 }
@@ -190,7 +192,8 @@ fn parse_is_rhs(
 fn parse_variant(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Variant> {
     let doc_before = parse_doc_comment(cursor);
 
-    let tag = parse_tag(cursor, expr_parser)?;
+    let shape = parse_type_expr(cursor, expr_parser)?;
+    let sp = Box::new(shape);
 
     let doc_after = parse_doc_comment(cursor);
 
@@ -198,24 +201,25 @@ fn parse_variant(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Varian
     Some(match doc.filter(|d| !d.is_empty()) {
         Some(d) => Variant::Local {
             doc_comment: Some(d),
-            tag,
+            shape: sp,
         },
-        None => Variant::External(tag),
+        None => Variant::External(sp),
     })
 }
 
 fn make_variant(
     doc_before: Option<DocComment>,
-    tag: Tag,
+    shape: Spanned<Expr>,
     doc_after: Option<DocComment>,
 ) -> Variant {
     let doc = doc_after.or(doc_before);
+    let sp = Box::new(shape);
     match doc.filter(|d| !d.is_empty()) {
         Some(d) => Variant::Local {
             doc_comment: Some(d),
-            tag,
+            shape: sp,
         },
-        None => Variant::External(tag),
+        None => Variant::External(sp),
     }
 }
 
@@ -223,23 +227,24 @@ fn attach_doc_to_previous(variants: &mut [Variant], doc: Option<DocComment>) {
     if let Some(doc) = doc.filter(|d| !d.is_empty())
         && let Some(prev) = variants.last_mut()
     {
-        let prev_owned = std::mem::replace(
-            prev,
-            Variant::External(Tag::Nominal(Intern::new(String::new()), SpanId::INVALID)),
-        );
+        let placeholder = Variant::External(Box::new(Spanned(
+            Expr::TypeNominal(Intern::new(String::new()), SpanId::INVALID),
+            SpanId::INVALID,
+        )));
+        let prev_owned = std::mem::replace(prev, placeholder);
         *prev = match prev_owned {
-            Variant::External(tag) => Variant::Local {
+            Variant::External(shape) => Variant::Local {
                 doc_comment: Some(doc),
-                tag,
+                shape,
             },
             Variant::Local {
                 mut doc_comment,
-                tag,
+                shape,
             } => {
                 if doc_comment.is_none() {
                     doc_comment = Some(doc);
                 }
-                Variant::Local { doc_comment, tag }
+                Variant::Local { doc_comment, shape }
             }
         };
     }
@@ -305,9 +310,9 @@ fn parse_one_declare_param(
 ) -> Option<(Intern<String>, ParameterKind)> {
     // Positional: bare Tag
     if matches!(cursor.peek(), Some(Token::Tag(_))) {
-        let tag = parse_tag(cursor, expr_parser)?;
-        let key = Intern::<String>::from_ref(tag.name());
-        return Some((key, ParameterKind::Tagged(tag)));
+        let sp = parse_type_expr(cursor, expr_parser)?;
+        let key = Intern::<String>::from_ref(type_surface_mangle_name(&sp.0));
+        return Some((key, ParameterKind::Tagged(Box::new(sp))));
     }
 
     // Named: id [Tag | : expr]
@@ -322,8 +327,8 @@ fn parse_one_declare_param(
 
     // id Tag → tagged
     if matches!(cursor.peek(), Some(Token::Tag(_))) {
-        let tag = parse_tag(cursor, expr_parser)?;
-        return Some((name, ParameterKind::Tagged(tag)));
+        let sp = parse_type_expr(cursor, expr_parser)?;
+        return Some((name, ParameterKind::Tagged(Box::new(sp))));
     }
 
     // id: expr → default

@@ -16,8 +16,8 @@ pub use parameter::*;
 mod path;
 pub use path::*;
 
-mod tag;
-pub use tag::*;
+mod variant;
+pub use variant::*;
 
 mod doc_comment;
 pub use doc_comment::*;
@@ -48,7 +48,7 @@ pub mod prelude {
     pub use crate::pattern::*;
     pub use crate::span::*;
 
-    pub use crate::tag::*;
+    pub use crate::variant::*;
 
     pub use internment::Intern;
 }

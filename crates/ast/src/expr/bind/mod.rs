@@ -2,11 +2,10 @@ use crate::span::SpanId;
 use internment::Intern;
 
 use crate::doc_comment::DocComment;
+use crate::parameter::fmt_type_expr_surface;
 use crate::parameter::Parameters;
 use crate::path::ModPath;
 use crate::span::Spanned;
-use crate::tag::Tag;
-use crate::type_tag_as_tag;
 
 use crate::expr::Expr;
 
@@ -18,34 +17,14 @@ pub use value::*;
 /// Lazily-formatted method name (e.g., "Single(a).method")
 pub struct MethodName<'a> {
     // TODO: come up with a better name than receiver
-    receiver: &'a Tag,
+    receiver: &'a Expr,
     name: Intern<String>,
 }
 
 impl std::fmt::Display for MethodName<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.receiver {
-            Tag::Nominal(type_name, _) => {
-                write!(f, "{}.{}", type_name.as_str(), self.name.as_str())
-            }
-            Tag::Generic(type_name, params, _) => {
-                write!(f, "{}(", type_name.as_str())?;
-                for (i, (k, v)) in params.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}: {}", k.as_str(), v)?;
-                }
-                write!(f, ").{}", self.name.as_str())
-            }
-            Tag::Qualified(path) => {
-                write!(f, "{}", path.root.as_str())?;
-                for seg in &path.segments {
-                    write!(f, ".{}", seg.as_str())?;
-                }
-                write!(f, ".{}", self.name.as_str())
-            }
-        }
+        fmt_type_expr_surface(self.receiver, f)?;
+        write!(f, ".{}", self.name.as_str())
     }
 }
 
@@ -57,11 +36,11 @@ pub struct Bind {
     pub name_span: SpanId,
     params: Option<Parameters>,
     value: BindValue,
-    /// Method receiver — [`Expr::TypeTag`] (`type_tag_expr_from_tag`).
+    /// Method receiver — structural type [`Expr`] (`TypeNominal` / …).
     receiver_type: Option<Box<Spanned<Expr>>>,
     return_type_name: Option<Intern<String>>,
     /// Explicit capitalized return type annotation, e.g. `Str` in `foo() Str: expr`.
-    /// [`Expr::TypeTag`] (`type_tag_expr_from_tag`).
+    /// Structural type [`Expr`].
     pub return_tag: Option<Box<Spanned<Expr>>>,
     /// Explicit type annotation with value args, e.g. `Maybe(3)` in `val Maybe(3): Some(3)`.
     pub type_annotation: Option<(Intern<String>, Vec<Spanned<Expr>>)>,
@@ -152,15 +131,14 @@ impl Bind {
         self.receiver_type.is_some()
     }
 
-    pub fn receiver_type(&self) -> Option<&Tag> {
-        self.receiver_type
-            .as_ref()
-            .and_then(|b| type_tag_as_tag(&b.0))
+    pub fn receiver_type_surface(&self) -> Option<&Spanned<Expr>> {
+        self.receiver_type.as_deref()
     }
 
     pub fn method_name(&self) -> Option<MethodName<'_>> {
-        self.receiver_type().map(|t| MethodName {
-            receiver: t,
+        let sp = self.receiver_type.as_deref()?;
+        Some(MethodName {
+            receiver: &sp.0,
             name: self.name,
         })
     }

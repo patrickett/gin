@@ -8,7 +8,7 @@ pub enum IfCondition {
     Bool(Box<Spanned<Expr>>),
     Pattern {
         subject: Box<Spanned<Expr>>,
-        /// Parsed `is …` pattern — [`Expr::IsPattern`] (see [`is_pattern_as_tag`](crate::is_pattern_as_tag)).
+        /// Parsed `is …` pattern — structural type [`Expr`](crate::Expr) (`TypeNominal` / `TypeQualified` / `TypeGeneric`).
         pattern: Box<Spanned<Expr>>,
     },
 }

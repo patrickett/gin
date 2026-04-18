@@ -1,6 +1,6 @@
 use ast::{
     BindValue, Expr, FileAst, FormatPart, IfCondition, LoopEnum, ParameterKind, Parameters,
-    SpanTable, Tag, WhenArm,
+    SpanTable, WhenArm,
 };
 
 #[derive(Debug, Clone)]
@@ -111,25 +111,32 @@ pub fn fn_call_at(ast: &FileAst, byte_pos: usize) -> Option<String> {
     best.map(|(name, _)| name)
 }
 
-fn find_call_in_tag_pattern(
-    tag: &Tag,
+fn find_call_in_type_surface(
+    expr: &Expr,
+    span_id: ast::SpanId,
     span_table: &SpanTable,
     byte_pos: usize,
     best: &mut Option<(String, usize)>,
 ) {
-    let Tag::Generic(_, params, _) = tag else {
+    let span = span_table.get(span_id);
+    if byte_pos < span.start || byte_pos > span.end {
         return;
-    };
-    for pk in params.values() {
-        match pk {
-            ParameterKind::Default(e) => {
-                find_call_in_expr(&e.0, e.1, span_table, byte_pos, best);
+    }
+    match expr {
+        Expr::TypeGeneric { params, .. } => {
+            for (_, pk) in params {
+                match pk {
+                    ParameterKind::Default(e) => {
+                        find_call_in_expr(&e.0, e.1, span_table, byte_pos, best);
+                    }
+                    ParameterKind::Tagged(sp) => {
+                        find_call_in_type_surface(&sp.0, sp.1, span_table, byte_pos, best);
+                    }
+                    ParameterKind::Generic => {}
+                }
             }
-            ParameterKind::Tagged(inner) => {
-                find_call_in_tag_pattern(inner, span_table, byte_pos, best);
-            }
-            ParameterKind::Generic => {}
         }
+        _ => {}
     }
 }
 
@@ -263,9 +270,10 @@ fn find_call_in_expr(
                 find_call_in_expr(&e.0, e.1, span_table, byte_pos, best);
             }
         }
-        Expr::IsPattern(t) | Expr::TypeTag(t) => {
-            find_call_in_tag_pattern(t, span_table, byte_pos, best);
+        Expr::TypeGeneric { span, .. } => {
+            find_call_in_type_surface(expr, *span, span_table, byte_pos, best);
         }
+        Expr::TypeNominal(..) | Expr::TypeQualified(_) => {}
         Expr::Lit(_) | Expr::SelfRef(_) | Expr::AnonymousTag(..) | Expr::Asm(_) => {}
     }
 }
@@ -298,7 +306,7 @@ pub fn format_params(params: &Parameters) -> String {
         .iter()
         .map(|(name, kind)| match kind {
             ParameterKind::Generic => name.to_string(),
-            ParameterKind::Tagged(tag) => format!("{name} {tag}"),
+            ParameterKind::Tagged(_) => format!("{name}{kind}"),
             ParameterKind::Default(expr) => format!("{name}: {expr:?}"),
         })
         .collect();

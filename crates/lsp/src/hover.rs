@@ -43,9 +43,7 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
             result.push_str(&crate::format_params(params));
         }
         if let Some(sp) = &bind.return_tag {
-            if let Some(tag) = ast::type_tag_as_tag(&sp.0) {
-                result.push_str(&format!(" {tag}"));
-            }
+            result.push_str(&format!(" {}", ast::format_type_surface(&sp.0)));
         }
         result.push_str("\n```");
         if let Some(doc) = bind.doc_comment() {
@@ -72,7 +70,8 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
             && let Some(kind) = params.get(&internment::Intern::<String>::from_ref(&word))
         {
             let label = match kind {
-                ast::ParameterKind::Tagged(tag) => format!("{word} {tag}"),
+                // `ParameterKind::Display` for `Tagged` already includes a leading space before the type.
+                ast::ParameterKind::Tagged(_) => format!("{word}{kind}"),
                 ast::ParameterKind::Default(expr) => format!("{word}: {expr:?}"),
                 ast::ParameterKind::Generic => word.clone(),
             };
@@ -329,22 +328,26 @@ pub fn find_references(ast: &ast::FileAst, name: &str) -> Vec<std::ops::Range<us
     out
 }
 
-fn collect_refs_tag_pattern(
-    tag: &ast::Tag,
+fn collect_refs_type_surface(
+    expr: &ast::Expr,
     name: &str,
     span_table: &ast::SpanTable,
     out: &mut Vec<std::ops::Range<usize>>,
 ) {
-    use ast::{ParameterKind, Tag};
-    let Tag::Generic(_, params, _) = tag else {
-        return;
-    };
-    for pk in params.values() {
-        match pk {
-            ParameterKind::Default(e) => collect_refs_expr(&e.0, name, span_table, out),
-            ParameterKind::Tagged(inner) => collect_refs_tag_pattern(inner, name, span_table, out),
-            ParameterKind::Generic => {}
+    use ast::{Expr, ParameterKind};
+    match expr {
+        Expr::TypeGeneric { params, .. } => {
+            for (_, pk) in params {
+                match pk {
+                    ParameterKind::Default(e) => collect_refs_expr(&e.0, name, span_table, out),
+                    ParameterKind::Tagged(sp) => {
+                        collect_refs_type_surface(&sp.0, name, span_table, out);
+                    }
+                    ParameterKind::Generic => {}
+                }
+            }
         }
+        _ => {}
     }
 }
 
@@ -423,9 +426,7 @@ fn collect_refs_expr(
                 ast::IfCondition::Bool(e) => collect_refs_expr(&e.0, name, span_table, out),
                 ast::IfCondition::Pattern { subject, pattern } => {
                     collect_refs_expr(&subject.0, name, span_table, out);
-                    if let Some(t) = ast::is_pattern_as_tag(&pattern.0) {
-                        collect_refs_tag_pattern(t, name, span_table, out);
-                    }
+                    collect_refs_type_surface(&pattern.0, name, span_table, out);
                 }
             }
             for e in &if_expr.body {
@@ -483,7 +484,8 @@ fn collect_refs_expr(
                 collect_refs_expr(e, name, span_table, out);
             }
         }
-        Expr::IsPattern(t) | Expr::TypeTag(t) => collect_refs_tag_pattern(t, name, span_table, out),
+        Expr::TypeGeneric { .. } => collect_refs_type_surface(expr, name, span_table, out),
+        Expr::TypeNominal(..) | Expr::TypeQualified(_) => {}
         Expr::Lit(_) | Expr::SelfRef(_) | Expr::Asm(_) => {}
     }
 }

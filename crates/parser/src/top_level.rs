@@ -3,8 +3,8 @@ use lexer::Token;
 use std::collections::HashSet;
 
 use ast::{
-    Bind, Declare, DeclareValue, Expr, FileAst, ImplBlock, ParameterKind, Spanned, Tag, Variant,
-    WhenArm, collapse_defs_for_platform, type_tag_expr_from_tag,
+    Bind, Declare, DeclareValue, Expr, FileAst, ImplBlock, ParameterKind, Spanned, Variant,
+    WhenArm, collapse_defs_for_platform, type_surface_mangle_name,
 };
 use indexmap::IndexMap;
 use internment::Intern;
@@ -220,12 +220,12 @@ fn parse_method_bind(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<To
         }
     }
 
-    let receiver_tag = match cursor.peek() {
+    let (recv_name, recv_span) = match cursor.peek() {
         Some(Token::Tag(n)) => {
             let name = cursor.intern(n);
             let span = cursor.peek_span()?;
             cursor.advance();
-            Tag::Nominal(name, span)
+            (name, span)
         }
         _ => return None,
     };
@@ -235,7 +235,10 @@ fn parse_method_bind(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<To
     }
 
     let bind = crate::expr::bind::parse_bind(cursor, expr_parser)?;
-    let bind = bind.with_receiver_type(Some(Box::new(type_tag_expr_from_tag(receiver_tag))));
+    let bind = bind.with_receiver_type(Some(Box::new(Spanned(
+        Expr::TypeNominal(recv_name, recv_span),
+        recv_span,
+    ))));
 
     Some(TopLevelValue::Bind(Box::new(bind)))
 }
@@ -252,18 +255,22 @@ fn collect_top_level(
             tags.insert(name, decl);
         }
         TopLevelValue::Bind(bind) => {
-            let name = if let Some(recv) = bind.receiver_type() {
-                Intern::<String>::new(format!("{}.{}", recv.name(), bind.name()))
+            let name = if let Some(sp) = bind.receiver_type_surface() {
+                Intern::<String>::new(format!(
+                    "{}.{}",
+                    type_surface_mangle_name(&sp.0),
+                    bind.name()
+                ))
             } else {
                 bind.name()
             };
             defs.entry(name).or_insert_with(Vec::new).push(*bind);
         }
         TopLevelValue::ImplBlock(block) => {
-            let recv = Box::new(type_tag_expr_from_tag(Tag::Nominal(
-                block.type_name,
+            let recv = Box::new(Spanned(
+                Expr::TypeNominal(block.type_name, block.type_name_span),
                 block.type_name_span,
-            )));
+            ));
             for (method_name, bind) in block.methods {
                 let bind = bind.with_receiver_type(Some(recv.clone()));
                 let mangled = Intern::<String>::new(format!(
@@ -296,7 +303,9 @@ fn generate_return_type_unions(
         let unique_tags: HashSet<_> = tag_buffer.drain(..).collect();
         let variants: Vec<Variant> = unique_tags
             .into_iter()
-            .map(|(name, span)| Variant::External(Tag::Nominal(name, span)))
+            .map(|(name, span)| {
+                Variant::External(Box::new(Spanned(Expr::TypeNominal(name, span), span)))
+            })
             .collect();
 
         if let Some(name) = bind.return_type_name() {
@@ -368,15 +377,13 @@ fn is_declare_from_offset(cursor: &TokenCursor, tag_offset: usize) -> bool {
 }
 
 fn extract_anonymous_tags_from_bind(bind: &Bind, tags: &mut Vec<(Intern<String>, SpanId)>) {
-    use ast::{BindValue, type_tag_as_tag};
+    use ast::BindValue;
 
-    if let Some(t) = bind.receiver_type() {
-        extract_anonymous_tags_from_is_pattern_tag(t, tags);
+    if let Some(sp) = bind.receiver_type_surface() {
+        extract_anonymous_tags_from_type_surface(&sp.0, tags);
     }
     if let Some(sp) = &bind.return_tag {
-        if let Some(t) = type_tag_as_tag(&sp.0) {
-            extract_anonymous_tags_from_is_pattern_tag(t, tags);
-        }
+        extract_anonymous_tags_from_type_surface(&sp.0, tags);
     }
 
     match bind.value() {
@@ -395,23 +402,27 @@ fn extract_anonymous_tags_from_bind(bind: &Bind, tags: &mut Vec<(Intern<String>,
     }
 }
 
-fn extract_anonymous_tags_from_is_pattern_tag(tag: &Tag, tags: &mut Vec<(Intern<String>, SpanId)>) {
-    match tag {
-        Tag::Nominal(name, span) => {
+fn extract_anonymous_tags_from_type_surface(
+    expr: &Expr,
+    tags: &mut Vec<(Intern<String>, SpanId)>,
+) {
+    match expr {
+        Expr::TypeNominal(name, span) => {
             tags.push((*name, *span));
         }
-        Tag::Qualified(_) => {}
-        Tag::Generic(_, params, _) => {
-            for pk in params.values() {
+        Expr::TypeQualified(_) => {}
+        Expr::TypeGeneric { params, .. } => {
+            for (_, pk) in params {
                 match pk {
                     ParameterKind::Default(e) => extract_anonymous_tags_from_expr(e, tags),
-                    ParameterKind::Tagged(inner) => {
-                        extract_anonymous_tags_from_is_pattern_tag(inner, tags);
+                    ParameterKind::Tagged(sp) => {
+                        extract_anonymous_tags_from_type_surface(&sp.0, tags);
                     }
                     ParameterKind::Generic => {}
                 }
             }
         }
+        _ => {}
     }
 }
 
@@ -484,8 +495,8 @@ fn extract_anonymous_tags_from_expr(expr: &Expr, tags: &mut Vec<(Intern<String>,
                 BindValue::Extern => {}
             }
         }
-        Expr::IsPattern(t) | Expr::TypeTag(t) => {
-            extract_anonymous_tags_from_is_pattern_tag(t, tags)
+        Expr::TypeNominal(..) | Expr::TypeQualified(_) | Expr::TypeGeneric { .. } => {
+            extract_anonymous_tags_from_type_surface(expr, tags);
         }
         _ => {}
     }

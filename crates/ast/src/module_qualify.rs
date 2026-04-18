@@ -3,6 +3,7 @@
 //!
 use crate::expr::AsmExpr;
 use crate::expr::{BindValue, Expr, FormatPart, IfCondition, IfExpr, Loop, WhenArm};
+use crate::parameter::ParameterKind;
 use crate::path::ModPath;
 use crate::span::Spanned;
 use crate::{Bind, DefMap, FileAst};
@@ -148,7 +149,19 @@ fn rewrite_expr(
                 rewrite_spanned_expr(a, old_names, qual_parts);
             }
         }
-        Expr::IsPattern(_) | Expr::TypeTag(_) => {}
+        Expr::TypeNominal(_, _) => {}
+        Expr::TypeQualified(path) => {
+            maybe_rewrite_fn_path(path, old_names, qual_parts);
+        }
+        Expr::TypeGeneric { params, .. } => {
+            for (_, pk) in params.iter_mut() {
+                match pk {
+                    ParameterKind::Default(e) => rewrite_spanned_expr(e, old_names, qual_parts),
+                    ParameterKind::Tagged(sp) => rewrite_spanned_expr(sp.as_mut(), old_names, qual_parts),
+                    ParameterKind::Generic => {}
+                }
+            }
+        }
         Expr::Range(r) => {
             rewrite_spanned_expr(&mut *r.start, old_names, qual_parts);
             rewrite_spanned_expr(&mut *r.end, old_names, qual_parts);

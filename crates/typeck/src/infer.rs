@@ -10,18 +10,19 @@
 //!   (tag types, function return types, local variable types).
 //! - [`LocalTypes`] abstracts over different local-variable representations so
 //!   inference works identically in typeck and codegen.
-//! - [`resolve_tag_from_map`] resolves a `Tag` AST node against a type map.
+//! - [`crate::r#type::resolve_type_expr_from_map`] resolves type-surface [`Expr`] nodes against a type map.
 //!
 //! For environment building, type checking, and diagnostics, see `type.rs`.
 
 use std::collections::HashMap;
 
 use ast::{
-    BinOp, Binary, Bind, BindValue, Expr, FnCall, Literal, ParameterKind, Spanned, Tag, TagCall,
-    WhenArm, WhenExpr, type_tag_as_tag,
+    BinOp, Binary, Bind, BindValue, Expr, FnCall, Literal, ParameterKind, Spanned, TagCall,
+    WhenArm, WhenExpr,
 };
 use internment::Intern;
 
+use crate::r#type::{is_type_surface, resolve_type_expr_from_map};
 use crate::{Ty, str_record_ty};
 
 /// Abstracts over different "local variable" type representations.
@@ -182,8 +183,8 @@ impl TyInfer for FnCall {
 impl TyInfer for Bind {
     fn infer_ty(&self, env: &TyInferEnv) -> Ty {
         if let Some(sp) = &self.return_tag {
-            if let Some(tag) = type_tag_as_tag(&sp.0) {
-                return resolve_tag_from_map(tag, env.tag_types);
+            if is_type_surface(&sp.0) {
+                return resolve_type_expr_from_map(&sp.0, env.tag_types);
             }
         }
 
@@ -199,9 +200,11 @@ impl TyInfer for Bind {
                 })
                 .collect(),
         };
-        if let Some(recv_tag) = self.receiver_type() {
-            let recv_ty = resolve_tag_from_map(recv_tag, env.tag_types);
-            locals.insert(Intern::<String>::from_ref("self"), recv_ty);
+        if let Some(sp) = self.receiver_type_surface() {
+            if is_type_surface(&sp.0) {
+                let recv_ty = resolve_type_expr_from_map(&sp.0, env.tag_types);
+                locals.insert(Intern::<String>::from_ref("self"), recv_ty);
+            }
         }
 
         let bind_env = TyInferEnv {
@@ -364,7 +367,9 @@ impl TyInfer for Expr {
             Expr::TupleLit(elems) => Ty::Tuple(elems.iter().map(|e| e.infer_ty(env)).collect()),
 
             // Only stored as `if` / `when` pattern payload or bind type position, not as a value.
-            Expr::IsPattern(_) | Expr::TypeTag(_) => Ty::Unit,
+            Expr::TypeNominal(..)
+            | Expr::TypeQualified(_)
+            | Expr::TypeGeneric { .. } => Ty::Unit,
         }
     }
 }
@@ -372,48 +377,6 @@ impl TyInfer for Expr {
 impl TyInfer for Spanned<Expr> {
     fn infer_ty(&self, env: &TyInferEnv) -> Ty {
         self.0.infer_ty(env)
-    }
-}
-
-/// Resolve a `Tag` to a concrete `Ty` using only the pre-built `tag_types` map.
-pub(crate) fn resolve_tag_from_map(tag: &Tag, tag_types: &HashMap<Intern<String>, Ty>) -> Ty {
-    match tag {
-        Tag::Nominal(name, _) => tag_types.get(name).cloned().unwrap_or(Ty::Int {
-            width: 64,
-            signed: true,
-            value: None,
-        }),
-        Tag::Generic(name, params, _) => match name.as_str() {
-            "Ptr" | "Ref" => {
-                let inner = params
-                    .values()
-                    .find_map(|kind| match kind {
-                        ParameterKind::Tagged(t) => Some(resolve_tag_from_map(t, tag_types)),
-                        _ => None,
-                    })
-                    .unwrap_or(Ty::Opaque(*name));
-                if name.as_str() == "Ptr" {
-                    Ty::Ptr {
-                        inner: Box::new(inner),
-                    }
-                } else {
-                    Ty::Ref {
-                        inner: Box::new(inner),
-                    }
-                }
-            }
-            _ => tag_types.get(name).cloned().unwrap_or(Ty::Opaque(*name)),
-        },
-        Tag::Qualified(path) => {
-            // For qualified types like Bool.True, we need to resolve them
-            // to the type of the variant. The type of a variant is the union type itself.
-            // E.g., Bool.True has type Bool (the union type)
-            let union_name = path.root;
-            tag_types
-                .get(&union_name)
-                .cloned()
-                .unwrap_or(Ty::Opaque(union_name))
-        }
     }
 }
 
@@ -427,7 +390,13 @@ fn resolve_parameter_kind_with(
     fn_return_types: &HashMap<Intern<String>, Ty>,
 ) -> Ty {
     match kind {
-        ParameterKind::Tagged(tag) => resolve_tag_from_map(tag, tag_types),
+        ParameterKind::Tagged(sp) => {
+            if is_type_surface(&sp.0) {
+                resolve_type_expr_from_map(&sp.0, tag_types)
+            } else {
+                Ty::Opaque(Intern::<String>::from_ref("?"))
+            }
+        }
         ParameterKind::Generic => Ty::Int {
             width: 64,
             signed: true,

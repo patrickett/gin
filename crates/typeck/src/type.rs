@@ -6,18 +6,18 @@
 //! - **[`TyEnv`]** — the owned type environment, built from parsed ASTs. Holds the
 //!   resolved `tag_types` and `fn_return_types` maps, plus a `variant_map` for union
 //!   lookups. Construction happens in [`TyEnv::from_multiple_file_asts`].
-//! - **Check methods** — [`check_unknowns`], [`check_bind`], [`check_expr`], [`check_tag`]
+//! - **Check methods** — [`check_unknowns`], [`check_bind`], [`check_expr`], plus type-surface checking on [`Expr`]
 //!   walk the AST and accumulate diagnostics for unknown names, type mismatches, etc.
 //!
 //! Pure type inference ("given an env, what type does this expression have?") lives in
 //! [`infer.rs`] and is accessed through [`TyInferEnv`] / the [`TyInfer`](crate::TyInfer) trait.
 //! This module provides [`TyEnv::infer_env`] to bridge between the two.
 
-use crate::{TyInfer, TyInferEnv, resolve_tag_from_map};
+use crate::{TyInfer, TyInferEnv};
 use ast::WhenArm;
 use ast::{
-    Bind, BindValue, DeclareValue, Expr, FileAst, FnCall, FormatPart, IfCondition, Loop,
-    ParameterKind, Spanned, Tag, is_pattern_as_tag, type_tag_as_tag,
+    type_surface_mangle_name, Bind, BindValue, DeclareValue, Expr, FileAst, FnCall, FormatPart,
+    IfCondition, Loop, ParameterKind, Spanned,
 };
 use i256::I256;
 use internment::Intern;
@@ -33,7 +33,55 @@ pub fn mangled_fn_call_name(call: &FnCall) -> Intern<String> {
     }
 }
 
-/// Resolved type — the canonical representation after resolving `Tag` names against declarations.
+pub(crate) fn is_type_surface(e: &Expr) -> bool {
+    matches!(
+        e,
+        Expr::TypeNominal(..) | Expr::TypeQualified(_) | Expr::TypeGeneric { .. }
+    )
+}
+
+pub(crate) fn resolve_type_expr_from_map(
+    e: &Expr,
+    tag_types: &HashMap<Intern<String>, Ty>,
+) -> Ty {
+    match e {
+        Expr::TypeNominal(name, _) => tag_types.get(name).cloned().unwrap_or(Ty::Int {
+            width: 64,
+            signed: true,
+            value: None,
+        }),
+        Expr::TypeGeneric { name, params, .. } => match name.as_str() {
+            "Ptr" | "Ref" => {
+                let inner = params
+                    .iter()
+                    .find_map(|(_, kind)| match kind {
+                        ParameterKind::Tagged(sp) => {
+                            Some(resolve_type_expr_from_map(&sp.0, tag_types))
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(Ty::Opaque(*name));
+                if name.as_str() == "Ptr" {
+                    Ty::Ptr {
+                        inner: Box::new(inner),
+                    }
+                } else {
+                    Ty::Ref {
+                        inner: Box::new(inner),
+                    }
+                }
+            }
+            _ => tag_types.get(name).cloned().unwrap_or(Ty::Opaque(*name)),
+        },
+        Expr::TypeQualified(path) => tag_types
+            .get(&path.root)
+            .cloned()
+            .unwrap_or(Ty::Opaque(path.root)),
+        _ => Ty::Opaque(Intern::<String>::from_ref("?")),
+    }
+}
+
+/// Resolved type — the canonical representation after resolving declared type names against declarations.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ty {
     Int {
@@ -241,9 +289,14 @@ impl TyEnv {
         }
     }
 
-    /// Resolve an AST `Tag` to a `Ty`.
-    pub fn resolve_tag(&self, tag: &Tag) -> Ty {
-        resolve_tag_from_map(tag, &self.tag_types)
+    /// Resolve a type-surface [`Expr`] to a `Ty` using this environment's `tag_types`.
+    pub fn resolve_type_expr(&self, e: &Expr) -> Ty {
+        resolve_type_expr_from_map(e, &self.tag_types)
+    }
+
+    /// Resolve a type-surface [`Expr`] only when `e` is a nominal, qualified, or generic type form.
+    pub fn resolve_type_surface(&self, e: &Expr) -> Option<Ty> {
+        is_type_surface(e).then(|| resolve_type_expr_from_map(e, &self.tag_types))
     }
 
     /// Resolve a `ParameterKind` to a `Ty`.
@@ -251,7 +304,13 @@ impl TyEnv {
     /// This consolidates the common pattern of converting parameters to their types.
     fn resolve_parameter_kind(&self, kind: &ParameterKind) -> Ty {
         match kind {
-            ParameterKind::Tagged(tag) => self.resolve_tag(tag),
+            ParameterKind::Tagged(sp) => {
+                if is_type_surface(&sp.0) {
+                    self.resolve_type_expr(&sp.0)
+                } else {
+                    Ty::Opaque(Intern::<String>::from_ref("?"))
+                }
+            }
             ParameterKind::Generic => Ty::Int {
                 width: 64,
                 signed: true,
@@ -509,21 +568,23 @@ fn range_bit_width(min: I256, max: I256) -> u8 {
     }
 }
 
-fn resolve_tag_ref(
-    tag: &Tag,
+fn resolve_type_expr_ref(
+    e: &Expr,
     raw: &HashMap<Intern<String>, &DeclareValue>,
     recursion_depth: usize,
 ) -> Ty {
-    match tag {
-        Tag::Nominal(name, _) => resolve_name(*name, raw, recursion_depth),
-        Tag::Generic(name, params, _) => match name.as_str() {
+    match e {
+        Expr::TypeNominal(name, _) => resolve_name(*name, raw, recursion_depth),
+        Expr::TypeGeneric { name, params, .. } => match name.as_str() {
             "Ptr" | "Ref" => {
                 let inner = params
-                    .values()
-                    .find_map(|kind| match kind {
-                        ParameterKind::Tagged(t) => {
-                            Some(resolve_tag_ref(t, raw, recursion_depth + 1))
-                        }
+                    .iter()
+                    .find_map(|(_, kind)| match kind {
+                        ParameterKind::Tagged(sp) => Some(resolve_type_expr_ref(
+                            &sp.0,
+                            raw,
+                            recursion_depth + 1,
+                        )),
                         _ => None,
                     })
                     .unwrap_or(Ty::Opaque(*name));
@@ -539,10 +600,11 @@ fn resolve_tag_ref(
             }
             _ => resolve_name(*name, raw, recursion_depth + 1),
         },
-        Tag::Qualified(path) => {
+        Expr::TypeQualified(path) => {
             // For qualified types like Bool.True, resolve the union type
             resolve_name(path.root, raw, recursion_depth)
         }
+        _ => Ty::Opaque(Intern::<String>::from_ref("?")),
     }
 }
 
@@ -567,7 +629,13 @@ fn resolve_name(
         return Ty::Opaque(name);
     }
     match raw.get(&name) {
-        Some(DeclareValue::Alias(tag)) => resolve_tag_ref(tag, raw, recursion_depth + 1),
+        Some(DeclareValue::Alias(sp)) => {
+            if is_type_surface(&sp.0) {
+                resolve_type_expr_ref(&sp.0, raw, recursion_depth + 1)
+            } else {
+                Ty::Opaque(name)
+            }
+        }
         Some(DeclareValue::Range(start, end)) => Ty::Int {
             width: range_bit_width(*start, *end),
             signed: start.is_negative(),
@@ -583,8 +651,12 @@ fn resolve_name(
                 .iter()
                 .map(|(field_name, kind)| {
                     let field_ty = match kind {
-                        ParameterKind::Tagged(tag) => {
-                            resolve_tag_ref(tag, raw, recursion_depth + 1)
+                        ParameterKind::Tagged(sp) => {
+                            if is_type_surface(&sp.0) {
+                                resolve_type_expr_ref(&sp.0, raw, recursion_depth + 1)
+                            } else {
+                                Ty::Opaque(*field_name)
+                            }
                         }
                         ParameterKind::Generic => Ty::Opaque(*field_name),
                         ParameterKind::Default(_) => Ty::Int {
@@ -601,16 +673,24 @@ fn resolve_name(
         Some(DeclareValue::Union { variants }) => {
             let resolved = variants
                 .iter()
-                .map(|v| {
-                    let tag = v.tag();
-                    let variant_name = Intern::<String>::from_ref(tag.name());
-                    let fields = match tag {
-                        Tag::Generic(_, params, _) if !params.is_empty() => params
+                .filter_map(|v| {
+                    let shape = &v.shape().0;
+                    if !is_type_surface(shape) {
+                        return None;
+                    }
+                    let variant_name =
+                        Intern::<String>::from_ref(type_surface_mangle_name(shape));
+                    let fields = match shape {
+                        Expr::TypeGeneric { params, .. } if !params.is_empty() => params
                             .iter()
                             .filter_map(|(field_name, kind)| match kind {
-                                ParameterKind::Tagged(inner) => Some((
+                                ParameterKind::Tagged(sp) => is_type_surface(&sp.0).then_some((
                                     *field_name,
-                                    Box::new(resolve_tag_ref(inner, raw, recursion_depth + 1)),
+                                    Box::new(resolve_type_expr_ref(
+                                        &sp.0,
+                                        raw,
+                                        recursion_depth + 1,
+                                    )),
                                 )),
                                 ParameterKind::Generic => {
                                     Some((*field_name, Box::new(Ty::Opaque(*field_name))))
@@ -620,7 +700,7 @@ fn resolve_name(
                             .collect(),
                         _ => vec![],
                     };
-                    (variant_name, fields)
+                    Some((variant_name, fields))
                 })
                 .collect();
             Ty::Union {
@@ -657,12 +737,13 @@ impl TyEnv {
         locals: &HashMap<Intern<String>, Ty>,
     ) {
         if let Some(sp) = &bind.return_tag {
-            if let Some(tag) = type_tag_as_tag(&sp.0) {
-                self.check_tag(tag, symptoms);
+            if is_type_surface(&sp.0) {
+                self.check_type_expr(&sp.0, symptoms);
                 if let Some(Ty::Union {
                     name: union_name,
                     variants,
-                }) = self.lookup_tag(Intern::<String>::from_ref(tag.name()))
+                }) = self
+                    .lookup_tag(Intern::<String>::from_ref(type_surface_mangle_name(&sp.0)))
                 {
                     let valid_variants: Vec<Intern<String>> =
                         variants.iter().map(|(vname, _)| *vname).collect();
@@ -772,8 +853,9 @@ impl TyEnv {
                             self.check_expr(body, symptoms, locals);
                         }
                         WhenArm::Is { pattern, body } => {
-                            if let Some(tag) = is_pattern_as_tag(&pattern.0) {
-                                let variant_name = Intern::<String>::from_ref(tag.name());
+                            if is_type_surface(&pattern.0) {
+                                let surface_name = type_surface_mangle_name(&pattern.0);
+                                let variant_name = Intern::<String>::from_ref(surface_name);
                                 match &subject_ty {
                                     Some(Ty::Union {
                                         name: union_name,
@@ -783,7 +865,7 @@ impl TyEnv {
                                         {
                                             symptoms.push(
                                                 TypeSymptom::NotAVariant {
-                                                    name: tag.name().to_string(),
+                                                    name: surface_name.to_string(),
                                                     union_name: union_name.to_string(),
                                                 }
                                                 .into_symptom(pattern.1),
@@ -794,14 +876,14 @@ impl TyEnv {
                                         if self.lookup_variant(variant_name).is_none() {
                                             symptoms.push(
                                                 TypeSymptom::UnknownTag {
-                                                    name: tag.name().to_string(),
+                                                    name: surface_name.to_string(),
                                                 }
                                                 .into_symptom(pattern.1),
                                             );
                                         }
                                     }
                                 }
-                                check_tag_pattern_default_exprs(tag, &mut |e| {
+                                check_type_pattern_default_exprs(&pattern.0, &mut |e| {
                                     self.check_expr(e, symptoms, locals);
                                 });
                             } else {
@@ -830,8 +912,8 @@ impl TyEnv {
                 IfCondition::Pattern { subject, pattern } => {
                     self.check_expr(subject, symptoms, locals);
                     let mut if_locals = locals.clone();
-                    if let Some(tag) = is_pattern_as_tag(&pattern.0) {
-                        if let Tag::Generic(_, params, _) = tag {
+                    if is_type_surface(&pattern.0) {
+                        if let Expr::TypeGeneric { params, .. } = &pattern.0 {
                             if_locals.extend(params.iter().filter_map(|(k, _)| {
                                 if k.as_str() != "_" {
                                     Some((*k, Ty::Opaque(*k)))
@@ -840,7 +922,7 @@ impl TyEnv {
                                 }
                             }));
                         }
-                        check_tag_pattern_default_exprs(tag, &mut |e| {
+                        check_type_pattern_default_exprs(&pattern.0, &mut |e| {
                             self.check_expr(e, symptoms, locals);
                         });
                     } else {
@@ -928,8 +1010,8 @@ impl TyEnv {
                     self.check_expr(arg, symptoms, locals);
                 }
             }
-            Expr::IsPattern(t) | Expr::TypeTag(t) => {
-                check_tag_pattern_default_exprs(t, &mut |e| self.check_expr(e, symptoms, locals));
+            Expr::TypeNominal(..) | Expr::TypeQualified(_) | Expr::TypeGeneric { .. } => {
+                self.check_type_expr(expr, symptoms);
             }
             Expr::Lit(_)
             | Expr::SelfRef(_)
@@ -939,12 +1021,12 @@ impl TyEnv {
         }
     }
 
-    fn check_tag(&self, tag: &Tag, symptoms: &mut Vec<diagnostic::Symptom>) {
+    fn check_type_expr(&self, e: &Expr, symptoms: &mut Vec<diagnostic::Symptom>) {
         use diagnostic::SymptomLike;
         use diagnostic::type_::TypeSymptom;
 
-        match tag {
-            Tag::Nominal(name, span) => {
+        match e {
+            Expr::TypeNominal(name, span) => {
                 if self.lookup_tag(*name).is_none() {
                     symptoms.push(
                         TypeSymptom::UnknownTag {
@@ -954,7 +1036,7 @@ impl TyEnv {
                     );
                 }
             }
-            Tag::Generic(name, params, span) => {
+            Expr::TypeGeneric { name, params, span } => {
                 if self.lookup_tag(*name).is_none() {
                     symptoms.push(
                         TypeSymptom::UnknownTag {
@@ -963,13 +1045,15 @@ impl TyEnv {
                         .into_symptom(*span),
                     );
                 }
-                for kind in params.values() {
-                    if let ParameterKind::Tagged(inner) = kind {
-                        self.check_tag(inner, symptoms);
+                for (_, kind) in params {
+                    if let ParameterKind::Tagged(sp) = kind {
+                        if is_type_surface(&sp.0) {
+                            self.check_type_expr(&sp.0, symptoms);
+                        }
                     }
                 }
             }
-            Tag::Qualified(path) => {
+            Expr::TypeQualified(path) => {
                 if self.lookup_tag(path.root).is_none() {
                     symptoms.push(
                         TypeSymptom::UnknownTag {
@@ -979,32 +1063,59 @@ impl TyEnv {
                     );
                 }
             }
+            _ => {}
         }
     }
 }
 
-fn check_tag_pattern_default_exprs(tag: &Tag, check: &mut impl FnMut(&Spanned<Expr>)) {
-    let Tag::Generic(_, params, _) = tag else {
+fn check_type_pattern_default_exprs(surface: &Expr, check: &mut impl FnMut(&Spanned<Expr>)) {
+    let Expr::TypeGeneric { params, .. } = surface else {
         return;
     };
-    for pk in params.values() {
+    for (_, pk) in params {
         match pk {
             ParameterKind::Default(e) => check(e),
-            ParameterKind::Tagged(inner) => check_tag_pattern_default_exprs(inner, check),
+            ParameterKind::Tagged(sp) => check_type_surface_defaults(&sp.0, check),
             ParameterKind::Generic => {}
         }
     }
 }
 
-fn tag_references_name(tag: &Tag, name: Intern<String>) -> bool {
-    let Tag::Generic(_, params, _) = tag else {
+fn check_type_surface_defaults(e: &Expr, check: &mut impl FnMut(&Spanned<Expr>)) {
+    match e {
+        Expr::TypeGeneric { params, .. } => {
+            for (_, pk) in params {
+                match pk {
+                    ParameterKind::Default(e) => check(e),
+                    ParameterKind::Tagged(sp) => check_type_surface_defaults(&sp.0, check),
+                    ParameterKind::Generic => {}
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn type_pattern_references_name(surface: &Expr, name: Intern<String>) -> bool {
+    let Expr::TypeGeneric { params, .. } = surface else {
         return false;
     };
-    params.values().any(|pk| match pk {
+    params.iter().any(|(_, pk)| match pk {
         ParameterKind::Default(e) => expr_references_name(&e.0, name),
-        ParameterKind::Tagged(inner) => tag_references_name(inner, name),
+        ParameterKind::Tagged(sp) => type_surface_references_name(&sp.0, name),
         ParameterKind::Generic => false,
     })
+}
+
+fn type_surface_references_name(e: &Expr, name: Intern<String>) -> bool {
+    match e {
+        Expr::TypeGeneric { params, .. } => params.iter().any(|(_, pk)| match pk {
+            ParameterKind::Default(e) => expr_references_name(&e.0, name),
+            ParameterKind::Tagged(sp) => type_surface_references_name(&sp.0, name),
+            ParameterKind::Generic => false,
+        }),
+        _ => false,
+    }
 }
 
 fn expr_references_name(expr: &Expr, name: Intern<String>) -> bool {
@@ -1039,7 +1150,7 @@ fn expr_references_name(expr: &Expr, name: Intern<String>) -> bool {
                         expr_references_name(condition, name) || expr_references_name(body, name)
                     }
                     WhenArm::Is { pattern, body } => {
-                        is_pattern_as_tag(&pattern.0).is_some_and(|t| tag_references_name(t, name))
+                        type_pattern_references_name(&pattern.0, name)
                             || expr_references_name(&body.0, name)
                     }
                     WhenArm::Else(body) => expr_references_name(body, name),
@@ -1050,8 +1161,7 @@ fn expr_references_name(expr: &Expr, name: Intern<String>) -> bool {
                 IfCondition::Bool(c) => expr_references_name(c, name),
                 IfCondition::Pattern { subject, pattern } => {
                     expr_references_name(subject, name)
-                        || is_pattern_as_tag(&pattern.0)
-                            .is_some_and(|t| tag_references_name(t, name))
+                        || type_pattern_references_name(&pattern.0, name)
                 }
             };
             cond_ref || if_expr.body.iter().any(|e| expr_references_name(e, name))
@@ -1096,7 +1206,8 @@ fn expr_references_name(expr: &Expr, name: Intern<String>) -> bool {
         Expr::Range(range) => {
             expr_references_name(&range.start, name) || expr_references_name(&range.end, name)
         }
-        Expr::IsPattern(t) | Expr::TypeTag(t) => tag_references_name(t, name),
+        Expr::TypeGeneric { .. } => type_surface_references_name(expr, name),
+        Expr::TypeNominal(..) | Expr::TypeQualified(_) => false,
         Expr::Lit(_)
         | Expr::SelfRef(_)
         | Expr::AnonymousTag(..)

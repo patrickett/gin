@@ -3,14 +3,14 @@ use lexer::Token;
 
 use ast::{
     ArchTarget, Bind, BindAttributes, BindValue, Complexity, ComplexityExpr, DocComment, Expr,
-    ModPath, OsTarget, ParameterKind, Parameters, Return, Spanned, Tag, type_tag_expr_from_tag,
+    ModPath, OsTarget, ParameterKind, Parameters, Return, Spanned, type_surface_mangle_name,
 };
 
 use super::ExprFn;
 use super::control::parse_return;
 use crate::cursor::TokenCursor;
 use crate::path::{parse_id, parse_tag_variant_path};
-use crate::tag::parse_tag;
+use crate::tag::parse_type_expr;
 
 type ReturnTypePart = (
     Option<Intern<String>>,
@@ -328,9 +328,10 @@ fn parse_return_type_part(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Retu
                     return (None, None, Some((variant_name, args)), Some(path));
                 }
             }
+            let span = path.span;
             return (
                 None,
-                Some(Box::new(type_tag_expr_from_tag(Tag::Qualified(path)))),
+                Some(Box::new(Spanned(Expr::TypeQualified(path), span))),
                 None,
                 None,
             );
@@ -358,9 +359,7 @@ fn parse_return_type_part(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Retu
 
     (
         None,
-        Some(Box::new(type_tag_expr_from_tag(Tag::Nominal(
-            name, name_span,
-        )))),
+        Some(Box::new(Spanned(Expr::TypeNominal(name, name_span), name_span))),
         None,
         None,
     )
@@ -456,9 +455,9 @@ fn parse_one_param(
 ) -> Option<(Intern<String>, ParameterKind)> {
     // Positional: bare Tag → (tag_name, ParameterKind::Tagged(tag))
     if matches!(cursor.peek(), Some(Token::Tag(_))) {
-        let tag = parse_tag(cursor, expr_parser)?;
-        let key = Intern::<String>::from_ref(tag.name());
-        return Some((key, ParameterKind::Tagged(tag)));
+        let sp = parse_type_expr(cursor, expr_parser)?;
+        let key = Intern::<String>::from_ref(type_surface_mangle_name(&sp.0));
+        return Some((key, ParameterKind::Tagged(Box::new(sp))));
     }
 
     // Named: id [Tag | : expr]
@@ -473,8 +472,8 @@ fn parse_one_param(
 
     // id Tag → tagged parameter
     if matches!(cursor.peek(), Some(Token::Tag(_))) {
-        let tag = parse_tag(cursor, expr_parser)?;
-        return Some((name, ParameterKind::Tagged(tag)));
+        let sp = parse_type_expr(cursor, expr_parser)?;
+        return Some((name, ParameterKind::Tagged(Box::new(sp))));
     }
 
     // id: expr → default value

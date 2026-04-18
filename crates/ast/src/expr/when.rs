@@ -32,7 +32,7 @@ pub enum WhenArm {
         condition: Box<Spanned<Expr>>,
         body: Box<Spanned<Expr>>,
     },
-    /// Pattern match: `is <tag> then <body>` — [`Expr::IsPattern`] on the pattern field.
+    /// Pattern match: `is <type> then <body>` — structural type [`Expr`](crate::Expr) on the pattern field.
     Is {
         pattern: Box<Spanned<Expr>>,
         body: Box<Spanned<Expr>>,

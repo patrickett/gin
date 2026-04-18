@@ -1,12 +1,11 @@
 use lexer::Token;
 
-use ast::{
-    Expr, FnCall, ForInLoop, IfCondition, IfExpr, Loop, ModPath, Return, Spanned, WhenArm,
-    WhenExpr, WhileLoop, is_pattern_expr_from_tag,
-};
+use ast::{Expr, FnCall, ForInLoop, IfCondition, IfExpr, Loop, ModPath, Return, Spanned, WhenArm,
+    WhenExpr, WhileLoop};
 
 use super::ExprFn;
 use crate::cursor::TokenCursor;
+use crate::tag::parse_type_expr;
 
 fn can_start_expr(token: &Token) -> bool {
     matches!(
@@ -145,10 +144,10 @@ pub fn parse_if_expr(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<If
     let cond_expr = expr_parser(cursor);
 
     let condition = if cursor.eat(&Token::Is) {
-        let tag = crate::tag::parse_is_pattern_tag(cursor, expr_parser)?;
+        let pattern = parse_type_expr(cursor, expr_parser)?;
         IfCondition::Pattern {
             subject: Box::new(cond_expr),
-            pattern: Box::new(is_pattern_expr_from_tag(tag)),
+            pattern: Box::new(pattern),
         }
     } else {
         IfCondition::Bool(Box::new(cond_expr))
@@ -274,7 +273,7 @@ fn parse_when_is_arms(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<V
             break;
         }
 
-        let tag = crate::tag::parse_is_pattern_tag(cursor, expr_parser)?;
+        let pattern = parse_type_expr(cursor, expr_parser)?;
 
         let indented = cursor.eat(&Token::Indent);
 
@@ -285,7 +284,7 @@ fn parse_when_is_arms(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<V
 
         let body = expr_parser(cursor);
         arms.push(WhenArm::Is {
-            pattern: Box::new(is_pattern_expr_from_tag(tag)),
+            pattern: Box::new(pattern),
             body: Box::new(body),
         });
 

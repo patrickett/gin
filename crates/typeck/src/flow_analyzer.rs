@@ -1,4 +1,5 @@
 use crate::TyInfer;
+use crate::r#type::is_type_surface;
 use crate::flow::{
     Bound, CmpOp, ConstValue, FlowAnalysis, FlowContext, ImpossibleCheck, IndexOutOfBounds,
     TypeConstraint,
@@ -7,8 +8,8 @@ use crate::r#type::{Ty, TyEnv};
 use ast::SpanId;
 use ast::Spanned;
 use ast::{
-    Bind, BindValue, Expr, FileAst, FnCall, IfCondition, IfExpr, Loop, Tag, WhenArm, WhenExpr,
-    for_loop_pattern_names, is_pattern_as_tag, tag_pattern_binding_names,
+    type_surface_mangle_name, Bind, BindValue, Expr, FileAst, FnCall, IfCondition, IfExpr, Loop,
+    WhenArm, WhenExpr, for_loop_pattern_names, pattern_type_binding_names,
 };
 use internment::Intern;
 use std::collections::{HashMap, HashSet};
@@ -162,10 +163,10 @@ impl<'a> FlowAnalyzer<'a> {
     ///
     /// e.g., if `val` holds `Some(3)` and the pattern is `Some(v)`, sets `v = 3`.
     /// Used for `if val is …` and `when val is … then …` pattern arms.
-    fn extract_pattern_constants(&mut self, subject_var: Intern<String>, pattern: &Tag) {
-        let tag_name = Intern::<String>::from_ref(pattern.name());
+    fn extract_pattern_constants(&mut self, subject_var: Intern<String>, pattern: &Expr) {
+        let tag_name = Intern::<String>::from_ref(type_surface_mangle_name(pattern));
         let params = match pattern {
-            Tag::Generic(_, params, _) => params,
+            Expr::TypeGeneric { params, .. } => params,
             _ => return,
         };
 
@@ -188,10 +189,10 @@ impl<'a> FlowAnalyzer<'a> {
         }
     }
 
-    /// Register names from `ast::tag_pattern_binding_names` in `in_scope`; pass the returned
+    /// Register names from `ast::pattern_type_binding_names` in `in_scope`; pass the returned
     /// list to `pop_tag_pattern_bindings` after analyzing the pattern arm body.
-    fn push_tag_pattern_bindings(&mut self, tag: &Tag) -> Vec<Intern<String>> {
-        let names = tag_pattern_binding_names(tag);
+    fn push_pattern_bindings(&mut self, pat: &Expr) -> Vec<Intern<String>> {
+        let names = pattern_type_binding_names(pat);
         for n in &names {
             self.in_scope.insert(*n);
         }
@@ -212,7 +213,7 @@ impl<'a> FlowAnalyzer<'a> {
             }
         }
         // Add self if this is a method
-        if bind.receiver_type().is_some() {
+        if bind.is_method() {
             self.in_scope.insert(Intern::<String>::from_ref("self"));
         }
     }
@@ -349,8 +350,10 @@ impl<'a> FlowAnalyzer<'a> {
             Expr::AnonymousTag(..) => {}
             Expr::SelfRef(_) => {}
 
-            // Only appears as `if`/`when` pattern or bind type payload (parsed separately).
-            Expr::IsPattern(_) | Expr::TypeTag(_) => {}
+            // Only appears as `if`/`when` pattern, bind type payload, or type-parameter syntax.
+            Expr::TypeNominal(..)
+            | Expr::TypeQualified(_)
+            | Expr::TypeGeneric { .. } => {}
 
             // Literals and other expressions.
             Expr::Lit(_) => {}
@@ -387,20 +390,21 @@ impl<'a> FlowAnalyzer<'a> {
             IfCondition::Pattern { subject, pattern } => {
                 self.analyze_spanned_expr(subject);
 
-                let Some(tag) = is_pattern_as_tag(&pattern.0) else {
+                if !is_type_surface(&pattern.0) {
                     self.push_context();
                     for expr in &if_expr.body {
                         self.analyze_spanned_expr(expr);
                     }
                     self.pop_context();
                     return;
-                };
+                }
 
                 // Extract variable name from subject if it's a simple variable reference
                 let var_name = self.extract_var_name(subject);
 
                 if let Some(var) = var_name {
-                    let variant_name = Intern::<String>::from_ref(tag.name());
+                    let variant_name =
+                        Intern::<String>::from_ref(type_surface_mangle_name(&pattern.0));
 
                     // Look up which union this variant belongs to
                     if let Some((union_name, _, _)) = self.ty_env.lookup_variant(variant_name) {
@@ -421,9 +425,9 @@ impl<'a> FlowAnalyzer<'a> {
                         self.push_context();
                         self.current_context_mut().narrow(var, constraint.clone());
 
-                        let pat_bindings = self.push_tag_pattern_bindings(tag);
+                        let pat_bindings = self.push_pattern_bindings(&pattern.0);
                         // Extract pattern variables from known constant value
-                        self.extract_pattern_constants(var, tag);
+                        self.extract_pattern_constants(var, &pattern.0);
 
                         // Every gin if block always ends with a `return` (syntax requirement),
                         // so any if block unconditionally exits the function early.
@@ -445,7 +449,7 @@ impl<'a> FlowAnalyzer<'a> {
                     } else {
                         // Unknown variant, analyze body without narrowing
                         self.push_context();
-                        let pat_bindings = self.push_tag_pattern_bindings(tag);
+                        let pat_bindings = self.push_pattern_bindings(&pattern.0);
                         for expr in &if_expr.body {
                             self.analyze_spanned_expr(expr);
                         }
@@ -455,7 +459,7 @@ impl<'a> FlowAnalyzer<'a> {
                 } else {
                     // Complex subject, analyze body without narrowing
                     self.push_context();
-                    let pat_bindings = self.push_tag_pattern_bindings(tag);
+                    let pat_bindings = self.push_pattern_bindings(&pattern.0);
                     for expr in &if_expr.body {
                         self.analyze_spanned_expr(expr);
                     }
@@ -477,13 +481,14 @@ impl<'a> FlowAnalyzer<'a> {
             for arm in &when_expr.arms {
                 match arm {
                     WhenArm::Is { pattern, body } => {
-                        let Some(tag) = is_pattern_as_tag(&pattern.0) else {
+                        if !is_type_surface(&pattern.0) {
                             self.push_context();
                             self.analyze_spanned_expr(body);
                             self.pop_context();
                             continue;
-                        };
-                        let variant_name = Intern::<String>::from_ref(tag.name());
+                        }
+                        let variant_name =
+                            Intern::<String>::from_ref(type_surface_mangle_name(&pattern.0));
 
                         if let Some((union_name, _, _)) = self.ty_env.lookup_variant(variant_name) {
                             let constraint = TypeConstraint::IsVariant(union_name, variant_name);
@@ -506,9 +511,9 @@ impl<'a> FlowAnalyzer<'a> {
                             if let Some(var) = var_name {
                                 self.current_context_mut().narrow(var, constraint);
                             }
-                            let pat_bindings = self.push_tag_pattern_bindings(tag);
+                            let pat_bindings = self.push_pattern_bindings(&pattern.0);
                             if let Some(var) = var_name {
-                                self.extract_pattern_constants(var, tag);
+                                self.extract_pattern_constants(var, &pattern.0);
                             }
                             self.analyze_spanned_expr(body);
                             self.pop_tag_pattern_bindings(&pat_bindings);
@@ -516,9 +521,9 @@ impl<'a> FlowAnalyzer<'a> {
                         } else {
                             // Unknown variant, analyze without narrowing
                             self.push_context();
-                            let pat_bindings = self.push_tag_pattern_bindings(tag);
+                            let pat_bindings = self.push_pattern_bindings(&pattern.0);
                             if let Some(var) = var_name {
-                                self.extract_pattern_constants(var, tag);
+                                self.extract_pattern_constants(var, &pattern.0);
                             }
                             self.analyze_spanned_expr(body);
                             self.pop_tag_pattern_bindings(&pat_bindings);

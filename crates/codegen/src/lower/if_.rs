@@ -1,5 +1,5 @@
 use crate::{prelude::*, ty_to_mlir};
-use ast::is_pattern_as_tag;
+use ast::{type_surface_mangle_name, Expr};
 use internment::Intern;
 use typeck::{Ty, TyInfer};
 
@@ -31,15 +31,15 @@ impl<'c> Lower<'c> for IfExpr {
                 block.append_op(op)
             }
             IfCondition::Pattern { subject, pattern } => {
-                let tag = is_pattern_as_tag(&pattern.0).expect("if pattern is IsPattern");
                 let subject_val = subject.lower(ctx, block, symtab)?;
-                let variant_name = Intern::<String>::from_ref(tag.name());
+                let surface_name = type_surface_mangle_name(&pattern.0);
+                let variant_name = Intern::<String>::from_ref(surface_name);
                 let (_, expected_disc, _) = match ctx.ty_env.lookup_variant(variant_name) {
                     Some(v) => v,
                     None => {
                         ctx.emit_internal(format!(
                             "Unknown variant '{}' in if pattern",
-                            tag.name()
+                            surface_name
                         ));
                         return None;
                     }
@@ -73,11 +73,11 @@ impl<'c> Lower<'c> for IfExpr {
 
             // Bind pattern variables if this is a pattern condition.
             if let IfCondition::Pattern { subject, pattern } = &self.condition
-                && let Some(tag) = is_pattern_as_tag(&pattern.0)
-                && let Tag::Generic(_, params, _) = tag
+                && let Expr::TypeGeneric { params, .. } = &pattern.0
             {
                 let subject_val = subject.lower(ctx, block, symtab)?;
-                let variant_name = Intern::<String>::from_ref(tag.name());
+                let variant_name =
+                    Intern::<String>::from_ref(type_surface_mangle_name(&pattern.0));
                 let payload_fields = ctx
                     .ty_env
                     .lookup_variant(variant_name)

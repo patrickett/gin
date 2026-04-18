@@ -1,13 +1,11 @@
-// Unified surface (patterns, type-shaped positions, values) — **partial**:
+// Unified surface (patterns, type-shaped positions, values):
 //
 // - **Values** — [`Expr`] in `crates/ast/src/expr/mod.rs`.
 // - **For binders** — [`Expr`] on [`crate::expr::ForInLoop`] (`for_loop_pattern_names`).
-// - **`if` / `when` `is` patterns** — [`Expr::IsPattern`] (still wraps [`Tag`] today).
-// - **Bind return / receiver** — [`Expr::TypeTag`] (still wraps [`Tag`] today).
+// - **`if` / `when` `is` patterns** — structural type [`Expr`] (`TypeNominal` / `TypeQualified` / `TypeGeneric`).
+// - **Bind return / receiver** — same structural type [`Expr`].
 //
-// **TODO — full expression-shaped types (Approach B):** see
-// [`docs/TODO_type_expression_migration.md`](../../../docs/TODO_type_expression_migration.md)
-// (`ParameterKind::Tagged`, declare `Alias` / `Variant`, remove `ast::Tag`, single parse pipeline).
+// The parser builds these [`Expr`] nodes directly (`parser::tag::parse_type_expr`).
 //
 // Ref: https://matklad.github.io/2025/08/09/zigs-lovely-syntax.html#Everything-Is-an-Expression
 
@@ -15,7 +13,6 @@ use internment::Intern;
 
 use crate::expr::{Expr, FnCall};
 use crate::span::Spanned;
-use crate::tag::Tag;
 
 /// `for` loop patterns are a subset of expressions:
 /// - a simple identifier (`x` → `Expr::FnCall` with an empty path tail), or
@@ -50,52 +47,27 @@ pub fn for_loop_single_binding(pat: &Expr) -> Option<Intern<String>> {
     (names.len() == 1).then_some(names[0])
 }
 
-/// Wrap a parsed `is`-pattern [`Tag`] as the unified [`Expr`] surface ([`Expr::IsPattern`]).
-#[inline]
-pub fn is_pattern_expr_from_tag(tag: Tag) -> Spanned<Expr> {
-    let span = tag.span();
-    Spanned(Expr::IsPattern(Box::new(tag)), span)
-}
-
-/// If `expr` is [`Expr::IsPattern`], return the inner tag.
-#[inline]
-pub fn is_pattern_as_tag(expr: &Expr) -> Option<&Tag> {
-    match expr {
-        Expr::IsPattern(t) => Some(t),
-        _ => None,
+/// Root name used for mangling `Receiver.method` (nominal / generic name, or qualified last segment).
+pub fn type_surface_mangle_name(e: &Expr) -> &str {
+    match e {
+        Expr::TypeNominal(n, _) => n.as_str(),
+        Expr::TypeGeneric { name, .. } => name.as_str(),
+        Expr::TypeQualified(path) => path
+            .segments
+            .last()
+            .map(|s| s.as_str())
+            .unwrap_or(path.root.as_str()),
+        _ => "_",
     }
 }
 
-/// Wrap a tag from a **type** position (return type, receiver) as [`Expr::TypeTag`].
-#[inline]
-pub fn type_tag_expr_from_tag(tag: Tag) -> Spanned<Expr> {
-    let span = tag.span();
-    Spanned(Expr::TypeTag(Box::new(tag)), span)
-}
-
-#[inline]
-pub fn type_tag_as_tag(expr: &Expr) -> Option<&Tag> {
+/// Names bound by an `is <type>` pattern (`TypeGeneric` parameter keys), e.g. `Some(v)` → `[v]`.
+/// [`Expr::TypeNominal`] and [`Expr::TypeQualified`] bind no names.
+pub fn pattern_type_binding_names(expr: &Expr) -> Vec<Intern<String>> {
     match expr {
-        Expr::TypeTag(t) => Some(t),
-        _ => None,
-    }
-}
-
-/// [`Expr::IsPattern`] or [`Expr::TypeTag`] — both wrap a [`Tag`] on the unified `Expr` surface.
-#[inline]
-pub fn tag_surface_as_tag(expr: &Expr) -> Option<&Tag> {
-    match expr {
-        Expr::IsPattern(t) | Expr::TypeTag(t) => Some(t),
-        _ => None,
-    }
-}
-
-/// Names bound by an `is <tag>` pattern ([`Tag::Generic`] parameter keys), e.g. `Some(v)` → `[v]`.
-/// [`Tag::Nominal`] and [`Tag::Qualified`] bind no names.
-pub fn tag_pattern_binding_names(tag: &Tag) -> Vec<Intern<String>> {
-    match tag {
-        Tag::Generic(_, params, _) => params.keys().copied().collect(),
-        Tag::Nominal(_, _) | Tag::Qualified(_) => Vec::new(),
+        Expr::TypeGeneric { params, .. } => params.iter().map(|(k, _)| *k).collect(),
+        Expr::TypeNominal(..) | Expr::TypeQualified(_) => Vec::new(),
+        _ => Vec::new(),
     }
 }
 
@@ -104,8 +76,7 @@ mod tests {
     use super::*;
     use crate::parameter::ParameterKind;
     use crate::path::ModPath;
-    use crate::span::SpanId;
-    use indexmap::IndexMap;
+    use crate::span::{SpanId, Spanned};
 
     fn intern(s: &str) -> Intern<String> {
         Intern::new(s.to_owned())
@@ -150,43 +121,18 @@ mod tests {
     }
 
     #[test]
-    fn tag_pattern_binding_names_generic() {
-        let mut params = IndexMap::new();
-        params.insert(intern("payload"), ParameterKind::Generic);
-        let tag = Tag::Generic(intern("Some"), params, SpanId::new(0));
-        assert_eq!(tag_pattern_binding_names(&tag), vec![intern("payload")]);
+    fn pattern_type_binding_names_generic() {
+        let e = Expr::TypeGeneric {
+            name: intern("Some"),
+            params: vec![(intern("v"), ParameterKind::Generic)],
+            span: SpanId::new(0),
+        };
+        assert_eq!(pattern_type_binding_names(&e), vec![intern("v")]);
     }
 
     #[test]
-    fn tag_pattern_binding_names_nominal_empty() {
-        let tag = Tag::Nominal(intern("None"), SpanId::new(0));
-        assert!(tag_pattern_binding_names(&tag).is_empty());
-    }
-
-    #[test]
-    fn is_pattern_roundtrips_tag() {
-        let tag = Tag::Nominal(intern("None"), SpanId::new(7));
-        let Spanned(e, sp) = is_pattern_expr_from_tag(tag);
-        assert_eq!(sp, SpanId::new(7));
-        assert!(matches!(
-            is_pattern_as_tag(&e),
-            Some(Tag::Nominal(n, s)) if *n == intern("None") && *s == SpanId::new(7)
-        ));
-    }
-
-    #[test]
-    fn type_tag_roundtrips_tag() {
-        let tag = Tag::Nominal(intern("Str"), SpanId::new(3));
-        let Spanned(e, sp) = type_tag_expr_from_tag(tag);
-        assert_eq!(sp, SpanId::new(3));
-        assert!(matches!(
-            type_tag_as_tag(&e),
-            Some(Tag::Nominal(n, s)) if *n == intern("Str") && *s == SpanId::new(3)
-        ));
-        assert!(is_pattern_as_tag(&e).is_none());
-        assert!(matches!(
-            tag_surface_as_tag(&e),
-            Some(Tag::Nominal(n, s)) if *n == intern("Str") && *s == SpanId::new(3)
-        ));
+    fn type_surface_mangle_name_nominal() {
+        let e = Expr::TypeNominal(intern("U32"), SpanId::new(1));
+        assert_eq!(type_surface_mangle_name(&e), "U32");
     }
 }
