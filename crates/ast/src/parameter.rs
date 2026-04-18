@@ -30,4 +30,7 @@ pub enum ParamInfo {
     Default(Spanned<Expr>),
 }
 
+// TODO: store a SpanId per parameter so LSP rename/go-to-def/find-references
+// can resolve parameter declarations and body usages precisely.
+// e.g. IndexMap<Intern<String>, (ParameterKind, SpanId)>
 pub type Parameters = IndexMap<Intern<String>, ParameterKind>;

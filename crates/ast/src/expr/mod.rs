@@ -3,8 +3,17 @@ use internment::Intern;
 
 use crate::span::Spanned;
 
+// TODO: Closure capture syntax and lambda expressions
+//   1. Procedure calls — add labels + code forms (jump to known labels with args on stack).
+//   2. Closures — close over free variables by storing them alongside the code pointer.
+//      Requires free-variable analysis to annotate each lambda with its captured set.
+//   3. Proper tail calls — use jmp instead of call in tail position for constant-space recursion.
+// The Expr enum should eventually include a Lambda/Closure variant.
+
 mod bind;
 pub use bind::*;
+mod asm;
+pub use asm::*;
 pub mod format_string;
 pub use format_string::*;
 pub mod literal;
@@ -84,6 +93,8 @@ pub enum Expr {
     Deref(Box<Spanned<Expr>>),
     /// Unary negation: `-expr`.
     Negate(Box<Spanned<Expr>>),
+    /// Inline assembly: `asm("template", "constraints", args...)`
+    Asm(AsmExpr),
     /// Tuple literal: `(e1, e2, …)` — at least two elements.
     TupleLit(Vec<Spanned<Expr>>),
 }

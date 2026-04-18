@@ -37,6 +37,12 @@ pub enum BinOp {
     BitXor,
     ShiftLeft,
     ShiftRight,
+    // TODO: Add `LogicalAnd` and `LogicalOr` variants for short-circuiting boolean operators.
+    //
+    // Design: `and` and `or` are already tokenized as `Token::And` and `Token::Or`
+    // (crates/lexer/src/token.rs). They should be wired into the infix operator table
+    // in `try_infix_op` (crates/parser/src/expr/mod.rs:638) as control-flow operators
+    // that short-circuit, NOT as plain binary operators. Short-circuiting boolean operators ARE control flow
 }
 
 impl BinOp {
