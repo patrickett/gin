@@ -17,6 +17,7 @@ mod literal;
 // This also deduplicates `parse_body_exprs` and `can_start_expr` that currently
 // exist in both control.rs and bind.rs. See conversation history for full plan.
 
+use internment::Intern;
 use lexer::{Lexer, Token};
 
 use ast::span::{SpanId, SpanTable};
@@ -26,7 +27,7 @@ use crate::cursor::{self, ParseError, TokenCursor};
 
 use crate::unescape::unescape;
 use ast::ModPath;
-use ast::{BinOp, Binary, FnCall, FormatPart, FormatString, Range, TagCall};
+use ast::{AsmExpr, BinOp, Binary, FnCall, FormatPart, FormatString, Range, TagCall};
 
 pub type ExprFn = fn(&mut TokenCursor) -> Spanned<Expr>;
 
@@ -200,6 +201,7 @@ fn parse_atom(cursor: &mut TokenCursor) -> Spanned<Expr> {
         Some(Token::SelfInstance) => parse_self_ref(cursor),
         Some(Token::ParenOpen) => parse_tuple_lit_or_alloc_or_group(cursor),
         Some(Token::FormatStringDelim) => parse_format_string_expr(cursor),
+        Some(Token::Asm) => parse_asm_expr(cursor),
         Some(Token::Id(_)) => {
             // Fast check: Id followed directly by : or := is always a bind.
             // This avoids calling looks_like_bind (which scans ahead for complex
@@ -799,4 +801,82 @@ fn parse_format_string_expr(cursor: &mut TokenCursor) -> Spanned<Expr> {
             }
         }
     }
+}
+
+fn parse_asm_expr(cursor: &mut TokenCursor) -> Spanned<Expr> {
+    let start_span = cursor.peek_span().unwrap_or_else(|| cursor.current_span());
+    cursor.advance(); // eat Asm
+
+    // expect (
+    if !cursor.eat(&Token::ParenOpen) {
+        cursor.error("expected '(' after 'asm'", cursor.current_span());
+        return Spanned(
+            Expr::AnonymousTag(cursor.intern("Error"), start_span),
+            start_span,
+        );
+    }
+
+    // first string literal = template
+    let template = match cursor.advance() {
+        Some((Token::String(s), _span)) => Intern::<String>::from_ref(s),
+        _ => {
+            cursor.error("expected assembly template string", cursor.current_span());
+            return Spanned(
+                Expr::AnonymousTag(cursor.intern("Error"), start_span),
+                start_span,
+            );
+        }
+    };
+
+    // expect comma
+    if !cursor.eat(&Token::Comma) {
+        cursor.error("expected ',' after asm template", cursor.current_span());
+        return Spanned(
+            Expr::AnonymousTag(cursor.intern("Error"), start_span),
+            start_span,
+        );
+    }
+
+    // second string literal = constraints
+    let constraints = match cursor.advance() {
+        Some((Token::String(s), _span)) => Intern::<String>::from_ref(s),
+        _ => {
+            cursor.error("expected constraints string", cursor.current_span());
+            return Spanned(
+                Expr::AnonymousTag(cursor.intern("Error"), start_span),
+                start_span,
+            );
+        }
+    };
+
+    // parse optional comma-separated operand expressions
+    let mut operands = Vec::new();
+    while cursor.eat(&Token::Comma) {
+        // allow trailing comma before )
+        if cursor.is_at(&Token::ParenClose) {
+            break;
+        }
+        operands.push(parse_expression(cursor));
+    }
+
+    // expect )
+    if !cursor.eat(&Token::ParenClose) {
+        cursor.error("expected ')' after asm operands", cursor.current_span());
+        return Spanned(
+            Expr::AnonymousTag(cursor.intern("Error"), start_span),
+            start_span,
+        );
+    }
+
+    let end_span = last_consumed_span(cursor);
+
+    Spanned(
+        Expr::Asm(AsmExpr {
+            template,
+            constraints,
+            operands,
+            span: merge_spans(start_span, end_span, cursor),
+        }),
+        merge_spans(start_span, end_span, cursor),
+    )
 }

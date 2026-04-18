@@ -8,6 +8,7 @@ mod cursor;
 pub mod declare;
 pub mod expr;
 mod impl_block;
+pub mod module;
 pub mod path;
 pub mod query;
 pub mod tag;
@@ -21,4 +22,9 @@ pub use unescape::*;
 pub use expr::parse_source as parse_from_str;
 
 // Re-export full parsing API
-pub use query::{ParseOutput, extract_local_import_paths, parse_source_full};
+pub use query::{
+    ParseOutput, extract_local_import_paths, extract_package_import_paths, parse_source_full,
+};
+
+// Re-export module discovery
+pub use module::{ModuleTree, discover_module, discover_module_at};

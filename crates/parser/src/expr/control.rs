@@ -1,8 +1,8 @@
 use lexer::Token;
 
 use ast::{
-    Expr, ForInLoop, IfCondition, IfExpr, Loop, Pattern, Return, Spanned, Tag, WhenArm, WhenExpr,
-    WhileLoop,
+    Expr, FnCall, ForInLoop, IfCondition, IfExpr, Loop, ModPath, Return, Spanned, WhenArm,
+    WhenExpr, WhileLoop,
 };
 
 use super::ExprFn;
@@ -30,33 +30,46 @@ fn can_start_expr(token: &Token) -> bool {
     )
 }
 
-fn parse_simple_tag(cursor: &mut TokenCursor) -> Option<Tag> {
-    match cursor.peek()? {
-        Token::Tag(name) => {
-            let name_str = *name;
-            let span = cursor.peek_span()?;
-            cursor.advance();
-            Some(Tag::Nominal(cursor.intern(name_str), span))
-        }
-        _ => None,
-    }
-}
-
-fn parse_pattern(cursor: &mut TokenCursor) -> Option<Pattern> {
+/// Parse a `for` binder using the same token shape as before (ids and `(id, …)` only).
+/// Produces `Expr` so the AST matches the unified-syntax direction without routing
+/// through the full expression parser (keeps `for` headers cheap on hot paths).
+fn parse_for_pattern(cursor: &mut TokenCursor) -> Option<Spanned<Expr>> {
     match cursor.peek()? {
         Token::Id(name) => {
+            let name = *name;
+            let start_span = cursor.peek_span()?;
             let id = cursor.intern(name);
             cursor.advance();
-            Some(Pattern::Ident(id))
+            let end_span = cursor.last_consumed_span();
+            let span = cursor.merge_span(start_span, end_span);
+            Some(Spanned(
+                Expr::FnCall(FnCall {
+                    path: ModPath::new(id, Vec::new(), start_span),
+                    args: None,
+                }),
+                span,
+            ))
         }
         Token::ParenOpen => {
+            let start_span = cursor.peek_span()?;
             cursor.advance();
-            let mut pats = Vec::new();
+            let mut elems: Vec<Spanned<Expr>> = Vec::new();
             loop {
                 match cursor.peek() {
                     Some(Token::Id(name)) => {
-                        pats.push(Pattern::Ident(cursor.intern(name)));
+                        let name = *name;
+                        let id_span = cursor.peek_span()?;
+                        let id = cursor.intern(name);
                         cursor.advance();
+                        let end_id = cursor.last_consumed_span();
+                        let elem_span = cursor.merge_span(id_span, end_id);
+                        elems.push(Spanned(
+                            Expr::FnCall(FnCall {
+                                path: ModPath::new(id, Vec::new(), id_span),
+                                args: None,
+                            }),
+                            elem_span,
+                        ));
                         if cursor.is_at(&Token::Comma) {
                             cursor.advance();
                         } else {
@@ -68,7 +81,16 @@ fn parse_pattern(cursor: &mut TokenCursor) -> Option<Pattern> {
                 }
             }
             cursor.expect(&Token::ParenClose)?;
-            Some(Pattern::Tuple(pats))
+            let end_span = cursor.last_consumed_span();
+            let merged = cursor.merge_span(start_span, end_span);
+            match elems.len() {
+                0 => Some(Spanned(Expr::TupleLit(Vec::new()), merged)),
+                1 => {
+                    let Spanned(e, _) = elems.pop().unwrap();
+                    Some(Spanned(e, merged))
+                }
+                _ => Some(Spanned(Expr::TupleLit(elems), merged)),
+            }
         }
         _ => None,
     }
@@ -123,7 +145,7 @@ pub fn parse_if_expr(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<If
     let cond_expr = expr_parser(cursor);
 
     let condition = if cursor.eat(&Token::Is) {
-        let tag = parse_simple_tag(cursor)?;
+        let tag = crate::tag::parse_tag(cursor, expr_parser)?;
         IfCondition::Pattern {
             subject: Box::new(cond_expr),
             tag,
@@ -252,7 +274,7 @@ fn parse_when_is_arms(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<V
             break;
         }
 
-        let tag = parse_simple_tag(cursor)?;
+        let tag = crate::tag::parse_tag(cursor, expr_parser)?;
 
         let indented = cursor.eat(&Token::Indent);
 
@@ -278,7 +300,7 @@ pub fn parse_loop_expr(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<
     if cursor.is_at(&Token::For) {
         cursor.advance();
 
-        let pat = parse_pattern(cursor)?;
+        let pat = parse_for_pattern(cursor)?;
 
         if !cursor.eat(&Token::In) {
             cursor.error("expected 'in'", cursor.current_span());
@@ -299,7 +321,7 @@ pub fn parse_loop_expr(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<
         }
 
         Some(Loop::ForIn(ForInLoop {
-            pat,
+            pat: Box::new(pat),
             iter: Box::new(iter),
             exprs,
         }))
@@ -333,7 +355,14 @@ pub fn parse_return(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Ret
         return None;
     }
 
-    if cursor.peek().is_none() || cursor.is_at(&Token::Dedent) {
+    // Use raw peek_at(0) to check the token immediately after `return`
+    // without skipping newlines. If it's a newline or dedent, this is a
+    // bare return — the return value must be on the same line.
+    if matches!(
+        cursor.peek_at(0),
+        Some(Token::Newline) | Some(Token::Dedent)
+    ) || cursor.peek().is_none()
+    {
         return Some(Return(None));
     }
 

@@ -7,6 +7,7 @@
 use ast::span::{SpanId, SpanTable};
 use diagnostic::lex::LexSymptom;
 use lexer::{Lexer, Token};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::cursor::ParseError;
@@ -79,7 +80,8 @@ pub fn parse_source_full(src: &str) -> ParseOutput {
 /// Extract local import directory paths from the AST, relative to the given directory.
 ///
 /// Returns `(path, span)` pairs for each `.gin` file found in locally-imported
-/// directories. Package imports are skipped (not yet supported).
+/// directories. Package imports are skipped — use [`extract_package_import_paths`]
+/// to resolve those separately with access to the dependency map.
 pub fn extract_local_import_paths(ast: &FileAst, base_dir: &Path) -> Vec<(PathBuf, SpanId)> {
     let mut paths = Vec::new();
 
@@ -114,6 +116,80 @@ pub fn extract_local_import_paths(ast: &FileAst, base_dir: &Path) -> Vec<(PathBu
     }
 
     paths
+}
+
+/// Resolve package imports (e.g. `use core.io`) against a dependency map.
+///
+/// `dependencies` maps package names (as declared in `flask.json`) to their
+/// on-disk directory paths. For each `ImportSource::Package(path)`:
+///
+/// - With segments (e.g. `core.io`): looks for `{dep_dir}/io.gin` and
+///   `{dep_dir}/src/io.gin`, including both if they exist.
+/// - Without segments (e.g. `core`): includes every `.gin` file found in
+///   `{dep_dir}/` and `{dep_dir}/src/`.
+///
+/// Returns `(path, span)` pairs for each resolved `.gin` file.
+pub fn extract_package_import_paths(
+    ast: &FileAst,
+    dependencies: &HashMap<String, PathBuf>,
+) -> Vec<(PathBuf, SpanId)> {
+    let mut paths = Vec::new();
+
+    for import in ast.uses() {
+        for module_import in &import.0 {
+            if let ImportSource::Package(mod_path) = &module_import.source {
+                let dep_dir = match dependencies.get(mod_path.root.as_str()) {
+                    Some(dir) => dir,
+                    None => continue,
+                };
+
+                if mod_path.segments.is_empty() {
+                    // `use core` — include all .gin files in the package
+                    collect_gin_files_from_dir(dep_dir, mod_path.span, &mut paths);
+                    let src_dir = dep_dir.join("src");
+                    if src_dir.is_dir() {
+                        collect_gin_files_from_dir(&src_dir, mod_path.span, &mut paths);
+                    }
+                } else {
+                    // `use core.io` — resolve each segment to a file
+                    for segment in &mod_path.segments {
+                        try_push_gin_file(
+                            dep_dir.join(format!("{}.gin", segment)),
+                            mod_path.span,
+                            &mut paths,
+                        );
+                        try_push_gin_file(
+                            dep_dir.join("src").join(format!("{}.gin", segment)),
+                            mod_path.span,
+                            &mut paths,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    paths
+}
+
+/// Collect all `.gin` files from a directory into `paths`.
+fn collect_gin_files_from_dir(dir: &Path, span: SpanId, paths: &mut Vec<(PathBuf, SpanId)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.extension().is_some_and(|e| e == "gin") {
+            paths.push((p, span));
+        }
+    }
+}
+
+/// Push a `.gin` file path onto `paths` if it exists on disk.
+fn try_push_gin_file(path: PathBuf, span: SpanId, paths: &mut Vec<(PathBuf, SpanId)>) {
+    if path.exists() {
+        paths.push((path, span));
+    }
 }
 
 /// Walk every expression in the AST and collect empty-paren call hints.

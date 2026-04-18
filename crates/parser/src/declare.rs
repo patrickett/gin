@@ -8,6 +8,7 @@ use i256::I256;
 use internment::Intern;
 use lexer::Token;
 
+/// asd
 pub fn parse_declare(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Declare> {
     let doc_before = parse_doc_comment(cursor);
     cursor.eat(&Token::Indent);
@@ -114,8 +115,7 @@ fn parse_is_rhs(
     // InRange: `in` N...M
     if cursor.eat(&Token::In) {
         if let Some((a, b)) = parse_int_range(cursor) {
-            let doc = parse_doc_comment(cursor);
-            return (DeclareValue::InRange(a, b), doc);
+            return (DeclareValue::InRange(a, b), None);
         }
         cursor.error("expected integer range after 'in'", cursor.current_span());
         return (
@@ -128,8 +128,7 @@ fn parse_is_rhs(
     if matches!(cursor.peek(), Some(Token::Int(_)) | Some(Token::Minus)) {
         let checkpoint = cursor.checkpoint();
         if let Some((a, b)) = parse_int_range(cursor) {
-            let doc = parse_doc_comment(cursor);
-            return (DeclareValue::Range(a, b), doc);
+            return (DeclareValue::Range(a, b), None);
         }
         cursor.rewind(checkpoint);
     }

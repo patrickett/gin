@@ -20,6 +20,8 @@ type ReturnTypePart = (
 );
 
 pub fn parse_bind(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Bind> {
+    cursor.skip_newlines();
+
     // Doc comments may appear before or after attributes; try both positions.
     let doc_before_attrs = parse_doc_comment(cursor);
     let attrs = parse_bind_attributes(cursor);

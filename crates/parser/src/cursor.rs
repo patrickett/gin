@@ -225,6 +225,36 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
     // ── Checkpoint / rewind ───────────────────────────────────────────────
 
+    // TODO: Add advance_push/advance_pop/advance_drop assertion API to catch
+    // infinite parse loops at the exact call site rather than via fuel or timeouts.
+    //
+    // Design: Before each loop iteration or recursive Pratt call, call advance_push()
+    // to record the current position. After the body, advance_pop() asserts that
+    // position increased (i.e., at least one token was consumed). If parsing bails
+    // without consuming (e.g., no infix operator found), advance_drop() discards the
+    // assertion without failing.
+    //
+    //   // In Pratt loop:
+    //   cursor.advance_push();
+    //   let rhs = parse_expression(cursor, right_binding_power);
+    //   cursor.advance_pop(); // panics if cursor didn't advance
+    //
+    //   // In "no match" branch:
+    //   cursor.advance_drop(); // OK, we didn't expect to advance
+    //
+    // Rationale: The current parser has a single progress check in parse_body_exprs
+    // (control.rs:92-98) that detects stalls after the fact and forces an advance.
+    // This works but produces unhelpful "expression parser made no progress" errors
+    // far from the actual buggy parse function. The push/pop pattern materializes
+    // the implicit "does this function always consume a token?" contract directly
+    // in the source, making infinite loops fail fast with an accurate stack trace.
+    //
+    // Implementation: Add a `advance_stack: Vec<usize>` field to TokenCursor.
+    // - advance_push(): push self.pos()
+    // - advance_pop(): pop and assert popped < self.pos()
+    // - advance_drop(): pop without assertion
+    // Ref: https://matklad.github.io/2025/12/28/parsing-advances.html
+
     pub fn checkpoint(&self) -> usize {
         self.pos
     }

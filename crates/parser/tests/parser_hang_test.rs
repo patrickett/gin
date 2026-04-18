@@ -432,6 +432,67 @@ fn bisect_main_with_if_and_bind_body() {
 }
 
 #[test]
+fn bisect_bare_bind_with_unindented_if_then_another_bind() {
+    let source = "Maybe(x) is Some(x) or None
+
+Int is 1...400
+
+
+-- is_empty(v Maybe(x)) Bool: when v is None then True else False
+
+--- Find the index of a target value in a buffer.
+--- Scans each byte from left to right until a match is found.
+#[complexity(Linear(len))]
+find_index(target Byte, buf Buffer, len Int) Int:
+    i: 0
+    while i < len
+        -- if buf.(i) = target
+        -- return i
+        i: i + 1
+    loop
+return -1
+
+
+-- TODO: better type for this
+-- but also would be sick if we know that the Int we get back is less then 10
+-- so we can have functions narrow potential values for us and that is kept inside the type
+-- system
+less_than_ten(num Int) Maybe(Int):
+    if num < 10
+    return Some(num)
+return None
+
+-- also this below
+is_positive(x): x > 0
+
+test:
+    value Int: 3
+    is_above_zero: is_positive(value)
+    if is_above_zero
+    return value
+return
+
+maid:
+    val Maybe(Int): Some(3)
+
+    if val is Some(v)
+    return v + 1
+
+
+return
+";
+    // Verify both parse_source (ignores errors) and parse_source_full (collects errors) succeed
+    assert_handwritten_parses(source);
+    let output = parser::parse_source_full(source);
+    assert!(
+        output.parse_errors.is_empty(),
+        "parse_source_full produced {} parse errors: {:?}",
+        output.parse_errors.len(),
+        output.parse_errors
+    );
+}
+
+#[test]
 fn hw_small_program() {
     assert_handwritten_parses(
         "Maybe(x) is Some(x) or None
@@ -444,4 +505,350 @@ main:
     return four
 ",
     );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Phase 8: Handwritten parser — #[complexity(...)] attribute
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn hw_complexity_constant() {
+    use ast::Complexity;
+    let src = "#[complexity(Constant)]\nget(i Int) Byte: buf.(i)\nreturn buf.(i)\n";
+    let ast = parser::expr::parse_source(src);
+    let bind = ast
+        .defs()
+        .get(&internment::Intern::<String>::from_ref("get"))
+        .expect("get should exist");
+    let c = bind
+        .attributes()
+        .complexity
+        .as_ref()
+        .expect("should have complexity");
+    assert_eq!(c, &Complexity::Constant);
+    assert_eq!(c.display_label(), "Constant");
+    assert_eq!(c.display_big_o(), "O(1)");
+}
+
+#[test]
+fn hw_complexity_linear() {
+    use ast::{Complexity, ComplexityExpr};
+    let src = "#[complexity(Linear(n))]\nfind_index(target Byte, buf Buffer, len Int) Int:\n    i: 0\nreturn i\n";
+    let ast = parser::expr::parse_source(src);
+    let bind = ast
+        .defs()
+        .get(&internment::Intern::<String>::from_ref("find_index"))
+        .expect("find_index should exist");
+    let c = bind
+        .attributes()
+        .complexity
+        .as_ref()
+        .expect("should have complexity");
+    assert_eq!(
+        c,
+        &Complexity::Linear(ComplexityExpr::Var(internment::Intern::<String>::from_ref(
+            "n"
+        )))
+    );
+    assert_eq!(c.display_label(), "Linear(n)");
+    assert_eq!(c.display_big_o(), "O(n)");
+}
+
+#[test]
+fn hw_doc_comment_before_attribute() {
+    let src = "--- Find the index of a target value in a buffer.\n--- Scans each byte from left to right until a match is found.\n#[complexity(Linear(len))]\nfind_index(target Byte, buf Buffer, len Int) Int:\n    i: 0\nreturn -1\n";
+    let ast = parser::expr::parse_source(src);
+
+    let bind = ast
+        .defs()
+        .get(&internment::Intern::<String>::from_ref("find_index"))
+        .expect("find_index should exist");
+
+    // Doc comment should be attached to the bind, not lost
+    let doc = bind.doc_comment().expect("should have a doc comment");
+    assert!(
+        doc.0.contains("Find the index"),
+        "doc should contain 'Find the index', got: {:?}",
+        doc.0
+    );
+    assert!(
+        doc.0.contains("Scans each byte"),
+        "doc should contain 'Scans each byte', got: {:?}",
+        doc.0
+    );
+
+    // Complexity attribute should also be present
+    let c = bind
+        .attributes()
+        .complexity
+        .as_ref()
+        .expect("should have complexity");
+    use ast::Complexity;
+    assert!(matches!(c, Complexity::Linear(_)));
+}
+
+#[test]
+fn hw_doc_comment_with_full_main_gin_source() {
+    // The exact source from packages/example/src/main.gin.
+    // Previously, the -- comment and extra blank lines before the doc comments
+    // caused the doc comments to be consumed by error handling before parse_bind
+    // could see them.
+    let src = "\
+Maybe(x) is Some(x) or None
+
+Int is 1...400
+
+
+-- is_empty(v Maybe(x)) Bool: when v is None then True else False
+
+--- Find the index of a target value in a buffer.
+--- Scans each byte from left to right until a match is found.
+#[complexity(Linear(len))]
+find_index(target Byte, buf Buffer, len Int) Int:
+    i: 0
+    while i < len
+        if buf.(i) = target
+        return i
+        i: i + 1
+    loop
+return -1
+
+main:
+    val Maybe(3): Some(3)
+
+    if val is Some(v)
+        val
+        four: v + 1
+    return four
+
+    -- when v is Some(x)
+    -- then S
+    -- else D
+
+    val
+return
+";
+    let ast = parser::expr::parse_source(src);
+
+    let bind = ast
+        .defs()
+        .get(&internment::Intern::<String>::from_ref("find_index"))
+        .expect("find_index should exist");
+
+    let doc = bind
+        .doc_comment()
+        .expect("find_index should have a doc comment");
+    assert!(
+        doc.0.contains("Find the index"),
+        "doc should contain 'Find the index', got: {:?}",
+        doc.0
+    );
+    assert!(
+        doc.0.contains("Scans each byte"),
+        "doc should contain 'Scans each byte', got: {:?}",
+        doc.0
+    );
+
+    let c = bind
+        .attributes()
+        .complexity
+        .as_ref()
+        .expect("should have complexity");
+    use ast::Complexity;
+    assert!(matches!(c, Complexity::Linear(_)));
+}
+
+#[test]
+fn hw_complexity_quadratic() {
+    use ast::{Complexity, ComplexityExpr};
+    let src = "#[complexity(Quadratic(n))]\nsort(list List) List:\n    x: list\nreturn x\n";
+    let ast = parser::expr::parse_source(src);
+    let bind = ast
+        .defs()
+        .get(&internment::Intern::<String>::from_ref("sort"))
+        .expect("sort should exist");
+    let c = bind
+        .attributes()
+        .complexity
+        .as_ref()
+        .expect("should have complexity");
+    assert_eq!(
+        c,
+        &Complexity::Quadratic(ComplexityExpr::Var(internment::Intern::<String>::from_ref(
+            "n"
+        )))
+    );
+    assert_eq!(c.display_label(), "Quadratic(n)");
+    assert_eq!(c.display_big_o(), "O(n²)");
+}
+
+#[test]
+fn hw_complexity_logarithmic() {
+    use ast::{Complexity, ComplexityExpr};
+    let src = "#[complexity(Logarithmic(n))]\nbinary_search(list List, target Int) Int:\n    i: 0\nreturn i\n";
+    let ast = parser::expr::parse_source(src);
+    let bind = ast
+        .defs()
+        .get(&internment::Intern::<String>::from_ref("binary_search"))
+        .expect("binary_search should exist");
+    let c = bind
+        .attributes()
+        .complexity
+        .as_ref()
+        .expect("should have complexity");
+    assert_eq!(
+        c,
+        &Complexity::Logarithmic(ComplexityExpr::Var(internment::Intern::<String>::from_ref(
+            "n"
+        )))
+    );
+    assert_eq!(c.display_label(), "Logarithmic(n)");
+    assert_eq!(c.display_big_o(), "O(log n)");
+}
+
+#[test]
+fn hw_complexity_log_linear() {
+    use ast::{Complexity, ComplexityExpr};
+    let src = "#[complexity(LogLinear(n))]\nmerge_sort(list List) List:\n    x: list\nreturn x\n";
+    let ast = parser::expr::parse_source(src);
+    let bind = ast
+        .defs()
+        .get(&internment::Intern::<String>::from_ref("merge_sort"))
+        .expect("merge_sort should exist");
+    let c = bind
+        .attributes()
+        .complexity
+        .as_ref()
+        .expect("should have complexity");
+    assert_eq!(
+        c,
+        &Complexity::LogLinear(ComplexityExpr::Var(internment::Intern::<String>::from_ref(
+            "n"
+        )))
+    );
+    assert_eq!(c.display_label(), "LogLinear(n)");
+    assert_eq!(c.display_big_o(), "O(n log n)");
+}
+
+#[test]
+fn hw_complexity_with_other_attributes() {
+    use ast::Complexity;
+    let src = "#[inline, complexity(Constant)]\nget(i Int) Byte: buf.(i)\nreturn buf.(i)\n";
+    let ast = parser::expr::parse_source(src);
+    let bind = ast
+        .defs()
+        .get(&internment::Intern::<String>::from_ref("get"))
+        .expect("get should exist");
+    assert!(bind.attributes().inline_always);
+    let c = bind
+        .attributes()
+        .complexity
+        .as_ref()
+        .expect("should have complexity");
+    assert_eq!(c, &Complexity::Constant);
+}
+
+#[test]
+fn hw_no_complexity() {
+    let src = "add(a Int, b Int) Int: a + b\nreturn a\n";
+    let ast = parser::expr::parse_source(src);
+    let bind = ast
+        .defs()
+        .get(&internment::Intern::<String>::from_ref("add"))
+        .expect("add should exist");
+    assert!(bind.attributes().complexity.is_none());
+}
+
+#[test]
+fn hw_complexity_big_o_with_custom_var() {
+    let src = "#[complexity(Linear(items))]\ncount(list List) Int:\n    x: 0\nreturn x\n";
+    let ast = parser::expr::parse_source(src);
+    let bind = ast
+        .defs()
+        .get(&internment::Intern::<String>::from_ref("count"))
+        .expect("count should exist");
+    let c = bind
+        .attributes()
+        .complexity
+        .as_ref()
+        .expect("should have complexity");
+    assert_eq!(c.display_label(), "Linear(items)");
+    assert_eq!(c.display_big_o(), "O(items)");
+}
+
+#[test]
+fn hw_complexity_product_expr() {
+    use ast::{Complexity, ComplexityExpr};
+    let src = "#[complexity(Linear(rows * cols))]\nmatrix_mul(a Matrix, b Matrix) Matrix:\n    x: a\nreturn x\n";
+    let ast = parser::expr::parse_source(src);
+    let bind = ast
+        .defs()
+        .get(&internment::Intern::<String>::from_ref("matrix_mul"))
+        .expect("matrix_mul should exist");
+    let c = bind
+        .attributes()
+        .complexity
+        .as_ref()
+        .expect("should have complexity");
+    assert_eq!(
+        c,
+        &Complexity::Linear(ComplexityExpr::Product(vec![
+            internment::Intern::<String>::from_ref("rows"),
+            internment::Intern::<String>::from_ref("cols"),
+        ]))
+    );
+    assert_eq!(c.display_label(), "Linear(rows * cols)");
+    assert_eq!(c.display_big_o(), "O(rows * cols)");
+}
+
+#[test]
+fn hw_complexity_sum_expr() {
+    use ast::{Complexity, ComplexityExpr};
+    let src =
+        "#[complexity(Linear(V + E))]\nbfs(graph Graph, start Int) List:\n    x: start\nreturn x\n";
+    let ast = parser::expr::parse_source(src);
+    let bind = ast
+        .defs()
+        .get(&internment::Intern::<String>::from_ref("bfs"))
+        .expect("bfs should exist");
+    let c = bind
+        .attributes()
+        .complexity
+        .as_ref()
+        .expect("should have complexity");
+    assert_eq!(
+        c,
+        &Complexity::Linear(ComplexityExpr::Sum(vec![
+            internment::Intern::<String>::from_ref("V"),
+            internment::Intern::<String>::from_ref("E"),
+        ]))
+    );
+    assert_eq!(c.display_label(), "Linear(V + E)");
+    assert_eq!(c.display_big_o(), "O(V + E)");
+}
+
+#[test]
+fn hw_complexity_quadratic_product_expr() {
+    use ast::{Complexity, ComplexityExpr};
+    let src = "#[complexity(Quadratic(n * m))]\ncross(list_a List, list_b List) List:\n    x: list_a\nreturn x\n";
+    let ast = parser::expr::parse_source(src);
+    let bind = ast
+        .defs()
+        .get(&internment::Intern::<String>::from_ref("cross"))
+        .expect("cross should exist");
+    let c = bind
+        .attributes()
+        .complexity
+        .as_ref()
+        .expect("should have complexity");
+    assert_eq!(
+        c,
+        &Complexity::Quadratic(ComplexityExpr::Product(vec![
+            internment::Intern::<String>::from_ref("n"),
+            internment::Intern::<String>::from_ref("m"),
+        ]))
+    );
+    // Compound expr wrapped in parens for superscript
+    assert_eq!(c.display_label(), "Quadratic(n * m)");
+    assert_eq!(c.display_big_o(), "O((n * m)²)");
 }
