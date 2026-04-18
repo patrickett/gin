@@ -1,0 +1,1 @@
+../../../tree-sitter-gin/queries/textobjects.scm
