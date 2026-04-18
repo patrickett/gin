@@ -171,6 +171,11 @@ impl TyEnv {
             }
         }
 
+        // Register built-in types not declared in any gin source file.
+        if !tag_types.contains_key(&Intern::<String>::from_ref("Str")) {
+            tag_types.insert(Intern::<String>::from_ref("Str"), str_record_ty());
+        }
+
         // Build variant reverse map from all union types.
         let mut variant_map: VariantMap = HashMap::new();
         for (union_name, ty) in &tag_types {
@@ -882,7 +887,11 @@ impl TyEnv {
                     self.check_expr(arg, symptoms, locals);
                 }
             }
-            Expr::Lit(_) | Expr::SelfRef(_) | Expr::Range(_) | Expr::FormatString(_) => {}
+            Expr::Lit(_)
+            | Expr::SelfRef(_)
+            | Expr::Range(_)
+            | Expr::FormatString(_)
+            | Expr::Asm(_) => {}
         }
     }
 
@@ -1013,7 +1022,11 @@ fn expr_references_name(expr: &Expr, name: Intern<String>) -> bool {
         Expr::Range(range) => {
             expr_references_name(&range.start, name) || expr_references_name(&range.end, name)
         }
-        Expr::Lit(_) | Expr::SelfRef(_) | Expr::AnonymousTag(..) | Expr::TagCall(_) => false,
+        Expr::Lit(_)
+        | Expr::SelfRef(_)
+        | Expr::AnonymousTag(..)
+        | Expr::TagCall(_)
+        | Expr::Asm(_) => false,
     }
 }
 

@@ -128,7 +128,31 @@ impl TyInfer for FnCall {
     fn infer_ty(&self, env: &TyInferEnv) -> Ty {
         let name = self.path.root;
         if let Some(local_ty) = env.locals.get_type(&name) {
-            return local_ty;
+            if self.path.segments.is_empty() {
+                return local_ty;
+            }
+            let mut ty = local_ty;
+            for seg in &self.path.segments {
+                ty = match &ty {
+                    Ty::Ptr { inner } | Ty::Ref { inner } if inner.is_record() => {
+                        match inner.as_ref() {
+                            Ty::Record { fields, .. } => fields
+                                .iter()
+                                .find(|(fname, _)| fname.as_str() == seg.as_str())
+                                .map(|(_, fty)| (**fty).clone())
+                                .unwrap_or(ty),
+                            _ => return ty,
+                        }
+                    }
+                    Ty::Record { fields, .. } => fields
+                        .iter()
+                        .find(|(fname, _)| fname.as_str() == seg.as_str())
+                        .map(|(_, fty)| (**fty).clone())
+                        .unwrap_or(ty),
+                    _ => return ty,
+                };
+            }
+            return ty;
         }
         env.fn_return_types.get(&name).cloned().unwrap_or(Ty::Int {
             width: 64,
@@ -241,6 +265,11 @@ impl TyInfer for Expr {
             Expr::FormatString(_) => str_record_ty(),
             Expr::Loop(_) => Ty::Unit,
             Expr::If(_) => Ty::Unit,
+            Expr::Asm(_) => Ty::Int {
+                width: 64,
+                signed: true,
+                value: None,
+            },
             Expr::Range(_) => Ty::Opaque(Intern::<String>::from_ref("Range")),
             Expr::TupleSet { .. } | Expr::BufSet { .. } => Ty::Unit,
             Expr::Cast { ty, .. } => Ty::Opaque(*ty),
