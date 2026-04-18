@@ -236,7 +236,7 @@ fn find_call_in_expr(
                 find_call_in_expr(&e.0, e.1, span_table, byte_pos, best);
             }
         }
-        Expr::Lit(_) | Expr::SelfRef(_) | Expr::AnonymousTag(..) => {}
+        Expr::Lit(_) | Expr::SelfRef(_) | Expr::AnonymousTag(..) | Expr::Asm(_) => {}
     }
 }
 
