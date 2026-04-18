@@ -39,6 +39,7 @@ impl<'src> fmt::Display for Token<'src> {
             Token::Has => write!(f, "[has]"),
             Token::And => write!(f, "[and]"),
             Token::Infer => write!(f, "[...]"),
+            Token::Asm => write!(f, "[asm]"),
             Token::As => write!(f, "[as]"),
             Token::If => write!(f, "[if]"),
             Token::In => write!(f, "[in]"),

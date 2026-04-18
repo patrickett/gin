@@ -217,6 +217,7 @@ impl<'src> Lexer<'src> {
             "has" => Token::Has,
             "and" => Token::And,
             "as" => Token::As,
+            "asm" => Token::Asm,
             "if" => Token::If,
             "in" => Token::In,
             "is" => Token::Is,
@@ -341,8 +342,23 @@ impl<'src> Lexer<'src> {
         self.int_result(span, &self.source.as_bytes()[start..self.pos], 10)
     }
 
+    // TODO: Implement raw/multiline string literals with `\\` prefix syntax (Zig-style).
+    //
+    // Design: Each line of a raw string is a separate token prefixed with `\\`.
+    // This means `\n` is always whitespace and the lexer can operate line-by-line.
+    // It avoids the indentation problems of Rust's `r##""##` and nesting issues
+    // with raw string delimiters. Example:
+    //     const raw =
+    //         \\Roses are red
+    //         \\  Violets are blue
+    //         \\
+    //     ;
+    // Key properties: no escape sequences needed, `\\` itself doesn't need escaping,
+    // each line is a separate lexer token, and unclosed raw strings can't corrupt
+    // subsequent lexical structure.
+    // Ref: https://matklad.github.io/2025/08/09/zigs-lovely-syntax.html#String-Literals
+
     fn lex_string(&mut self, start: usize) -> (Token<'src>, SpanId) {
-        self.pos += 1;
         let bytes = self.source.as_bytes();
 
         let end = memchr2(b'\'', b'\n', &bytes[self.pos..]).map_or(bytes.len(), |i| self.pos + i);

@@ -33,6 +33,7 @@ pub enum Token<'src> {
     And,
     ArrowLeft,
     ArrowRight,
+    Asm,
     As,
     At,
     BracketClose,
