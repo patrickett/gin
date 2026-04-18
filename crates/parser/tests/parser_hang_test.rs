@@ -32,6 +32,13 @@ fn parse_handwritten_with_timeout(source: &str, timeout: Duration) -> Result<ast
     }
 }
 
+fn first_def_bind<'a>(ast: &'a ast::FileAst, name: &str) -> &'a ast::Bind {
+    let key = internment::Intern::<String>::from_ref(name);
+    ast.defs()
+        .get(&key)
+        .unwrap_or_else(|| panic!("def {name} should exist"))
+}
+
 fn assert_handwritten_parses(source: &str) {
     eprintln!(
         "  handwritten parsing: {:?}...",
@@ -516,10 +523,7 @@ fn hw_complexity_constant() {
     use ast::Complexity;
     let src = "#[complexity(Constant)]\nget(i Int) Byte: buf.(i)\nreturn buf.(i)\n";
     let ast = parser::expr::parse_source(src);
-    let bind = ast
-        .defs()
-        .get(&internment::Intern::<String>::from_ref("get"))
-        .expect("get should exist");
+    let bind = first_def_bind(&ast, "get");
     let c = bind
         .attributes()
         .complexity
@@ -535,10 +539,7 @@ fn hw_complexity_linear() {
     use ast::{Complexity, ComplexityExpr};
     let src = "#[complexity(Linear(n))]\nfind_index(target Byte, buf Buffer, len Int) Int:\n    i: 0\nreturn i\n";
     let ast = parser::expr::parse_source(src);
-    let bind = ast
-        .defs()
-        .get(&internment::Intern::<String>::from_ref("find_index"))
-        .expect("find_index should exist");
+    let bind = first_def_bind(&ast, "find_index");
     let c = bind
         .attributes()
         .complexity
@@ -559,10 +560,7 @@ fn hw_doc_comment_before_attribute() {
     let src = "--- Find the index of a target value in a buffer.\n--- Scans each byte from left to right until a match is found.\n#[complexity(Linear(len))]\nfind_index(target Byte, buf Buffer, len Int) Int:\n    i: 0\nreturn -1\n";
     let ast = parser::expr::parse_source(src);
 
-    let bind = ast
-        .defs()
-        .get(&internment::Intern::<String>::from_ref("find_index"))
-        .expect("find_index should exist");
+    let bind = first_def_bind(&ast, "find_index");
 
     // Doc comment should be attached to the bind, not lost
     let doc = bind.doc_comment().expect("should have a doc comment");
@@ -630,10 +628,7 @@ return
 ";
     let ast = parser::expr::parse_source(src);
 
-    let bind = ast
-        .defs()
-        .get(&internment::Intern::<String>::from_ref("find_index"))
-        .expect("find_index should exist");
+    let bind = first_def_bind(&ast, "find_index");
 
     let doc = bind
         .doc_comment()
@@ -663,10 +658,7 @@ fn hw_complexity_quadratic() {
     use ast::{Complexity, ComplexityExpr};
     let src = "#[complexity(Quadratic(n))]\nsort(list List) List:\n    x: list\nreturn x\n";
     let ast = parser::expr::parse_source(src);
-    let bind = ast
-        .defs()
-        .get(&internment::Intern::<String>::from_ref("sort"))
-        .expect("sort should exist");
+    let bind = first_def_bind(&ast, "sort");
     let c = bind
         .attributes()
         .complexity
@@ -687,10 +679,7 @@ fn hw_complexity_logarithmic() {
     use ast::{Complexity, ComplexityExpr};
     let src = "#[complexity(Logarithmic(n))]\nbinary_search(list List, target Int) Int:\n    i: 0\nreturn i\n";
     let ast = parser::expr::parse_source(src);
-    let bind = ast
-        .defs()
-        .get(&internment::Intern::<String>::from_ref("binary_search"))
-        .expect("binary_search should exist");
+    let bind = first_def_bind(&ast, "binary_search");
     let c = bind
         .attributes()
         .complexity
@@ -711,10 +700,7 @@ fn hw_complexity_log_linear() {
     use ast::{Complexity, ComplexityExpr};
     let src = "#[complexity(LogLinear(n))]\nmerge_sort(list List) List:\n    x: list\nreturn x\n";
     let ast = parser::expr::parse_source(src);
-    let bind = ast
-        .defs()
-        .get(&internment::Intern::<String>::from_ref("merge_sort"))
-        .expect("merge_sort should exist");
+    let bind = first_def_bind(&ast, "merge_sort");
     let c = bind
         .attributes()
         .complexity
@@ -735,10 +721,7 @@ fn hw_complexity_with_other_attributes() {
     use ast::Complexity;
     let src = "#[inline, complexity(Constant)]\nget(i Int) Byte: buf.(i)\nreturn buf.(i)\n";
     let ast = parser::expr::parse_source(src);
-    let bind = ast
-        .defs()
-        .get(&internment::Intern::<String>::from_ref("get"))
-        .expect("get should exist");
+    let bind = first_def_bind(&ast, "get");
     assert!(bind.attributes().inline_always);
     let c = bind
         .attributes()
@@ -752,10 +735,7 @@ fn hw_complexity_with_other_attributes() {
 fn hw_no_complexity() {
     let src = "add(a Int, b Int) Int: a + b\nreturn a\n";
     let ast = parser::expr::parse_source(src);
-    let bind = ast
-        .defs()
-        .get(&internment::Intern::<String>::from_ref("add"))
-        .expect("add should exist");
+    let bind = first_def_bind(&ast, "add");
     assert!(bind.attributes().complexity.is_none());
 }
 
@@ -763,10 +743,7 @@ fn hw_no_complexity() {
 fn hw_complexity_big_o_with_custom_var() {
     let src = "#[complexity(Linear(items))]\ncount(list List) Int:\n    x: 0\nreturn x\n";
     let ast = parser::expr::parse_source(src);
-    let bind = ast
-        .defs()
-        .get(&internment::Intern::<String>::from_ref("count"))
-        .expect("count should exist");
+    let bind = first_def_bind(&ast, "count");
     let c = bind
         .attributes()
         .complexity
@@ -781,10 +758,7 @@ fn hw_complexity_product_expr() {
     use ast::{Complexity, ComplexityExpr};
     let src = "#[complexity(Linear(rows * cols))]\nmatrix_mul(a Matrix, b Matrix) Matrix:\n    x: a\nreturn x\n";
     let ast = parser::expr::parse_source(src);
-    let bind = ast
-        .defs()
-        .get(&internment::Intern::<String>::from_ref("matrix_mul"))
-        .expect("matrix_mul should exist");
+    let bind = first_def_bind(&ast, "matrix_mul");
     let c = bind
         .attributes()
         .complexity
@@ -807,10 +781,7 @@ fn hw_complexity_sum_expr() {
     let src =
         "#[complexity(Linear(V + E))]\nbfs(graph Graph, start Int) List:\n    x: start\nreturn x\n";
     let ast = parser::expr::parse_source(src);
-    let bind = ast
-        .defs()
-        .get(&internment::Intern::<String>::from_ref("bfs"))
-        .expect("bfs should exist");
+    let bind = first_def_bind(&ast, "bfs");
     let c = bind
         .attributes()
         .complexity
@@ -832,10 +803,7 @@ fn hw_complexity_quadratic_product_expr() {
     use ast::{Complexity, ComplexityExpr};
     let src = "#[complexity(Quadratic(n * m))]\ncross(list_a List, list_b List) List:\n    x: list_a\nreturn x\n";
     let ast = parser::expr::parse_source(src);
-    let bind = ast
-        .defs()
-        .get(&internment::Intern::<String>::from_ref("cross"))
-        .expect("cross should exist");
+    let bind = first_def_bind(&ast, "cross");
     let c = bind
         .attributes()
         .complexity

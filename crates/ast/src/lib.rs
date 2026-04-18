@@ -7,6 +7,9 @@ pub use expr::*;
 mod file_ast;
 pub use file_ast::*;
 
+mod module_qualify;
+pub use module_qualify::qualify_module_defs;
+
 mod parameter;
 pub use parameter::*;
 

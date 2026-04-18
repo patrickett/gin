@@ -138,6 +138,16 @@ impl Bind {
         &self.value
     }
 
+    pub fn value_mut(&mut self) -> &mut BindValue {
+        &mut self.value
+    }
+
+    /// Rename the top-level symbol (used when qualifying module definitions).
+    pub fn remap_module_symbol(mut self, symbol: Intern<String>) -> Self {
+        self.name = symbol;
+        self
+    }
+
     pub fn is_method(&self) -> bool {
         self.receiver_type.is_some()
     }

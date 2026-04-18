@@ -1,4 +1,4 @@
-use ast::{DefMap, ImplBlock};
+use ast::{ImplBlock, MethodMap};
 use lexer::Token;
 use std::collections::HashMap;
 
@@ -55,7 +55,7 @@ pub fn parse_impl_block(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option
     cursor.eat(&Token::Indent);
 
     // Parse zero or more binds until ')'
-    let mut methods: DefMap = HashMap::new();
+    let mut methods: MethodMap = HashMap::new();
     loop {
         if cursor.is_at(&Token::ParenClose) {
             break;

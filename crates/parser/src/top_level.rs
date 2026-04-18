@@ -1,12 +1,13 @@
 use ast::span::{SpanId, SpanTable};
-use internment::Intern;
 use lexer::Token;
 use std::collections::HashSet;
 
 use ast::{
     Bind, Declare, DeclareValue, Expr, FileAst, ImplBlock, ParameterKind, Spanned, Tag, Variant,
-    WhenArm, type_tag_expr_from_tag,
+    WhenArm, collapse_defs_for_platform, type_tag_expr_from_tag,
 };
+use indexmap::IndexMap;
+use internment::Intern;
 
 use crate::cursor::TokenCursor;
 use crate::expr::ExprFn;
@@ -29,13 +30,13 @@ pub fn parse_file(cursor: &mut TokenCursor, expr_parser: ExprFn) -> FileAst {
     }
 
     let mut tags = ast::TagMap::new();
-    let mut defs = ast::DefMap::new();
+    let mut defs_scratch: IndexMap<Intern<String>, Vec<Bind>> = IndexMap::new();
     let mut private_defs = HashSet::new();
     let mut private_tags = HashSet::new();
     let mut exprs = Vec::new();
 
     for el in public_elements {
-        collect_top_level(el, &mut tags, &mut defs, &mut exprs);
+        collect_top_level(el, &mut tags, &mut defs_scratch, &mut exprs);
     }
 
     for el in private_elements {
@@ -58,9 +59,10 @@ pub fn parse_file(cursor: &mut TokenCursor, expr_parser: ExprFn) -> FileAst {
             }
             TopLevelValue::Expr(..) => {}
         }
-        collect_top_level(el, &mut tags, &mut defs, &mut exprs);
+        collect_top_level(el, &mut tags, &mut defs_scratch, &mut exprs);
     }
 
+    let defs = collapse_defs_for_platform(defs_scratch);
     generate_return_type_unions(&defs, &mut tags, &private_defs);
 
     FileAst {
@@ -241,7 +243,7 @@ fn parse_method_bind(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<To
 fn collect_top_level(
     el: TopLevelValue,
     tags: &mut ast::TagMap,
-    defs: &mut ast::DefMap,
+    defs: &mut IndexMap<Intern<String>, Vec<Bind>>,
     exprs: &mut Vec<(Expr, SpanId)>,
 ) {
     match el {
@@ -255,7 +257,7 @@ fn collect_top_level(
             } else {
                 bind.name()
             };
-            defs.insert(name, *bind);
+            defs.entry(name).or_insert_with(Vec::new).push(*bind);
         }
         TopLevelValue::ImplBlock(block) => {
             let recv = Box::new(type_tag_expr_from_tag(Tag::Nominal(
@@ -269,7 +271,7 @@ fn collect_top_level(
                     block.type_name.as_str(),
                     method_name.as_str()
                 ));
-                defs.insert(mangled, bind);
+                defs.entry(mangled).or_insert_with(Vec::new).push(bind);
             }
         }
         TopLevelValue::Expr(expr, span) => {
@@ -366,7 +368,7 @@ fn is_declare_from_offset(cursor: &TokenCursor, tag_offset: usize) -> bool {
 }
 
 fn extract_anonymous_tags_from_bind(bind: &Bind, tags: &mut Vec<(Intern<String>, SpanId)>) {
-    use ast::{type_tag_as_tag, BindValue};
+    use ast::{BindValue, type_tag_as_tag};
 
     if let Some(t) = bind.receiver_type() {
         extract_anonymous_tags_from_is_pattern_tag(t, tags);
@@ -393,10 +395,7 @@ fn extract_anonymous_tags_from_bind(bind: &Bind, tags: &mut Vec<(Intern<String>,
     }
 }
 
-fn extract_anonymous_tags_from_is_pattern_tag(
-    tag: &Tag,
-    tags: &mut Vec<(Intern<String>, SpanId)>,
-) {
+fn extract_anonymous_tags_from_is_pattern_tag(tag: &Tag, tags: &mut Vec<(Intern<String>, SpanId)>) {
     match tag {
         Tag::Nominal(name, span) => {
             tags.push((*name, *span));
@@ -485,7 +484,9 @@ fn extract_anonymous_tags_from_expr(expr: &Expr, tags: &mut Vec<(Intern<String>,
                 BindValue::Extern => {}
             }
         }
-        Expr::IsPattern(t) | Expr::TypeTag(t) => extract_anonymous_tags_from_is_pattern_tag(t, tags),
+        Expr::IsPattern(t) | Expr::TypeTag(t) => {
+            extract_anonymous_tags_from_is_pattern_tag(t, tags)
+        }
         _ => {}
     }
 }

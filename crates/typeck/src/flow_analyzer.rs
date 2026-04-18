@@ -49,6 +49,9 @@ impl<'a> FlowAnalyzer<'a> {
     // TODO: constant propagation through reassignment in loops (i: i + 1 where i = 0)
     pub fn analyze_file(&mut self, ast: &FileAst) {
         for bind in ast.defs.values() {
+            if !bind.attributes().matches_current_platform() {
+                continue;
+            }
             self.analyze_bind(bind);
         }
     }

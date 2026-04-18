@@ -16,6 +16,7 @@ indexmap = { workspace = true }
 merkle_hash = "3.8.0"
 once_cell = "1.21.3"
 parser = { workspace = true }
+flask = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10.9"

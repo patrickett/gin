@@ -1,7 +1,7 @@
 use crate::span::SpanId;
 use std::hash::{Hash, Hasher};
 
-use crate::DefMap;
+use crate::MethodMap;
 use internment::Intern;
 
 /// A trait implementation block: `Args.Iterator (next: ...)`
@@ -10,7 +10,7 @@ pub struct ImplBlock {
     pub type_name: Intern<String>,
     pub type_name_span: SpanId,
     pub trait_name: Intern<String>,
-    pub methods: DefMap,
+    pub methods: MethodMap,
 }
 
 impl Hash for ImplBlock {

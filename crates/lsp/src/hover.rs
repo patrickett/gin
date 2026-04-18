@@ -35,34 +35,35 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
 
     // Look for function definitions
     for (name, bind) in ast.defs() {
-        if name.as_str() == word {
-            let mut result = format!("```gin\n{}", name.as_str());
-            if let Some(params) = bind.params() {
-                result.push_str(&crate::format_params(params));
-            }
-            if let Some(sp) = &bind.return_tag {
-                if let Some(tag) = ast::type_tag_as_tag(&sp.0) {
-                    result.push_str(&format!(" {tag}"));
-                }
-            }
-            result.push_str("\n```");
-            if let Some(doc) = bind.doc_comment() {
-                result.push_str(&format!("\n\n---\n\n{}", doc.0));
-            }
-            let mut meta_parts = Vec::new();
-            let is_function = bind.params().is_some();
-            if !is_function && let Some(ty) = ty_env.fn_return_ty(name) {
-                meta_parts.push(format!("size = {}", typeck::ty_byte_size_static(ty)));
-                meta_parts.push(format!("align = {}", typeck::ty_alignment(ty)));
-            }
-            if let Some(complexity) = bind.attributes().complexity.as_ref() {
-                meta_parts.push(format!("complexity = {}", complexity.display_big_o()));
-            }
-            if !meta_parts.is_empty() {
-                result.push_str(&format!("\n\n---\n\n{}", meta_parts.join(", ")));
-            }
-            return Some(result);
+        if name.as_str() != word {
+            continue;
         }
+        let mut result = format!("```gin\n{}", name.as_str());
+        if let Some(params) = bind.params() {
+            result.push_str(&crate::format_params(params));
+        }
+        if let Some(sp) = &bind.return_tag {
+            if let Some(tag) = ast::type_tag_as_tag(&sp.0) {
+                result.push_str(&format!(" {tag}"));
+            }
+        }
+        result.push_str("\n```");
+        if let Some(doc) = bind.doc_comment() {
+            result.push_str(&format!("\n\n---\n\n{}", doc.0));
+        }
+        let mut meta_parts = Vec::new();
+        let is_function = bind.params().is_some();
+        if !is_function && let Some(ty) = ty_env.fn_return_ty(name) {
+            meta_parts.push(format!("size = {}", typeck::ty_byte_size_static(ty)));
+            meta_parts.push(format!("align = {}", typeck::ty_alignment(ty)));
+        }
+        if let Some(complexity) = bind.attributes().complexity.as_ref() {
+            meta_parts.push(format!("complexity = {}", complexity.display_big_o()));
+        }
+        if !meta_parts.is_empty() {
+            result.push_str(&format!("\n\n---\n\n{}", meta_parts.join(", ")));
+        }
+        return Some(result);
     }
 
     // Look for parameter names across all defs

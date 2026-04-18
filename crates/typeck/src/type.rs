@@ -16,12 +16,22 @@
 use crate::{TyInfer, TyInferEnv, resolve_tag_from_map};
 use ast::WhenArm;
 use ast::{
-    is_pattern_as_tag, type_tag_as_tag, Bind, BindValue, DeclareValue, Expr, FileAst, FormatPart,
-    IfCondition, Loop, ParameterKind, Spanned, Tag,
+    Bind, BindValue, DeclareValue, Expr, FileAst, FnCall, FormatPart, IfCondition, Loop,
+    ParameterKind, Spanned, Tag, is_pattern_as_tag, type_tag_as_tag,
 };
 use i256::I256;
 use internment::Intern;
 use std::collections::HashMap;
+
+/// Symbol name for a callee: `foo` or `io.print` (matches codegen).
+pub fn mangled_fn_call_name(call: &FnCall) -> Intern<String> {
+    if call.path.segments.is_empty() {
+        call.path.root
+    } else {
+        let segs: Vec<&str> = call.path.segments.iter().map(|s| s.as_str()).collect();
+        Intern::<String>::new(format!("{}.{}", call.path.root.as_str(), segs.join(".")))
+    }
+}
 
 /// Resolved type — the canonical representation after resolving `Tag` names against declarations.
 #[derive(Debug, Clone, PartialEq)]
@@ -627,6 +637,9 @@ fn resolve_name(
 impl TyEnv {
     pub fn check_unknowns(&self, ast: &FileAst, symptoms: &mut Vec<diagnostic::Symptom>) {
         for bind in ast.defs.values() {
+            if !bind.attributes().matches_current_platform() {
+                continue;
+            }
             let mut locals = HashMap::new();
             if let Some(params) = bind.params() {
                 for (name, kind) in params.iter() {
@@ -713,11 +726,12 @@ impl TyEnv {
         match expr {
             Expr::FnCall(call) => {
                 let name = call.path.root;
+                let mangled = mangled_fn_call_name(call);
                 if let Some(args) = &call.args {
-                    if self.fn_return_ty(&name).is_none() {
+                    if self.fn_return_ty(&mangled).is_none() {
                         symptoms.push(
                             TypeSymptom::UnknownBinding {
-                                name: name.to_string(),
+                                name: mangled.to_string(),
                             }
                             .into_symptom(call.path.span),
                         );
@@ -727,11 +741,11 @@ impl TyEnv {
                     }
                 } else if call.path.segments.is_empty()
                     && !locals.contains_key(&name)
-                    && self.fn_return_ty(&name).is_none()
+                    && self.fn_return_ty(&mangled).is_none()
                 {
                     symptoms.push(
                         TypeSymptom::UnknownBinding {
-                            name: name.to_string(),
+                            name: mangled.to_string(),
                         }
                         .into_symptom(call.path.span),
                     );
@@ -765,7 +779,8 @@ impl TyEnv {
                                         name: union_name,
                                         variants,
                                     }) => {
-                                        if !variants.iter().any(|(vname, _)| vname == &variant_name) {
+                                        if !variants.iter().any(|(vname, _)| vname == &variant_name)
+                                        {
                                             symptoms.push(
                                                 TypeSymptom::NotAVariant {
                                                     name: tag.name().to_string(),
@@ -968,10 +983,7 @@ impl TyEnv {
     }
 }
 
-fn check_tag_pattern_default_exprs(
-    tag: &Tag,
-    check: &mut impl FnMut(&Spanned<Expr>),
-) {
+fn check_tag_pattern_default_exprs(tag: &Tag, check: &mut impl FnMut(&Spanned<Expr>)) {
     let Tag::Generic(_, params, _) = tag else {
         return;
     };
@@ -1027,8 +1039,7 @@ fn expr_references_name(expr: &Expr, name: Intern<String>) -> bool {
                         expr_references_name(condition, name) || expr_references_name(body, name)
                     }
                     WhenArm::Is { pattern, body } => {
-                        is_pattern_as_tag(&pattern.0)
-                            .is_some_and(|t| tag_references_name(t, name))
+                        is_pattern_as_tag(&pattern.0).is_some_and(|t| tag_references_name(t, name))
                             || expr_references_name(&body.0, name)
                     }
                     WhenArm::Else(body) => expr_references_name(body, name),

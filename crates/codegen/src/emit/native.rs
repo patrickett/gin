@@ -427,14 +427,7 @@ fn compile_llvm_ir_to_object(
     true
 }
 
-/// Path to gin_core/runtime.c, resolved at compile time relative to this crate.
-const GIN_CORE_RUNTIME_C: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../packages/gin_core/runtime.c"
-);
-
 /// Link an object file into an executable using the system C compiler.
-/// Automatically compiles and links gin_core/runtime.c if it exists.
 pub fn link_executable(
     obj_path: &Path,
     output: &Path,
@@ -446,51 +439,8 @@ pub fn link_executable(
         return (false, symptoms);
     };
 
-    let runtime_c = Path::new(GIN_CORE_RUNTIME_C);
-    let runtime_obj = output.with_extension("runtime.o");
-    let has_runtime = if runtime_c.exists() {
-        let mut compile = Command::new(&cc);
-        compile
-            .arg("-c")
-            .arg("-O2")
-            .arg(runtime_c)
-            .arg("-o")
-            .arg(&runtime_obj);
-        if let Some(triple) = target {
-            compile.arg(format!("--target={triple}"));
-        }
-        let out = match compile.output() {
-            Ok(o) => o,
-            Err(e) => {
-                symptoms.push(
-                    CodegenSymptom::Internal {
-                        message: format!("Failed to compile gin_core runtime: {e}"),
-                    }
-                    .into_symptom(SpanId::INVALID),
-                );
-                return (false, symptoms);
-            }
-        };
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            symptoms.push(
-                CodegenSymptom::Internal {
-                    message: format!("gin_core runtime compile failed:\n{stderr}"),
-                }
-                .into_symptom(SpanId::INVALID),
-            );
-            return (false, symptoms);
-        }
-        true
-    } else {
-        false
-    };
-
     let mut cmd = Command::new(&cc);
     cmd.arg("-o").arg(output).arg(obj_path);
-    if has_runtime {
-        cmd.arg(&runtime_obj);
-    }
     if let Some(triple) = target {
         cmd.arg(format!("--target={triple}"));
     }
@@ -504,16 +454,9 @@ pub fn link_executable(
                 }
                 .into_symptom(SpanId::INVALID),
             );
-            if has_runtime {
-                let _ = std::fs::remove_file(&runtime_obj);
-            }
             return (false, symptoms);
         }
     };
-
-    if has_runtime {
-        let _ = std::fs::remove_file(&runtime_obj);
-    }
 
     if !result.status.success() {
         let stderr = String::from_utf8_lossy(&result.stderr);

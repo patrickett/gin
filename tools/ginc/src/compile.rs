@@ -7,14 +7,16 @@
 // distinct for easier debugging and enables incremental recompilation.
 
 use crate::cli::Args;
-use ast::FileAst;
 use ast::ImportSource;
+use ast::{FileAst, qualify_module_defs};
 use codegen::emit::native;
 use diagnostic::lex::LexSymptom;
 use diagnostic::parse::ParseSymptom;
 use diagnostic::{Category, Symptom, SymptomLike};
+use flask::{DependencyKind, FlaskConfig};
 use lexer::debug_tokens;
 use parser::{ParseOutput, discover_module, extract_package_import_paths, parse_source_full};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use typeck::{TyEnv, analyze_file};
 
@@ -89,8 +91,55 @@ impl GinCompiler {
         if !is_library && !parsed_files.is_empty() {
             // Extract data from the entry file before mutating parsed_files.
             let entry_path = parsed_files[0].path.clone();
+            let entry_dir = entry_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default();
             let entry_ast = parsed_files[0].output.ast.clone();
             let base_dir = entry_path.parent().unwrap_or(Path::new(""));
+
+            if args.dependencies.is_empty() {
+                if let Some(config) = FlaskConfig::from_directory(&entry_dir) {
+                    args.dependencies = resolve_flask_path_dependencies(&config, &entry_dir);
+                }
+            }
+
+            if !args.dependencies.is_empty() {
+                let mut dep_paths: Vec<PathBuf> = args
+                    .dependencies
+                    .values()
+                    .flat_map(|root| collect_gin_files_recursive(root))
+                    .collect();
+                dep_paths.sort();
+                let mut insert_idx = 1usize;
+                for file_path in dep_paths {
+                    if parsed_files.iter().any(|p| p.path == file_path) {
+                        continue;
+                    }
+                    let source = match std::fs::read_to_string(&file_path) {
+                        Ok(s) => s,
+                        Err(err) => {
+                            eprintln!("Error reading dependency {}: {}", file_path.display(), err);
+                            continue;
+                        }
+                    };
+                    let mut output = parse_source_full(&source);
+                    if let Some(qual) =
+                        module_qualifier_for_dep_file(&file_path, &args.dependencies)
+                    {
+                        output.ast = qualify_module_defs(output.ast, &qual);
+                    }
+                    parsed_files.insert(
+                        insert_idx,
+                        ParsedFile {
+                            path: file_path,
+                            source,
+                            output,
+                        },
+                    );
+                    insert_idx += 1;
+                }
+            }
 
             // Local imports: use module tree discovery to find direct files
             // and all sub-module files. `use 'utils'` pulls in utils/*.gin for
@@ -182,6 +231,38 @@ impl GinCompiler {
 // ── File Collection ─────────────────────────────────────────────────────────
 
 /// Collect all .gin file paths in a directory recursively, skipping `target/`.
+fn resolve_flask_path_dependencies(
+    config: &FlaskConfig,
+    config_dir: &Path,
+) -> HashMap<String, PathBuf> {
+    let mut dependencies = HashMap::new();
+    for (name, dep) in config.dependencies() {
+        if let DependencyKind::Path { path: dep_path } = &dep.kind {
+            dependencies.insert(name.clone(), config_dir.join(dep_path));
+        }
+    }
+    dependencies
+}
+
+fn module_qualifier_for_dep_file(path: &Path, deps: &HashMap<String, PathBuf>) -> Option<String> {
+    let file = std::fs::canonicalize(path).ok()?;
+    for dep_root in deps.values() {
+        let root = std::fs::canonicalize(dep_root).ok()?;
+        if let Ok(rel) = file.strip_prefix(&root) {
+            let mut s = rel.to_string_lossy().replace('\\', "/");
+            s = s.trim_start_matches('/').to_string();
+            if let Some(stripped) = s.strip_suffix(".gin") {
+                s = stripped.to_string();
+            }
+            if s.is_empty() {
+                return None;
+            }
+            return Some(s.replace('/', "."));
+        }
+    }
+    None
+}
+
 pub fn collect_gin_files_recursive(dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {

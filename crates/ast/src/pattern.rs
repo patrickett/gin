@@ -1,13 +1,13 @@
-// Unified surface (patterns, type-shaped positions, values) — **done for AST boundaries**:
+// Unified surface (patterns, type-shaped positions, values) — **partial**:
 //
 // - **Values** — [`Expr`] in `crates/ast/src/expr/mod.rs`.
 // - **For binders** — [`Expr`] on [`crate::expr::ForInLoop`] (`for_loop_pattern_names`).
-// - **`if` / `when` `is` patterns** — [`Expr::IsPattern`] (`is_pattern_expr_from_tag`).
-// - **Bind return / receiver tags** — [`Expr::TypeTag`] (`type_tag_expr_from_tag`).
+// - **`if` / `when` `is` patterns** — [`Expr::IsPattern`] (still wraps [`Tag`] today).
+// - **Bind return / receiver** — [`Expr::TypeTag`] (still wraps [`Tag`] today).
 //
-// [`Tag`] remains the *payload* inside `IsPattern` / `TypeTag` and for declare bodies,
-// `ParameterKind::Tagged`, etc., until generic type parameters are fully expression-shaped
-// (then `Tag` can shrink toward a pure typeck IR).
+// **TODO — full expression-shaped types (Approach B):** see
+// [`docs/TODO_type_expression_migration.md`](../../../docs/TODO_type_expression_migration.md)
+// (`ParameterKind::Tagged`, declare `Alias` / `Variant`, remove `ast::Tag`, single parse pipeline).
 //
 // Ref: https://matklad.github.io/2025/08/09/zigs-lovely-syntax.html#Everything-Is-an-Expression
 

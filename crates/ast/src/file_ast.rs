@@ -1,5 +1,6 @@
 use crate::prelude::*;
 use crate::span::{SpanId, SpanTable};
+use indexmap::IndexMap;
 use std::{
     collections::{HashMap, HashSet},
     hash::{Hash, Hasher},
@@ -7,7 +8,38 @@ use std::{
 };
 
 pub type TagMap = HashMap<Intern<String>, Declare>;
-pub type DefMap = HashMap<Intern<String>, Bind>;
+/// Method name → single bind (impl blocks, etc.).
+pub type MethodMap = HashMap<Intern<String>, Bind>;
+/// Top-level def name → one bind after platform filtering (see [`collapse_defs_for_platform`]).
+pub type DefMap = IndexMap<Intern<String>, Bind>;
+
+/// Collapse parser scratch (`Vec` per name from raw top-level collection) to a single bind per name
+/// for the current host `#[os]` / `#[arch]`. Names with no matching overload are dropped.
+pub fn collapse_defs_for_platform(multi: IndexMap<Intern<String>, Vec<Bind>>) -> DefMap {
+    let mut defs = DefMap::new();
+    for (name, binds) in multi {
+        if let Some(bind) = pick_bind_for_platform(binds) {
+            defs.insert(name, bind);
+        }
+    }
+    defs
+}
+
+fn pick_bind_for_platform(binds: Vec<Bind>) -> Option<Bind> {
+    if binds.is_empty() {
+        return None;
+    }
+    let mut matching: Vec<Bind> = binds
+        .into_iter()
+        .filter(|b| b.attributes().matches_current_platform())
+        .collect();
+    if matching.is_empty() {
+        None
+    } else {
+        // If several overloads match (misconfiguration), keep the first.
+        Some(matching.remove(0))
+    }
+}
 
 /// Symbol kind - distinguishes between different types of symbols.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -278,7 +310,7 @@ impl FileAst {
     /// Merge defs and tags from `other` into `self`.
     ///
     /// Existing entries in `self` take precedence (entry file can shadow dependency symbols).
-    /// Dep binds that don't match the current build platform are skipped, allowing the same
+    /// Dependency defs that don't match the current build platform are skipped, allowing the same
     /// name (e.g. `SYS_WRITE`) to be defined in separate platform-specific files.
     /// The dependency's top-level exprs and private symbols are not imported.
     pub fn merge_from(&mut self, other: FileAst) {
@@ -286,8 +318,11 @@ impl FileAst {
             self.tags.entry(name).or_insert(declare);
         }
         for (name, bind) in other.defs {
+            if self.defs.contains_key(&name) {
+                continue;
+            }
             if bind.attributes().matches_current_platform() {
-                self.defs.entry(name).or_insert(bind);
+                self.defs.insert(name, bind);
             }
         }
     }

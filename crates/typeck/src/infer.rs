@@ -127,11 +127,23 @@ impl TyInfer for Binary {
 impl TyInfer for FnCall {
     fn infer_ty(&self, env: &TyInferEnv) -> Ty {
         let name = self.path.root;
-        if let Some(local_ty) = env.locals.get_type(&name) {
-            if self.path.segments.is_empty() {
+        if self.path.segments.is_empty() {
+            if let Some(local_ty) = env.locals.get_type(&name) {
                 return local_ty;
             }
-            let mut ty = local_ty;
+            let mangled = crate::mangled_fn_call_name(self);
+            return env
+                .fn_return_types
+                .get(&mangled)
+                .cloned()
+                .unwrap_or(Ty::Int {
+                    width: 64,
+                    signed: true,
+                    value: None,
+                });
+        }
+
+        if let Some(mut ty) = env.locals.get_type(&name) {
             for seg in &self.path.segments {
                 ty = match &ty {
                     Ty::Ptr { inner } | Ty::Ref { inner } if inner.is_record() => {
@@ -154,11 +166,16 @@ impl TyInfer for FnCall {
             }
             return ty;
         }
-        env.fn_return_types.get(&name).cloned().unwrap_or(Ty::Int {
-            width: 64,
-            signed: true,
-            value: None,
-        })
+
+        let mangled = crate::mangled_fn_call_name(self);
+        env.fn_return_types
+            .get(&mangled)
+            .cloned()
+            .unwrap_or(Ty::Int {
+                width: 64,
+                signed: true,
+                value: None,
+            })
     }
 }
 
