@@ -1,13 +1,20 @@
 //! Compilation orchestration — the main compiler pipeline.
+//!
+
+// TODO: Separate compilation for modules — currently all files are merged into one AST
+// before codegen. A better approach is to compile module files independently into object
+// files with global symbol tables, then link them. This keeps user code and library code
+// distinct for easier debugging and enables incremental recompilation.
 
 use crate::cli::Args;
 use ast::FileAst;
+use ast::ImportSource;
 use codegen::emit::native;
 use diagnostic::lex::LexSymptom;
 use diagnostic::parse::ParseSymptom;
 use diagnostic::{Category, Symptom, SymptomLike};
 use lexer::debug_tokens;
-use parser::{ParseOutput, extract_local_import_paths, parse_source_full};
+use parser::{ParseOutput, discover_module, extract_package_import_paths, parse_source_full};
 use std::path::{Path, PathBuf};
 use typeck::{TyEnv, analyze_file};
 
@@ -80,16 +87,55 @@ impl GinCompiler {
 
         // ── Phase 3: Resolve imports (binary mode only) ──────────────
         if !is_library && !parsed_files.is_empty() {
-            let entry = &parsed_files[0];
-            let base_dir = entry.path.parent().unwrap_or(Path::new(""));
-            let import_paths = extract_local_import_paths(&entry.output.ast, base_dir);
+            // Extract data from the entry file before mutating parsed_files.
+            let entry_path = parsed_files[0].path.clone();
+            let entry_ast = parsed_files[0].output.ast.clone();
+            let base_dir = entry_path.parent().unwrap_or(Path::new(""));
 
-            for (import_path, _span) in &import_paths {
-                // Skip if already included
+            // Local imports: use module tree discovery to find direct files
+            // and all sub-module files. `use 'utils'` pulls in utils/*.gin for
+            // unqualified access AND utils/requests/*.gin etc. so that qualified
+            // calls like `requests.make_request(...)` can resolve.
+            for import in entry_ast.uses() {
+                for module_import in &import.0 {
+                    if let ImportSource::Local(path, _span) = &module_import.source {
+                        let import_dir = base_dir.join(path);
+                        let Some(tree) = discover_module(&import_dir) else {
+                            continue;
+                        };
+
+                        for file_path in tree.all_files_recursive() {
+                            if parsed_files.iter().any(|p| p.path == file_path) {
+                                continue;
+                            }
+                            let source = match std::fs::read_to_string(&file_path) {
+                                Ok(s) => s,
+                                Err(err) => {
+                                    eprintln!(
+                                        "Error reading import {}: {}",
+                                        file_path.display(),
+                                        err
+                                    );
+                                    continue;
+                                }
+                            };
+                            let output = parse_source_full(&source);
+                            parsed_files.push(ParsedFile {
+                                path: file_path,
+                                source,
+                                output,
+                            });
+                        }
+                    }
+                }
+            }
+
+            // Package imports: resolve against flask.json dependency map.
+            let pkg_paths = extract_package_import_paths(&entry_ast, &args.dependencies);
+            for (import_path, _span) in &pkg_paths {
                 if parsed_files.iter().any(|p| p.path == *import_path) {
                     continue;
                 }
-
                 let source = match std::fs::read_to_string(import_path) {
                     Ok(s) => s,
                     Err(err) => {
