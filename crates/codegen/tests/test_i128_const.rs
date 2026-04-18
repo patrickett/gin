@@ -1,8 +1,20 @@
-use parser::parse_from_str;
 use codegen::build_module_with_context;
 use diagnostic::Symptom;
 use melior::Context;
+use parser::parse_from_str;
 use typeck::TyEnv;
+
+// TODO: Introduce `insta` snapshot testing for MLIR and LLVM IR output. Current tests use
+// `assert!(mlir_text.contains(...))` which only checks for scattered substrings — it catches
+// outright bugs (e.g., truncated constants) but cannot detect regressions in IR quality such
+// as redundant allocas, unnecessary bitcasts, missed canonicalization opportunities, or wrong
+// control-flow structure. Snapshot tests with `insta` would capture the full IR text as a
+// "golden" reference. On any codegen change, `cargo insta review` presents a diff so you can
+// accept intentional improvements and reject unintended regressions. This is especially
+// valuable when comparing against `rustc --emit=llvm-ir` output: you snapshot both Gin and
+// Rust LLVM IR side by side, and any diff that makes Gin's IR *further* from Rust's is a
+// signal to investigate. Add `insta = "1"` to [dev-dependencies] in codegen/Cargo.toml, then
+// replace substring assertions with `insta::assert_snapshot!("i128_const", mlir_text)`.
 
 /// Helper to generate MLIR text from a source string using the single codegen path.
 fn codegen_to_mlir_text(source: &str, filename: &str) -> (String, Vec<Symptom>) {

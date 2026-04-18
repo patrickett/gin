@@ -172,34 +172,6 @@ impl<'c> Lower<'c> for FnCall {
             Intern::<String>::new(format!("{}.{}", self.path.root, segs.join(".")))
         };
 
-        if func_name.as_str() == "syscall" {
-            return lower_syscall_call(self, ctx, block, symtab);
-        }
-
-        if func_name.as_str() == "float_bits" {
-            let arg = match self.args.as_ref().and_then(|a| a.first()) {
-                Some(a) => a,
-                None => {
-                    ctx.emit_internal("float_bits requires one argument");
-                    return None;
-                }
-            };
-            let val = arg.lower(ctx, block, symtab)?;
-            let loc = ctx.location();
-            let op = match OperationBuilder::new("llvm.bitcast", loc)
-                .add_operands(&[val])
-                .add_results(&[ctx.mlir.i64()])
-                .build()
-            {
-                Ok(op) => op,
-                Err(e) => {
-                    ctx.emit_internal(format!("llvm.bitcast: {e}"));
-                    return None;
-                }
-            };
-            return Some(block.append_op(op));
-        }
-
         // Global constant array — return a pointer via addressof.
         if ctx
             .global_const_elems
@@ -323,64 +295,4 @@ fn lower_field_access<'c>(
     }
 
     Some(val)
-}
-
-fn lower_syscall_call<'c>(
-    fn_call: &ast::FnCall,
-    ctx: &CodegenContext<'_, 'c>,
-    block: &BlockRef<'c, 'c>,
-    symtab: &mut RuntimeSymbolTable<'c>,
-) -> Option<Value<'c, 'c>> {
-    let loc = ctx.location();
-    let zero = block.const_i64(ctx.mlir, 0);
-    let empty: Vec<Spanned<Expr>> = Vec::new();
-    let arg_exprs = fn_call.args.as_deref().unwrap_or(&empty);
-
-    // Lower up to 6 args, padding missing ones with 0.
-    let mut operands: Vec<Value<'c, 'c>> = Vec::with_capacity(6);
-    for i in 0..6 {
-        let val = if i < arg_exprs.len() {
-            arg_exprs[i].lower(ctx, block, symtab)?
-        } else {
-            zero
-        };
-        operands.push(val);
-    }
-
-    // aarch64: syscall number goes in x16 (macOS) or x8 (Linux).
-    // Args go in x0–x4 (a0 is tied to the x0 output register).
-    // Result comes back in x0.
-    #[cfg(target_os = "macos")]
-    let (asm_str, num_reg) = ("svc #0x80", "x16");
-    #[cfg(not(target_os = "macos"))]
-    let (asm_str, num_reg) = ("svc #0", "x8");
-
-    let constraints = format!("={{x0}},{{{num_reg}}},0,{{x1}},{{x2}},{{x3}},{{x4}},~{{memory}}");
-
-    let bool_true = IntegerAttribute::new(IntegerType::new(ctx.mlir, 1).into(), 1).into();
-
-    let asm_op = match OperationBuilder::new("llvm.inline_asm", loc)
-        .add_attributes(&[
-            (
-                Identifier::new(ctx.mlir, "asm_string"),
-                StringAttribute::new(ctx.mlir, asm_str).into(),
-            ),
-            (
-                Identifier::new(ctx.mlir, "constraints"),
-                StringAttribute::new(ctx.mlir, &constraints).into(),
-            ),
-            (Identifier::new(ctx.mlir, "has_side_effects"), bool_true),
-        ])
-        .add_operands(&operands)
-        .add_results(&[ctx.mlir.i64()])
-        .build()
-    {
-        Ok(op) => op,
-        Err(e) => {
-            ctx.emit_internal(format!("llvm.inline_asm: {e}"));
-            return None;
-        }
-    };
-
-    Some(block.append_op(asm_op))
 }

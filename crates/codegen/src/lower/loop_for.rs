@@ -1,5 +1,7 @@
 use crate::prelude::*;
 
+use ast::for_loop_pattern_names;
+
 impl<'c> Lower<'c> for ForInLoop {
     fn lower(
         &self,
@@ -43,12 +45,20 @@ impl<'c> Lower<'c> for ForInLoop {
             let iv_i64 = loop_blk_ref.append_op(arith_dialect::index_cast(iv, ctx.mlir.i64(), loc));
 
             let mut loop_symtab = symtab.clone();
-            match &self.pat {
-                Pattern::Ident(name) => {
+            match for_loop_pattern_names(&self.pat.0).as_deref() {
+                Some([name]) => {
                     loop_symtab.insert(name.as_str().to_string(), iv_i64);
                 }
-                Pattern::Tuple(_) => {
+                Some([]) => {
+                    ctx.emit_internal("Empty for-loop pattern is not supported");
+                    return None;
+                }
+                Some(_) => {
                     ctx.emit_internal("Tuple patterns in for loops are not yet supported");
+                    return None;
+                }
+                None => {
+                    ctx.emit_internal("Invalid for-loop pattern (expected identifier(s))");
                     return None;
                 }
             }

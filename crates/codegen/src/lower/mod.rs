@@ -1,3 +1,4 @@
+mod asm;
 mod binary;
 mod bind;
 mod fn_call;
@@ -654,6 +655,7 @@ impl<'c> Lower<'c> for Expr {
                 let undef = block.append_op(ctx.mlir.llvm_undef(union_mlir_ty));
                 Some(block.append_op(ctx.mlir.llvm_insertvalue(undef, disc_val, 0)))
             }
+            Expr::Asm(asm_expr) => asm_expr.lower(ctx, block, symtab),
             Expr::TupleLit(elems) => {
                 let elem_vals: Vec<Value<'c, 'c>> = elems
                     .iter()

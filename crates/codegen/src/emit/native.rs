@@ -1,5 +1,10 @@
 //! Native compilation: MLIR module → object file → linked executable.
 
+// TODO: Add proper tail-call optimization. (unbounded tail calls in constant space).
+// guarantee the same for self-recursive tail calls. recognize tail position, then use a
+// jump instead of a call.
+// maybe also greedy-shuffling to minimize argument-copying overhead in tail calls.
+
 use crate::build_module_with_context;
 use ast::FileAst;
 use diagnostic::codegen::CodegenSymptom;
@@ -204,6 +209,7 @@ pub fn native_from_module(
 ) -> (bool, Vec<Symptom>) {
     let mut symptoms = Vec::new();
     let mlir_text = module.as_operation().to_string();
+
     let fixed_text = fix_llvm_call_segments(&mlir_text);
 
     let mut fixed_module = match Module::parse(context, &fixed_text) {
