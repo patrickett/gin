@@ -358,7 +358,9 @@ fn parse_return_type_part(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Retu
 
     (
         None,
-        Some(Box::new(type_tag_expr_from_tag(Tag::Nominal(name, name_span)))),
+        Some(Box::new(type_tag_expr_from_tag(Tag::Nominal(
+            name, name_span,
+        )))),
         None,
         None,
     )

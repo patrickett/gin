@@ -3,7 +3,7 @@ use ast::Tag;
 use internment::Intern;
 use parser::parse_from_str;
 use typeck::{
-    flow::ConstValue, Ty, TyEnv, flow_analyzer::FlowAnalyzer, ty_alignment, ty_byte_size_static,
+    Ty, TyEnv, flow::ConstValue, flow_analyzer::FlowAnalyzer, ty_alignment, ty_byte_size_static,
 };
 
 #[test]

@@ -7,8 +7,8 @@ use crate::r#type::{Ty, TyEnv};
 use ast::SpanId;
 use ast::Spanned;
 use ast::{
-    for_loop_pattern_names, is_pattern_as_tag, tag_pattern_binding_names, Bind, BindValue, Expr,
-    FileAst, FnCall, IfCondition, IfExpr, Loop, Tag, WhenArm, WhenExpr,
+    Bind, BindValue, Expr, FileAst, FnCall, IfCondition, IfExpr, Loop, Tag, WhenArm, WhenExpr,
+    for_loop_pattern_names, is_pattern_as_tag, tag_pattern_binding_names,
 };
 use internment::Intern;
 use std::collections::{HashMap, HashSet};

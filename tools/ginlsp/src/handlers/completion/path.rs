@@ -91,7 +91,11 @@ fn complete_local_paths(file_uri: &Url, partial: &str) -> Vec<CompletionItem> {
         items.push(CompletionItem {
             label,
             kind: Some(kind),
-            detail: Some(if is_dir { "directory".to_string() } else { "gin module".to_string() }),
+            detail: Some(if is_dir {
+                "directory".to_string()
+            } else {
+                "gin module".to_string()
+            }),
             ..Default::default()
         });
     }

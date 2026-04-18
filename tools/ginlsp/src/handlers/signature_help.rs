@@ -1,6 +1,6 @@
 use crate::Backend;
-use lsp::{position_to_byte_offset, fn_call_at, signature_for_fn};
 use ast::FileAst;
+use lsp::{fn_call_at, position_to_byte_offset, signature_for_fn};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 

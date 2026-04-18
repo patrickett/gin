@@ -1,7 +1,7 @@
 #[test]
 fn test_inline_dash_formatting() {
-    use ginfmt::format_with_config;
     use ginfmt::Config;
+    use ginfmt::format_with_config;
 
     let source = "Maybe(x) is  --- Used to represent values that may or may not be present.
     Some(x) or --- has a value

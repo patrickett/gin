@@ -23,7 +23,14 @@ fn print_tree(node: tree_sitter::Node, source: &str, indent: usize) {
         text.replace('\n', "\\n")
     };
 
-    println!("{}[{}:{}] {} = {:?}", indent_str, node.start_byte(), node.end_byte(), node.kind(), text_preview);
+    println!(
+        "{}[{}:{}] {} = {:?}",
+        indent_str,
+        node.start_byte(),
+        node.end_byte(),
+        node.kind(),
+        text_preview
+    );
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {

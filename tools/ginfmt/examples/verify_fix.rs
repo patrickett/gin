@@ -17,7 +17,10 @@ Serial is 0...9999";
 
     // Verify the fix
     assert!(output.contains("is"), "Output should contain 'is'");
-    assert!(!output.contains(" s "), "Output should not contain ' s ' (missing 'i')");
+    assert!(
+        !output.contains(" s "),
+        "Output should not contain ' s ' (missing 'i')"
+    );
 
     let lines: Vec<&str> = output.lines().collect();
     assert_eq!(lines[0], "Area   is 0...999");

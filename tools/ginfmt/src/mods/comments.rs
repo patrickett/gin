@@ -70,9 +70,7 @@ mod tests {
         let source = "--- Used to represent values.\n--- has a value\n";
         let visitor = FmtVisitor::new(source, Config::default());
         let mut parser = tree_sitter::Parser::new();
-        parser
-            .set_language(&tree_sitter_gin::language())
-            .unwrap();
+        parser.set_language(&tree_sitter_gin::language()).unwrap();
         let tree = parser.parse(source, None).unwrap();
 
         let root = tree.root_node();

@@ -1,5 +1,5 @@
 use clap::Args;
-use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
+use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
 use flask::PACKAGE_CONFIG_NAME;
 use std::{
     fs,
@@ -157,13 +157,17 @@ pub fn write_flask_json(path: &Path, name: &str, author: &str, entry: Option<&st
 
 pub fn write_main_gin(path: &Path, template: Template) {
     let content = match template {
-        Template::HelloWorld => r#"main:
+        Template::HelloWorld => {
+            r#"main:
     print("Hello, world!")
 return
-"#,
-        Template::Library => r#"add(a: int, b: int) -> int:
+"#
+        }
+        Template::Library => {
+            r#"add(a: int, b: int) -> int:
     return a + b
-"#,
+"#
+        }
     };
 
     if let Err(e) = fs::write(path, content) {
@@ -172,11 +176,7 @@ return
 }
 
 fn run_git_init(dir: &Path) {
-    match Command::new("git")
-        .arg("init")
-        .current_dir(dir)
-        .output()
-    {
+    match Command::new("git").arg("init").current_dir(dir).output() {
         Ok(_) => {
             println!("Initialized git repository");
         }

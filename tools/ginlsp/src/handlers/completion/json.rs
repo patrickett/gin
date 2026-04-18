@@ -33,16 +33,56 @@ pub(crate) fn complete_flask_json(
 fn complete_top_level_fields() -> Vec<CompletionItem> {
     vec![
         item("name", CompletionItemKind::FIELD, "Required – package name"),
-        item("version", CompletionItemKind::FIELD, "Required – semver version"),
-        item("entry", CompletionItemKind::FIELD, "Optional – main .gin file"),
-        item("dependencies", CompletionItemKind::FIELD, "Optional – package dependencies"),
-        item("authors", CompletionItemKind::FIELD, "Optional – list of authors"),
-        item("description", CompletionItemKind::FIELD, "Optional – package description"),
-        item("license", CompletionItemKind::FIELD, "Optional – license(s)"),
-        item("repository", CompletionItemKind::FIELD, "Optional – repo URL"),
-        item("keywords", CompletionItemKind::FIELD, "Optional – package keywords"),
-        item("targets", CompletionItemKind::FIELD, "Optional – build targets"),
-        item("exclude", CompletionItemKind::FIELD, "Optional – files to exclude"),
+        item(
+            "version",
+            CompletionItemKind::FIELD,
+            "Required – semver version",
+        ),
+        item(
+            "entry",
+            CompletionItemKind::FIELD,
+            "Optional – main .gin file",
+        ),
+        item(
+            "dependencies",
+            CompletionItemKind::FIELD,
+            "Optional – package dependencies",
+        ),
+        item(
+            "authors",
+            CompletionItemKind::FIELD,
+            "Optional – list of authors",
+        ),
+        item(
+            "description",
+            CompletionItemKind::FIELD,
+            "Optional – package description",
+        ),
+        item(
+            "license",
+            CompletionItemKind::FIELD,
+            "Optional – license(s)",
+        ),
+        item(
+            "repository",
+            CompletionItemKind::FIELD,
+            "Optional – repo URL",
+        ),
+        item(
+            "keywords",
+            CompletionItemKind::FIELD,
+            "Optional – package keywords",
+        ),
+        item(
+            "targets",
+            CompletionItemKind::FIELD,
+            "Optional – build targets",
+        ),
+        item(
+            "exclude",
+            CompletionItemKind::FIELD,
+            "Optional – files to exclude",
+        ),
         item(
             "interface_hash",
             CompletionItemKind::FIELD,

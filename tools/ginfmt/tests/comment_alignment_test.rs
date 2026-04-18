@@ -1,6 +1,6 @@
 //! Integration tests for comment alignment with `---` separator.
 
-use ginfmt::{format_with_config, Config};
+use ginfmt::{Config, format_with_config};
 
 #[test]
 fn test_dash_comment_alignment() {
@@ -24,7 +24,8 @@ fn test_dash_comment_alignment() {
 #[test]
 fn test_mixed_content_with_comments() {
     // Test that regular code and `---` comments coexist properly
-    let input = "Area is 0...999\n--- Comment about Area\nGroup is 0...99\n--- Comment about Group\n";
+    let input =
+        "Area is 0...999\n--- Comment about Area\nGroup is 0...99\n--- Comment about Group\n";
     let output = format_with_config(input, Config::default());
 
     // Should not crash and should produce output
@@ -37,7 +38,13 @@ fn test_mixed_content_with_comments() {
 fn test_comment_alignment_disabled() {
     // Test that comment alignment can be disabled
     let input = "--- Short\n--- Much longer comment here\n";
-    let output = format_with_config(input, Config { align_comments: false, ..Default::default() });
+    let output = format_with_config(
+        input,
+        Config {
+            align_comments: false,
+            ..Default::default()
+        },
+    );
 
     // Comments should remain as-is (no alignment applied)
     assert!(output.contains("--- Short"));

@@ -148,9 +148,6 @@ fn doc_heavy_source() -> String {
     s
 }
 
-// ─── Pipeline: lex + parse ────────────────────────────────────────────────────
-// Each function runs the full pipeline from source string to FileAst.
-
 /// Validate that all benchmark sources parse without errors.
 /// Panics with a descriptive message if any source has parse errors,
 /// so broken sources are caught before benchmarking.
@@ -191,13 +188,6 @@ fn validate_sources() {
         );
     }
 }
-
-fn lex_handwritten_then_handwritten(source: &str) {
-    let ast = expr::parse_source(source);
-    std::hint::black_box(ast);
-}
-
-// ─── Benchmarks ───────────────────────────────────────────────────────────────
 
 /// Benchmark full pipeline (lex + parse) with the handwritten parser.
 fn bench_lex_and_parse(c: &mut Criterion) {

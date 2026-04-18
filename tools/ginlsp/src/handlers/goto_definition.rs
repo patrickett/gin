@@ -1,6 +1,6 @@
 use crate::diagnostics::span_to_range;
 use crate::Backend;
-use lsp::{get_word_at_position, find_definition_span};
+use lsp::{find_definition_span, get_word_at_position};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 
@@ -13,7 +13,11 @@ impl Backend {
             return Ok(None);
         }
 
-        let uri = params.text_document_position_params.text_document.uri.clone();
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .clone();
         let position = params.text_document_position_params.position;
 
         if let Some(state) = self.documents.get(&uri.to_string()) {

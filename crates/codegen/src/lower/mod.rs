@@ -867,10 +867,15 @@ pub fn lower_function<'c>(
 
         let result = lower_bind_value(ctx, &block, bind.value(), &symtab)?;
 
-        let ret_op = if let Some(result1) = result {
-            block.ret(ctx.mlir, &[result1])
-        } else {
-            block.ret(ctx.mlir, &[])
+        let ret_op = match result {
+            None => block.ret(ctx.mlir, &[]),
+            Some(v) => {
+                if matches!(return_ty, Ty::Unit) {
+                    block.ret(ctx.mlir, &[])
+                } else {
+                    block.ret(ctx.mlir, &[v])
+                }
+            }
         };
         block.append_operation(ret_op);
     }

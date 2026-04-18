@@ -62,15 +62,6 @@ pub fn rewrite(visitor: &FmtVisitor, node: tree_sitter::Node, when_col: usize) -
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::config::Config;
-
-    fn parse_when(source: &str) -> tree_sitter::Tree {
-        let mut parser = tree_sitter::Parser::new();
-        parser.set_language(&tree_sitter_gin::language()).unwrap();
-        parser.parse(source, None).unwrap()
-    }
-
     #[test]
     #[ignore]
     fn debug_print_when_ast() {
