@@ -18,16 +18,8 @@ pub struct Import(pub Vec<ModuleImport>);
 // but in use statements so scripts can use remote depenecies
 // `use 'https://github.com/gin/db_project.git' as db`
 
-// TODO: Implement import wildcard support (*)
+// TODO: explicit importing for reduces interface subscription
 // `use core.http (...)`
-
-// TODO: Decide on import wildcard policy. Zig and this language share a philosophy
-// of explicit imports: no glob imports, no prelude, no implicit namespacing.
-// Every symbol must be explicitly imported. This keeps name resolution simple and
-// makes it trivial to find where any name comes from.
-// The wildcard support (*) should be REMOVED from the roadmap, and the parser
-// should reject glob imports outright.
-// Ref: https://matklad.github.io/2025/08/09/zigs-lovely-syntax.html#Clarity-of-Names
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ImportSource {
