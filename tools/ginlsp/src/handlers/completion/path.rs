@@ -1,4 +1,4 @@
-use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Position, Url};
+use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Position, Range, Url};
 
 pub(crate) fn use_completions(
     source: &str,
@@ -18,13 +18,25 @@ pub(crate) fn use_completions(
 
     if let Some(quote_pos) = before_cursor.rfind('\'') {
         let partial = &before_cursor[quote_pos + 1..];
-        return Some(complete_local_paths(file_uri, partial));
+        return Some(complete_local_paths(
+            source,
+            file_uri,
+            position,
+            quote_pos,
+            partial,
+        ));
     }
 
     Some(complete_dependency_names(file_uri, config))
 }
 
-fn complete_local_paths(file_uri: &Url, partial: &str) -> Vec<CompletionItem> {
+fn complete_local_paths(
+    source: &str,
+    file_uri: &Url,
+    position: Position,
+    quote_pos: usize,
+    partial: &str,
+) -> Vec<CompletionItem> {
     let file_path = match file_uri.to_file_path() {
         Ok(p) => p,
         Err(_) => return vec![],
@@ -75,12 +87,14 @@ fn complete_local_paths(file_uri: &Url, partial: &str) -> Vec<CompletionItem> {
             continue;
         }
 
-        let label = if is_dir {
+        let insert_text = if is_dir {
             format!("{prefix}{name}/")
         } else {
             let stem = path.file_stem().unwrap_or_default().to_string_lossy();
             format!("{prefix}{stem}")
         };
+
+        let label = insert_text.clone();
 
         let kind = if is_dir {
             CompletionItemKind::FOLDER
@@ -88,8 +102,23 @@ fn complete_local_paths(file_uri: &Url, partial: &str) -> Vec<CompletionItem> {
             CompletionItemKind::FILE
         };
 
+        // The text edit range replaces only the partial path after the quote
+        let text_edit_range = Range {
+            start: Position {
+                line: position.line,
+                character: (quote_pos + 1) as u32,
+            },
+            end: position,
+        };
+
         items.push(CompletionItem {
             label,
+            text_edit: Some(tower_lsp::lsp_types::CompletionTextEdit::Edit(
+                tower_lsp::lsp_types::TextEdit {
+                    range: text_edit_range,
+                    new_text: insert_text,
+                },
+            )),
             kind: Some(kind),
             detail: Some(if is_dir {
                 "directory".to_string()

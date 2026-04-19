@@ -96,7 +96,7 @@ pub enum BeginCommand {
 }
 
 impl BeginCommand {
-    /// Returns true if this command can run without an existing flask.json
+    /// Returns true if this command can run without an existing flask.jsonc
     pub fn needs_config(&self) -> bool {
         !matches!(self, BeginCommand::Init | BeginCommand::New(_))
     }

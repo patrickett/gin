@@ -89,7 +89,7 @@ pub fn extract_local_import_paths(ast: &FileAst, base_dir: &Path) -> Vec<(PathBu
         for module_import in &import.0 {
             match &module_import.source {
                 ImportSource::Package(_path) => {
-                    // Package imports from flask.json dependencies are not resolved
+                    // Package imports from flask.jsonc dependencies are not resolved
                     // by this pure function. Callers that need package resolution
                     // should handle it separately with access to the dependency map.
                 }
@@ -120,7 +120,7 @@ pub fn extract_local_import_paths(ast: &FileAst, base_dir: &Path) -> Vec<(PathBu
 
 /// Resolve package imports (e.g. `use core.io`) against a dependency map.
 ///
-/// `dependencies` maps package names (as declared in `flask.json`) to their
+/// `dependencies` maps package names (as declared in `flask.jsonc`) to their
 /// on-disk directory paths. For each `ImportSource::Package(path)`:
 ///
 /// - With segments (e.g. `core.io`): looks for `{dep_dir}/io.gin` and

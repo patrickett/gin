@@ -32,7 +32,7 @@ impl GinSnapshot {
 pub struct PackageInfo {
     /// All `.gin` files discovered in the package source directory.
     pub files: Vec<File>,
-    /// The root directory of the package (where `flask.json` lives).
+    /// The root directory of the package (where `flask.jsonc` lives).
     #[allow(dead_code)]
     pub root: PathBuf,
 }

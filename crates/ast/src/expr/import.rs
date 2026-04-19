@@ -14,7 +14,7 @@ use crate::path::ModPath;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Import(pub Vec<ModuleImport>);
 
-// TODO: for scripts we want to support git urls as if they were in flask.json
+// TODO: for scripts we want to support git urls as if they were in flask.jsonc
 // but in use statements so scripts can use remote depenecies
 // `use 'https://github.com/gin/db_project.git' as db`
 
@@ -23,7 +23,7 @@ pub struct Import(pub Vec<ModuleImport>);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ImportSource {
-    /// Top level name defined in `flask.json` ex. `use http.*`
+    /// Top level name defined in `flask.jsonc` ex. `use http.*`
     Package(ModPath),
     /// Path to a module on disk ex. `use '../http' as http`
     Local(PathBuf, SpanId),

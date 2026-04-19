@@ -88,15 +88,16 @@ impl GinCompiler {
         }
 
         // ── Phase 3: Resolve imports (binary mode only) ──────────────
+        // Extract data from entry file before mutating parsed_files.
+        let entry_path = parsed_files[0].path.clone();
+        let entry_dir = entry_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        let entry_ast = parsed_files[0].output.ast.clone();
+        let base_dir = entry_path.parent().unwrap_or(Path::new(""));
+
         if !is_library && !parsed_files.is_empty() {
-            // Extract data from the entry file before mutating parsed_files.
-            let entry_path = parsed_files[0].path.clone();
-            let entry_dir = entry_path
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_default();
-            let entry_ast = parsed_files[0].output.ast.clone();
-            let base_dir = entry_path.parent().unwrap_or(Path::new(""));
 
             if args.dependencies.is_empty() {
                 if let Some(config) = FlaskConfig::from_directory(&entry_dir) {
@@ -147,7 +148,7 @@ impl GinCompiler {
             // calls like `requests.make_request(...)` can resolve.
             for import in entry_ast.uses() {
                 for module_import in &import.0 {
-                    if let ImportSource::Local(path, _span) = &module_import.source {
+                    if let ImportSource::Local(path, span) = &module_import.source {
                         let import_dir = base_dir.join(path);
                         let Some(tree) = discover_module(&import_dir) else {
                             continue;
@@ -179,7 +180,7 @@ impl GinCompiler {
                 }
             }
 
-            // Package imports: resolve against flask.json dependency map.
+            // Package imports: resolve against flask.jsonc dependency map.
             let pkg_paths = extract_package_import_paths(&entry_ast, &args.dependencies);
             for (import_path, _span) in &pkg_paths {
                 if parsed_files.iter().any(|p| p.path == *import_path) {
@@ -205,7 +206,7 @@ impl GinCompiler {
         let all_asts: Vec<FileAst> = parsed_files.iter().map(|p| p.output.ast.clone()).collect();
 
         // ── Phase 5: Print diagnostics ────────────────────────────────
-        let has_flaws = print_diagnostics(&parsed_files, &all_asts);
+        let has_flaws = print_diagnostics(&parsed_files, &all_asts, &entry_ast);
         if has_flaws {
             return;
         }
@@ -289,7 +290,11 @@ pub fn collect_gin_files_recursive(dir: &Path) -> Vec<PathBuf> {
 /// Print diagnostics for all files — parse errors, lex errors, and type/flow analysis.
 ///
 /// Returns `true` if any fatal flaws were found.
-fn print_diagnostics(parsed_files: &[ParsedFile], all_asts: &[FileAst]) -> bool {
+fn print_diagnostics(
+    parsed_files: &[ParsedFile], 
+    all_asts: &[FileAst],
+    entry_ast: &FileAst,
+) -> bool {
     let mut has_flaws = false;
 
     for (i, parsed) in parsed_files.iter().enumerate() {
@@ -340,6 +345,27 @@ fn print_diagnostics(parsed_files: &[ParsedFile], all_asts: &[FileAst]) -> bool 
             symptom.print(span_table, &parsed.source, &filename);
             if matches!(symptom.category, Category::Flaw) {
                 has_flaws = true;
+            }
+        }
+    }
+
+    // Check for direct .gin file imports in entry file
+    for import in entry_ast.uses() {
+        for module_import in &import.0 {
+            if let ImportSource::Local(path, span) = &module_import.source {
+                if path.extension().is_some_and(|ext| ext == "gin") {
+                    let symptom = ParseSymptom::DirectFileImport {
+                        path: path.to_string_lossy().into(),
+                    }.into_symptom(*span);
+                    
+                    // Create dummy span table for printing
+                    use ast::SpanTable;
+                    let span_table = SpanTable::new();
+                    let entry_source = format!("use '{}'", path.display());
+                    
+                    symptom.print(&span_table, &entry_source, "use statement");
+                    has_flaws = true;
+                }
             }
         }
     }

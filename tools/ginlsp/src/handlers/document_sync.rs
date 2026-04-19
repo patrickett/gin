@@ -18,7 +18,7 @@ impl Backend {
             self.json_documents
                 .insert(uri.clone(), JsonDocumentState { source: text });
             self.client
-                .log_message(MessageType::INFO, format!("Opened flask.json: {}", uri))
+                .log_message(MessageType::INFO, format!("Opened flask.jsonc: {}", uri))
                 .await;
             return;
         }

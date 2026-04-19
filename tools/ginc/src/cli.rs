@@ -71,7 +71,7 @@ pub struct Args {
     #[arg(short, long)]
     pub verbose: Option<bool>,
 
-    /// Resolved dependency paths: name → directory. Populated by `begin build` from flask.json.
+    /// Resolved dependency paths: name → directory. Populated by `begin build` from flask.jsonc.
     /// Not a CLI argument — set programmatically.
     #[arg(skip)]
     pub dependencies: HashMap<String, PathBuf>,

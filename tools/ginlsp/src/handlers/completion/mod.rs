@@ -38,7 +38,7 @@ impl Backend {
             self.client
                 .log_message(
                     MessageType::INFO,
-                    format!("Returning {} completions for flask.json", items.len()),
+                    format!("Returning {} completions for flask.jsonc", items.len()),
                 )
                 .await;
             return Ok(Some(CompletionResponse::Array(items)));

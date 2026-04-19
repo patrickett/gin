@@ -27,13 +27,13 @@ pub fn begin_add(_config: FlaskConfig, args: AddArgs) {
         }
     );
 
-    // TODO: Add dependency to flask.json
-    // 1. Find flask.json in current directory or parent directories
+    // TODO: Add dependency to flask.jsonc
+    // 1. Find flask.jsonc in current directory or parent directories
     // 2. Parse existing config
     // 3. Add new dependency to dependencies map
-    // 4. Write updated config back to flask.json
+    // 4. Write updated config back to flask.jsonc
 
-    todo!("Add dependency to flask.json: {dep_name}")
+    todo!("Add dependency to flask.jsonc: {dep_name}")
 }
 
 fn parse_package(package: &str) -> Dependency {

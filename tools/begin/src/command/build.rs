@@ -31,7 +31,7 @@ pub fn begin_build(config: FlaskConfig, input: Option<PathBuf>) {
         todo!("fancy error message for path 404")
     }
 
-    // Resolve path dependencies relative to cwd (where flask.json lives).
+    // Resolve path dependencies relative to cwd (where flask.jsonc lives).
     let config_dir = std::env::current_dir().unwrap_or_default();
     let dependencies = super::resolve_path_dependencies(&config, &config_dir);
 

@@ -84,7 +84,7 @@ impl DerefMut for FlaskConfigWriteGuard<'_> {
 }
 
 impl FlaskConfigHandle {
-    /// Load config from a directory, searching upward for flask.json.
+    /// Load config from a directory, searching upward for flask.jsonc.
     pub fn load(from_dir: &Path) -> Result<Self, ConfigError> {
         let mut search = from_dir.to_path_buf();
         loop {

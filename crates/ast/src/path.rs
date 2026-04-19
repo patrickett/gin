@@ -9,7 +9,7 @@ use crate::span::SpanId;
 /// stored in caches or sent across threads safely.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ModPath {
-    /// The root of a path can be a name mapped in `flask.json` or
+    /// The root of a path can be a name mapped in `flask.jsonc` or
     /// a child folder in the current directory.
     ///
     /// NOTE: If there is a name conflict it will error.

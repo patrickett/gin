@@ -6,6 +6,7 @@ pub enum ParseSymptom {
     Custom(String),
     EmptyParens { suggested: String },
     UnusedValue { value: String },
+    DirectFileImport { path: String },
 }
 
 impl SymptomLike for ParseSymptom {
@@ -40,6 +41,12 @@ impl SymptomLike for ParseSymptom {
                 message = format!("unused value: `{value}`");
                 help =
                     Some("did you mean to indent this as part of the previous expression?".into());
+            }
+            Self::DirectFileImport { path } => {
+                category = Category::Flaw;
+                code = "parse-direct-file-import";
+                message = format!("cannot import specific `.gin` file: `{}`", path);
+                help = Some("remove the `.gin` extension and import the module folder instead".into());
             }
         }
 

@@ -33,7 +33,7 @@ pub fn begin_run(config: FlaskConfig, input: Option<PathBuf>, watch: bool) {
         return;
     }
 
-    // Resolve path dependencies relative to cwd (where flask.json lives).
+    // Resolve path dependencies relative to cwd (where flask.jsonc lives).
     let config_dir = std::env::current_dir().unwrap_or_default();
     let dependencies = super::resolve_path_dependencies(&config, &config_dir);
 

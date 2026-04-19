@@ -146,7 +146,7 @@ impl Backend {
 
     /// Determine the package root directory for a file URI.
     ///
-    /// Searches upward from the file's directory for a `flask.json`. Falls back
+    /// Searches upward from the file's directory for a `flask.jsonc`. Falls back
     /// to the file's immediate parent directory when no config is found.
     fn package_root_for_uri(&self, uri: &Url) -> Option<std::path::PathBuf> {
         if let Some(handle) = self.get_or_load_config(uri) {

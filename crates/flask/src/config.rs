@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, io::BufReader};
 
-// Settled on flask.json since we now own flasks.io
-pub const PACKAGE_CONFIG_NAME: &str = "flask.json";
+pub const PACKAGE_CONFIG_NAME: &str = "flask.jsonc";
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Feature {}
@@ -167,7 +166,7 @@ impl FlaskConfig {
                     return Some(config);
                 }
             }
-            search.pop(); // remove flask.json
+            search.pop(); // remove flask.jsonc
             if !search.pop() {
                 return None;
             }

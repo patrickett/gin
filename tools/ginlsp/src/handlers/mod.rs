@@ -12,7 +12,7 @@ use tower_lsp::lsp_types::Url;
 pub(crate) fn is_flask_json_file(uri: &Url) -> bool {
     uri.to_file_path()
         .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy() == "flask.json"))
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy() == "flask.jsonc"))
         .unwrap_or(false)
 }
 

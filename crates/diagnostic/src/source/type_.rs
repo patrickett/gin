@@ -56,7 +56,7 @@ impl SymptomLike for TypeSymptom {
             Self::UnknownBinding { name } => {
                 code = "type-unknown-binding";
                 message = format!("use of undefined binding `{name}`");
-                help = Some("define bind before using it".into());
+                help = Some("import or define bind before using it".into());
             }
             Self::UnknownTag { name } => {
                 code = "type-unknown-tag";
