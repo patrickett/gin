@@ -148,7 +148,7 @@ impl GinCompiler {
             // calls like `requests.make_request(...)` can resolve.
             for import in entry_ast.uses() {
                 for module_import in &import.0 {
-                    if let ImportSource::Local(path, span) = &module_import.source {
+                    if let ImportSource::Local(path, _span) = &module_import.source {
                         let import_dir = base_dir.join(path);
                         let Some(tree) = discover_module(&import_dir) else {
                             continue;
@@ -350,21 +350,24 @@ fn print_diagnostics(
     }
 
     // Check for direct .gin file imports in entry file
-    for import in entry_ast.uses() {
-        for module_import in &import.0 {
-            if let ImportSource::Local(path, span) = &module_import.source {
-                if path.extension().is_some_and(|ext| ext == "gin") {
-                    let symptom = ParseSymptom::DirectFileImport {
-                        path: path.to_string_lossy().into(),
-                    }.into_symptom(*span);
-                    
-                    // Create dummy span table for printing
-                    use ast::SpanTable;
-                    let span_table = SpanTable::new();
-                    let entry_source = format!("use '{}'", path.display());
-                    
-                    symptom.print(&span_table, &entry_source, "use statement");
-                    has_flaws = true;
+    // The entry file is always parsed_files[0]
+    if let Some(entry_parsed) = parsed_files.first() {
+        let entry_span_table = &entry_parsed.output.span_table;
+        let entry_source = &entry_parsed.source;
+        let entry_filename = entry_parsed.filename();
+
+        for import in entry_ast.uses() {
+            for module_import in &import.0 {
+                if let ImportSource::Local(path, span) = &module_import.source {
+                    if path.extension().is_some_and(|ext| ext == "gin") {
+                        let symptom = ParseSymptom::DirectFileImport {
+                            path: path.to_string_lossy().into(),
+                        }
+                        .into_symptom(*span);
+
+                        symptom.print(entry_span_table, entry_source, &entry_filename);
+                        has_flaws = true;
+                    }
                 }
             }
         }

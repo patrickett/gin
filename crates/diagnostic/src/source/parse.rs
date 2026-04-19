@@ -45,7 +45,7 @@ impl SymptomLike for ParseSymptom {
             Self::DirectFileImport { path } => {
                 category = Category::Flaw;
                 code = "parse-direct-file-import";
-                message = format!("cannot import specific `.gin` file: `{}`", path);
+                message = format!("cannot import `.gin` files directly: `{}`", path);
                 help = Some("remove the `.gin` extension and import the module folder instead".into());
             }
         }
