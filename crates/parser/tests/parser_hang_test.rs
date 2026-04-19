@@ -491,11 +491,16 @@ return
     // Verify both parse_source (ignores errors) and parse_source_full (collects errors) succeed
     assert_handwritten_parses(source);
     let output = parser::parse_source_full(source);
+    let parse_flaws: Vec<_> = output
+        .symptoms
+        .iter()
+        .filter(|s| s.code.starts_with("parse-") && matches!(s.category, diagnostic::Category::Flaw))
+        .collect();
     assert!(
-        output.parse_errors.is_empty(),
+        parse_flaws.is_empty(),
         "parse_source_full produced {} parse errors: {:?}",
-        output.parse_errors.len(),
-        output.parse_errors
+        parse_flaws.len(),
+        parse_flaws
     );
 }
 

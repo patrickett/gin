@@ -6,9 +6,6 @@ use ast::FileAst;
 use dashmap::DashMap;
 use database::File;
 use database::Symptoms;
-use diagnostic::lex::LexSymptom;
-use diagnostic::parse::ParseSymptom;
-use diagnostic::SymptomLike;
 use diagnostics::symptoms_to_diagnostics;
 use futures::FutureExt;
 use parser::parse_source_full;
@@ -179,10 +176,10 @@ impl Backend {
 
         let snapshot = self.snapshot();
 
-        // Parse all files and collect parse/lex diagnostics.
+        // Parse all files and collect diagnostics.
         let mut all_asts: Vec<FileAst> = Vec::with_capacity(all_files.len());
         let mut all_span_tables: Vec<_> = Vec::with_capacity(all_files.len());
-        let mut all_parse_symptoms: Vec<Vec<_>> = Vec::with_capacity(all_files.len());
+        let mut all_symptoms: Vec<Vec<_>> = Vec::with_capacity(all_files.len());
         let mut all_sources: Vec<String> = Vec::with_capacity(all_files.len());
 
         for &f in &all_files {
@@ -205,36 +202,9 @@ impl Backend {
 
             let output = parse_source_full(&source);
 
-            let mut symptoms = Vec::new();
-            for &span_id in &output.unterminated_strings {
-                symptoms.push(LexSymptom::UnclosedString.into_symptom(span_id));
-            }
-            for (s, span_id) in &output.lex_errors {
-                symptoms.push(s.clone().into_symptom(*span_id));
-            }
-            for err in &output.parse_errors {
-                symptoms.push(ParseSymptom::Custom(err.message.clone()).into_symptom(err.span));
-            }
-            for (suggested, span_id) in &output.help_hints {
-                symptoms.push(
-                    ParseSymptom::EmptyParens {
-                        suggested: suggested.clone(),
-                    }
-                    .into_symptom(*span_id),
-                );
-            }
-            for (value, span_id) in &output.unused_values {
-                symptoms.push(
-                    ParseSymptom::UnusedValue {
-                        value: value.clone(),
-                    }
-                    .into_symptom(*span_id),
-                );
-            }
-
             all_asts.push(output.ast);
             all_span_tables.push(output.span_table);
-            all_parse_symptoms.push(symptoms);
+            all_symptoms.push(output.symptoms);
             all_sources.push(source);
             tokio::task::yield_now().await;
         }
@@ -250,7 +220,7 @@ impl Backend {
                 Err(_) => continue,
             };
 
-            let mut symptoms = all_parse_symptoms[i].clone();
+            let mut symptoms = all_symptoms[i].clone();
 
             // Type-check and flow-analysis symptoms
             symptoms.extend(analyze_file(&all_asts[i], &all_asts));

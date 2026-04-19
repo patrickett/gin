@@ -6,11 +6,12 @@
 
 use ast::span::{SpanId, SpanTable};
 use diagnostic::lex::LexSymptom;
+use diagnostic::parse::ParseSymptom;
+use diagnostic::{Symptom, SymptomLike};
 use lexer::{Lexer, Token};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::cursor::ParseError;
 use crate::expr;
 use ast::{BindValue, Expr, FileAst, FnCall, ImportSource};
 
@@ -22,16 +23,8 @@ pub struct ParseOutput {
     pub ast: FileAst,
     /// Span table mapping SpanIds to byte ranges in the source.
     pub span_table: SpanTable,
-    /// Errors encountered during parsing.
-    pub parse_errors: Vec<ParseError>,
-    /// Errors encountered during lexing, paired with their span.
-    pub lex_errors: Vec<(LexSymptom, SpanId)>,
-    /// SpanIds for unterminated string literals.
-    pub unterminated_strings: Vec<SpanId>,
-    /// Empty-paren hints: (suggested form, span ID).
-    pub help_hints: Vec<(String, SpanId)>,
-    /// Unused value info diagnostics: (value description, span ID).
-    pub unused_values: Vec<(String, SpanId)>,
+    /// All diagnostics collected during lexing and parsing.
+    pub symptoms: Vec<Symptom>,
 }
 
 /// Parse source text and return full results including all diagnostics.
@@ -57,23 +50,66 @@ pub fn parse_source_full(src: &str) -> ParseOutput {
     let (ast, hw_parse_errors) = expr::parse_tokens_with_errors(&filtered_tokens, span_table);
     let span_table = span_table_clone;
 
-    let help_hints = collect_empty_paren_hints(&ast);
-    let unused_values = collect_unused_values(&ast);
+    let mut symptoms: Vec<Symptom> = Vec::new();
 
-    let unterminated_strings: Vec<_> = tokens
+    // Unterminated strings
+    for (_, span_id) in tokens
         .iter()
         .filter(|(t, _)| matches!(t, Token::UnterminatedString(_)))
-        .map(|(_, s)| *s)
-        .collect();
+    {
+        symptoms.push(LexSymptom::UnclosedString.into_symptom(*span_id));
+    }
+
+    // Lex errors
+    for (s, span_id) in &lex_errors {
+        symptoms.push(s.clone().into_symptom(*span_id));
+    }
+
+    // Parse errors
+    for err in &hw_parse_errors {
+        symptoms.push(ParseSymptom::Custom(err.message.clone()).into_symptom(err.span));
+    }
+
+    // Import validation (direct .gin file imports)
+    for import in ast.uses() {
+        for module_import in &import.0 {
+            if let ImportSource::Local(path, span_id) = &module_import.source {
+                if path.extension().is_some_and(|ext| ext == "gin") {
+                    symptoms.push(
+                        ParseSymptom::DirectFileImport {
+                            path: path.to_string_lossy().into(),
+                        }
+                        .into_symptom(*span_id),
+                    );
+                }
+            }
+        }
+    }
+
+    // Help hints (empty-paren suggestions)
+    for (suggested, span_id) in collect_empty_paren_hints(&ast) {
+        symptoms.push(
+            ParseSymptom::EmptyParens {
+                suggested,
+            }
+            .into_symptom(span_id),
+        );
+    }
+
+    // Unused value info diagnostics
+    for (value, span_id) in collect_unused_values(&ast) {
+        symptoms.push(
+            ParseSymptom::UnusedValue {
+                value,
+            }
+            .into_symptom(span_id),
+        );
+    }
 
     ParseOutput {
         ast,
         span_table,
-        parse_errors: hw_parse_errors,
-        unterminated_strings,
-        lex_errors,
-        help_hints,
-        unused_values,
+        symptoms,
     }
 }
 

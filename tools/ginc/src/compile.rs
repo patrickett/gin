@@ -10,9 +10,7 @@ use crate::cli::Args;
 use ast::ImportSource;
 use ast::{FileAst, qualify_module_defs};
 use codegen::emit::native;
-use diagnostic::lex::LexSymptom;
-use diagnostic::parse::ParseSymptom;
-use diagnostic::{Category, Symptom, SymptomLike};
+use diagnostic::Category;
 use flask::{DependencyKind, FlaskConfig};
 use lexer::debug_tokens;
 use parser::{ParseOutput, discover_module, extract_package_import_paths, parse_source_full};
@@ -293,49 +291,15 @@ pub fn collect_gin_files_recursive(dir: &Path) -> Vec<PathBuf> {
 fn print_diagnostics(
     parsed_files: &[ParsedFile], 
     all_asts: &[FileAst],
-    entry_ast: &FileAst,
+    _entry_ast: &FileAst,
 ) -> bool {
     let mut has_flaws = false;
 
     for (i, parsed) in parsed_files.iter().enumerate() {
         let filename = parsed.filename();
         let span_table = &parsed.output.span_table;
-        let mut symptoms: Vec<Symptom> = Vec::new();
 
-        // Unterminated strings
-        for &span_id in &parsed.output.unterminated_strings {
-            symptoms.push(LexSymptom::UnclosedString.into_symptom(span_id));
-        }
-
-        // Lex errors
-        for (symptom, span_id) in &parsed.output.lex_errors {
-            symptoms.push(symptom.clone().into_symptom(*span_id));
-        }
-
-        // Parse errors
-        for err in &parsed.output.parse_errors {
-            symptoms.push(ParseSymptom::Custom(err.message.clone()).into_symptom(err.span));
-        }
-
-        // Help hints (empty-paren suggestions)
-        for (suggested, span_id) in &parsed.output.help_hints {
-            symptoms.push(
-                ParseSymptom::EmptyParens {
-                    suggested: suggested.clone(),
-                }
-                .into_symptom(*span_id),
-            );
-        }
-
-        // Unused value info diagnostics
-        for (value, span_id) in &parsed.output.unused_values {
-            symptoms.push(
-                ParseSymptom::UnusedValue {
-                    value: value.clone(),
-                }
-                .into_symptom(*span_id),
-            );
-        }
+        let mut symptoms = parsed.output.symptoms.clone();
 
         // Type-check and flow-analysis symptoms
         symptoms.extend(analyze_file(&all_asts[i], all_asts));
@@ -345,30 +309,6 @@ fn print_diagnostics(
             symptom.print(span_table, &parsed.source, &filename);
             if matches!(symptom.category, Category::Flaw) {
                 has_flaws = true;
-            }
-        }
-    }
-
-    // Check for direct .gin file imports in entry file
-    // The entry file is always parsed_files[0]
-    if let Some(entry_parsed) = parsed_files.first() {
-        let entry_span_table = &entry_parsed.output.span_table;
-        let entry_source = &entry_parsed.source;
-        let entry_filename = entry_parsed.filename();
-
-        for import in entry_ast.uses() {
-            for module_import in &import.0 {
-                if let ImportSource::Local(path, span) = &module_import.source {
-                    if path.extension().is_some_and(|ext| ext == "gin") {
-                        let symptom = ParseSymptom::DirectFileImport {
-                            path: path.to_string_lossy().into(),
-                        }
-                        .into_symptom(*span);
-
-                        symptom.print(entry_span_table, entry_source, &entry_filename);
-                        has_flaws = true;
-                    }
-                }
             }
         }
     }
