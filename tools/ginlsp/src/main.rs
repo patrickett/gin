@@ -16,24 +16,40 @@ use state::{DocumentState, GinHost, JsonDocumentState};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::ops::Deref;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use typeck::analyze_file;
 
-struct Backend {
-    client: Client,
-    host: Arc<Mutex<GinHost>>,
-    documents: DashMap<String, DocumentState>,
-    json_documents: DashMap<String, JsonDocumentState>,
-    config: RwLock<Option<flask::FlaskConfigHandle>>,
-    ast_cache: DashMap<String, Arc<FileAst>>,
-    shutdown: AtomicBool,
+/// Shared LSP state. Heavy work (package diagnostics) is spawned so `shutdown`
+/// and other requests are not stuck behind `did_change` / `did_open`.
+pub(crate) struct GinLspBackend {
+    pub(crate) client: Client,
+    pub(crate) host: Arc<Mutex<GinHost>>,
+    pub(crate) documents: DashMap<String, DocumentState>,
+    pub(crate) json_documents: DashMap<String, JsonDocumentState>,
+    pub(crate) config: RwLock<Option<flask::FlaskConfigHandle>>,
+    pub(crate) ast_cache: DashMap<String, Arc<FileAst>>,
+    pub(crate) shutdown: AtomicBool,
+    /// Latest in-flight `publish_diagnostics_for` task; aborted on new publish and on shutdown.
+    pub(crate) diagnostic_job: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct Backend(Arc<GinLspBackend>);
+
+impl Deref for Backend {
+    type Target = GinLspBackend;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 impl Backend {
-    fn new(client: Client) -> Self {
-        Self {
+    pub(crate) fn new(client: Client) -> Self {
+        Self(Arc::new(GinLspBackend {
             client,
             host: Arc::new(Mutex::new(GinHost::new())),
             documents: DashMap::new(),
@@ -41,7 +57,20 @@ impl Backend {
             config: RwLock::new(None),
             ast_cache: DashMap::new(),
             shutdown: AtomicBool::new(false),
+            diagnostic_job: Mutex::new(None),
+        }))
+    }
+
+    /// Update `documents` / host synchronously, then run diagnostics without blocking LSP I/O.
+    pub(crate) fn spawn_publish_diagnostics(&self, uri: Url, file: File, text: String) {
+        let mut slot = self.diagnostic_job.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(prev) = slot.take() {
+            prev.abort();
         }
+        let this = self.clone();
+        *slot = Some(tokio::spawn(async move {
+            this.publish_diagnostics_for(uri, file, &text).await;
+        }));
     }
 
     fn is_shutdown(&self) -> bool {
@@ -157,6 +186,9 @@ impl Backend {
         let mut all_sources: Vec<String> = Vec::with_capacity(all_files.len());
 
         for &f in &all_files {
+            if self.is_shutdown() {
+                return;
+            }
             // Source text: prefer the in-memory document (may have unsaved
             // edits) over the on-disk copy stored in the database.
             let source = if f == trigger_file {
@@ -204,10 +236,14 @@ impl Backend {
             all_span_tables.push(output.span_table);
             all_parse_symptoms.push(symptoms);
             all_sources.push(source);
+            tokio::task::yield_now().await;
         }
 
         // Run type-check and flow analysis, then publish diagnostics per file.
         for (i, &pkg_file) in all_files.iter().enumerate() {
+            if self.is_shutdown() {
+                return;
+            }
             let pkg_path = pkg_file.path(&snapshot.db);
             let pkg_uri = match Url::from_file_path(&pkg_path) {
                 Ok(u) => u,

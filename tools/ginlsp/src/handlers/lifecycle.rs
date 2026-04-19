@@ -1,4 +1,5 @@
 use crate::Backend;
+use std::sync::atomic::Ordering;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 
@@ -53,8 +54,18 @@ impl Backend {
     pub(crate) async fn handle_initialized(&self, _: InitializedParams) {}
 
     pub(crate) async fn handle_shutdown(&self) -> Result<()> {
-        self.shutdown
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.shutdown.store(true, Ordering::SeqCst);
+        let diagnostic_handle = {
+            let mut slot = self
+                .diagnostic_job
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            slot.take()
+        };
+        if let Some(handle) = diagnostic_handle {
+            handle.abort();
+            let _ = handle.await;
+        }
         self.documents.clear();
         self.json_documents.clear();
         self.ast_cache.clear();

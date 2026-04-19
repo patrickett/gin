@@ -36,8 +36,7 @@ impl Backend {
                     file,
                 },
             );
-            self.publish_diagnostics_for(uri_for_diag, file, &text)
-                .await;
+            self.spawn_publish_diagnostics(uri_for_diag, file, text);
         }
 
         #[cfg(debug_assertions)]
@@ -82,8 +81,7 @@ impl Backend {
                         file,
                     },
                 );
-                self.publish_diagnostics_for(uri_for_diag, file, &text)
-                    .await;
+                self.spawn_publish_diagnostics(uri_for_diag, file, text);
             }
         }
 
@@ -128,7 +126,7 @@ impl Backend {
                         file,
                     },
                 );
-                self.publish_diagnostics_for(uri_for_diag, file, text).await;
+                self.spawn_publish_diagnostics(uri_for_diag, file, text.clone());
             }
         }
 
