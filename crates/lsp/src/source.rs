@@ -136,3 +136,84 @@ pub fn get_char_at_position(source: &str, line: u32, character: u32) -> Option<c
     let byte_idx = position_to_byte_offset(source, line, character)?;
     source.as_bytes().get(byte_idx).map(|&b| b as char)
 }
+
+/// Result of detecting a string literal at a cursor position.
+pub struct StringLiteralInfo {
+    /// Byte range of the entire string token including quotes.
+    pub range: std::ops::Range<usize>,
+    /// The string content without quotes.
+    pub content: String,
+}
+
+/// If `byte_pos` is inside a single-quoted string literal (non-template),
+/// return information about it. Returns `None` if the position is inside a
+/// format string or not inside any string at all.
+pub fn get_string_literal_at(source: &str, byte_pos: usize) -> Option<StringLiteralInfo> {
+    let bytes = source.as_bytes();
+
+    // Scan backwards for an odd number of consecutive single quotes.
+    // An odd count means we're inside a string opened by that quote.
+    let mut pos = byte_pos;
+    let mut quote_pos: Option<usize> = None;
+
+    while pos > 0 {
+        pos -= 1;
+        if bytes[pos] == b'\'' {
+            // Count consecutive quotes at this position
+            let mut count = 1;
+            let mut p = pos;
+            while p > 0 && bytes[p - 1] == b'\'' {
+                p -= 1;
+                count += 1;
+            }
+            if count % 2 == 1 {
+                // Odd number — this opens a string
+                quote_pos = Some(pos);
+                break;
+            }
+            // Even number — these are escaped quotes, keep scanning
+            pos = p;
+        } else if bytes[pos] == b'\n' {
+            // Plain strings can't span lines
+            break;
+        }
+    }
+
+    let open = quote_pos?;
+
+    // Find the closing quote
+    let mut close = open + 1;
+    while close < bytes.len() && bytes[close] != b'\'' && bytes[close] != b'\n' {
+        close += 1;
+    }
+
+    if close >= bytes.len() || bytes[close] != b'\'' {
+        // Unterminated string
+        return None;
+    }
+
+    // Check byte_pos is within the token span (including quotes)
+    if byte_pos < open || byte_pos > close + 1 {
+        return None;
+    }
+
+    // Make sure this isn't inside a format string (double-quoted)
+    // Check if there's an unmatched " before the open quote on the same line
+    let line_start = source[..=open]
+        .rfind('\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let text_before = &source[line_start..open];
+    let double_quotes = text_before.chars().filter(|&c| c == '"').count();
+    if double_quotes % 2 == 1 {
+        // Inside a format string
+        return None;
+    }
+
+    let content = source[open + 1..close].to_string();
+
+    Some(StringLiteralInfo {
+        range: open..close + 1,
+        content,
+    })
+}
