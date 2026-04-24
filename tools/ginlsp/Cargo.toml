@@ -14,6 +14,7 @@ dashmap = { workspace = true }
 flask = { workspace = true }
 ginfmt = { workspace = true }
 lsp = { workspace = true }
+analyze = { path = "../../crates/analyze" }
 database = { workspace = true }
 ast = { workspace = true }
 typeck = { workspace = true }
@@ -22,6 +23,5 @@ lsp-types = { workspace = true }
 parser = { workspace = true }
 span = { workspace = true }
 crossbeam-channel = { workspace = true }
-salsa = { workspace = true }
 internment = "0.8"
 futures = "0.3"

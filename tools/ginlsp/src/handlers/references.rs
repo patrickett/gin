@@ -1,5 +1,6 @@
 use crate::diagnostics::span_to_range;
 use crate::Backend;
+use database::parse_file;
 use lsp::{find_references, get_word_at_position};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
@@ -21,7 +22,7 @@ impl Backend {
                 get_word_at_position(&state.source, position.line, position.character)
             {
                 let snapshot = self.snapshot();
-                let ast = snapshot.parse(state.file);
+                let ast = parse_file(&snapshot.db, state.file);
                 let locations: Vec<Location> = find_references(&ast, &word)
                     .into_iter()
                     .map(|span| Location {

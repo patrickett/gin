@@ -7,6 +7,8 @@ edition = "2024"
 diagnostic = { workspace = true }
 span = { workspace = true }
 salsa = { workspace = true }
+ast = { workspace = true }
+parser = { workspace = true }
 dashmap = { workspace = true }
 crossbeam-channel = { workspace = true }
 notify-debouncer-mini = "0.4.1"

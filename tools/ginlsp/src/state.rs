@@ -1,9 +1,6 @@
-use ast::FileAst;
 use crossbeam_channel::unbounded;
 use database::input_database::InputDatabase;
-use database::{Db, File};
-use parser::parse_from_str;
-use salsa::Setter;
+use database::{Db, File, set_file_contents};
 use std::path::{Path, PathBuf};
 
 pub struct DocumentState {
@@ -18,14 +15,6 @@ pub struct JsonDocumentState {
 #[derive(Clone)]
 pub struct GinSnapshot {
     pub db: InputDatabase,
-}
-
-impl GinSnapshot {
-    /// Parse a file using the pure parser (no Salsa tracking).
-    pub fn parse(&self, file: File) -> FileAst {
-        let source = file.contents(&self.db);
-        parse_from_str(source)
-    }
 }
 
 /// Information about the files belonging to a Gin package.
@@ -59,7 +48,7 @@ impl GinHost {
     pub fn upsert_file(&mut self, path: PathBuf, contents: String) -> Option<File> {
         match self.db.input(path) {
             Ok(file) => {
-                file.set_contents(&mut self.db).to(contents);
+                set_file_contents(&mut self.db, file, contents);
                 Some(file)
             }
             Err(_) => None,

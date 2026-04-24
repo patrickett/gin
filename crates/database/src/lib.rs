@@ -1,6 +1,8 @@
 pub mod input_database;
+pub mod queries;
 
 pub use input_database::{Db, InputDatabase};
+pub use queries::{parse_file, set_file_contents};
 
 use diagnostic::{Symptom, SymptomLike};
 use span::SpanId;

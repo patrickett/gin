@@ -1,0 +1,12 @@
+[package]
+name = "analyze"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+database = { workspace = true }
+salsa = { workspace = true }
+ast = { workspace = true }
+typeck = { workspace = true }
+internment = "0.8"
+

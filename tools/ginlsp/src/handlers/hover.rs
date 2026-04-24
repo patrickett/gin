@@ -1,7 +1,8 @@
 use crate::Backend;
+use analyze::hover_markdown;
 use lsp::{
     byte_offset_to_position, get_char_at_position, get_number_at_position, get_string_literal_at,
-    hover_at, is_in_comment, position_to_byte_offset, word_at_byte_offset,
+    is_in_comment, position_to_byte_offset, word_at_byte_offset,
 };
 
 use tower_lsp::jsonrpc::Result;
@@ -111,8 +112,10 @@ impl Backend {
 
                 // General hover (definitions, bindings, etc.)
                 let snapshot = self.snapshot();
-                let ast = snapshot.parse(state.file);
-                if let Some(value) = hover_at(&state.source, &ast, byte_pos) {
+                let byte_pos_u32 = u32::try_from(byte_pos).ok();
+                if let Some(value) = byte_pos_u32
+                    .and_then(|pos| hover_markdown(&snapshot.db, state.file, pos))
+                {
                     return Ok(Some(Hover {
                         contents: HoverContents::Markup(MarkupContent {
                             kind: MarkupKind::Markdown,

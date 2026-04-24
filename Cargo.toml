@@ -9,6 +9,7 @@ members = [
     "crates/typeck",
     "crates/codegen",
     "crates/lsp",
+    "crates/analyze",
     "crates/database",
     "crates/parser",
     "tools/ginc",

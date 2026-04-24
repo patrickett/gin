@@ -3,6 +3,7 @@ mod path;
 
 use crate::Backend;
 use ast::FileAst;
+use database::parse_file;
 use lsp::{completions_for_ast, dot_type_at, position_to_byte_offset, CompletionKind};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
@@ -60,7 +61,7 @@ impl Backend {
                 position_to_byte_offset(&state.source, position.line, position.character)
             {
                 let snapshot = self.snapshot();
-                let ast = snapshot.parse(state.file);
+                let ast = parse_file(&snapshot.db, state.file);
                 let ty_env = TyEnv::from_file_ast(&ast);
                 if let Some(ty) = dot_type_at(&state.source, &ast, &ty_env, byte_pos) {
                     let items = dot_completions(ty);
@@ -71,7 +72,7 @@ impl Backend {
             }
 
             let snapshot = self.snapshot();
-            let ast = snapshot.parse(state.file);
+            let ast = parse_file(&snapshot.db, state.file);
             return Ok(Some(CompletionResponse::Array(build_completions(&ast))));
         }
 

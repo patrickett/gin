@@ -1,6 +1,7 @@
 use crate::diagnostics::span_to_range;
 use crate::Backend;
 use ast::ImportSource;
+use database::parse_file;
 use lsp::{find_definition_span, get_word_at_position, position_to_byte_offset};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
@@ -23,7 +24,7 @@ impl Backend {
 
         if let Some(state) = self.documents.get(&uri.to_string()) {
             let snapshot = self.snapshot();
-            let ast = snapshot.parse(state.file);
+            let ast = parse_file(&snapshot.db, state.file);
 
             let byte_pos = position_to_byte_offset(&state.source, position.line, position.character);
 
