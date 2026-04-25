@@ -9,6 +9,7 @@ diagnostic = { workspace = true }
 i256 = { workspace = true }
 indexmap = { workspace = true }
 internment = "0.8"
+salsa = { workspace = true }
 
 [dev-dependencies]
 parser = { workspace = true }

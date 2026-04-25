@@ -2,7 +2,7 @@ use crate::diagnostics::span_to_range;
 use crate::Backend;
 use ast::ImportSource;
 use database::parse_file;
-use lsp::{find_definition_span, get_word_at_position, position_to_byte_offset};
+use ide::{find_definition_span, get_word_at_position, position_to_byte_offset};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 

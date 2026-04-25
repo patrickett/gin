@@ -16,7 +16,7 @@ pub trait SymptomLike: Sized {
     fn into_symptom(self, span_id: SpanId) -> Symptom;
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Symptom {
     pub code: &'static str,
     pub message: String,

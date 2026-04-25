@@ -13,13 +13,13 @@ use diagnostic::type_::TypeSymptom;
 /// # Arguments
 /// * `ast`       — The AST of the file to analyze
 /// * `all_asts`  — All ASTs in the package (for building the shared type environment)
-pub fn analyze_file(ast: &FileAst, all_asts: &[FileAst]) -> Vec<diagnostic::Symptom> {
+/// Type-check and flow-analyze `ast` using a pre-built package [`TyEnv`].
+pub fn analyze_file_with_ty_env(ast: &FileAst, ty_env: &TyEnv) -> Vec<diagnostic::Symptom> {
     let mut symptoms = Vec::new();
-    let ty_env = TyEnv::from_multiple_file_asts(all_asts);
 
     ty_env.check_unknowns(ast, &mut symptoms);
 
-    let mut analyzer = FlowAnalyzer::new(&ty_env);
+    let mut analyzer = FlowAnalyzer::new(ty_env);
     analyzer.analyze_file(ast);
     let result = analyzer.into_result();
 
@@ -34,6 +34,11 @@ pub fn analyze_file(ast: &FileAst, all_asts: &[FileAst]) -> Vec<diagnostic::Symp
     }
 
     symptoms
+}
+
+pub fn analyze_file(ast: &FileAst, all_asts: &[FileAst]) -> Vec<diagnostic::Symptom> {
+    let ty_env = TyEnv::from_multiple_file_asts(all_asts);
+    analyze_file_with_ty_env(ast, &ty_env)
 }
 
 /// Analyze a package of pre-parsed ASTs.

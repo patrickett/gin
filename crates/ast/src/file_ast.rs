@@ -336,6 +336,7 @@ impl PartialEq for FileAst {
             && self.private_defs == other.private_defs
             && self.private_tags == other.private_tags
             && self.exprs == other.exprs
+            && self.span_table == other.span_table
     }
 }
 
@@ -360,6 +361,7 @@ impl Hash for FileAst {
             self.private_defs.contains(k).hash(state);
         }
         self.exprs.hash(state);
+        self.span_table.hash(state);
     }
 }
 

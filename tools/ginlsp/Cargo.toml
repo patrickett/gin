@@ -13,7 +13,7 @@ tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "io-std"]
 dashmap = { workspace = true }
 flask = { workspace = true }
 ginfmt = { workspace = true }
-lsp = { workspace = true }
+ide = { workspace = true }
 analyze = { path = "../../crates/analyze" }
 database = { workspace = true }
 ast = { workspace = true }

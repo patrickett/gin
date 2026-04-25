@@ -1,4 +1,4 @@
-//! LSP utilities for the Gin language.
+//! Editor / LSP-facing utilities (positions, UTF-16 columns, re-exports of [`analyze`]).
 
 pub mod completions;
 pub mod hover;

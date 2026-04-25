@@ -42,6 +42,16 @@ pub struct ModuleTree {
     pub children: BTreeMap<String, ModuleTree>,
 }
 
+// Kinda like the idea of each module having its own flask.json file optionally
+// so each module can have its own dependencies and interface hash so you can subscribe to just one module
+// or all modules in a project. 
+
+// I think this means implicitly modules cannot inherit from their parent.
+// TODO: investigate this
+
+// On second thought, this I think might already work. since child folders are also modules having a flask.json
+// would not change how they are used, but you could depend on them from elsewhere easily.
+
 impl ModuleTree {
     /// Returns `true` if this module has no files and no children.
     pub fn is_empty(&self) -> bool {

@@ -1,8 +1,10 @@
+//! Persistent inputs and low-level Salsa queries (for example parsing).
+//! Semantic analysis and editor integration live in the `analyze` and `ide` crates.
 pub mod input_database;
 pub mod queries;
 
 pub use input_database::{Db, InputDatabase};
-pub use queries::{parse_file, set_file_contents};
+pub use queries::{file_parse_output, parse_file, set_file_contents};
 
 use diagnostic::{Symptom, SymptomLike};
 use span::SpanId;

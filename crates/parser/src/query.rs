@@ -18,6 +18,7 @@ use ast::{BindValue, Expr, FileAst, FnCall, ImportSource};
 // TODO: change ParseOutput to a Vec<Symptom> or some vec of enum so we dont need the different
 // fields
 /// Full output from parsing source text, including all diagnostic info.
+#[derive(Clone, PartialEq, Eq)]
 pub struct ParseOutput {
     /// The parsed abstract syntax tree.
     pub ast: FileAst,

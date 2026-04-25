@@ -1,6 +1,6 @@
 use database::Symptoms;
 use diagnostic::Category;
-use lsp::source::byte_offset_to_position;
+use ide::source::byte_offset_to_position;
 use span::SpanTable;
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range};
 

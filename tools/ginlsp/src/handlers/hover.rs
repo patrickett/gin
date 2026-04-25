@@ -1,6 +1,6 @@
 use crate::Backend;
 use analyze::hover_markdown;
-use lsp::{
+use ide::{
     byte_offset_to_position, get_char_at_position, get_number_at_position, get_string_literal_at,
     is_in_comment, position_to_byte_offset, word_at_byte_offset,
 };

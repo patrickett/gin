@@ -105,7 +105,7 @@ impl Span {
 /// This enables interned span storage - each unique span is stored once and
 /// referenced by ID throughout the AST. This dramatically reduces memory usage
 /// compared to storing full span data in every node.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct SpanTable {
     spans: Vec<Span>,
 }

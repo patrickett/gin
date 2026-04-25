@@ -12,3 +12,5 @@ pub use infer::*;
 
 mod r#type;
 pub use r#type::*;
+
+mod salsa_update;

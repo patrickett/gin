@@ -205,6 +205,7 @@ type VariantLookupResult<'a> = (Intern<String>, usize, &'a [(Intern<String>, Ty)
 
 /// Type environment built from a `FileAst`. Resolves tag names to `Ty` and infers
 /// function parameter / return types.
+#[derive(PartialEq)]
 pub struct TyEnv {
     pub tag_types: HashMap<Intern<String>, Ty>,
     pub fn_return_types: HashMap<Intern<String>, Ty>,

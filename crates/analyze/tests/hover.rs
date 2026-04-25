@@ -1,7 +1,7 @@
-//! Hover tests for the Gin LSP.
+//! Hover tests for semantic hover (`analyze::hover_at`).
 //!
 //! Uses a `†` (dagger, U+2020) cursor marker to indicate the hover position.
-//! The [`hover_at_marker`] helper strips the marker and calls [`lsp::hover_at`].
+//! The [`hover_at_marker`] helper strips the marker and calls [`analyze::hover_at`].
 //!
 //! # Example
 //!
@@ -15,7 +15,7 @@
 //! }
 //! ```
 
-use lsp::hover_at;
+use analyze::hover_at;
 use parser::expr::parse_source;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────

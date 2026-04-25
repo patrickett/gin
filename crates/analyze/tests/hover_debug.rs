@@ -1,8 +1,9 @@
 //! Debug tests for while loop comparison narrowing.
 //!
-//! Run with: cargo test -p lsp --test hover_debug -- --nocapture
+//! Run with: cargo test -p analyze --test hover_debug -- --nocapture
 
-use lsp::hover_at;
+use analyze::hover_at;
+use ide::word_at_byte_offset;
 use parser::expr::parse_source;
 
 fn debug_hover_at_marker(source: &str) -> Option<String> {
@@ -132,7 +133,7 @@ fn debug_hover_at_marker(source: &str) -> Option<String> {
     }
 
     // Check narrowing and constants at cursor
-    let word = lsp::word_at_byte_offset(&cleaned, cursor_byte);
+    let word = word_at_byte_offset(&cleaned, cursor_byte);
     println!("\n=== Word at cursor ===");
     println!("word: {:?}", word);
 

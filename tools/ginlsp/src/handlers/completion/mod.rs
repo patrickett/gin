@@ -4,7 +4,7 @@ mod path;
 use crate::Backend;
 use ast::FileAst;
 use database::parse_file;
-use lsp::{completions_for_ast, dot_type_at, position_to_byte_offset, CompletionKind};
+use ide::{completions_for_ast, dot_type_at, position_to_byte_offset, CompletionKind};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use typeck::{Ty, TyEnv};

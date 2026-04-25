@@ -7,6 +7,13 @@ edition = "2024"
 database = { workspace = true }
 salsa = { workspace = true }
 ast = { workspace = true }
+parser = { workspace = true }
 typeck = { workspace = true }
+diagnostic = { workspace = true }
 internment = "0.8"
+
+[dev-dependencies]
+ide = { path = "../ide" }
+indoc = "2"
+parser = { workspace = true }
 

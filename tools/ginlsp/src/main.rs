@@ -8,7 +8,6 @@ use database::File;
 use database::Symptoms;
 use diagnostics::symptoms_to_diagnostics;
 use futures::FutureExt;
-use parser::parse_source_full;
 use state::{DocumentState, GinHost, JsonDocumentState};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,7 +16,8 @@ use std::ops::Deref;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
-use typeck::analyze_file;
+use analyze::{package_typecheck_symptoms, sorted_package_files, PackageFiles};
+use database::file_parse_output;
 
 /// Shared LSP state. Heavy work (package diagnostics) is spawned so `shutdown`
 /// and other requests are not stuck behind `did_change` / `did_open`.
@@ -174,43 +174,18 @@ impl Backend {
             vec![trigger_file]
         };
 
+        {
+            let mut host = self.lock_host();
+            database::set_file_contents(&mut host.db, trigger_file, trigger_source.to_string());
+        }
         let snapshot = self.snapshot();
 
-        // Parse all files and collect diagnostics.
-        let mut all_asts: Vec<FileAst> = Vec::with_capacity(all_files.len());
-        let mut all_span_tables: Vec<_> = Vec::with_capacity(all_files.len());
-        let mut all_symptoms: Vec<Vec<_>> = Vec::with_capacity(all_files.len());
-        let mut all_sources: Vec<String> = Vec::with_capacity(all_files.len());
+        let package_files = sorted_package_files(&snapshot.db, &all_files);
+        let pkg = PackageFiles::new(&snapshot.db, package_files.clone());
+        let typecheck_symptoms = package_typecheck_symptoms(&snapshot.db, pkg);
 
-        for &f in &all_files {
-            if self.is_shutdown() {
-                return;
-            }
-            // Source text: prefer the in-memory document (may have unsaved
-            // edits) over the on-disk copy stored in the database.
-            let source = if f == trigger_file {
-                trigger_source.to_string()
-            } else if let Ok(doc_uri) = Url::from_file_path(f.path(&snapshot.db)) {
-                if let Some(doc) = self.documents.get(&doc_uri.to_string()) {
-                    doc.source.clone()
-                } else {
-                    f.contents(&snapshot.db).to_string()
-                }
-            } else {
-                f.contents(&snapshot.db).to_string()
-            };
-
-            let output = parse_source_full(&source);
-
-            all_asts.push(output.ast);
-            all_span_tables.push(output.span_table);
-            all_symptoms.push(output.symptoms);
-            all_sources.push(source);
-            tokio::task::yield_now().await;
-        }
-
-        // Run type-check and flow analysis, then publish diagnostics per file.
-        for (i, &pkg_file) in all_files.iter().enumerate() {
+        // Publish parse + type-check + flow diagnostics per file (Salsa-cached).
+        for (i, &pkg_file) in package_files.iter().enumerate() {
             if self.is_shutdown() {
                 return;
             }
@@ -220,16 +195,18 @@ impl Backend {
                 Err(_) => continue,
             };
 
-            let mut symptoms = all_symptoms[i].clone();
+            let parse = file_parse_output(&snapshot.db, pkg_file);
+            let source = pkg_file.contents(&snapshot.db).to_string();
+            let mut symptoms = parse.symptoms.clone();
 
-            // Type-check and flow-analysis symptoms
-            symptoms.extend(analyze_file(&all_asts[i], &all_asts));
+            // Type-check and flow-analysis symptoms (shared package TyEnv)
+            symptoms.extend(typecheck_symptoms[i].iter().cloned());
 
             // Cache a clean AST for the trigger file so that other handlers
             // (goto-definition, hover, completion) can use it.
             if pkg_file == trigger_file && symptoms.is_empty() {
                 self.ast_cache
-                    .insert(uri.to_string(), Arc::new(all_asts[i].clone()));
+                    .insert(uri.to_string(), Arc::new(parse.ast.clone()));
             }
 
             // Wrap symptoms for compatibility with symptoms_to_diagnostics
@@ -237,10 +214,11 @@ impl Backend {
             let symptom_refs: Vec<&Symptoms> = wrapped.iter().collect();
 
             let diagnostics =
-                symptoms_to_diagnostics(&all_sources[i], &all_span_tables[i], &symptom_refs);
+                symptoms_to_diagnostics(&source, &parse.span_table, &symptom_refs);
             self.client
                 .publish_diagnostics(pkg_uri, diagnostics, None)
                 .await;
+            tokio::task::yield_now().await;
         }
     }
 }

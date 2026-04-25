@@ -1,3 +1,5 @@
+//! Completions and signature-help (semantic layer, no LSP types).
+
 use ast::{
     BindValue, Expr, FileAst, FormatPart, IfCondition, LoopEnum, ParameterKind, Parameters,
     SpanTable, WhenArm,
