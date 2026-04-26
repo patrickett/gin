@@ -68,7 +68,6 @@ impl Backend {
         }
         self.documents.clear();
         self.json_documents.clear();
-        self.ast_cache.clear();
         Ok(())
     }
 }

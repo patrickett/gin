@@ -141,7 +141,6 @@ impl Backend {
 
         if self.json_documents.remove(&uri).is_none() {
             self.documents.remove(&uri);
-            self.ast_cache.remove(&uri);
         }
 
         #[cfg(debug_assertions)]

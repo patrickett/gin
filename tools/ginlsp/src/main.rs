@@ -2,7 +2,6 @@ mod diagnostics;
 mod handlers;
 mod state;
 
-use ast::FileAst;
 use dashmap::DashMap;
 use database::File;
 use database::Symptoms;
@@ -27,7 +26,6 @@ pub(crate) struct GinLspBackend {
     pub(crate) documents: DashMap<String, DocumentState>,
     pub(crate) json_documents: DashMap<String, JsonDocumentState>,
     pub(crate) config: RwLock<Option<flask::FlaskConfigHandle>>,
-    pub(crate) ast_cache: DashMap<String, Arc<FileAst>>,
     pub(crate) shutdown: AtomicBool,
     /// Latest in-flight `publish_diagnostics_for` task; aborted on new publish and on shutdown.
     pub(crate) diagnostic_job: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -52,7 +50,6 @@ impl Backend {
             documents: DashMap::new(),
             json_documents: DashMap::new(),
             config: RwLock::new(None),
-            ast_cache: DashMap::new(),
             shutdown: AtomicBool::new(false),
             diagnostic_job: Mutex::new(None),
         }))
@@ -201,13 +198,6 @@ impl Backend {
 
             // Type-check and flow-analysis symptoms (shared package TyEnv)
             symptoms.extend(typecheck_symptoms[i].iter().cloned());
-
-            // Cache a clean AST for the trigger file so that other handlers
-            // (goto-definition, hover, completion) can use it.
-            if pkg_file == trigger_file && symptoms.is_empty() {
-                self.ast_cache
-                    .insert(uri.to_string(), Arc::new(parse.ast.clone()));
-            }
 
             // Wrap symptoms for compatibility with symptoms_to_diagnostics
             let wrapped: Vec<Symptoms> = symptoms.into_iter().map(Symptoms).collect();

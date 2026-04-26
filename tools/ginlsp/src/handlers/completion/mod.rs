@@ -3,11 +3,12 @@ mod path;
 
 use crate::Backend;
 use ast::FileAst;
-use database::parse_file;
+use analyze::{intern_package_files, package_ty_env, sorted_package_files};
+use database::file_parse_output;
 use ide::{completions_for_ast, dot_type_at, position_to_byte_offset, CompletionKind};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
-use typeck::{Ty, TyEnv};
+use typeck::Ty;
 
 impl Backend {
     pub(crate) async fn handle_completion(
@@ -18,7 +19,8 @@ impl Backend {
             return Ok(None);
         }
 
-        let uri = params.text_document_position.text_document.uri.to_string();
+        let doc_uri = params.text_document_position.text_document.uri.clone();
+        let uri = doc_uri.to_string();
         let position = params.text_document_position.position;
 
         #[cfg(debug_assertions)]
@@ -61,8 +63,18 @@ impl Backend {
                 position_to_byte_offset(&state.source, position.line, position.character)
             {
                 let snapshot = self.snapshot();
-                let ast = parse_file(&snapshot.db, state.file);
-                let ty_env = TyEnv::from_file_ast(&ast);
+                let ast = file_parse_output(&snapshot.db, state.file).ast.clone();
+                let pkg_root = self.package_root_for_uri(&doc_uri);
+                let all_files = if let Some(root) = &pkg_root {
+                    let mut host = self.lock_host();
+                    host.load_package(root).files
+                } else {
+                    vec![state.file]
+                };
+                let package_files = sorted_package_files(&snapshot.db, &all_files);
+                let pkg = intern_package_files(&snapshot.db, package_files);
+                let ty_env = package_ty_env(&snapshot.db, pkg);
+
                 if let Some(ty) = dot_type_at(&state.source, &ast, &ty_env, byte_pos) {
                     let items = dot_completions(ty);
                     if !items.is_empty() {
@@ -72,7 +84,7 @@ impl Backend {
             }
 
             let snapshot = self.snapshot();
-            let ast = parse_file(&snapshot.db, state.file);
+            let ast = file_parse_output(&snapshot.db, state.file).ast.clone();
             return Ok(Some(CompletionResponse::Array(build_completions(&ast))));
         }
 

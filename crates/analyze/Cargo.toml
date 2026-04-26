@@ -16,4 +16,5 @@ internment = "0.8"
 ide = { path = "../ide" }
 indoc = "2"
 parser = { workspace = true }
+crossbeam-channel = { workspace = true }
 

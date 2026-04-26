@@ -1,6 +1,6 @@
 use crate::Backend;
 use ast::FileAst;
-use database::parse_file;
+use database::file_parse_output;
 use ide::{fn_call_at, position_to_byte_offset, signature_for_fn};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
@@ -23,7 +23,7 @@ impl Backend {
 
         if let Some(state) = self.documents.get(&uri) {
             let snapshot = self.snapshot();
-            let ast = parse_file(&snapshot.db, state.file);
+            let ast = file_parse_output(&snapshot.db, state.file).ast.clone();
             if let Some(help) = build_signature_help(&state.source, &ast, position) {
                 return Ok(Some(help));
             }
