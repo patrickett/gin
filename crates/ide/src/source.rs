@@ -129,7 +129,32 @@ pub fn get_number_at_position(source: &str, line: u32, character: u32) -> Option
         return None;
     }
 
+    // If the numeric token is part of an identifier (e.g. `Tag123`), do not treat it
+    // as a numeric literal. This prevents number-hover from stealing hover for tags.
+    if start > 0 && is_identifier_char(bytes[start - 1] as char) {
+        return None;
+    }
+    if end < bytes.len() && is_identifier_char(bytes[end] as char) {
+        return None;
+    }
+
     Some(source[start..end].to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::get_number_at_position;
+
+    #[test]
+    fn number_at_position_rejects_digits_inside_identifiers() {
+        let src = "Tag123 other 456";
+        // Cursor on the '1' in Tag123
+        assert_eq!(get_number_at_position(src, 0, 3), None);
+        // Cursor on the '3' in Tag123
+        assert_eq!(get_number_at_position(src, 0, 5), None);
+        // Cursor on the '4' in 456
+        assert_eq!(get_number_at_position(src, 0, 14), Some("456".to_string()));
+    }
 }
 
 pub fn get_char_at_position(source: &str, line: u32, character: u32) -> Option<char> {
