@@ -8,6 +8,8 @@ repository = "https://github.com/patrickett/gin"
 
 [grammars.gin]
 wasm_path = "grammars/gin.wasm"
+repository = "https://github.com/patrickett/gin"
+rev = "main"
 
 [language_servers.ginlsp]
 name = "Gin Language Server"
