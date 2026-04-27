@@ -2,7 +2,7 @@ use crate::Backend;
 use analyze::hover_markdown;
 use ide::{
     byte_offset_to_position, get_char_at_position, get_number_at_position, get_string_literal_at,
-    is_in_comment, position_to_byte_offset, word_at_byte_offset,
+    get_range_literal_at_position, is_in_comment, position_to_byte_offset, word_at_byte_offset,
 };
 
 use tower_lsp::jsonrpc::Result;
@@ -35,6 +35,85 @@ impl Backend {
             if let Some(byte_pos) =
                 position_to_byte_offset(&state.source, position.line, position.character)
             {
+                // TODO: handle the ... hover with info about range and link to range.gin
+                // TODO: also handle the number hover with info about the number and link to number.gin, 
+                // auto detect the size of the int and and in for loops bind that type to the loop variable
+                let dot_hover_range = {
+                    let bytes = state.source.as_bytes();
+                    let is_dot = bytes.get(byte_pos) == Some(&b'.');
+                    if !is_dot {
+                        None
+                    } else {
+                        let start = if byte_pos >= 2
+                            && bytes.get(byte_pos - 2) == Some(&b'.')
+                            && bytes.get(byte_pos - 1) == Some(&b'.')
+                        {
+                            Some(byte_pos - 2)
+                        } else if byte_pos >= 1
+                            && bytes.get(byte_pos - 1) == Some(&b'.')
+                            && bytes.get(byte_pos + 1) == Some(&b'.')
+                        {
+                            Some(byte_pos - 1)
+                        } else if bytes.get(byte_pos + 1) == Some(&b'.')
+                            && bytes.get(byte_pos + 2) == Some(&b'.')
+                        {
+                            Some(byte_pos)
+                        } else {
+                            None
+                        };
+
+                        start.map(|s| {
+                            let (start_line, start_char) =
+                                byte_offset_to_position(s, &state.source);
+                            let (end_line, end_char) =
+                                byte_offset_to_position(s + 3, &state.source);
+                            Range {
+                                start: Position {
+                                    line: start_line,
+                                    character: start_char,
+                                },
+                                end: Position {
+                                    line: end_line,
+                                    character: end_char,
+                                },
+                            }
+                        })
+                    }
+                };
+
+                // Range literals (e.g. `12...1200`) — hover shows the whole token
+                if let Some(range_lit) = get_range_literal_at_position(
+                    &state.source,
+                    position.line,
+                    position.character,
+                ) {
+                    if dot_hover_range.is_some() {
+                        return Ok(Some(Hover {
+                            contents: HoverContents::Markup(MarkupContent {
+                                kind: MarkupKind::Markdown,
+                                value: String::from(
+                                    "```gin\n...\n```\n\n---\n\n\
+                                    Creates a `core.range.Range` from `start...end`.\n\n\
+                                    - `start`: lower bound\n\
+                                    - `end`: upper bound\n\n\
+                                    Example:\n\n\
+                                    ```gin\n\
+                                    r Range(Int) := 12...1200\n\
+                                    ```",
+                                ),
+                            }),
+                            range: dot_hover_range,
+                        }));
+                    }
+                    return Ok(Some(Hover {
+                        contents: HoverContents::Markup(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value: format!("```gin\n{range_lit}\n```"),
+                        }),
+                        range: dot_hover_range,
+                    }));
+                }
+
                 // Number literals
                 if let Some(num) = get_number_at_position(
                     &state.source,
