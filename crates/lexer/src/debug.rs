@@ -16,6 +16,7 @@ impl<'src> fmt::Display for Token<'src> {
             Token::FormatStringText(s) => write!(f, "[format-text: \"{s}\"]"),
             Token::Comment(s) => write!(f, "[comment: \"{s}\"]"),
             Token::DocComment(s) => write!(f, "[doc-comment: \"{s}\"]"),
+            Token::ModuleDocComment(s) => write!(f, "[module-doc-comment: \"{s}\"]"),
 
             Token::FormatStringDelim => write!(f, "[format-delim]"),
             Token::FormatInterpStart => write!(f, "[interp-start]"),

@@ -240,6 +240,8 @@ impl SymbolTable {
 /// Output of parsing a gin file.
 #[derive(Debug, Clone, Default)]
 pub struct FileAst {
+    /// Module-level doc comment collected from leading `--| ...` lines.
+    pub module_doc: Option<DocComment>,
     pub uses: Vec<Import>,
     pub tags: TagMap,
     pub defs: DefMap,
@@ -252,6 +254,10 @@ pub struct FileAst {
 }
 
 impl FileAst {
+    pub fn module_doc(&self) -> Option<&DocComment> {
+        self.module_doc.as_ref()
+    }
+
     pub fn uses(&self) -> &[Import] {
         &self.uses
     }
@@ -330,7 +336,8 @@ impl FileAst {
 
 impl PartialEq for FileAst {
     fn eq(&self, other: &Self) -> bool {
-        self.uses == other.uses
+        self.module_doc == other.module_doc
+            && self.uses == other.uses
             && self.tags == other.tags
             && self.defs == other.defs
             && self.private_defs == other.private_defs
@@ -344,6 +351,7 @@ impl Eq for FileAst {}
 
 impl Hash for FileAst {
     fn hash<H: Hasher>(&self, state: &mut H) {
+        self.module_doc.hash(state);
         self.uses.hash(state);
         // Sort keys for deterministic hashing
         let mut tag_keys: Vec<_> = self.tags.keys().collect();

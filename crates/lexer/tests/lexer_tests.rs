@@ -224,14 +224,16 @@ fn test_punctuation() {
 
 #[test]
 fn test_comments() {
-    let src = "-- this is a comment\n--- this is a doc comment";
+    let src = "-- this is a comment\n--- this is a doc comment\n--| this is a module doc comment";
 
     let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
-    assert_eq!(tokens.len(), 2);
+    assert_eq!(tokens.len(), 4);
     assert!(matches!(tokens[0], Token::Newline));
     assert!(matches!(tokens[1], Token::DocComment(_)));
+    assert!(matches!(tokens[2], Token::Newline));
+    assert!(matches!(tokens[3], Token::ModuleDocComment(_)));
 }
 
 #[test]

@@ -32,6 +32,13 @@ pub struct Lexer<'src> {
     line_end: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommentKind {
+    Line,
+    Doc,
+    ModuleDoc,
+}
+
 impl<'src> Lexer<'src> {
     pub fn new(source: &'src str) -> Self {
         let line_end = memchr(b'\n', source.as_bytes()).unwrap_or(source.len());
@@ -488,22 +495,23 @@ impl<'src> Lexer<'src> {
         }
     }
 
-    fn lex_comment(&mut self, start: usize, doc: bool) -> (Token<'src>, SpanId) {
-        if doc {
-            self.pos += 2;
-        } else {
-            self.pos += 1;
-        }
+    fn lex_comment(
+        &mut self,
+        start: usize,
+        prefix_len: usize,
+        kind: CommentKind,
+    ) -> (Token<'src>, SpanId) {
+        self.pos += prefix_len;
         self.ensure_line_end();
         self.pos = self.line_end;
         let text = self.slice_from(start);
         let range = self.current_span(start);
         let span = self.insert_span(range);
 
-        if doc {
-            (Token::DocComment(text), span)
-        } else {
-            (Token::Comment(text), span)
+        match kind {
+            CommentKind::Line => (Token::Comment(text), span),
+            CommentKind::Doc => (Token::DocComment(text), span),
+            CommentKind::ModuleDoc => (Token::ModuleDocComment(text), span),
         }
     }
 
@@ -572,8 +580,11 @@ impl<'src> Lexer<'src> {
 
                 b'-' => {
                     return match (self.peek(), self.peek_at(1)) {
-                        (Some(b'-'), Some(b'-')) => Some(self.lex_comment(start, true)),
-                        (Some(b'-'), _) => Some(self.lex_comment(start, false)),
+                        (Some(b'-'), Some(b'|')) => {
+                            Some(self.lex_comment(start, 2, CommentKind::ModuleDoc))
+                        }
+                        (Some(b'-'), Some(b'-')) => Some(self.lex_comment(start, 2, CommentKind::Doc)),
+                        (Some(b'-'), _) => Some(self.lex_comment(start, 1, CommentKind::Line)),
                         (Some(b'>'), _) => {
                             self.pos += 1;
                             Some((

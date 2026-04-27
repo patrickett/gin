@@ -13,6 +13,7 @@ use crate::cursor::TokenCursor;
 use crate::expr::ExprFn;
 
 pub fn parse_file(cursor: &mut TokenCursor, expr_parser: ExprFn) -> FileAst {
+    let module_doc = parse_module_doc(cursor);
     let imports = parse_imports(cursor);
 
     let mut public_elements = Vec::new();
@@ -66,6 +67,7 @@ pub fn parse_file(cursor: &mut TokenCursor, expr_parser: ExprFn) -> FileAst {
     generate_return_type_unions(&defs, &mut tags, &private_defs);
 
     FileAst {
+        module_doc,
         uses: imports,
         tags,
         defs,
@@ -74,6 +76,43 @@ pub fn parse_file(cursor: &mut TokenCursor, expr_parser: ExprFn) -> FileAst {
         exprs,
         span_table: SpanTable::new(),
     }
+}
+
+fn parse_module_doc(cursor: &mut TokenCursor) -> Option<ast::DocComment> {
+    cursor.skip_newlines();
+
+    let first = match cursor.peek()? {
+        Token::ModuleDocComment(text) => {
+            let stripped = text
+                .strip_prefix("--|")
+                .map(|s| s.trim_start())
+                .unwrap_or(text)
+                .to_owned();
+            cursor.advance();
+            stripped
+        }
+        _ => return None,
+    };
+
+    // Fast path: single-line module doc
+    if !matches!(cursor.peek(), Some(Token::ModuleDocComment(_))) {
+        let doc = ast::DocComment(first);
+        return if doc.is_empty() { None } else { Some(doc) };
+    }
+
+    let mut lines = vec![first];
+    while let Some(Token::ModuleDocComment(text)) = cursor.peek() {
+        let stripped = text
+            .strip_prefix("--|")
+            .map(|s| s.trim_start())
+            .unwrap_or(text)
+            .to_owned();
+        cursor.advance();
+        lines.push(stripped);
+    }
+
+    let doc = ast::DocComment(lines.join("\n"));
+    if doc.is_empty() { None } else { Some(doc) }
 }
 
 fn parse_imports(cursor: &mut TokenCursor) -> Vec<ast::Import> {
@@ -97,6 +136,16 @@ enum TopLevelValue {
 
 fn parse_top_level_element(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<TopLevelValue> {
     if cursor.is_eof() {
+        return None;
+    }
+
+    if matches!(cursor.peek(), Some(Token::ModuleDocComment(_))) {
+        cursor.error(
+            "module doc comments (--|) are only allowed at the start of the file",
+            cursor.peek_span().unwrap_or(SpanId::INVALID),
+        );
+        cursor.advance();
+        cursor.consume_trailing_newline();
         return None;
     }
 

@@ -14,6 +14,10 @@
       "patterns": [
         {
           "name": "comment.line.documentation.gin",
+          "match": "--\\|[^\\n]*"
+        },
+        {
+          "name": "comment.line.documentation.gin",
           "match": "---[^\\n]*"
         },
         {

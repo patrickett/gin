@@ -50,6 +50,7 @@ pub enum Token<'src> {
     CurlyOpen,
     Dedent,
     DocComment(&'src str),
+    ModuleDocComment(&'src str),
     Dot,
     Else,
     Eq,
