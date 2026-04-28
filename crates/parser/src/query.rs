@@ -5,7 +5,7 @@
 //! infrastructure.
 
 use ast::span::{HasSpanId, SpanId, SpanTable};
-use diagnostic::lex::LexSymptom;
+use diagnostic::LexSymptom;
 use diagnostic::parse::ParseSymptom;
 use diagnostic::{Symptom, SymptomLike};
 use lexer::{Lexer, Token};

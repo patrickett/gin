@@ -1,13 +1,20 @@
-use crate::SpanId;
-use crate::{Category, Symptom, SymptomLike};
+use strum::AsRefStr;
 
-#[derive(Default, Debug, Clone, PartialEq)]
+use crate::SpanId;
+use crate::{Category, Symptom, SymptomCode, SymptomLike};
+
+#[derive(Default, Debug, Clone, PartialEq, Eq, AsRefStr)]
 pub enum LexSymptom {
+    #[strum(to_string = "lex-unclosed-string")]
     UnclosedString,
+    #[strum(to_string = "lex-invalid-integer")]
     InvalidInteger,
+    #[strum(to_string = "lex-invalid-float")]
     InvalidFloat,
+    #[strum(to_string = "lex-overflow-indent")]
     OverflowIndent,
     #[default]
+    #[strum(to_string = "lex-unexpected-character")]
     UnexpectedCharacter,
 }
 
@@ -25,40 +32,20 @@ impl From<std::num::ParseFloatError> for LexSymptom {
 
 impl SymptomLike for LexSymptom {
     fn into_symptom(self, span_id: SpanId) -> Symptom {
-        let category = Category::Flaw;
-        let code: &str;
-        let help: Option<String> = None;
-        let message: String;
-
-        match self {
-            Self::UnclosedString => {
-                code = "lex-unclosed-string";
-                message = "unclosed string literal".into();
-            }
-            Self::InvalidInteger => {
-                code = "lex-invalid-integer";
-                message = "integer literal out of range".into();
-            }
-            Self::InvalidFloat => {
-                code = "lex-invalid-float";
-                message = "float literal out of range".into();
-            }
-            Self::OverflowIndent => {
-                code = "lex-overflow-indent";
-                message = "indentation overflow".into();
-            }
-            Self::UnexpectedCharacter => {
-                code = "lex-unexpected-character";
-                message = "unexpected character".into();
-            }
-        }
+        let message: &str = match self {
+            Self::UnclosedString => "unclosed string literal",
+            Self::InvalidInteger => "integer literal out of range",
+            Self::InvalidFloat => "float literal out of range",
+            Self::OverflowIndent => "indentation overflow",
+            Self::UnexpectedCharacter => "unexpected character",
+        };
 
         Symptom {
-            code,
-            message,
-            help,
+            code: SymptomCode::Lex(self),
+            message: message.into(),
+            help: None,
             span_id,
-            category,
+            category: Category::Flaw,
         }
     }
 }

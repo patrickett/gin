@@ -500,7 +500,7 @@ return
     let parse_flaws: Vec<_> = output
         .symptoms
         .iter()
-        .filter(|s| s.code.starts_with("parse-") && matches!(s.category, diagnostic::Category::Flaw))
+        .filter(|s| s.error_code().starts_with("parse-") && matches!(s.category, diagnostic::Category::Flaw))
         .collect();
     assert!(
         parse_flaws.is_empty(),

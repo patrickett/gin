@@ -10,8 +10,7 @@ use crate::cli::Args;
 use ast::ImportSource;
 use ast::{FileAst, ModPath, ModuleImport, qualify_module_defs};
 use codegen::emit::native;
-use diagnostic::Category;
-use diagnostic::{SpanId, Symptom};
+use diagnostic::{Category, ImportSymptom, SpanId, Symptom, SymptomLike};
 use flask::{DependencyKind, FlaskConfig};
 use lexer::debug_tokens;
 use parser::{ParseOutput, parse_source_full};
@@ -32,16 +31,6 @@ struct ParsedFile {
 impl ParsedFile {
     fn filename(&self) -> String {
         self.path.to_string_lossy().into_owned()
-    }
-}
-
-fn import_flaw(code: &'static str, message: impl Into<String>, help: impl Into<String>, span_id: SpanId) -> Symptom {
-    Symptom {
-        code,
-        message: message.into(),
-        help: Some(help.into()),
-        span_id,
-        category: Category::Flaw,
     }
 }
 
@@ -160,36 +149,23 @@ impl GinCompiler {
                             }
 
                             if !file_path.is_file() {
-                                // Import resolution returned a path that doesn't exist as a file.
-                                // Treat this as a fatal flaw so users don't get silent "missing module".
-                                parsed_files[from_idx].output.symptoms.push(import_flaw(
-                                    "import-target-not-found",
-                                    format!("import target not found: `{}`", file_path.display()),
-                                    "ensure the export `path` points to an existing `.gin` file (or a folder-module when importing a folder)",
-                                    span_id,
-                                ));
+                                parsed_files[from_idx].output.symptoms.push(
+                                    ImportSymptom::TargetNotFound {
+                                        path: file_path.display().to_string(),
+                                    }.into_symptom(span_id),
+                                );
                                 continue;
                             }
 
                             if let Some(prev) = seen.get(&file_path) {
                                 if prev != &qual {
-                                    // Importing the same file under different qualifiers is fatal:
-                                    // it breaks the merged namespace model.
-                                    parsed_files[from_idx].output.symptoms.push(Symptom {
-                                        code: "import-conflict",
-                                        message: format!(
-                                            "import conflict: {} is pulled in as `{}` and `{}`",
-                                            file_path.display(),
-                                            prev,
-                                            qual
-                                        ),
-                                        help: Some(
-                                            "choose a single qualifier/alias for this module"
-                                                .to_string(),
-                                        ),
-                                        span_id,
-                                        category: Category::Flaw,
-                                    });
+                                    parsed_files[from_idx].output.symptoms.push(
+                                        ImportSymptom::Conflict {
+                                            path: file_path.display().to_string(),
+                                            qualifier_a: prev.clone(),
+                                            qualifier_b: qual,
+                                        }.into_symptom(span_id),
+                                    );
                                     continue;
                                 }
                             }
@@ -245,12 +221,9 @@ impl GinCompiler {
                 parsed_files[cycle.closing_from]
                     .output
                     .symptoms
-                    .push(crate::module_graph::cycle_symptom(
-                        "import-cycle",
-                        "import cycle detected",
-                        format!("cycle: {chain}"),
-                        cycle.closing_span,
-                    ));
+                    .push(
+                        ImportSymptom::Cycle { chain }.into_symptom(cycle.closing_span),
+                    );
             }
         }
 
@@ -328,22 +301,20 @@ fn resolve_module_import(
     match &module_import.source {
         ImportSource::Local(path, _) => {
             if !path.extension().is_some_and(|e| e == "gin") {
-                symptoms.push(import_flaw(
-                    "import-local-must-end-in-gin",
-                    format!("local import `{}` must end in `.gin`", path.display()),
-                    "use `use './file.gin'` for local file imports",
-                    span_id,
-                ));
+                symptoms.push(
+                    ImportSymptom::LocalMustEndInGin {
+                        path: path.display().to_string(),
+                    }.into_symptom(span_id),
+                );
                 return Vec::new();
             }
             let full = base_dir.join(path);
             if !full.is_file() {
-                symptoms.push(import_flaw(
-                    "import-local-not-found",
-                    format!("local import not found: `{}`", full.display()),
-                    "check the path relative to this file, and ensure it ends in `.gin`",
-                    span_id,
-                ));
+                symptoms.push(
+                    ImportSymptom::LocalNotFound {
+                        path: full.display().to_string(),
+                    }.into_symptom(span_id),
+                );
                 return Vec::new();
             }
             let stem = full
@@ -360,42 +331,33 @@ fn resolve_module_import(
         ImportSource::LocalBundle(b) => {
             let folder = base_dir.join(b.root.as_str());
             let Some(config) = FlaskConfig::from_directory(&folder) else {
-                symptoms.push(import_flaw(
-                    "import-folder-missing-config",
-                    format!("`{}` is not a folder module (missing flask.jsonc)", folder.display()),
-                    "add a flask.jsonc to the folder module, or import a .gin file instead",
-                    span_id,
-                ));
+                symptoms.push(
+                    ImportSymptom::FolderMissingConfig {
+                        folder: folder.display().to_string(),
+                    }.into_symptom(span_id),
+                );
                 return Vec::new();
             };
             let mut out = Vec::new();
             for m in &b.members {
                 let Some(spec) = config.exports().get(m.export.as_str()) else {
-                    symptoms.push(import_flaw(
-                        "import-missing-export",
-                        format!(
-                            "folder `{}` has no export `{}`",
-                            folder.display(),
-                            m.export
-                        ),
-                        "add this key to `exports` in flask.jsonc",
-                        span_id,
-                    ));
+                    symptoms.push(
+                        ImportSymptom::MissingExport {
+                            folder: folder.display().to_string(),
+                            export: m.export.to_string(),
+                        }.into_symptom(span_id),
+                    );
                     continue;
                 };
                 let p = folder.join(&spec.path);
                 if !p.exists() {
-                    symptoms.push(import_flaw(
-                        "import-export-target-not-found",
-                        format!(
-                            "export `{}` in `{}` points to missing path `{}`",
-                            m.export,
-                            folder.display(),
-                            p.display()
-                        ),
-                        "fix the `path` in `exports` so it points to an existing file or folder-module",
-                        span_id,
-                    ));
+                    symptoms.push(
+                        ImportSymptom::ExportTargetNotFound {
+                            export: m.export.to_string(),
+                            folder: folder.display().to_string(),
+                            path: p.display().to_string(),
+                        }.into_symptom(span_id),
+                    );
                     continue;
                 }
                 let qual = m
@@ -424,31 +386,23 @@ fn resolve_package_like_import(
     let root_name = mp.root.as_str();
     match local_module_root(base_dir, root_name) {
         LocalModuleRoot::Ambiguous => {
-            symptoms.push(import_flaw(
-                "import-ambiguous-local-root",
-                format!(
-                    "ambiguous `{}`: both `{}` and `{}/` exist",
-                    root_name,
-                    base_dir.join(format!("{root_name}.gin")).display(),
-                    base_dir.join(root_name).display()
-                ),
-                "rename one of them, or use an explicit local file import (`use './path.gin'`)",
-                span_id,
-            ));
+            symptoms.push(
+                ImportSymptom::AmbiguousLocalRoot {
+                    name: root_name.to_string(),
+                    file_path: base_dir.join(format!("{root_name}.gin")).display().to_string(),
+                    folder_path: base_dir.join(root_name).display().to_string(),
+                }.into_symptom(span_id),
+            );
             Vec::new()
         }
         LocalModuleRoot::File(f) => {
             if !mp.segments.is_empty() {
-                symptoms.push(import_flaw(
-                    "import-file-has-segments",
-                    format!(
-                        "file module `{}` cannot have `{}` after it",
-                        f.display(),
-                        mp.segments[0]
-                    ),
-                    "remove the trailing segment, or import a folder-module with exports instead",
-                    span_id,
-                ));
+                symptoms.push(
+                    ImportSymptom::FileHasSegments {
+                        file_path: f.display().to_string(),
+                        segment: mp.segments[0].to_string(),
+                    }.into_symptom(span_id),
+                );
                 return Vec::new();
             }
             let qual = module_import
@@ -460,12 +414,11 @@ fn resolve_package_like_import(
         }
         LocalModuleRoot::Folder(folder) => {
             let Some(config) = FlaskConfig::from_directory(&folder) else {
-                symptoms.push(import_flaw(
-                    "import-folder-missing-config",
-                    format!("folder `{}` is missing flask.jsonc", folder.display()),
-                    "add a flask.jsonc with `exports`, or import a .gin file instead",
-                    span_id,
-                ));
+                symptoms.push(
+                    ImportSymptom::FolderMissingConfig {
+                        folder: folder.display().to_string(),
+                    }.into_symptom(span_id),
+                );
                 return Vec::new();
             };
             let eff_root = module_import
@@ -484,17 +437,13 @@ fn resolve_package_like_import(
                     .map(|(export_key, spec)| {
                         let p = folder.join(&spec.path);
                         if !p.exists() {
-                            symptoms.push(import_flaw(
-                                "import-export-target-not-found",
-                                format!(
-                                    "export `{}` in `{}` points to missing path `{}`",
-                                    export_key,
-                                    folder.display(),
-                                    p.display()
-                                ),
-                                "fix the `path` in `exports` so it points to an existing file or folder-module",
-                                span_id,
-                            ));
+                            symptoms.push(
+                                ImportSymptom::ExportTargetNotFound {
+                                    export: export_key.clone(),
+                                    folder: folder.display().to_string(),
+                                    path: p.display().to_string(),
+                                }.into_symptom(span_id),
+                            );
                             return (PathBuf::new(), String::new());
                         }
                         let qual = format!("{eff_root}.{export_key}");
@@ -519,25 +468,20 @@ fn resolve_package_like_import(
         }
         LocalModuleRoot::None => {
             let Some(dep_dir) = dependencies.get(root_name) else {
-                symptoms.push(import_flaw(
-                    "import-unknown-dependency",
-                    format!("unknown dependency `{}` (not found in flask.jsonc dependencies)", root_name),
-                    "add it to `dependencies` in flask.jsonc, or use a local file import",
-                    span_id,
-                ));
+                symptoms.push(
+                    ImportSymptom::UnknownDependency {
+                        name: root_name.to_string(),
+                    }.into_symptom(span_id),
+                );
                 return Vec::new();
             };
             let Some(config) = FlaskConfig::from_directory(dep_dir) else {
-                symptoms.push(import_flaw(
-                    "import-dependency-missing-config",
-                    format!(
-                        "dependency `{}` has no flask.jsonc at {}",
-                        root_name,
-                        dep_dir.display()
-                    ),
-                    "add a flask.jsonc to the dependency root directory",
-                    span_id,
-                ));
+                symptoms.push(
+                    ImportSymptom::DependencyMissingConfig {
+                        name: root_name.to_string(),
+                        path: dep_dir.display().to_string(),
+                    }.into_symptom(span_id),
+                );
                 return Vec::new();
             };
 
@@ -551,17 +495,13 @@ fn resolve_package_like_import(
                     .map(|(export_key, spec)| {
                         let p = dep_dir.join(&spec.path);
                         if !p.exists() {
-                            symptoms.push(import_flaw(
-                                "import-export-target-not-found",
-                                format!(
-                                    "export `{}` in `{}` points to missing path `{}`",
-                                    export_key,
-                                    dep_dir.display(),
-                                    p.display()
-                                ),
-                                "fix the `path` in `exports` so it points to an existing file or folder-module",
-                                span_id,
-                            ));
+                            symptoms.push(
+                                ImportSymptom::ExportTargetNotFound {
+                                    export: export_key.clone(),
+                                    folder: dep_dir.display().to_string(),
+                                    path: p.display().to_string(),
+                                }.into_symptom(span_id),
+                            );
                             return (PathBuf::new(), String::new());
                         }
                         let qual = match &module_import.alias {
@@ -610,25 +550,23 @@ fn resolve_chained_exports_from_dir(
         Ok(t) => t,
         Err(err) => {
             match err {
-                flask::ExportResolveError::MissingConfig { dir } => symptoms.push(import_flaw(
-                    "import-missing-config",
-                    format!("missing flask.jsonc at `{}`", dir.display()),
-                    "add a flask.jsonc with `exports` for this folder-module",
-                    span_id,
-                )),
-                flask::ExportResolveError::MissingExport { dir, key } => symptoms.push(import_flaw(
-                    "import-missing-export",
-                    format!("folder `{}` has no export `{}`", dir.display(), key),
-                    "add this key to `exports` in flask.jsonc",
-                    span_id,
-                )),
+                flask::ExportResolveError::MissingConfig { dir } => symptoms.push(
+                    ImportSymptom::MissingConfig {
+                        dir: dir.display().to_string(),
+                    }.into_symptom(span_id),
+                ),
+                flask::ExportResolveError::MissingExport { dir, key } => symptoms.push(
+                    ImportSymptom::MissingExport {
+                        folder: dir.display().to_string(),
+                        export: key,
+                    }.into_symptom(span_id),
+                ),
                 flask::ExportResolveError::IntermediateNotFolderModule { path } => {
-                    symptoms.push(import_flaw(
-                        "import-chained-export-not-folder",
-                        format!("intermediate export resolved to non-folder-module `{}`", path.display()),
-                        "make the export's `path` point to a folder containing flask.jsonc, or stop the chain here",
-                        span_id,
-                    ))
+                    symptoms.push(
+                        ImportSymptom::ChainedExportNotFolder {
+                            path: path.display().to_string(),
+                        }.into_symptom(span_id),
+                    )
                 }
             }
             return Vec::new();
@@ -638,12 +576,11 @@ fn resolve_chained_exports_from_dir(
     match target {
         flask::ExportTarget::FolderModule(folder) => {
             let Some(folder_cfg) = FlaskConfig::from_directory(&folder) else {
-                symptoms.push(import_flaw(
-                    "import-folder-missing-config",
-                    format!("folder `{}` is missing flask.jsonc", folder.display()),
-                    "add a flask.jsonc with `exports`",
-                    span_id,
-                ));
+                symptoms.push(
+                    ImportSymptom::FolderMissingConfig {
+                        folder: folder.display().to_string(),
+                    }.into_symptom(span_id),
+                );
                 return Vec::new();
             };
 
@@ -653,17 +590,13 @@ fn resolve_chained_exports_from_dir(
                 .filter_map(|(export_key, spec)| {
                     let p = folder.join(&spec.path);
                     if !p.exists() {
-                        symptoms.push(import_flaw(
-                            "import-export-target-not-found",
-                            format!(
-                                "export `{}` in `{}` points to missing path `{}`",
-                                export_key,
-                                folder.display(),
-                                p.display()
-                            ),
-                            "fix the `path` in `exports` so it points to an existing file or folder-module",
-                            span_id,
-                        ));
+                        symptoms.push(
+                            ImportSymptom::ExportTargetNotFound {
+                                export: export_key.clone(),
+                                folder: folder.display().to_string(),
+                                path: p.display().to_string(),
+                            }.into_symptom(span_id),
+                        );
                         return None;
                     }
                     Some((p, format!("{effective_prefix}.{export_key}")))
@@ -672,16 +605,13 @@ fn resolve_chained_exports_from_dir(
         }
         flask::ExportTarget::File(p) => {
             if !p.exists() {
-                symptoms.push(import_flaw(
-                    "import-export-target-not-found",
-                    format!(
-                        "export chain `{}` points to missing path `{}`",
-                        effective_prefix,
-                        p.display()
-                    ),
-                    "fix the `path` in `exports` so it points to an existing file or folder-module",
-                    span_id,
-                ));
+                symptoms.push(
+                    ImportSymptom::ExportTargetNotFound {
+                        export: effective_prefix.to_string(),
+                        folder: String::new(),
+                        path: p.display().to_string(),
+                    }.into_symptom(span_id),
+                );
                 return Vec::new();
             }
             vec![(p, effective_prefix.to_string())]
@@ -751,13 +681,13 @@ fn emit_mlir(merged_ast: &FileAst, ty_env: &TyEnv) {
     match result {
         Some(mlir_text) => {
             for s in &symptoms {
-                eprintln!("Codegen warning: [{}] {}", s.code, s.message);
+                eprintln!("Codegen warning: [{}] {}", s.error_code(), s.message);
             }
             println!("\n```mlir\n{mlir_text}```\n");
         }
         None => {
             for s in &symptoms {
-                eprintln!("Codegen error: [{}] {}", s.code, s.message);
+                eprintln!("Codegen error: [{}] {}", s.error_code(), s.message);
             }
         }
     }
@@ -793,7 +723,7 @@ fn emit_native(merged_ast: &FileAst, ty_env: &TyEnv, args: &Args, path: &Path, i
         native::compile_to_object(merged_ast, &obj_path, profile, "", &filename, ty_env);
     if !ok {
         for s in &symptoms {
-            eprintln!("Codegen error: [{}] {}", s.code, s.message);
+            eprintln!("Codegen error: [{}] {}", s.error_code(), s.message);
         }
         return;
     }
@@ -807,13 +737,13 @@ fn emit_native(merged_ast: &FileAst, ty_env: &TyEnv, args: &Args, path: &Path, i
             native::link_executable(&obj_path, &exe_path, args.target.as_deref());
         if !linked {
             for s in &link_symptoms {
-                eprintln!("Link error: [{}] {}", s.code, s.message);
+                eprintln!("Link error: [{}] {}", s.error_code(), s.message);
             }
         }
         let _ = std::fs::remove_file(&obj_path);
     } else {
         for s in &symptoms {
-            eprintln!("Codegen warning: [{}] {}", s.code, s.message);
+            eprintln!("Codegen warning: [{}] {}", s.error_code(), s.message);
         }
         println!("Compiled to {}", obj_path.display());
     }

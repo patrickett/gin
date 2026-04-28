@@ -7,8 +7,10 @@
 //! - Error codes (`{stage}-{name}` format, e.g. `lex-unexpected-char`)
 
 mod category;
+mod code;
 mod source;
 pub use category::Category;
+pub use code::*;
 pub use source::*;
 pub use span::{Span, SpanId, SpanTable, Spanned};
 
@@ -18,7 +20,7 @@ pub trait SymptomLike: Sized {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Symptom {
-    pub code: &'static str,
+    pub code: SymptomCode,
     pub message: String,
     pub help: Option<String>,
     pub span_id: SpanId,
@@ -26,8 +28,23 @@ pub struct Symptom {
 }
 
 impl Symptom {
-    pub fn error_code(&self) -> &'static str {
-        self.code
+    pub fn error_code(&self) -> &str {
+        self.code.as_ref()
+    }
+
+    pub fn flaw(
+        code: impl Into<SymptomCode>,
+        message: impl Into<String>,
+        help: impl Into<String>,
+        span_id: SpanId,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            help: Some(help.into()),
+            span_id,
+            category: Category::Flaw,
+        }
     }
 
     /// Pretty-print this symptom using ariadne with source context.
@@ -48,10 +65,11 @@ impl Symptom {
 
         let span: Range<usize> = start..end;
 
-        let msg = format!("[{}] {}", self.code, self.message);
+        let msg = format!("[{}] {}", self.error_code(), self.message);
         let mut builder = Report::build(kind, (filename, span.clone())).with_message(msg);
 
-        let is_unclosed_string = self.code == "lex-unclosed-string";
+        let is_unclosed_string =
+            self.code == SymptomCode::Lex(LexSymptom::UnclosedString);
 
         if is_unclosed_string && start < end {
             let mut display_source = source.to_string();

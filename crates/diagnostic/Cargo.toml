@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 span = { workspace = true }
 ariadne = "0.5.1"
+strum = { workspace = true }

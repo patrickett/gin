@@ -1,5 +1,5 @@
 use crate::{LexContext, MAX_INDENT_DEPTH, Token};
-use diagnostic::lex::LexSymptom;
+use diagnostic::LexSymptom;
 use memchr::{memchr, memchr2, memchr3};
 use span::{Span, SpanId, SpanTable};
 

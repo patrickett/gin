@@ -1,4 +1,4 @@
-use diagnostic::{Category, SpanId, Symptom};
+use diagnostic::SpanId;
 
 #[derive(Debug, Clone)]
 pub struct ImportEdge {
@@ -84,19 +84,3 @@ pub fn detect_first_cycle(adj: &[Vec<ImportEdge>]) -> Option<ImportCycle> {
     }
     None
 }
-
-pub fn cycle_symptom(
-    code: &'static str,
-    message: impl Into<String>,
-    help: impl Into<String>,
-    span_id: SpanId,
-) -> Symptom {
-    Symptom {
-        code,
-        message: message.into(),
-        help: Some(help.into()),
-        span_id,
-        category: Category::Flaw,
-    }
-}
-
