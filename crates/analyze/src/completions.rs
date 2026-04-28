@@ -1,8 +1,8 @@
 //! Completions and signature-help (semantic layer, no LSP types).
 
 use ast::{
-    BindValue, Expr, FileAst, FormatPart, IfCondition, LoopEnum, ParameterKind, Parameters,
-    SpanTable, WhenArm,
+    BindValue, Expr, FileAst, FormatPart, HasSpanId, IfCondition, LoopEnum, ParameterKind,
+    Parameters, SpanTable, WhenArm,
 };
 
 #[derive(Debug, Clone)]
@@ -155,7 +155,7 @@ fn find_call_in_expr(
     }
     match expr {
         Expr::FnCall(call) if call.args.is_some() => {
-            let call_span = span_table.get(call.path.span);
+            let call_span = span_table.get(call.path.span_id());
             if call_span.end <= byte_pos {
                 let len = span.end - span.start;
                 if best.as_ref().is_none_or(|(_, bl)| len < *bl) {

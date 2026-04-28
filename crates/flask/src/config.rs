@@ -42,6 +42,13 @@ pub struct Dependency {
     pub common: DependencyCommon,
 }
 
+/// One exported submodule from a folder-module (`flask.jsonc` in that directory).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ExportSpec {
+    /// Path relative to this `flask.jsonc`, e.g. `"math.gin"`.
+    pub path: String,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Author(pub String);
 
@@ -78,6 +85,8 @@ pub struct FlaskConfig {
     entry: Option<String>,
     #[serde(default)]
     dependencies: HashMap<String, Dependency>,
+    #[serde(default)]
+    exports: HashMap<String, ExportSpec>,
 }
 
 impl FlaskConfig {
@@ -95,6 +104,7 @@ impl FlaskConfig {
             targets: None,
             entry: None,
             dependencies: HashMap::new(),
+            exports: HashMap::new(),
         }
     }
 }
@@ -154,6 +164,10 @@ impl FlaskConfig {
 
     pub fn dependencies(&self) -> &HashMap<String, Dependency> {
         &self.dependencies
+    }
+
+    pub fn exports(&self) -> &HashMap<String, ExportSpec> {
+        &self.exports
     }
 
     pub fn from_directory(dir: &std::path::Path) -> Option<FlaskConfig> {

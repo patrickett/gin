@@ -4,7 +4,7 @@
 //! information from ASTs without relying on incremental compilation
 //! infrastructure.
 
-use ast::span::{SpanId, SpanTable};
+use ast::span::{HasSpanId, SpanId, SpanTable};
 use diagnostic::lex::LexSymptom;
 use diagnostic::parse::ParseSymptom;
 use diagnostic::{Symptom, SymptomLike};
@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use crate::expr;
 use ast::{BindValue, Expr, FileAst, FnCall, ImportSource};
+use flask::FlaskConfig;
 
 // TODO: change ParseOutput to a Vec<Symptom> or some vec of enum so we dont need the different
 // fields
@@ -68,19 +69,31 @@ pub fn parse_source_full(src: &str) -> ParseOutput {
 
     // Parse errors
     for err in &hw_parse_errors {
-        symptoms.push(ParseSymptom::Custom(err.message.clone()).into_symptom(err.span));
+        symptoms.push(ParseSymptom::Custom(err.message.clone()).into_symptom(err.span_id()));
     }
 
-    // Import validation (direct .gin file imports)
+    // Import validation: quoted local imports must name a `.gin` file.
     for import in ast.uses() {
         for module_import in &import.0 {
             if let ImportSource::Local(path, span_id) = &module_import.source {
-                if path.extension().is_some_and(|ext| ext == "gin") {
+                if !path.extension().is_some_and(|ext| ext == "gin") {
                     symptoms.push(
-                        ParseSymptom::DirectFileImport {
-                            path: path.to_string_lossy().into(),
-                        }
+                        ParseSymptom::Custom(format!(
+                            "local import path must include a `.gin` file name, got `{}`",
+                            path.to_string_lossy()
+                        ))
                         .into_symptom(*span_id),
+                    );
+                }
+            }
+            if let ImportSource::LocalBundle(b) = &module_import.source {
+                if module_import.alias.is_some() {
+                    symptoms.push(
+                        ParseSymptom::Custom(
+                            "`as` alias on `use pkg.(...)` is not supported; use `export as alias` inside the list"
+                                .into(),
+                        )
+                        .into_symptom(b.span_id()),
                     );
                 }
             }
@@ -114,38 +127,24 @@ pub fn parse_source_full(src: &str) -> ParseOutput {
     }
 }
 
-/// Extract local import directory paths from the AST, relative to the given directory.
+/// Extract locally-imported `.gin` file paths from the AST (quoted `use '...gin'` only).
 ///
-/// Returns `(path, span)` pairs for each `.gin` file found in locally-imported
-/// directories. Package imports are skipped — use [`extract_package_import_paths`]
-/// to resolve those separately with access to the dependency map.
+/// Package imports and same-folder `use foo` / `use foo.(...)` are not included here.
 pub fn extract_local_import_paths(ast: &FileAst, base_dir: &Path) -> Vec<(PathBuf, SpanId)> {
     let mut paths = Vec::new();
 
     for import in ast.uses() {
         for module_import in &import.0 {
             match &module_import.source {
-                ImportSource::Package(_path) => {
-                    // Package imports from flask.jsonc dependencies are not resolved
-                    // by this pure function. Callers that need package resolution
-                    // should handle it separately with access to the dependency map.
-                }
+                ImportSource::Package(_path) => {}
+                ImportSource::LocalBundle(_b) => {}
                 ImportSource::Local(path, span) => {
-                    let folder = base_dir.join(path);
-                    // TODO: PERF can we mmap files directly instead of individual read_dirs
-                    match std::fs::read_dir(&folder) {
-                        Ok(entries) => {
-                            for entry in entries.flatten() {
-                                let p = entry.path();
-                                if p.extension().is_some_and(|e| e == "gin") {
-                                    paths.push((p, *span));
-                                }
-                            }
-                        }
-                        Err(_) => {
-                            // Caller is responsible for handling resolution failures
-                            // since we don't have access to a diagnostic emitter here.
-                        }
+                    if !path.extension().is_some_and(|e| e == "gin") {
+                        continue;
+                    }
+                    let p = base_dir.join(path);
+                    if p.is_file() {
+                        paths.push((p, *span));
                     }
                 }
             }
@@ -160,10 +159,11 @@ pub fn extract_local_import_paths(ast: &FileAst, base_dir: &Path) -> Vec<(PathBu
 /// `dependencies` maps package names (as declared in `flask.jsonc`) to their
 /// on-disk directory paths. For each `ImportSource::Package(path)`:
 ///
-/// - With segments (e.g. `core.io`): looks for `{dep_dir}/io.gin` and
-///   `{dep_dir}/src/io.gin`, including both if they exist.
-/// - Without segments (e.g. `core`): includes every `.gin` file found in
-///   `{dep_dir}/` and `{dep_dir}/src/`.
+/// - With **no** segments (e.g. `use core`): each file listed in that package's
+///   `flask.jsonc` `exports` map (paths relative to the package root).
+/// - With **one** segment (e.g. `use core.io`): only `{dep_dir}/{exports["io"].path}` —
+///   no scanning for `{dep_dir}/io.gin` or `src/io.gin` unless the export says so.
+/// - More than one segment is not supported here (returns nothing).
 ///
 /// Returns `(path, span)` pairs for each resolved `.gin` file.
 pub fn extract_package_import_paths(
@@ -181,45 +181,33 @@ pub fn extract_package_import_paths(
                 };
 
                 if mod_path.segments.is_empty() {
-                    // `use core` — include all .gin files in the package
-                    collect_gin_files_from_dir(dep_dir, mod_path.span, &mut paths);
-                    let src_dir = dep_dir.join("src");
-                    if src_dir.is_dir() {
-                        collect_gin_files_from_dir(&src_dir, mod_path.span, &mut paths);
+                    if let Some(config) = FlaskConfig::from_directory(dep_dir) {
+                        for (_, spec) in config.exports() {
+                            try_push_gin_file(
+                                dep_dir.join(&spec.path),
+                                mod_path.span_id(),
+                                &mut paths,
+                            );
+                        }
                     }
-                } else {
-                    // `use core.io` — resolve each segment to a file
-                    for segment in &mod_path.segments {
-                        try_push_gin_file(
-                            dep_dir.join(format!("{}.gin", segment)),
-                            mod_path.span,
-                            &mut paths,
-                        );
-                        try_push_gin_file(
-                            dep_dir.join("src").join(format!("{}.gin", segment)),
-                            mod_path.span,
-                            &mut paths,
-                        );
+                } else if mod_path.segments.len() == 1 {
+                    let export_key = mod_path.segments[0].as_str();
+                    if let Some(config) = FlaskConfig::from_directory(dep_dir) {
+                        if let Some(spec) = config.exports().get(export_key) {
+                            try_push_gin_file(
+                                dep_dir.join(&spec.path),
+                                mod_path.span_id(),
+                                &mut paths,
+                            );
+                        }
                     }
                 }
+                // `use a.b.c` with more than one trailing segment: unsupported for export-only resolution.
             }
         }
     }
 
     paths
-}
-
-/// Collect all `.gin` files from a directory into `paths`.
-fn collect_gin_files_from_dir(dir: &Path, span: SpanId, paths: &mut Vec<(PathBuf, SpanId)>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let p = entry.path();
-        if p.extension().is_some_and(|e| e == "gin") {
-            paths.push((p, span));
-        }
-    }
 }
 
 /// Push a `.gin` file path onto `paths` if it exists on disk.
@@ -254,7 +242,7 @@ fn scan_expr(expr: &Expr, hints: &mut Vec<(String, SpanId)>) {
         Expr::FnCall(call) => {
             if let Some(args) = &call.args {
                 if args.is_empty() {
-                    hints.push((fmt_call_without_parens(call), call.path.span));
+                    hints.push((fmt_call_without_parens(call), call.path.span_id()));
                 }
                 for arg in args {
                     scan_expr(arg, hints);
@@ -328,7 +316,7 @@ fn collect_unused_values(ast: &FileAst) -> Vec<(String, SpanId)> {
                     let segs: Vec<&str> = call.path.segments.iter().map(|s| s.as_str()).collect();
                     format!("{}.{}", call.path.root.as_str(), segs.join("."))
                 };
-                (name, call.path.span)
+                (name, call.path.span_id())
             }
             Expr::AnonymousTag(tag, span) => (tag.as_str().to_string(), *span),
             _ => ("expression".to_string(), *expr_span),

@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 ast = { workspace = true }
+flask = { workspace = true }
 span = { workspace = true }
 lexer = { workspace = true }
 diagnostic = { workspace = true }

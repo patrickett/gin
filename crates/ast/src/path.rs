@@ -1,6 +1,7 @@
 use internment::Intern;
 
 use crate::span::SpanId;
+use crate::span::HasSpanId;
 
 /// A multi‑segment identifier.
 ///
@@ -29,5 +30,11 @@ impl ModPath {
             segments,
             span,
         }
+    }
+}
+
+impl HasSpanId for ModPath {
+    fn span_id(&self) -> SpanId {
+        self.span
     }
 }

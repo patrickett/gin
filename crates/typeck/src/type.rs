@@ -17,7 +17,7 @@ use crate::{TyInfer, TyInferEnv};
 use ast::WhenArm;
 use ast::{
     type_surface_mangle_name, Bind, BindValue, DeclareValue, Expr, FileAst, FnCall, FormatPart,
-    IfCondition, Loop, ParameterKind, Spanned,
+    HasSpanId, IfCondition, Loop, ParameterKind, Spanned,
 };
 use i256::I256;
 use internment::Intern;
@@ -815,7 +815,7 @@ impl TyEnv {
                             TypeSymptom::UnknownBinding {
                                 name: mangled.to_string(),
                             }
-                            .into_symptom(call.path.span),
+                            .into_symptom(call.path.span_id()),
                         );
                     }
                     for arg in args {
@@ -829,7 +829,7 @@ impl TyEnv {
                         TypeSymptom::UnknownBinding {
                             name: mangled.to_string(),
                         }
-                        .into_symptom(call.path.span),
+                        .into_symptom(call.path.span_id()),
                     );
                 }
             }
@@ -996,7 +996,7 @@ impl TyEnv {
                             TypeSymptom::UnknownTag {
                                 name: path.root.to_string(),
                             }
-                            .into_symptom(path.span),
+                            .into_symptom(path.span_id()),
                         );
                     }
                 } else if self.lookup_variant(tc.name).is_none() {
@@ -1004,7 +1004,7 @@ impl TyEnv {
                         TypeSymptom::UnknownTag {
                             name: tc.name.to_string(),
                         }
-                        .into_symptom(tc.span),
+                        .into_symptom(tc.span_id()),
                     );
                 }
                 for arg in &tc.args {
@@ -1060,7 +1060,7 @@ impl TyEnv {
                         TypeSymptom::UnknownTag {
                             name: path.root.to_string(),
                         }
-                        .into_symptom(path.span),
+                        .into_symptom(path.span_id()),
                     );
                 }
             }
@@ -1254,7 +1254,7 @@ fn check_return_variants(
                         name: tc.name.to_string(),
                         union_name: union_name.to_string(),
                     }
-                    .into_symptom(tc.span),
+                    .into_symptom(tc.span_id()),
                 );
             }
             Expr::If(if_expr) => {

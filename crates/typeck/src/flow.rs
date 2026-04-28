@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use ast::SpanId;
+use ast::{HasSpanId, SpanId};
 
 use internment::Intern;
 
@@ -459,4 +459,10 @@ pub struct IndexOutOfBounds {
     pub index: i128,
     /// The size of the buffer.
     pub size: usize,
+}
+
+impl HasSpanId for IndexOutOfBounds {
+    fn span_id(&self) -> SpanId {
+        self.span
+    }
 }

@@ -1,7 +1,7 @@
 //! Analysis pipeline — single entry point for type checking and flow analysis.
 
 use crate::{FlowAnalyzer, TyEnv};
-use ast::FileAst;
+use ast::{FileAst, HasSpanId};
 use diagnostic::SymptomLike;
 use diagnostic::type_::TypeSymptom;
 
@@ -29,7 +29,7 @@ pub fn analyze_file_with_ty_env(ast: &FileAst, ty_env: &TyEnv) -> Vec<diagnostic
                 index: check.index,
                 size: check.size,
             }
-            .into_symptom(check.span),
+            .into_symptom(check.span_id()),
         );
     }
 

@@ -1,6 +1,6 @@
 //! Hover and related semantic helpers (engine layer).
 
-use ast::Parameters;
+use ast::{HasSpanId, Parameters};
 
 fn is_identifier_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
@@ -308,7 +308,7 @@ fn find_name_in_expr(
             Some(*name)
         }
         Expr::FnCall(call)
-            if call.args.is_none() && span_table.get(call.path.span).end == dot_pos =>
+            if call.args.is_none() && span_table.get(call.path.span_id()).end == dot_pos =>
         {
             Some(call.path.root)
         }
@@ -388,7 +388,7 @@ fn collect_refs_expr(
     use ast::Expr;
     match expr {
         Expr::FnCall(call) => {
-            let call_span = span_table.get(call.path.span);
+            let call_span = span_table.get(call.path.span_id());
             if call.path.segments.is_empty() {
                 if call.path.root.as_str() == name {
                     let s = call_span.start;
@@ -417,7 +417,7 @@ fn collect_refs_expr(
         }
         Expr::TagCall(tc) => {
             if tc.name.as_str() == name {
-                let tc_span = span_table.get(tc.span);
+                let tc_span = span_table.get(tc.span_id());
                 out.push(tc_span.start..tc_span.start + name.len());
             }
             for arg in &tc.args {

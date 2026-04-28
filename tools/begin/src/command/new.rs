@@ -139,13 +139,23 @@ pub fn write_flask_json(path: &Path, name: &str, author: &str, entry: Option<&st
         None => "null".to_string(),
     };
 
+    let exports_json = match entry {
+        Some(e) => format!(
+            r#",
+  "exports": {{
+    "main": {{ "path": "{e}" }}
+  }}"#
+        ),
+        None => String::new(),
+    };
+
     let content = format!(
         r#"{{
   "name": "{name}",
   "version": "0.1.0",
   "authors": {authors_json},
   "entry": {entry_json},
-  "dependencies": {{}}
+  "dependencies": {{}}{exports_json}
 }}
 "#
     );

@@ -766,6 +766,7 @@ fn parse_format_string_expr(cursor: &mut TokenCursor) -> Spanned<Expr> {
 
     let mut parts = Vec::new();
 
+    // TODO: go through codebase and remove loop {...}
     loop {
         match cursor.peek() {
             Some(Token::FormatStringText(s)) => {

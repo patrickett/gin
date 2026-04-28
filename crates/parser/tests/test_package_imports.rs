@@ -30,6 +30,14 @@ impl TempPackage {
     fn path(&self) -> PathBuf {
         self.dir.clone()
     }
+
+    /// Minimal `flask.jsonc` so `use core` resolves via `exports` (not directory scan).
+    fn add_flask_with_exports(&self, exports: &str) {
+        let json = format!(
+            r#"{{"name":"core","version":"0.1.0","authors":[],"exports":{exports}}}"#
+        );
+        fs::write(self.dir.join("flask.jsonc"), json).unwrap();
+    }
 }
 
 impl Drop for TempPackage {
@@ -45,6 +53,7 @@ fn test_package_import_with_segment() {
         "io.gin",
         "print(s Str):\n    write(1, s.pointer as Int, s.len)\nreturn\n",
     );
+    pkg.add_flask_with_exports(r#"{"io":{"path":"io.gin"}}"#);
 
     let src = "use core.io\nmain:\nreturn\n";
     let ast = parse_from_str(src);
@@ -65,6 +74,7 @@ fn test_package_import_segment_in_src_dir() {
         "int.gin",
         "Int is -9223372036854775808...9223372036854775807\n",
     );
+    pkg.add_flask_with_exports(r#"{"int":{"path":"src/int.gin"}}"#);
 
     let src = "use core.int\nmain:\nreturn\n";
     let ast = parse_from_str(src);
@@ -92,6 +102,9 @@ fn test_package_import_no_segments_collects_all() {
     pkg.add_src_file(
         "int.gin",
         "Int is -9223372036854775808...9223372036854775807\n",
+    );
+    pkg.add_flask_with_exports(
+        r#"{"io":{"path":"io.gin"},"sys":{"path":"sys.gin"},"bool":{"path":"src/bool.gin"},"int":{"path":"src/int.gin"}}"#,
     );
 
     let src = "use core\nmain:\nreturn\n";
@@ -134,6 +147,7 @@ fn test_package_import_multiple_segments() {
         "sys.gin",
         "write(fd Int, buf Int, len Int) Int:\nreturn 0\n",
     );
+    pkg.add_flask_with_exports(r#"{"io":{"path":"io.gin"},"sys":{"path":"sys.gin"}}"#);
 
     let src = "use core.io, core.sys\nmain:\nreturn\n";
     let ast = parse_from_str(src);
@@ -157,6 +171,7 @@ fn test_package_import_multiple_segments() {
 fn test_package_import_skips_local_imports() {
     let pkg = TempPackage::new("mixed");
     pkg.add_file("io.gin", "print(s Str):\nreturn\n");
+    pkg.add_flask_with_exports(r#"{"io":{"path":"io.gin"}}"#);
 
     let src = "use core.io\nuse './local' as local\nmain:\nreturn\n";
     let ast = parse_from_str(src);
@@ -173,7 +188,7 @@ fn test_package_import_skips_local_imports() {
 #[test]
 fn test_package_import_nonexistent_file_in_segment() {
     let pkg = TempPackage::new("missing_file");
-    // Don't create any files - the segment resolution should just skip missing files
+    pkg.add_flask_with_exports("{}");
 
     let src = "use core.nonexistent\nmain:\nreturn\n";
     let ast = parse_from_str(src);
@@ -183,5 +198,21 @@ fn test_package_import_nonexistent_file_in_segment() {
 
     let paths = extract_package_import_paths(&ast, &deps);
 
+    assert!(paths.is_empty());
+}
+
+#[test]
+fn test_package_import_two_segments_returns_nothing() {
+    let pkg = TempPackage::new("two_seg");
+    pkg.add_file("io.gin", "x\n");
+    pkg.add_flask_with_exports(r#"{"io":{"path":"io.gin"}}"#);
+
+    let src = "use core.io.extra\nmain:\nreturn\n";
+    let ast = parse_from_str(src);
+
+    let mut deps = HashMap::new();
+    deps.insert("core".to_string(), pkg.path());
+
+    let paths = extract_package_import_paths(&ast, &deps);
     assert!(paths.is_empty());
 }

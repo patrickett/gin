@@ -2,7 +2,7 @@ use internment::Intern;
 
 use crate::expr::Expr;
 use crate::path::ModPath;
-use crate::span::SpanId;
+use crate::span::{HasSpanId, SpanId};
 use crate::span::Spanned;
 
 /// A capitalized variant constructor call, e.g. `Some(5)` or `Maybe.Some(3)`.
@@ -17,4 +17,10 @@ pub struct TagCall {
     pub qual_path: Option<ModPath>,
     pub args: Vec<Spanned<Expr>>,
     pub span: SpanId,
+}
+
+impl HasSpanId for TagCall {
+    fn span_id(&self) -> SpanId {
+        self.span
+    }
 }

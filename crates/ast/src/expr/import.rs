@@ -1,15 +1,32 @@
-use crate::span::SpanId;
+use crate::span::{HasSpanId, SpanId};
 use internment::Intern;
 use std::path::PathBuf;
 
 use crate::path::ModPath;
+
+/// One entry inside `use pkg.(a, b as c)`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BundleExportImport {
+    pub export: Intern<String>,
+    pub alias: Option<Intern<String>>,
+}
+
+/// `use folder.(export1, export2 as alias)` — same-folder folder-module with explicit exports.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LocalBundleImport {
+    pub root: Intern<String>,
+    pub members: Vec<BundleExportImport>,
+    /// Span covering the whole `root.(...)` construct for diagnostics / goto-def.
+    pub span: SpanId,
+}
 
 /// `use` can include several different modules seperated by a `,`
 ///
 /// ex.
 /// ```gin
 /// use http.web, crypto.hash
-/// use './math' as math
+/// use './math.gin' as math
+/// use utils.(math, http as h)
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Import(pub Vec<ModuleImport>);
@@ -27,6 +44,8 @@ pub enum ImportSource {
     Package(ModPath),
     /// Path to a module on disk ex. `use '../http' as http`
     Local(PathBuf, SpanId),
+    /// Same-folder folder-module destructure: `use utils.(math, http as h)`
+    LocalBundle(LocalBundleImport),
 }
 
 /// An import is structured like the following:
@@ -56,6 +75,29 @@ impl ModuleImport {
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_string(),
+            ImportSource::LocalBundle(b) => b.root.to_string(),
         }
+    }
+}
+
+impl HasSpanId for ImportSource {
+    fn span_id(&self) -> SpanId {
+        match self {
+            ImportSource::Package(mp) => mp.span_id(),
+            ImportSource::Local(_, span_id) => *span_id,
+            ImportSource::LocalBundle(b) => b.span_id(),
+        }
+    }
+}
+
+impl HasSpanId for ModuleImport {
+    fn span_id(&self) -> SpanId {
+        self.source.span_id()
+    }
+}
+
+impl HasSpanId for LocalBundleImport {
+    fn span_id(&self) -> SpanId {
+        self.span
     }
 }

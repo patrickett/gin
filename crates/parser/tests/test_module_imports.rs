@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
+use ast::ImportSource;
 use parser::{discover_module, discover_module_at, parse_from_str};
 
 struct TempProject {
@@ -256,6 +257,25 @@ fn test_use_multiple_local_imports() {
 
     assert_eq!(ast.uses().len(), 1);
     assert_eq!(ast.uses()[0].0.len(), 2);
+}
+
+#[test]
+fn test_use_local_bundle_parses() {
+    let src = "use utils.(math, http as h)\nmain:\nreturn\n";
+    let ast = parse_from_str(src);
+    let import = &ast.uses()[0];
+    assert_eq!(import.0.len(), 1);
+    match &import.0[0].source {
+        ImportSource::LocalBundle(b) => {
+            assert_eq!(b.root.as_str(), "utils");
+            assert_eq!(b.members.len(), 2);
+            assert_eq!(b.members[0].export.as_str(), "math");
+            assert!(b.members[0].alias.is_none());
+            assert_eq!(b.members[1].export.as_str(), "http");
+            assert_eq!(b.members[1].alias.as_ref().unwrap().as_str(), "h");
+        }
+        _ => panic!("expected LocalBundle"),
+    }
 }
 
 #[test]

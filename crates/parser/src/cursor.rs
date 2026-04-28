@@ -1,6 +1,6 @@
 use std::cell::Cell;
 
-use ast::span::{Span, SpanId, SpanTable};
+use ast::span::{HasSpanId, Span, SpanId, SpanTable};
 use internment::Intern;
 use lexer::Token;
 
@@ -8,6 +8,12 @@ use lexer::Token;
 pub struct ParseError {
     pub message: String,
     pub span: SpanId,
+}
+
+impl HasSpanId for ParseError {
+    fn span_id(&self) -> SpanId {
+        self.span
+    }
 }
 
 pub struct TokenCursor<'src, 't> {
