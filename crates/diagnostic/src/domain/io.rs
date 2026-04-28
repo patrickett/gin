@@ -1,7 +1,7 @@
 use strum::AsRefStr;
 
 use crate::SpanId;
-use crate::{Category, Symptom, SymptomCode, SymptomLike};
+use crate::{Category, Diagnostic, DiagnosticCode, DiagnosticLike};
 
 #[derive(Debug, Clone, PartialEq, Eq, AsRefStr)]
 pub enum IoSymptom {
@@ -13,8 +13,8 @@ pub enum IoSymptom {
     ResolutionFailed,
 }
 
-impl SymptomLike for IoSymptom {
-    fn into_symptom(self, span_id: SpanId) -> Symptom {
+impl DiagnosticLike for IoSymptom {
+    fn into_diagnostic(self, span_id: SpanId) -> Diagnostic {
         let (message, help): (&str, &str) = match self {
             Self::ReadFailed => (
                 "failed to read file",
@@ -30,8 +30,8 @@ impl SymptomLike for IoSymptom {
             ),
         };
 
-        Symptom {
-            code: SymptomCode::Io(self),
+        Diagnostic {
+            code: DiagnosticCode::Io(self),
             message: message.into(),
             help: Some(help.into()),
             span_id,

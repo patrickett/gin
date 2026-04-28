@@ -7,7 +7,7 @@
 use ast::span::{HasSpanId, SpanId, SpanTable};
 use diagnostic::LexSymptom;
 use diagnostic::parse::ParseSymptom;
-use diagnostic::{Symptom, SymptomLike};
+use diagnostic::{Diagnostic, DiagnosticLike};
 use lexer::{Lexer, Token};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -16,7 +16,7 @@ use crate::expr;
 use ast::{BindValue, Expr, FileAst, FnCall, ImportSource};
 use flask::FlaskConfig;
 
-// TODO: change ParseOutput to a Vec<Symptom> or some vec of enum so we dont need the different
+// TODO: change ParseOutput to a Vec<Diagnostic> or some vec of enum so we dont need the different
 // fields
 /// Full output from parsing source text, including all diagnostic info.
 #[derive(Clone, PartialEq, Eq)]
@@ -26,7 +26,7 @@ pub struct ParseOutput {
     /// Span table mapping SpanIds to byte ranges in the source.
     pub span_table: SpanTable,
     /// All diagnostics collected during lexing and parsing.
-    pub symptoms: Vec<Symptom>,
+    pub symptoms: Vec<Diagnostic>,
 }
 
 /// Parse source text and return full results including all diagnostics.
@@ -52,24 +52,24 @@ pub fn parse_source_full(src: &str) -> ParseOutput {
     let (ast, hw_parse_errors) = expr::parse_tokens_with_errors(&filtered_tokens, span_table);
     let span_table = span_table_clone;
 
-    let mut symptoms: Vec<Symptom> = Vec::new();
+    let mut symptoms: Vec<Diagnostic> = Vec::new();
 
     // Unterminated strings
     for (_, span_id) in tokens
         .iter()
         .filter(|(t, _)| matches!(t, Token::UnterminatedString(_)))
     {
-        symptoms.push(LexSymptom::UnclosedString.into_symptom(*span_id));
+        symptoms.push(LexSymptom::UnclosedString.into_diagnostic(*span_id));
     }
 
     // Lex errors
     for (s, span_id) in &lex_errors {
-        symptoms.push(s.clone().into_symptom(*span_id));
+        symptoms.push(s.clone().into_diagnostic(*span_id));
     }
 
     // Parse errors
     for err in &hw_parse_errors {
-        symptoms.push(ParseSymptom::Custom(err.message.clone()).into_symptom(err.span_id()));
+        symptoms.push(ParseSymptom::Custom(err.message.clone()).into_diagnostic(err.span_id()));
     }
 
     // Import validation: quoted local imports must name a `.gin` file.
@@ -82,7 +82,7 @@ pub fn parse_source_full(src: &str) -> ParseOutput {
                             "local import path must include a `.gin` file name, got `{}`",
                             path.to_string_lossy()
                         ))
-                        .into_symptom(*span_id),
+                        .into_diagnostic(*span_id),
                     );
                 }
             }
@@ -93,7 +93,7 @@ pub fn parse_source_full(src: &str) -> ParseOutput {
                             "`as` alias on `use pkg.(...)` is not supported; use `export as alias` inside the list"
                                 .into(),
                         )
-                        .into_symptom(b.span_id()),
+                        .into_diagnostic(b.span_id()),
                     );
                 }
             }
@@ -106,7 +106,7 @@ pub fn parse_source_full(src: &str) -> ParseOutput {
             ParseSymptom::EmptyParens {
                 suggested,
             }
-            .into_symptom(span_id),
+            .into_diagnostic(span_id),
         );
     }
 
@@ -116,7 +116,7 @@ pub fn parse_source_full(src: &str) -> ParseOutput {
             ParseSymptom::UnusedValue {
                 value,
             }
-            .into_symptom(span_id),
+            .into_diagnostic(span_id),
         );
     }
 

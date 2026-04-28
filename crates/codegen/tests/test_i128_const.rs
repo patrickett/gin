@@ -1,5 +1,5 @@
 use codegen::build_module_with_context;
-use diagnostic::Symptom;
+use diagnostic::Diagnostic;
 use melior::Context;
 use parser::parse_from_str;
 use typeck::TyEnv;
@@ -17,7 +17,7 @@ use typeck::TyEnv;
 // replace substring assertions with `insta::assert_snapshot!("i128_const", mlir_text)`.
 
 /// Helper to generate MLIR text from a source string using the single codegen path.
-fn codegen_to_mlir_text(source: &str, filename: &str) -> (String, Vec<Symptom>) {
+fn codegen_to_mlir_text(source: &str, filename: &str) -> (String, Vec<Diagnostic>) {
     let ast = parse_from_str(source);
     let ty_env = TyEnv::from_file_ast(&ast);
 

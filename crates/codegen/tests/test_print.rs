@@ -1,10 +1,10 @@
 use codegen::build_module_with_context;
-use diagnostic::Symptom;
+use diagnostic::Diagnostic;
 use melior::Context;
 use parser::parse_from_str;
 use typeck::TyEnv;
 
-fn codegen_to_mlir_text(source: &str, filename: &str) -> (String, Vec<Symptom>) {
+fn codegen_to_mlir_text(source: &str, filename: &str) -> (String, Vec<Diagnostic>) {
     let ast = parse_from_str(source);
     let ty_env = TyEnv::from_file_ast(&ast);
 
@@ -23,7 +23,7 @@ fn codegen_to_mlir_text(source: &str, filename: &str) -> (String, Vec<Symptom>) 
     (mlir_text, symptoms)
 }
 
-fn assert_no_symptoms(symptoms: &[Symptom]) {
+fn assert_no_symptoms(symptoms: &[Diagnostic]) {
     assert!(
         symptoms.is_empty(),
         "expected no codegen symptoms: {symptoms:?}"

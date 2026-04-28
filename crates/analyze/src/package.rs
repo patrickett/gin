@@ -2,7 +2,7 @@
 
 use ast::FileAst;
 use database::{Db, File};
-use diagnostic::Symptom;
+use diagnostic::Diagnostic;
 use typeck;
 
 /// Stable ordering for package [`File`] lists (path string).
@@ -19,7 +19,7 @@ pub fn intern_package_files<'db>(db: &'db dyn Db, files: Vec<File>) -> crate::qu
 
 /// Run type-check and flow analysis for each file, using a shared [`typeck::TyEnv`]
 /// built from all ASTs (same behavior as `begin build` / LSP diagnostics).
-pub fn typecheck_symptoms_for_package(all_asts: &[FileAst]) -> Vec<Vec<Symptom>> {
+pub fn typecheck_symptoms_for_package(all_asts: &[FileAst]) -> Vec<Vec<Diagnostic>> {
     (0..all_asts.len())
         .map(|i| typeck::analyze_file(&all_asts[i], all_asts))
         .collect()

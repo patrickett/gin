@@ -1,39 +1,39 @@
 //! Unified diagnostics for the ginc compiler.
 //!
-//! This module provides a single `Symptom` type that encompasses all
+//! This module provides a single `Diagnostic` type that encompasses all
 //! flaw/help/info types produced by the compiler, with support for:
-//! - Source spans (using 0..0 for flaws without a location)
+//! - Source spans (using 0..0 for diagnostics without a location)
 //! - Severity levels (Flaw, Hint, Info)
 //! - Error codes (`{stage}-{name}` format, e.g. `lex-unexpected-char`)
 
 mod category;
 mod code;
-mod source;
+mod domain;
 pub use category::Category;
 pub use code::*;
-pub use source::*;
+pub use domain::*;
 pub use span::{Span, SpanId, SpanTable, Spanned};
 
-pub trait SymptomLike: Sized {
-    fn into_symptom(self, span_id: SpanId) -> Symptom;
+pub trait DiagnosticLike: Sized {
+    fn into_diagnostic(self, span_id: SpanId) -> Diagnostic;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Symptom {
-    pub code: SymptomCode,
+pub struct Diagnostic {
+    pub code: DiagnosticCode,
     pub message: String,
     pub help: Option<String>,
     pub span_id: SpanId,
     pub category: Category,
 }
 
-impl Symptom {
+impl Diagnostic {
     pub fn error_code(&self) -> &str {
         self.code.as_ref()
     }
 
     pub fn flaw(
-        code: impl Into<SymptomCode>,
+        code: impl Into<DiagnosticCode>,
         message: impl Into<String>,
         help: impl Into<String>,
         span_id: SpanId,
@@ -47,7 +47,7 @@ impl Symptom {
         }
     }
 
-    /// Pretty-print this symptom using ariadne with source context.
+    /// Pretty-print this diagnostic using ariadne with source context.
     pub fn print(&self, span_table: &SpanTable, source: &str, filename: &str) {
         use ariadne::{Label, Report, ReportKind, Source};
         use std::ops::Range;
@@ -69,7 +69,7 @@ impl Symptom {
         let mut builder = Report::build(kind, (filename, span.clone())).with_message(msg);
 
         let is_unclosed_string =
-            self.code == SymptomCode::Lex(LexSymptom::UnclosedString);
+            self.code == DiagnosticCode::Lex(LexSymptom::UnclosedString);
 
         if is_unclosed_string && start < end {
             let mut display_source = source.to_string();

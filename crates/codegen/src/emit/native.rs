@@ -8,7 +8,7 @@
 use crate::build_module_with_context;
 use ast::FileAst;
 use diagnostic::codegen::CodegenSymptom;
-use diagnostic::{Symptom, SymptomLike};
+use diagnostic::{Diagnostic, DiagnosticLike};
 use melior::{Context, dialect::DialectRegistry, ir::Module, pass, utility};
 use span::SpanId;
 use std::path::Path;
@@ -53,7 +53,7 @@ fn optimize_mlir(
     context: &Context,
     module: &mut Module,
     profile: Profile,
-    symptoms: &mut Vec<Symptom>,
+    symptoms: &mut Vec<Diagnostic>,
 ) -> bool {
     if !matches!(profile, Profile::Release) {
         return true;
@@ -70,7 +70,7 @@ fn optimize_mlir(
                 CodegenSymptom::Internal {
                     message: format!("Optimization pass failed: {e}"),
                 }
-                .into_symptom(SpanId::INVALID),
+                .into_diagnostic(SpanId::INVALID),
             );
             false
         }
@@ -78,7 +78,7 @@ fn optimize_mlir(
 }
 
 /// Lower a module in-place: SCF → CF, then everything → LLVM.
-fn lower_to_llvm(context: &Context, module: &mut Module, symptoms: &mut Vec<Symptom>) -> bool {
+fn lower_to_llvm(context: &Context, module: &mut Module, symptoms: &mut Vec<Diagnostic>) -> bool {
     let pm = pass::PassManager::new(context);
 
     // SCF (structured control flow) must be lowered to CF first
@@ -95,7 +95,7 @@ fn lower_to_llvm(context: &Context, module: &mut Module, symptoms: &mut Vec<Symp
                 CodegenSymptom::Internal {
                     message: format!("MLIR pass pipeline failed: {e}"),
                 }
-                .into_symptom(SpanId::INVALID),
+                .into_diagnostic(SpanId::INVALID),
             );
             false
         }
@@ -156,7 +156,7 @@ pub fn native_from_mlir(
     mlir_text: &str,
     obj_path: &Path,
     profile: Profile,
-) -> (bool, Vec<Symptom>) {
+) -> (bool, Vec<Diagnostic>) {
     let mut symptoms = Vec::new();
     let context = create_native_context();
 
@@ -168,7 +168,7 @@ pub fn native_from_mlir(
                 CodegenSymptom::Internal {
                     message: "Failed to re-parse MLIR for native compilation".into(),
                 }
-                .into_symptom(SpanId::INVALID),
+                .into_diagnostic(SpanId::INVALID),
             );
             return (false, symptoms);
         }
@@ -206,7 +206,7 @@ pub fn native_from_module(
     module: &Module,
     obj_path: &Path,
     profile: Profile,
-) -> (bool, Vec<Symptom>) {
+) -> (bool, Vec<Diagnostic>) {
     let mut symptoms = Vec::new();
     let mlir_text = module.as_operation().to_string();
 
@@ -219,7 +219,7 @@ pub fn native_from_module(
                 CodegenSymptom::Internal {
                     message: "Failed to re-parse MLIR after fixing llvm.call segments".into(),
                 }
-                .into_symptom(SpanId::INVALID),
+                .into_diagnostic(SpanId::INVALID),
             );
             return (false, symptoms);
         }
@@ -248,7 +248,7 @@ pub fn build_module_text(
     source: &str,
     filename: &str,
     ty_env: &TyEnv,
-) -> (Option<String>, Vec<Symptom>) {
+) -> (Option<String>, Vec<Diagnostic>) {
     let context = create_native_context();
 
     let (source_module, symptoms) =
@@ -266,7 +266,7 @@ pub fn compile_to_object(
     source: &str,
     filename: &str,
     ty_env: &TyEnv,
-) -> (bool, Vec<Symptom>) {
+) -> (bool, Vec<Diagnostic>) {
     let context = create_native_context();
 
     let (source_module, lower_symptoms) =
@@ -284,7 +284,7 @@ pub fn compile_to_object(
 }
 
 /// Translate LLVM-dialect MLIR text to LLVM IR using `mlir-translate`.
-fn mlir_to_llvm_ir(mlir_text: &str, symptoms: &mut Vec<Symptom>) -> Option<String> {
+fn mlir_to_llvm_ir(mlir_text: &str, symptoms: &mut Vec<Diagnostic>) -> Option<String> {
     let mlir_translate = find_tool("mlir-translate", symptoms)?;
 
     let mut cmd = Command::new(&mlir_translate);
@@ -300,7 +300,7 @@ fn mlir_to_llvm_ir(mlir_text: &str, symptoms: &mut Vec<Symptom>) -> Option<Strin
                 CodegenSymptom::Internal {
                     message: format!("Failed to run mlir-translate: {e}"),
                 }
-                .into_symptom(SpanId::INVALID),
+                .into_diagnostic(SpanId::INVALID),
             );
             return None;
         }
@@ -312,7 +312,7 @@ fn mlir_to_llvm_ir(mlir_text: &str, symptoms: &mut Vec<Symptom>) -> Option<Strin
             CodegenSymptom::Internal {
                 message: format!("Failed to write to mlir-translate stdin: {e}"),
             }
-            .into_symptom(SpanId::INVALID),
+            .into_diagnostic(SpanId::INVALID),
         );
         return None;
     }
@@ -324,7 +324,7 @@ fn mlir_to_llvm_ir(mlir_text: &str, symptoms: &mut Vec<Symptom>) -> Option<Strin
                 CodegenSymptom::Internal {
                     message: format!("mlir-translate failed: {e}"),
                 }
-                .into_symptom(SpanId::INVALID),
+                .into_diagnostic(SpanId::INVALID),
             );
             return None;
         }
@@ -339,7 +339,7 @@ fn mlir_to_llvm_ir(mlir_text: &str, symptoms: &mut Vec<Symptom>) -> Option<Strin
                     output.status.code().unwrap_or(-1)
                 ),
             }
-            .into_symptom(SpanId::INVALID),
+            .into_diagnostic(SpanId::INVALID),
         );
         return None;
     }
@@ -351,7 +351,7 @@ fn mlir_to_llvm_ir(mlir_text: &str, symptoms: &mut Vec<Symptom>) -> Option<Strin
                 CodegenSymptom::Internal {
                     message: format!("mlir-translate output is not UTF-8: {e}"),
                 }
-                .into_symptom(SpanId::INVALID),
+                .into_diagnostic(SpanId::INVALID),
             );
             None
         }
@@ -363,7 +363,7 @@ fn compile_llvm_ir_to_object(
     llvm_ir: &str,
     obj_path: &Path,
     profile: Profile,
-    symptoms: &mut Vec<Symptom>,
+    symptoms: &mut Vec<Diagnostic>,
 ) -> bool {
     let ll_path = obj_path.with_extension("ll");
 
@@ -372,7 +372,7 @@ fn compile_llvm_ir_to_object(
             CodegenSymptom::Internal {
                 message: format!("Failed to write LLVM IR: {e}"),
             }
-            .into_symptom(SpanId::INVALID),
+            .into_diagnostic(SpanId::INVALID),
         );
         return false;
     }
@@ -401,7 +401,7 @@ fn compile_llvm_ir_to_object(
                 CodegenSymptom::Internal {
                     message: format!("Failed to run '{cc}': {e}"),
                 }
-                .into_symptom(SpanId::INVALID),
+                .into_diagnostic(SpanId::INVALID),
             );
             let _ = std::fs::remove_file(&ll_path);
             return false;
@@ -419,7 +419,7 @@ fn compile_llvm_ir_to_object(
                     result.status.code().unwrap_or(-1)
                 ),
             }
-            .into_symptom(SpanId::INVALID),
+            .into_diagnostic(SpanId::INVALID),
         );
         return false;
     }
@@ -432,7 +432,7 @@ pub fn link_executable(
     obj_path: &Path,
     output: &Path,
     target: Option<&str>,
-) -> (bool, Vec<Symptom>) {
+) -> (bool, Vec<Diagnostic>) {
     let mut symptoms = Vec::new();
 
     let Some(cc) = find_cc(&mut symptoms) else {
@@ -452,7 +452,7 @@ pub fn link_executable(
                 CodegenSymptom::Internal {
                     message: format!("Failed to run linker '{cc}': {e}"),
                 }
-                .into_symptom(SpanId::INVALID),
+                .into_diagnostic(SpanId::INVALID),
             );
             return (false, symptoms);
         }
@@ -467,7 +467,7 @@ pub fn link_executable(
                     result.status.code().unwrap_or(-1)
                 ),
             }
-            .into_symptom(SpanId::INVALID),
+            .into_diagnostic(SpanId::INVALID),
         );
         return (false, symptoms);
     }
@@ -476,7 +476,7 @@ pub fn link_executable(
 }
 
 /// Find `mlir-translate` or similar LLVM/MLIR tool.
-fn find_tool(name: &str, symptoms: &mut Vec<Symptom>) -> Option<String> {
+fn find_tool(name: &str, symptoms: &mut Vec<Diagnostic>) -> Option<String> {
     // Check PATH first
     if let Ok(output) = Command::new(name).arg("--help").output()
         && output.status.success()
@@ -496,14 +496,14 @@ fn find_tool(name: &str, symptoms: &mut Vec<Symptom>) -> Option<String> {
         CodegenSymptom::Internal {
             message: format!("'{name}' not found. Install LLVM or add it to PATH."),
         }
-        .into_symptom(SpanId::INVALID),
+        .into_diagnostic(SpanId::INVALID),
     );
     None
 }
 
 /// Find a C compiler: check $CC, then prefer Homebrew LLVM clang (same version
 /// as mlir-translate), then fall back to `cc`.
-fn find_cc(symptoms: &mut Vec<Symptom>) -> Option<String> {
+fn find_cc(symptoms: &mut Vec<Diagnostic>) -> Option<String> {
     if let Ok(cc) = std::env::var("CC")
         && !cc.is_empty()
     {
@@ -531,7 +531,7 @@ fn find_cc(symptoms: &mut Vec<Symptom>) -> Option<String> {
                 CodegenSymptom::Internal {
                     message: "No C compiler found. Install LLVM or set $CC.".into(),
                 }
-                .into_symptom(SpanId::INVALID),
+                .into_diagnostic(SpanId::INVALID),
             );
             None
         }

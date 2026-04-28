@@ -716,7 +716,7 @@ fn resolve_name(
 // ─── Unknown reference checking ──────────────────────────────────────────────
 
 impl TyEnv {
-    pub fn check_unknowns(&self, ast: &FileAst, symptoms: &mut Vec<diagnostic::Symptom>) {
+    pub fn check_unknowns(&self, ast: &FileAst, symptoms: &mut Vec<diagnostic::Diagnostic>) {
         for bind in ast.defs.values() {
             if !bind.attributes().matches_current_platform() {
                 continue;
@@ -734,7 +734,7 @@ impl TyEnv {
     fn check_bind(
         &self,
         bind: &Bind,
-        symptoms: &mut Vec<diagnostic::Symptom>,
+        symptoms: &mut Vec<diagnostic::Diagnostic>,
         locals: &HashMap<Intern<String>, Ty>,
     ) {
         if let Some(sp) = &bind.return_tag {
@@ -755,7 +755,7 @@ impl TyEnv {
         match bind.value() {
             BindValue::Expr(expr) => self.check_expr(expr, symptoms, locals),
             BindValue::Body { exprs, ret } => {
-                use diagnostic::SymptomLike;
+                use diagnostic::DiagnosticLike;
                 use diagnostic::type_::TypeSymptom;
 
                 let mut body_locals = locals.clone();
@@ -773,7 +773,7 @@ impl TyEnv {
                                 TypeSymptom::UnusedBinding {
                                     name: name.to_string(),
                                 }
-                                .into_symptom(inner.name_span),
+                                .into_diagnostic(inner.name_span),
                             );
                         }
                         body_locals.insert(name, {
@@ -799,10 +799,10 @@ impl TyEnv {
     fn check_expr(
         &self,
         expr: &Expr,
-        symptoms: &mut Vec<diagnostic::Symptom>,
+        symptoms: &mut Vec<diagnostic::Diagnostic>,
         locals: &HashMap<Intern<String>, Ty>,
     ) {
-        use diagnostic::SymptomLike;
+        use diagnostic::DiagnosticLike;
         use diagnostic::type_::TypeSymptom;
 
         match expr {
@@ -815,7 +815,7 @@ impl TyEnv {
                             TypeSymptom::UnknownBinding {
                                 name: mangled.to_string(),
                             }
-                            .into_symptom(call.path.span_id()),
+                            .into_diagnostic(call.path.span_id()),
                         );
                     }
                     for arg in args {
@@ -829,7 +829,7 @@ impl TyEnv {
                         TypeSymptom::UnknownBinding {
                             name: mangled.to_string(),
                         }
-                        .into_symptom(call.path.span_id()),
+                        .into_diagnostic(call.path.span_id()),
                     );
                 }
             }
@@ -869,7 +869,7 @@ impl TyEnv {
                                                     name: surface_name.to_string(),
                                                     union_name: union_name.to_string(),
                                                 }
-                                                .into_symptom(pattern.1),
+                                                .into_diagnostic(pattern.1),
                                             );
                                         }
                                     }
@@ -879,7 +879,7 @@ impl TyEnv {
                                                 TypeSymptom::UnknownTag {
                                                     name: surface_name.to_string(),
                                                 }
-                                                .into_symptom(pattern.1),
+                                                .into_diagnostic(pattern.1),
                                             );
                                         }
                                     }
@@ -892,7 +892,7 @@ impl TyEnv {
                                     TypeSymptom::UnknownTag {
                                         name: "invalid is-pattern".to_string(),
                                     }
-                                    .into_symptom(pattern.1),
+                                    .into_diagnostic(pattern.1),
                                 );
                             }
                             self.check_expr(body, symptoms, locals);
@@ -931,7 +931,7 @@ impl TyEnv {
                             TypeSymptom::UnknownTag {
                                 name: "invalid is-pattern".to_string(),
                             }
-                            .into_symptom(pattern.1),
+                            .into_diagnostic(pattern.1),
                         );
                     }
                     for e in &if_expr.body {
@@ -985,7 +985,7 @@ impl TyEnv {
                         TypeSymptom::UnknownTag {
                             name: name.to_string(),
                         }
-                        .into_symptom(*span),
+                        .into_diagnostic(*span),
                     );
                 }
             }
@@ -996,7 +996,7 @@ impl TyEnv {
                             TypeSymptom::UnknownTag {
                                 name: path.root.to_string(),
                             }
-                            .into_symptom(path.span_id()),
+                            .into_diagnostic(path.span_id()),
                         );
                     }
                 } else if self.lookup_variant(tc.name).is_none() {
@@ -1004,7 +1004,7 @@ impl TyEnv {
                         TypeSymptom::UnknownTag {
                             name: tc.name.to_string(),
                         }
-                        .into_symptom(tc.span_id()),
+                        .into_diagnostic(tc.span_id()),
                     );
                 }
                 for arg in &tc.args {
@@ -1022,8 +1022,8 @@ impl TyEnv {
         }
     }
 
-    fn check_type_expr(&self, e: &Expr, symptoms: &mut Vec<diagnostic::Symptom>) {
-        use diagnostic::SymptomLike;
+    fn check_type_expr(&self, e: &Expr, symptoms: &mut Vec<diagnostic::Diagnostic>) {
+        use diagnostic::DiagnosticLike;
         use diagnostic::type_::TypeSymptom;
 
         match e {
@@ -1033,7 +1033,7 @@ impl TyEnv {
                         TypeSymptom::UnknownTag {
                             name: name.to_string(),
                         }
-                        .into_symptom(*span),
+                        .into_diagnostic(*span),
                     );
                 }
             }
@@ -1043,7 +1043,7 @@ impl TyEnv {
                         TypeSymptom::UnknownTag {
                             name: name.to_string(),
                         }
-                        .into_symptom(*span),
+                        .into_diagnostic(*span),
                     );
                 }
                 for (_, kind) in params {
@@ -1060,7 +1060,7 @@ impl TyEnv {
                         TypeSymptom::UnknownTag {
                             name: path.root.to_string(),
                         }
-                        .into_symptom(path.span_id()),
+                        .into_diagnostic(path.span_id()),
                     );
                 }
             }
@@ -1221,16 +1221,16 @@ fn check_return_variants(
     bind: &Bind,
     valid_variants: &[Intern<String>],
     union_name: Intern<String>,
-    symptoms: &mut Vec<diagnostic::Symptom>,
+    symptoms: &mut Vec<diagnostic::Diagnostic>,
 ) {
-    use diagnostic::SymptomLike;
+    use diagnostic::DiagnosticLike;
     use diagnostic::type_::TypeSymptom;
 
     fn check_expr(
         expr: &Spanned<Expr>,
         valid_variants: &[Intern<String>],
         union_name: Intern<String>,
-        symptoms: &mut Vec<diagnostic::Symptom>,
+        symptoms: &mut Vec<diagnostic::Diagnostic>,
     ) {
         match &expr.0 {
             Expr::AnonymousTag(name, span)
@@ -1241,7 +1241,7 @@ fn check_return_variants(
                         name: name.to_string(),
                         union_name: union_name.to_string(),
                     }
-                    .into_symptom(*span),
+                    .into_diagnostic(*span),
                 );
             }
             Expr::TagCall(tc)
@@ -1254,7 +1254,7 @@ fn check_return_variants(
                         name: tc.name.to_string(),
                         union_name: union_name.to_string(),
                     }
-                    .into_symptom(tc.span_id()),
+                    .into_diagnostic(tc.span_id()),
                 );
             }
             Expr::If(if_expr) => {
@@ -1268,7 +1268,7 @@ fn check_return_variants(
                         TypeSymptom::EmptyReturn {
                             expected_type: union_name.to_string(),
                         }
-                        .into_symptom(expr.1),
+                        .into_diagnostic(expr.1),
                     );
                 }
             }
@@ -1300,7 +1300,7 @@ fn check_return_variants(
                             TypeSymptom::EmptyReturn {
                                 expected_type: union_name.to_string(),
                             }
-                            .into_symptom(inner.name_span),
+                            .into_diagnostic(inner.name_span),
                         );
                     }
                 }
@@ -1323,7 +1323,7 @@ fn check_return_variants(
                     TypeSymptom::EmptyReturn {
                         expected_type: union_name.to_string(),
                     }
-                    .into_symptom(bind.name_span),
+                    .into_diagnostic(bind.name_span),
                 );
             }
         }

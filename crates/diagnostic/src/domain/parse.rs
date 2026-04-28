@@ -1,7 +1,7 @@
 use strum::AsRefStr;
 
 use crate::SpanId;
-use crate::{Category, Symptom, SymptomCode, SymptomLike};
+use crate::{Category, Diagnostic, DiagnosticCode, DiagnosticLike};
 
 #[derive(Debug, Clone, PartialEq, Eq, AsRefStr)]
 pub enum ParseSymptom {
@@ -17,8 +17,8 @@ pub enum ParseSymptom {
     DirectFileImport { path: String },
 }
 
-impl SymptomLike for ParseSymptom {
-    fn into_symptom(self, span_id: SpanId) -> Symptom {
+impl DiagnosticLike for ParseSymptom {
+    fn into_diagnostic(self, span_id: SpanId) -> Diagnostic {
         let (category, message, help) = match &self {
             Self::UnexpectedToken => (
                 Category::Flaw,
@@ -47,8 +47,8 @@ impl SymptomLike for ParseSymptom {
             ),
         };
 
-        Symptom {
-            code: SymptomCode::Parse(self),
+        Diagnostic {
+            code: DiagnosticCode::Parse(self),
             message,
             help,
             span_id,

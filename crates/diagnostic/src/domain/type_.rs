@@ -1,7 +1,7 @@
 use strum::AsRefStr;
 
 use crate::SpanId;
-use crate::{Category, Symptom, SymptomCode, SymptomLike};
+use crate::{Category, Diagnostic, DiagnosticCode, DiagnosticLike};
 
 #[derive(Debug, Clone, PartialEq, Eq, AsRefStr)]
 pub enum TypeSymptom {
@@ -39,8 +39,8 @@ pub enum TypeSymptom {
     EmptyReturn { expected_type: String },
 }
 
-impl SymptomLike for TypeSymptom {
-    fn into_symptom(self, span_id: SpanId) -> Symptom {
+impl DiagnosticLike for TypeSymptom {
+    fn into_diagnostic(self, span_id: SpanId) -> Diagnostic {
         let (category, message, help) = match &self {
             Self::Mismatch => (
                 Category::Flaw,
@@ -121,8 +121,8 @@ impl SymptomLike for TypeSymptom {
             ),
         };
 
-        Symptom {
-            code: SymptomCode::Type(self),
+        Diagnostic {
+            code: DiagnosticCode::Type(self),
             message,
             help,
             span_id,

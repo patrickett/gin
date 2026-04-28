@@ -1,7 +1,7 @@
 use strum::AsRefStr;
 
 use crate::SpanId;
-use crate::{Category, Symptom, SymptomCode, SymptomLike};
+use crate::{Category, Diagnostic, DiagnosticCode, DiagnosticLike};
 
 #[derive(Debug, Clone, PartialEq, Eq, AsRefStr)]
 pub enum CodegenSymptom {
@@ -9,8 +9,8 @@ pub enum CodegenSymptom {
     Internal { message: String },
 }
 
-impl SymptomLike for CodegenSymptom {
-    fn into_symptom(self, span_id: SpanId) -> Symptom {
+impl DiagnosticLike for CodegenSymptom {
+    fn into_diagnostic(self, span_id: SpanId) -> Diagnostic {
         let (message, help) = match &self {
             Self::Internal { message: msg } => (
                 msg.clone(),
@@ -18,8 +18,8 @@ impl SymptomLike for CodegenSymptom {
             ),
         };
 
-        Symptom {
-            code: SymptomCode::Codegen(self),
+        Diagnostic {
+            code: DiagnosticCode::Codegen(self),
             message,
             help,
             span_id,

@@ -1,5 +1,5 @@
 use database::{Db, File};
-use diagnostic::Symptom;
+use diagnostic::Diagnostic;
 use std::sync::Arc;
 
 /// Interned package file set (stable identity for Salsa tracked queries).
@@ -49,7 +49,7 @@ pub fn package_ty_env<'db>(db: &'db dyn Db, pkg: PackageFiles<'db>) -> Arc<typec
 pub fn package_typecheck_symptoms<'db>(
     db: &'db dyn Db,
     pkg: PackageFiles<'db>,
-) -> Vec<Vec<Symptom>> {
+) -> Vec<Vec<Diagnostic>> {
     let ty_env = package_ty_env(db, pkg);
     let files = pkg.files(db);
     files

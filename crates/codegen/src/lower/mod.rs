@@ -17,7 +17,7 @@ use ::ast::{
 };
 use ::span::SpanId;
 use diagnostic::codegen::CodegenSymptom;
-use diagnostic::{Symptom, SymptomLike, TypeSymptom};
+use diagnostic::{Diagnostic, DiagnosticLike, TypeSymptom};
 use internment::Intern;
 use typeck::{LocalTypes, Ty, TyEnv, TyInfer, TyInferEnv};
 
@@ -160,7 +160,7 @@ pub struct CodegenContext<'a, 'c> {
     pub mutable_slots: RefCell<HashSet<String>>,
     /// Element type of global constant arrays (top-level `:=` TupleLit binds), keyed by name.
     pub global_const_elems: RefCell<HashMap<String, Ty>>,
-    symptoms: RefCell<Vec<Symptom>>,
+    symptoms: RefCell<Vec<Diagnostic>>,
     pub current_span: Cell<SpanId>,
     pub source_filename: String,
     pub line_starts: Vec<usize>,
@@ -220,10 +220,10 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         name
     }
 
-    pub fn emit_symptom<S: SymptomLike>(&self, symptom: S) {
+    pub fn emit_symptom<S: DiagnosticLike>(&self, symptom: S) {
         self.symptoms
             .borrow_mut()
-            .push(symptom.into_symptom(self.current_span.get()));
+            .push(symptom.into_diagnostic(self.current_span.get()));
     }
 
     pub fn emit_internal(&self, message: impl Into<String>) {
@@ -231,11 +231,11 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
             CodegenSymptom::Internal {
                 message: message.into(),
             }
-            .into_symptom(self.current_span.get()),
+            .into_diagnostic(self.current_span.get()),
         );
     }
 
-    pub fn drain_symptoms(&self) -> Vec<Symptom> {
+    pub fn drain_symptoms(&self) -> Vec<Diagnostic> {
         self.symptoms.borrow_mut().drain(..).collect()
     }
 }
@@ -263,7 +263,7 @@ pub fn build_module_with_context<'c>(
     source: &str,
     filename: &str,
     ty_env: &TyEnv,
-) -> (Option<Module<'c>>, Vec<Symptom>) {
+) -> (Option<Module<'c>>, Vec<Diagnostic>) {
     // Register dialects
     melior::dialect::DialectHandle::llvm().register_dialect(context);
     context.get_or_load_dialect("arith");

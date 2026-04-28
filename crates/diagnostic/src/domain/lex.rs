@@ -1,7 +1,7 @@
 use strum::AsRefStr;
 
 use crate::SpanId;
-use crate::{Category, Symptom, SymptomCode, SymptomLike};
+use crate::{Category, Diagnostic, DiagnosticCode, DiagnosticLike};
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, AsRefStr)]
 pub enum LexSymptom {
@@ -30,8 +30,8 @@ impl From<std::num::ParseFloatError> for LexSymptom {
     }
 }
 
-impl SymptomLike for LexSymptom {
-    fn into_symptom(self, span_id: SpanId) -> Symptom {
+impl DiagnosticLike for LexSymptom {
+    fn into_diagnostic(self, span_id: SpanId) -> Diagnostic {
         let message: &str = match self {
             Self::UnclosedString => "unclosed string literal",
             Self::InvalidInteger => "integer literal out of range",
@@ -40,8 +40,8 @@ impl SymptomLike for LexSymptom {
             Self::UnexpectedCharacter => "unexpected character",
         };
 
-        Symptom {
-            code: SymptomCode::Lex(self),
+        Diagnostic {
+            code: DiagnosticCode::Lex(self),
             message: message.into(),
             help: None,
             span_id,

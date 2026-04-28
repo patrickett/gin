@@ -1,7 +1,7 @@
 use strum::AsRefStr;
 
 use crate::SpanId;
-use crate::{Category, Symptom, SymptomCode, SymptomLike};
+use crate::{Category, Diagnostic, DiagnosticCode, DiagnosticLike};
 
 #[derive(Debug, Clone, PartialEq, Eq, AsRefStr)]
 pub enum ImportSymptom {
@@ -72,8 +72,8 @@ pub enum ImportSymptom {
     },
 }
 
-impl SymptomLike for ImportSymptom {
-    fn into_symptom(self, span_id: SpanId) -> Symptom {
+impl DiagnosticLike for ImportSymptom {
+    fn into_diagnostic(self, span_id: SpanId) -> Diagnostic {
         let (message, help): (String, Option<String>) = match &self {
             Self::Conflict {
                 path,
@@ -193,8 +193,8 @@ impl SymptomLike for ImportSymptom {
             ),
         };
 
-        Symptom {
-            code: SymptomCode::Import(self),
+        Diagnostic {
+            code: DiagnosticCode::Import(self),
             message,
             help,
             span_id,

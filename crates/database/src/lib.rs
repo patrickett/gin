@@ -6,7 +6,7 @@ pub mod queries;
 pub use input_database::{Db, InputDatabase};
 pub use queries::{file_parse_output, parse_file, set_file_contents};
 
-use diagnostic::{Symptom, SymptomLike};
+use diagnostic::{Diagnostic, DiagnosticLike};
 use span::SpanId;
 use std::ops::Deref;
 use std::path::PathBuf;
@@ -21,16 +21,16 @@ pub struct File {
 /// Salsa accumulator for diagnostics.
 ///
 /// Defined here (rather than in `diagnostic`) so that the `diagnostic` crate
-/// doesn't need to depend on `salsa`. Use [`EmitSymptom::emit`] at call sites
-/// and `accumulated::<Symptoms>` to retrieve accumulated diagnostics.
+/// doesn't need to depend on `salsa`. Use [`EmitDiagnostic::emit`] at call sites
+/// and `accumulated::<Diagnostics>` to retrieve accumulated diagnostics.
 #[salsa::accumulator]
 #[derive(Debug, Clone)]
-pub struct Symptoms(pub Symptom);
+pub struct Diagnostics(pub Diagnostic);
 
-impl Deref for Symptoms {
-    type Target = Symptom;
+impl Deref for Diagnostics {
+    type Target = Diagnostic;
 
-    fn deref(&self) -> &Symptom {
+    fn deref(&self) -> &Diagnostic {
         &self.0
     }
 }
@@ -40,14 +40,14 @@ impl Deref for Symptoms {
 ///
 /// Import this trait wherever you need to emit diagnostics:
 /// ```ignore
-/// use database::EmitSymptom;
+/// use database::EmitDiagnostic;
 /// SomeSymptom.emit(db, span_id);
 /// ```
-pub trait EmitSymptom: SymptomLike {
+pub trait EmitDiagnostic: DiagnosticLike {
     fn emit<D: salsa::Database + ?Sized>(self, db: &D, span_id: SpanId) {
         use salsa::Accumulator;
-        Symptoms(self.into_symptom(span_id)).accumulate(db);
+        Diagnostics(self.into_diagnostic(span_id)).accumulate(db);
     }
 }
 
-impl<T: SymptomLike> EmitSymptom for T {}
+impl<T: DiagnosticLike> EmitDiagnostic for T {}
