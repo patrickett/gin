@@ -10,6 +10,9 @@ i256 = { workspace = true }
 indexmap = { workspace = true }
 internment = "0.8"
 salsa = { workspace = true }
+lexer = { workspace = true }
 
 [dev-dependencies]
 parser = { workspace = true }
+indoc = "2"
+crossbeam-channel = { workspace = true }

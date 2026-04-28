@@ -1,19 +1,20 @@
-use analyze::{package_ty_env, PackageFiles};
+use database::{package_ty_env, PackageFiles};
 use crossbeam_channel::unbounded;
-use database::{set_file_contents, File, InputDatabase};
+use database::{set_file_contents, InputDatabase};
 use std::path::PathBuf;
+use ast::prelude::Intern;
 
 #[test]
 fn package_ty_env_invalidates_on_file_change() {
     let (tx, _rx) = unbounded();
     let mut db = InputDatabase::new(tx);
 
-    let f1 = File::new(
+    let f1 = database::File::new(
         &db,
         PathBuf::from("/tmp/a.gin"),
         "Bool is True or False\n".to_string(),
     );
-    let f2 = File::new(
+    let f2 = database::File::new(
         &db,
         PathBuf::from("/tmp/b.gin"),
         "Maybe(x) is Some(x) or None\n".to_string(),
@@ -36,6 +37,5 @@ fn package_ty_env_invalidates_on_file_change() {
         package_ty_env(&db, pkg).tag_types.clone()
     };
     assert_ne!(before, after);
-    assert!(after.contains_key(&internment::Intern::<String>::from_ref("Other")));
+    assert!(after.contains_key(&Intern::<String>::from_ref("Other")));
 }
-

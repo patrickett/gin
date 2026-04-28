@@ -1,47 +1,12 @@
 //! Hover and related semantic helpers (engine layer).
 
-use ast::{HasSpanId, Parameters};
-
-fn is_identifier_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
-}
-
-fn word_at_byte_offset(source: &str, byte_pos: usize) -> Option<String> {
-    let mut start = byte_pos;
-    let mut end = byte_pos;
-    let bytes = source.as_bytes();
-    while start > 0 && is_identifier_char(bytes[start - 1] as char) {
-        start -= 1;
-    }
-    while end < bytes.len() && is_identifier_char(bytes[end] as char) {
-        end += 1;
-    }
-    if start == end {
-        return None;
-    }
-    Some(source[start..end].to_string())
-}
-
-fn format_params(params: &Parameters) -> String {
-    if params.is_empty() {
-        return String::new();
-    }
-    let parts: Vec<String> = params
-        .iter()
-        .map(|(name, kind)| match kind {
-            ast::ParameterKind::Generic => name.to_string(),
-            ast::ParameterKind::Tagged(_) => format!("{name}{kind}"),
-            ast::ParameterKind::Default(expr) => format!("{name}: {expr:?}"),
-        })
-        .collect();
-    format!("({})", parts.join(", "))
-}
+use ast::{HasSpanId, Parameters, ParameterKind};
 
 /// Return markdown hover text for the word at `byte_pos` in the given AST.
 /// Returns `None` if there is nothing hover-able at that position.
 pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<String> {
-    let word = word_at_byte_offset(source, byte_pos)?;
-    let ty_env = typeck::TyEnv::from_file_ast(ast);
+    let word = crate::source::word_at_byte_offset(source, byte_pos)?;
+    let ty_env = crate::TyEnv::from_file_ast(ast);
 
     // Look for tag definitions
     for (name, decl) in ast.tags() {
@@ -53,8 +18,8 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
             if let Some(ty) = ty_env.lookup_tag(*name) {
                 result.push_str(&format!(
                     "\n\n---\n\nsize = {}, align = {}",
-                    typeck::ty_byte_size_static(ty),
-                    typeck::ty_alignment(ty),
+                    crate::ty_byte_size_static(ty),
+                    crate::ty_alignment(ty),
                 ));
             }
             return Some(result);
@@ -80,8 +45,8 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
         let mut meta_parts = Vec::new();
         let is_function = bind.params().is_some();
         if !is_function && let Some(ty) = ty_env.fn_return_ty(name) {
-            meta_parts.push(format!("size = {}", typeck::ty_byte_size_static(ty)));
-            meta_parts.push(format!("align = {}", typeck::ty_alignment(ty)));
+            meta_parts.push(format!("size = {}", crate::ty_byte_size_static(ty)));
+            meta_parts.push(format!("align = {}", crate::ty_alignment(ty)));
         }
         if let Some(complexity) = bind.attributes().complexity.as_ref() {
             meta_parts.push(format!("complexity = {}", complexity.display_big_o()));
@@ -98,25 +63,23 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
             && let Some(kind) = params.get(&internment::Intern::<String>::from_ref(&word))
         {
             let label = match kind {
-                // `ParameterKind::Display` for `Tagged` already includes a leading space before the type.
-                ast::ParameterKind::Tagged(_) => format!("{word}{kind}"),
-                ast::ParameterKind::Default(expr) => format!("{word}: {expr:?}"),
-                ast::ParameterKind::Generic => word.clone(),
+                ParameterKind::Tagged(_) => format!("{word}{kind}"),
+                ParameterKind::Default(expr) => format!("{word}: {expr:?}"),
+                ParameterKind::Generic => word.clone(),
             };
 
-            // Check for flow narrowing at the cursor position (e.g. `num < 10` inside if body)
-            let mut analyzer = typeck::FlowAnalyzer::new(&ty_env);
+            // Check for flow narrowing at the cursor position
+            let mut analyzer = crate::FlowAnalyzer::new(&ty_env);
             analyzer.analyze_file(ast);
             let flow = analyzer.into_result();
             let narrowed = narrowed_at_position(ast, &flow, byte_pos, &word);
 
             if let Some(constraint) = &narrowed {
                 let suffix = match constraint {
-                    typeck::TypeConstraint::IsVariant(_, variant) => {
+                    crate::TypeConstraint::IsVariant(_, variant) => {
                         Some(variant.as_str().to_string())
                     }
-                    typeck::TypeConstraint::IsNotVariant(union, excluded) => {
-                        // Resolve to remaining variant(s), same as body binds
+                    crate::TypeConstraint::IsNotVariant(union, excluded) => {
                         if let Some(variants) = flow.union_to_variants.get(union) {
                             let remaining: Vec<_> =
                                 variants.iter().filter(|v| *v != excluded).collect();
@@ -133,10 +96,10 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
                             None
                         }
                     }
-                    typeck::TypeConstraint::Compare { op, bound } => {
+                    crate::TypeConstraint::Compare { op, bound } => {
                         let bound_str = match bound {
-                            typeck::Bound::Variable(name) => name.as_str().to_string(),
-                            typeck::Bound::Constant(val) => val.to_hover_string(),
+                            crate::Bound::Variable(name) => name.as_str().to_string(),
+                            crate::Bound::Constant(val) => val.to_hover_string(),
                         };
                         Some(format!("{} {}", op.symbol(), bound_str))
                     }
@@ -152,8 +115,7 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
 
     // Look for body-level binds inside function bodies
     if let Some(body_bind) = find_body_bind(ast, &word) {
-        // Run flow analysis to check for type narrowing and constant propagation
-        let mut analyzer = typeck::FlowAnalyzer::new(&ty_env);
+        let mut analyzer = crate::FlowAnalyzer::new(&ty_env);
         analyzer.analyze_file(ast);
         let flow = analyzer.into_result();
         let narrowed = narrowed_at_position(ast, &flow, byte_pos, &word);
@@ -161,11 +123,9 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
 
         let mut result = format!("```gin\n{word}");
         match &narrowed {
-            Some(typeck::TypeConstraint::IsVariant(_, variant)) => {
-                // Show narrowed variant with payload from constant propagation
-                // e.g. `val Some(3)` instead of just `val Some`
+            Some(crate::TypeConstraint::IsVariant(_, variant)) => {
                 match &const_val {
-                    Some(typeck::ConstValue::Tag { name, .. }) if name == variant => {
+                    Some(crate::ConstValue::Tag { name, .. }) if name == variant => {
                         result.push_str(&format!(
                             " {}",
                             const_val.as_ref().unwrap().to_hover_string()
@@ -176,8 +136,7 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
                     }
                 }
             }
-            Some(typeck::TypeConstraint::IsNotVariant(union, excluded)) => {
-                // After an early-returning if, show the remaining variant(s)
+            Some(crate::TypeConstraint::IsNotVariant(union, excluded)) => {
                 if let Some(variants) = flow.union_to_variants.get(union) {
                     let remaining: Vec<_> = variants.iter().filter(|v| *v != excluded).collect();
                     if remaining.len() == 1 {
@@ -189,11 +148,10 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
                     }
                 }
             }
-            Some(typeck::TypeConstraint::Compare { op, bound }) => {
-                // Show comparison constraint from while/if condition, e.g. `i < len`
+            Some(crate::TypeConstraint::Compare { op, bound }) => {
                 let bound_str = match bound {
-                    typeck::Bound::Variable(name) => name.as_str().to_string(),
-                    typeck::Bound::Constant(val) => val.to_hover_string(),
+                    crate::Bound::Variable(name) => name.as_str().to_string(),
+                    crate::Bound::Constant(val) => val.to_hover_string(),
                 };
                 result.push_str(&format!(" {} {}", op.symbol(), bound_str));
             }
@@ -204,7 +162,6 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
                         format_type_annotation(type_name.as_str(), args)
                     ));
                 } else if let Some(ref cv) = const_val {
-                    // No narrowing and no type annotation, but we know the value
                     result.push_str(&format!(" {}", cv.to_hover_string()));
                 }
             }
@@ -215,34 +172,29 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
         {
             result.push_str(&format!(
                 "\n\n---\n\nsize = {}, align = {}",
-                typeck::ty_byte_size_static(ty),
-                typeck::ty_alignment(ty),
+                crate::ty_byte_size_static(ty),
+                crate::ty_alignment(ty),
             ));
         }
         return Some(result);
     }
 
     // Look for in-scope variables with known constant values or comparison constraints
-    // (e.g., pattern-extracted variables like `v` in `is Some(v)`,
-    //  constant-folded values like `four` from `four: v + 1`,
-    //  or comparison constraints like `i < len` from while conditions)
     {
-        let mut analyzer = typeck::FlowAnalyzer::new(&ty_env);
+        let mut analyzer = crate::FlowAnalyzer::new(&ty_env);
         analyzer.analyze_file(ast);
         let flow = analyzer.into_result();
         let narrowed = narrowed_at_position(ast, &flow, byte_pos, &word);
         let const_val = const_at_position(ast, &flow, byte_pos, &word);
 
-        // Comparison constraints take priority (e.g. `i < len` inside while)
-        if let Some(typeck::TypeConstraint::Compare { op, bound }) = &narrowed {
+        if let Some(crate::TypeConstraint::Compare { op, bound }) = &narrowed {
             let bound_str = match bound {
-                typeck::Bound::Variable(name) => name.as_str().to_string(),
-                typeck::Bound::Constant(val) => val.to_hover_string(),
+                crate::Bound::Variable(name) => name.as_str().to_string(),
+                crate::Bound::Constant(val) => val.to_hover_string(),
             };
             return Some(format!("```gin\n{word} {} {}\n```", op.symbol(), bound_str,));
         }
 
-        // Then constant values (e.g. `v 3`)
         if let Some(const_val) = const_val {
             return Some(format!(
                 "```gin\n{word} {}\n```",
@@ -258,9 +210,9 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
 pub fn dot_type_at(
     source: &str,
     ast: &ast::FileAst,
-    ty_env: &typeck::TyEnv,
+    ty_env: &crate::TyEnv,
     byte_pos: usize,
-) -> Option<typeck::Ty> {
+) -> Option<crate::Ty> {
     // Check if cursor is right after a dot
     let dot_pos = byte_pos.checked_sub(1)?;
     if source.as_bytes().get(dot_pos) != Some(&b'.') {
@@ -362,9 +314,8 @@ fn collect_refs_type_surface(
     span_table: &ast::SpanTable,
     out: &mut Vec<std::ops::Range<usize>>,
 ) {
-    use ast::{Expr, ParameterKind};
     match expr {
-        Expr::TypeGeneric { params, .. } => {
+        ast::Expr::TypeGeneric { params, .. } => {
             for (_, pk) in params {
                 match pk {
                     ParameterKind::Default(e) => collect_refs_expr(&e.0, name, span_table, out),
@@ -454,7 +405,7 @@ fn collect_refs_expr(
                 ast::IfCondition::Bool(e) => collect_refs_expr(&e.0, name, span_table, out),
                 ast::IfCondition::Pattern { subject, pattern } => {
                     collect_refs_expr(&subject.0, name, span_table, out);
-                    collect_refs_type_surface(&pattern.0, name, span_table, out);
+                    collect_refs_expr_type_surface(&pattern.0, name, span_table, out);
                 }
             }
             for e in &if_expr.body {
@@ -516,6 +467,16 @@ fn collect_refs_expr(
         Expr::TypeNominal(..) | Expr::TypeQualified(_) => {}
         Expr::Lit(_) | Expr::SelfRef(_) | Expr::Asm(_) => {}
     }
+}
+
+/// Helper for If pattern case -- type surface doesn't have refs_expr, use type_surface version
+fn collect_refs_expr_type_surface(
+    expr: &ast::Expr,
+    name: &str,
+    span_table: &ast::SpanTable,
+    out: &mut Vec<std::ops::Range<usize>>,
+) {
+    collect_refs_type_surface(expr, name, span_table, out);
 }
 
 fn collect_refs_bind_value(
@@ -648,7 +609,7 @@ fn search_expr(expr: &ast::Expr, name: internment::Intern<String>) -> Option<&as
 /// Find the innermost (smallest) expression index whose span contains `byte_pos`.
 fn innermost_expr_index(
     ast: &ast::FileAst,
-    analysis: &typeck::FlowAnalysis,
+    analysis: &crate::FlowAnalysis,
     byte_pos: usize,
 ) -> Option<usize> {
     let span_table = ast.span_table();
@@ -670,34 +631,24 @@ fn innermost_expr_index(
 }
 
 /// Find the narrowed type constraint for `var_name` at a given byte position.
-///
-/// Searches all recorded expression spans and returns the constraint from
-/// the smallest (most specific) span that contains `byte_pos`.
 fn narrowed_at_position(
     ast: &ast::FileAst,
-    analysis: &typeck::FlowAnalysis,
+    analysis: &crate::FlowAnalysis,
     byte_pos: usize,
     var_name: &str,
-) -> Option<typeck::TypeConstraint> {
+) -> Option<crate::TypeConstraint> {
     let idx = innermost_expr_index(ast, analysis, byte_pos)?;
     analysis.narrowed_at(idx, var_name).cloned()
 }
 
 /// Find the known constant value for `var_name` at a given byte position.
-///
-/// Contexts are saved *before* expression analysis, so constants defined by a
-/// bind expression (e.g. `four: v + 1`) only appear in later indices. We check
-/// the innermost span's index and the next two indices to cover this gap.
 fn const_at_position(
     ast: &ast::FileAst,
-    analysis: &typeck::FlowAnalysis,
+    analysis: &crate::FlowAnalysis,
     byte_pos: usize,
     var_name: &str,
-) -> Option<typeck::ConstValue> {
+) -> Option<crate::ConstValue> {
     let idx = innermost_expr_index(ast, analysis, byte_pos)?;
-    // The context at `idx` is saved before the expression is analysed.
-    // For binds, the constant is recorded during analysis, so it only
-    // appears in contexts saved for sub-expressions (idx+1, idx+2, …).
     for offset in 0..3 {
         if let Some(val) = analysis.value_at(idx + offset, var_name) {
             return Some(val.clone());
@@ -727,3 +678,6 @@ fn format_type_annotation(type_name: &str, args: &[ast::Spanned<ast::Expr>]) -> 
     format!("{}({})", type_name, parts.join(", "))
 }
 
+fn format_params(params: &Parameters) -> String {
+    crate::format_params(params)
+}

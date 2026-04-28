@@ -15,8 +15,7 @@ use std::ops::Deref;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
-use analyze::{package_typecheck_symptoms, sorted_package_files, PackageFiles};
-use database::file_parse_output;
+use database::{file_parse_output, sorted_package_files, PackageFiles, package_typecheck_symptoms};
 
 /// Shared LSP state. Heavy work (package diagnostics) is spawned so `shutdown`
 /// and other requests are not stuck behind `did_change` / `did_open`.
@@ -139,9 +138,6 @@ impl Backend {
     }
 
     /// Determine the package root directory for a file URI.
-    ///
-    /// Searches upward from the file's directory for a `flask.jsonc`. Falls back
-    /// to the file's immediate parent directory when no config is found.
     fn package_root_for_uri(&self, uri: &Url) -> Option<std::path::PathBuf> {
         if let Some(handle) = self.get_or_load_config(uri) {
             return Some(handle.source_dir());
@@ -153,10 +149,6 @@ impl Backend {
 
     /// Collect and publish diagnostics for every `.gin` file in the package
     /// that contains `trigger_file`.
-    ///
-    /// This mirrors the analysis performed by `begin build`: all files in the
-    /// package are parsed, a shared type environment is built, and diagnostics
-    /// (parse + type-check + flow-analysis) are collected and published per-file.
     async fn publish_diagnostics_for(&self, uri: Url, trigger_file: File, trigger_source: &str) {
         if self.is_shutdown() {
             return;

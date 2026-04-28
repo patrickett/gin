@@ -1,8 +1,8 @@
 use database::Diagnostics;
 use diagnostic::Category;
-use ide::source::byte_offset_to_position;
 use span::SpanTable;
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range};
+use typeck::byte_offset_to_position;
 
 pub fn span_to_range(start: usize, end: usize, source: &str) -> Range {
     let (start_line, start_col) = byte_offset_to_position(start, source);

@@ -2,8 +2,8 @@
 //!
 //! Run with: cargo test -p analyze --test hover_debug -- --nocapture
 
-use analyze::hover_at;
-use ide::word_at_byte_offset;
+use typeck::hover_at;
+use typeck::word_at_byte_offset;
 use parser::expr::parse_source;
 
 fn debug_hover_at_marker(source: &str) -> Option<String> {

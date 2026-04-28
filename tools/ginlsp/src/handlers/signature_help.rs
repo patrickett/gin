@@ -1,7 +1,7 @@
 use crate::Backend;
 use ast::FileAst;
 use database::file_parse_output;
-use ide::{fn_call_at, position_to_byte_offset, signature_for_fn};
+use typeck::{fn_call_at, position_to_byte_offset, signature_for_fn};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 

@@ -2,7 +2,7 @@ use crate::diagnostics::span_to_range;
 use crate::Backend;
 use ast::{HasSpanId, ImportSource};
 use database::file_parse_output;
-use ide::{find_definition_span, get_word_at_position, position_to_byte_offset};
+use typeck::{find_definition_span, get_word_at_position, position_to_byte_offset};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 
@@ -31,11 +31,8 @@ fn resolve_use_import_source_fs(base_uri: &Url, source: &ImportSource) -> Option
             let base_path = base_uri.to_file_path().ok()?;
             let base_dir = base_path.parent()?;
 
-            // Local imports are always relative to the current file.
             let mut resolved = base_dir.join(path);
 
-            // In the editor we commonly write `use './math'` (without `.gin`).
-            // Prefer the `.gin` file when no extension is present.
             if resolved.extension().is_none() {
                 let with_ext = resolved.with_extension("gin");
                 if with_ext.exists() {
@@ -53,7 +50,6 @@ fn resolve_use_import_source_fs(base_uri: &Url, source: &ImportSource) -> Option
             let base_dir = base_path.parent()?;
             let folder = base_dir.join(b.root.as_str());
 
-            // Folder-modules must have `flask.jsonc`; jump there.
             let flask_jsonc_path = folder.join(flask::PACKAGE_CONFIG_NAME);
             if !flask_jsonc_path.exists() {
                 return None;
@@ -73,11 +69,9 @@ fn resolve_use_import_source_fs(base_uri: &Url, source: &ImportSource) -> Option
             let dep = cfg.config.dependencies().get(mod_path.root.as_str())?;
             let dep_dir = match &dep.kind {
                 flask::DependencyKind::Path { path } => config_dir.join(path),
-                // TODO: support version/git dependencies in the LSP (requires a package store).
                 _ => return None,
             };
 
-            // No segment: open the dependency's `flask.jsonc`.
             if mod_path.segments.is_empty() {
                 let dep_cfg = dep_dir.join(flask::PACKAGE_CONFIG_NAME);
                 if !dep_cfg.exists() {
@@ -91,14 +85,6 @@ fn resolve_use_import_source_fs(base_uri: &Url, source: &ImportSource) -> Option
     }
 }
 
-/// Resolve a package path (`dep` / `dep.a` / `dep.a.b`) to a location depending on which
-/// identifier is selected (root vs segment).
-///
-/// - `selected_part = 0` means the dependency root (`dep`) → open dependency `flask.jsonc`.
-/// - `selected_part = k>0` means segment `segments[k-1]`:
-///   - resolves chained exports up to that segment
-///   - opens a file if it resolves to a file
-///   - opens `flask.jsonc` if it resolves to a folder-module
 fn resolve_package_part_location_fs(
     base_uri: &Url,
     root: &internment::Intern<String>,
@@ -132,13 +118,10 @@ fn resolve_package_part_location_fs(
         return None;
     }
 
-    // Resolve chained exports up to (and including) the selected segment.
     resolve_chained_export_location(&dep_dir, &segments[..=seg_idx])
 }
 
 fn part_index_in_dotted_path(span_text: &str, byte_in_span: usize) -> Option<usize> {
-    // We only care about `core.io` style; treat `.` as separator.
-    // Return which part index (0=root, 1=first seg, ...).
     let mut part = 0usize;
     for (i, ch) in span_text.char_indices() {
         if i >= byte_in_span {
@@ -151,10 +134,6 @@ fn part_index_in_dotted_path(span_text: &str, byte_in_span: usize) -> Option<usi
     Some(part)
 }
 
-/// Walk chained exports starting at `start_dir` (must contain a `flask.jsonc`).
-///
-/// - Intermediate segments must resolve to folder-modules (dir + flask.jsonc).
-/// - Final segment can resolve to a file (open file) or a folder-module (open its flask.jsonc).
 fn resolve_chained_export_location(
     start_dir: &std::path::Path,
     segments: &[internment::Intern<String>],
@@ -199,7 +178,6 @@ impl Backend {
 
             let byte_pos = position_to_byte_offset(&state.source, position.line, position.character);
 
-            // Check if cursor is inside a use import string or package path
             if let Some(byte_pos) = byte_pos {
                 if let Some(link) = self.resolve_use_import_at(&uri, &ast, &state.source, byte_pos)
                 {
@@ -227,9 +205,6 @@ impl Backend {
 }
 
 impl Backend {
-    /// Check if `byte_pos` falls inside any import in the AST, and if so,
-    /// resolve the import target and return a `LocationLink` whose
-    /// `origin_selection_range` covers the full import string/path.
     fn resolve_use_import_at(
         &self,
         base_uri: &Url,
@@ -264,7 +239,6 @@ impl Backend {
 
                 let target_location = match &source_ref {
                     ImportSource::Package(mp) => {
-                        // Click root vs segments inside the dotted path.
                         let span_text = source.get(span.start..span.end).unwrap_or("");
                         let byte_in_span = byte_pos.saturating_sub(span.start);
                         let part = part_index_in_dotted_path(span_text, byte_in_span).unwrap_or(0);
@@ -322,7 +296,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
-        // Root flask.jsonc with dep path dependency.
         write_file(
             &dir.join("flask.jsonc"),
             r#"
@@ -337,7 +310,6 @@ mod tests {
 "#,
         );
 
-        // Dep config with exports pointing to a gin file.
         write_file(
             &dir.join("dep/flask.jsonc"),
             r#"
@@ -694,7 +666,6 @@ mod tests {
 
         let base_uri = Url::from_file_path(dir.join("main.gin")).unwrap();
 
-        // Root selection (core) -> opens core/flask.jsonc
         let loc_root = resolve_package_part_location_fs(
             &base_uri,
             &Intern::<String>::from_ref("core"),
@@ -707,7 +678,6 @@ mod tests {
             dir.join("core/flask.jsonc")
         );
 
-        // Segment selection (io) -> opens core/io.gin
         let loc_io = resolve_package_part_location_fs(
             &base_uri,
             &Intern::<String>::from_ref("core"),

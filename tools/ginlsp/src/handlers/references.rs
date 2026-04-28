@@ -1,7 +1,7 @@
 use crate::diagnostics::span_to_range;
 use crate::Backend;
 use database::file_parse_output;
-use ide::{find_references, get_word_at_position};
+use typeck::{find_references, get_word_at_position};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 

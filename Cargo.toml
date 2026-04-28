@@ -8,8 +8,6 @@ members = [
     "crates/lexer",
     "crates/typeck",
     "crates/codegen",
-    "crates/ide",
-    "crates/analyze",
     "crates/database",
     "crates/parser",
     "tools/ginc",
@@ -31,7 +29,6 @@ diagnostic = { path = "crates/diagnostic" }
 lexer = { path = "crates/lexer" }
 typeck = { path = "crates/typeck" }
 codegen = { path = "crates/codegen" }
-ide = { path = "crates/ide" }
 database = { path = "crates/database" }
 parser = { path = "crates/parser" }
 ginfmt = { path = "tools/ginfmt" }

@@ -1,6 +1,6 @@
 use crate::Backend;
-use analyze::hover_markdown;
-use ide::{
+use database::semantic_queries::hover_markdown;
+use typeck::{
     byte_offset_to_position, get_char_at_position, get_number_at_position, get_string_literal_at,
     get_range_literal_at_position, is_in_comment, position_to_byte_offset, word_at_byte_offset,
 };
@@ -35,9 +35,6 @@ impl Backend {
             if let Some(byte_pos) =
                 position_to_byte_offset(&state.source, position.line, position.character)
             {
-                // TODO: handle the ... hover with info about range and link to range.gin
-                // TODO: also handle the number hover with info about the number and link to number.gin, 
-                // auto detect the size of the int and and in for loops bind that type to the loop variable
                 let dot_hover_range = {
                     let bytes = state.source.as_bytes();
                     let is_dot = bytes.get(byte_pos) == Some(&b'.');

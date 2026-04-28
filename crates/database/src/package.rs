@@ -1,9 +1,15 @@
 //! Package-wide analysis: shared type environment across all parsed files in a package.
 
 use ast::FileAst;
-use database::{Db, File};
+use crate::{Db, File};
 use diagnostic::Diagnostic;
-use typeck;
+
+/// Interned package file set (stable identity for Salsa tracked queries).
+#[salsa::interned]
+pub struct PackageFiles<'db> {
+    #[returns(ref)]
+    pub files: Vec<File>,
+}
 
 /// Stable ordering for package [`File`] lists (path string).
 pub fn sorted_package_files(db: &dyn Db, files: &[File]) -> Vec<File> {
@@ -12,9 +18,9 @@ pub fn sorted_package_files(db: &dyn Db, files: &[File]) -> Vec<File> {
     v
 }
 
-/// Intern sorted package files for [`queries::package_typecheck_symptoms`](crate::queries::package_typecheck_symptoms).
-pub fn intern_package_files<'db>(db: &'db dyn Db, files: Vec<File>) -> crate::queries::PackageFiles<'db> {
-    crate::queries::PackageFiles::new(db, files)
+/// Intern sorted package files for [`super::semantic_queries::package_typecheck_symptoms`].
+pub fn intern_package_files<'db>(db: &'db dyn Db, files: Vec<File>) -> PackageFiles<'db> {
+    PackageFiles::new(db, files)
 }
 
 /// Run type-check and flow analysis for each file, using a shared [`typeck::TyEnv`]

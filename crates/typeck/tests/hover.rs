@@ -15,7 +15,7 @@
 //! }
 //! ```
 
-use analyze::hover_at;
+use typeck::hover_at;
 use parser::expr::parse_source;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────

@@ -14,3 +14,11 @@ mod r#type;
 pub use r#type::*;
 
 mod salsa_update;
+
+pub mod completions;
+pub mod hover;
+pub mod source;
+
+pub use completions::*;
+pub use hover::{dot_type_at, find_definition_span, find_references, hover_at};
+pub use source::*;
