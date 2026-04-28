@@ -8,6 +8,8 @@ use crate::cursor::TokenCursor;
 use crate::tag::parse_type_expr;
 
 fn can_start_expr(token: &Token) -> bool {
+    // Note: `Token::Return` is intentionally excluded — `return` after `if` belongs to
+    // `parse_if_expr`'s trailing `parse_return`, not the indented `parse_body_exprs` block.
     matches!(
         token,
         Token::Id(_)

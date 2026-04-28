@@ -223,8 +223,9 @@ fn hw_multiline_if() {
     assert_handwritten_parses(
         "f(x Int):
     if x > 0
-        return x
+        x
     return 0
+return 0
 ",
     );
 }
@@ -321,8 +322,9 @@ fn hw_if_return() {
     assert_handwritten_parses(
         "f():
     if true
-        return 1
+        1
     return 0
+return 0
 ",
     );
 }
@@ -408,8 +410,9 @@ fn bisect_main_with_if() {
         "main:
     x: 5
     if x > 0
-        return x
+        x
     return 0
+return 0
 ",
     );
 }
@@ -420,8 +423,9 @@ fn bisect_main_with_if_is() {
         "main:
     val: Some(3)
     if val is Some(v)
-        return v
+        v
     return 0
+return 0
 ",
     );
 }
@@ -430,10 +434,12 @@ fn bisect_main_with_if_is() {
 fn bisect_main_with_if_and_bind_body() {
     assert_handwritten_parses(
         "main:
-    if true
-        x: 1
-        y: 2
-    return x
+    z:
+        if true
+            x: 1
+            y: 2
+        return x
+    return z
 ",
     );
 }
