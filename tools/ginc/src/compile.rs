@@ -10,7 +10,7 @@ use crate::cli::Args;
 use ast::ImportSource;
 use ast::{FileAst, ModPath, ModuleImport, qualify_module_defs};
 use codegen::emit::native;
-use diagnostic::{Category, ImportSymptom, SpanId, Symptom, SymptomLike};
+use diagnostic::{Category, ImportSymptom, SpanId, Diagnostic, DiagnosticLike};
 use flask::{DependencyKind, FlaskConfig};
 use lexer::debug_tokens;
 use parser::{ParseOutput, parse_source_full};
@@ -130,7 +130,7 @@ impl GinCompiler {
                 for import in from_ast.uses() {
                     for module_import in &import.0 {
                         let span_id = ast::HasSpanId::span_id(module_import);
-                        let mut import_symptoms: Vec<Symptom> = Vec::new();
+                        let mut import_symptoms: Vec<Diagnostic> = Vec::new();
                         let resolved = resolve_module_import(
                             module_import,
                             &from_dir,
@@ -152,7 +152,7 @@ impl GinCompiler {
                                 parsed_files[from_idx].output.symptoms.push(
                                     ImportSymptom::TargetNotFound {
                                         path: file_path.display().to_string(),
-                                    }.into_symptom(span_id),
+                                    }.into_diagnostic(span_id),
                                 );
                                 continue;
                             }
@@ -164,7 +164,7 @@ impl GinCompiler {
                                             path: file_path.display().to_string(),
                                             qualifier_a: prev.clone(),
                                             qualifier_b: qual,
-                                        }.into_symptom(span_id),
+                                        }.into_diagnostic(span_id),
                                     );
                                     continue;
                                 }
@@ -222,7 +222,7 @@ impl GinCompiler {
                     .output
                     .symptoms
                     .push(
-                        ImportSymptom::Cycle { chain }.into_symptom(cycle.closing_span),
+                        ImportSymptom::Cycle { chain }.into_diagnostic(cycle.closing_span),
                     );
             }
         }
@@ -296,7 +296,7 @@ fn resolve_module_import(
     base_dir: &Path,
     dependencies: &HashMap<String, PathBuf>,
     span_id: SpanId,
-    symptoms: &mut Vec<Symptom>,
+    symptoms: &mut Vec<Diagnostic>,
 ) -> Vec<(PathBuf, String)> {
     match &module_import.source {
         ImportSource::Local(path, _) => {
@@ -304,7 +304,7 @@ fn resolve_module_import(
                 symptoms.push(
                     ImportSymptom::LocalMustEndInGin {
                         path: path.display().to_string(),
-                    }.into_symptom(span_id),
+                    }.into_diagnostic(span_id),
                 );
                 return Vec::new();
             }
@@ -313,7 +313,7 @@ fn resolve_module_import(
                 symptoms.push(
                     ImportSymptom::LocalNotFound {
                         path: full.display().to_string(),
-                    }.into_symptom(span_id),
+                    }.into_diagnostic(span_id),
                 );
                 return Vec::new();
             }
@@ -334,7 +334,7 @@ fn resolve_module_import(
                 symptoms.push(
                     ImportSymptom::FolderMissingConfig {
                         folder: folder.display().to_string(),
-                    }.into_symptom(span_id),
+                    }.into_diagnostic(span_id),
                 );
                 return Vec::new();
             };
@@ -345,7 +345,7 @@ fn resolve_module_import(
                         ImportSymptom::MissingExport {
                             folder: folder.display().to_string(),
                             export: m.export.to_string(),
-                        }.into_symptom(span_id),
+                        }.into_diagnostic(span_id),
                     );
                     continue;
                 };
@@ -356,7 +356,7 @@ fn resolve_module_import(
                             export: m.export.to_string(),
                             folder: folder.display().to_string(),
                             path: p.display().to_string(),
-                        }.into_symptom(span_id),
+                        }.into_diagnostic(span_id),
                     );
                     continue;
                 }
@@ -381,7 +381,7 @@ fn resolve_package_like_import(
     base_dir: &Path,
     dependencies: &HashMap<String, PathBuf>,
     span_id: SpanId,
-    symptoms: &mut Vec<Symptom>,
+    symptoms: &mut Vec<Diagnostic>,
 ) -> Vec<(PathBuf, String)> {
     let root_name = mp.root.as_str();
     match local_module_root(base_dir, root_name) {
@@ -391,7 +391,7 @@ fn resolve_package_like_import(
                     name: root_name.to_string(),
                     file_path: base_dir.join(format!("{root_name}.gin")).display().to_string(),
                     folder_path: base_dir.join(root_name).display().to_string(),
-                }.into_symptom(span_id),
+                }.into_diagnostic(span_id),
             );
             Vec::new()
         }
@@ -401,7 +401,7 @@ fn resolve_package_like_import(
                     ImportSymptom::FileHasSegments {
                         file_path: f.display().to_string(),
                         segment: mp.segments[0].to_string(),
-                    }.into_symptom(span_id),
+                    }.into_diagnostic(span_id),
                 );
                 return Vec::new();
             }
@@ -417,7 +417,7 @@ fn resolve_package_like_import(
                 symptoms.push(
                     ImportSymptom::FolderMissingConfig {
                         folder: folder.display().to_string(),
-                    }.into_symptom(span_id),
+                    }.into_diagnostic(span_id),
                 );
                 return Vec::new();
             };
@@ -442,7 +442,7 @@ fn resolve_package_like_import(
                                     export: export_key.clone(),
                                     folder: folder.display().to_string(),
                                     path: p.display().to_string(),
-                                }.into_symptom(span_id),
+                                }.into_diagnostic(span_id),
                             );
                             return (PathBuf::new(), String::new());
                         }
@@ -471,7 +471,7 @@ fn resolve_package_like_import(
                 symptoms.push(
                     ImportSymptom::UnknownDependency {
                         name: root_name.to_string(),
-                    }.into_symptom(span_id),
+                    }.into_diagnostic(span_id),
                 );
                 return Vec::new();
             };
@@ -480,7 +480,7 @@ fn resolve_package_like_import(
                     ImportSymptom::DependencyMissingConfig {
                         name: root_name.to_string(),
                         path: dep_dir.display().to_string(),
-                    }.into_symptom(span_id),
+                    }.into_diagnostic(span_id),
                 );
                 return Vec::new();
             };
@@ -500,7 +500,7 @@ fn resolve_package_like_import(
                                     export: export_key.clone(),
                                     folder: dep_dir.display().to_string(),
                                     path: p.display().to_string(),
-                                }.into_symptom(span_id),
+                                }.into_diagnostic(span_id),
                             );
                             return (PathBuf::new(), String::new());
                         }
@@ -543,7 +543,7 @@ fn resolve_chained_exports_from_dir(
     effective_prefix: &str,
     segments: &[internment::Intern<String>],
     span_id: SpanId,
-    symptoms: &mut Vec<Symptom>,
+    symptoms: &mut Vec<Diagnostic>,
 ) -> Vec<(PathBuf, String)> {
     let segs: Vec<&str> = segments.iter().map(|s| s.as_str()).collect();
     let target = match flask::resolve_chained_exports(start_dir, &segs) {
@@ -553,19 +553,19 @@ fn resolve_chained_exports_from_dir(
                 flask::ExportResolveError::MissingConfig { dir } => symptoms.push(
                     ImportSymptom::MissingConfig {
                         dir: dir.display().to_string(),
-                    }.into_symptom(span_id),
+                    }.into_diagnostic(span_id),
                 ),
                 flask::ExportResolveError::MissingExport { dir, key } => symptoms.push(
                     ImportSymptom::MissingExport {
                         folder: dir.display().to_string(),
                         export: key,
-                    }.into_symptom(span_id),
+                    }.into_diagnostic(span_id),
                 ),
                 flask::ExportResolveError::IntermediateNotFolderModule { path } => {
                     symptoms.push(
                         ImportSymptom::ChainedExportNotFolder {
                             path: path.display().to_string(),
-                        }.into_symptom(span_id),
+                        }.into_diagnostic(span_id),
                     )
                 }
             }
@@ -579,7 +579,7 @@ fn resolve_chained_exports_from_dir(
                 symptoms.push(
                     ImportSymptom::FolderMissingConfig {
                         folder: folder.display().to_string(),
-                    }.into_symptom(span_id),
+                    }.into_diagnostic(span_id),
                 );
                 return Vec::new();
             };
@@ -595,7 +595,7 @@ fn resolve_chained_exports_from_dir(
                                 export: export_key.clone(),
                                 folder: folder.display().to_string(),
                                 path: p.display().to_string(),
-                            }.into_symptom(span_id),
+                            }.into_diagnostic(span_id),
                         );
                         return None;
                     }
@@ -610,7 +610,7 @@ fn resolve_chained_exports_from_dir(
                         export: effective_prefix.to_string(),
                         folder: String::new(),
                         path: p.display().to_string(),
-                    }.into_symptom(span_id),
+                    }.into_diagnostic(span_id),
                 );
                 return Vec::new();
             }

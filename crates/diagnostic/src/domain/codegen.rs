@@ -1,7 +1,6 @@
 use strum::AsRefStr;
 
-use crate::SpanId;
-use crate::{Category, Diagnostic, DiagnosticCode, DiagnosticLike};
+use crate::DiagnosticLike;
 
 #[derive(Debug, Clone, PartialEq, Eq, AsRefStr)]
 pub enum CodegenSymptom {
@@ -10,20 +9,13 @@ pub enum CodegenSymptom {
 }
 
 impl DiagnosticLike for CodegenSymptom {
-    fn into_diagnostic(self, span_id: SpanId) -> Diagnostic {
-        let (message, help) = match &self {
-            Self::Internal { message: msg } => (
-                msg.clone(),
-                Some("an internal compiler error occurred".into()),
-            ),
-        };
-
-        Diagnostic {
-            code: DiagnosticCode::Codegen(self),
-            message,
-            help,
-            span_id,
-            category: Category::Flaw,
+    fn message(&self) -> String {
+        match self {
+            Self::Internal { message } => message.clone(),
         }
+    }
+
+    fn help(&self) -> Option<String> {
+        Some("an internal compiler error occurred".into())
     }
 }

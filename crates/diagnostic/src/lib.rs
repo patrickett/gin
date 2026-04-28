@@ -14,8 +14,11 @@ pub use code::*;
 pub use domain::*;
 pub use span::{Span, SpanId, SpanTable, Spanned};
 
-pub trait DiagnosticLike: Sized {
-    fn into_diagnostic(self, span_id: SpanId) -> Diagnostic;
+/// A secondary span label attached to a diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelatedSpan {
+    pub span_id: SpanId,
+    pub label: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,26 +28,50 @@ pub struct Diagnostic {
     pub help: Option<String>,
     pub span_id: SpanId,
     pub category: Category,
+    pub related: Vec<RelatedSpan>,
+}
+
+/// Trait for domain-specific diagnostic types that know how to describe themselves.
+///
+/// Implementors provide their message, help text, and category. The `into_diagnostic`
+/// default impl handles the mechanical work of wrapping into a `Diagnostic`.
+pub trait DiagnosticLike: Sized {
+    /// The primary message for this diagnostic.
+    fn message(&self) -> String;
+
+    /// Optional help text suggesting how to fix the issue.
+    fn help(&self) -> Option<String> {
+        None
+    }
+
+    /// The severity category. Defaults to `Category::Flaw`.
+    fn category(&self) -> Category {
+        Category::Flaw
+    }
+
+    /// Convert into a full `Diagnostic` anchored at the given span.
+    fn into_diagnostic(self, span_id: SpanId) -> Diagnostic
+    where
+        Self: Into<DiagnosticCode>,
+    {
+        let message = self.message();
+        let help = self.help();
+        let category = self.category();
+        let code: DiagnosticCode = self.into();
+        Diagnostic {
+            message,
+            help,
+            category,
+            code,
+            span_id,
+            related: Vec::new(),
+        }
+    }
 }
 
 impl Diagnostic {
     pub fn error_code(&self) -> &str {
         self.code.as_ref()
-    }
-
-    pub fn flaw(
-        code: impl Into<DiagnosticCode>,
-        message: impl Into<String>,
-        help: impl Into<String>,
-        span_id: SpanId,
-    ) -> Self {
-        Self {
-            code: code.into(),
-            message: message.into(),
-            help: Some(help.into()),
-            span_id,
-            category: Category::Flaw,
-        }
     }
 
     /// Pretty-print this diagnostic using ariadne with source context.
@@ -68,24 +95,8 @@ impl Diagnostic {
         let msg = format!("[{}] {}", self.error_code(), self.message);
         let mut builder = Report::build(kind, (filename, span.clone())).with_message(msg);
 
-        let is_unclosed_string =
-            self.code == DiagnosticCode::Lex(LexSymptom::UnclosedString);
-
-        if is_unclosed_string && start < end {
-            let mut display_source = source.to_string();
-            display_source.insert(end, '\'');
-
-            let quote_span = end..end + 1;
-
-            let label = Label::new((filename, quote_span))
-                .with_color(self.category.color())
-                .with_message("add single quote here");
-            builder = builder.with_label(label);
-
-            let report = builder.finish();
-            report
-                .eprint((filename, Source::from(display_source)))
-                .unwrap_or_else(|e| eprintln!("Failed to print diagnostic: {e}"));
+        // Let the domain type do custom rendering if needed.
+        if self.code.render_custom(self, span_table, source, filename) {
             return;
         }
 
@@ -108,6 +119,18 @@ impl Diagnostic {
             builder = builder.with_label(label);
         } else if let Some(help) = &self.help {
             builder = builder.with_note(help);
+        }
+
+        // Render related spans as secondary labels.
+        for related in &self.related {
+            let rspan = span_table.get(related.span_id);
+            let rstart = rspan.start.min(len);
+            let rend = rspan.end.max(rstart).min(len);
+            if rstart < rend {
+                let label = Label::new((filename, rstart..rend))
+                    .with_message(related.label.as_str());
+                builder = builder.with_label(label);
+            }
         }
 
         let report = builder.finish();

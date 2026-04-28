@@ -17,7 +17,7 @@ use ::ast::{
 };
 use ::span::SpanId;
 use diagnostic::codegen::CodegenSymptom;
-use diagnostic::{Diagnostic, DiagnosticLike, TypeSymptom};
+use diagnostic::{Diagnostic, DiagnosticCode, DiagnosticLike, TypeSymptom};
 use internment::Intern;
 use typeck::{LocalTypes, Ty, TyEnv, TyInfer, TyInferEnv};
 
@@ -220,7 +220,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         name
     }
 
-    pub fn emit_symptom<S: DiagnosticLike>(&self, symptom: S) {
+    pub fn emit_symptom<S: DiagnosticLike + Into<DiagnosticCode>>(&self, symptom: S) {
         self.symptoms
             .borrow_mut()
             .push(symptom.into_diagnostic(self.current_span.get()));

@@ -1,4 +1,4 @@
-use database::Symptoms;
+use database::Diagnostics;
 use diagnostic::Category;
 use ide::source::byte_offset_to_position;
 use span::SpanTable;
@@ -31,7 +31,7 @@ pub fn span_to_range(start: usize, end: usize, source: &str) -> Range {
 pub fn symptoms_to_diagnostics(
     source: &str,
     span_table: &SpanTable,
-    symptoms: &[&Symptoms],
+    symptoms: &[&Diagnostics],
 ) -> Vec<Diagnostic> {
     symptoms
         .iter()

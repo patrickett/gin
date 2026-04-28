@@ -6,7 +6,7 @@ pub mod queries;
 pub use input_database::{Db, InputDatabase};
 pub use queries::{file_parse_output, parse_file, set_file_contents};
 
-use diagnostic::{Diagnostic, DiagnosticLike};
+use diagnostic::{Diagnostic, DiagnosticCode, DiagnosticLike};
 use span::SpanId;
 use std::ops::Deref;
 use std::path::PathBuf;
@@ -44,10 +44,13 @@ impl Deref for Diagnostics {
 /// SomeSymptom.emit(db, span_id);
 /// ```
 pub trait EmitDiagnostic: DiagnosticLike {
-    fn emit<D: salsa::Database + ?Sized>(self, db: &D, span_id: SpanId) {
+    fn emit<D: salsa::Database + ?Sized>(self, db: &D, span_id: SpanId)
+    where
+        Self: Into<DiagnosticCode>,
+    {
         use salsa::Accumulator;
         Diagnostics(self.into_diagnostic(span_id)).accumulate(db);
     }
 }
 
-impl<T: DiagnosticLike> EmitDiagnostic for T {}
+impl<T: DiagnosticLike + Into<DiagnosticCode>> EmitDiagnostic for T {}

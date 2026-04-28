@@ -1,7 +1,6 @@
 use strum::AsRefStr;
 
-use crate::SpanId;
-use crate::{Category, Diagnostic, DiagnosticCode, DiagnosticLike};
+use crate::{Category, DiagnosticLike};
 
 #[derive(Debug, Clone, PartialEq, Eq, AsRefStr)]
 pub enum ParseSymptom {
@@ -18,41 +17,30 @@ pub enum ParseSymptom {
 }
 
 impl DiagnosticLike for ParseSymptom {
-    fn into_diagnostic(self, span_id: SpanId) -> Diagnostic {
-        let (category, message, help) = match &self {
-            Self::UnexpectedToken => (
-                Category::Flaw,
-                "invalid syntax".into(),
-                None,
-            ),
-            Self::Custom(msg) => (
-                Category::Flaw,
-                msg.clone(),
-                None,
-            ),
-            Self::EmptyParens { suggested } => (
-                Category::Help,
-                "empty parentheses are not needed".into(),
-                Some(format!("remove the parentheses: `{suggested}`")),
-            ),
-            Self::UnusedValue { value } => (
-                Category::Info,
-                format!("unused value: `{value}`"),
-                Some("did you mean to indent this as part of the previous expression?".into()),
-            ),
-            Self::DirectFileImport { path } => (
-                Category::Flaw,
-                format!("cannot import `.gin` files directly: `{}`", path),
-                Some("remove the `.gin` extension and import the module folder instead".into()),
-            ),
-        };
+    fn message(&self) -> String {
+        match self {
+            Self::UnexpectedToken => "invalid syntax".into(),
+            Self::Custom(msg) => msg.clone(),
+            Self::EmptyParens { suggested: _ } => "empty parentheses are not needed".into(),
+            Self::UnusedValue { value } => format!("unused value: `{value}`"),
+            Self::DirectFileImport { path } => format!("cannot import `.gin` files directly: `{}`", path),
+        }
+    }
 
-        Diagnostic {
-            code: DiagnosticCode::Parse(self),
-            message,
-            help,
-            span_id,
-            category,
+    fn help(&self) -> Option<String> {
+        match self {
+            Self::UnexpectedToken | Self::Custom(_) => None,
+            Self::EmptyParens { suggested } => Some(format!("remove the parentheses: `{suggested}`")),
+            Self::UnusedValue { .. } => Some("did you mean to indent this as part of the previous expression?".into()),
+            Self::DirectFileImport { .. } => Some("remove the `.gin` extension and import the module folder instead".into()),
+        }
+    }
+
+    fn category(&self) -> Category {
+        match self {
+            Self::EmptyParens { .. } => Category::Help,
+            Self::UnusedValue { .. } => Category::Info,
+            _ => Category::Flaw,
         }
     }
 }

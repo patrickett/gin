@@ -4,7 +4,7 @@ mod state;
 
 use dashmap::DashMap;
 use database::File;
-use database::Symptoms;
+use database::Diagnostics;
 use diagnostics::symptoms_to_diagnostics;
 use futures::FutureExt;
 use state::{DocumentState, GinHost, JsonDocumentState};
@@ -200,8 +200,8 @@ impl Backend {
             symptoms.extend(typecheck_symptoms[i].iter().cloned());
 
             // Wrap symptoms for compatibility with symptoms_to_diagnostics
-            let wrapped: Vec<Symptoms> = symptoms.into_iter().map(Symptoms).collect();
-            let symptom_refs: Vec<&Symptoms> = wrapped.iter().collect();
+            let wrapped: Vec<Diagnostics> = symptoms.into_iter().map(Diagnostics).collect();
+            let symptom_refs: Vec<&Diagnostics> = wrapped.iter().collect();
 
             let diagnostics =
                 symptoms_to_diagnostics(&source, &parse.span_table, &symptom_refs);
