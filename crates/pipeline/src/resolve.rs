@@ -336,27 +336,7 @@ fn resolve_package_like_import(
             let eff_root = module_import.alias.as_ref().unwrap_or(&mp.root).to_string();
 
             if mp.segments.is_empty() {
-                return config
-                    .exports()
-                    .iter()
-                    .map(|(export_key, spec)| {
-                        let p = folder.join(&spec.path);
-                        if !p.exists() {
-                            symptoms.push(
-                                ImportSymptom::ExportTargetNotFound {
-                                    export: export_key.clone(),
-                                    folder: folder.display().to_string(),
-                                    path: p.display().to_string(),
-                                }
-                                .into_diagnostic(span_id),
-                            );
-                            return (PathBuf::new(), String::new());
-                        }
-                        let qual = format!("{eff_root}.{export_key}");
-                        (p, qual)
-                    })
-                    .filter(|(p, q)| !p.as_os_str().is_empty() && !q.is_empty())
-                    .collect();
+                return resolve_all_exports(&config, &folder, &eff_root, span_id, symptoms);
             }
 
             let chain = mp
@@ -397,30 +377,12 @@ fn resolve_package_like_import(
             };
 
             if mp.segments.is_empty() {
-                return config
-                    .exports()
-                    .iter()
-                    .map(|(export_key, spec)| {
-                        let p = dep_dir.join(&spec.path);
-                        if !p.exists() {
-                            symptoms.push(
-                                ImportSymptom::ExportTargetNotFound {
-                                    export: export_key.clone(),
-                                    folder: dep_dir.display().to_string(),
-                                    path: p.display().to_string(),
-                                }
-                                .into_diagnostic(span_id),
-                            );
-                            return (PathBuf::new(), String::new());
-                        }
-                        let qual = match &module_import.alias {
-                            Some(a) => format!("{}.{}", a, export_key),
-                            None => export_key.clone(),
-                        };
-                        (p, qual)
-                    })
-                    .filter(|(p, q)| !p.as_os_str().is_empty() && !q.is_empty())
-                    .collect();
+                let eff_root = module_import
+                    .alias
+                    .as_ref()
+                    .map(|a| a.to_string())
+                    .unwrap_or_else(|| root_name.to_string());
+                return resolve_all_exports(&config, dep_dir, &eff_root, span_id, symptoms);
             }
 
             let chain = mp
@@ -495,25 +457,7 @@ fn resolve_chained_exports_from_dir(
                 return Vec::new();
             };
 
-            folder_cfg
-                .exports()
-                .iter()
-                .filter_map(|(export_key, spec)| {
-                    let p = folder.join(&spec.path);
-                    if !p.exists() {
-                        symptoms.push(
-                            ImportSymptom::ExportTargetNotFound {
-                                export: export_key.clone(),
-                                folder: folder.display().to_string(),
-                                path: p.display().to_string(),
-                            }
-                            .into_diagnostic(span_id),
-                        );
-                        return None;
-                    }
-                    Some((p, format!("{effective_prefix}.{export_key}")))
-                })
-                .collect()
+            resolve_all_exports(&folder_cfg, &folder, effective_prefix, span_id, symptoms)
         }
         flask::ExportTarget::File(p) => {
             if !p.exists() {
@@ -530,4 +474,37 @@ fn resolve_chained_exports_from_dir(
             vec![(p, effective_prefix.to_string())]
         }
     }
+}
+
+/// Resolve all exports from a FlaskConfig's exports map into `(path, qualifier)` pairs.
+///
+/// For each export, joins its path under `base_dir`, checks existence, and constructs
+/// a qualifier as `{qual_prefix}.{export_key}`. Missing targets produce diagnostics
+/// and are excluded from the result.
+fn resolve_all_exports(
+    config: &FlaskConfig,
+    base_dir: &Path,
+    qual_prefix: &str,
+    span_id: SpanId,
+    symptoms: &mut Vec<Diagnostic>,
+) -> Vec<(PathBuf, String)> {
+    config
+        .exports()
+        .iter()
+        .filter_map(|(export_key, spec)| {
+            let p = base_dir.join(&spec.path);
+            if !p.exists() {
+                symptoms.push(
+                    ImportSymptom::ExportTargetNotFound {
+                        export: export_key.clone(),
+                        folder: base_dir.display().to_string(),
+                        path: p.display().to_string(),
+                    }
+                    .into_diagnostic(span_id),
+                );
+                return None;
+            }
+            Some((p, format!("{qual_prefix}.{export_key}")))
+        })
+        .collect()
 }
