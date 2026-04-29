@@ -779,9 +779,7 @@ impl<'c> Lower<'c> for Expr {
                     Some(block.append_op(ctx.mlir.build_binop(ArithOps::SUB, zero, val, val_ty)))
                 }
             }
-            Expr::TypeNominal(..)
-            | Expr::TypeQualified(_)
-            | Expr::TypeGeneric { .. } => {
+            Expr::TypeNominal(..) | Expr::TypeQualified(_) | Expr::TypeGeneric { .. } => {
                 ctx.emit_internal(
                     "type/pattern syntax may only appear in pattern or type positions, not as a value",
                 );
@@ -804,10 +802,10 @@ pub fn lower_function<'c>(
     let param_info_ref = ctx.ty_env.param_types(bind);
     let mut param_info: Vec<(Intern<String>, Ty)> =
         param_info_ref.into_iter().map(|(n, t)| (*n, t)).collect();
-    if let Some(sp) = bind.receiver_type_surface() {
-        if let Some(self_ty) = ctx.ty_env.resolve_type_surface(&sp.0) {
-            param_info.insert(0, (Intern::<String>::from_ref("self"), self_ty));
-        }
+    if let Some(sp) = bind.receiver_type_surface()
+        && let Some(self_ty) = ctx.ty_env.resolve_type_surface(&sp.0)
+    {
+        param_info.insert(0, (Intern::<String>::from_ref("self"), self_ty));
     }
 
     let input_types: Vec<Type<'c>> = param_info

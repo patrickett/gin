@@ -313,7 +313,7 @@ fn collect_top_level(
             } else {
                 bind.name()
             };
-            defs.entry(name).or_insert_with(Vec::new).push(*bind);
+            defs.entry(name).or_default().push(*bind);
         }
         TopLevelValue::ImplBlock(block) => {
             let recv = Box::new(Spanned(
@@ -327,7 +327,7 @@ fn collect_top_level(
                     block.type_name.as_str(),
                     method_name.as_str()
                 ));
-                defs.entry(mangled).or_insert_with(Vec::new).push(bind);
+                defs.entry(mangled).or_default().push(bind);
             }
         }
         TopLevelValue::Expr(expr, span) => {
@@ -451,10 +451,7 @@ fn extract_anonymous_tags_from_bind(bind: &Bind, tags: &mut Vec<(Intern<String>,
     }
 }
 
-fn extract_anonymous_tags_from_type_surface(
-    expr: &Expr,
-    tags: &mut Vec<(Intern<String>, SpanId)>,
-) {
+fn extract_anonymous_tags_from_type_surface(expr: &Expr, tags: &mut Vec<(Intern<String>, SpanId)>) {
     match expr {
         Expr::TypeNominal(name, span) => {
             tags.push((*name, *span));

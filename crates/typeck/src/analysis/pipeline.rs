@@ -13,7 +13,7 @@ use diagnostic::type_::TypeSymptom;
 /// # Arguments
 /// * `ast`       — The AST of the file to analyze
 /// * `all_asts`  — All ASTs in the package (for building the shared type environment)
-/// Type-check and flow-analyze `ast` using a pre-built package [`TyEnv`].
+///   Type-check and flow-analyze `ast` using a pre-built package [`TyEnv`].
 pub fn analyze_file_with_ty_env(ast: &FileAst, ty_env: &TyEnv) -> Vec<diagnostic::Diagnostic> {
     let mut symptoms = Vec::new();
 

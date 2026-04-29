@@ -1,6 +1,6 @@
 //! Hover and related semantic helpers (engine layer).
 
-use ast::{HasSpanId, Parameters, ParameterKind};
+use ast::{HasSpanId, ParameterKind, Parameters};
 
 /// Return markdown hover text for the word at `byte_pos` in the given AST.
 /// Returns `None` if there is nothing hover-able at that position.
@@ -123,19 +123,17 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
 
         let mut result = format!("```gin\n{word}");
         match &narrowed {
-            Some(crate::TypeConstraint::IsVariant(_, variant)) => {
-                match &const_val {
-                    Some(crate::ConstValue::Tag { name, .. }) if name == variant => {
-                        result.push_str(&format!(
-                            " {}",
-                            const_val.as_ref().unwrap().to_hover_string()
-                        ));
-                    }
-                    _ => {
-                        result.push_str(&format!(" {}", variant.as_str()));
-                    }
+            Some(crate::TypeConstraint::IsVariant(_, variant)) => match &const_val {
+                Some(crate::ConstValue::Tag { name, .. }) if name == variant => {
+                    result.push_str(&format!(
+                        " {}",
+                        const_val.as_ref().unwrap().to_hover_string()
+                    ));
                 }
-            }
+                _ => {
+                    result.push_str(&format!(" {}", variant.as_str()));
+                }
+            },
             Some(crate::TypeConstraint::IsNotVariant(union, excluded)) => {
                 if let Some(variants) = flow.union_to_variants.get(union) {
                     let remaining: Vec<_> = variants.iter().filter(|v| *v != excluded).collect();
@@ -314,19 +312,16 @@ fn collect_refs_type_surface(
     span_table: &ast::SpanTable,
     out: &mut Vec<std::ops::Range<usize>>,
 ) {
-    match expr {
-        ast::Expr::TypeGeneric { params, .. } => {
-            for (_, pk) in params {
-                match pk {
-                    ParameterKind::Default(e) => collect_refs_expr(&e.0, name, span_table, out),
-                    ParameterKind::Tagged(sp) => {
-                        collect_refs_type_surface(&sp.0, name, span_table, out);
-                    }
-                    ParameterKind::Generic => {}
+    if let ast::Expr::TypeGeneric { params, .. } = expr {
+        for (_, pk) in params {
+            match pk {
+                ParameterKind::Default(e) => collect_refs_expr(&e.0, name, span_table, out),
+                ParameterKind::Tagged(sp) => {
+                    collect_refs_type_surface(&sp.0, name, span_table, out);
                 }
+                ParameterKind::Generic => {}
             }
         }
-        _ => {}
     }
 }
 
@@ -591,7 +586,9 @@ fn search_expr(expr: &ast::Expr, name: internment::Intern<String>) -> Option<&as
                 None
             }
         },
-        Expr::Binary(bin) => search_expr(&bin.lhs.0, name).or_else(|| search_expr(&bin.rhs.0, name)),
+        Expr::Binary(bin) => {
+            search_expr(&bin.lhs.0, name).or_else(|| search_expr(&bin.rhs.0, name))
+        }
         Expr::FnCall(call) => {
             if let Some(args) = &call.args {
                 for arg in args {

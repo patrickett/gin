@@ -44,7 +44,7 @@ pub struct ModuleTree {
 
 // Kinda like the idea of each module having its own flask.json file optionally
 // so each module can have its own dependencies and interface hash so you can subscribe to just one module
-// or all modules in a project. 
+// or all modules in a project.
 
 // I think this means implicitly modules cannot inherit from their parent.
 // TODO: investigate this
@@ -149,10 +149,10 @@ pub fn discover_module(dir: &Path) -> Option<ModuleTree> {
 
             // Only discover sub-directories that contain .gin files somewhere
             // in their tree. An empty directory shouldn't show up as a module.
-            if let Some(child_tree) = discover_module(&path) {
-                if child_tree.has_any_files() {
-                    children.insert(dir_name, child_tree);
-                }
+            if let Some(child_tree) = discover_module(&path)
+                && child_tree.has_any_files()
+            {
+                children.insert(dir_name, child_tree);
             }
         } else if path.extension().is_some_and(|e| e == "gin") {
             files.push(path);
@@ -235,7 +235,7 @@ mod tests {
         let tree = discover_module(&tmp.path).unwrap();
         assert_eq!(tree.files.len(), 1);
         assert!(tree.files[0].ends_with("helper.gin"));
-        assert!(tree.is_empty() == false);
+        assert!(!tree.is_empty());
     }
 
     #[test]

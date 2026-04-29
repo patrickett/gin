@@ -76,10 +76,10 @@ pub fn detect_first_cycle(adj: &[Vec<ImportEdge>]) -> Option<ImportCycle> {
     }
 
     for u in 0..n {
-        if mark[u] == Mark::Unvisited {
-            if let Some(c) = dfs(u, adj, &mut mark, &mut stack, &mut stack_pos) {
-                return Some(c);
-            }
+        if mark[u] == Mark::Unvisited
+            && let Some(c) = dfs(u, adj, &mut mark, &mut stack, &mut stack_pos)
+        {
+            return Some(c);
         }
     }
     None

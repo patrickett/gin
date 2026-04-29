@@ -124,21 +124,18 @@ fn find_call_in_type_surface(
     if byte_pos < span.start || byte_pos > span.end {
         return;
     }
-    match expr {
-        Expr::TypeGeneric { params, .. } => {
-            for (_, pk) in params {
-                match pk {
-                    ParameterKind::Default(e) => {
-                        find_call_in_expr(&e.0, e.1, span_table, byte_pos, best);
-                    }
-                    ParameterKind::Tagged(sp) => {
-                        find_call_in_type_surface(&sp.0, sp.1, span_table, byte_pos, best);
-                    }
-                    ParameterKind::Generic => {}
+    if let Expr::TypeGeneric { params, .. } = expr {
+        for (_, pk) in params {
+            match pk {
+                ParameterKind::Default(e) => {
+                    find_call_in_expr(&e.0, e.1, span_table, byte_pos, best);
                 }
+                ParameterKind::Tagged(sp) => {
+                    find_call_in_type_surface(&sp.0, sp.1, span_table, byte_pos, best);
+                }
+                ParameterKind::Generic => {}
             }
         }
-        _ => {}
     }
 }
 

@@ -22,7 +22,7 @@ pub fn qualify_module_defs(mut ast: FileAst, module_qual: &str) -> FileAst {
     let qual_parts: Vec<Intern<String>> = module_qual
         .split('.')
         .filter(|s| !s.is_empty())
-        .map(|s| Intern::<String>::from_ref(s))
+        .map(Intern::<String>::from_ref)
         .collect();
     if qual_parts.is_empty() {
         return ast;
@@ -123,14 +123,14 @@ fn rewrite_expr(
         Expr::If(ifex) => rewrite_if(ifex, old_names, qual_parts),
         Expr::Loop(loop_ex) => match loop_ex {
             Loop::While(w) => {
-                rewrite_spanned_expr(&mut *w.cond, old_names, qual_parts);
+                rewrite_spanned_expr(&mut w.cond, old_names, qual_parts);
                 for e in &mut w.exprs {
                     rewrite_spanned_expr(e, old_names, qual_parts);
                 }
             }
             Loop::ForIn(f) => {
-                rewrite_spanned_expr(&mut *f.pat, old_names, qual_parts);
-                rewrite_spanned_expr(&mut *f.iter, old_names, qual_parts);
+                rewrite_spanned_expr(&mut f.pat, old_names, qual_parts);
+                rewrite_spanned_expr(&mut f.iter, old_names, qual_parts);
                 for e in &mut f.exprs {
                     rewrite_spanned_expr(e, old_names, qual_parts);
                 }
@@ -157,14 +157,16 @@ fn rewrite_expr(
             for (_, pk) in params.iter_mut() {
                 match pk {
                     ParameterKind::Default(e) => rewrite_spanned_expr(e, old_names, qual_parts),
-                    ParameterKind::Tagged(sp) => rewrite_spanned_expr(sp.as_mut(), old_names, qual_parts),
+                    ParameterKind::Tagged(sp) => {
+                        rewrite_spanned_expr(sp.as_mut(), old_names, qual_parts)
+                    }
                     ParameterKind::Generic => {}
                 }
             }
         }
         Expr::Range(r) => {
-            rewrite_spanned_expr(&mut *r.start, old_names, qual_parts);
-            rewrite_spanned_expr(&mut *r.end, old_names, qual_parts);
+            rewrite_spanned_expr(&mut r.start, old_names, qual_parts);
+            rewrite_spanned_expr(&mut r.end, old_names, qual_parts);
         }
         Expr::TupleAlloc { init, .. } => rewrite_spanned_expr(init, old_names, qual_parts),
         Expr::TupleGet { base, .. } => rewrite_spanned_expr(base, old_names, qual_parts),

@@ -204,7 +204,7 @@ fn test_discover_module_at_qualified_path() {
 
 #[test]
 fn test_nonexistent_directory_returns_none() {
-    let result = discover_module(&std::path::Path::new("/nonexistent/path/xyz"));
+    let result = discover_module(std::path::Path::new("/nonexistent/path/xyz"));
     assert!(result.is_none());
 }
 

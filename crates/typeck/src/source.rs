@@ -453,10 +453,7 @@ pub fn get_string_literal_at(source: &str, byte_pos: usize) -> Option<StringLite
 
     // Make sure this isn't inside a format string (double-quoted)
     // Check if there's an unmatched " before the open quote on the same line
-    let line_start = source[..=open]
-        .rfind('\n')
-        .map(|i| i + 1)
-        .unwrap_or(0);
+    let line_start = source[..=open].rfind('\n').map(|i| i + 1).unwrap_or(0);
     let text_before = &source[line_start..open];
     let double_quotes = text_before.chars().filter(|&c| c == '"').count();
     if double_quotes % 2 == 1 {
@@ -470,4 +467,79 @@ pub fn get_string_literal_at(source: &str, byte_pos: usize) -> Option<StringLite
         range: open..close + 1,
         content,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::get_number_at_position;
+    use super::get_range_literal_at_position;
+
+    #[test]
+    fn number_at_position_rejects_digits_inside_identifiers() {
+        let src = "Tag123 other 456";
+        // Cursor on the '1' in Tag123
+        assert_eq!(get_number_at_position(src, 0, 3), None);
+        // Cursor on the '3' in Tag123
+        assert_eq!(get_number_at_position(src, 0, 5), None);
+        // Cursor on the '4' in 456
+        assert_eq!(get_number_at_position(src, 0, 14), Some("456".to_string()));
+    }
+
+    #[test]
+    fn range_literal_at_position_prefers_full_range() {
+        let src = "12...1200 other 3...4";
+        // Cursor on the first number.
+        assert_eq!(
+            get_range_literal_at_position(src, 0, 0),
+            Some("12...1200".to_string())
+        );
+        // Cursor on the second number.
+        assert_eq!(
+            get_range_literal_at_position(src, 0, 5),
+            Some("12...1200".to_string())
+        );
+        // Cursor on dots.
+        assert_eq!(
+            get_range_literal_at_position(src, 0, 2),
+            Some("12...1200".to_string())
+        );
+        assert_eq!(
+            get_range_literal_at_position(src, 0, 3),
+            Some("12...1200".to_string())
+        );
+        assert_eq!(
+            get_range_literal_at_position(src, 0, 4),
+            Some("12...1200".to_string())
+        );
+        // Second range.
+        assert_eq!(
+            get_range_literal_at_position(src, 0, 16),
+            Some("3...4".to_string())
+        );
+    }
+
+    #[test]
+    fn range_literal_at_position_allows_whitespace_around_dots() {
+        let src = "12 ... 1200";
+        // Hover in whitespace should still show full range.
+        assert_eq!(
+            get_range_literal_at_position(src, 0, 2),
+            Some("12 ... 1200".to_string())
+        );
+        assert_eq!(
+            get_range_literal_at_position(src, 0, 3),
+            Some("12 ... 1200".to_string())
+        );
+        assert_eq!(
+            get_range_literal_at_position(src, 0, 5),
+            Some("12 ... 1200".to_string())
+        );
+    }
+
+    #[test]
+    fn range_literal_rejects_identifier_digits() {
+        let src = "Tag12...1200";
+        // Cursor on the `1` in Tag12... should NOT be treated as a range number.
+        assert_eq!(get_range_literal_at_position(src, 0, 3), None);
+    }
 }

@@ -16,8 +16,8 @@
 use crate::{TyInfer, TyInferEnv};
 use ast::WhenArm;
 use ast::{
-    type_surface_mangle_name, Bind, BindValue, DeclareValue, Expr, FileAst, FnCall, FormatPart,
-    HasSpanId, IfCondition, Loop, ParameterKind, Spanned,
+    Bind, BindValue, DeclareValue, Expr, FileAst, FnCall, FormatPart, HasSpanId, IfCondition, Loop,
+    ParameterKind, Spanned, type_surface_mangle_name,
 };
 use i256::I256;
 use internment::Intern;
@@ -40,10 +40,7 @@ pub(crate) fn is_type_surface(e: &Expr) -> bool {
     )
 }
 
-pub(crate) fn resolve_type_expr_from_map(
-    e: &Expr,
-    tag_types: &HashMap<Intern<String>, Ty>,
-) -> Ty {
+pub(crate) fn resolve_type_expr_from_map(e: &Expr, tag_types: &HashMap<Intern<String>, Ty>) -> Ty {
     match e {
         Expr::TypeNominal(name, _) => tag_types.get(name).cloned().unwrap_or(Ty::Int {
             width: 64,
@@ -231,9 +228,9 @@ impl TyEnv {
         }
 
         // Register built-in types not declared in any gin source file.
-        if !tag_types.contains_key(&Intern::<String>::from_ref("Str")) {
-            tag_types.insert(Intern::<String>::from_ref("Str"), str_record_ty());
-        }
+        tag_types
+            .entry(Intern::<String>::from_ref("Str"))
+            .or_insert_with(str_record_ty);
 
         // Build variant reverse map from all union types.
         let mut variant_map: VariantMap = HashMap::new();
@@ -581,11 +578,9 @@ fn resolve_type_expr_ref(
                 let inner = params
                     .iter()
                     .find_map(|(_, kind)| match kind {
-                        ParameterKind::Tagged(sp) => Some(resolve_type_expr_ref(
-                            &sp.0,
-                            raw,
-                            recursion_depth + 1,
-                        )),
+                        ParameterKind::Tagged(sp) => {
+                            Some(resolve_type_expr_ref(&sp.0, raw, recursion_depth + 1))
+                        }
                         _ => None,
                     })
                     .unwrap_or(Ty::Opaque(*name));
@@ -679,8 +674,7 @@ fn resolve_name(
                     if !is_type_surface(shape) {
                         return None;
                     }
-                    let variant_name =
-                        Intern::<String>::from_ref(type_surface_mangle_name(shape));
+                    let variant_name = Intern::<String>::from_ref(type_surface_mangle_name(shape));
                     let fields = match shape {
                         Expr::TypeGeneric { params, .. } if !params.is_empty() => params
                             .iter()
@@ -737,19 +731,18 @@ impl TyEnv {
         symptoms: &mut Vec<diagnostic::Diagnostic>,
         locals: &HashMap<Intern<String>, Ty>,
     ) {
-        if let Some(sp) = &bind.return_tag {
-            if is_type_surface(&sp.0) {
-                self.check_type_expr(&sp.0, symptoms);
-                if let Some(Ty::Union {
-                    name: union_name,
-                    variants,
-                }) = self
-                    .lookup_tag(Intern::<String>::from_ref(type_surface_mangle_name(&sp.0)))
-                {
-                    let valid_variants: Vec<Intern<String>> =
-                        variants.iter().map(|(vname, _)| *vname).collect();
-                    check_return_variants(bind, &valid_variants, *union_name, symptoms);
-                }
+        if let Some(sp) = &bind.return_tag
+            && is_type_surface(&sp.0)
+        {
+            self.check_type_expr(&sp.0, symptoms);
+            if let Some(Ty::Union {
+                name: union_name,
+                variants,
+            }) = self.lookup_tag(Intern::<String>::from_ref(type_surface_mangle_name(&sp.0)))
+            {
+                let valid_variants: Vec<Intern<String>> =
+                    variants.iter().map(|(vname, _)| *vname).collect();
+                check_return_variants(bind, &valid_variants, *union_name, symptoms);
             }
         }
         match bind.value() {
@@ -1027,15 +1020,13 @@ impl TyEnv {
         use diagnostic::type_::TypeSymptom;
 
         match e {
-            Expr::TypeNominal(name, span) => {
-                if self.lookup_tag(*name).is_none() {
-                    symptoms.push(
-                        TypeSymptom::UnknownTag {
-                            name: name.to_string(),
-                        }
-                        .into_diagnostic(*span),
-                    );
-                }
+            Expr::TypeNominal(name, span) if self.lookup_tag(*name).is_none() => {
+                symptoms.push(
+                    TypeSymptom::UnknownTag {
+                        name: name.to_string(),
+                    }
+                    .into_diagnostic(*span),
+                );
             }
             Expr::TypeGeneric { name, params, span } => {
                 if self.lookup_tag(*name).is_none() {
@@ -1047,22 +1038,20 @@ impl TyEnv {
                     );
                 }
                 for (_, kind) in params {
-                    if let ParameterKind::Tagged(sp) = kind {
-                        if is_type_surface(&sp.0) {
-                            self.check_type_expr(&sp.0, symptoms);
-                        }
+                    if let ParameterKind::Tagged(sp) = kind
+                        && is_type_surface(&sp.0)
+                    {
+                        self.check_type_expr(&sp.0, symptoms);
                     }
                 }
             }
-            Expr::TypeQualified(path) => {
-                if self.lookup_tag(path.root).is_none() {
-                    symptoms.push(
-                        TypeSymptom::UnknownTag {
-                            name: path.root.to_string(),
-                        }
-                        .into_diagnostic(path.span_id()),
-                    );
-                }
+            Expr::TypeQualified(path) if self.lookup_tag(path.root).is_none() => {
+                symptoms.push(
+                    TypeSymptom::UnknownTag {
+                        name: path.root.to_string(),
+                    }
+                    .into_diagnostic(path.span_id()),
+                );
             }
             _ => {}
         }
@@ -1083,17 +1072,14 @@ fn check_type_pattern_default_exprs(surface: &Expr, check: &mut impl FnMut(&Span
 }
 
 fn check_type_surface_defaults(e: &Expr, check: &mut impl FnMut(&Spanned<Expr>)) {
-    match e {
-        Expr::TypeGeneric { params, .. } => {
-            for (_, pk) in params {
-                match pk {
-                    ParameterKind::Default(e) => check(e),
-                    ParameterKind::Tagged(sp) => check_type_surface_defaults(&sp.0, check),
-                    ParameterKind::Generic => {}
-                }
+    if let Expr::TypeGeneric { params, .. } = e {
+        for (_, pk) in params {
+            match pk {
+                ParameterKind::Default(e) => check(e),
+                ParameterKind::Tagged(sp) => check_type_surface_defaults(&sp.0, check),
+                ParameterKind::Generic => {}
             }
         }
-        _ => {}
     }
 }
 

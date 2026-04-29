@@ -182,10 +182,10 @@ impl TyInfer for FnCall {
 
 impl TyInfer for Bind {
     fn infer_ty(&self, env: &TyInferEnv) -> Ty {
-        if let Some(sp) = &self.return_tag {
-            if is_type_surface(&sp.0) {
-                return resolve_type_expr_from_map(&sp.0, env.tag_types);
-            }
+        if let Some(sp) = &self.return_tag
+            && is_type_surface(&sp.0)
+        {
+            return resolve_type_expr_from_map(&sp.0, env.tag_types);
         }
 
         let mut locals: HashMap<Intern<String>, Ty> = match self.params().as_ref() {
@@ -200,11 +200,11 @@ impl TyInfer for Bind {
                 })
                 .collect(),
         };
-        if let Some(sp) = self.receiver_type_surface() {
-            if is_type_surface(&sp.0) {
-                let recv_ty = resolve_type_expr_from_map(&sp.0, env.tag_types);
-                locals.insert(Intern::<String>::from_ref("self"), recv_ty);
-            }
+        if let Some(sp) = self.receiver_type_surface()
+            && is_type_surface(&sp.0)
+        {
+            let recv_ty = resolve_type_expr_from_map(&sp.0, env.tag_types);
+            locals.insert(Intern::<String>::from_ref("self"), recv_ty);
         }
 
         let bind_env = TyInferEnv {
@@ -367,9 +367,7 @@ impl TyInfer for Expr {
             Expr::TupleLit(elems) => Ty::Tuple(elems.iter().map(|e| e.infer_ty(env)).collect()),
 
             // Only stored as `if` / `when` pattern payload or bind type position, not as a value.
-            Expr::TypeNominal(..)
-            | Expr::TypeQualified(_)
-            | Expr::TypeGeneric { .. } => Ty::Unit,
+            Expr::TypeNominal(..) | Expr::TypeQualified(_) | Expr::TypeGeneric { .. } => Ty::Unit,
         }
     }
 }

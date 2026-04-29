@@ -75,49 +75,39 @@ pub fn parse_source_full(src: &str) -> ParseOutput {
     // Import validation: quoted local imports must name a `.gin` file.
     for import in ast.uses() {
         for module_import in &import.0 {
-            if let ImportSource::Local(path, span_id) = &module_import.source {
-                if !path.extension().is_some_and(|ext| ext == "gin") {
-                    symptoms.push(
-                        ParseSymptom::Custom(format!(
-                            "local import path must include a `.gin` file name, got `{}`",
-                            path.to_string_lossy()
-                        ))
-                        .into_diagnostic(*span_id),
-                    );
-                }
+            if let ImportSource::Local(path, span_id) = &module_import.source
+                && path.extension().is_none_or(|ext| ext != "gin")
+            {
+                symptoms.push(
+                    ParseSymptom::Custom(format!(
+                        "local import path must include a `.gin` file name, got `{}`",
+                        path.to_string_lossy()
+                    ))
+                    .into_diagnostic(*span_id),
+                );
             }
-            if let ImportSource::LocalBundle(b) = &module_import.source {
-                if module_import.alias.is_some() {
-                    symptoms.push(
-                        ParseSymptom::Custom(
-                            "`as` alias on `use pkg.(...)` is not supported; use `export as alias` inside the list"
-                                .into(),
-                        )
-                        .into_diagnostic(b.span_id()),
-                    );
-                }
+            if let ImportSource::LocalBundle(b) = &module_import.source
+                && module_import.alias.is_some()
+            {
+                symptoms.push(
+                    ParseSymptom::Custom(
+                        "`as` alias on `use pkg.(...)` is not supported; use `export as alias` inside the list"
+                            .into(),
+                    )
+                    .into_diagnostic(b.span_id()),
+                );
             }
         }
     }
 
     // Help hints (empty-paren suggestions)
     for (suggested, span_id) in collect_empty_paren_hints(&ast) {
-        symptoms.push(
-            ParseSymptom::EmptyParens {
-                suggested,
-            }
-            .into_diagnostic(span_id),
-        );
+        symptoms.push(ParseSymptom::EmptyParens { suggested }.into_diagnostic(span_id));
     }
 
     // Unused value info diagnostics
     for (value, span_id) in collect_unused_values(&ast) {
-        symptoms.push(
-            ParseSymptom::UnusedValue {
-                value,
-            }
-            .into_diagnostic(span_id),
-        );
+        symptoms.push(ParseSymptom::UnusedValue { value }.into_diagnostic(span_id));
     }
 
     ParseOutput {
@@ -139,7 +129,7 @@ pub fn extract_local_import_paths(ast: &FileAst, base_dir: &Path) -> Vec<(PathBu
                 ImportSource::Package(_path) => {}
                 ImportSource::LocalBundle(_b) => {}
                 ImportSource::Local(path, span) => {
-                    if !path.extension().is_some_and(|e| e == "gin") {
+                    if path.extension().is_none_or(|e| e != "gin") {
                         continue;
                     }
                     let p = base_dir.join(path);
@@ -182,7 +172,7 @@ pub fn extract_package_import_paths(
 
                 if mod_path.segments.is_empty() {
                     if let Some(config) = FlaskConfig::from_directory(dep_dir) {
-                        for (_, spec) in config.exports() {
+                        for spec in config.exports().values() {
                             try_push_gin_file(
                                 dep_dir.join(&spec.path),
                                 mod_path.span_id(),
@@ -192,14 +182,10 @@ pub fn extract_package_import_paths(
                     }
                 } else if mod_path.segments.len() == 1 {
                     let export_key = mod_path.segments[0].as_str();
-                    if let Some(config) = FlaskConfig::from_directory(dep_dir) {
-                        if let Some(spec) = config.exports().get(export_key) {
-                            try_push_gin_file(
-                                dep_dir.join(&spec.path),
-                                mod_path.span_id(),
-                                &mut paths,
-                            );
-                        }
+                    if let Some(config) = FlaskConfig::from_directory(dep_dir)
+                        && let Some(spec) = config.exports().get(export_key)
+                    {
+                        try_push_gin_file(dep_dir.join(&spec.path), mod_path.span_id(), &mut paths);
                     }
                 }
                 // `use a.b.c` with more than one trailing segment: unsupported for export-only resolution.
