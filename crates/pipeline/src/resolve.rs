@@ -9,7 +9,7 @@ use internment::Intern;
 
 use parser::parse_source_full;
 
-use crate::{ParseResult, ParsedFile, ResolveResult};
+use crate::ParsedFile;
 
 /// Resolve imports for a parsed package.
 ///
@@ -18,26 +18,19 @@ use crate::{ParseResult, ParsedFile, ResolveResult};
 /// detecting import cycles. When `deps` is `None` (library mode), files are
 /// passed through unchanged.
 pub fn resolve_imports(
-    parsed: ParseResult,
+    files: Vec<ParsedFile>,
     deps: Option<&HashMap<String, PathBuf>>,
-) -> ResolveResult {
+) -> Vec<ParsedFile> {
     let Some(deps) = deps else {
-        return ResolveResult {
-            files: parsed.files,
-            diagnostics: parsed.diagnostics,
-        };
+        return files;
     };
 
     // Nothing to resolve if there are no files.
-    if parsed.files.is_empty() {
-        return ResolveResult {
-            files: parsed.files,
-            diagnostics: parsed.diagnostics,
-        };
+    if files.is_empty() {
+        return files;
     }
 
-    let mut files = parsed.files;
-    let mut diagnostics = parsed.diagnostics;
+    let mut files = files;
 
     let entry_path = files[0].path.clone();
     let _entry_dir = entry_path
@@ -158,12 +151,7 @@ pub fn resolve_imports(
             .push(ImportSymptom::Cycle { chain }.into_diagnostic(cycle.closing_span));
     }
 
-    // Collect all diagnostics from all files into the result.
-    for file in &files {
-        diagnostics.extend(file.output.symptoms.clone());
-    }
-
-    ResolveResult { files, diagnostics }
+    files
 }
 
 pub fn resolve_flask_path_dependencies(

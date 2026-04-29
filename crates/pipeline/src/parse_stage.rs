@@ -1,34 +1,21 @@
-use crate::{ParseResult, ParsedFile, SourceCollection};
+use crate::ParsedFile;
 use parser::parse_source_full;
+use std::path::PathBuf;
 
-/// Read and parse all source files in the collection.
+/// Parse source texts into ASTs.
 ///
-/// Each file is read from disk and parsed into an AST. Parse diagnostics
-/// are accumulated in the result. Callers should check `has_fatal()` before
-/// proceeding to import resolution.
-pub fn parse(collection: SourceCollection) -> ParseResult {
-    let mut files = Vec::with_capacity(collection.file_paths.len());
-    let mut diagnostics = Vec::new();
-
-    for fp in &collection.file_paths {
-        let source = match std::fs::read_to_string(fp) {
-            Ok(s) => s,
-            Err(err) => {
-                eprintln!("Error reading {}: {}", fp.display(), err);
-                continue;
+/// Each `(PathBuf, String)` pair is a file path and its contents.
+/// Parse diagnostics are stored in each `ParsedFile`'s `output.symptoms`.
+pub fn parse(sources: &[(PathBuf, String)]) -> Vec<ParsedFile> {
+    sources
+        .iter()
+        .map(|(path, source)| {
+            let output = parse_source_full(source);
+            ParsedFile {
+                path: path.clone(),
+                source: source.clone(),
+                output,
             }
-        };
-        let output = parse_source_full(&source);
-        diagnostics.extend(output.symptoms.clone());
-        files.push(ParsedFile {
-            path: fp.clone(),
-            source,
-            output,
-        });
-    }
-
-    ParseResult {
-        files,
-        diagnostics,
-    }
+        })
+        .collect()
 }

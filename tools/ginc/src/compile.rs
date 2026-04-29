@@ -3,10 +3,11 @@
 use crate::cli::Args;
 use ast::FileAst;
 use codegen::emit::native;
+use diagnostic::Category;
 use flask::FlaskConfig;
 use lexer::debug_tokens;
-use pipeline::TypecheckResult;
-use std::path::Path;
+use pipeline::{ParsedFile, TypecheckResult};
+use std::path::{Path, PathBuf};
 use typeck::TyEnv;
 
 /// Analogous to the `ginc` command
@@ -25,58 +26,57 @@ impl GinCompiler {
     pub fn compile(args: &'_ mut Args) {
         let path = args.input.to_owned();
 
-        let collection = pipeline::collect(&path);
-        if collection.file_paths.is_empty() {
+        let file_paths = collect_gin_files(&path);
+        if file_paths.is_empty() {
             eprintln!("No .gin files found in {}", path.display());
             return;
         }
 
-        let is_library = collection.is_library;
+        let is_library = path.is_dir();
+        let sources = read_sources(&file_paths);
 
-        let parsed = pipeline::parse(collection);
+        let files = pipeline::parse(&sources);
 
         // Early exit for token dump
         if matches!(args.emit, crate::cli::Emit::Tokens) {
-            for file in &parsed.files {
+            for file in &files {
                 print!("{}", debug_tokens(&file.source));
             }
             return;
         }
 
-        if pipeline::print_diagnostics(&parsed.files) {
+        if print_diagnostics(&files) {
             return;
         }
 
-        let deps = if !is_library {
-            let entry_dir = parsed.files[0]
+        let files = if !is_library {
+            let entry_dir = files[0]
                 .path
                 .parent()
                 .map(|p| p.to_path_buf())
                 .unwrap_or_default();
-            if args.dependencies.is_empty() {
-                if let Some(config) = FlaskConfig::from_directory(&entry_dir) {
-                    args.dependencies =
-                        pipeline::resolve::resolve_flask_path_dependencies(&config, &entry_dir);
-                }
+            if args.dependencies.is_empty()
+                && let Some(config) = FlaskConfig::from_directory(&entry_dir)
+            {
+                args.dependencies =
+                    pipeline::resolve::resolve_flask_path_dependencies(&config, &entry_dir);
             }
-            Some(&args.dependencies)
+            pipeline::resolve_imports(files, Some(&args.dependencies))
         } else {
-            None
+            files
         };
 
-        let resolved = pipeline::resolve_imports(parsed, deps);
-
-        if pipeline::print_diagnostics(&resolved.files) {
+        if print_diagnostics(&files) {
             return;
         }
 
-        let checked = pipeline::typecheck(&resolved);
+        let checked = pipeline::typecheck(&files);
 
-        if pipeline::print_diagnostics(&checked.files) {
+        if print_typecheck_diagnostics(&files, &checked) {
             return;
         }
 
-        let merged_ast = merge_asts(&checked);
+        let merged_ast = merge_asts(&files);
         match args.emit {
             crate::cli::Emit::Mlir => emit_mlir(&merged_ast, &checked.ty_env),
             crate::cli::Emit::Obj | crate::cli::Emit::Exe => {
@@ -87,9 +87,87 @@ impl GinCompiler {
     }
 }
 
-fn merge_asts(checked: &TypecheckResult) -> FileAst {
+/// Collect `.gin` file paths under `root`, skipping `target/` directories.
+fn collect_gin_files(root: &Path) -> Vec<PathBuf> {
+    if root.is_dir() {
+        collect_gin_files_recursive(root)
+    } else {
+        vec![root.to_path_buf()]
+    }
+}
+
+fn collect_gin_files_recursive(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return files;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if path.file_name().is_some_and(|n| n == "target") {
+                continue;
+            }
+            files.extend(collect_gin_files_recursive(&path));
+        } else if path.extension().is_some_and(|ext| ext == "gin") {
+            files.push(path);
+        }
+    }
+
+    files
+}
+
+/// Read file contents from disk, skipping files that can't be read.
+fn read_sources(paths: &[PathBuf]) -> Vec<(PathBuf, String)> {
+    let mut sources = Vec::with_capacity(paths.len());
+    for fp in paths {
+        match std::fs::read_to_string(fp) {
+            Ok(s) => sources.push((fp.clone(), s)),
+            Err(err) => eprintln!("Error reading {}: {}", fp.display(), err),
+        }
+    }
+    sources
+}
+
+/// Print all diagnostics for a slice of parsed files.
+///
+/// Each file's symptoms are printed with its own span table and source text.
+/// Returns `true` if any fatal diagnostics were found.
+fn print_diagnostics(files: &[ParsedFile]) -> bool {
+    let mut has_flaws = false;
+    for file in files {
+        let filename = file.filename();
+        let span_table = file.output.ast.span_table();
+        for diag in &file.output.symptoms {
+            diag.print(span_table, &file.source, &filename);
+            if matches!(diag.category, Category::Flaw) {
+                has_flaws = true;
+            }
+        }
+    }
+    has_flaws
+}
+
+/// Print type-check diagnostics returned by the typecheck stage.
+fn print_typecheck_diagnostics(files: &[ParsedFile], result: &TypecheckResult) -> bool {
+    let mut has_flaws = false;
+    for (i, symptoms) in result.symptoms.iter().enumerate() {
+        let file = &files[i];
+        let filename = file.filename();
+        let span_table = file.output.ast.span_table();
+        for diag in symptoms {
+            diag.print(span_table, &file.source, &filename);
+            if matches!(diag.category, Category::Flaw) {
+                has_flaws = true;
+            }
+        }
+    }
+    has_flaws
+}
+
+fn merge_asts(files: &[ParsedFile]) -> FileAst {
     let mut merged = FileAst::default();
-    for file in &checked.files {
+    for file in files {
         merged.merge_from(file.output.ast.clone());
     }
     merged
