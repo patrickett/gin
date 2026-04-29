@@ -10,8 +10,9 @@ impl<'c> Lower<'c> for FnCall {
         symtab: &mut RuntimeSymbolTable<'c>,
     ) -> Option<Value<'c, 'c>> {
         if !self.path.segments.is_empty() {
-            let root = self.path.root.as_str();
-            if let Some(ty) = ctx.var_types.borrow().get(root).cloned() {
+            let root = self.path.root;
+            let root_str = root.as_str();
+            if let Some(ty) = ctx.var_types.borrow().get(&root).cloned() {
                 // Unwrap one level of Ptr/Ref for auto-deref field access.
                 let record_ty = match &ty {
                     Ty::Ptr { inner } | Ty::Ref { inner } if inner.is_record() => {
@@ -38,7 +39,7 @@ impl<'c> Lower<'c> for FnCall {
                                 ctx,
                                 block,
                                 symtab,
-                                root,
+                                root_str,
                                 &self.path.segments,
                                 ty,
                             );
@@ -48,10 +49,10 @@ impl<'c> Lower<'c> for FnCall {
                             type_name.as_str(),
                             segment.as_str()
                         ));
-                        let self_val = match symtab.get(root).copied() {
+                        let self_val = match symtab.get(root_str).copied() {
                             Some(v) => v,
                             None => {
-                                ctx.emit_internal(format!("Unknown variable '{root}'"));
+                                ctx.emit_internal(format!("Unknown variable '{root_str}'"));
                                 return None;
                             }
                         };
@@ -83,10 +84,10 @@ impl<'c> Lower<'c> for FnCall {
                             type_name.as_str(),
                             method.as_str()
                         ));
-                        let self_val = match symtab.get(root).copied() {
+                        let self_val = match symtab.get(root_str).copied() {
                             Some(v) => v,
                             None => {
-                                ctx.emit_internal(format!("Unknown variable '{root}'"));
+                                ctx.emit_internal(format!("Unknown variable '{root_str}'"));
                                 return None;
                             }
                         };
@@ -122,22 +123,22 @@ impl<'c> Lower<'c> for FnCall {
                             let mangled =
                                 Intern::<String>::new(format!("{type_name}.{}", method.as_str()));
                             // Load value from alloca slot if mutable; use raw SSA value otherwise.
-                            let self_val = if ctx.mutable_slots.borrow().contains(root) {
+                            let self_val = if ctx.mutable_slots.borrow().contains(root_str) {
                                 let elem_mlir_ty = ty_to_mlir(&record_ty, ctx.mlir);
                                 let loc = ctx.location();
-                                let ptr = match symtab.get(root).copied() {
+                                let ptr = match symtab.get(root_str).copied() {
                                     Some(v) => v,
                                     None => {
-                                        ctx.emit_internal(format!("Unknown variable '{root}'"));
+                                        ctx.emit_internal(format!("Unknown variable '{root_str}'"));
                                         return None;
                                     }
                                 };
                                 block.load_typed(ctx, ptr, elem_mlir_ty, loc)?
                             } else {
-                                match symtab.get(root).copied() {
+                                match symtab.get(root_str).copied() {
                                     Some(v) => v,
                                     None => {
-                                        ctx.emit_internal(format!("Unknown variable '{root}'"));
+                                        ctx.emit_internal(format!("Unknown variable '{root_str}'"));
                                         return None;
                                     }
                                 }
@@ -187,7 +188,7 @@ impl<'c> Lower<'c> for FnCall {
                 let ty = ctx
                     .var_types
                     .borrow()
-                    .get(func_name.as_str())
+                    .get(&func_name)
                     .cloned()
                     .unwrap_or(Ty::Int {
                         width: 64,

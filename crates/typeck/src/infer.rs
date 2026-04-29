@@ -40,6 +40,42 @@ impl LocalTypes for HashMap<Intern<String>, Ty> {
     }
 }
 
+/// A layered local-types overlay: wraps a parent with a small Vec of new bindings.
+///
+/// Avoids cloning the entire parent HashMap when entering a new scope.
+pub struct LayeredLocals<'a> {
+    parent: &'a dyn LocalTypes,
+    bindings: Vec<(Intern<String>, Ty)>,
+}
+
+impl<'a> LayeredLocals<'a> {
+    pub fn new(parent: &'a dyn LocalTypes) -> Self {
+        Self {
+            parent,
+            bindings: Vec::new(),
+        }
+    }
+
+    pub fn insert(&mut self, name: Intern<String>, ty: Ty) {
+        self.bindings.push((name, ty));
+    }
+
+    pub fn contains_key(&self, name: &Intern<String>) -> bool {
+        self.bindings.iter().rev().any(|(n, _)| n == name) || self.parent.get_type(name).is_some()
+    }
+}
+
+impl LocalTypes for LayeredLocals<'_> {
+    fn get_type(&self, name: &Intern<String>) -> Option<Ty> {
+        self.bindings
+            .iter()
+            .rev()
+            .find(|(n, _)| n == name)
+            .map(|(_, t)| t.clone())
+            .or_else(|| self.parent.get_type(name))
+    }
+}
+
 /// Everything an expression needs to infer its type, bundled into one struct.
 pub struct TyInferEnv<'a> {
     pub tag_types: &'a HashMap<Intern<String>, Ty>,

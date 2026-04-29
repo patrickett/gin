@@ -246,8 +246,8 @@ fn bench_parse_only(c: &mut Criterion) {
         group.throughput(criterion::Throughput::Bytes(source.len() as u64));
         group.bench_function(BenchmarkId::new("handwritten", label), |b| {
             b.iter(|| {
-                let st = span_table.clone();
-                let ast = expr::parse_tokens(&tokens, st);
+                let mut st = span_table.clone();
+                let ast = expr::parse_tokens(&tokens, &mut st);
                 std::hint::black_box(ast);
             });
         });

@@ -16,3 +16,9 @@ internment = "0.8"
 
 [dev-dependencies]
 database = { workspace = true }
+criterion = { workspace = true }
+parser = { workspace = true }
+
+[[bench]]
+name = "codegen_bench"
+harness = false

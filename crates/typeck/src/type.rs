@@ -13,7 +13,7 @@
 //! [`infer.rs`] and is accessed through [`TyInferEnv`] / the [`TyInfer`](crate::TyInfer) trait.
 //! This module provides [`TyEnv::infer_env`] to bridge between the two.
 
-use crate::{TyInfer, TyInferEnv};
+use crate::{LayeredLocals, LocalTypes, TyInfer, TyInferEnv};
 use ast::WhenArm;
 use ast::{
     Bind, BindValue, DeclareValue, Expr, FileAst, FnCall, FormatPart, HasSpanId, IfCondition, Loop,
@@ -21,15 +21,19 @@ use ast::{
 };
 use i256::I256;
 use internment::Intern;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Symbol name for a callee: `foo` or `io.print` (matches codegen).
 pub fn mangled_fn_call_name(call: &FnCall) -> Intern<String> {
     if call.path.segments.is_empty() {
         call.path.root
     } else {
-        let segs: Vec<&str> = call.path.segments.iter().map(|s| s.as_str()).collect();
-        Intern::<String>::new(format!("{}.{}", call.path.root.as_str(), segs.join(".")))
+        let mut joined = call.path.root.as_str().to_string();
+        for seg in &call.path.segments {
+            joined.push('.');
+            joined.push_str(seg.as_str());
+        }
+        Intern::<String>::new(joined)
     }
 }
 
@@ -525,30 +529,34 @@ pub fn ty_byte_size_static(ty: &Ty) -> usize {
 }
 
 /// Canonical `Str` record type: `{ pointer: Ptr(Byte), len: Int }`.
+static STR_RECORD_TY: std::sync::OnceLock<Ty> = std::sync::OnceLock::new();
+
 pub fn str_record_ty() -> Ty {
-    Ty::Record {
-        name: Intern::<String>::from_ref("Str"),
-        fields: vec![
-            (
-                Intern::<String>::from_ref("pointer"),
-                Box::new(Ty::Ptr {
-                    inner: Box::new(Ty::Int {
-                        width: 8,
+    STR_RECORD_TY
+        .get_or_init(|| Ty::Record {
+            name: Intern::<String>::from_ref("Str"),
+            fields: vec![
+                (
+                    Intern::<String>::from_ref("pointer"),
+                    Box::new(Ty::Ptr {
+                        inner: Box::new(Ty::Int {
+                            width: 8,
+                            signed: false,
+                            value: None,
+                        }),
+                    }),
+                ),
+                (
+                    Intern::<String>::from_ref("len"),
+                    Box::new(Ty::Int {
+                        width: 64,
                         signed: false,
                         value: None,
                     }),
-                }),
-            ),
-            (
-                Intern::<String>::from_ref("len"),
-                Box::new(Ty::Int {
-                    width: 64,
-                    signed: false,
-                    value: None,
-                }),
-            ),
-        ],
-    }
+                ),
+            ],
+        })
+        .clone()
 }
 
 fn range_bit_width(min: I256, max: I256) -> u8 {
@@ -729,7 +737,7 @@ impl TyEnv {
         &self,
         bind: &Bind,
         symptoms: &mut Vec<diagnostic::Diagnostic>,
-        locals: &HashMap<Intern<String>, Ty>,
+        locals: &dyn LocalTypes,
     ) {
         if let Some(sp) = &bind.return_tag
             && is_type_surface(&sp.0)
@@ -751,25 +759,12 @@ impl TyEnv {
                 use diagnostic::DiagnosticLike;
                 use diagnostic::type_::TypeSymptom;
 
-                let mut body_locals = locals.clone();
-                for (i, expr) in exprs.iter().enumerate() {
+                // Forward pass: type-check each binding/expression.
+                let mut body_locals = LayeredLocals::new(locals);
+                for expr in exprs.iter() {
                     if let Expr::Bind(inner) = &**expr {
                         self.check_bind(inner, symptoms, &body_locals);
-                        let name = inner.name();
-                        let used = exprs[i + 1..].iter().any(|e| expr_references_name(e, name))
-                            || ret
-                                .0
-                                .as_ref()
-                                .is_some_and(|e| expr_references_name(e, name));
-                        if !used && !name.starts_with('_') {
-                            symptoms.push(
-                                TypeSymptom::UnusedBinding {
-                                    name: name.to_string(),
-                                }
-                                .into_diagnostic(inner.name_span),
-                            );
-                        }
-                        body_locals.insert(name, {
+                        body_locals.insert(inner.name(), {
                             let env = TyInferEnv {
                                 tag_types: &self.tag_types,
                                 fn_return_types: &self.fn_return_types,
@@ -784,6 +779,32 @@ impl TyEnv {
                 if let Some(ret_expr) = &ret.0 {
                     self.check_expr(ret_expr, symptoms, &body_locals);
                 }
+
+                // Reverse pass: collect unused bindings in O(N) instead of O(N^2).
+                let mut suffix_refs: HashSet<Intern<String>> = HashSet::new();
+                if let Some(e) = &ret.0 {
+                    collect_referenced_names(e, &mut suffix_refs);
+                }
+                let mut unused_spans: Vec<_> = Vec::new();
+                for expr in exprs.iter().rev() {
+                    if let Expr::Bind(inner) = &**expr {
+                        let name = inner.name();
+                        if !suffix_refs.contains(&name) && !name.starts_with('_') {
+                            unused_spans.push((name, inner.name_span));
+                        }
+                        collect_bind_value_refs(inner, &mut suffix_refs);
+                    } else {
+                        collect_referenced_names(expr, &mut suffix_refs);
+                    }
+                }
+                for (name, span) in unused_spans.into_iter().rev() {
+                    symptoms.push(
+                        TypeSymptom::UnusedBinding {
+                            name: name.to_string(),
+                        }
+                        .into_diagnostic(span),
+                    );
+                }
             }
             BindValue::Extern => {}
         }
@@ -793,7 +814,7 @@ impl TyEnv {
         &self,
         expr: &Expr,
         symptoms: &mut Vec<diagnostic::Diagnostic>,
-        locals: &HashMap<Intern<String>, Ty>,
+        locals: &dyn LocalTypes,
     ) {
         use diagnostic::DiagnosticLike;
         use diagnostic::type_::TypeSymptom;
@@ -815,7 +836,7 @@ impl TyEnv {
                         self.check_expr(arg, symptoms, locals);
                     }
                 } else if call.path.segments.is_empty()
-                    && !locals.contains_key(&name)
+                    && locals.get_type(&name).is_none()
                     && self.fn_return_ty(&mangled).is_none()
                 {
                     symptoms.push(
@@ -905,16 +926,14 @@ impl TyEnv {
                 }
                 IfCondition::Pattern { subject, pattern } => {
                     self.check_expr(subject, symptoms, locals);
-                    let mut if_locals = locals.clone();
+                    let mut if_locals = LayeredLocals::new(locals);
                     if is_type_surface(&pattern.0) {
                         if let Expr::TypeGeneric { params, .. } = &pattern.0 {
-                            if_locals.extend(params.iter().filter_map(|(k, _)| {
+                            for (k, _) in params.iter() {
                                 if k.as_str() != "_" {
-                                    Some((*k, Ty::Opaque(*k)))
-                                } else {
-                                    None
+                                    if_locals.insert(*k, Ty::Opaque(*k));
                                 }
-                            }));
+                            }
                         }
                         check_type_pattern_default_exprs(&pattern.0, &mut |e| {
                             self.check_expr(e, symptoms, locals);
@@ -1083,123 +1102,154 @@ fn check_type_surface_defaults(e: &Expr, check: &mut impl FnMut(&Spanned<Expr>))
     }
 }
 
-fn type_pattern_references_name(surface: &Expr, name: Intern<String>) -> bool {
-    let Expr::TypeGeneric { params, .. } = surface else {
-        return false;
-    };
-    params.iter().any(|(_, pk)| match pk {
-        ParameterKind::Default(e) => expr_references_name(&e.0, name),
-        ParameterKind::Tagged(sp) => type_surface_references_name(&sp.0, name),
-        ParameterKind::Generic => false,
-    })
-}
-
-fn type_surface_references_name(e: &Expr, name: Intern<String>) -> bool {
-    match e {
-        Expr::TypeGeneric { params, .. } => params.iter().any(|(_, pk)| match pk {
-            ParameterKind::Default(e) => expr_references_name(&e.0, name),
-            ParameterKind::Tagged(sp) => type_surface_references_name(&sp.0, name),
-            ParameterKind::Generic => false,
-        }),
-        _ => false,
-    }
-}
-
-fn expr_references_name(expr: &Expr, name: Intern<String>) -> bool {
+/// Collect all names referenced by an expression into `out`.
+fn collect_referenced_names(expr: &Expr, out: &mut HashSet<Intern<String>>) {
     match expr {
         Expr::FnCall(call) => {
-            (call.path.root == name && call.path.segments.is_empty())
-                || call
-                    .args
-                    .as_ref()
-                    .is_some_and(|args| args.iter().any(|a| expr_references_name(a, name)))
-        }
-        Expr::Bind(bind) => match bind.value() {
-            BindValue::Expr(e) => expr_references_name(e, name),
-            BindValue::Body { exprs, ret } => {
-                exprs.iter().any(|e| expr_references_name(e, name))
-                    || ret
-                        .0
-                        .as_ref()
-                        .is_some_and(|e| expr_references_name(e, name))
+            if call.path.segments.is_empty() {
+                out.insert(call.path.root);
             }
-            BindValue::Extern => false,
-        },
+            if let Some(args) = &call.args {
+                for a in args {
+                    collect_referenced_names(a, out);
+                }
+            }
+        }
+        Expr::Bind(bind) => collect_bind_value_refs(bind, out),
         Expr::Binary(bin) => {
-            expr_references_name(&bin.lhs, name) || expr_references_name(&bin.rhs, name)
+            collect_referenced_names(&bin.lhs, out);
+            collect_referenced_names(&bin.rhs, out);
         }
         Expr::When(w) => {
-            w.subject
-                .as_ref()
-                .is_some_and(|s| expr_references_name(s, name))
-                || w.arms.iter().any(|arm| match arm {
+            if let Some(s) = &w.subject {
+                collect_referenced_names(s, out);
+            }
+            for arm in &w.arms {
+                match arm {
                     WhenArm::Cond { condition, body } => {
-                        expr_references_name(condition, name) || expr_references_name(body, name)
+                        collect_referenced_names(condition, out);
+                        collect_referenced_names(body, out);
                     }
                     WhenArm::Is { pattern, body } => {
-                        type_pattern_references_name(&pattern.0, name)
-                            || expr_references_name(&body.0, name)
+                        collect_type_pattern_refs(&pattern.0, out);
+                        collect_referenced_names(&body.0, out);
                     }
-                    WhenArm::Else(body) => expr_references_name(body, name),
-                })
+                    WhenArm::Else(body) => collect_referenced_names(body, out),
+                }
+            }
         }
         Expr::If(if_expr) => {
-            let cond_ref = match &if_expr.condition {
-                IfCondition::Bool(c) => expr_references_name(c, name),
+            match &if_expr.condition {
+                IfCondition::Bool(c) => collect_referenced_names(c, out),
                 IfCondition::Pattern { subject, pattern } => {
-                    expr_references_name(subject, name)
-                        || type_pattern_references_name(&pattern.0, name)
+                    collect_referenced_names(subject, out);
+                    collect_type_pattern_refs(&pattern.0, out);
                 }
-            };
-            cond_ref || if_expr.body.iter().any(|e| expr_references_name(e, name))
+            }
+            for e in &if_expr.body {
+                collect_referenced_names(e, out);
+            }
         }
         Expr::Loop(loop_expr) => match loop_expr {
             Loop::While(w) => {
-                expr_references_name(&w.cond, name)
-                    || w.exprs.iter().any(|e| expr_references_name(e, name))
+                collect_referenced_names(&w.cond, out);
+                for e in &w.exprs {
+                    collect_referenced_names(e, out);
+                }
             }
             Loop::ForIn(f) => {
-                expr_references_name(&f.iter, name)
-                    || f.exprs.iter().any(|e| expr_references_name(e, name))
+                collect_referenced_names(&f.iter, out);
+                for e in &f.exprs {
+                    collect_referenced_names(e, out);
+                }
             }
         },
-        Expr::TupleLit(elems) => elems.iter().any(|e| expr_references_name(e, name)),
-        Expr::TupleAlloc { init, .. } => expr_references_name(init, name),
-        Expr::TupleGet { base, .. } => expr_references_name(base, name),
+        Expr::TupleLit(elems) => {
+            for e in elems {
+                collect_referenced_names(e, out);
+            }
+        }
+        Expr::TupleAlloc { init, .. } => collect_referenced_names(init, out),
+        Expr::TupleGet { base, .. } => collect_referenced_names(base, out),
         Expr::TupleSet { base, value, .. } => {
-            expr_references_name(base, name) || expr_references_name(value, name)
+            collect_referenced_names(base, out);
+            collect_referenced_names(value, out);
         }
         Expr::BufGet { buf, index, .. } => {
-            expr_references_name(buf, name) || expr_references_name(index, name)
+            collect_referenced_names(buf, out);
+            collect_referenced_names(index, out);
         }
         Expr::BufSet {
             buf, index, value, ..
         } => {
-            expr_references_name(buf, name)
-                || expr_references_name(index, name)
-                || expr_references_name(value, name)
+            collect_referenced_names(buf, out);
+            collect_referenced_names(index, out);
+            collect_referenced_names(value, out);
         }
-        Expr::Cast { expr, .. } => expr_references_name(expr, name),
+        Expr::Cast { expr, .. } => collect_referenced_names(expr, out),
         Expr::TakePtr(e) | Expr::TakeRef(e) | Expr::Deref(e) | Expr::Negate(e) => {
-            expr_references_name(e, name)
+            collect_referenced_names(e, out);
         }
-        Expr::FormatString(fs) => fs.parts.iter().any(|p| {
-            if let FormatPart::Expr(e) = p {
-                expr_references_name(e, name)
-            } else {
-                false
+        Expr::FormatString(fs) => {
+            for p in &fs.parts {
+                if let FormatPart::Expr(e) = p {
+                    collect_referenced_names(e, out);
+                }
             }
-        }),
-        Expr::Range(range) => {
-            expr_references_name(&range.start, name) || expr_references_name(&range.end, name)
         }
-        Expr::TypeGeneric { .. } => type_surface_references_name(expr, name),
-        Expr::TypeNominal(..) | Expr::TypeQualified(_) => false,
+        Expr::Range(range) => {
+            collect_referenced_names(&range.start, out);
+            collect_referenced_names(&range.end, out);
+        }
+        Expr::TypeGeneric { .. } => collect_type_surface_refs(expr, out),
         Expr::Lit(_)
         | Expr::SelfRef(_)
         | Expr::AnonymousTag(..)
         | Expr::TagCall(_)
-        | Expr::Asm(_) => false,
+        | Expr::Asm(_)
+        | Expr::TypeNominal(..)
+        | Expr::TypeQualified(_) => {}
+    }
+}
+
+/// Collect names referenced inside a bind's value.
+fn collect_bind_value_refs(bind: &Bind, out: &mut HashSet<Intern<String>>) {
+    match bind.value() {
+        BindValue::Expr(e) => collect_referenced_names(e, out),
+        BindValue::Body { exprs, ret } => {
+            for e in exprs {
+                collect_referenced_names(e, out);
+            }
+            if let Some(e) = &ret.0 {
+                collect_referenced_names(e, out);
+            }
+        }
+        BindValue::Extern => {}
+    }
+}
+
+fn collect_type_pattern_refs(surface: &Expr, out: &mut HashSet<Intern<String>>) {
+    let Expr::TypeGeneric { params, .. } = surface else {
+        return;
+    };
+    for (_, pk) in params {
+        match pk {
+            ParameterKind::Default(e) => collect_referenced_names(&e.0, out),
+            ParameterKind::Tagged(sp) => collect_type_surface_refs(&sp.0, out),
+            ParameterKind::Generic => {}
+        }
+    }
+}
+
+fn collect_type_surface_refs(e: &Expr, out: &mut HashSet<Intern<String>>) {
+    if let Expr::TypeGeneric { params, .. } = e {
+        for (_, pk) in params {
+            match pk {
+                ParameterKind::Default(e) => collect_referenced_names(&e.0, out),
+                ParameterKind::Tagged(sp) => collect_type_surface_refs(&sp.0, out),
+                ParameterKind::Generic => {}
+            }
+        }
     }
 }
 

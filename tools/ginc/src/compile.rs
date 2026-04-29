@@ -678,7 +678,7 @@ fn print_diagnostics(
 
     for (i, parsed) in parsed_files.iter().enumerate() {
         let filename = parsed.filename();
-        let span_table = &parsed.output.span_table;
+        let span_table = parsed.output.ast.span_table();
 
         let mut symptoms = parsed.output.symptoms.clone();
 

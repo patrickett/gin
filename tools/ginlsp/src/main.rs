@@ -196,7 +196,7 @@ impl Backend {
             let symptom_refs: Vec<&Diagnostics> = wrapped.iter().collect();
 
             let diagnostics =
-                symptoms_to_diagnostics(&source, &parse.span_table, &symptom_refs);
+                symptoms_to_diagnostics(&source, parse.ast.span_table(), &symptom_refs);
             self.client
                 .publish_diagnostics(pkg_uri, diagnostics, None)
                 .await;

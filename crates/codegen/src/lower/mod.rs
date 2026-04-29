@@ -154,7 +154,7 @@ pub struct CodegenContext<'a, 'c> {
     pub string_symbols: RefCell<HashMap<String, String>>,
     pub string_counter: Cell<usize>,
     /// Maps variable name → its resolved Ty, used for field-access lowering.
-    pub var_types: RefCell<HashMap<String, Ty>>,
+    pub var_types: RefCell<HashMap<Intern<String>, Ty>>,
     /// Names of mutable (`:`) local variables — their symtab value is an alloca ptr.
     /// Cleared at the start of each top-level function lower.
     pub mutable_slots: RefCell<HashSet<String>>,
@@ -242,7 +242,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
 
 impl LocalTypes for CodegenContext<'_, '_> {
     fn get_type(&self, name: &Intern<String>) -> Option<Ty> {
-        self.var_types.borrow().get(name.as_str()).cloned()
+        self.var_types.borrow().get(name).cloned()
     }
 }
 
@@ -719,13 +719,7 @@ impl<'c> Lower<'c> for Expr {
             }
             Expr::Cast { expr, ty } => {
                 let val = expr.lower(ctx, block, symtab)?;
-                let locals: HashMap<Intern<String>, Ty> = ctx
-                    .var_types
-                    .borrow()
-                    .iter()
-                    .map(|(k, v)| (Intern::<String>::from_ref(k), v.clone()))
-                    .collect();
-                let src_ty = expr.0.infer_ty(&ctx.ty_env.infer_env(&locals));
+                let src_ty = expr.0.infer_ty(&ctx.ty_env.infer_env(&*ctx.var_types.borrow()));
                 let dst_ty = ctx.ty_env.lookup_tag(*ty).cloned().unwrap_or(Ty::Int {
                     width: 64,
                     signed: true,
@@ -738,13 +732,7 @@ impl<'c> Lower<'c> for Expr {
             }
             Expr::Deref(inner) => {
                 let ptr = inner.lower(ctx, block, symtab)?;
-                let locals: HashMap<Intern<String>, Ty> = ctx
-                    .var_types
-                    .borrow()
-                    .iter()
-                    .map(|(k, v)| (Intern::<String>::from_ref(k), v.clone()))
-                    .collect();
-                let pointee_ty = match inner.0.infer_ty(&ctx.ty_env.infer_env(&locals)) {
+                let pointee_ty = match inner.0.infer_ty(&ctx.ty_env.infer_env(&*ctx.var_types.borrow())) {
                     Ty::Ptr { inner } | Ty::Ref { inner } => *inner,
                     _ => Ty::Int {
                         width: 64,
@@ -759,13 +747,7 @@ impl<'c> Lower<'c> for Expr {
             Expr::Negate(inner) => {
                 let val = inner.lower(ctx, block, symtab)?;
                 let loc = ctx.location();
-                let locals: HashMap<Intern<String>, Ty> = ctx
-                    .var_types
-                    .borrow()
-                    .iter()
-                    .map(|(k, v)| (Intern::<String>::from_ref(k), v.clone()))
-                    .collect();
-                let ty = inner.infer_ty(&ctx.ty_env.infer_env(&locals));
+                let ty = inner.infer_ty(&ctx.ty_env.infer_env(&*ctx.var_types.borrow()));
                 if ty.is_float() {
                     let neg_op = OperationBuilder::new("arith.negf", loc)
                         .add_operands(&[val])
@@ -863,7 +845,7 @@ pub fn lower_function<'c>(
             symtab.insert(param_name.as_str().to_string(), arg.into());
             ctx.var_types
                 .borrow_mut()
-                .insert(param_name.as_str().to_string(), param_ty.clone());
+                .insert(*param_name, param_ty.clone());
         }
 
         let result = lower_bind_value(ctx, &block, bind.value(), &symtab)?;
@@ -906,9 +888,9 @@ fn lower_take_ptr<'c>(
         && call.path.segments.is_empty()
         && call.args.is_none()
     {
-        let name = call.path.root.as_str();
-        if ctx.mutable_slots.borrow().contains(name) {
-            let var_ty = ctx.var_types.borrow().get(name).cloned();
+        let name = call.path.root;
+        if ctx.mutable_slots.borrow().contains(name.as_str()) {
+            let var_ty = ctx.var_types.borrow().get(&name).cloned();
             if matches!(
                 var_ty,
                 Some(Ty::Array { .. }) | Some(Ty::Ptr { .. }) | Some(Ty::Ref { .. })
@@ -917,20 +899,14 @@ fn lower_take_ptr<'c>(
                 // pointer itself — evaluate normally to load it from the slot.
                 return inner.lower(ctx, block, symtab);
             }
-            if let Some(&ptr) = symtab.get(name) {
+            if let Some(&ptr) = symtab.get(name.as_str()) {
                 return Some(ptr);
             }
         }
     }
     // Otherwise evaluate the inner expression and spill to a fresh alloca.
     let val = inner.0.lower(ctx, block, symtab)?;
-    let locals: HashMap<Intern<String>, Ty> = ctx
-        .var_types
-        .borrow()
-        .iter()
-        .map(|(k, v)| (Intern::<String>::from_ref(k), v.clone()))
-        .collect();
-    let elem_ty = inner.infer_ty(&ctx.ty_env.infer_env(&locals));
+    let elem_ty = inner.infer_ty(&ctx.ty_env.infer_env(&*ctx.var_types.borrow()));
     let mlir_ty = ty_to_mlir(&elem_ty, ctx.mlir);
     let loc = ctx.location();
     let ptr = block.alloca_typed(ctx.mlir, mlir_ty, loc);
@@ -987,11 +963,11 @@ fn elem_ty_of_array_expr(base: &Spanned<Expr>, ctx: &CodegenContext) -> Ty {
         && call.path.segments.is_empty()
         && call.args.is_none()
     {
-        let name = call.path.root.as_str();
-        if let Some(Ty::Array { elem, .. }) = ctx.var_types.borrow().get(name).cloned() {
+        let name = call.path.root;
+        if let Some(Ty::Array { elem, .. }) = ctx.var_types.borrow().get(&name).cloned() {
             return *elem;
         }
-        if let Some(elem_ty) = ctx.global_const_elems.borrow().get(name).cloned() {
+        if let Some(elem_ty) = ctx.global_const_elems.borrow().get(name.as_str()).cloned() {
             return elem_ty;
         }
     }
@@ -1047,13 +1023,7 @@ fn lower_tuple_get<'c>(
 
     // If the base is a struct value (not a pointer), use extractvalue.
     if base_val.r#type() != ctx.mlir.llvm_ptr() {
-        let locals: HashMap<Intern<String>, Ty> = ctx
-            .var_types
-            .borrow()
-            .iter()
-            .map(|(k, v)| (Intern::<String>::from_ref(k), v.clone()))
-            .collect();
-        let base_ty = base.infer_ty(&ctx.ty_env.infer_env(&locals));
+        let base_ty = base.infer_ty(&ctx.ty_env.infer_env(&*ctx.var_types.borrow()));
         let field_ty = match base_ty {
             Ty::Tuple(ref fields) => fields
                 .get(index)

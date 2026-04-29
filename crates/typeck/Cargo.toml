@@ -16,3 +16,9 @@ lexer = { workspace = true }
 parser = { workspace = true }
 indoc = "2"
 crossbeam-channel = { workspace = true }
+criterion = { workspace = true }
+lexer = { workspace = true }
+
+[[bench]]
+name = "typeck_bench"
+harness = false

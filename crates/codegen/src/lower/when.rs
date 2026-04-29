@@ -1,6 +1,5 @@
 use crate::{prelude::*, ty_to_mlir};
 use ast::{type_surface_mangle_name, Expr};
-use internment::Intern;
 use typeck::{Ty, TyInfer};
 
 impl<'c> Lower<'c> for WhenExpr {
@@ -30,13 +29,7 @@ impl<'c> Lower<'c> for WhenExpr {
                     })
                 });
             body.map(|b| {
-                let locals: std::collections::HashMap<Intern<String>, typeck::Ty> = ctx
-                    .var_types
-                    .borrow()
-                    .iter()
-                    .map(|(k, v)| (Intern::<String>::from_ref(k), v.clone()))
-                    .collect();
-                let ty = b.infer_ty(&ctx.ty_env.infer_env(&locals));
+                let ty = b.infer_ty(&ctx.ty_env.infer_env(&*ctx.var_types.borrow()));
                 ty_to_mlir(&ty, ctx.mlir)
             })
             .unwrap_or_else(|| ctx.mlir.i64())

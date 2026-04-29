@@ -31,23 +31,20 @@ use ast::{AsmExpr, BinOp, Binary, FnCall, FormatPart, FormatString, Range, TagCa
 
 pub type ExprFn = fn(&mut TokenCursor) -> Spanned<Expr>;
 
-pub fn parse_tokens(tokens: &[(Token<'_>, SpanId)], mut span_table: SpanTable) -> FileAst {
-    let mut cursor = cursor::TokenCursor::new(tokens, &mut span_table);
-    let mut ast = crate::top_level::parse_file(&mut cursor, parse_expression as ExprFn);
-    ast.span_table = span_table;
-    ast
+pub fn parse_tokens(tokens: &[(Token<'_>, SpanId)], span_table: &mut SpanTable) -> FileAst {
+    let mut cursor = cursor::TokenCursor::new(tokens, span_table);
+    crate::top_level::parse_file(&mut cursor, parse_expression as ExprFn)
 }
 
 /// Parse tokens and return both the AST and any parse errors accumulated
 /// by the cursor during parsing.
 pub fn parse_tokens_with_errors(
     tokens: &[(Token<'_>, SpanId)],
-    mut span_table: SpanTable,
+    span_table: &mut SpanTable,
 ) -> (FileAst, Vec<ParseError>) {
-    let mut cursor = cursor::TokenCursor::new(tokens, &mut span_table);
-    let mut ast = crate::top_level::parse_file(&mut cursor, parse_expression as ExprFn);
+    let mut cursor = cursor::TokenCursor::new(tokens, span_table);
+    let ast = crate::top_level::parse_file(&mut cursor, parse_expression as ExprFn);
     let errors = std::mem::take(&mut cursor.errors);
-    ast.span_table = span_table;
     (ast, errors)
 }
 
@@ -63,8 +60,10 @@ pub fn parse_source(source: &str) -> FileAst {
             }
         })
         .collect();
-    let span_table = lexer.take_span_table();
-    parse_tokens(&tokens, span_table)
+    let mut span_table = lexer.take_span_table();
+    let mut ast = parse_tokens(&tokens, &mut span_table);
+    ast.span_table = span_table;
+    ast
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

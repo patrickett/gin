@@ -4,7 +4,7 @@
 //! information from ASTs without relying on incremental compilation
 //! infrastructure.
 
-use ast::span::{HasSpanId, SpanId, SpanTable};
+use ast::span::{HasSpanId, SpanId};
 use diagnostic::LexSymptom;
 use diagnostic::parse::ParseSymptom;
 use diagnostic::{Diagnostic, DiagnosticLike};
@@ -23,8 +23,6 @@ use flask::FlaskConfig;
 pub struct ParseOutput {
     /// The parsed abstract syntax tree.
     pub ast: FileAst,
-    /// Span table mapping SpanIds to byte ranges in the source.
-    pub span_table: SpanTable,
     /// All diagnostics collected during lexing and parsing.
     pub symptoms: Vec<Diagnostic>,
 }
@@ -37,7 +35,7 @@ pub fn parse_source_full(src: &str) -> ParseOutput {
     let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().collect();
     let lex_errors = std::mem::take(&mut lexer.errors);
-    let span_table = lexer.take_span_table();
+    let mut span_table = lexer.take_span_table();
 
     // Filter out comments for the handwritten parser
     let filtered_tokens: Vec<_> = tokens
@@ -46,11 +44,8 @@ pub fn parse_source_full(src: &str) -> ParseOutput {
         .copied()
         .collect();
 
-    // Clone span_table before passing ownership to parse_tokens_with_errors,
-    // since we also need it in the ParseOutput for diagnostic resolution.
-    let span_table_clone = span_table.clone();
-    let (ast, hw_parse_errors) = expr::parse_tokens_with_errors(&filtered_tokens, span_table);
-    let span_table = span_table_clone;
+    let (mut ast, hw_parse_errors) = expr::parse_tokens_with_errors(&filtered_tokens, &mut span_table);
+    ast.span_table = span_table;
 
     let mut symptoms: Vec<Diagnostic> = Vec::new();
 
@@ -112,7 +107,6 @@ pub fn parse_source_full(src: &str) -> ParseOutput {
 
     ParseOutput {
         ast,
-        span_table,
         symptoms,
     }
 }
