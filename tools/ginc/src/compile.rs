@@ -2,7 +2,7 @@
 
 use crate::cli::Args;
 use ast::FileAst;
-use codegen::emit::native;
+use codegen::emit;
 use diagnostic::Category;
 use flask::FlaskConfig;
 use lexer::debug_tokens;
@@ -175,7 +175,7 @@ fn merge_asts(files: &[ParsedFile]) -> FileAst {
 
 /// Print MLIR text to stdout.
 fn emit_mlir(merged_ast: &FileAst, ty_env: &TyEnv) {
-    let (result, symptoms) = native::build_module_text(merged_ast, "", "<stdin>", ty_env);
+    let (result, symptoms) = emit::build_module_text(merged_ast, "", "<stdin>", ty_env);
     match result {
         Some(mlir_text) => {
             for s in &symptoms {
@@ -216,7 +216,7 @@ fn emit_native(merged_ast: &FileAst, ty_env: &TyEnv, args: &Args, path: &Path, i
     let filename = path.to_string_lossy();
     let profile = args.profile.into();
     let (ok, symptoms) =
-        native::compile_to_object(merged_ast, &obj_path, profile, "", &filename, ty_env);
+        emit::compile_to_object(merged_ast, &obj_path, profile, "", &filename, ty_env);
     if !ok {
         for s in &symptoms {
             eprintln!("Codegen error: [{}] {}", s.error_code(), s.message);
@@ -230,7 +230,7 @@ fn emit_native(merged_ast: &FileAst, ty_env: &TyEnv, args: &Args, path: &Path, i
             .clone()
             .unwrap_or_else(|| path.with_extension(""));
         let (linked, link_symptoms) =
-            native::link_executable(&obj_path, &exe_path, args.target.as_deref());
+            emit::link_executable(&obj_path, &exe_path, args.target.as_deref());
         if !linked {
             for s in &link_symptoms {
                 eprintln!("Link error: [{}] {}", s.error_code(), s.message);
