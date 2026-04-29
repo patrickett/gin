@@ -118,7 +118,7 @@ pub type UnionVariants = Vec<(Intern<String>, UnionFields)>;
 /// Type alias for union variant fields: (variant_name, [(field_name, field_type)])
 type UnionVariant<'a> = (Intern<String>, Vec<(Intern<String>, Box<Ty>)>);
 
-fn ty_union_discriminant_size(num_variants: usize) -> usize {
+pub fn ty_union_discriminant_size(num_variants: usize) -> usize {
     if num_variants <= 256 {
         1
     } else if num_variants <= 65536 {

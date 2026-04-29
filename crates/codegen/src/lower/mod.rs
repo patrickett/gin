@@ -19,7 +19,7 @@ use ::span::SpanId;
 use diagnostic::codegen::CodegenSymptom;
 use diagnostic::{Diagnostic, DiagnosticCode, DiagnosticLike, TypeSymptom};
 use internment::Intern;
-use typeck::{LocalTypes, Ty, TyEnv, TyInfer, TyInferEnv};
+use typeck::{LocalTypes, Ty, TyEnv, TyInfer, TyInferEnv, ty_byte_size_static, ty_union_discriminant_size};
 
 /// Convert a resolved `Ty` to its MLIR `Type` representation.
 pub fn ty_to_mlir<'c>(ty: &Ty, ctx: &'c Context) -> Type<'c> {
@@ -32,47 +32,29 @@ pub fn ty_to_mlir<'c>(ty: &Ty, ctx: &'c Context) -> Type<'c> {
         Ty::Float { .. } => ctx.f64(),
         Ty::Bool => ctx.i1(),
         Ty::Union { variants, .. } => {
-            // Check if all variants have no fields
             let all_empty = variants.iter().all(|(_, fields)| fields.is_empty());
             if all_empty && variants.len() <= 256 {
-                // For simple enums like Bool (2 variants, no fields), use i1 or i8
                 if variants.len() == 2 {
                     ctx.i1()
                 } else {
                     IntegerType::new(ctx, 8).into()
                 }
             } else if all_empty {
-                // Many variants but no fields - use appropriate discriminant size
-                let discriminant_bits = if variants.len() <= 256 {
-                    8
-                } else if variants.len() <= 65536 {
-                    16
-                } else {
-                    64
-                };
+                let discriminant_bits = (ty_union_discriminant_size(variants.len()) * 8) as u32;
                 IntegerType::new(ctx, discriminant_bits).into()
             } else {
-                // Calculate discriminant size and max fields
-                let discriminant_bits = if variants.len() <= 256 {
-                    8
-                } else if variants.len() <= 65536 {
-                    16
-                } else {
-                    64
-                };
+                let discriminant_bits = (ty_union_discriminant_size(variants.len()) * 8) as u32;
                 let max_fields = variants
                     .iter()
                     .map(|(_, fields)| fields.len())
                     .max()
                     .unwrap_or(0);
                 let mut slot_types = vec![IntegerType::new(ctx, discriminant_bits).into()];
-                // Size each payload slot by the widest field type across all variants.
-                // This ensures i128 fields get an i128 slot rather than being truncated to i64.
                 for slot_idx in 0..max_fields {
                     let widest = variants
                         .iter()
                         .filter_map(|(_, fields)| fields.get(slot_idx))
-                        .map(|(_, ft)| ty_byte_size(ft))
+                        .map(|(_, ft)| ty_byte_size_static(ft))
                         .max()
                         .unwrap_or(8);
                     let slot_ty: Type<'c> = match widest {
@@ -679,7 +661,7 @@ impl<'c> Lower<'c> for Expr {
                 let ptr = buf.lower(ctx, block, symtab)?;
                 let idx = index.lower(ctx, block, symtab)?;
                 let elem_ty = elem_ty_of_array_expr(buf, ctx);
-                let elem_bytes = ty_byte_size(&elem_ty) as i64;
+                let elem_bytes = ty_byte_size_static(&elem_ty) as i64;
                 let byte_idx = if elem_bytes == 1 {
                     idx
                 } else {
@@ -701,7 +683,7 @@ impl<'c> Lower<'c> for Expr {
                 let idx = index.lower(ctx, block, symtab)?;
                 let val = value.lower(ctx, block, symtab)?;
                 let elem_ty = elem_ty_of_array_expr(buf, ctx);
-                let elem_bytes = ty_byte_size(&elem_ty) as i64;
+                let elem_bytes = ty_byte_size_static(&elem_ty) as i64;
                 let byte_idx = if elem_bytes == 1 {
                     idx
                 } else {
@@ -914,47 +896,6 @@ fn lower_take_ptr<'c>(
     Some(ptr)
 }
 
-/// Returns the number of bytes an element of type `ty` occupies in memory.
-fn ty_byte_size(ty: &Ty) -> usize {
-    match ty {
-        Ty::Int { width: 8, .. } => 1,
-        Ty::Int { width: 16, .. } => 2,
-        Ty::Int { width: 32, .. } => 4,
-        Ty::Int { width: 128, .. } => 16,
-        Ty::Int { .. } => 8,
-        Ty::Float { .. } => 8,
-        Ty::Bool => 1,
-        Ty::Array { .. } | Ty::Ptr { .. } | Ty::Ref { .. } => 8,
-        Ty::Unit | Ty::Opaque(_) | Ty::Record { .. } => 8,
-        Ty::Union { variants, .. } => {
-            // Check if all variants have no fields
-            let all_empty = variants.iter().all(|(_, fields)| fields.is_empty());
-            if all_empty && variants.len() <= 256 {
-                1
-            } else if all_empty {
-                // Discriminant size for many variants
-                if variants.len() <= 65536 { 2 } else { 8 }
-            } else {
-                // Discriminant + max field size
-                let discriminant_size = if variants.len() <= 256 {
-                    1
-                } else if variants.len() <= 65536 {
-                    2
-                } else {
-                    8
-                };
-                let max_field_size = variants
-                    .iter()
-                    .flat_map(|(_, fields)| fields.iter().map(|(_, ft)| ty_byte_size(ft)))
-                    .max()
-                    .unwrap_or(0);
-                discriminant_size + max_field_size
-            }
-        }
-        Ty::Tuple(fields) => fields.iter().map(ty_byte_size).sum(),
-    }
-}
-
 /// Look up the element type of a base expression that should have `Ty::Array`.
 /// Falls back to `Ty::Int { width: 8, signed: false }` (byte) if the type cannot be determined.
 fn elem_ty_of_array_expr(base: &Spanned<Expr>, ctx: &CodegenContext) -> Ty {
@@ -989,7 +930,7 @@ fn lower_tuple_alloc<'c>(
 
     // Infer element type from init expression.
     let elem_ty = init.infer_ty(&ctx.ty_env.infer_env(&HashMap::new()));
-    let elem_bytes = ty_byte_size(&elem_ty);
+    let elem_bytes = ty_byte_size_static(&elem_ty);
     let total_bytes = size * elem_bytes;
 
     // Allocate stack buffer. The buffer is uninitialized — callers write before reading.
@@ -1036,7 +977,7 @@ fn lower_tuple_get<'c>(
 
     // Existing pointer-based path (for TupleAlloc and global arrays).
     let elem_ty = elem_ty_of_array_expr(base, ctx);
-    let elem_bytes = ty_byte_size(&elem_ty);
+    let elem_bytes = ty_byte_size_static(&elem_ty);
     let elem_mlir_ty = ty_to_mlir(&elem_ty, ctx.mlir);
     let byte_offset = block.const_i64(ctx.mlir, (index * elem_bytes) as i64);
     let elem_ptr = block.gep_i8(ctx, base_val, byte_offset, loc)?;
@@ -1065,7 +1006,7 @@ fn lower_tuple_set<'c>(
     let ptr = base.lower(ctx, block, symtab)?;
 
     let elem_ty = elem_ty_of_array_expr(base, ctx);
-    let elem_bytes = ty_byte_size(&elem_ty);
+    let elem_bytes = ty_byte_size_static(&elem_ty);
 
     let byte_offset = block.const_i64(ctx.mlir, (index * elem_bytes) as i64);
     let elem_ptr = block.gep_i8(ctx, ptr, byte_offset, loc)?;
