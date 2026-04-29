@@ -1,5 +1,4 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use lexer::Lexer;
 use parser::parse_source_full;
 use typeck::TyEnv;
 
@@ -70,12 +69,16 @@ fn bench_typecheck(c: &mut Criterion) {
         let size = source.len();
         group.throughput(criterion::Throughput::Bytes(size as u64));
 
-        group.bench_with_input(BenchmarkId::new("full_pipeline", label), source, |b, src| {
-            b.iter(|| {
-                let ty_env = parse_and_typecheck(src);
-                std::hint::black_box(&ty_env);
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("full_pipeline", label),
+            source,
+            |b, src| {
+                b.iter(|| {
+                    let ty_env = parse_and_typecheck(src);
+                    std::hint::black_box(&ty_env);
+                });
+            },
+        );
     }
     group.finish();
 }
@@ -131,12 +134,16 @@ fn bench_check_unknowns(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_typecheck, bench_typecheck_only, bench_check_unknowns);
+criterion_group!(
+    benches,
+    bench_typecheck,
+    bench_typecheck_only,
+    bench_check_unknowns
+);
 criterion_main!(benches);
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn test_string_heavy_source() {

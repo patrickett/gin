@@ -34,13 +34,8 @@ fn bench_codegen(c: &mut Criterion) {
         |b, (ast, ty_env)| {
             b.iter(|| {
                 let context = melior::Context::new();
-                let result = codegen::build_module_with_context(
-                    &context,
-                    ast,
-                    &source,
-                    "bench.gin",
-                    ty_env,
-                );
+                let result =
+                    codegen::build_module_with_context(&context, ast, &source, "bench.gin", ty_env);
                 std::hint::black_box(&result);
             });
         },
@@ -54,7 +49,6 @@ criterion_main!(benches);
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn test_codegen_source_compiles() {
@@ -63,13 +57,8 @@ mod tests {
         assert!(!output.ast.defs().is_empty());
         let ty_env = TyEnv::from_file_ast(&output.ast);
         let context = melior::Context::new();
-        let result = codegen::build_module_with_context(
-            &context,
-            &output.ast,
-            &source,
-            "test.gin",
-            &ty_env,
-        );
+        let result =
+            codegen::build_module_with_context(&context, &output.ast, &source, "test.gin", &ty_env);
         assert!(result.0.is_some(), "codegen should succeed");
     }
 }
