@@ -10,8 +10,16 @@ pub use analysis::*;
 pub mod infer;
 pub use infer::*;
 
-mod r#type;
-pub use r#type::*;
+mod ty;
+pub use ty::*;
+
+mod resolve;
+pub use resolve::*;
+
+mod env;
+pub use env::*;
+
+mod check;
 
 mod salsa_update;
 

@@ -10,9 +10,9 @@
 //!   (tag types, function return types, local variable types).
 //! - [`LocalTypes`] abstracts over different local-variable representations so
 //!   inference works identically in typeck and codegen.
-//! - [`crate::r#type::resolve_type_expr_from_map`] resolves type-surface [`Expr`] nodes against a type map.
+//! - [`crate::resolve::resolve_type_expr_from_map`] resolves type-surface [`Expr`] nodes against a type map.
 //!
-//! For environment building, type checking, and diagnostics, see `type.rs`.
+//! For environment building, type checking, and diagnostics, see `env.rs` and `check.rs`.
 
 use std::collections::HashMap;
 
@@ -22,7 +22,7 @@ use ast::{
 };
 use internment::Intern;
 
-use crate::r#type::{is_type_surface, resolve_type_expr_from_map};
+use crate::resolve::{is_type_surface, resolve_type_expr_from_map};
 use crate::{Ty, str_record_ty};
 
 /// Abstracts over different "local variable" type representations.

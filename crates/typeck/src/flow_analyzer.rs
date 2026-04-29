@@ -1,10 +1,10 @@
 use crate::TyInfer;
-use crate::r#type::is_type_surface;
+use crate::resolve::is_type_surface;
 use crate::flow::{
     Bound, CmpOp, ConstValue, FlowAnalysis, FlowContext, ImpossibleCheck, IndexOutOfBounds,
     TypeConstraint,
 };
-use crate::r#type::{Ty, TyEnv};
+use crate::{Ty, TyEnv};
 use ast::SpanId;
 use ast::Spanned;
 use ast::{
