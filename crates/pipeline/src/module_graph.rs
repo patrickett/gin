@@ -55,7 +55,6 @@ pub fn detect_first_cycle(adj: &[Vec<ImportEdge>]) -> Option<ImportCycle> {
                     }
                 }
                 Mark::Visiting => {
-                    // Back-edge: u -> v closes a cycle. Reconstruct from v..end, then add v.
                     let start = stack_pos[v].unwrap_or(0);
                     let mut nodes = stack[start..].to_vec();
                     nodes.push(v);

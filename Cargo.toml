@@ -10,6 +10,7 @@ members = [
     "crates/codegen",
     "crates/database",
     "crates/parser",
+    "crates/pipeline",
     "tools/ginc",
     "tools/ginfmt",
     "tools/ginlsp",
@@ -32,6 +33,7 @@ codegen = { path = "crates/codegen" }
 database = { path = "crates/database" }
 parser = { path = "crates/parser" }
 ginfmt = { path = "tools/ginfmt" }
+pipeline = { path = "crates/pipeline" }
 dashmap = "6.1.0"
 indexmap = "2"
 log = "0.4"
