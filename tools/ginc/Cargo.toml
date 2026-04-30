@@ -9,7 +9,7 @@ diagnostic = { workspace = true }
 lexer = { workspace = true }
 typeck = { workspace = true }
 codegen = { workspace = true }
-pipeline = { workspace = true }
+resolve = { workspace = true }
 ariadne = "0.5.1"
 clap = { workspace = true }
 indexmap = { workspace = true }

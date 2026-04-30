@@ -1,5 +1,5 @@
 [package]
-name = "pipeline"
+name = "resolve"
 version = "0.1.0"
 edition = "2024"
 
@@ -7,6 +7,5 @@ edition = "2024"
 ast = { workspace = true }
 diagnostic = { workspace = true }
 parser = { workspace = true }
-typeck = { workspace = true }
 flask = { workspace = true }
 internment = "0.8"

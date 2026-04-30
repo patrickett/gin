@@ -1,14 +1,20 @@
-//! Compilation orchestration — thin wrapper around the pipeline crate.
+//! Compilation orchestration.
 
 use crate::cli::Args;
 use ast::FileAst;
 use codegen::emit;
-use diagnostic::Category;
+use diagnostic::{Category, Diagnostic};
 use flask::FlaskConfig;
 use lexer::debug_tokens;
-use pipeline::{ParsedFile, TypecheckResult};
+use parser::parse_source_full;
+use resolve::ParsedFile;
 use std::path::{Path, PathBuf};
 use typeck::TyEnv;
+
+struct TypecheckResult {
+    ty_env: TyEnv,
+    symptoms: Vec<Vec<Diagnostic>>,
+}
 
 /// Analogous to the `ginc` command
 pub struct GinCompiler;
@@ -35,7 +41,7 @@ impl GinCompiler {
         let is_library = path.is_dir();
         let sources = read_sources(&file_paths);
 
-        let files = pipeline::parse(&sources);
+        let files = parse(&sources);
 
         // Early exit for token dump
         if matches!(args.emit, crate::cli::Emit::Tokens) {
@@ -59,9 +65,9 @@ impl GinCompiler {
                 && let Some(config) = FlaskConfig::from_directory(&entry_dir)
             {
                 args.dependencies =
-                    pipeline::resolve::resolve_flask_path_dependencies(&config, &entry_dir);
+                    resolve::resolve_flask_path_dependencies(&config, &entry_dir);
             }
-            pipeline::resolve_imports(files, Some(&args.dependencies))
+            resolve::resolve_imports(files, Some(&args.dependencies))
         } else {
             files
         };
@@ -70,7 +76,7 @@ impl GinCompiler {
             return;
         }
 
-        let checked = pipeline::typecheck(&files);
+        let checked = typecheck(&files);
 
         if print_typecheck_diagnostics(&files, &checked) {
             return;
@@ -85,6 +91,32 @@ impl GinCompiler {
             crate::cli::Emit::Tokens => unreachable!(),
         }
     }
+}
+
+fn parse(sources: &[(PathBuf, String)]) -> Vec<ParsedFile> {
+    sources
+        .iter()
+        .map(|(path, source)| {
+            let output = parse_source_full(source);
+            ParsedFile {
+                path: path.clone(),
+                source: source.clone(),
+                output,
+            }
+        })
+        .collect()
+}
+
+fn typecheck(files: &[ParsedFile]) -> TypecheckResult {
+    let asts: Vec<_> = files.iter().map(|f| f.output.ast.clone()).collect();
+    let ty_env = TyEnv::from_multiple_file_asts(&asts);
+
+    let symptoms = asts
+        .iter()
+        .map(|ast| typeck::analyze_file_with_ty_env(ast, &ty_env))
+        .collect();
+
+    TypecheckResult { ty_env, symptoms }
 }
 
 /// Collect `.gin` file paths under `root`, skipping `target/` directories.
