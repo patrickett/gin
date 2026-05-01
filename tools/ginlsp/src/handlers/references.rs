@@ -17,25 +17,35 @@ impl Backend {
         let uri = params.text_document_position.text_document.uri.clone();
         let position = params.text_document_position.position;
 
-        if let Some(state) = self.documents.get(&uri.to_string()) {
-            if let Some(word) =
-                get_word_at_position(&state.source, position.line, position.character)
-            {
-                let snapshot = self.snapshot();
-                let ast = file_parse_output(&snapshot.db, state.file).ast.clone();
-                let locations: Vec<Location> = find_references(&ast, &word)
+        let (source, file) = match self.documents.get(&uri.to_string()) {
+            Some(state) => (state.source.clone(), state.file),
+            None => return Ok(None),
+        };
+
+        let Some(word) = get_word_at_position(&source, position.line, position.character) else {
+            return Ok(None);
+        };
+
+        // `file_parse_output` runs the parser; offload so a hang cannot pin
+        // the async runtime.
+        let uri_for_locs = uri.clone();
+        let locations = self
+            .run_blocking_request("references", move |this| {
+                let snapshot = this.snapshot();
+                let ast = file_parse_output(&snapshot.db, file).ast.clone();
+                find_references(&ast, &word)
                     .into_iter()
                     .map(|span| Location {
-                        uri: uri.clone(),
-                        range: span_to_range(span.start, span.end, &state.source),
+                        uri: uri_for_locs.clone(),
+                        range: span_to_range(span.start, span.end, &source),
                     })
-                    .collect();
-                if !locations.is_empty() {
-                    return Ok(Some(locations));
-                }
-            }
-        }
+                    .collect::<Vec<_>>()
+            })
+            .await;
 
-        Ok(None)
+        match locations {
+            Some(locs) if !locs.is_empty() => Ok(Some(locs)),
+            _ => Ok(None),
+        }
     }
 }

@@ -124,13 +124,10 @@ fn parse_body_exprs(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Vec<Spanne
                     }
                 }
 
-                let pos_before = cursor.pos();
+                cursor.advance_push();
                 let expr = expr_parser(cursor);
                 exprs.push(expr);
-                if cursor.pos() == pos_before {
-                    cursor.error("expression parser made no progress", cursor.current_span());
-                    cursor.advance();
-                }
+                cursor.advance_pop();
             }
             _ => break,
         }

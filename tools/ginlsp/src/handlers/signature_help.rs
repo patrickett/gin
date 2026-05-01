@@ -21,15 +21,23 @@ impl Backend {
             .to_string();
         let position = params.text_document_position_params.position;
 
-        if let Some(state) = self.documents.get(&uri) {
-            let snapshot = self.snapshot();
-            let ast = file_parse_output(&snapshot.db, state.file).ast.clone();
-            if let Some(help) = build_signature_help(&state.source, &ast, position) {
-                return Ok(Some(help));
-            }
-        }
+        // Drop the DashMap ref before the spawn_blocking await: it is `!Send`
+        // and would prevent the future from being scheduled. `file_parse_output`
+        // runs the parser via Salsa and is the part that can hang on bad input.
+        let (source, file) = match self.documents.get(&uri) {
+            Some(state) => (state.source.clone(), state.file),
+            None => return Ok(None),
+        };
 
-        Ok(None)
+        let result = self
+            .run_blocking_request("signature_help", move |this| {
+                let snapshot = this.snapshot();
+                let ast = file_parse_output(&snapshot.db, file).ast.clone();
+                build_signature_help(&source, &ast, position)
+            })
+            .await;
+
+        Ok(result.flatten())
     }
 }
 

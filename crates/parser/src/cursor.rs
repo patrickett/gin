@@ -22,6 +22,14 @@ pub struct TokenCursor<'src, 't> {
     pos: usize,
     last_consumed_pos: Option<usize>,
     sig_pos_cache: Cell<Option<usize>>,
+    /// Stack of saved positions for [`Self::advance_pop`] progress assertions.
+    /// See the section "Loop progress assertions" below.
+    advance_stack: Vec<usize>,
+    /// Optional cancellation hook invoked at every successful loop iteration
+    /// (i.e. inside [`Self::advance_pop`]). The hook may panic to abort the
+    /// parse — Salsa's `Cancelled` is the canonical use case. See "Cooperative
+    /// cancellation" below.
+    cancel_check: Option<&'t (dyn Fn() + 't)>,
     pub errors: Vec<ParseError>,
 }
 
@@ -33,7 +41,36 @@ impl<'src, 't> TokenCursor<'src, 't> {
             pos: 0,
             last_consumed_pos: None,
             sig_pos_cache: Cell::new(None),
+            advance_stack: Vec::new(),
+            cancel_check: None,
             errors: Vec::new(),
+        }
+    }
+
+    /// Builder: install a cancellation hook to be invoked once per parse-loop
+    /// iteration. The hook should panic (typically with `salsa::Cancelled`) to
+    /// abort the parse mid-flight — the hook itself never returns a value.
+    ///
+    /// # Cooperative cancellation
+    ///
+    /// Layer 1 (progress assertions) guarantees the parser terminates on any
+    /// input. Layer 2 (this hook) makes it *interruptible* — when a new edit
+    /// arrives mid-parse, the salsa write triggers cancellation, and the very
+    /// next loop iteration unwinds out of the parser via the hook's panic.
+    /// Without it, an in-flight parse on stale input runs to completion before
+    /// the new edit's compute can start.
+    pub fn with_cancel_check(mut self, check: &'t (dyn Fn() + 't)) -> Self {
+        self.cancel_check = Some(check);
+        self
+    }
+
+    /// Invoke the cancellation hook (if installed). Called from
+    /// [`Self::advance_pop`]; if the hook panics, the panic propagates up
+    /// through the parser stack to the caller of `parse_*`.
+    #[inline]
+    fn check_cancellation(&self) {
+        if let Some(check) = self.cancel_check {
+            check();
         }
     }
 
@@ -231,36 +268,6 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
     // ── Checkpoint / rewind ───────────────────────────────────────────────
 
-    // TODO: Add advance_push/advance_pop/advance_drop assertion API to catch
-    // infinite parse loops at the exact call site rather than via fuel or timeouts.
-    //
-    // Design: Before each loop iteration or recursive Pratt call, call advance_push()
-    // to record the current position. After the body, advance_pop() asserts that
-    // position increased (i.e., at least one token was consumed). If parsing bails
-    // without consuming (e.g., no infix operator found), advance_drop() discards the
-    // assertion without failing.
-    //
-    //   // In Pratt loop:
-    //   cursor.advance_push();
-    //   let rhs = parse_expression(cursor, right_binding_power);
-    //   cursor.advance_pop(); // panics if cursor didn't advance
-    //
-    //   // In "no match" branch:
-    //   cursor.advance_drop(); // OK, we didn't expect to advance
-    //
-    // Rationale: The current parser has a single progress check in parse_body_exprs
-    // (control.rs:92-98) that detects stalls after the fact and forces an advance.
-    // This works but produces unhelpful "expression parser made no progress" errors
-    // far from the actual buggy parse function. The push/pop pattern materializes
-    // the implicit "does this function always consume a token?" contract directly
-    // in the source, making infinite loops fail fast with an accurate stack trace.
-    //
-    // Implementation: Add a `advance_stack: Vec<usize>` field to TokenCursor.
-    // - advance_push(): push self.pos()
-    // - advance_pop(): pop and assert popped < self.pos()
-    // - advance_drop(): pop without assertion
-    // Ref: https://matklad.github.io/2025/12/28/parsing-advances.html
-
     pub fn checkpoint(&self) -> usize {
         self.pos
     }
@@ -268,6 +275,72 @@ impl<'src, 't> TokenCursor<'src, 't> {
     pub fn rewind(&mut self, pos: usize) {
         self.pos = pos;
         self.invalidate_cache();
+    }
+
+    // ── Loop progress assertions ──────────────────────────────────────────
+    //
+    // Materializes the implicit "this loop body always consumes a token"
+    // contract that recursive-descent parsers depend on. Wrap each parser
+    // production called inside a loop:
+    //
+    //   loop {
+    //       cursor.advance_push();
+    //       match parse_thing(cursor) {
+    //           Some(x) => { cursor.advance_pop(); /* consume x */ }
+    //           None    => { cursor.advance_drop(); break; }
+    //       }
+    //   }
+    //
+    // `advance_pop` panics if the cursor did not move past the saved position.
+    // `advance_drop` discards the saved position without checking — use it on
+    // the "no match, exit loop" branch, where not advancing is expected.
+    //
+    // Rationale: an infinite parse loop is by far the worst failure mode for
+    // an editor — silent, blocks the LSP, and recovery is impossible without
+    // killing the process. Asserting progress at the call site converts that
+    // class of bug into a panic with a precise stack trace that `catch_unwind`
+    // in the LSP can surface as an LSP error, and that tests can lock in.
+    // Ref: https://matklad.github.io/2025/12/28/parsing-advances.html
+
+    /// Record the current position so a later [`Self::advance_pop`] can assert
+    /// the cursor moved past it.
+    #[inline]
+    pub fn advance_push(&mut self) {
+        self.advance_stack.push(self.pos);
+    }
+
+    /// Pop the most recent [`Self::advance_push`] and panic if the cursor did
+    /// not advance past it. Use after a parser production succeeded inside a
+    /// loop body.
+    ///
+    /// After the progress assertion succeeds, this also invokes the
+    /// cancellation hook (if installed). This is the canonical place for the
+    /// check: every productive parser iteration funnels through here, so the
+    /// hook fires at most once per loop iteration but at least once per
+    /// iteration of every loop guarded by a push/pop pair.
+    #[inline]
+    #[track_caller]
+    pub fn advance_pop(&mut self) {
+        let prev = self
+            .advance_stack
+            .pop()
+            .expect("advance_pop called without matching advance_push");
+        assert!(
+            self.pos > prev,
+            "parse loop made no progress at pos={prev} \
+             (token={:?}); this is a parser bug — every iteration must consume at least one token",
+            self.tokens.get(prev).map(|(t, _)| t),
+        );
+        self.check_cancellation();
+    }
+
+    /// Pop the most recent [`Self::advance_push`] without asserting progress.
+    /// Use on the "no match, exit loop" branch where not advancing is intended.
+    #[inline]
+    pub fn advance_drop(&mut self) {
+        self.advance_stack
+            .pop()
+            .expect("advance_drop called without matching advance_push");
     }
 
     // ── Interning ─────────────────────────────────────────────────────────

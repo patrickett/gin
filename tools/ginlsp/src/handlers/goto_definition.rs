@@ -172,35 +172,42 @@ impl Backend {
             .clone();
         let position = params.text_document_position_params.position;
 
-        if let Some(state) = self.documents.get(&uri.to_string()) {
-            let snapshot = self.snapshot();
-            let ast = file_parse_output(&snapshot.db, state.file).ast.clone();
+        let (source, file) = match self.documents.get(&uri.to_string()) {
+            Some(state) => (state.source.clone(), state.file),
+            None => return Ok(None),
+        };
 
-            let byte_pos = position_to_byte_offset(&state.source, position.line, position.character);
+        // `file_parse_output` runs the parser via Salsa; offload so a stuck
+        // parse cannot pin the async runtime.
+        let response = self
+            .run_blocking_request("goto_definition", move |this| {
+                let snapshot = this.snapshot();
+                let ast = file_parse_output(&snapshot.db, file).ast.clone();
 
-            if let Some(byte_pos) = byte_pos {
-                if let Some(link) = self.resolve_use_import_at(&uri, &ast, &state.source, byte_pos)
+                if let Some(byte_pos) =
+                    position_to_byte_offset(&source, position.line, position.character)
                 {
-                    return Ok(Some(GotoDefinitionResponse::Link(vec![link])));
+                    if let Some(link) = this.resolve_use_import_at(&uri, &ast, &source, byte_pos) {
+                        return Some(GotoDefinitionResponse::Link(vec![link]));
+                    }
                 }
-            }
 
-            if let Some(word) =
-                get_word_at_position(&state.source, position.line, position.character)
-            {
-                let range = find_definition_span(&ast, &word)
-                    .map(|span| span_to_range(span.start, span.end, &state.source))
-                    .unwrap_or_default();
-                if range != Range::default() {
-                    return Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                        uri,
-                        range,
-                    })));
+                if let Some(word) =
+                    get_word_at_position(&source, position.line, position.character)
+                {
+                    let range = find_definition_span(&ast, &word)
+                        .map(|span| span_to_range(span.start, span.end, &source))
+                        .unwrap_or_default();
+                    if range != Range::default() {
+                        return Some(GotoDefinitionResponse::Scalar(Location { uri, range }));
+                    }
                 }
-            }
-        }
 
-        Ok(None)
+                None
+            })
+            .await;
+
+        Ok(response.flatten())
     }
 }
 

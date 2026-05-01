@@ -9,16 +9,31 @@ use diagnostics::symptoms_to_diagnostics;
 use futures::FutureExt;
 use state::{DocumentState, GinHost, JsonDocumentState};
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::ops::Deref;
+use std::time::Duration;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use database::{file_parse_output, sorted_package_files, PackageFiles, package_typecheck_symptoms};
 
-/// Shared LSP state. Heavy work (package diagnostics) is spawned so `shutdown`
-/// and other requests are not stuck behind `did_change` / `did_open`.
+/// Final safety net for a single package-wide diagnostic computation. Salsa
+/// cancellation already aborts in-flight work as soon as a new edit arrives
+/// (see [`Backend::run_blocking_request`] for the read-request equivalent),
+/// and the parser is now structurally guaranteed to terminate. This timeout
+/// only catches truly pathological compute that the type-checker hasn't been
+/// audited for yet — it should virtually never fire in practice.
+const DIAGNOSTIC_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Final safety net for a single read request. Edit-during-compute is handled
+/// by Salsa cancellation, so this only fires on type-checker pathologies.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Shared LSP state. Heavy work (package diagnostics) runs on the blocking
+/// pool so panicking/spinning parsers cannot starve the async runtime, and
+/// stale results are filtered via a monotonic generation counter rather than
+/// `JoinHandle::abort` (which is a no-op for sync CPU loops).
 pub(crate) struct GinLspBackend {
     pub(crate) client: Client,
     pub(crate) host: Arc<Mutex<GinHost>>,
@@ -26,8 +41,9 @@ pub(crate) struct GinLspBackend {
     pub(crate) json_documents: DashMap<String, JsonDocumentState>,
     pub(crate) config: RwLock<Option<flask::FlaskConfigHandle>>,
     pub(crate) shutdown: AtomicBool,
-    /// Latest in-flight `publish_diagnostics_for` task; aborted on new publish and on shutdown.
-    pub(crate) diagnostic_job: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Bumped on every `spawn_publish_diagnostics`. A worker that observes a
+    /// newer value than the one it was spawned with discards its results.
+    pub(crate) latest_diagnostic_gen: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -50,24 +66,88 @@ impl Backend {
             json_documents: DashMap::new(),
             config: RwLock::new(None),
             shutdown: AtomicBool::new(false),
-            diagnostic_job: Mutex::new(None),
+            latest_diagnostic_gen: AtomicU64::new(0),
         }))
     }
 
-    /// Update `documents` / host synchronously, then run diagnostics without blocking LSP I/O.
-    pub(crate) fn spawn_publish_diagnostics(&self, uri: Url, file: File, text: String) {
-        let mut slot = self.diagnostic_job.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(prev) = slot.take() {
-            prev.abort();
-        }
+    /// Bump the diagnostic generation and kick off a worker for it. The
+    /// caller must have already written the new file contents to the host
+    /// database (via [`state::GinHost::upsert_file`] in the document-sync
+    /// handlers); this is what arms Salsa cancellation against any earlier
+    /// in-flight worker.
+    pub(crate) fn spawn_publish_diagnostics(&self, uri: Url, file: File) {
+        let my_gen = self
+            .latest_diagnostic_gen
+            .fetch_add(1, Ordering::SeqCst)
+            .wrapping_add(1);
         let this = self.clone();
-        *slot = Some(tokio::spawn(async move {
-            this.publish_diagnostics_for(uri, file, &text).await;
-        }));
+        tokio::spawn(async move {
+            this.publish_diagnostics_for(uri, file, my_gen).await;
+        });
     }
 
     fn is_shutdown(&self) -> bool {
         self.shutdown.load(Ordering::SeqCst)
+    }
+
+    /// True if a newer `spawn_publish_diagnostics` has been issued since `my_gen`.
+    fn is_stale(&self, my_gen: u64) -> bool {
+        self.latest_diagnostic_gen.load(Ordering::SeqCst) != my_gen
+    }
+
+    /// Run a Salsa-touching request on the blocking pool with cooperative
+    /// cancellation. Returns `None` on shutdown, cancellation, panic, or
+    /// timeout — the LSP handler maps that to "no result" so the editor's
+    /// spinner clears.
+    ///
+    /// Cancellation flow: every Salsa setter call (e.g. `set_file_contents`
+    /// from `did_change`) bumps the database revision. In-flight queries on
+    /// snapshot clones detect the bumped revision at their next query
+    /// boundary and panic with [`salsa::Cancelled::PendingWrite`]. We catch
+    /// that here as a clean `Err` so the worker thread returns immediately
+    /// instead of running stale-and-doomed work to completion. This is the
+    /// idiomatic Salsa pattern and the reason rust-analyzer stays snappy on
+    /// large crates while you type.
+    ///
+    /// The wall-clock [`REQUEST_TIMEOUT`] is a final safety net for the case
+    /// where compute is slow but no edit has arrived to cancel it (e.g. an
+    /// unbounded type-checker recursion); it should virtually never fire.
+    async fn run_blocking_request<F, T>(&self, name: &'static str, f: F) -> Option<T>
+    where
+        F: FnOnce(Backend) -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        if self.is_shutdown() {
+            return None;
+        }
+        let this = self.clone();
+        let blocking = tokio::task::spawn_blocking(move || -> Option<T> {
+            // `Backend` contains `Mutex` / `RwLock` which poison on panic;
+            // catching `salsa::Cancelled` here cannot leave shared state in
+            // an unsafe limbo, so `AssertUnwindSafe` is sound. Same pattern
+            // as the existing `Backend::catch_request` panic handler.
+            // `Err(salsa::Cancelled)` means a new edit invalidated our
+            // snapshot — normal operation, not an error. The next request
+            // will be served from the fresher revision.
+            let work = AssertUnwindSafe(move || f(this));
+            salsa::Cancelled::catch(work).ok()
+        });
+        match tokio::time::timeout(REQUEST_TIMEOUT, blocking).await {
+            Ok(Ok(value)) => value,
+            Ok(Err(join_err)) => {
+                // Non-cancellation panic (real bug). Cancellations are
+                // converted to `None` inside the closure above.
+                eprintln!("[ginlsp] '{name}' worker panicked: {join_err}");
+                None
+            }
+            Err(_) => {
+                eprintln!(
+                    "[ginlsp] '{name}' exceeded {:?}; abandoning",
+                    REQUEST_TIMEOUT
+                );
+                None
+            }
+        }
     }
 
     fn lock_host(&self) -> std::sync::MutexGuard<'_, GinHost> {
@@ -149,13 +229,72 @@ impl Backend {
 
     /// Collect and publish diagnostics for every `.gin` file in the package
     /// that contains `trigger_file`.
-    async fn publish_diagnostics_for(&self, uri: Url, trigger_file: File, trigger_source: &str) {
-        if self.is_shutdown() {
+    ///
+    /// Cancellation: the worker runs on the blocking pool inside
+    /// [`salsa::Cancelled::catch`]. When a fresh `did_change` arrives during
+    /// compute, that handler's `set_file_contents` call bumps the database
+    /// revision and our worker's next Salsa query unwinds via Cancelled. We
+    /// observe an empty payload and publish nothing — the new edit will spawn
+    /// its own worker for the fresher state. [`DIAGNOSTIC_TIMEOUT`] only
+    /// triggers when compute is slow but no edit arrived to cancel it (e.g.
+    /// type-checker pathologies); in steady state it should never fire.
+    async fn publish_diagnostics_for(&self, uri: Url, trigger_file: File, my_gen: u64) {
+        if self.is_shutdown() || self.is_stale(my_gen) {
             return;
         }
         let pkg_root = self.package_root_for_uri(&uri);
 
-        // Discover all `.gin` files in the package directory.
+        let this = self.clone();
+        let blocking = tokio::task::spawn_blocking(move || -> Vec<(Url, Vec<Diagnostic>)> {
+            // `Err(salsa::Cancelled)` → empty payload → publish nothing; the
+            // newer worker that triggered the cancellation will publish.
+            let work =
+                AssertUnwindSafe(move || this.compute_package_diagnostics(pkg_root, trigger_file));
+            salsa::Cancelled::catch(work).unwrap_or_default()
+        });
+
+        let payload = match tokio::time::timeout(DIAGNOSTIC_TIMEOUT, blocking).await {
+            Ok(Ok(payload)) => payload,
+            Ok(Err(join_err)) => {
+                eprintln!("[ginlsp] diagnostic worker panicked: {join_err}");
+                return;
+            }
+            Err(_) => {
+                eprintln!(
+                    "[ginlsp] diagnostic computation exceeded {:?}; abandoning gen {}",
+                    DIAGNOSTIC_TIMEOUT, my_gen
+                );
+                return;
+            }
+        };
+
+        for (pkg_uri, diags) in payload {
+            if self.is_shutdown() || self.is_stale(my_gen) {
+                return;
+            }
+            self.client.publish_diagnostics(pkg_uri, diags, None).await;
+        }
+    }
+
+    /// Synchronous half of [`publish_diagnostics_for`]: discover package files,
+    /// run parse + typecheck on a Salsa snapshot, and assemble per-file
+    /// diagnostics. Cancellation is delivered by Salsa unwinding through this
+    /// function — the caller [`salsa::Cancelled::catch`]es it.
+    ///
+    /// Note: the trigger file's contents were already written to the host
+    /// database in `handle_did_change` before this worker spawned; we do not
+    /// re-write them here, both to avoid a redundant revision bump and to
+    /// ensure this worker's snapshot is consistent with the edit that
+    /// scheduled it.
+    fn compute_package_diagnostics(
+        &self,
+        pkg_root: Option<std::path::PathBuf>,
+        trigger_file: File,
+    ) -> Vec<(Url, Vec<Diagnostic>)> {
+        if self.is_shutdown() {
+            return Vec::new();
+        }
+
         let all_files: Vec<File> = if let Some(root) = &pkg_root {
             let mut host = self.lock_host();
             host.load_package(root).files
@@ -163,21 +302,22 @@ impl Backend {
             vec![trigger_file]
         };
 
-        {
-            let mut host = self.lock_host();
-            database::set_file_contents(&mut host.db, trigger_file, trigger_source.to_string());
-        }
         let snapshot = self.snapshot();
+
+        if self.is_shutdown() {
+            return Vec::new();
+        }
 
         let package_files = sorted_package_files(&snapshot.db, &all_files);
         let pkg = PackageFiles::new(&snapshot.db, package_files.clone());
         let typecheck_symptoms = package_typecheck_symptoms(&snapshot.db, pkg);
 
-        // Publish parse + type-check + flow diagnostics per file (Salsa-cached).
+        if self.is_shutdown() {
+            return Vec::new();
+        }
+
+        let mut results = Vec::with_capacity(package_files.len());
         for (i, &pkg_file) in package_files.iter().enumerate() {
-            if self.is_shutdown() {
-                return;
-            }
             let pkg_path = pkg_file.path(&snapshot.db);
             let pkg_uri = match Url::from_file_path(&pkg_path) {
                 Ok(u) => u,
@@ -187,21 +327,16 @@ impl Backend {
             let parse = file_parse_output(&snapshot.db, pkg_file);
             let source = pkg_file.contents(&snapshot.db).to_string();
             let mut symptoms = parse.symptoms.clone();
-
-            // Type-check and flow-analysis symptoms (shared package TyEnv)
             symptoms.extend(typecheck_symptoms[i].iter().cloned());
 
-            // Wrap symptoms for compatibility with symptoms_to_diagnostics
             let wrapped: Vec<Diagnostics> = symptoms.into_iter().map(Diagnostics).collect();
             let symptom_refs: Vec<&Diagnostics> = wrapped.iter().collect();
 
             let diagnostics =
                 symptoms_to_diagnostics(&source, parse.ast.span_table(), &symptom_refs);
-            self.client
-                .publish_diagnostics(pkg_uri, diagnostics, None)
-                .await;
-            tokio::task::yield_now().await;
+            results.push((pkg_uri, diagnostics));
         }
+        results
     }
 }
 

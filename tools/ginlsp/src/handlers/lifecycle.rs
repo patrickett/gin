@@ -54,18 +54,12 @@ impl Backend {
     pub(crate) async fn handle_initialized(&self, _: InitializedParams) {}
 
     pub(crate) async fn handle_shutdown(&self) -> Result<()> {
+        // In-flight diagnostic workers observe `shutdown` at their next
+        // staleness checkpoint and exit without publishing. We deliberately
+        // do not block on them: a wedged sync compute (which is the whole
+        // reason this path exists) cannot be cancelled, and shutdown must
+        // not hang on it.
         self.shutdown.store(true, Ordering::SeqCst);
-        let diagnostic_handle = {
-            let mut slot = self
-                .diagnostic_job
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            slot.take()
-        };
-        if let Some(handle) = diagnostic_handle {
-            handle.abort();
-            let _ = handle.await;
-        }
         self.documents.clear();
         self.json_documents.clear();
         Ok(())

@@ -831,3 +831,86 @@ fn hw_complexity_quadratic_product_expr() {
     assert_eq!(c.display_label(), "Quadratic(n * m)");
     assert_eq!(c.display_big_o(), "O((n * m)²)");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Partial-input regression — inputs the LSP routinely sees mid-keystroke.
+//
+// These cover the class of bug that motivated the cursor `advance_push` /
+// `advance_pop` progress assertions: mid-edit token streams that previously
+// could trip a parser loop into running forever (or into a soft-recovery
+// path that masked the real bug). They must all parse to *something* within
+// the timeout — the AST shape is irrelevant here, the contract is "parser
+// always terminates and never panics on incomplete user input".
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// `core.` with nothing after — the exact reproducer that froze the LSP
+/// from `modules/hello_world/main.gin` before the progress assertions landed.
+#[test]
+fn partial_dangling_dot_after_id() {
+    assert_handwritten_parses("main:\n    core.\nreturn 0\n");
+}
+
+#[test]
+fn partial_dangling_dot_at_top_level() {
+    assert_handwritten_parses("core.\n");
+}
+
+#[test]
+fn partial_double_dot() {
+    assert_handwritten_parses("main:\n    core..\nreturn 0\n");
+}
+
+#[test]
+fn partial_dangling_dot_eof_no_newline() {
+    assert_handwritten_parses("core.");
+}
+
+#[test]
+fn partial_dangling_use_keyword() {
+    assert_handwritten_parses("use\n");
+}
+
+#[test]
+fn partial_dangling_use_dot() {
+    assert_handwritten_parses("use core.\n");
+}
+
+#[test]
+fn partial_open_paren_eof() {
+    assert_handwritten_parses("main:\n    f(\nreturn 0\n");
+}
+
+#[test]
+fn partial_open_paren_id_eof() {
+    assert_handwritten_parses("main:\n    f(x\nreturn 0\n");
+}
+
+#[test]
+fn partial_dangling_binary_op() {
+    assert_handwritten_parses("main:\n    x: 1 +\nreturn 0\n");
+}
+
+#[test]
+fn partial_dangling_range_op() {
+    assert_handwritten_parses("main:\n    r: 1...\nreturn 0\n");
+}
+
+#[test]
+fn partial_unterminated_string() {
+    assert_handwritten_parses("main:\n    s: 'unclosed\nreturn 0\n");
+}
+
+#[test]
+fn partial_unterminated_format_string() {
+    assert_handwritten_parses("main:\n    s: \"hello {name\nreturn 0\n");
+}
+
+#[test]
+fn partial_bare_dot_in_body() {
+    assert_handwritten_parses("main:\n    .\nreturn 0\n");
+}
+
+#[test]
+fn partial_just_newlines_then_dot() {
+    assert_handwritten_parses("\n\n.\n");
+}

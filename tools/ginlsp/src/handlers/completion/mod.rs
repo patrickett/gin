@@ -31,11 +31,7 @@ impl Backend {
             .await;
 
         if let Some(state) = self.json_documents.get(&uri) {
-            let items = json::complete_flask_json(
-                &state.source,
-                position,
-                &params.text_document_position.text_document.uri,
-            );
+            let items = json::complete_flask_json(&state.source, position, &doc_uri);
             #[cfg(debug_assertions)]
             self.client
                 .log_message(
@@ -46,57 +42,73 @@ impl Backend {
             return Ok(Some(CompletionResponse::Array(items)));
         }
 
-        if let Some(state) = self.documents.get(&uri) {
-            let config = self.get_or_load_config(&params.text_document_position.text_document.uri);
-
-            if let Some(items) = path::use_completions(
-                &state.source,
-                position,
-                &params.text_document_position.text_document.uri,
-                config.as_ref(),
-            ) {
-                return Ok(Some(CompletionResponse::Array(items)));
+        // Snapshot what we need from the document store and drop the DashMap
+        // ref before any await: `Ref` holds a shard read-lock and is `!Send`.
+        let (source, file) = match self.documents.get(&uri) {
+            Some(state) => (state.source.clone(), state.file),
+            None => {
+                #[cfg(debug_assertions)]
+                self.client
+                    .log_message(
+                        MessageType::INFO,
+                        format!("No document found for URI: {}", uri),
+                    )
+                    .await;
+                return Ok(None);
             }
+        };
 
-            if let Some(byte_pos) =
-                position_to_byte_offset(&state.source, position.line, position.character)
-            {
-                let snapshot = self.snapshot();
-                let ast = file_parse_output(&snapshot.db, state.file).ast.clone();
-                let pkg_root = self.package_root_for_uri(&doc_uri);
-                let all_files = if let Some(root) = &pkg_root {
-                    let mut host = self.lock_host();
-                    host.load_package(root).files
-                } else {
-                    vec![state.file]
-                };
-                let package_files = sorted_package_files(&snapshot.db, &all_files);
-                let pkg = intern_package_files(&snapshot.db, package_files);
-                let ty_env = package_ty_env(&snapshot.db, pkg);
-
-                if let Some(ty) = dot_type_at(&state.source, &ast, &ty_env, byte_pos) {
-                    let items = dot_completions(ty);
-                    if !items.is_empty() {
-                        return Ok(Some(CompletionResponse::Array(items)));
-                    }
-                }
-            }
-
-            let snapshot = self.snapshot();
-            let ast = file_parse_output(&snapshot.db, state.file).ast.clone();
-            return Ok(Some(CompletionResponse::Array(build_completions(&ast))));
+        // `use` import path completion is filesystem-only and cheap; keep it
+        // on the async runtime so the common case stays fast.
+        let config = self.get_or_load_config(&doc_uri);
+        if let Some(items) = path::use_completions(&source, position, &doc_uri, config.as_ref()) {
+            return Ok(Some(CompletionResponse::Array(items)));
         }
 
-        #[cfg(debug_assertions)]
-        self.client
-            .log_message(
-                MessageType::INFO,
-                format!("No document found for URI: {}", uri),
-            )
+        // Heavy section: parse + package-wide TyEnv. Off-load so a wedged
+        // Salsa query (e.g. parser hang on `core.`) cannot pin an async worker.
+        let result = self
+            .run_blocking_request("completion", move |this| {
+                compute_completions(&this, doc_uri, source, file, position)
+            })
             .await;
 
-        Ok(None)
+        Ok(result.map(CompletionResponse::Array))
     }
+}
+
+/// Synchronous completion compute, intended to run on the blocking pool.
+fn compute_completions(
+    backend: &Backend,
+    doc_uri: Url,
+    source: String,
+    file: database::File,
+    position: Position,
+) -> Vec<CompletionItem> {
+    let snapshot = backend.snapshot();
+    let ast = file_parse_output(&snapshot.db, file).ast.clone();
+
+    if let Some(byte_pos) = position_to_byte_offset(&source, position.line, position.character) {
+        let pkg_root = backend.package_root_for_uri(&doc_uri);
+        let all_files = if let Some(root) = &pkg_root {
+            let mut host = backend.lock_host();
+            host.load_package(root).files
+        } else {
+            vec![file]
+        };
+        let package_files = sorted_package_files(&snapshot.db, &all_files);
+        let pkg = intern_package_files(&snapshot.db, package_files);
+        let ty_env = package_ty_env(&snapshot.db, pkg);
+
+        if let Some(ty) = dot_type_at(&source, &ast, &ty_env, byte_pos) {
+            let items = dot_completions(ty);
+            if !items.is_empty() {
+                return items;
+            }
+        }
+    }
+
+    build_completions(&ast)
 }
 
 pub(crate) fn build_completions(ast: &FileAst) -> Vec<CompletionItem> {

@@ -17,16 +17,36 @@ pub fn parse_file(cursor: &mut TokenCursor, expr_parser: ExprFn) -> FileAst {
     let imports = parse_imports(cursor);
 
     let mut public_elements = Vec::new();
-    while let Some(el) = parse_element_line(cursor, expr_parser) {
-        public_elements.push(el);
+    loop {
+        cursor.advance_push();
+        match parse_element_line(cursor, expr_parser) {
+            Some(el) => {
+                cursor.advance_pop();
+                public_elements.push(el);
+            }
+            None => {
+                cursor.advance_drop();
+                break;
+            }
+        }
     }
 
     let mut private_elements = Vec::new();
     cursor.skip_newlines();
     if cursor.eat(&Token::Private) {
         cursor.skip_newlines();
-        while let Some(el) = parse_element_line(cursor, expr_parser) {
-            private_elements.push(el);
+        loop {
+            cursor.advance_push();
+            match parse_element_line(cursor, expr_parser) {
+                Some(el) => {
+                    cursor.advance_pop();
+                    private_elements.push(el);
+                }
+                None => {
+                    cursor.advance_drop();
+                    break;
+                }
+            }
         }
     }
 
@@ -118,10 +138,16 @@ fn parse_module_doc(cursor: &mut TokenCursor) -> Option<ast::DocComment> {
 fn parse_imports(cursor: &mut TokenCursor) -> Vec<ast::Import> {
     let mut imports = Vec::new();
     while cursor.is_at(&Token::Use) {
-        if let Some(import) = crate::expr::import::parse_import(cursor) {
-            imports.push(import);
-        } else {
-            break;
+        cursor.advance_push();
+        match crate::expr::import::parse_import(cursor) {
+            Some(import) => {
+                cursor.advance_pop();
+                imports.push(import);
+            }
+            None => {
+                cursor.advance_drop();
+                break;
+            }
         }
     }
     imports

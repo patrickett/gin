@@ -1,4 +1,5 @@
 pub(crate) mod bind;
+pub(crate) mod body_trivia;
 pub(crate) mod control;
 pub(crate) mod r#import;
 mod literal;
@@ -42,7 +43,20 @@ pub fn parse_tokens_with_errors(
     tokens: &[(Token<'_>, SpanId)],
     span_table: &mut SpanTable,
 ) -> (FileAst, Vec<ParseError>) {
-    let mut cursor = cursor::TokenCursor::new(tokens, span_table);
+    parse_tokens_with_errors_cancellable(tokens, span_table, &|| {})
+}
+
+/// Same as [`parse_tokens_with_errors`] but installs a cancellation hook
+/// invoked once per successful parse-loop iteration. The hook should panic
+/// (typically with `salsa::Cancelled`) to abort the parse — the panic
+/// propagates up out of the parser to the caller, who is responsible for
+/// catching it (e.g. via `salsa::Cancelled::catch`).
+pub fn parse_tokens_with_errors_cancellable(
+    tokens: &[(Token<'_>, SpanId)],
+    span_table: &mut SpanTable,
+    cancel: &(dyn Fn() + '_),
+) -> (FileAst, Vec<ParseError>) {
+    let mut cursor = cursor::TokenCursor::new(tokens, span_table).with_cancel_check(cancel);
     let ast = crate::top_level::parse_file(&mut cursor, parse_expression as ExprFn);
     let errors = std::mem::take(&mut cursor.errors);
     (ast, errors)
@@ -114,8 +128,11 @@ fn parse_expr_min_prec(cursor: &mut TokenCursor, min_prec: u8) -> Spanned<Expr> 
     };
 
     loop {
+        cursor.advance_push();
+
         lhs = match apply_postfix(cursor, lhs) {
             Ok(postfixed) => {
+                cursor.advance_pop();
                 lhs = postfixed;
                 continue;
             }
@@ -124,7 +141,10 @@ fn parse_expr_min_prec(cursor: &mut TokenCursor, min_prec: u8) -> Spanned<Expr> 
 
         let token = match cursor.peek() {
             Some(t) => *t,
-            None => break,
+            None => {
+                cursor.advance_drop();
+                break;
+            }
         };
 
         // Range operator: `...` (precedence 2, left-associative)
@@ -138,8 +158,10 @@ fn parse_expr_min_prec(cursor: &mut TokenCursor, min_prec: u8) -> Spanned<Expr> 
                     Expr::Range(Range::new(lhs, rhs)),
                     merge_spans(lhs_span, rhs_span, cursor),
                 );
+                cursor.advance_pop();
                 continue;
             }
+            cursor.advance_drop();
             break;
         }
 
@@ -154,9 +176,11 @@ fn parse_expr_min_prec(cursor: &mut TokenCursor, min_prec: u8) -> Spanned<Expr> 
                 Expr::Binary(Binary::new(lhs, binop, rhs)),
                 merge_spans(lhs_span, rhs_span, cursor),
             );
+            cursor.advance_pop();
             continue;
         }
 
+        cursor.advance_drop();
         break;
     }
 
@@ -765,21 +789,24 @@ fn parse_format_string_expr(cursor: &mut TokenCursor) -> Spanned<Expr> {
 
     let mut parts = Vec::new();
 
-    // TODO: go through codebase and remove loop {...}
     loop {
+        cursor.advance_push();
         match cursor.peek() {
             Some(Token::FormatStringText(s)) => {
                 parts.push(FormatPart::Text(unescape(s)));
                 cursor.advance();
+                cursor.advance_pop();
             }
             Some(Token::FormatInterpStart) => {
                 cursor.advance();
                 let expr = parse_expression(cursor);
                 parts.push(FormatPart::Expr(Box::new(expr)));
                 cursor.expect(&Token::FormatInterpEnd);
+                cursor.advance_pop();
             }
             Some(Token::FormatStringDelim) => {
                 cursor.advance(); // consume closing "
+                cursor.advance_drop();
                 let end_span = last_consumed_span(cursor);
                 return Spanned(
                     Expr::FormatString(FormatString { parts }),
@@ -787,6 +814,7 @@ fn parse_format_string_expr(cursor: &mut TokenCursor) -> Spanned<Expr> {
                 );
             }
             Some(Token::UnterminatedFormatString) | None => {
+                cursor.advance_drop();
                 let span = cursor.current_span();
                 cursor.error("unterminated format string", span);
                 return Spanned(
@@ -798,6 +826,7 @@ fn parse_format_string_expr(cursor: &mut TokenCursor) -> Spanned<Expr> {
                 let span = cursor.current_span();
                 cursor.error("unexpected token in format string", span);
                 cursor.advance();
+                cursor.advance_pop();
             }
         }
     }

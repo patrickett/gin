@@ -29,14 +29,8 @@ impl Backend {
         };
 
         if let Some(file) = file {
-            self.documents.insert(
-                uri,
-                DocumentState {
-                    source: text.clone(),
-                    file,
-                },
-            );
-            self.spawn_publish_diagnostics(uri_for_diag, file, text);
+            self.documents.insert(uri, DocumentState { source: text, file });
+            self.spawn_publish_diagnostics(uri_for_diag, file);
         }
 
         #[cfg(debug_assertions)]
@@ -74,14 +68,8 @@ impl Backend {
             };
 
             if let Some(file) = file {
-                self.documents.insert(
-                    uri,
-                    DocumentState {
-                        source: text.clone(),
-                        file,
-                    },
-                );
-                self.spawn_publish_diagnostics(uri_for_diag, file, text);
+                self.documents.insert(uri, DocumentState { source: text, file });
+                self.spawn_publish_diagnostics(uri_for_diag, file);
             }
         }
 
@@ -126,7 +114,7 @@ impl Backend {
                         file,
                     },
                 );
-                self.spawn_publish_diagnostics(uri_for_diag, file, text.clone());
+                self.spawn_publish_diagnostics(uri_for_diag, file);
             }
         }
 
