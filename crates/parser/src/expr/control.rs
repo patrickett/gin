@@ -100,6 +100,7 @@ fn parse_for_pattern(cursor: &mut TokenCursor) -> Option<Spanned<Expr>> {
 fn parse_body_exprs(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Vec<Spanned<Expr>> {
     let mut exprs = Vec::new();
     loop {
+        super::body_trivia::skip_expr_body_trivia(cursor);
         match cursor.peek() {
             Some(t) if can_start_expr(t) => {
                 // Fast path: in body context, Id followed by : or := is always a bind.
