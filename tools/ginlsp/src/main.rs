@@ -10,7 +10,8 @@ use futures::FutureExt;
 use state::{DocumentState, GinHost, JsonDocumentState};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::ops::Deref;
 use std::time::Duration;
 use tower_lsp::jsonrpc::Result;
@@ -30,6 +31,23 @@ const DIAGNOSTIC_TIMEOUT: Duration = Duration::from_secs(10);
 /// by Salsa cancellation, so this only fires on type-checker pathologies.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Canonical directory containing `flask.jsonc` for `from_dir`, if any (walks upward like
+/// [`flask::FlaskConfigHandle::load`]).
+fn package_root_containing(from_dir: &Path) -> Option<std::path::PathBuf> {
+    let mut search = from_dir.to_path_buf();
+    loop {
+        search.push(flask::PACKAGE_CONFIG_NAME);
+        if search.exists() {
+            search.pop();
+            return std::fs::canonicalize(&search).ok().or(Some(search));
+        }
+        search.pop();
+        if !search.pop() {
+            return None;
+        }
+    }
+}
+
 /// Shared LSP state. Heavy work (package diagnostics) runs on the blocking
 /// pool so panicking/spinning parsers cannot starve the async runtime, and
 /// stale results are filtered via a monotonic generation counter rather than
@@ -39,7 +57,9 @@ pub(crate) struct GinLspBackend {
     pub(crate) host: Arc<Mutex<GinHost>>,
     pub(crate) documents: DashMap<String, DocumentState>,
     pub(crate) json_documents: DashMap<String, JsonDocumentState>,
-    pub(crate) config: RwLock<Option<flask::FlaskConfigHandle>>,
+    /// One cached [`flask::FlaskConfigHandle`] per package root (`flask.jsonc` directory).
+    /// Unlike a single global handle, this stays correct in multi-package workspaces.
+    pub(crate) package_configs: DashMap<std::path::PathBuf, flask::FlaskConfigHandle>,
     pub(crate) shutdown: AtomicBool,
     /// Bumped on every `spawn_publish_diagnostics`. A worker that observes a
     /// newer value than the one it was spawned with discards its results.
@@ -64,7 +84,7 @@ impl Backend {
             host: Arc::new(Mutex::new(GinHost::new())),
             documents: DashMap::new(),
             json_documents: DashMap::new(),
-            config: RwLock::new(None),
+            package_configs: DashMap::new(),
             shutdown: AtomicBool::new(false),
             latest_diagnostic_gen: AtomicU64::new(0),
         }))
@@ -154,14 +174,6 @@ impl Backend {
         self.host.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn read_config(&self) -> std::sync::RwLockReadGuard<'_, Option<flask::FlaskConfigHandle>> {
-        self.config.read().unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn write_config(&self) -> std::sync::RwLockWriteGuard<'_, Option<flask::FlaskConfigHandle>> {
-        self.config.write().unwrap_or_else(|e| e.into_inner())
-    }
-
     async fn catch_request<T: Send + 'static>(
         &self,
         name: &str,
@@ -198,23 +210,19 @@ impl Backend {
     }
 
     fn get_or_load_config(&self, file_uri: &Url) -> Option<flask::FlaskConfigHandle> {
-        {
-            let config = self.read_config();
-            if config.is_some() {
-                return config.clone();
-            }
-        }
-
         let file_path = file_uri.to_file_path().ok()?;
         let file_dir = file_path.parent()?;
 
-        if let Ok(handle) = flask::FlaskConfigHandle::load(file_dir) {
-            let mut config = self.write_config();
-            *config = Some(handle.clone());
-            return Some(handle);
+        let cache_key = package_root_containing(file_dir)?;
+
+        if let Some(existing) = self.package_configs.get(&cache_key) {
+            return Some(existing.clone());
         }
 
-        None
+        let loaded = flask::FlaskConfigHandle::load(file_dir).ok()?;
+        self.package_configs
+            .insert(cache_key, loaded.clone());
+        Some(loaded)
     }
 
     /// Determine the package root directory for a file URI.

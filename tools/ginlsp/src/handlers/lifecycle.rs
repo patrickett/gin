@@ -62,6 +62,7 @@ impl Backend {
         self.shutdown.store(true, Ordering::SeqCst);
         self.documents.clear();
         self.json_documents.clear();
+        self.package_configs.clear();
         Ok(())
     }
 }
