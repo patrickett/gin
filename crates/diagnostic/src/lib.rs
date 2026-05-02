@@ -4,7 +4,7 @@
 //! flaw/help/info types produced by the compiler, with support for:
 //! - Source spans (using 0..0 for diagnostics without a location)
 //! - Severity levels (Flaw, Hint, Info)
-//! - Error codes (`{stage}-{name}` format, e.g. `lex-unexpected-char`)
+//! - Error codes (`{stage}-{name}` format, e.g. `lex-unexpected-character`)
 
 mod category;
 mod code;
@@ -25,6 +25,9 @@ pub struct RelatedSpan {
 pub struct Diagnostic {
     pub code: DiagnosticCode,
     pub message: String,
+    /// Shown on the source underline in terminal reports. When set with [`Self::help`], the
+    /// latter is rendered as a separate `help: …` line (LSP and ariadne).
+    pub help_on_span: Option<String>,
     pub help: Option<String>,
     pub span_id: SpanId,
     pub category: Category,
@@ -33,14 +36,19 @@ pub struct Diagnostic {
 
 /// Trait for domain-specific diagnostic types that know how to describe themselves.
 ///
-/// Implementors provide their message, help text, and category. The `into_diagnostic`
-/// default impl handles the mechanical work of wrapping into a `Diagnostic`.
+/// Implementors provide their message, optional `help` / `help_on_span`, and category.
+/// The `into_diagnostic` default impl wraps them into a [`Diagnostic`].
 pub trait DiagnosticLike: Sized {
     /// The primary message for this diagnostic.
     fn message(&self) -> String;
 
     /// Optional help text suggesting how to fix the issue.
     fn help(&self) -> Option<String> {
+        None
+    }
+
+    /// Optional text on the span underline in terminal output (see [`Diagnostic::help_on_span`]).
+    fn help_on_span(&self) -> Option<String> {
         None
     }
 
@@ -55,11 +63,13 @@ pub trait DiagnosticLike: Sized {
         Self: Into<DiagnosticCode>,
     {
         let message = self.message();
+        let help_on_span = self.help_on_span();
         let help = self.help();
         let category = self.category();
         let code: DiagnosticCode = self.into();
         Diagnostic {
             message,
+            help_on_span,
             help,
             category,
             code,
@@ -71,7 +81,7 @@ pub trait DiagnosticLike: Sized {
 
 impl Diagnostic {
     pub fn error_code(&self) -> &str {
-        self.code.as_ref()
+        self.code.slug()
     }
 
     /// Pretty-print this diagnostic using ariadne with source context.
@@ -100,24 +110,75 @@ impl Diagnostic {
             return;
         }
 
+        let color = self.category.color();
+
         if start < end {
-            let mut label = Label::new((filename, span)).with_color(self.category.color());
+            let underline = self
+                .help_on_span
+                .as_deref()
+                .or(self.help.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
 
-            if let Some(help) = &self.help {
-                label = label.with_message(help);
+            let mut primary = Label::new((filename, span.clone())).with_color(color);
+            if let Some(m) = underline {
+                primary = primary.with_message(m);
             }
+            builder = builder.with_label(primary);
 
-            builder = builder.with_label(label);
+            if self.help_on_span.is_some() {
+                if let Some(h) = self
+                    .help
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    let point = start..start;
+                    let secondary = Label::new((filename, point))
+                        .with_color(color)
+                        .with_message(format!("help: {h}"))
+                        .with_order(1);
+                    builder = builder.with_label(secondary);
+                }
+            }
         } else if start > 0 {
             let back = (start - 1)..start;
+            let underline = self
+                .help_on_span
+                .as_deref()
+                .or(self.help.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+
             let mut label = Label::new((filename, back))
-                .with_color(self.category.color())
+                .with_color(color)
                 .with_message("here");
-            if let Some(help) = &self.help {
-                label = label.with_message(help);
+            if let Some(m) = underline {
+                label = label.with_message(m);
             }
             builder = builder.with_label(label);
-        } else if let Some(help) = &self.help {
+
+            if self.help_on_span.is_some() {
+                if let Some(h) = self
+                    .help
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    let point = start..start;
+                    let secondary = Label::new((filename, point))
+                        .with_color(color)
+                        .with_message(format!("help: {h}"))
+                        .with_order(1);
+                    builder = builder.with_label(secondary);
+                }
+            }
+        } else if let Some(help) = self
+            .help
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
             builder = builder.with_note(help);
         }
 

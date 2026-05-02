@@ -1,14 +1,12 @@
-use strum::AsRefStr;
-
 use crate::DiagnosticLike;
 
-#[derive(Debug, Clone, PartialEq, Eq, AsRefStr)]
+#[derive(Debug, Clone, PartialEq, Eq, strum::AsRefStr)]
 pub enum IoSymptom {
-    #[strum(to_string = "io-read-failed")]
+    #[strum(serialize = "io-read-failed")]
     ReadFailed,
-    #[strum(to_string = "io-write-failed")]
+    #[strum(serialize = "io-write-failed")]
     WriteFailed,
-    #[strum(to_string = "io-resolution-failed")]
+    #[strum(serialize = "io-resolution-failed")]
     ResolutionFailed,
 }
 

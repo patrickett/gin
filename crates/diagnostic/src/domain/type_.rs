@@ -1,40 +1,42 @@
-use strum::AsRefStr;
-
 use crate::{Category, DiagnosticLike};
 
-#[derive(Debug, Clone, PartialEq, Eq, AsRefStr)]
+#[derive(Debug, Clone, PartialEq, Eq, strum::AsRefStr)]
 pub enum TypeSymptom {
-    #[strum(to_string = "type-mismatch")]
+    #[strum(serialize = "type-mismatch")]
     Mismatch,
-    #[strum(to_string = "type-unknown-binding")]
-    UnknownBinding { name: String },
-    #[strum(to_string = "type-unknown-tag")]
+    #[strum(serialize = "type-unknown-binding")]
+    UnknownBinding {
+        name: String,
+        /// Closest in-scope name (imports, functions, tags) within edit distance ≤ 2.
+        did_you_mean: Option<String>,
+    },
+    #[strum(serialize = "type-unknown-tag")]
     UnknownTag { name: String },
-    #[strum(to_string = "type-inference-failed")]
+    #[strum(serialize = "type-inference-failed")]
     InferenceFailed,
-    #[strum(to_string = "type-constraint-violation")]
+    #[strum(serialize = "type-constraint-violation")]
     ConstraintViolation {
         param: String,
         expected: String,
         got: String,
     },
-    #[strum(to_string = "type-unresolved-type-param")]
+    #[strum(serialize = "type-unresolved-type-param")]
     UnresolvedTypeParam { name: String },
-    #[strum(to_string = "type-arity-mismatch")]
+    #[strum(serialize = "type-arity-mismatch")]
     ArityMismatch {
         name: String,
         expected: usize,
         got: usize,
     },
-    #[strum(to_string = "type-index-out-of-bounds")]
+    #[strum(serialize = "type-index-out-of-bounds")]
     IndexOutOfBounds { index: i128, size: usize },
-    #[strum(to_string = "type-unused-binding")]
+    #[strum(serialize = "type-unused-binding")]
     UnusedBinding { name: String },
-    #[strum(to_string = "type-not-a-variant")]
+    #[strum(serialize = "type-not-a-variant")]
     NotAVariant { name: String, union_name: String },
-    #[strum(to_string = "type-self-outside-method")]
+    #[strum(serialize = "type-self-outside-method")]
     SelfOutsideMethod,
-    #[strum(to_string = "type-empty-return")]
+    #[strum(serialize = "type-empty-return")]
     EmptyReturn { expected_type: String },
 }
 
@@ -42,7 +44,7 @@ impl DiagnosticLike for TypeSymptom {
     fn message(&self) -> String {
         match self {
             Self::Mismatch => "type mismatch".into(),
-            Self::UnknownBinding { name } => format!("use of undefined binding `{name}`"),
+            Self::UnknownBinding { name, .. } => format!("use of undefined binding `{name}`"),
             Self::UnknownTag { name } => format!("use of undeclared tag `{name}`"),
             Self::InferenceFailed => "failed to infer type".into(),
             Self::ConstraintViolation { param, expected, got } => format!(
@@ -66,27 +68,44 @@ impl DiagnosticLike for TypeSymptom {
         }
     }
 
+    fn help_on_span(&self) -> Option<String> {
+        match self {
+            Self::UnknownBinding { .. } => {
+                Some("import or define bind before using it".into())
+            }
+            _ => None,
+        }
+    }
+
     fn help(&self) -> Option<String> {
-        Some(match self {
-            Self::Mismatch => "types do not match".into(),
-            Self::UnknownBinding { .. } => "import or define bind before using it".into(),
-            Self::UnknownTag { .. } => "declare the tag before using it".into(),
-            Self::InferenceFailed => "could not infer the type".into(),
-            Self::ConstraintViolation { param, expected, .. } => format!(
+        match self {
+            Self::UnknownBinding { did_you_mean, .. } => did_you_mean
+                .as_ref()
+                .map(|m| format!("did you mean `{m}`?")),
+            Self::Mismatch => Some("types do not match".into()),
+            Self::UnknownTag { .. } => Some("declare the tag before using it".into()),
+            Self::InferenceFailed => Some("could not infer the type".into()),
+            Self::ConstraintViolation { param, expected, .. } => Some(format!(
                 "ensure the type argument for `{param}` satisfies the `{expected}` constraint"
-            ),
-            Self::UnresolvedTypeParam { name } => format!(
+            )),
+            Self::UnresolvedTypeParam { name } => Some(format!(
                 "provide a concrete type for `{name}` at the instantiation site"
+            )),
+            Self::ArityMismatch { expected, .. } => {
+                Some(format!("provide exactly {expected} type argument(s)"))
+            }
+            Self::IndexOutOfBounds { size, .. } => Some(format!("valid indices are 0..{size}")),
+            Self::UnusedBinding { .. } => Some(
+                "if this is intentional, prefix the name with `_` to suppress this warning".into(),
             ),
-            Self::ArityMismatch { expected, .. } => format!("provide exactly {expected} type argument(s)"),
-            Self::IndexOutOfBounds { size, .. } => format!("valid indices are 0..{size}"),
-            Self::UnusedBinding { .. } => "if this is intentional, prefix the name with `_` to suppress this warning".into(),
-            Self::NotAVariant { union_name, .. } => format!(
+            Self::NotAVariant { union_name, .. } => Some(format!(
                 "expected one of the variants declared in `{union_name}`"
-            ),
-            Self::SelfOutsideMethod => "self can only be used inside methods".into(),
-            Self::EmptyReturn { expected_type } => format!("expected a variant of `{expected_type}`"),
-        })
+            )),
+            Self::SelfOutsideMethod => Some("self can only be used inside methods".into()),
+            Self::EmptyReturn { expected_type } => Some(format!(
+                "expected a variant of `{expected_type}`"
+            )),
+        }
     }
 
     fn category(&self) -> Category {

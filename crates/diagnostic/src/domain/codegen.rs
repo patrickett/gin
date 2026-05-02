@@ -1,10 +1,8 @@
-use strum::AsRefStr;
-
 use crate::DiagnosticLike;
 
-#[derive(Debug, Clone, PartialEq, Eq, AsRefStr)]
+#[derive(Debug, Clone, PartialEq, Eq, strum::AsRefStr)]
 pub enum CodegenSymptom {
-    #[strum(to_string = "codegen-internal")]
+    #[strum(serialize = "codegen-internal")]
     Internal { message: String },
 }
 

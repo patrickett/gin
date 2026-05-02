@@ -1,19 +1,17 @@
-use strum::AsRefStr;
-
 use crate::{Category, Diagnostic, DiagnosticLike, SpanTable};
 
-#[derive(Default, Debug, Clone, PartialEq, Eq, AsRefStr)]
+#[derive(Default, Debug, Clone, PartialEq, Eq, strum::AsRefStr)]
 pub enum LexSymptom {
-    #[strum(to_string = "lex-unclosed-string")]
+    #[strum(serialize = "lex-unclosed-string")]
     UnclosedString,
-    #[strum(to_string = "lex-invalid-integer")]
+    #[strum(serialize = "lex-invalid-integer")]
     InvalidInteger,
-    #[strum(to_string = "lex-invalid-float")]
+    #[strum(serialize = "lex-invalid-float")]
     InvalidFloat,
-    #[strum(to_string = "lex-overflow-indent")]
+    #[strum(serialize = "lex-overflow-indent")]
     OverflowIndent,
     #[default]
-    #[strum(to_string = "lex-unexpected-character")]
+    #[strum(serialize = "lex-unexpected-character")]
     UnexpectedCharacter,
 }
 

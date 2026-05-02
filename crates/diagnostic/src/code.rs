@@ -1,8 +1,6 @@
-use strum::AsRefStr;
+use crate::{CodegenSymptom, ImportSymptom, IoSymptom, LexSymptom, ParseSymptom, TypeSymptom};
 
-use crate::{LexSymptom, ParseSymptom, TypeSymptom, IoSymptom, ImportSymptom, CodegenSymptom};
-
-#[derive(Debug, Clone, PartialEq, Eq, AsRefStr)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiagnosticCode {
     Import(ImportSymptom),
     Lex(LexSymptom),
@@ -32,6 +30,19 @@ impl From<CodegenSymptom> for DiagnosticCode {
 }
 
 impl DiagnosticCode {
+    /// Stable kebab-case slug for this diagnostic (e.g. `type-unknown-binding`), not the
+    /// outer `DiagnosticCode` variant name.
+    pub fn slug(&self) -> &str {
+        match self {
+            DiagnosticCode::Import(s) => s.as_ref(),
+            DiagnosticCode::Lex(s) => s.as_ref(),
+            DiagnosticCode::Parse(s) => s.as_ref(),
+            DiagnosticCode::Type(s) => s.as_ref(),
+            DiagnosticCode::Io(s) => s.as_ref(),
+            DiagnosticCode::Codegen(s) => s.as_ref(),
+        }
+    }
+
     /// Delegate custom rendering to the domain type.
     /// Returns `true` if the domain handled printing itself.
     pub fn render_custom(

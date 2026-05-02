@@ -1,18 +1,16 @@
-use strum::AsRefStr;
-
 use crate::{Category, DiagnosticLike};
 
-#[derive(Debug, Clone, PartialEq, Eq, AsRefStr)]
+#[derive(Debug, Clone, PartialEq, Eq, strum::AsRefStr)]
 pub enum ParseSymptom {
-    #[strum(to_string = "parse-unexpected-token")]
+    #[strum(serialize = "parse-unexpected-token")]
     UnexpectedToken,
-    #[strum(to_string = "parse-custom")]
+    #[strum(serialize = "parse-custom")]
     Custom(String),
-    #[strum(to_string = "parse-empty-parens")]
+    #[strum(serialize = "parse-empty-parens")]
     EmptyParens { suggested: String },
-    #[strum(to_string = "parse-unused-value")]
+    #[strum(serialize = "parse-unused-value")]
     UnusedValue { value: String },
-    #[strum(to_string = "parse-direct-file-import")]
+    #[strum(serialize = "parse-direct-file-import")]
     DirectFileImport { path: String },
 }
 

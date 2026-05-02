@@ -1,71 +1,69 @@
-use strum::AsRefStr;
-
 use crate::DiagnosticLike;
 
-#[derive(Debug, Clone, PartialEq, Eq, AsRefStr)]
+#[derive(Debug, Clone, PartialEq, Eq, strum::AsRefStr)]
 pub enum ImportSymptom {
-    #[strum(to_string = "import-conflict")]
+    #[strum(serialize = "import-conflict")]
     Conflict {
         path: String,
         qualifier_a: String,
         qualifier_b: String,
     },
-    #[strum(to_string = "import-target-not-found")]
+    #[strum(serialize = "import-target-not-found")]
     TargetNotFound {
         path: String,
     },
-    #[strum(to_string = "import-local-must-end-in-gin")]
+    #[strum(serialize = "import-local-must-end-in-gin")]
     LocalMustEndInGin {
         path: String,
     },
-    #[strum(to_string = "import-local-not-found")]
+    #[strum(serialize = "import-local-not-found")]
     LocalNotFound {
         path: String,
     },
-    #[strum(to_string = "import-folder-missing-config")]
+    #[strum(serialize = "import-folder-missing-config")]
     FolderMissingConfig {
         folder: String,
     },
-    #[strum(to_string = "import-missing-export")]
+    #[strum(serialize = "import-missing-export")]
     MissingExport {
         folder: String,
         export: String,
     },
-    #[strum(to_string = "import-export-target-not-found")]
+    #[strum(serialize = "import-export-target-not-found")]
     ExportTargetNotFound {
         export: String,
         folder: String,
         path: String,
     },
-    #[strum(to_string = "import-ambiguous-local-root")]
+    #[strum(serialize = "import-ambiguous-local-root")]
     AmbiguousLocalRoot {
         name: String,
         file_path: String,
         folder_path: String,
     },
-    #[strum(to_string = "import-file-has-segments")]
+    #[strum(serialize = "import-file-has-segments")]
     FileHasSegments {
         file_path: String,
         segment: String,
     },
-    #[strum(to_string = "import-unknown-dependency")]
+    #[strum(serialize = "import-unknown-dependency")]
     UnknownDependency {
         name: String,
     },
-    #[strum(to_string = "import-dependency-missing-config")]
+    #[strum(serialize = "import-dependency-missing-config")]
     DependencyMissingConfig {
         name: String,
         path: String,
     },
-    #[strum(to_string = "import-missing-config")]
+    #[strum(serialize = "import-missing-config")]
     MissingConfig {
         dir: String,
     },
-    #[strum(to_string = "import-chained-export-not-folder")]
+    #[strum(serialize = "import-chained-export-not-folder")]
     ChainedExportNotFolder {
         path: String,
     },
-    #[strum(to_string = "import-cycle")]
+    #[strum(serialize = "import-cycle")]
     Cycle {
         chain: String,
     },
