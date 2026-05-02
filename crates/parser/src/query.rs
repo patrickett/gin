@@ -14,7 +14,9 @@ use std::path::{Path, PathBuf};
 
 use crate::expr;
 use ast::{BindValue, Expr, FileAst, FnCall, ImportSource};
-use flask::FlaskConfig;
+use flask::{
+    list_package_gin_files, resolve_nested_package_path, NestedPackageTarget, PACKAGE_CONFIG_NAME,
+};
 
 // TODO: change ParseOutput to a Vec<Diagnostic> or some vec of enum so we dont need the different
 // fields
@@ -67,20 +69,9 @@ pub fn parse_source_full(src: &str) -> ParseOutput {
         symptoms.push(ParseSymptom::Custom(err.message.clone()).into_diagnostic(err.span_id()));
     }
 
-    // Import validation: quoted local imports must name a `.gin` file.
+    // Import validation: `use pkg.(...)` does not support a top-level `as`.
     for import in ast.uses() {
         for module_import in &import.0 {
-            if let ImportSource::Local(path, span_id) = &module_import.source
-                && path.extension().is_none_or(|ext| ext != "gin")
-            {
-                symptoms.push(
-                    ParseSymptom::Custom(format!(
-                        "local import path must include a `.gin` file name, got `{}`",
-                        path.to_string_lossy()
-                    ))
-                    .into_diagnostic(*span_id),
-                );
-            }
             if let ImportSource::LocalBundle(b) = &module_import.source
                 && module_import.alias.is_some()
             {
@@ -113,7 +104,7 @@ pub fn parse_source_full(src: &str) -> ParseOutput {
 
 /// Extract locally-imported `.gin` file paths from the AST (quoted `use '...gin'` only).
 ///
-/// Package imports and same-folder `use foo` / `use foo.(...)` are not included here.
+/// Package imports, dependency bundles (`use dep.(...)`), and unquoted local roots are not included here.
 pub fn extract_local_import_paths(ast: &FileAst, base_dir: &Path) -> Vec<(PathBuf, SpanId)> {
     let mut paths = Vec::new();
 
@@ -123,12 +114,13 @@ pub fn extract_local_import_paths(ast: &FileAst, base_dir: &Path) -> Vec<(PathBu
                 ImportSource::Package(_path) => {}
                 ImportSource::LocalBundle(_b) => {}
                 ImportSource::Local(path, span) => {
-                    if path.extension().is_none_or(|e| e != "gin") {
-                        continue;
-                    }
                     let p = base_dir.join(path);
-                    if p.is_file() {
+                    if p.is_file() && p.extension().is_some_and(|e| e == "gin") {
                         paths.push((p, *span));
+                    } else if p.is_dir() && p.join(PACKAGE_CONFIG_NAME).is_file() {
+                        for g in list_package_gin_files(&p) {
+                            paths.push((g, *span));
+                        }
                     }
                 }
             }
@@ -138,16 +130,11 @@ pub fn extract_local_import_paths(ast: &FileAst, base_dir: &Path) -> Vec<(PathBu
     paths
 }
 
-/// Resolve package imports (e.g. `use core.io`) against a dependency map.
+/// Resolve package imports (e.g. `use core`, `use core.subpkg`) against a dependency map.
 ///
-/// `dependencies` maps package names (as declared in `flask.jsonc`) to their
-/// on-disk directory paths. For each `ImportSource::Package(path)`:
-///
-/// - With **no** segments (e.g. `use core`): each file listed in that package's
-///   `flask.jsonc` `exports` map (paths relative to the package root).
-/// - With **one** segment (e.g. `use core.io`): only `{dep_dir}/{exports["io"].path}` —
-///   no scanning for `{dep_dir}/io.gin` or `src/io.gin` unless the export says so.
-/// - More than one segment is not supported here (returns nothing).
+/// - `use dep`: every `*.gin` in `dep/` next to `flask.jsonc` (non-recursive).
+/// - `use dep.a.b`: nested folder modules `dep/a/b/` with `flask.jsonc`, then flat `*.gin` there.
+/// - `use dep.(a, b)`: each listed name is a nested folder module under `dep/`.
 ///
 /// Returns `(path, span)` pairs for each resolved `.gin` file.
 pub fn extract_package_import_paths(
@@ -158,43 +145,57 @@ pub fn extract_package_import_paths(
 
     for import in ast.uses() {
         for module_import in &import.0 {
-            if let ImportSource::Package(mod_path) = &module_import.source {
-                let dep_dir = match dependencies.get(mod_path.root.as_str()) {
-                    Some(dir) => dir,
-                    None => continue,
-                };
+            match &module_import.source {
+                ImportSource::Package(mod_path) => {
+                    let dep_dir = match dependencies.get(mod_path.root.as_str()) {
+                        Some(dir) => dir,
+                        None => continue,
+                    };
 
-                if mod_path.segments.is_empty() {
-                    if let Some(config) = FlaskConfig::from_directory(dep_dir) {
-                        for spec in config.exports().values() {
-                            try_push_gin_file(
-                                dep_dir.join(&spec.path),
-                                mod_path.span_id(),
-                                &mut paths,
-                            );
+                    let span = mod_path.span_id();
+                    if mod_path.segments.is_empty() {
+                        if dep_dir.join(PACKAGE_CONFIG_NAME).is_file() {
+                            for p in list_package_gin_files(dep_dir) {
+                                paths.push((p, span));
+                            }
+                        }
+                        continue;
+                    }
+
+                    let segs: Vec<&str> =
+                        mod_path.segments.iter().map(|s| s.as_str()).collect();
+                    if let Ok(NestedPackageTarget::FolderModule(dir)) =
+                        resolve_nested_package_path(dep_dir, &segs)
+                    {
+                        for p in list_package_gin_files(&dir) {
+                            paths.push((p, span));
                         }
                     }
-                } else if mod_path.segments.len() == 1 {
-                    let export_key = mod_path.segments[0].as_str();
-                    if let Some(config) = FlaskConfig::from_directory(dep_dir)
-                        && let Some(spec) = config.exports().get(export_key)
-                    {
-                        try_push_gin_file(dep_dir.join(&spec.path), mod_path.span_id(), &mut paths);
+                }
+                ImportSource::LocalBundle(b) => {
+                    let dep_dir = match dependencies.get(b.root.as_str()) {
+                        Some(dir) => dir,
+                        None => continue,
+                    };
+                    if !dep_dir.join(PACKAGE_CONFIG_NAME).is_file() {
+                        continue;
+                    }
+                    let span = b.span_id();
+                    for m in &b.members {
+                        let nested = dep_dir.join(m.export.as_str());
+                        if nested.join(PACKAGE_CONFIG_NAME).is_file() {
+                            for p in list_package_gin_files(&nested) {
+                                paths.push((p, span));
+                            }
+                        }
                     }
                 }
-                // `use a.b.c` with more than one trailing segment: unsupported for export-only resolution.
+                ImportSource::Local(_, _) => {}
             }
         }
     }
 
     paths
-}
-
-/// Push a `.gin` file path onto `paths` if it exists on disk.
-fn try_push_gin_file(path: PathBuf, span: SpanId, paths: &mut Vec<(PathBuf, SpanId)>) {
-    if path.exists() {
-        paths.push((path, span));
-    }
 }
 
 /// Walk every expression in the AST and collect empty-paren call hints.

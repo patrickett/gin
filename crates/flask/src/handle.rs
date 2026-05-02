@@ -89,15 +89,14 @@ impl FlaskConfigHandle {
         let mut search = from_dir.to_path_buf();
         loop {
             search.push(PACKAGE_CONFIG_NAME);
-            match std::fs::File::open(&search) {
-                Ok(file) => {
-                    let config =
-                        serde_json::from_reader::<_, FlaskConfig>(file).map_err(|_err| {
-                            ConfigError::Io(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                "failed to parse config",
-                            ))
-                        })?;
+            match std::fs::read_to_string(&search) {
+                Ok(raw) => {
+                    let config = json5::from_str::<FlaskConfig>(&raw).map_err(|_err| {
+                        ConfigError::Io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "failed to parse config",
+                        ))
+                    })?;
                     search.pop();
                     return Ok(Self {
                         inner: Arc::new(RwLock::new(FlaskConfigHandleInner {
@@ -136,7 +135,7 @@ impl FlaskConfigHandle {
 
     pub fn save(&self) -> Result<(), ConfigError> {
         let config = self.read().config.clone();
-        let json = serde_json::to_string_pretty(&config).expect("failed to serialize config");
+        let json = json5::to_string(&config).expect("failed to serialize config");
         let source_dir = self.source_dir();
         let mut file =
             File::create(source_dir.join(PACKAGE_CONFIG_NAME)).map_err(ConfigError::Io)?;

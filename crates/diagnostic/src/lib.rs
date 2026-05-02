@@ -126,20 +126,19 @@ impl Diagnostic {
             }
             builder = builder.with_label(primary);
 
-            if self.help_on_span.is_some() {
-                if let Some(h) = self
+            if self.help_on_span.is_some()
+                && let Some(h) = self
                     .help
                     .as_deref()
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
-                {
-                    let point = start..start;
-                    let secondary = Label::new((filename, point))
-                        .with_color(color)
-                        .with_message(format!("help: {h}"))
-                        .with_order(1);
-                    builder = builder.with_label(secondary);
-                }
+            {
+                let point = start..start;
+                let secondary = Label::new((filename, point))
+                    .with_color(color)
+                    .with_message(format!("help: {h}"))
+                    .with_order(1);
+                builder = builder.with_label(secondary);
             }
         } else if start > 0 {
             let back = (start - 1)..start;
@@ -158,20 +157,19 @@ impl Diagnostic {
             }
             builder = builder.with_label(label);
 
-            if self.help_on_span.is_some() {
-                if let Some(h) = self
+            if self.help_on_span.is_some()
+                && let Some(h) = self
                     .help
                     .as_deref()
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
-                {
-                    let point = start..start;
-                    let secondary = Label::new((filename, point))
-                        .with_color(color)
-                        .with_message(format!("help: {h}"))
-                        .with_order(1);
-                    builder = builder.with_label(secondary);
-                }
+            {
+                let point = start..start;
+                let secondary = Label::new((filename, point))
+                    .with_color(color)
+                    .with_message(format!("help: {h}"))
+                    .with_order(1);
+                builder = builder.with_label(secondary);
             }
         } else if let Some(help) = self
             .help
@@ -188,8 +186,8 @@ impl Diagnostic {
             let rstart = rspan.start.min(len);
             let rend = rspan.end.max(rstart).min(len);
             if rstart < rend {
-                let label = Label::new((filename, rstart..rend))
-                    .with_message(related.label.as_str());
+                let label =
+                    Label::new((filename, rstart..rend)).with_message(related.label.as_str());
                 builder = builder.with_label(label);
             }
         }

@@ -24,7 +24,7 @@ fn zero_location(uri: Url) -> Location {
     }
 }
 
-/// Resolve a `use` import to a file location, matching `ginc`'s export-based rules.
+/// Resolve a `use` import to a file location (folder module → `flask.jsonc`, file → `.gin`).
 ///
 /// This function is intentionally side-effect free (filesystem reads only) so it can be unit tested.
 fn resolve_use_import_source_fs(base_uri: &Url, source: &ImportSource) -> Option<Location> {
@@ -33,32 +33,48 @@ fn resolve_use_import_source_fs(base_uri: &Url, source: &ImportSource) -> Option
             let base_path = base_uri.to_file_path().ok()?;
             let base_dir = base_path.parent()?;
 
-            let mut resolved = base_dir.join(path);
-
-            if resolved.extension().is_none() {
-                let with_ext = resolved.with_extension("gin");
-                if with_ext.exists() {
-                    resolved = with_ext;
+            let resolved = base_dir.join(path);
+            if resolved.is_dir() {
+                let flask_jsonc_path = resolved.join(flask::PACKAGE_CONFIG_NAME);
+                if flask_jsonc_path.is_file() {
+                    return Some(zero_location(
+                        Url::from_file_path(&flask_jsonc_path).ok()?,
+                    ));
                 }
             }
 
-            if !resolved.exists() {
+            let mut file_res = resolved.clone();
+            if file_res.extension().is_none() {
+                let with_ext = file_res.with_extension("gin");
+                if with_ext.is_file() {
+                    file_res = with_ext;
+                }
+            }
+
+            if !file_res.is_file() {
                 return None;
             }
-            Some(zero_location(Url::from_file_path(&resolved).ok()?))
+            Some(zero_location(Url::from_file_path(&file_res).ok()?))
         }
         ImportSource::LocalBundle(b) => {
             let base_path = base_uri.to_file_path().ok()?;
             let base_dir = base_path.parent()?;
-            let folder = base_dir.join(b.root.as_str());
 
-            let flask_jsonc_path = folder.join(flask::PACKAGE_CONFIG_NAME);
-            if !flask_jsonc_path.exists() {
+            let handle = flask::FlaskConfigHandle::load(base_dir).ok()?;
+            let cfg = handle.read();
+            let config_dir = handle.source_dir();
+
+            let dep = cfg.config.dependencies().get(b.root.as_str())?;
+            let dep_dir = match &dep.kind {
+                flask::DependencyKind::Path { path } => config_dir.join(path),
+                _ => return None,
+            };
+
+            let flask_path = dep_dir.join(flask::PACKAGE_CONFIG_NAME);
+            if !flask_path.is_file() {
                 return None;
             }
-            Some(zero_location(
-                Url::from_file_path(&flask_jsonc_path).ok()?,
-            ))
+            Some(zero_location(Url::from_file_path(&flask_path).ok()?))
         }
         ImportSource::Package(mod_path) => {
             let base_path = base_uri.to_file_path().ok()?;
@@ -82,7 +98,7 @@ fn resolve_use_import_source_fs(base_uri: &Url, source: &ImportSource) -> Option
                 return Some(zero_location(Url::from_file_path(&dep_cfg).ok()?));
             }
 
-            resolve_chained_export_location(&dep_dir, &mod_path.segments)
+            resolve_nested_package_manifest_location(&dep_dir, &mod_path.segments)
         }
     }
 }
@@ -120,7 +136,7 @@ fn resolve_package_part_location_fs(
         return None;
     }
 
-    resolve_chained_export_location(&dep_dir, &segments[..=seg_idx])
+    resolve_nested_package_manifest_location(&dep_dir, &segments[..=seg_idx])
 }
 
 fn part_index_in_dotted_path(span_text: &str, byte_in_span: usize) -> Option<usize> {
@@ -136,19 +152,14 @@ fn part_index_in_dotted_path(span_text: &str, byte_in_span: usize) -> Option<usi
     Some(part)
 }
 
-fn resolve_chained_export_location(
+/// `flask.jsonc` for the folder module at `start_dir/seg1/.../segN/`.
+fn resolve_nested_package_manifest_location(
     start_dir: &std::path::Path,
     segments: &[internment::Intern<String>],
 ) -> Option<Location> {
     let segs: Vec<&str> = segments.iter().map(|s| s.as_str()).collect();
-    match flask::resolve_chained_exports(start_dir, &segs).ok()? {
-        flask::ExportTarget::File(p) => {
-            if !p.exists() {
-                return None;
-            }
-            Some(zero_location(Url::from_file_path(&p).ok()?))
-        }
-        flask::ExportTarget::FolderModule(dir) => {
+    match flask::resolve_nested_package_path(start_dir, &segs).ok()? {
+        flask::NestedPackageTarget::FolderModule(dir) => {
             let cfg = dir.join(flask::PACKAGE_CONFIG_NAME);
             if !cfg.exists() {
                 return None;
@@ -304,8 +315,8 @@ mod tests {
     }
 
     #[test]
-    fn goto_def_dep_export_to_file_opens_file() {
-        let dir = unique_temp_dir("export_file");
+    fn goto_def_dep_chained_nested_opens_nested_flask_jsonc() {
+        let dir = unique_temp_dir("export_nested");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
@@ -329,14 +340,15 @@ mod tests {
 {
   "name": "dep",
   "version": "0.0.0",
-  "authors": [],
-  "exports": {
-    "filemod": { "path": "filemod.gin" }
-  }
+  "authors": []
 }
 "#,
         );
-        write_file(&dir.join("dep/filemod.gin"), "x: 1\n");
+        write_file(
+            &dir.join("dep/filemod/flask.jsonc"),
+            r#"{"name":"filemod","version":"0.0.0","authors":[]}"#,
+        );
+        write_file(&dir.join("dep/filemod/x.gin"), "x: 1\n");
         write_file(&dir.join("main.gin"), "main:\n    return 0\n");
 
         let base_uri = Url::from_file_path(dir.join("main.gin")).unwrap();
@@ -349,14 +361,14 @@ mod tests {
         let loc = resolve_use_import_source_fs(&base_uri, &ImportSource::Package(mp)).unwrap();
         assert_eq!(
             loc.uri.to_file_path().unwrap(),
-            dir.join("dep/filemod.gin")
+            dir.join("dep/filemod/flask.jsonc")
         );
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn goto_def_dep_export_to_folder_opens_folder_flask_jsonc() {
+    fn goto_def_dep_nested_folder_opens_folder_flask_jsonc() {
         let dir = unique_temp_dir("export_folder");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -381,23 +393,13 @@ mod tests {
 {
   "name": "dep",
   "version": "0.0.0",
-  "authors": [],
-  "exports": {
-    "foldermod": { "path": "foldermod" }
-  }
+  "authors": []
 }
 "#,
         );
         write_file(
             &dir.join("dep/foldermod/flask.jsonc"),
-            r#"
-{
-  "name": "foldermod",
-  "version": "0.0.0",
-  "authors": [],
-  "exports": {}
-}
-"#,
+            r#"{"name":"foldermod","version":"0.0.0","authors":[]}"#,
         );
         write_file(&dir.join("main.gin"), "main:\n    return 0\n");
 
@@ -443,8 +445,7 @@ mod tests {
 {
   "name": "dep",
   "version": "0.0.0",
-  "authors": [],
-  "exports": {}
+  "authors": []
 }
 "#,
         );
@@ -464,24 +465,32 @@ mod tests {
     }
 
     #[test]
-    fn goto_def_local_bundle_opens_folder_flask_jsonc() {
-        let dir = unique_temp_dir("local_bundle");
+    fn goto_def_dep_bundle_opens_dependency_flask_jsonc() {
+        let dir = unique_temp_dir("dep_bundle");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
-        write_file(&dir.join("main.gin"), "use utils.(io)\n\nmain:\n    return 0\n");
         write_file(
-            &dir.join("utils/flask.jsonc"),
+            &dir.join("flask.jsonc"),
             r#"
 {
-  "name": "utils",
+  "name": "root",
   "version": "0.0.0",
   "authors": [],
-  "exports": {
-    "io": { "path": "io.gin" }
+  "dependencies": {
+    "utils": { "path": "utils" }
   }
 }
 "#,
+        );
+        write_file(&dir.join("main.gin"), "use utils.(io)\n\nmain:\n    return 0\n");
+        write_file(
+            &dir.join("utils/flask.jsonc"),
+            r#"{"name":"utils","version":"0.0.0","authors":[]}"#,
+        );
+        write_file(
+            &dir.join("utils/io/flask.jsonc"),
+            r#"{"name":"io","version":"0.0.0","authors":[]}"#,
         );
 
         let base_uri = Url::from_file_path(dir.join("main.gin")).unwrap();
@@ -495,81 +504,13 @@ mod tests {
         };
 
         let loc = resolve_use_import_source_fs(&base_uri, &ImportSource::LocalBundle(lb)).unwrap();
-        assert_eq!(
-            loc.uri.to_file_path().unwrap(),
-            dir.join("utils/flask.jsonc")
-        );
+        assert_eq!(loc.uri.to_file_path().unwrap(), dir.join("utils/flask.jsonc"));
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn goto_def_dep_a_b_resolves_to_file() {
-        let dir = unique_temp_dir("dep_a_b_file");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-
-        write_file(
-            &dir.join("flask.jsonc"),
-            r#"
-{
-  "name": "root",
-  "version": "0.0.0",
-  "authors": [],
-  "dependencies": {
-    "dep": { "path": "dep" }
-  }
-}
-"#,
-        );
-
-        write_file(
-            &dir.join("dep/flask.jsonc"),
-            r#"
-{
-  "name": "dep",
-  "version": "0.0.0",
-  "authors": [],
-  "exports": {
-    "a": { "path": "a" }
-  }
-}
-"#,
-        );
-        write_file(
-            &dir.join("dep/a/flask.jsonc"),
-            r#"
-{
-  "name": "dep_a",
-  "version": "0.0.0",
-  "authors": [],
-  "exports": {
-    "b": { "path": "b.gin" }
-  }
-}
-"#,
-        );
-        write_file(&dir.join("dep/a/b.gin"), "x: 1\n");
-        write_file(&dir.join("main.gin"), "main:\n    return 0\n");
-
-        let base_uri = Url::from_file_path(dir.join("main.gin")).unwrap();
-        let mp = ModPath::new(
-            Intern::<String>::from_ref("dep"),
-            vec![
-                Intern::<String>::from_ref("a"),
-                Intern::<String>::from_ref("b"),
-            ],
-            SpanId::new(0),
-        );
-
-        let loc = resolve_use_import_source_fs(&base_uri, &ImportSource::Package(mp)).unwrap();
-        assert_eq!(loc.uri.to_file_path().unwrap(), dir.join("dep/a/b.gin"));
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn goto_def_dep_a_b_opens_folder_module_flask_jsonc() {
+    fn goto_def_dep_a_b_opens_deepest_folder_flask_jsonc() {
         let dir = unique_temp_dir("dep_a_b_folder");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -590,40 +531,15 @@ mod tests {
 
         write_file(
             &dir.join("dep/flask.jsonc"),
-            r#"
-{
-  "name": "dep",
-  "version": "0.0.0",
-  "authors": [],
-  "exports": {
-    "a": { "path": "a" }
-  }
-}
-"#,
+            r#"{"name":"dep","version":"0.0.0","authors":[]}"#,
         );
         write_file(
             &dir.join("dep/a/flask.jsonc"),
-            r#"
-{
-  "name": "dep_a",
-  "version": "0.0.0",
-  "authors": [],
-  "exports": {
-    "b": { "path": "b" }
-  }
-}
-"#,
+            r#"{"name":"dep_a","version":"0.0.0","authors":[]}"#,
         );
         write_file(
             &dir.join("dep/a/b/flask.jsonc"),
-            r#"
-{
-  "name": "dep_ab",
-  "version": "0.0.0",
-  "authors": [],
-  "exports": {}
-}
-"#,
+            r#"{"name":"dep_ab","version":"0.0.0","authors":[]}"#,
         );
         write_file(&dir.join("main.gin"), "main:\n    return 0\n");
 
@@ -643,12 +559,37 @@ mod tests {
             dir.join("dep/a/b/flask.jsonc")
         );
 
+        let seg_a = Intern::<String>::from_ref("a");
+        let seg_b = Intern::<String>::from_ref("b");
+        let loc_mid = resolve_package_part_location_fs(
+            &base_uri,
+            &Intern::<String>::from_ref("dep"),
+            &[seg_a.clone(), seg_b.clone()],
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            loc_mid.uri.to_file_path().unwrap(),
+            dir.join("dep/a/flask.jsonc")
+        );
+        let loc_root = resolve_package_part_location_fs(
+            &base_uri,
+            &Intern::<String>::from_ref("dep"),
+            &[seg_a, seg_b],
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            loc_root.uri.to_file_path().unwrap(),
+            dir.join("dep/flask.jsonc")
+        );
+
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn goto_def_core_io_root_opens_core_config_but_io_opens_export() {
-        let dir = unique_temp_dir("core_io_root_vs_seg");
+    fn goto_def_core_io_nested_package_opens_io_flask_jsonc() {
+        let dir = unique_temp_dir("core_io_nested");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
@@ -665,16 +606,13 @@ mod tests {
         );
         write_file(
             &dir.join("core/flask.jsonc"),
-            r#"
-{
-  "name": "core",
-  "version": "0.0.0",
-  "authors": [],
-  "exports": { "io": { "path": "io.gin" } }
-}
-"#,
+            r#"{"name":"core","version":"0.0.0","authors":[]}"#,
         );
-        write_file(&dir.join("core/io.gin"), "x: 1\n");
+        write_file(
+            &dir.join("core/io/flask.jsonc"),
+            r#"{"name":"io","version":"0.0.0","authors":[]}"#,
+        );
+        write_file(&dir.join("core/io/x.gin"), "x: 1\n");
         write_file(&dir.join("main.gin"), "use core.io\n\nmain:\n    return 0\n");
 
         let base_uri = Url::from_file_path(dir.join("main.gin")).unwrap();
@@ -698,7 +636,10 @@ mod tests {
             1,
         )
         .unwrap();
-        assert_eq!(loc_io.uri.to_file_path().unwrap(), dir.join("core/io.gin"));
+        assert_eq!(
+            loc_io.uri.to_file_path().unwrap(),
+            dir.join("core/io/flask.jsonc")
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

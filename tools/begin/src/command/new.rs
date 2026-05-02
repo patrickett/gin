@@ -7,8 +7,6 @@ use std::{
     process::Command,
 };
 
-const DEFAULT_ENTRY: &str = "main.gin";
-
 #[derive(Args, Debug, Clone)]
 pub struct NewArgs {
     /// Name of the new project
@@ -61,15 +59,14 @@ pub fn begin_new(args: NewArgs) {
     }
 
     let flask_path = project_dir.join(PACKAGE_CONFIG_NAME);
-    let main_path = project_dir.join(DEFAULT_ENTRY);
 
-    let entry = match options.template {
-        Template::HelloWorld => Some("main.gin"),
-        Template::Library => None,
+    write_flask_json(&flask_path, &options.name, &options.author);
+
+    let starter_gin = match options.template {
+        Template::HelloWorld => project_dir.join(super::DEFAULT_ENTRY),
+        Template::Library => project_dir.join(super::DEFAULT_LIB),
     };
-
-    write_flask_json(&flask_path, &options.name, &options.author, entry);
-    write_main_gin(&main_path, options.template);
+    write_main_gin(&starter_gin, options.template);
 
     if options.git_init {
         run_git_init(&project_dir);
@@ -125,7 +122,7 @@ fn prompt_new_options(pre_filled_name: Option<String>) -> Option<NewOptions> {
     })
 }
 
-pub fn write_flask_json(path: &Path, name: &str, author: &str, entry: Option<&str>) {
+pub fn write_flask_json(path: &Path, name: &str, author: &str) {
     let authors_json = if author.is_empty() {
         "[]".to_string()
     } else {
@@ -134,28 +131,12 @@ pub fn write_flask_json(path: &Path, name: &str, author: &str, entry: Option<&st
         format!(r#"[\"{escaped}\"]"#)
     };
 
-    let entry_json = match entry {
-        Some(e) => format!(r#""{e}""#),
-        None => "null".to_string(),
-    };
-
-    let exports_json = match entry {
-        Some(e) => format!(
-            r#",
-  "exports": {{
-    "main": {{ "path": "{e}" }}
-  }}"#
-        ),
-        None => String::new(),
-    };
-
     let content = format!(
         r#"{{
   "name": "{name}",
   "version": "0.1.0",
   "authors": {authors_json},
-  "entry": {entry_json},
-  "dependencies": {{}}{exports_json}
+  "dependencies": {{}}
 }}
 "#
     );

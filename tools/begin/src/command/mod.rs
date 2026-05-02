@@ -13,6 +13,9 @@ use flask::{DependencyKind, FlaskConfig};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+pub const DEFAULT_ENTRY: &str = "main.gin";
+pub const DEFAULT_LIB: &str = "lib.gin";
+
 /// Resolve path dependencies relative to a config directory.
 ///
 /// Takes the FlaskConfig dependencies and resolves all `Path` dependencies

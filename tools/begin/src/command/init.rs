@@ -3,8 +3,6 @@ use std::{env, path::PathBuf};
 
 use crate::command::new::{write_flask_json, write_main_gin};
 
-const DEFAULT_ENTRY: &str = "main.gin";
-
 /// `begin init` initialises a Gin project in the current directory
 pub fn begin_init() {
     let cwd = match env::current_dir() {
@@ -31,9 +29,9 @@ pub fn begin_init() {
         .unwrap_or("project")
         .to_string();
 
-    write_flask_json(&flask_path, &project_name, "", Some("main.gin"));
+    write_flask_json(&flask_path, &project_name, "");
 
-    let main_path = PathBuf::from(DEFAULT_ENTRY);
+    let main_path = PathBuf::from(super::DEFAULT_ENTRY);
     if !main_path.exists() {
         write_main_gin(&main_path, crate::command::new::Template::HelloWorld);
     }

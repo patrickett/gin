@@ -6,18 +6,9 @@ use std::process::Command;
 
 // TODO: support passing args to the executable: begin run -- --some-arg
 
-/// `begin (r)un` compiles and executes the entry point.
-/// For libraries, prints a helpful message suggesting `begin build`.
+/// `begin (r)un` compiles and executes the default entry file (see [`super::DEFAULT_ENTRY`])
+/// or the given file. Without that entry, treats the package as a library and does not run.
 pub fn begin_run(config: FlaskConfig, input: Option<PathBuf>, watch: bool) {
-    // Check if this is a binary (has entry) or a library
-    let Some(entry) = config.entry() else {
-        eprintln!(
-            "warning: '{}' is a library package. Use `begin build` to compile libraries.",
-            config.name
-        );
-        return;
-    };
-
     let cwd = match std::env::current_dir() {
         Ok(d) => d,
         Err(_) => {
@@ -26,7 +17,19 @@ pub fn begin_run(config: FlaskConfig, input: Option<PathBuf>, watch: bool) {
         }
     };
 
-    let path = input.unwrap_or_else(|| cwd.join(entry));
+    let main_path = cwd.join(super::DEFAULT_ENTRY);
+    let path = match input {
+        Some(p) => p,
+        None if main_path.is_file() => main_path,
+        None => {
+            eprintln!(
+                "warning: '{}' has no {} — library package. Use `begin build` for libraries.",
+                config.name,
+                super::DEFAULT_ENTRY
+            );
+            return;
+        }
+    };
 
     if !path.exists() {
         eprintln!("error: Entry file not found: {}", path.display());

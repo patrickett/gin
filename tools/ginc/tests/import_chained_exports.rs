@@ -23,12 +23,11 @@ fn write_file(path: &std::path::Path, contents: &str) {
 }
 
 #[test]
-fn chained_exports_dep_a_b_resolves_to_file() {
-    let dir = unique_temp_dir("dep_a_b_file");
+fn chained_nested_dep_a_b_loads_package_at_b() {
+    let dir = unique_temp_dir("dep_a_b_nested");
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
 
-    // Root config declares path dependency `dep`.
     write_file(
         &dir.join("flask.jsonc"),
         r#"
@@ -43,37 +42,20 @@ fn chained_exports_dep_a_b_resolves_to_file() {
 "#,
     );
 
-    // dep exports a -> folder-module dep/a
     write_file(
         &dir.join("dep/flask.jsonc"),
-        r#"
-{
-  "name": "dep",
-  "version": "0.0.0",
-  "authors": [],
-  "exports": {
-    "a": { "path": "a" }
-  }
-}
-"#,
+        r#"{"name":"dep","version":"0.0.0","authors":[]}"#,
     );
-    // dep/a exports b -> b.gin
     write_file(
         &dir.join("dep/a/flask.jsonc"),
-        r#"
-{
-  "name": "dep_a",
-  "version": "0.0.0",
-  "authors": [],
-  "exports": {
-    "b": { "path": "b.gin" }
-  }
-}
-"#,
+        r#"{"name":"dep_a","version":"0.0.0","authors":[]}"#,
     );
-    write_file(&dir.join("dep/a/b.gin"), "x: 1\n");
+    write_file(
+        &dir.join("dep/a/b/flask.jsonc"),
+        r#"{"name":"dep_ab","version":"0.0.0","authors":[]}"#,
+    );
+    write_file(&dir.join("dep/a/b/x.gin"), "x: 1\n");
 
-    // Entry uses multi-segment package path.
     write_file(
         &dir.join("main.gin"),
         "use dep.a.b\n\nmain:\n    return 0\n",
@@ -98,7 +80,7 @@ fn chained_exports_dep_a_b_resolves_to_file() {
 }
 
 #[test]
-fn chained_exports_dep_a_b_imports_folder_module_exports() {
+fn chained_exports_dep_a_b_imports_folder_module_sources() {
     let dir = unique_temp_dir("dep_a_b_folder");
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -119,46 +101,18 @@ fn chained_exports_dep_a_b_imports_folder_module_exports() {
 
     write_file(
         &dir.join("dep/flask.jsonc"),
-        r#"
-{
-  "name": "dep",
-  "version": "0.0.0",
-  "authors": [],
-  "exports": {
-    "a": { "path": "a" }
-  }
-}
-"#,
+        r#"{"name":"dep","version":"0.0.0","authors":[]}"#,
     );
     write_file(
         &dir.join("dep/a/flask.jsonc"),
-        r#"
-{
-  "name": "dep_a",
-  "version": "0.0.0",
-  "authors": [],
-  "exports": {
-    "b": { "path": "b" }
-  }
-}
-"#,
+        r#"{"name":"dep_a","version":"0.0.0","authors":[]}"#,
     );
     write_file(
         &dir.join("dep/a/b/flask.jsonc"),
-        r#"
-{
-  "name": "dep_ab",
-  "version": "0.0.0",
-  "authors": [],
-  "exports": {
-    "c": { "path": "c.gin" }
-  }
-}
-"#,
+        r#"{"name":"dep_ab","version":"0.0.0","authors":[]}"#,
     );
     write_file(&dir.join("dep/a/b/c.gin"), "y: 2\n");
 
-    // `b` resolves to a folder-module; importing `dep.a.b` should import its exports (c.gin).
     write_file(
         &dir.join("main.gin"),
         "use dep.a.b\n\nmain:\n    return 0\n",
@@ -183,8 +137,8 @@ fn chained_exports_dep_a_b_imports_folder_module_exports() {
 }
 
 #[test]
-fn missing_export_target_path_is_a_fatal_import_flaw() {
-    let dir = unique_temp_dir("missing_export_target");
+fn missing_nested_package_is_a_fatal_import_flaw() {
+    let dir = unique_temp_dir("missing_nested");
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
 
@@ -202,19 +156,9 @@ fn missing_export_target_path_is_a_fatal_import_flaw() {
 "#,
     );
 
-    // Export points to a missing path.
     write_file(
         &dir.join("dep/flask.jsonc"),
-        r#"
-{
-  "name": "dep",
-  "version": "0.0.0",
-  "authors": [],
-  "exports": {
-    "io": { "path": "does_not_exist.gin" }
-  }
-}
-"#,
+        r#"{"name":"dep","version":"0.0.0","authors":[]}"#,
     );
     write_file(
         &dir.join("main.gin"),
@@ -233,57 +177,48 @@ fn missing_export_target_path_is_a_fatal_import_flaw() {
 
     assert!(
         !exe.exists(),
-        "expected compilation to fail (missing export target path)"
+        "expected compilation to fail (no dep/io folder module)"
     );
 
     let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn local_folder_module_chained_segment_qualifies_intermediate_folder_exports() {
-    let dir = unique_temp_dir("local_folder_chain_qual");
+fn chained_dep_utils_a_does_not_conflict_with_use_utils() {
+    let dir = unique_temp_dir("utils_chain_qual");
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
 
-    // Local folder-module `utils/` with a direct `io` export and a nested folder-module export `a`.
     write_file(
-        &dir.join("utils/flask.jsonc"),
+        &dir.join("flask.jsonc"),
         r#"
 {
-  "name": "utils",
+  "name": "root",
   "version": "0.0.0",
   "authors": [],
-  "exports": {
-    "io": { "path": "io.gin" },
-    "a": { "path": "a" }
+  "dependencies": {
+    "utils": { "path": "utils" }
   }
 }
 "#,
+    );
+
+    write_file(
+        &dir.join("utils/flask.jsonc"),
+        r#"{"name":"utils","version":"0.0.0","authors":[]}"#,
     );
     write_file(&dir.join("utils/io.gin"), "x: 1\n");
 
-    // Intermediate folder-module `utils/a/` exporting its own `io`.
     write_file(
         &dir.join("utils/a/flask.jsonc"),
-        r#"
-{
-  "name": "utils_a",
-  "version": "0.0.0",
-  "authors": [],
-  "exports": {
-    "io": { "path": "io.gin" }
-  }
-}
-"#,
+        r#"{"name":"utils_a","version":"0.0.0","authors":[]}"#,
     );
     write_file(&dir.join("utils/a/io.gin"), "y: 2\n");
 
-    // Import a direct file export and a chained folder-module export. If `use utils.a`
-    // incorrectly qualifies as `utils.io`, it will conflict with `use utils.io`.
     write_file(
         &dir.join("main.gin"),
         r#"
-use utils.io
+use utils
 use utils.a
 
 main:
@@ -303,9 +238,8 @@ main:
 
     assert!(
         exe.exists(),
-        "expected compilation to succeed (utils.io and utils.a.io should not conflict)"
+        "expected compilation: `use utils` (prefix utils.*) vs `use utils.a` (prefix a.*) do not conflict"
     );
 
     let _ = fs::remove_dir_all(&dir);
 }
-

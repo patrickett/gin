@@ -17,11 +17,10 @@ pub fn begin_build(config: FlaskConfig, input: Option<PathBuf>) {
                 }
             };
 
-            if let Some(entry) = config.entry() {
-                // Binary package - use entry file
-                (cwd.join(entry), Emit::Exe)
+            let main_gin = cwd.join(super::DEFAULT_ENTRY);
+            if main_gin.is_file() {
+                (main_gin, Emit::Exe)
             } else {
-                // Library package - use directory as input
                 (cwd, Emit::Obj)
             }
         }

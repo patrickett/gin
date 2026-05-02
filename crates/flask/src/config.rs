@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, io::BufReader};
+use std::collections::HashMap;
 
 pub const PACKAGE_CONFIG_NAME: &str = "flask.jsonc";
 
@@ -42,13 +42,6 @@ pub struct Dependency {
     pub common: DependencyCommon,
 }
 
-/// One exported submodule from a folder-module (`flask.jsonc` in that directory).
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ExportSpec {
-    /// Path relative to this `flask.jsonc`, e.g. `"math.gin"`.
-    pub path: String,
-}
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Author(pub String);
 
@@ -82,11 +75,7 @@ pub struct FlaskConfig {
     funding: Option<Vec<String>>,
     targets: Option<Vec<String>>,
     #[serde(default)]
-    entry: Option<String>,
-    #[serde(default)]
     dependencies: HashMap<String, Dependency>,
-    #[serde(default)]
-    exports: HashMap<String, ExportSpec>,
 }
 
 impl FlaskConfig {
@@ -102,9 +91,7 @@ impl FlaskConfig {
             bugs: None,
             funding: None,
             targets: None,
-            entry: None,
             dependencies: HashMap::new(),
-            exports: HashMap::new(),
         }
     }
 }
@@ -138,10 +125,6 @@ impl FlaskConfig {
         self.license.as_deref()
     }
 
-    pub fn entry(&self) -> Option<&str> {
-        self.entry.as_deref()
-    }
-
     pub fn set_name(&mut self, name: String) {
         self.name = name;
     }
@@ -166,19 +149,14 @@ impl FlaskConfig {
         &self.dependencies
     }
 
-    pub fn exports(&self) -> &HashMap<String, ExportSpec> {
-        &self.exports
-    }
-
     pub fn from_directory(dir: &std::path::Path) -> Option<FlaskConfig> {
         let mut search = dir.to_path_buf();
         loop {
             search.push(PACKAGE_CONFIG_NAME);
-            if let Ok(file) = std::fs::File::open(&search) {
-                let reader = BufReader::new(file);
-                if let Ok(config) = serde_json::from_reader::<_, FlaskConfig>(reader) {
-                    return Some(config);
-                }
+            if let Ok(raw) = std::fs::read_to_string(&search)
+                && let Ok(config) = json5::from_str::<FlaskConfig>(&raw)
+            {
+                return Some(config);
             }
             search.pop(); // remove flask.jsonc
             if !search.pop() {
@@ -194,11 +172,10 @@ impl FlaskConfig {
         #[cfg(debug_assertions)]
         println!("info: config_path ({path:#?})");
 
-        match std::fs::File::open(&path) {
-            Ok(file) => {
-                let reader = BufReader::new(file);
+        match std::fs::read_to_string(&path) {
+            Ok(raw) => {
                 let config: FlaskConfig =
-                    serde_json::from_reader(reader).expect("if we have the json expect to read it");
+                    json5::from_str(&raw).expect("if we have the json expect to read it");
                 return Some(config);
             }
             Err(err) => match err.kind() {
@@ -221,10 +198,9 @@ impl FlaskConfig {
                     }
 
                     match found_path {
-                        Some(found) => match std::fs::File::open(found) {
-                            Ok(file) => {
-                                let reader = BufReader::new(file);
-                                let config: FlaskConfig = serde_json::from_reader(reader)
+                        Some(found) => match std::fs::read_to_string(found) {
+                            Ok(raw) => {
+                                let config: FlaskConfig = json5::from_str(&raw)
                                     .expect("if we have the json expect to read it");
                                 return Some(config);
                             }

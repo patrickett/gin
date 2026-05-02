@@ -67,6 +67,23 @@ pub enum ImportSymptom {
     Cycle {
         chain: String,
     },
+    #[strum(serialize = "import-local-folder-requires-as")]
+    LocalFolderRequiresAs {
+        path: String,
+    },
+    #[strum(serialize = "import-nested-package-not-found")]
+    NestedPackageNotFound {
+        parent: String,
+        segment: String,
+    },
+    #[strum(serialize = "import-package-no-gin-files")]
+    PackageHasNoGinFiles {
+        dir: String,
+    },
+    #[strum(serialize = "import-duplicate-top-level")]
+    DuplicateTopLevel {
+        symbol: String,
+    },
 }
 
 impl DiagnosticLike for ImportSymptom {
@@ -103,25 +120,54 @@ impl DiagnosticLike for ImportSymptom {
                 "intermediate export resolved to non-folder-module `{}`", path
             ),
             Self::Cycle { chain: _ } => "import cycle detected".into(),
+            Self::LocalFolderRequiresAs { path } => format!(
+                "folder module `{}` must be imported with `as` (e.g. `use '{}' as name`)",
+                path, path
+            ),
+            Self::NestedPackageNotFound { parent, segment } => format!(
+                "no nested package `{}/{}` (expected a folder module with flask.jsonc)",
+                parent, segment
+            ),
+            Self::PackageHasNoGinFiles { dir } => format!(
+                "folder module `{}` contains no `.gin` source files",
+                dir
+            ),
+            Self::DuplicateTopLevel { symbol } => format!(
+                "duplicate top-level definition `{}` when merging module files",
+                symbol
+            ),
         }
     }
 
     fn help(&self) -> Option<String> {
         Some(match self {
             Self::Conflict { .. } => "choose a single qualifier/alias for this module".into(),
-            Self::TargetNotFound { .. } => "ensure the export `path` points to an existing `.gin` file (or a folder-module when importing a folder)".into(),
+            Self::TargetNotFound { .. } => "ensure the import path points to an existing `.gin` file or folder module".into(),
             Self::LocalMustEndInGin { .. } => "use `use './file.gin'` for local file imports".into(),
             Self::LocalNotFound { .. } => "check the path relative to this file, and ensure it ends in `.gin`".into(),
             Self::FolderMissingConfig { .. } => "add a flask.jsonc to the folder module, or import a .gin file instead".into(),
-            Self::MissingExport { .. } => "add this key to `exports` in flask.jsonc".into(),
-            Self::ExportTargetNotFound { .. } => "fix the `path` in `exports` so it points to an existing file or folder-module".into(),
+            Self::MissingExport { .. } => "add a nested folder `segment/flask.jsonc` under the parent package".into(),
+            Self::ExportTargetNotFound { .. } => "ensure the nested package path exists with a `flask.jsonc`".into(),
             Self::AmbiguousLocalRoot { .. } => "rename one of them, or use an explicit local file import (`use './path.gin'`)".into(),
-            Self::FileHasSegments { .. } => "remove the trailing segment, or import a folder-module with exports instead".into(),
+            Self::FileHasSegments { .. } => "remove the trailing segment, or use a nested folder package".into(),
             Self::UnknownDependency { .. } => "add it to `dependencies` in flask.jsonc, or use a local file import".into(),
             Self::DependencyMissingConfig { .. } => "add a flask.jsonc to the dependency root directory".into(),
-            Self::MissingConfig { .. } => "add a flask.jsonc with `exports` for this folder-module".into(),
+            Self::MissingConfig { .. } => "add a `flask.jsonc` in this folder module directory".into(),
             Self::ChainedExportNotFolder { .. } => "make the export's `path` point to a folder containing flask.jsonc, or stop the chain here".into(),
             Self::Cycle { chain } => format!("cycle: {chain}"),
+            Self::LocalFolderRequiresAs { .. } => {
+                "add `as Alias` so the folder module has a single namespace prefix".into()
+            }
+            Self::NestedPackageNotFound { .. } => {
+                "create `segment/flask.jsonc` under the parent package, or fix the import path".into()
+            }
+            Self::PackageHasNoGinFiles { .. } => {
+                "add at least one `.gin` file next to flask.jsonc".into()
+            }
+            Self::DuplicateTopLevel { .. } => {
+                "rename or move one of the definitions so each public top-level name is unique in the package"
+                    .into()
+            }
         })
     }
 }

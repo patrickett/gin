@@ -27,8 +27,7 @@ pub(crate) fn use_completions(
         ));
     }
 
-    // Non-quoted path: either dependency name completion (`use dep...`) or export-key completion
-    // (`use dep.export` / `use dep.a.b`).
+    // Non-quoted path: dependency root (`use dep`) or nested folder modules (`use dep.seg1.seg2`).
     Some(complete_package_paths(file_uri, config, line_text, position))
 }
 
@@ -66,10 +65,7 @@ fn complete_package_paths(
         return vec![];
     };
 
-    // Determine which module's exports we are completing:
-    // - `dep.` completes exports from dep root
-    // - `dep.a.` completes exports from folder-module at dep.exports[a]
-    // - `dep.a.b` completes exports at dep.exports[a], using `b` as partial
+    // Nested package names: immediate subdirectories of the dependency (or chained folder) that contain `flask.jsonc`.
     let mut segments: Vec<&str> = rest.split('.').collect();
     let ends_with_dot = token.ends_with('.');
     if ends_with_dot && segments.last().copied() == Some("") {
@@ -81,23 +77,18 @@ fn complete_package_paths(
         segments.pop().unwrap_or("")
     };
 
-    // Walk intermediate segments, each must resolve to a folder-module.
-    let Some(dep_cfg) = flask::FlaskConfig::from_directory(&dep_dir) else {
-        return vec![];
-    };
-    let Some(exports_cfg) = walk_exports_chain(&dep_dir, &dep_cfg, &segments) else {
+    let Some(base_pkg_dir) = walk_nested_package_dir(&dep_dir, &segments) else {
         return vec![];
     };
 
     let base_prefix = &token[..token.rfind('.').unwrap_or(token.len()) + 1];
-    exports_cfg
-        .exports()
-        .keys()
+    nested_folder_module_names(&base_pkg_dir)
+        .into_iter()
         .filter(|k| k.starts_with(partial))
         .map(|k| CompletionItem {
-            label: k.to_string(),
+            label: k.clone(),
             kind: Some(CompletionItemKind::MODULE),
-            detail: Some("export".to_string()),
+            detail: Some("nested package".to_string()),
             text_edit: Some(tower_lsp::lsp_types::CompletionTextEdit::Edit(
                 tower_lsp::lsp_types::TextEdit {
                     range: Range {
@@ -113,6 +104,33 @@ fn complete_package_paths(
             ..Default::default()
         })
         .collect()
+}
+
+fn nested_folder_module_names(package_dir: &std::path::Path) -> Vec<String> {
+    let mut names = Vec::new();
+    let Ok(rd) = std::fs::read_dir(package_dir) else {
+        return names;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() && p.join(flask::PACKAGE_CONFIG_NAME).is_file() {
+            names.push(e.file_name().to_string_lossy().into_owned());
+        }
+    }
+    names.sort();
+    names
+}
+
+fn walk_nested_package_dir(
+    dep_dir: &std::path::Path,
+    segments: &[&str],
+) -> Option<std::path::PathBuf> {
+    if segments.is_empty() {
+        return Some(dep_dir.to_path_buf());
+    }
+    match flask::resolve_nested_package_path(dep_dir, segments).ok()? {
+        flask::NestedPackageTarget::FolderModule(dir) => Some(dir),
+    }
 }
 
 fn resolve_dep_dir(
@@ -141,21 +159,6 @@ fn load_config_and_dir(
     let cfg = flask::FlaskConfig::from_directory(file_dir)?;
     let cfg_dir = flask::FlaskConfigHandle::load(file_dir).ok()?.source_dir();
     Some((cfg, cfg_dir))
-}
-
-fn walk_exports_chain(
-    dep_dir: &std::path::Path,
-    dep_cfg: &flask::FlaskConfig,
-    segments: &[&str],
-) -> Option<flask::FlaskConfig> {
-    if segments.is_empty() {
-        return Some(dep_cfg.clone());
-    }
-
-    match flask::resolve_chained_exports(dep_dir, segments).ok()? {
-        flask::ExportTarget::FolderModule(dir) => flask::FlaskConfig::from_directory(&dir),
-        flask::ExportTarget::File(_) => None,
-    }
 }
 
 fn complete_local_paths(
@@ -329,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn use_completion_dep_root_exports() {
+    fn use_completion_dep_root_nested_packages() {
         let dir = unique_temp_dir("dep_root_exports");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -351,10 +354,17 @@ mod tests {
 {
   "name": "dep",
   "version": "0.0.0",
-  "authors": [],
-  "exports": { "io": { "path": "io.gin" }, "math": { "path": "math.gin" } }
+  "authors": []
 }
 "#,
+        );
+        write_file(
+            &dir.join("dep/io/flask.jsonc"),
+            r#"{"name":"io","version":"0.0.0","authors":[]}"#,
+        );
+        write_file(
+            &dir.join("dep/math/flask.jsonc"),
+            r#"{"name":"math","version":"0.0.0","authors":[]}"#,
         );
         write_file(&dir.join("main.gin"), "use dep.\n");
 
@@ -373,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn use_completion_chained_exports_dep_a_dot_completes_exports_in_a() {
+    fn use_completion_chained_nested_packages_under_dep_a() {
         let dir = unique_temp_dir("dep_a_exports");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -395,21 +405,21 @@ mod tests {
 {
   "name": "dep",
   "version": "0.0.0",
-  "authors": [],
-  "exports": { "a": { "path": "a" } }
+  "authors": []
 }
 "#,
         );
         write_file(
             &dir.join("dep/a/flask.jsonc"),
-            r#"
-{
-  "name": "dep_a",
-  "version": "0.0.0",
-  "authors": [],
-  "exports": { "b": { "path": "b.gin" }, "c": { "path": "c.gin" } }
-}
-"#,
+            r#"{"name":"dep_a","version":"0.0.0","authors":[]}"#,
+        );
+        write_file(
+            &dir.join("dep/a/b/flask.jsonc"),
+            r#"{"name":"b","version":"0.0.0","authors":[]}"#,
+        );
+        write_file(
+            &dir.join("dep/a/c/flask.jsonc"),
+            r#"{"name":"c","version":"0.0.0","authors":[]}"#,
         );
         write_file(&dir.join("main.gin"), "use dep.a.\n");
 
@@ -428,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn use_completion_filters_export_keys_by_partial() {
+    fn use_completion_filters_nested_names_by_partial() {
         let dir = unique_temp_dir("dep_root_exports_partial");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -450,10 +460,17 @@ mod tests {
 {
   "name": "dep",
   "version": "0.0.0",
-  "authors": [],
-  "exports": { "io": { "path": "io.gin" }, "math": { "path": "math.gin" } }
+  "authors": []
 }
 "#,
+        );
+        write_file(
+            &dir.join("dep/io/flask.jsonc"),
+            r#"{"name":"io","version":"0.0.0","authors":[]}"#,
+        );
+        write_file(
+            &dir.join("dep/math/flask.jsonc"),
+            r#"{"name":"math","version":"0.0.0","authors":[]}"#,
         );
         write_file(&dir.join("main.gin"), "use dep.i\n");
 

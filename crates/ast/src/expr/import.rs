@@ -11,7 +11,7 @@ pub struct BundleExportImport {
     pub alias: Option<Intern<String>>,
 }
 
-/// `use folder.(export1, export2 as alias)` — same-folder folder-module with explicit exports.
+/// `use dep.(a, b as c)` — dependency `dep` must be in `flask.jsonc`; each member is a nested folder module under the dependency root.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LocalBundleImport {
     pub root: Intern<String>,
@@ -44,7 +44,7 @@ pub enum ImportSource {
     Package(ModPath),
     /// Path to a module on disk ex. `use '../http' as http`
     Local(PathBuf, SpanId),
-    /// Same-folder folder-module destructure: `use utils.(math, http as h)`
+    /// Dependency bundle: `use core.(io, fs as store)`
     LocalBundle(LocalBundleImport),
 }
 

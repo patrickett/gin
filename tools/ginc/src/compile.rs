@@ -4,7 +4,8 @@ use crate::cli::Args;
 use ast::FileAst;
 use codegen::emit;
 use diagnostic::{Category, Diagnostic};
-use flask::FlaskConfig;
+use flask::{FlaskConfig, PACKAGE_CONFIG_NAME};
+use internment::Intern;
 use lexer::debug_tokens;
 use parser::parse_source_full;
 use resolve::ParsedFile;
@@ -82,7 +83,21 @@ impl GinCompiler {
             return;
         }
 
-        let merged_ast = merge_asts(&files);
+        let merged_ast = match resolve::merge_asts_checked(&files) {
+            Ok(m) => m,
+            Err(symptoms) => {
+                print_standalone_import_diagnostics(&files, &symptoms);
+                return;
+            }
+        };
+
+        if matches!(args.emit, crate::cli::Emit::Exe)
+            && !is_library
+            && !validate_main_binary(&merged_ast, &path)
+        {
+            return;
+        }
+
         match args.emit {
             crate::cli::Emit::Mlir => emit_mlir(&files, &merged_ast, &checked.ty_env),
             crate::cli::Emit::Obj | crate::cli::Emit::Exe => {
@@ -120,9 +135,15 @@ fn typecheck(files: &[ParsedFile]) -> TypecheckResult {
 }
 
 /// Collect `.gin` file paths under `root`, skipping `target/` directories.
+///
+/// If `root` is a folder module (contains `flask.jsonc`), only immediate `*.gin` files are used.
 fn collect_gin_files(root: &Path) -> Vec<PathBuf> {
     if root.is_dir() {
-        collect_gin_files_recursive(root)
+        if root.join(PACKAGE_CONFIG_NAME).is_file() {
+            flask::list_package_gin_files(root)
+        } else {
+            collect_gin_files_recursive(root)
+        }
     } else {
         vec![root.to_path_buf()]
     }
@@ -223,12 +244,40 @@ fn print_typecheck_diagnostics(files: &[ParsedFile], result: &TypecheckResult) -
     has_flaws
 }
 
-fn merge_asts(files: &[ParsedFile]) -> FileAst {
-    let mut merged = FileAst::default();
-    for file in files {
-        merged.merge_from(file.output.ast.clone());
+fn validate_main_binary(merged: &FileAst, input: &Path) -> bool {
+    let is_main_entry = input.file_name().is_some_and(|n| n == "main.gin");
+    if !is_main_entry {
+        return true;
     }
-    merged
+    let main_name = Intern::<String>::from_ref("main");
+    if merged.defs.contains_key(&main_name) {
+        return true;
+    }
+    eprintln!(
+        "error: binary entry main.gin must define a top-level `main` binding (see {})",
+        input.display()
+    );
+    false
+}
+
+fn print_standalone_import_diagnostics(files: &[ParsedFile], symptoms: &[Diagnostic]) {
+    let Some(primary) = files.first() else {
+        for s in symptoms {
+            eprintln!(
+                "{}: [{}] {}",
+                s.category.as_str(),
+                s.error_code(),
+                s.message
+            );
+        }
+        return;
+    };
+    let label = path_for_diagnostic_report(&primary.path);
+    let span_table = primary.output.ast.span_table();
+    let source = primary.source.as_str();
+    for d in symptoms {
+        d.print(span_table, source, &label);
+    }
 }
 
 /// Print codegen / link diagnostics with the same ariadne layout as parse and type errors.

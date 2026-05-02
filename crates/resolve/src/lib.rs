@@ -1,5 +1,5 @@
 pub mod resolve;
-pub use resolve::{resolve_imports, resolve_flask_path_dependencies};
+pub use resolve::{merge_asts_checked, resolve_imports, resolve_flask_path_dependencies};
 
 mod module_graph;
 

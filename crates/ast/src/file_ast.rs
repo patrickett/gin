@@ -310,6 +310,22 @@ impl FileAst {
         names.sort();
         names
     }
+
+    /// Remove `private` tags and defs so importers only see the public API (after [`crate::qualify_module_defs`]).
+    pub fn strip_private_for_importer(mut self) -> Self {
+        self.tags.retain(|k, _| !self.private_tags.contains(k));
+        self.defs.retain(|k, _| !self.private_defs.contains(k));
+        self.private_tags.clear();
+        self.private_defs.clear();
+        self
+    }
+}
+
+/// Duplicate top-level name when merging compilation units.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeConflict {
+    Tag { name: Intern<String> },
+    Def { name: Intern<String> },
 }
 
 impl FileAst {
@@ -331,6 +347,29 @@ impl FileAst {
                 self.defs.insert(name, bind);
             }
         }
+    }
+
+    /// Like [`merge_from`], but returns an error if `other` introduces a tag or def that already exists.
+    pub fn merge_from_checked(&mut self, other: FileAst) -> Result<(), MergeConflict> {
+        for name in other.tags.keys() {
+            if self.tags.contains_key(name) {
+                return Err(MergeConflict::Tag { name: *name });
+            }
+        }
+        for name in other.defs.keys() {
+            if self.defs.contains_key(name) {
+                return Err(MergeConflict::Def { name: *name });
+            }
+        }
+        for (name, declare) in other.tags {
+            self.tags.insert(name, declare);
+        }
+        for (name, bind) in other.defs {
+            if bind.attributes().matches_current_platform() {
+                self.defs.insert(name, bind);
+            }
+        }
+        Ok(())
     }
 }
 
