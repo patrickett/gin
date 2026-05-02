@@ -10,6 +10,12 @@ pub enum TypeSymptom {
         /// Closest in-scope name (imports, functions, tags) within edit distance ≤ 2.
         did_you_mean: Option<String>,
     },
+    /// Imported package prefix (or similar) used where a value / callable expression is required.
+    #[strum(serialize = "type-not-expr")]
+    NotExpr {
+        /// Name as written in source (shown in the message as `'name'`).
+        name: String,
+    },
     #[strum(serialize = "type-unknown-tag")]
     UnknownTag { name: String },
     #[strum(serialize = "type-inference-failed")]
@@ -45,6 +51,7 @@ impl DiagnosticLike for TypeSymptom {
         match self {
             Self::Mismatch => "type mismatch".into(),
             Self::UnknownBinding { name, .. } => format!("use of undefined binding `{name}`"),
+            Self::NotExpr { name } => format!("'{name}' is not an expression"),
             Self::UnknownTag { name } => format!("use of undeclared tag `{name}`"),
             Self::InferenceFailed => "failed to infer type".into(),
             Self::ConstraintViolation { param, expected, got } => format!(
@@ -82,6 +89,7 @@ impl DiagnosticLike for TypeSymptom {
             Self::UnknownBinding { did_you_mean, .. } => did_you_mean
                 .as_ref()
                 .map(|m| format!("did you mean `{m}`?")),
+            Self::NotExpr { .. } => None,
             Self::Mismatch => Some("types do not match".into()),
             Self::UnknownTag { .. } => Some("declare the tag before using it".into()),
             Self::InferenceFailed => Some("could not infer the type".into()),

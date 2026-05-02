@@ -290,6 +290,29 @@ pub fn find_definition_span(ast: &ast::FileAst, name: &str) -> Option<std::ops::
         })
 }
 
+/// Byte range of the `use` path text that introduces `name` into scope (package last segment /
+/// root-only path, local basename, bundle root, or `as` alias), for goto-definition before jumping
+/// off-file to the dependency.
+///
+/// Returns `None` when `name` is not introduced by any `use` in this file.
+pub fn find_import_definition_span(ast: &ast::FileAst, name: &str) -> Option<std::ops::Range<usize>> {
+    let span_table = ast.span_table();
+    let key = internment::Intern::<String>::from_ref(name);
+    for imp in ast.uses() {
+        for mi in &imp.0 {
+            let imported = mi
+                .alias
+                .unwrap_or_else(|| internment::Intern::<String>::new(mi.effective_name()));
+            if imported != key {
+                continue;
+            }
+            let span = span_table.get(mi.source.span_id());
+            return Some(span.start..span.end);
+        }
+    }
+    None
+}
+
 /// Find all use-sites of `name` in the AST, returning byte ranges suitable for LSP locations.
 ///
 /// Matches plain function calls, method calls (by last segment), bare tag references,

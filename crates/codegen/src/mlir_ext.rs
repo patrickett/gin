@@ -264,14 +264,15 @@ pub trait BlockExt<'c> {
     fn const_string_with_ctx(&self, ctx: &CodegenContext<'_, 'c>, value: &str) -> Value<'c, 'c>;
     /// Return a unit/void value
     fn unit_value(&self, ctx: &CodegenContext<'_, 'c>) -> Value<'c, 'c>;
-    fn ret(&self, ctx: &'c Context, values: &[Value<'c, 'c>]) -> Operation<'c>;
-    fn call_void(&self, ctx: &'c Context, func_name: &str, args: &[Value<'c, 'c>]);
+    fn ret(&self, ctx: &'c Context, values: &[Value<'c, 'c>], loc: Location<'c>) -> Operation<'c>;
+    fn call_void(&self, ctx: &'c Context, func_name: &str, args: &[Value<'c, 'c>], loc: Location<'c>);
     fn call(
         &self,
         ctx: &'c Context,
         func_name: &str,
         args: &[Value<'c, 'c>],
         return_type: Type<'c>,
+        loc: Location<'c>,
     ) -> Value<'c, 'c>;
     /// `llvm.getelementptr` with a dynamic byte offset into a `!llvm.ptr`.
     fn gep_i8(
@@ -350,15 +351,15 @@ impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
         self.const_i64(ctx.mlir, 0)
     }
 
-    fn ret(&self, ctx: &'c Context, values: &[Value<'c, 'c>]) -> Operation<'c> {
-        melior::dialect::func::r#return(values, ctx.unknown_loc())
+    fn ret(&self, _ctx: &'c Context, values: &[Value<'c, 'c>], loc: Location<'c>) -> Operation<'c> {
+        melior::dialect::func::r#return(values, loc)
     }
 
-    fn call_void(&self, ctx: &'c Context, func_name: &str, args: &[Value<'c, 'c>]) {
+    fn call_void(&self, ctx: &'c Context, func_name: &str, args: &[Value<'c, 'c>], loc: Location<'c>) {
         let callee_id = Identifier::new(ctx, "callee");
         let symbol_ref = ctx.symbol_ref_attr(func_name);
         self.append_operation(
-            OperationBuilder::new("func.call", ctx.unknown_loc())
+            OperationBuilder::new("func.call", loc)
                 .add_attributes(&[(callee_id, symbol_ref)])
                 .add_operands(args)
                 .build()
@@ -372,11 +373,12 @@ impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
         func_name: &str,
         args: &[Value<'c, 'c>],
         return_type: Type<'c>,
+        loc: Location<'c>,
     ) -> Value<'c, 'c> {
         let callee_id = Identifier::new(ctx, "callee");
         let symbol_ref = ctx.symbol_ref_attr(func_name);
         self.append_op(
-            OperationBuilder::new("func.call", ctx.unknown_loc())
+            OperationBuilder::new("func.call", loc)
                 .add_attributes(&[(callee_id, symbol_ref)])
                 .add_operands(args)
                 .add_results(&[return_type])

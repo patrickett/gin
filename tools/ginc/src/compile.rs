@@ -84,9 +84,9 @@ impl GinCompiler {
 
         let merged_ast = merge_asts(&files);
         match args.emit {
-            crate::cli::Emit::Mlir => emit_mlir(&merged_ast, &checked.ty_env),
+            crate::cli::Emit::Mlir => emit_mlir(&files, &merged_ast, &checked.ty_env),
             crate::cli::Emit::Obj | crate::cli::Emit::Exe => {
-                emit_native(&merged_ast, &checked.ty_env, args, &path, is_library)
+                emit_native(&files, &merged_ast, &checked.ty_env, args, &path, is_library)
             }
             crate::cli::Emit::Tokens => unreachable!(),
         }
@@ -150,6 +150,32 @@ fn collect_gin_files_recursive(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// Read file contents from disk, skipping files that can't be read.
+/// Path shown in ariadne diagnostics: relative to the process current directory when possible.
+fn path_for_diagnostic_report(path: &Path) -> String {
+    let Ok(cwd) = std::env::current_dir() else {
+        return path.display().to_string();
+    };
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    match (abs.canonicalize(), cwd.canonicalize()) {
+        (Ok(abs), Ok(base)) => abs
+            .strip_prefix(&base)
+            .map(|p| {
+                let s = p.display().to_string();
+                if s.is_empty() {
+                    ".".to_string()
+                } else {
+                    s
+                }
+            })
+            .unwrap_or_else(|_| abs.display().to_string()),
+        _ => path.display().to_string(),
+    }
+}
+
 fn read_sources(paths: &[PathBuf]) -> Vec<(PathBuf, String)> {
     let mut sources = Vec::with_capacity(paths.len());
     for fp in paths {
@@ -168,7 +194,7 @@ fn read_sources(paths: &[PathBuf]) -> Vec<(PathBuf, String)> {
 fn print_diagnostics(files: &[ParsedFile]) -> bool {
     let mut has_flaws = false;
     for file in files {
-        let filename = file.filename();
+        let filename = path_for_diagnostic_report(&file.path);
         let span_table = file.output.ast.span_table();
         for diag in &file.output.symptoms {
             diag.print(span_table, &file.source, &filename);
@@ -185,7 +211,7 @@ fn print_typecheck_diagnostics(files: &[ParsedFile], result: &TypecheckResult) -
     let mut has_flaws = false;
     for (i, symptoms) in result.symptoms.iter().enumerate() {
         let file = &files[i];
-        let filename = file.filename();
+        let filename = path_for_diagnostic_report(&file.path);
         let span_table = file.output.ast.span_table();
         for diag in symptoms {
             diag.print(span_table, &file.source, &filename);
@@ -205,26 +231,63 @@ fn merge_asts(files: &[ParsedFile]) -> FileAst {
     merged
 }
 
+/// Print codegen / link diagnostics with the same ariadne layout as parse and type errors.
+///
+/// Uses the first parsed `.gin` file as source context (span table + text). This matches
+/// lowering, which is keyed off the compilation entry file.
+fn print_codegen_diagnostics(files: &[ParsedFile], symptoms: &[Diagnostic]) {
+    if symptoms.is_empty() {
+        return;
+    }
+    let Some(primary) = files.first() else {
+        for s in symptoms {
+            eprintln!(
+                "{}: [{}] {}",
+                s.category.as_str(),
+                s.error_code(),
+                s.message
+            );
+        }
+        return;
+    };
+    let label = path_for_diagnostic_report(&primary.path);
+    let span_table = primary.output.ast.span_table();
+    let source = primary.source.as_str();
+    for d in symptoms {
+        d.print(span_table, source, &label);
+    }
+}
+
 /// Print MLIR text to stdout.
-fn emit_mlir(merged_ast: &FileAst, ty_env: &TyEnv) {
-    let (result, symptoms) = emit::build_module_text(merged_ast, "", "<stdin>", ty_env);
+fn emit_mlir(files: &[ParsedFile], merged_ast: &FileAst, ty_env: &TyEnv) {
+    let (source, label) = match files.first() {
+        Some(f) => (
+            f.source.as_str(),
+            path_for_diagnostic_report(&f.path),
+        ),
+        None => ("", "<stdin>".to_string()),
+    };
+    let (result, symptoms) = emit::build_module_text(merged_ast, source, &label, ty_env);
     match result {
         Some(mlir_text) => {
-            for s in &symptoms {
-                eprintln!("Codegen warning: [{}] {}", s.error_code(), s.message);
-            }
+            print_codegen_diagnostics(files, &symptoms);
             println!("\n```mlir\n{mlir_text}```\n");
         }
         None => {
-            for s in &symptoms {
-                eprintln!("Codegen error: [{}] {}", s.error_code(), s.message);
-            }
+            print_codegen_diagnostics(files, &symptoms);
         }
     }
 }
 
 /// Compile to object file / executable.
-fn emit_native(merged_ast: &FileAst, ty_env: &TyEnv, args: &Args, path: &Path, is_library: bool) {
+fn emit_native(
+    files: &[ParsedFile],
+    merged_ast: &FileAst,
+    ty_env: &TyEnv,
+    args: &Args,
+    path: &Path,
+    is_library: bool,
+) {
     let obj_path = if is_library {
         args.output.clone().unwrap_or_else(|| {
             let pkg_name = path.file_name().unwrap_or_default().to_string_lossy();
@@ -245,14 +308,18 @@ fn emit_native(merged_ast: &FileAst, ty_env: &TyEnv, args: &Args, path: &Path, i
         let _ = std::fs::create_dir_all(parent);
     }
 
-    let filename = path.to_string_lossy();
+    let (source, label) = match files.first() {
+        Some(f) => (
+            f.source.as_str(),
+            path_for_diagnostic_report(&f.path),
+        ),
+        None => ("", path.to_string_lossy().into_owned()),
+    };
     let profile = args.profile.into();
     let (ok, symptoms) =
-        emit::compile_to_object(merged_ast, &obj_path, profile, "", &filename, ty_env);
+        emit::compile_to_object(merged_ast, &obj_path, profile, source, &label, ty_env);
     if !ok {
-        for s in &symptoms {
-            eprintln!("Codegen error: [{}] {}", s.error_code(), s.message);
-        }
+        print_codegen_diagnostics(files, &symptoms);
         return;
     }
 
@@ -264,15 +331,11 @@ fn emit_native(merged_ast: &FileAst, ty_env: &TyEnv, args: &Args, path: &Path, i
         let (linked, link_symptoms) =
             emit::link_executable(&obj_path, &exe_path, args.target.as_deref());
         if !linked {
-            for s in &link_symptoms {
-                eprintln!("Link error: [{}] {}", s.error_code(), s.message);
-            }
+            print_codegen_diagnostics(files, &link_symptoms);
         }
         let _ = std::fs::remove_file(&obj_path);
     } else {
-        for s in &symptoms {
-            eprintln!("Codegen warning: [{}] {}", s.error_code(), s.message);
-        }
+        print_codegen_diagnostics(files, &symptoms);
         println!("Compiled to {}", obj_path.display());
     }
 }

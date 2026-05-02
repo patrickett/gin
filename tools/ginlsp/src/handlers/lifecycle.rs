@@ -36,6 +36,7 @@ impl Backend {
                 ..Default::default()
             }),
             hover_provider: Some(HoverProviderCapability::Simple(true)),
+            code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
             signature_help_provider: Some(SignatureHelpOptions {
                 trigger_characters: Some(vec!["(".to_string()]),
                 retrigger_characters: Some(vec![",".to_string()]),

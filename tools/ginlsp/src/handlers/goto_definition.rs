@@ -2,7 +2,9 @@ use crate::diagnostics::span_to_range;
 use crate::Backend;
 use ast::{HasSpanId, ImportSource};
 use database::file_parse_output;
-use typeck::{find_definition_span, get_word_at_position, position_to_byte_offset};
+use typeck::{
+    find_definition_span, find_import_definition_span, get_word_at_position, position_to_byte_offset,
+};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 
@@ -199,6 +201,10 @@ impl Backend {
                         .map(|span| span_to_range(span.start, span.end, &source))
                         .unwrap_or_default();
                     if range != Range::default() {
+                        return Some(GotoDefinitionResponse::Scalar(Location { uri, range }));
+                    }
+                    if let Some(span) = find_import_definition_span(&ast, &word) {
+                        let range = span_to_range(span.start, span.end, &source);
                         return Some(GotoDefinitionResponse::Scalar(Location { uri, range }));
                     }
                 }

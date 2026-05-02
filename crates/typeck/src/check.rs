@@ -12,8 +12,96 @@ use crate::resolve::{is_type_surface, mangled_fn_call_name};
 use crate::ty::Ty;
 use crate::{LayeredLocals, LocalTypes, TyInfer, TyInferEnv};
 
+/// Value-level names brought into scope by `use` (package root, last segment, or `as` alias).
+fn collect_import_names(ast: &FileAst) -> HashSet<Intern<String>> {
+    let mut out = HashSet::new();
+    for imp in ast.uses() {
+        for mi in &imp.0 {
+            let name = mi
+                .alias
+                .unwrap_or_else(|| Intern::<String>::new(mi.effective_name()));
+            out.insert(name);
+        }
+    }
+    out
+}
+
+/// Levenshtein distance for short identifiers (imports, bind names).
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let n = a.len();
+    let m = b.len();
+    if n == 0 {
+        return m;
+    }
+    if m == 0 {
+        return n;
+    }
+    let mut prev: Vec<usize> = (0..=m).collect();
+    let mut curr = vec![0usize; m + 1];
+    for i in 1..=n {
+        curr[0] = i;
+        for j in 1..=m {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            curr[j] = (curr[j - 1] + 1)
+                .min(prev[j] + 1)
+                .min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[m]
+}
+
 impl TyEnv {
+    /// Best single-character-edit match among imports, top-level functions, and declared tags.
+    fn suggest_typo_for_identifier(
+        &self,
+        unknown: &str,
+        imports: &HashSet<Intern<String>>,
+    ) -> Option<String> {
+        if unknown.is_empty() || unknown.contains('.') {
+            return None;
+        }
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut candidates: Vec<String> = Vec::new();
+        for k in imports {
+            let s = k.to_string();
+            if seen.insert(s.clone()) {
+                candidates.push(s);
+            }
+        }
+        for k in self.fn_return_types.keys() {
+            let s = k.to_string();
+            if seen.insert(s.clone()) {
+                candidates.push(s);
+            }
+        }
+        for k in self.tag_types.keys() {
+            let s = k.to_string();
+            if seen.insert(s.clone()) {
+                candidates.push(s);
+            }
+        }
+        let mut scored: Vec<(usize, String)> = candidates
+            .into_iter()
+            .filter(|c| c != unknown)
+            .map(|c| (levenshtein(unknown, &c), c))
+            .filter(|(d, _)| *d > 0 && *d <= 2)
+            .collect();
+        if scored.is_empty() {
+            return None;
+        }
+        scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        let best_d = scored[0].0;
+        if scored.len() > 1 && scored[1].0 == best_d {
+            return None;
+        }
+        Some(scored[0].1.clone())
+    }
+
     pub fn check_unknowns(&self, ast: &FileAst, symptoms: &mut Vec<diagnostic::Diagnostic>) {
+        let imports = collect_import_names(ast);
         for bind in ast.defs.values() {
             if !bind.attributes().matches_current_platform() {
                 continue;
@@ -24,7 +112,7 @@ impl TyEnv {
                     locals.insert(*name, self.resolve_parameter_kind(kind));
                 }
             }
-            self.check_bind(bind, symptoms, &locals);
+            self.check_bind(bind, symptoms, &locals, &imports);
         }
     }
 
@@ -33,6 +121,7 @@ impl TyEnv {
         bind: &Bind,
         symptoms: &mut Vec<diagnostic::Diagnostic>,
         locals: &dyn LocalTypes,
+        imports: &HashSet<Intern<String>>,
     ) {
         if let Some(sp) = &bind.return_tag
             && is_type_surface(&sp.0)
@@ -49,7 +138,7 @@ impl TyEnv {
             }
         }
         match bind.value() {
-            BindValue::Expr(expr) => self.check_expr(expr, symptoms, locals),
+            BindValue::Expr(expr) => self.check_expr(expr, symptoms, locals, imports),
             BindValue::Body { exprs, ret } => {
                 use diagnostic::DiagnosticLike;
                 use diagnostic::type_::TypeSymptom;
@@ -57,7 +146,7 @@ impl TyEnv {
                 let mut body_locals = LayeredLocals::new(locals);
                 for expr in exprs.iter() {
                     if let Expr::Bind(inner) = &**expr {
-                        self.check_bind(inner, symptoms, &body_locals);
+                        self.check_bind(inner, symptoms, &body_locals, imports);
                         body_locals.insert(inner.name(), {
                             let env = TyInferEnv {
                                 tag_types: &self.tag_types,
@@ -67,11 +156,11 @@ impl TyEnv {
                             inner.infer_ty(&env)
                         });
                     } else {
-                        self.check_expr(expr, symptoms, &body_locals);
+                        self.check_expr(expr, symptoms, &body_locals, imports);
                     }
                 }
                 if let Some(ret_expr) = &ret.0 {
-                    self.check_expr(ret_expr, symptoms, &body_locals);
+                    self.check_expr(ret_expr, symptoms, &body_locals, imports);
                 }
 
                 let mut suffix_refs: HashSet<Intern<String>> = HashSet::new();
@@ -108,6 +197,7 @@ impl TyEnv {
         expr: &Expr,
         symptoms: &mut Vec<diagnostic::Diagnostic>,
         locals: &dyn LocalTypes,
+        imports: &HashSet<Intern<String>>,
     ) {
         use diagnostic::DiagnosticLike;
         use diagnostic::type_::TypeSymptom;
@@ -118,32 +208,54 @@ impl TyEnv {
                 let mangled = mangled_fn_call_name(call);
                 if let Some(args) = &call.args {
                     if self.fn_return_ty(&mangled).is_none() {
+                        let mangled_str = mangled.to_string();
+                        let suggestion = if !mangled_str.contains('.') {
+                            self.suggest_typo_for_identifier(&mangled_str, imports)
+                        } else {
+                            None
+                        };
                         symptoms.push(
                             TypeSymptom::UnknownBinding {
-                                name: mangled.to_string(),
+                                name: mangled_str,
+                                did_you_mean: suggestion,
                             }
                             .into_diagnostic(call.path.span_id()),
                         );
                     }
                     for arg in args {
-                        self.check_expr(arg, symptoms, locals);
+                        self.check_expr(arg, symptoms, locals, imports);
                     }
                 } else if call.path.segments.is_empty()
                     && locals.get_type(&name).is_none()
                     && self.fn_return_ty(&mangled).is_none()
+                    && !imports.contains(&name)
                 {
+                    let suggestion = self.suggest_typo_for_identifier(name.as_str(), imports);
                     symptoms.push(
                         TypeSymptom::UnknownBinding {
                             name: mangled.to_string(),
+                            did_you_mean: suggestion,
+                        }
+                        .into_diagnostic(call.path.span_id()),
+                    );
+                } else if call.path.segments.is_empty()
+                    && call.args.is_none()
+                    && locals.get_type(&name).is_none()
+                    && self.fn_return_ty(&mangled).is_none()
+                    && imports.contains(&name)
+                {
+                    symptoms.push(
+                        TypeSymptom::NotExpr {
+                            name: name.to_string(),
                         }
                         .into_diagnostic(call.path.span_id()),
                     );
                 }
             }
-            Expr::Bind(bind) => self.check_bind(bind, symptoms, locals),
+            Expr::Bind(bind) => self.check_bind(bind, symptoms, locals, imports),
             Expr::Binary(bin) => {
-                self.check_expr(&bin.lhs, symptoms, locals);
-                self.check_expr(&bin.rhs, symptoms, locals);
+                self.check_expr(&bin.lhs, symptoms, locals, imports);
+                self.check_expr(&bin.rhs, symptoms, locals, imports);
             }
             Expr::When(w) => {
                 let subject_ty = w
@@ -151,13 +263,13 @@ impl TyEnv {
                     .as_ref()
                     .map(|s| s.infer_ty(&self.infer_env(locals)));
                 if let Some(subject) = &w.subject {
-                    self.check_expr(subject, symptoms, locals);
+                    self.check_expr(subject, symptoms, locals, imports);
                 }
                 for arm in &w.arms {
                     match arm {
                         WhenArm::Cond { condition, body } => {
-                            self.check_expr(condition, symptoms, locals);
-                            self.check_expr(body, symptoms, locals);
+                            self.check_expr(condition, symptoms, locals, imports);
+                            self.check_expr(body, symptoms, locals, imports);
                         }
                         WhenArm::Is { pattern, body } => {
                             if is_type_surface(&pattern.0) {
@@ -191,7 +303,7 @@ impl TyEnv {
                                     }
                                 }
                                 check_type_pattern_default_exprs(&pattern.0, &mut |e| {
-                                    self.check_expr(e, symptoms, locals);
+                                    self.check_expr(e, symptoms, locals, imports);
                                 });
                             } else {
                                 symptoms.push(
@@ -201,23 +313,23 @@ impl TyEnv {
                                     .into_diagnostic(pattern.1),
                                 );
                             }
-                            self.check_expr(body, symptoms, locals);
+                            self.check_expr(body, symptoms, locals, imports);
                         }
                         WhenArm::Else(body) => {
-                            self.check_expr(body, symptoms, locals);
+                            self.check_expr(body, symptoms, locals, imports);
                         }
                     }
                 }
             }
             Expr::If(if_expr) => match &if_expr.condition {
                 IfCondition::Bool(cond) => {
-                    self.check_expr(cond, symptoms, locals);
+                    self.check_expr(cond, symptoms, locals, imports);
                     for e in &if_expr.body {
-                        self.check_expr(e, symptoms, locals);
+                        self.check_expr(e, symptoms, locals, imports);
                     }
                 }
                 IfCondition::Pattern { subject, pattern } => {
-                    self.check_expr(subject, symptoms, locals);
+                    self.check_expr(subject, symptoms, locals, imports);
                     let mut if_locals = LayeredLocals::new(locals);
                     if is_type_surface(&pattern.0) {
                         if let Expr::TypeGeneric { params, .. } = &pattern.0 {
@@ -228,7 +340,7 @@ impl TyEnv {
                             }
                         }
                         check_type_pattern_default_exprs(&pattern.0, &mut |e| {
-                            self.check_expr(e, symptoms, locals);
+                            self.check_expr(e, symptoms, locals, imports);
                         });
                     } else {
                         symptoms.push(
@@ -239,49 +351,49 @@ impl TyEnv {
                         );
                     }
                     for e in &if_expr.body {
-                        self.check_expr(e, symptoms, &if_locals);
+                        self.check_expr(e, symptoms, &if_locals, imports);
                     }
                 }
             },
             Expr::Loop(loop_expr) => match loop_expr {
                 Loop::While(w) => {
-                    self.check_expr(&w.cond, symptoms, locals);
+                    self.check_expr(&w.cond, symptoms, locals, imports);
                     for e in &w.exprs {
-                        self.check_expr(e, symptoms, locals);
+                        self.check_expr(e, symptoms, locals, imports);
                     }
                 }
                 Loop::ForIn(f) => {
-                    self.check_expr(&f.iter, symptoms, locals);
+                    self.check_expr(&f.iter, symptoms, locals, imports);
                     for e in &f.exprs {
-                        self.check_expr(e, symptoms, locals);
+                        self.check_expr(e, symptoms, locals, imports);
                     }
                 }
             },
             Expr::TupleLit(elems) => {
                 for e in elems {
-                    self.check_expr(e, symptoms, locals);
+                    self.check_expr(e, symptoms, locals, imports);
                 }
             }
-            Expr::TupleAlloc { init, .. } => self.check_expr(init, symptoms, locals),
-            Expr::TupleGet { base, .. } => self.check_expr(base, symptoms, locals),
+            Expr::TupleAlloc { init, .. } => self.check_expr(init, symptoms, locals, imports),
+            Expr::TupleGet { base, .. } => self.check_expr(base, symptoms, locals, imports),
             Expr::TupleSet { base, value, .. } => {
-                self.check_expr(base, symptoms, locals);
-                self.check_expr(value, symptoms, locals);
+                self.check_expr(base, symptoms, locals, imports);
+                self.check_expr(value, symptoms, locals, imports);
             }
             Expr::BufGet { buf, index, .. } => {
-                self.check_expr(buf, symptoms, locals);
-                self.check_expr(index, symptoms, locals);
+                self.check_expr(buf, symptoms, locals, imports);
+                self.check_expr(index, symptoms, locals, imports);
             }
             Expr::BufSet {
                 buf, index, value, ..
             } => {
-                self.check_expr(buf, symptoms, locals);
-                self.check_expr(index, symptoms, locals);
-                self.check_expr(value, symptoms, locals);
+                self.check_expr(buf, symptoms, locals, imports);
+                self.check_expr(index, symptoms, locals, imports);
+                self.check_expr(value, symptoms, locals, imports);
             }
-            Expr::Cast { expr, .. } => self.check_expr(expr, symptoms, locals),
+            Expr::Cast { expr, .. } => self.check_expr(expr, symptoms, locals, imports),
             Expr::TakePtr(e) | Expr::TakeRef(e) | Expr::Deref(e) | Expr::Negate(e) => {
-                self.check_expr(e, symptoms, locals);
+                self.check_expr(e, symptoms, locals, imports);
             }
             Expr::AnonymousTag(name, span) => {
                 if self.lookup_variant(*name).is_none() {
@@ -312,7 +424,7 @@ impl TyEnv {
                     );
                 }
                 for arg in &tc.args {
-                    self.check_expr(arg, symptoms, locals);
+                    self.check_expr(arg, symptoms, locals, imports);
                 }
             }
             Expr::TypeNominal(..) | Expr::TypeQualified(_) | Expr::TypeGeneric { .. } => {

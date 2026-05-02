@@ -1,8 +1,59 @@
 use database::Diagnostics;
-use diagnostic::Category;
+use diagnostic::{Category, DiagnosticCode, TypeSymptom};
 use span::SpanTable;
-use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range};
+use tower_lsp::lsp_types::{
+    Diagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, Location, NumberOrString,
+    Position, Range, Url,
+};
 use typeck::byte_offset_to_position;
+
+/// One-line diagnostic text for the editor (Problems / hover): primary message plus
+/// `ginc(<slug>)`. Details live in `related_information`.
+fn lsp_diagnostic_message(message: &str, code_slug: &str) -> String {
+    format!("{} ginc({})", message.trim(), code_slug)
+}
+
+fn diagnostic_related_information(
+    uri: &Url,
+    range: Range,
+    help_on_span: Option<&str>,
+    help: Option<&str>,
+) -> Option<Vec<DiagnosticRelatedInformation>> {
+    let mut items = Vec::new();
+    if let Some(s) = help_on_span.map(str::trim).filter(|s| !s.is_empty()) {
+        items.push(DiagnosticRelatedInformation {
+            location: Location {
+                uri: uri.clone(),
+                range,
+            },
+            message: s.to_string(),
+        });
+    }
+    if let Some(h) = help.map(str::trim).filter(|s| !s.is_empty()) {
+        items.push(DiagnosticRelatedInformation {
+            location: Location {
+                uri: uri.clone(),
+                range,
+            },
+            message: format!("help: {h}"),
+        });
+    }
+    (!items.is_empty()).then_some(items)
+}
+
+fn diagnostic_quickfix_data(symptom: &Diagnostics) -> Option<serde_json::Value> {
+    match &symptom.code {
+        DiagnosticCode::Type(TypeSymptom::UnknownBinding {
+            name,
+            did_you_mean: Some(suggested),
+        }) => Some(serde_json::json!({
+            "gincQuickFix": "replace-binding",
+            "oldName": name,
+            "newName": suggested,
+        })),
+        _ => None,
+    }
+}
 
 pub fn span_to_range(start: usize, end: usize, source: &str) -> Range {
     let (start_line, start_col) = byte_offset_to_position(start, source);
@@ -32,6 +83,7 @@ pub fn symptoms_to_diagnostics(
     source: &str,
     span_table: &SpanTable,
     symptoms: &[&Diagnostics],
+    document_uri: &Url,
 ) -> Vec<Diagnostic> {
     symptoms
         .iter()
@@ -43,16 +95,24 @@ pub fn symptoms_to_diagnostics(
                 Category::Help => DiagnosticSeverity::HINT,
                 Category::Info => DiagnosticSeverity::INFORMATION,
             };
+            let slug = symptom.error_code().to_string();
+            let message = lsp_diagnostic_message(&symptom.message, &slug);
+            let related_information = diagnostic_related_information(
+                document_uri,
+                range.clone(),
+                symptom.help_on_span.as_deref(),
+                symptom.help.as_deref(),
+            );
             Diagnostic {
                 range,
                 severity: Some(severity),
-                code: Some(NumberOrString::String(symptom.error_code().to_string())),
+                code: Some(NumberOrString::String(slug)),
                 code_description: None,
                 source: Some("ginc".to_string()),
-                message: symptom.message.clone(),
-                related_information: None,
+                message,
+                related_information,
                 tags: None,
-                data: None,
+                data: diagnostic_quickfix_data(symptom),
             }
         })
         .collect()

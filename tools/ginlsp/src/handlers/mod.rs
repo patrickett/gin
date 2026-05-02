@@ -1,3 +1,4 @@
+pub(crate) mod code_action;
 pub(crate) mod completion;
 mod document_sync;
 mod formatting;

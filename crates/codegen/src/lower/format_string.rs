@@ -68,7 +68,9 @@ impl<'c> Lower<'c> for FormatString {
                     let val = e.lower(ctx, block, symtab)?;
                     let ty = e.infer_ty(&ctx.ty_env.infer_env(&std::collections::HashMap::new()));
                     let fn_name = to_string_fn_name(&ty);
-                    let str_val = block.call(ctx.mlir, &fn_name, &[val], ctx.mlir.string_type());
+                    let loc = ctx.location();
+                    let str_val =
+                        block.call(ctx.mlir, &fn_name, &[val], ctx.mlir.string_type(), loc);
                     let ptr = block.append_op(ctx.mlir.llvm_extractvalue(
                         str_val,
                         0,

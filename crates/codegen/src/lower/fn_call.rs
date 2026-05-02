@@ -61,11 +61,13 @@ impl<'c> Lower<'c> for FnCall {
                             .fn_return_ty(&mangled)
                             .map(|t| ty_to_mlir(t, ctx.mlir))
                             .unwrap_or_else(|| ctx.mlir.i64());
+                        let loc = ctx.location();
                         return Some(block.call(
                             ctx.mlir,
                             mangled.as_str(),
                             &[self_val],
                             return_type,
+                            loc,
                         ));
                     }
                     // Method call: `p.method(args)` or `self.method(args)`.
@@ -100,7 +102,14 @@ impl<'c> Lower<'c> for FnCall {
                             .fn_return_ty(&mangled)
                             .map(|t| ty_to_mlir(t, ctx.mlir))
                             .unwrap_or_else(|| ctx.mlir.i64());
-                        return Some(block.call(ctx.mlir, mangled.as_str(), &args, return_type));
+                        let loc = ctx.location();
+                        return Some(block.call(
+                            ctx.mlir,
+                            mangled.as_str(),
+                            &args,
+                            return_type,
+                            loc,
+                        ));
                     }
                     _ => {
                         let canonical = match &record_ty {
@@ -154,11 +163,13 @@ impl<'c> Lower<'c> for FnCall {
                                 .fn_return_ty(&mangled)
                                 .map(|t| ty_to_mlir(t, ctx.mlir))
                                 .unwrap_or_else(|| ctx.mlir.i64());
+                            let loc = ctx.location();
                             return Some(block.call(
                                 ctx.mlir,
                                 mangled.as_str(),
                                 &args,
                                 return_type,
+                                loc,
                             ));
                         }
                     }
@@ -222,14 +233,21 @@ impl<'c> Lower<'c> for FnCall {
         }
 
         let ret_ty = ctx.ty_env.fn_return_ty(&func_name).cloned();
+        let loc = ctx.location();
         if matches!(ret_ty, Some(Ty::Unit)) {
-            block.call_void(ctx.mlir, func_name.as_str(), &args);
+            block.call_void(ctx.mlir, func_name.as_str(), &args, loc);
             return Some(block.unit_value(ctx));
         }
         let return_type = ret_ty
             .map(|ty| ty_to_mlir(&ty, ctx.mlir))
             .unwrap_or_else(|| ctx.mlir.i64());
-        Some(block.call(ctx.mlir, func_name.as_str(), &args, return_type))
+        Some(block.call(
+            ctx.mlir,
+            func_name.as_str(),
+            &args,
+            return_type,
+            loc,
+        ))
     }
 }
 

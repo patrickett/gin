@@ -206,6 +206,7 @@ impl Backend {
 
     fn snapshot(&self) -> state::GinSnapshot {
         let host = self.lock_host();
+      
         host.snapshot()
     }
 
@@ -340,8 +341,12 @@ impl Backend {
             let wrapped: Vec<Diagnostics> = symptoms.into_iter().map(Diagnostics).collect();
             let symptom_refs: Vec<&Diagnostics> = wrapped.iter().collect();
 
-            let diagnostics =
-                symptoms_to_diagnostics(&source, parse.ast.span_table(), &symptom_refs);
+            let diagnostics = symptoms_to_diagnostics(
+                &source,
+                parse.ast.span_table(),
+                &symptom_refs,
+                &pkg_uri,
+            );
             results.push((pkg_uri, diagnostics));
         }
         results
@@ -413,6 +418,11 @@ impl LanguageServer for Backend {
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
         self.catch_request("formatting", self.handle_formatting(params))
+            .await
+    }
+
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+        self.catch_request("code_action", self.handle_code_action(params))
             .await
     }
 }

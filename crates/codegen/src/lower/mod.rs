@@ -18,7 +18,7 @@ use crate::prelude::*;
 use ::ast::{
     Bind, BindValue, DeclareValue, Expr, FileAst, Spanned, SymbolTable as CompileTimeSymbolTable,
 };
-use ::span::SpanId;
+use ::span::{SpanId, SpanTable};
 use diagnostic::codegen::CodegenSymptom;
 use diagnostic::{Diagnostic, DiagnosticCode, DiagnosticLike, TypeSymptom};
 use internment::Intern;
@@ -68,6 +68,19 @@ fn compute_line_starts(source: &str) -> Vec<usize> {
     starts
 }
 
+/// 1-based line and column for MLIR `FileLineCol` locations.
+fn byte_offset_to_line_col(line_starts: &[usize], byte: usize) -> (usize, usize) {
+    if line_starts.is_empty() {
+        return (1, 1);
+    }
+    let line_idx = line_starts.partition_point(|&s| s <= byte);
+    let line_idx = line_idx.saturating_sub(1).min(line_starts.len().saturating_sub(1));
+    let line_start = line_starts[line_idx];
+    let line_no = line_idx + 1;
+    let col = byte.saturating_sub(line_start) + 1;
+    (line_no, col)
+}
+
 pub struct CodegenContext<'a, 'c> {
     pub mlir: &'c Context,
     pub type_info: &'a HashMap<Intern<String>, TypeInfo>,
@@ -86,6 +99,8 @@ pub struct CodegenContext<'a, 'c> {
     symptoms: RefCell<Vec<Diagnostic>>,
     pub current_span: Cell<SpanId>,
     pub source_filename: String,
+    pub source: &'a str,
+    pub span_table: &'a SpanTable,
     pub line_starts: Vec<usize>,
 }
 
@@ -95,8 +110,9 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         type_info: &'a HashMap<Intern<String>, TypeInfo>,
         symbol_table: &'a CompileTimeSymbolTable,
         ty_env: &'a TyEnv,
-        source: &str,
+        source: &'a str,
         filename: &str,
+        span_table: &'a SpanTable,
     ) -> Self {
         Self {
             mlir,
@@ -112,14 +128,21 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
             symptoms: RefCell::new(Vec::new()),
             current_span: Cell::new(SpanId::INVALID),
             source_filename: filename.to_string(),
+            source,
+            span_table,
             line_starts: compute_line_starts(source),
         }
     }
 
     pub fn location(&self) -> Location<'c> {
-        // With SpanId we can't resolve byte offsets without a SpanTable.
-        // For now, use unknown_loc for all generated MLIR locations.
-        self.mlir.unknown_loc()
+        let id = self.current_span.get();
+        if !id.is_valid() {
+            return self.mlir.unknown_loc();
+        }
+        let span = self.span_table.get(id);
+        let byte = span.start.min(self.source.len());
+        let (line, col) = byte_offset_to_line_col(&self.line_starts, byte);
+        Location::new(self.mlir, &self.source_filename, line, col)
     }
 
     pub fn register_string(&self, s: &str) -> String {
@@ -203,7 +226,15 @@ pub fn build_module_with_context<'c>(
             return (None, Vec::new());
         }
     };
-    let ctx = CodegenContext::new(context, &type_info, &symbol_table, ty_env, source, filename);
+    let ctx = CodegenContext::new(
+        context,
+        &type_info,
+        &symbol_table,
+        ty_env,
+        source,
+        filename,
+        ast.span_table(),
+    );
 
     let module = Module::new(context.unknown_loc());
 
@@ -773,13 +804,14 @@ pub fn lower_function<'c>(
 
         let result = lower_bind_value(ctx, &block, bind.value(), &symtab)?;
 
+        let ret_loc = ctx.location();
         let ret_op = match result {
-            None => block.ret(ctx.mlir, &[]),
+            None => block.ret(ctx.mlir, &[], ret_loc),
             Some(v) => {
                 if matches!(return_ty, Ty::Unit) {
-                    block.ret(ctx.mlir, &[])
+                    block.ret(ctx.mlir, &[], ret_loc)
                 } else {
-                    block.ret(ctx.mlir, &[v])
+                    block.ret(ctx.mlir, &[v], ret_loc)
                 }
             }
         };
