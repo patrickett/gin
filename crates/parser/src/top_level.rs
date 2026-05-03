@@ -252,10 +252,17 @@ fn dispatch_tag_element(
         return parse_method_bind(cursor, expr_parser);
     }
 
-    // Tag(...).Id → generic-receiver method_bind (skip a balanced () after the tag)
+    // Tag(...).Id or Tag[...].Id → generic-receiver method_bind (skip a balanced () or [] after the tag)
     if let Some(after_parens) = skip_balanced_parens_offset(cursor, after_tag)
         && matches!(cursor.peek_at(after_parens), Some(Token::Dot))
         && matches!(cursor.peek_at(after_parens + 1), Some(Token::Id(_)))
+    {
+        return parse_method_bind(cursor, expr_parser);
+    }
+
+    if let Some(after_brackets) = skip_balanced_brackets_offset(cursor, after_tag)
+        && matches!(cursor.peek_at(after_brackets), Some(Token::Dot))
+        && matches!(cursor.peek_at(after_brackets + 1), Some(Token::Id(_)))
     {
         return parse_method_bind(cursor, expr_parser);
     }
@@ -285,6 +292,31 @@ fn skip_balanced_parens_offset(cursor: &TokenCursor, offset: usize) -> Option<us
                 o += 1;
             }
             Some(Token::ParenClose) => {
+                depth -= 1;
+                o += 1;
+            }
+            None => return None,
+            _ => {
+                o += 1;
+            }
+        }
+    }
+    Some(o)
+}
+
+fn skip_balanced_brackets_offset(cursor: &TokenCursor, offset: usize) -> Option<usize> {
+    if !matches!(cursor.peek_at(offset), Some(Token::BracketOpen)) {
+        return None;
+    }
+    let mut o = offset + 1;
+    let mut depth = 1;
+    while depth > 0 {
+        match cursor.peek_at(o) {
+            Some(Token::BracketOpen) => {
+                depth += 1;
+                o += 1;
+            }
+            Some(Token::BracketClose) => {
                 depth -= 1;
                 o += 1;
             }
@@ -450,31 +482,15 @@ fn skip_metadata_offset(cursor: &TokenCursor) -> usize {
 
 fn is_declare_from_offset(cursor: &TokenCursor, tag_offset: usize) -> bool {
     let mut offset = tag_offset + 1;
-
-    if matches!(cursor.peek_at(offset), Some(Token::ParenOpen)) {
-        offset += 1;
-        let mut depth = 1;
-        while depth > 0 {
-            match cursor.peek_at(offset) {
-                Some(Token::ParenOpen) => {
-                    depth += 1;
-                    offset += 1;
-                }
-                Some(Token::ParenClose) => {
-                    depth -= 1;
-                    offset += 1;
-                }
-                None => return false,
-                _ => {
-                    offset += 1;
-                }
-            }
-        }
+    if let Some(next) = skip_balanced_parens_offset(cursor, offset) {
+        offset = next;
+    } else if let Some(next) = skip_balanced_brackets_offset(cursor, offset) {
+        offset = next;
     }
 
     while matches!(
         cursor.peek_at(offset),
-        Some(Token::Newline) | Some(Token::Indent)
+        Some(Token::Newline) | Some(Token::Indent) | Some(Token::Whitespace)
     ) {
         offset += 1;
     }

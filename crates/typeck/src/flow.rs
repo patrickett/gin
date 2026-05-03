@@ -315,7 +315,7 @@ impl Default for FlowContext {
 // - `if num < 10` / `while i < len` → comparison narrowing inside body, negated after
 // TODO: constant propagation through reassignment in loops (i: i + 1 where i = 0)
 // TODO: Cross-function type narrowing — functions narrowing return types based on conditions.
-// e.g. `less_than_ten(num Int) Maybe(Int)` should let callers know the Int payload is `< 10`.
+// e.g. `less_than_ten(num Int) Maybe[Int]` should let callers know the Int payload is `< 10`.
 // This requires encoding the function's postconditions (derived from its flow analysis) into
 // a "contract" that the caller's flow analyzer can apply when it sees the call result.
 // A lighter first step: store the narrowed constraints from each `return` in FlowAnalysis

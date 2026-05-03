@@ -1,6 +1,6 @@
 // Debug AST structure for multiline sum type
 fn main() {
-    let source = "Maybe(thing) is
+    let source = "Maybe[thing] is
     Some(thing)
     or
     None

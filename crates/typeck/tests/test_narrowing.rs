@@ -7,7 +7,7 @@ use typeck::{
 
 #[test]
 fn test_when_pattern_constant_propagation() {
-    let src = "Maybe(x) is Some(x) or None\n\nmain:\n    val: Maybe.Some(3)\n    out: when val is Some(v) then v else 0\n    return out\nreturn\n";
+    let src = "Maybe[x] is Some(x) or None\n\nmain:\n    val: Maybe.Some(3)\n    out: when val is Some(v) then v else 0\n    return out\nreturn\n";
 
     let ast = parse_from_str(src);
     let ty_env = TyEnv::from_file_ast(&ast);
@@ -29,7 +29,7 @@ fn test_when_pattern_constant_propagation() {
 
 #[test]
 fn test_narrowing_after_if_early_return() {
-    let src = "Maybe(x) is Some(x) or None\n\nmain:\n    val: Maybe.Some(3)\n\n    if val is Some(v)\n    return ''\nreturn\n";
+    let src = "Maybe[x] is Some(x) or None\n\nmain:\n    val: Maybe.Some(3)\n\n    if val is Some(v)\n    return ''\nreturn\n";
 
     let ast = parse_from_str(src);
     let ty_env = TyEnv::from_file_ast(&ast);
@@ -183,7 +183,7 @@ fn test_three_variant_union_optimization() {
 
 #[test]
 fn test_union_with_fields_not_optimized() {
-    let src = "Maybe(x) is Some(x) or None";
+    let src = "Maybe[x] is Some(x) or None";
 
     let ast = parse_from_str(src);
     let ty_env = TyEnv::from_file_ast(&ast);

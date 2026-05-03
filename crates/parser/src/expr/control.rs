@@ -7,7 +7,7 @@ use ast::{
 
 use super::ExprFn;
 use crate::cursor::TokenCursor;
-use crate::tag::parse_type_expr;
+use crate::tag::parse_pattern_type_expr;
 
 fn can_start_expr(token: &Token) -> bool {
     // Note: `Token::Return` is intentionally excluded — `return` after `if` belongs to
@@ -146,7 +146,7 @@ pub fn parse_if_expr(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<If
     let cond_expr = expr_parser(cursor);
 
     let condition = if cursor.eat(&Token::Is) {
-        let pattern = parse_type_expr(cursor, expr_parser)?;
+        let pattern = parse_pattern_type_expr(cursor, expr_parser)?;
         IfCondition::Pattern {
             subject: Box::new(cond_expr),
             pattern: Box::new(pattern),
@@ -275,7 +275,7 @@ fn parse_when_is_arms(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<V
             break;
         }
 
-        let pattern = parse_type_expr(cursor, expr_parser)?;
+        let pattern = parse_pattern_type_expr(cursor, expr_parser)?;
 
         let indented = cursor.eat(&Token::Indent);
 

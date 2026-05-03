@@ -160,16 +160,16 @@ fn hover_function_with_complexity_before_doc_comment() {
 fn hover_method_name_on_call_shows_doc_comment() {
     assert_hover(
         "\
-Range(x) has (start x, end x)
+Range[x] has (start x, end x)
 
 --- create a new range
-Range(x).new(start x, end x) Range(x): (start, end)
+Range[x].new(start x, end x) Range[x]: (start, end)
 
 main:
     r := Range.†new(12, 1200)
 return
 ",
-        &["Range.new(start x, end x) Range(x)", "create a new range"],
+        &["Range.new(start x, end x) Range[x]", "create a new range"],
     );
 }
 
@@ -190,7 +190,7 @@ fn hover_const_bind() {
 #[test]
 fn hover_tag_union() {
     assert_hover(
-        "--- A value that may or may not exist.\nMaybe(x) is Some(x) or None\n\nval: †Maybe(3)\n",
+        "--- A value that may or may not exist.\nMaybe[x] is Some(x) or None\n\nval: †Maybe(3)\n",
         &["Maybe", "A value that may or may not exist."],
     );
 }
@@ -221,9 +221,9 @@ fn hover_declare_bool_union_size_align() {
 
 #[test]
 fn hover_declare_maybe_union_size_align() {
-    // Maybe(x) is Some(x) or None — discriminant (1 byte) + opaque payload (8 bytes)
+    // Maybe[x] is Some(x) or None — discriminant (1 byte) + opaque payload (8 bytes)
     assert_hover(
-        "Maybe(x) is Some(x) or None\n\n†Maybe\n",
+        "Maybe[x] is Some(x) or None\n\n†Maybe\n",
         &["Maybe", "size = 9, align = 8"],
     );
 }
@@ -332,7 +332,7 @@ fn hover_default_parameter() {
 fn hover_body_typed_bind_with_size_align() {
     // val Maybe(3): Some(3) should show `val Maybe(3)` with sizing
     assert_hover(
-        "Maybe(x) is Some(x) or None\n\nmain:\n    val Maybe(3): Some(3)\n    †val\nreturn\n",
+        "Maybe[x] is Some(x) or None\n\nmain:\n    val Maybe(3): Some(3)\n    †val\nreturn\n",
         &["val Maybe(3)", "size = 9, align = 8"],
     );
 }
@@ -407,10 +407,10 @@ fn hover_with_inline_attribute_and_doc() {
 
 #[test]
 fn hover_maybe_tag_union() {
-    // Maybe(x) is Some(x) or None
+    // Maybe[x] is Some(x) or None
     assert_hover(
-        "Maybe(x) is Some(x) or None\n\nval: †Maybe(3)\n",
-        &["Maybe(x) is Some(x) or None"],
+        "Maybe[x] is Some(x) or None\n\nval: †Maybe(3)\n",
+        &["Maybe[x] is Some(x) or None"],
     );
 }
 
@@ -484,7 +484,7 @@ fn hover_main_at_call_site() {
 fn hover_some_variant_is_word_fallback() {
     // `Some` is a variant inside the Maybe union, not a top-level tag.
     // It falls through to the basic word hover.
-    let result = hover_at_marker("Maybe(x) is Some(x) or None\n\nval: †Some(3)\n");
+    let result = hover_at_marker("Maybe[x] is Some(x) or None\n\nval: †Some(3)\n");
     assert!(result.is_some());
     let md = result.unwrap();
     assert!(md.contains("Some"), "should contain 'Some', got:\n{md}");
@@ -493,7 +493,7 @@ fn hover_some_variant_is_word_fallback() {
 #[test]
 fn hover_none_variant_is_word_fallback() {
     // `None` is a variant inside the Maybe union, not a top-level tag.
-    let result = hover_at_marker("Maybe(x) is Some(x) or None\n\nv: †None\n");
+    let result = hover_at_marker("Maybe[x] is Some(x) or None\n\nv: †None\n");
     assert!(result.is_some());
     let md = result.unwrap();
     assert!(md.contains("None"), "should contain 'None', got:\n{md}");
@@ -503,7 +503,7 @@ fn hover_none_variant_is_word_fallback() {
 fn hover_body_variable_typed_bind() {
     // `val` is a body bind with type annotation — shows `val Maybe(3)` with sizing.
     let src = indoc::indoc! {"
-        Maybe(x) is Some(x) or None
+        Maybe[x] is Some(x) or None
 
         main:
             val Maybe(3): Some(3)
@@ -537,8 +537,8 @@ fn hover_typed_bind_with_tag_annotation() {
     // val Maybe(3): Some(3) — the `Maybe(3)` is a type annotation on the bind.
     // Hovering `Maybe` on a use site should still find the tag.
     assert_hover(
-        "Maybe(x) is Some(x) or None\n\nval †Maybe(3): Some(3)\n",
-        &["Maybe(x) is Some(x) or None"],
+        "Maybe[x] is Some(x) or None\n\nval †Maybe(3): Some(3)\n",
+        &["Maybe[x] is Some(x) or None"],
     );
 }
 
@@ -550,7 +550,7 @@ fn hover_val_narrowed_inside_if() {
     // with payload from constant propagation: `val Some(3)` instead of `val Maybe(3)`.
     // Size/align still comes from the original type annotation `Maybe(3)`.
     assert_hover(
-        "Maybe(x) is Some(x) or None\n\nmain:\n    val Maybe(3): Some(3)\n    if val is Some(v)\n        result: †val\n        four: v + 1\n    return four\nreturn\n",
+        "Maybe[x] is Some(x) or None\n\nmain:\n    val Maybe(3): Some(3)\n    if val is Some(v)\n        result: †val\n        four: v + 1\n    return four\nreturn\n",
         &["val Some(3)", "size = 9, align = 8"],
     );
 }
@@ -560,7 +560,7 @@ fn hover_val_not_narrowed_on_declaration() {
     // On the declaration line, `val` should show the full type annotation `Maybe(3)`
     // with sizing — no narrowing is in effect yet.
     assert_hover(
-        "Maybe(x) is Some(x) or None\n\nmain:\n    †val Maybe(3): Some(3)\n    if val is Some(v)\n        result: val\n        four: v + 1\n    return four\nreturn\n",
+        "Maybe[x] is Some(x) or None\n\nmain:\n    †val Maybe(3): Some(3)\n    if val is Some(v)\n        result: val\n        four: v + 1\n    return four\nreturn\n",
         &["val Maybe(3)", "size = 9, align = 8"],
     );
 }
@@ -570,7 +570,7 @@ fn hover_untyped_val_narrowed_inside_if() {
     // An untyped bind `val: Some(3)` narrowed inside `if val is Some(v)`
     // should show `val Some` with no size/align (no type annotation to derive sizing from).
     assert_hover(
-        "Maybe(x) is Some(x) or None\n\nmain:\n    val: Some(3)\n    if val is Some(v)\n        result: †val\n        four: v + 1\n    return four\nreturn\n",
+        "Maybe[x] is Some(x) or None\n\nmain:\n    val: Some(3)\n    if val is Some(v)\n        result: †val\n        four: v + 1\n    return four\nreturn\n",
         &["val Some"],
     );
 }
@@ -580,7 +580,7 @@ fn hover_narrowed_val_no_size_align_when_untyped() {
     // Narrowed untyped bind should NOT include size/align metadata
     // (there's no type annotation to derive sizing from).
     let src = indoc::indoc! {"
-        Maybe(x) is Some(x) or None
+        Maybe[x] is Some(x) or None
 
         main:
             val: Some(3)
@@ -602,7 +602,7 @@ fn hover_pattern_extracted_variable() {
     // Inside `if val is Some(v)` where val holds `Some(3)`,
     // hovering `v` should show `v 3` via pattern extraction.
     assert_hover(
-        "Maybe(x) is Some(x) or None\n\nmain:\n    val Maybe(3): Some(3)\n    if val is Some(v)\n        result: val\n        four: †v + 1\n    return four\nreturn\n",
+        "Maybe[x] is Some(x) or None\n\nmain:\n    val Maybe(3): Some(3)\n    if val is Some(v)\n        result: val\n        four: †v + 1\n    return four\nreturn\n",
         &["v 3"],
     );
 }
@@ -611,7 +611,7 @@ fn hover_pattern_extracted_variable() {
 fn hover_constant_folded_bind() {
     // `four: v + 1` where `v = 3` → constant folding gives `four = 4`.
     assert_hover(
-        "Maybe(x) is Some(x) or None\n\nmain:\n    val Maybe(3): Some(3)\n    if val is Some(v)\n        result: val\n        †four: v + 1\n    return four\nreturn\n",
+        "Maybe[x] is Some(x) or None\n\nmain:\n    val Maybe(3): Some(3)\n    if val is Some(v)\n        result: val\n        †four: v + 1\n    return four\nreturn\n",
         &["four 4"],
     );
 }
@@ -621,7 +621,7 @@ fn hover_val_none_after_early_return() {
     // After `if val is Some(v) return four`, val must be `None`
     // since Maybe is `Some(x) or None` and we early-returned the Some case.
     assert_hover(
-        "Maybe(x) is Some(x) or None\n\nmain:\n    val Maybe(3): Some(3)\n    if val is Some(v)\n        result: val\n        four: v + 1\n    return four\n    †val\nreturn\n",
+        "Maybe[x] is Some(x) or None\n\nmain:\n    val Maybe(3): Some(3)\n    if val is Some(v)\n        result: val\n        four: v + 1\n    return four\n    †val\nreturn\n",
         &["val None"],
     );
 }
@@ -642,7 +642,7 @@ fn hover_val_none_after_early_return() {
 /// Shared source for the full example integration tests.
 fn full_example_source() -> String {
     indoc::indoc! {"
-        Maybe(x) is Some(x) or None
+        Maybe[x] is Some(x) or None
 
         main:
             val Maybe(3): Some(3)
@@ -763,7 +763,7 @@ fn hover_num_narrowed_inside_if_less_than() {
     // Inside `if num < 10`, hovering `num` (a parameter) should show `num Int < 10`.
     assert_hover(
         indoc::indoc! {"
-            less_than_ten(num Int) Maybe(Int):
+            less_than_ten(num Int) Maybe[Int]:
                 if num < 10
                     †num
                 return Some(num)
@@ -778,7 +778,7 @@ fn hover_num_narrowed_after_early_return_if_less_than() {
     // After `if num < 10 return Some(num)`, hovering `num` (a parameter) should show `num Int >= 10`.
     assert_hover(
         indoc::indoc! {"
-            less_than_ten(num Int) Maybe(Int):
+            less_than_ten(num Int) Maybe[Int]:
                 if num < 10
                     num
                 return Some(num)
@@ -845,7 +845,7 @@ fn hover_if_bool_body_bind_narrowed_after_early_return() {
     // After `if num < 10 return Some(num)`, hovering `num` (a body bind) should show `num >= 10`.
     assert_hover(
         indoc::indoc! {"
-            Maybe(x) is Some(x) or None
+            Maybe[x] is Some(x) or None
 
             main:
                 num: 5
@@ -868,12 +868,12 @@ fn hover_if_bool_body_bind_narrowed_after_early_return() {
 /// Tests call this and then insert their own marker at the desired position.
 fn main_gin_source() -> String {
     indoc::indoc! {"
-        Maybe(x) is Some(x) or None
+        Maybe[x] is Some(x) or None
 
         Int is 1...400
 
 
-        -- is_empty(v Maybe(x)) Bool: when v is None then True else False
+        -- is_empty(v Maybe[x]) Bool: when v is None then True else False
 
         --- Find the index of a target value in a buffer.
         --- Scans each byte from left to right until a match is found.
@@ -924,7 +924,7 @@ fn hover_main_gin_find_index_on_definition() {
 fn hover_main_gin_maybe_tag() {
     // Hover Maybe in the type annotation `val Maybe(3)`.
     let src = main_gin_source().replace("val Maybe(3)", "val †Maybe(3)");
-    assert_hover(&src, &["Maybe(x) is Some(x) or None"]);
+    assert_hover(&src, &["Maybe[x] is Some(x) or None"]);
 }
 
 #[test]

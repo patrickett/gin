@@ -105,7 +105,7 @@ impl TyEnv {
                 continue;
             }
             // Method-scoped type variables introduced by a generic receiver
-            // (e.g. `x` in `Range(x).new`). Treated as opaque while checking
+            // (e.g. `x` in `Range[x].new`). Treated as opaque while checking
             // this method's own body.
             let subst = bind
                 .receiver_type_surface()
@@ -155,7 +155,7 @@ impl TyEnv {
             }
         }
         // Body-vs-return-tag tuple-IS-record check: when the return tag is a
-        // record (e.g. `Range(x)`) and the body produces a tuple of matching
+        // record (e.g. `Range[x]`) and the body produces a tuple of matching
         // arity (e.g. `(start, end)`), accept it without requiring an explicit
         // record-literal syntax. This is the first step toward fully unifying
         // `Ty::Tuple` and `Ty::Record` per the design intent.
@@ -512,7 +512,7 @@ impl TyEnv {
     /// Verify the bind's body type is compatible with its declared return type.
     ///
     /// Today this only covers the tuple-IS-record case for top-level binds with
-    /// a record-shaped return tag (`Range(x): (start, end)`). Callers rely on
+    /// a record-shaped return tag (`Range[x]: (start, end)`). Callers rely on
     /// this to lock in that a positional tuple value satisfies a same-arity
     /// record return without an explicit record-literal in the body.
     fn check_body_matches_return(

@@ -13,18 +13,37 @@ pub fn parse_is_pattern_tag(
     cursor: &mut TokenCursor,
     expr_parser: ExprFn,
 ) -> Option<Spanned<Expr>> {
-    parse_type_expr(cursor, expr_parser)
+    parse_pattern_type_expr(cursor, expr_parser)
 }
 
-/// Parse a capitalized type path (`Str`, `Maybe(T)`, `Mod.Item`) into structural type [`Expr`].
+/// Parse a capitalized type path (`Str`, `Maybe[T]`, `Mod.Item`) into structural type [`Expr`].
 pub fn parse_type_expr(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Spanned<Expr>> {
+    parse_type_expr_with(cursor, expr_parser, false)
+}
+
+/// Parse a type-shaped variant/pattern surface.
+///
+/// Nominal type arguments use brackets (`Maybe[x]`), but variants and `is`
+/// patterns still bind payloads with constructor-style parentheses (`Some(x)`).
+pub fn parse_pattern_type_expr(
+    cursor: &mut TokenCursor,
+    expr_parser: ExprFn,
+) -> Option<Spanned<Expr>> {
+    parse_type_expr_with(cursor, expr_parser, true)
+}
+
+fn parse_type_expr_with(
+    cursor: &mut TokenCursor,
+    expr_parser: ExprFn,
+    allow_paren_params: bool,
+) -> Option<Spanned<Expr>> {
     let start_span = cursor.current_span();
 
     if cursor.peek_at(1) == Some(&Token::Dot) {
         let qual_checkpoint = cursor.checkpoint();
         if let Some(path) = parse_tag_variant_path(cursor) {
-            if cursor.is_at(&Token::ParenOpen) {
-                let params = parse_tag_params(cursor, expr_parser);
+            if let Some((open, close)) = type_param_delimiters(cursor, allow_paren_params) {
+                let params = parse_tag_type_params_delimited(cursor, expr_parser, open, close);
                 let end_span = cursor.last_consumed_span();
                 let span = cursor.merge_span(start_span, end_span);
                 if !params.is_empty() {
@@ -55,8 +74,8 @@ pub fn parse_type_expr(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<
         _ => return None,
     };
 
-    if cursor.is_at(&Token::ParenOpen) {
-        let params = parse_tag_params(cursor, expr_parser);
+    if let Some((open, close)) = type_param_delimiters(cursor, allow_paren_params) {
+        let params = parse_tag_type_params_delimited(cursor, expr_parser, open, close);
         let end_span = cursor.last_consumed_span();
         let span = cursor.merge_span(name_span, end_span);
         if !params.is_empty() {
@@ -75,19 +94,41 @@ pub fn parse_type_expr(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<
     Some(Spanned(Expr::TypeNominal(name, name_span), name_span))
 }
 
-fn parse_tag_params(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Parameters {
-    if cursor.expect(&Token::ParenOpen).is_none() {
+fn type_param_delimiters(
+    cursor: &TokenCursor,
+    allow_paren_params: bool,
+) -> Option<(Token<'static>, Token<'static>)> {
+    if cursor.is_at(&Token::BracketOpen) {
+        Some((Token::BracketOpen, Token::BracketClose))
+    } else if allow_paren_params && cursor.is_at(&Token::ParenOpen) {
+        Some((Token::ParenOpen, Token::ParenClose))
+    } else {
+        None
+    }
+}
+
+pub(crate) fn parse_tag_type_params(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Parameters {
+    parse_tag_type_params_delimited(cursor, expr_parser, Token::BracketOpen, Token::BracketClose)
+}
+
+fn parse_tag_type_params_delimited(
+    cursor: &mut TokenCursor,
+    expr_parser: ExprFn,
+    open_token: Token<'static>,
+    close_token: Token<'static>,
+) -> Parameters {
+    if cursor.expect(&open_token).is_none() {
         return Parameters::new();
     }
 
     let mut params = Parameters::new();
 
-    if !cursor.is_at(&Token::ParenClose) {
+    if !cursor.is_at(&close_token) {
         if let Some(param) = parse_one_tag_param(cursor, expr_parser) {
             params.insert(param.0, param.1);
         }
         while cursor.eat(&Token::Comma) {
-            if cursor.is_at(&Token::ParenClose) {
+            if cursor.is_at(&close_token) {
                 break;
             }
             if let Some(param) = parse_one_tag_param(cursor, expr_parser) {
@@ -96,7 +137,7 @@ fn parse_tag_params(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Parameters
         }
     }
 
-    cursor.expect(&Token::ParenClose);
+    cursor.expect(&close_token);
     params
 }
 

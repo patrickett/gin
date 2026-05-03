@@ -1,8 +1,8 @@
-use database::{package_ty_env, PackageFiles};
-use crossbeam_channel::unbounded;
-use database::{set_file_contents, InputDatabase};
-use std::path::PathBuf;
 use ast::prelude::Intern;
+use crossbeam_channel::unbounded;
+use database::{InputDatabase, set_file_contents};
+use database::{PackageFiles, package_ty_env};
+use std::path::PathBuf;
 
 #[test]
 fn package_ty_env_invalidates_on_file_change() {
@@ -17,7 +17,7 @@ fn package_ty_env_invalidates_on_file_change() {
     let f2 = database::File::new(
         &db,
         PathBuf::from("/tmp/b.gin"),
-        "Maybe(x) is Some(x) or None\n".to_string(),
+        "Maybe[x] is Some(x) or None\n".to_string(),
     );
 
     let before = {
@@ -29,7 +29,7 @@ fn package_ty_env_invalidates_on_file_change() {
     set_file_contents(
         &mut db,
         f2,
-        "Maybe(x) is Some(x) or None\nOther is X or Y\n".to_string(),
+        "Maybe[x] is Some(x) or None\nOther is X or Y\n".to_string(),
     );
 
     let after = {

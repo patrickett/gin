@@ -1,5 +1,5 @@
 //! Parser tests for method binds with parameterized-type receivers,
-//! e.g. `Range(x).new(start x, end x) Range(x): (start, end)`.
+//! e.g. `Range[x].new(start x, end x) Range[x]: (start, end)`.
 
 use ast::{Expr, ParameterKind};
 use internment::Intern;
@@ -12,7 +12,7 @@ fn intern(s: &str) -> Intern<String> {
 #[test]
 fn parses_generic_method_bind_with_typevar_params_and_return() {
     let src =
-        "Range(x) has (start x, end x)\n\nRange(x).new(start x, end x) Range(x): (start, end)\n";
+        "Range[x] has (start x, end x)\n\nRange[x].new(start x, end x) Range[x]: (start, end)\n";
     let ast = parse_str(src);
 
     // Tag declaration is recorded as `Range`
@@ -62,7 +62,7 @@ fn parses_generic_method_bind_with_typevar_params_and_return() {
         }
     }
 
-    // Return type is TypeGeneric Range(x), stored on bind.return_tag
+    // Return type is TypeGeneric Range[x], stored on bind.return_tag
     let ret = bind
         .return_tag
         .as_ref()
@@ -73,7 +73,7 @@ fn parses_generic_method_bind_with_typevar_params_and_return() {
             assert_eq!(params.len(), 1);
             assert_eq!(params[0].0.as_str(), "x");
         }
-        other => panic!("return_tag should be TypeGeneric Range(x), got {:?}", other),
+        other => panic!("return_tag should be TypeGeneric Range[x], got {:?}", other),
     }
 }
 
@@ -130,10 +130,10 @@ fn parses_custom_range_no_type_param_for_contrast() {
 #[test]
 fn doc_comment_attaches_to_method_bind() {
     let src = "\
-Range(x) has (start x, end x)
+Range[x] has (start x, end x)
 
 --- create a new range
-Range(x).new(start x, end x) Range(x): (start, end)
+Range[x].new(start x, end x) Range[x]: (start, end)
 ";
     let ast = parse_str(src);
     let bind = ast
@@ -149,9 +149,9 @@ Range(x).new(start x, end x) Range(x): (start, end)
 #[test]
 fn parses_module_rooted_generic_method_call() {
     let src = "\
-Range(x) has (start x, end x)
+Range[x] has (start x, end x)
 
-Range(x).new(start x, end x) Range(x): (start, end)
+Range[x].new(start x, end x) Range[x]: (start, end)
 
 core.Range.new(12, 1200)
 ";

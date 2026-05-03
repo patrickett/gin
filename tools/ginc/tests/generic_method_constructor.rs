@@ -1,6 +1,6 @@
 //! End-to-end ginc test: declare and use a parameterized-receiver method.
 //!
-//! Compiles a small program defining `Range(x).new(start x, end x) Range(x): (start, end)`
+//! Compiles a small program defining `Range[x].new(start x, end x) Range[x]: (start, end)`
 //! and calling `Range.new(12, 1200)`, asserting the resulting record's
 //! `.start` field can be returned from main and observed as the exit code.
 //!
@@ -30,9 +30,9 @@ fn ginc_debug_exe() -> PathBuf {
 }
 
 const RANGE_PROGRAM: &str = "\
-Range(x) has (start x, end x)
+Range[x] has (start x, end x)
 
-Range(x).new(start x, end x) Range(x): (start, end)
+Range[x].new(start x, end x) Range[x]: (start, end)
 
 main:
     r := Range.new(12, 1200)

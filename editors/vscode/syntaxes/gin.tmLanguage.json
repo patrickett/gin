@@ -7,7 +7,9 @@
     { "include": "#strings-double" },
     { "include": "#strings-single" },
     { "include": "#numbers" },
-    { "include": "#keywords" }
+    { "include": "#keywords" },
+    { "include": "#type-identifiers" },
+    { "include": "#method-names" }
   ],
   "repository": {
     "comments": {
@@ -76,6 +78,14 @@
           "match": "\\b(?:in|as|self)\\b"
         }
       ]
+    },
+    "type-identifiers": {
+      "name": "entity.name.type.gin",
+      "match": "\\b[A-Z][A-Za-z0-9_]*(?=\\s*(?:\\(|\\[))"
+    },
+    "method-names": {
+      "name": "entity.name.function.method.gin",
+      "match": "(?<=\\.)[a-z][A-Za-z0-9_]*(?=\\s*\\()"
     }
   }
 }

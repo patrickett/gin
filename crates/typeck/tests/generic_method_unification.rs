@@ -6,7 +6,7 @@
 //! - Contrast: `CustomRange has (start, end)` (no type variable) accepts
 //!   `CustomRange.new(1, "hi")` because `start` and `end` are independently
 //!   generic.
-//! - Tuple-IS-record: the body `(start, end)` satisfies the `Range(x)` record
+//! - Tuple-IS-record: the body `(start, end)` satisfies the `Range[x]` record
 //!   return without an explicit record literal.
 
 use diagnostic::{DiagnosticCode, TypeSymptom};
@@ -14,7 +14,7 @@ use parser::parse_source_full;
 use typeck::TyEnv;
 
 const RANGE_DECL: &str =
-    "Range(x) has (start x, end x)\n\nRange(x).new(start x, end x) Range(x): (start, end)\n\n";
+    "Range[x] has (start x, end x)\n\nRange[x].new(start x, end x) Range[x]: (start, end)\n\n";
 const CUSTOM_DECL: &str =
     "CustomRange has (start, end)\n\nCustomRange.new(start, end) CustomRange: (start, end)\n\n";
 
@@ -79,7 +79,7 @@ fn custom_range_without_type_var_accepts_mixed_arg_types() {
 #[test]
 fn range_new_body_tuple_satisfies_record_return_without_literal() {
     // Tuple-IS-record: just declaring the method (whose body is `(start, end)`
-    // returned against the record `Range(x)`) should typecheck cleanly. No
+    // returned against the record `Range[x]`) should typecheck cleanly. No
     // diagnostic should be emitted for the tuple literal vs. record return.
     let src = format!("{RANGE_DECL}");
     let out = parse_source_full(&src);
@@ -90,7 +90,7 @@ fn range_new_body_tuple_satisfies_record_return_without_literal() {
     assert_eq!(
         type_mismatch_count(&symptoms),
         0,
-        "Range.new body `(start, end)` should satisfy `Range(x)` via tuple-IS-record; got: {:#?}",
+        "Range.new body `(start, end)` should satisfy `Range[x]` via tuple-IS-record; got: {:#?}",
         symptoms
     );
 }

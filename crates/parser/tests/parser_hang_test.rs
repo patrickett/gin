@@ -86,7 +86,7 @@ fn print_all_token_streams() {
         ("fn_two_params", "f(x, y Int): x + y\n"),
         ("fn_named_return", "f() result: 42\n"),
         ("union_decl", "Result is Ok or Err\n"),
-        ("generic_decl", "Maybe(T) is Some(T) or None\n"),
+        ("generic_decl", "Maybe[T] is Some(T) or None\n"),
         ("record_decl", "Point has (x Int, y Int)\n"),
         ("range_decl", "U8 is 0...255\n"),
         ("import", "use http.web\n"),
@@ -240,7 +240,7 @@ fn hw_declare_union() {
 }
 #[test]
 fn hw_declare_union_with_params() {
-    assert_handwritten_parses("Maybe(T) is Some(T) or None\n");
+    assert_handwritten_parses("Maybe[T] is Some(T) or None\n");
 }
 #[test]
 fn hw_declare_range() {
@@ -359,13 +359,13 @@ return 0
 
 #[test]
 fn bisect_just_declare() {
-    assert_handwritten_parses("Maybe(x) is Some(x) or None\n");
+    assert_handwritten_parses("Maybe[x] is Some(x) or None\n");
 }
 
 #[test]
 fn bisect_declare_and_empty_main() {
     assert_handwritten_parses(
-        "Maybe(x) is Some(x) or None
+        "Maybe[x] is Some(x) or None
 
 main:
     return 0
@@ -446,12 +446,12 @@ fn bisect_main_with_if_and_bind_body() {
 
 #[test]
 fn bisect_bare_bind_with_unindented_if_then_another_bind() {
-    let source = "Maybe(x) is Some(x) or None
+    let source = "Maybe[x] is Some(x) or None
 
 Int is 1...400
 
 
--- is_empty(v Maybe(x)) Bool: when v is None then True else False
+-- is_empty(v Maybe[x]) Bool: when v is None then True else False
 
 --- Find the index of a target value in a buffer.
 --- Scans each byte from left to right until a match is found.
@@ -470,7 +470,7 @@ return -1
 -- but also would be sick if we know that the Int we get back is less then 10
 -- so we can have functions narrow potential values for us and that is kept inside the type
 -- system
-less_than_ten(num Int) Maybe(Int):
+less_than_ten(num Int) Maybe[Int]:
     if num < 10
     return Some(num)
 return None
@@ -486,7 +486,7 @@ test:
 return
 
 maid:
-    val Maybe(Int): Some(3)
+    val Maybe[Int]: Some(3)
 
     if val is Some(v)
     return v + 1
@@ -516,7 +516,7 @@ return
 #[test]
 fn hw_small_program() {
     assert_handwritten_parses(
-        "Maybe(x) is Some(x) or None
+        "Maybe[x] is Some(x) or None
 
 main:
     val Maybe(3): Some(3)
@@ -606,12 +606,12 @@ fn hw_doc_comment_with_full_main_gin_source() {
     // caused the doc comments to be consumed by error handling before parse_bind
     // could see them.
     let src = "\
-Maybe(x) is Some(x) or None
+Maybe[x] is Some(x) or None
 
 Int is 1...400
 
 
--- is_empty(v Maybe(x)) Bool: when v is None then True else False
+-- is_empty(v Maybe[x]) Bool: when v is None then True else False
 
 --- Find the index of a target value in a buffer.
 --- Scans each byte from left to right until a match is found.

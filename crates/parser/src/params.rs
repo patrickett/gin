@@ -3,7 +3,7 @@
 //!
 //! The two call sites historically diverged: only the declare side accepted the
 //! `id id` form (parameter name + lowercase type-variable, e.g. `start x` in
-//! `Range(x) has (start x, end x)`). This module centralises the
+//! `Range[x] has (start x, end x)`). This module centralises the
 //! "after-name" classification so both parsers stay in sync.
 
 use ast::{Expr, ParameterKind, Spanned};

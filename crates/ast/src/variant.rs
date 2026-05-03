@@ -30,7 +30,25 @@ impl Variant {
 
 impl std::fmt::Display for Variant {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        fmt_type_expr_surface(&self.shape().0, f)
+        fmt_variant_shape_surface(&self.shape().0, f)
+    }
+}
+
+fn fmt_variant_shape_surface(e: &Expr, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match e {
+        Expr::TypeGeneric { name, params, .. } => {
+            write!(f, "{}(", name.as_str())?;
+            let mut first = true;
+            for (k, v) in params {
+                if !first {
+                    write!(f, ", ")?;
+                }
+                first = false;
+                write!(f, "{}{v}", k.as_str())?;
+            }
+            write!(f, ")")
+        }
+        _ => fmt_type_expr_surface(e, f),
     }
 }
 

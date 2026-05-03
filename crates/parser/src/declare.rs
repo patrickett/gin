@@ -5,7 +5,7 @@ use ast::span::SpanId;
 use ast::{Declare, DeclareValue, DocComment, ParameterKind, Parameters, Variant};
 use ast::{Spanned, type_surface_mangle_name};
 
-use crate::tag::parse_type_expr;
+use crate::tag::{parse_pattern_type_expr, parse_type_expr};
 use i256::I256;
 use internment::Intern;
 use lexer::Token;
@@ -139,33 +139,33 @@ fn parse_is_rhs(
     let checkpoint = cursor.checkpoint();
     let first_doc = parse_doc_comment(cursor);
 
-    if let Some(first_shape) = parse_type_expr(cursor, expr_parser)
-        && cursor.is_at(&Token::Or)
-    {
-        // Union: Tag (or Tag)+
-        let first_post_doc = parse_doc_comment(cursor);
+    if let Some(first_shape) = parse_pattern_type_expr(cursor, expr_parser) {
+        if cursor.is_at(&Token::Or) {
+            // Union: Tag (or Tag)+
+            let first_post_doc = parse_doc_comment(cursor);
 
-        let first_variant = make_variant(first_doc, first_shape, first_post_doc);
-        let mut variants = vec![first_variant];
+            let first_variant = make_variant(first_doc, first_shape, first_post_doc);
+            let mut variants = vec![first_variant];
 
-        while cursor.eat(&Token::Or) {
-            let doc_on_or_line = parse_doc_comment(cursor);
-            cursor.eat(&Token::Indent);
+            while cursor.eat(&Token::Or) {
+                let doc_on_or_line = parse_doc_comment(cursor);
+                cursor.eat(&Token::Indent);
 
-            match parse_variant(cursor, expr_parser) {
-                Some(next_variant) => {
-                    attach_doc_to_previous(&mut variants, doc_on_or_line);
-                    variants.push(next_variant);
-                }
-                None => {
-                    cursor.error("expected variant after 'or'", cursor.current_span());
-                    break;
+                match parse_variant(cursor, expr_parser) {
+                    Some(next_variant) => {
+                        attach_doc_to_previous(&mut variants, doc_on_or_line);
+                        variants.push(next_variant);
+                    }
+                    None => {
+                        cursor.error("expected variant after 'or'", cursor.current_span());
+                        break;
+                    }
                 }
             }
-        }
 
-        let post_doc = parse_doc_comment(cursor);
-        return (DeclareValue::Union { variants }, post_doc);
+            let post_doc = parse_doc_comment(cursor);
+            return (DeclareValue::Union { variants }, post_doc);
+        }
     }
 
     // Not a union — rewind to before any doc comment and try as alias
@@ -192,7 +192,7 @@ fn parse_is_rhs(
 fn parse_variant(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Variant> {
     let doc_before = parse_doc_comment(cursor);
 
-    let shape = parse_type_expr(cursor, expr_parser)?;
+    let shape = parse_pattern_type_expr(cursor, expr_parser)?;
     let sp = Box::new(shape);
 
     let doc_after = parse_doc_comment(cursor);
@@ -275,14 +275,16 @@ fn parse_signed_int(cursor: &mut TokenCursor) -> Option<I256> {
 }
 
 fn parse_params_for_declare(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Parameters> {
-    if !cursor.is_at(&Token::ParenOpen) {
-        return None;
-    }
+    let (_open_token, close_token) = match cursor.peek() {
+        Some(Token::ParenOpen) => (Token::ParenOpen, Token::ParenClose),
+        Some(Token::BracketOpen) => (Token::BracketOpen, Token::BracketClose),
+        _ => return None,
+    };
     cursor.advance();
 
     let mut params = Parameters::new();
 
-    if cursor.is_at(&Token::ParenClose) {
+    if cursor.is_at(&close_token) {
         cursor.advance();
         return Some(params);
     }
@@ -292,7 +294,7 @@ fn parse_params_for_declare(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Op
     }
 
     while cursor.eat(&Token::Comma) {
-        if cursor.is_at(&Token::ParenClose) {
+        if cursor.is_at(&close_token) {
             break;
         }
         if let Some((key, kind)) = parse_one_declare_param(cursor, expr_parser) {
@@ -300,7 +302,7 @@ fn parse_params_for_declare(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Op
         }
     }
 
-    cursor.expect(&Token::ParenClose);
+    cursor.expect(&close_token);
     Some(params)
 }
 
@@ -326,6 +328,6 @@ fn parse_one_declare_param(
     };
 
     // Shared helper supports `id Tag`, `id id` (type variable, e.g.
-    // `Range(x) has (start x, end x)`), `id: expr`, and bare `id` (generic).
+    // `Range[x] has (start x, end x)`), `id: expr`, and bare `id` (generic).
     crate::params::parse_param_after_name(cursor, expr_parser, name)
 }

@@ -18,7 +18,7 @@ fn alpha_idx(i: usize) -> String {
 }
 
 fn small_source() -> &'static str {
-    r#"Maybe(x) is Some(x) or None
+    r#"Maybe[x] is Some(x) or None
 
 main(a, b):
     val: a + b

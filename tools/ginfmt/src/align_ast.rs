@@ -12,7 +12,7 @@ pub enum DelimiterKind {
     Is,
     /// For ":" bind statements (e.g., `start: Instant.now`)
     Colon,
-    /// For "---" comment separators (e.g., `Maybe(thing) is --- Used to represent...`)
+    /// For "---" comment separators (e.g., `Maybe[thing] is --- Used to represent...`)
     Dash,
 }
 

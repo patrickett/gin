@@ -45,7 +45,7 @@ fn test_bug_2_blank_line_preservation() {
 #[test]
 fn test_bug_3_multiline_sum_type() {
     // Multi-line sum types should not be corrupted
-    let source = "Maybe(thing) is\n    Some(thing)\n    or\n    None\n";
+    let source = "Maybe[thing] is\n    Some(thing)\n    or\n    None\n";
     let config = Config {
         align_binds: false,
         ..Default::default()

@@ -219,7 +219,7 @@ impl TyInfer for FnCall {
 impl TyInfer for Bind {
     fn infer_ty(&self, env: &TyInferEnv) -> Ty {
         // Build the method-scoped type-variable map. For
-        // `Range(x).new(start x, end x) Range(x): ...`, this yields
+        // `Range[x].new(start x, end x) Range[x]: ...`, this yields
         // `{ x -> Ty::Opaque(x) }` so each occurrence of `x` in params, body,
         // and return type resolves to the same opaque tag (and unifies trivially).
         let subst: HashMap<Intern<String>, Ty> = self
@@ -441,7 +441,7 @@ impl TyInfer for Spanned<Expr> {
 /// parameters use `start x, end x` with an explicit type-variable name.
 ///
 /// `subst` lets `start x` and `end x` in
-/// `Range(x).new(start x, end x) Range(x): ...` both resolve to the same
+/// `Range[x].new(start x, end x) Range[x]: ...` both resolve to the same
 /// `Ty::Opaque(x)`. Pass an empty map for non-method binds.
 pub(crate) fn resolve_parameter_kind_with_subst(
     name: Intern<String>,

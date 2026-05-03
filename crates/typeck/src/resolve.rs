@@ -29,7 +29,7 @@ pub(crate) fn is_type_surface(e: &Expr) -> bool {
 }
 
 /// Collect every type-parameter name introduced by a method's receiver type
-/// surface, e.g. `x` in `Range(x).new(...)`. The returned substitution maps
+/// surface, e.g. `x` in `Range[x].new(...)`. The returned substitution maps
 /// each name to `Ty::Opaque(name)` (the identity binding used while
 /// typechecking the method itself).
 ///
@@ -59,7 +59,7 @@ pub(crate) fn resolve_type_expr_from_map(e: &Expr, tag_types: &HashMap<Intern<St
 /// names found in `subst`.
 ///
 /// `subst` maps method-scoped type variable names (e.g. `x` in
-/// `Range(x).new(start x, end x) Range(x)`) to the `Ty` they currently stand for.
+/// `Range[x].new(start x, end x) Range[x]`) to the `Ty` they currently stand for.
 /// During typechecking of the method body itself, the substitution is the identity
 /// (`x -> Ty::Opaque(x)`) so the same opaque tag flows through params, body, and
 /// return type. At call sites, `subst` can bind `x` to a concrete type (e.g.
@@ -71,7 +71,7 @@ pub(crate) fn resolve_type_expr_from_map(e: &Expr, tag_types: &HashMap<Intern<St
 /// - The fields of a `Ty::Record`/`Ty::Union` looked up via
 ///   `Expr::TypeGeneric { name, params, .. }`. Each `Ty::Opaque(p)` field is
 ///   replaced with `subst[p]` if the param `p` appears in the generic call's
-///   arguments. This implements `Range(x)` → `Record { start: Opaque(x), end: Opaque(x) }`
+///   arguments. This implements `Range[x]` → `Record { start: Opaque(x), end: Opaque(x) }`
 ///   when called with the identity subst, and `Range(Int)` → `Record { start: Int, end: Int }`
 ///   when called with `{ x -> Int }`.
 pub(crate) fn resolve_type_expr_with_subst(
@@ -132,7 +132,7 @@ pub(crate) fn resolve_type_expr_with_subst(
 /// Build a substitution map from the generic-call params at a use site.
 ///
 /// Maps each declared type-parameter name (the key in `params`, e.g. `x` in
-/// `Range(x)`) to the `Ty` resolved from the corresponding `Tagged` argument
+/// `Range[x]`) to the `Ty` resolved from the corresponding `Tagged` argument
 /// (or to `Ty::Opaque(name)` for bare `Generic` args, which is the identity
 /// case used while typechecking the method itself).
 fn build_subst_for_generic(

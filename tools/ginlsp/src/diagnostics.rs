@@ -7,10 +7,10 @@ use tower_lsp::lsp_types::{
 };
 use typeck::byte_offset_to_position;
 
-/// One-line diagnostic text for the editor (Problems / hover): primary message plus
-/// `ginc(<slug>)`. Details live in `related_information`.
-fn lsp_diagnostic_message(message: &str, code_slug: &str) -> String {
-    format!("{} ginc({})", message.trim(), code_slug)
+/// One-line diagnostic text for the editor (Problems / hover): primary message. The
+/// `code` field surfaces `ginc(<slug>)` for hover panels that display it separately.
+fn lsp_diagnostic_message(message: &str) -> String {
+    message.trim().to_string()
 }
 
 fn diagnostic_related_information(
@@ -96,7 +96,7 @@ pub fn symptoms_to_diagnostics(
                 Category::Info => DiagnosticSeverity::INFORMATION,
             };
             let slug = symptom.error_code().to_string();
-            let message = lsp_diagnostic_message(&symptom.message, &slug);
+            let message = lsp_diagnostic_message(&symptom.message);
             let related_information = diagnostic_related_information(
                 document_uri,
                 range.clone(),

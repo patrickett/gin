@@ -4,7 +4,7 @@ fn main() {
 Group is 0...99
 Serial is 0...9999
 
-Maybe(thing) is --- Used to represent values that may or may not be present.
+Maybe[thing] is --- Used to represent values that may or may not be present.
     Some(thing) or --- has a value
     None --- has no value
 

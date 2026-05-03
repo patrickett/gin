@@ -27,7 +27,7 @@ pub struct FnParamInfo {
     /// Positional parameter types in declaration order.
     pub params: Vec<(Intern<String>, Ty)>,
     /// Method-scoped type variables introduced by the receiver, e.g. `x` in
-    /// `Range(x).new`. Empty for non-method binds.
+    /// `Range[x].new`. Empty for non-method binds.
     pub typevars: HashMap<Intern<String>, Ty>,
 }
 
@@ -162,7 +162,7 @@ impl TyEnv {
     /// type-variable substitution map.
     ///
     /// `subst` lets `start x` and `end x` in
-    /// `Range(x).new(start x, end x) Range(x): ...` both resolve to the same
+    /// `Range[x].new(start x, end x) Range[x]: ...` both resolve to the same
     /// `Ty::Opaque(x)`. Pass an empty map for non-method binds.
     pub(crate) fn resolve_parameter_kind_with_subst(
         &self,
@@ -181,7 +181,7 @@ impl TyEnv {
             // Bare-id (`Generic`) params resolve as a fresh per-param type
             // variable `Ty::Opaque(name)` so each call argument can bind it
             // independently. Use `name x` to share a type variable across
-            // params (see `Range(x).new(start x, end x)`).
+            // params (see `Range[x].new(start x, end x)`).
             ParameterKind::Generic => Ty::Opaque(name),
             ParameterKind::Default(expr) => {
                 let empty: HashMap<Intern<String>, Ty> = HashMap::new();

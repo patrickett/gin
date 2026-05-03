@@ -3,21 +3,21 @@ mod handlers;
 mod state;
 
 use dashmap::DashMap;
-use database::File;
 use database::Diagnostics;
+use database::File;
+use database::{file_parse_output, package_typecheck_symptoms, sorted_package_files, PackageFiles};
 use diagnostics::symptoms_to_diagnostics;
 use futures::FutureExt;
 use state::{DocumentState, GinHost, JsonDocumentState};
-use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::path::Path;
-use std::sync::{Arc, Mutex};
 use std::ops::Deref;
+use std::panic::AssertUnwindSafe;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
-use database::{file_parse_output, sorted_package_files, PackageFiles, package_typecheck_symptoms};
 
 /// Final safety net for a single package-wide diagnostic computation. Salsa
 /// cancellation already aborts in-flight work as soon as a new edit arrives
@@ -206,7 +206,7 @@ impl Backend {
 
     fn snapshot(&self) -> state::GinSnapshot {
         let host = self.lock_host();
-      
+
         host.snapshot()
     }
 
@@ -221,8 +221,7 @@ impl Backend {
         }
 
         let loaded = flask::FlaskConfigHandle::load(file_dir).ok()?;
-        self.package_configs
-            .insert(cache_key, loaded.clone());
+        self.package_configs.insert(cache_key, loaded.clone());
         Some(loaded)
     }
 
@@ -341,12 +340,8 @@ impl Backend {
             let wrapped: Vec<Diagnostics> = symptoms.into_iter().map(Diagnostics).collect();
             let symptom_refs: Vec<&Diagnostics> = wrapped.iter().collect();
 
-            let diagnostics = symptoms_to_diagnostics(
-                &source,
-                parse.ast.span_table(),
-                &symptom_refs,
-                &pkg_uri,
-            );
+            let diagnostics =
+                symptoms_to_diagnostics(&source, parse.ast.span_table(), &symptom_refs, &pkg_uri);
             results.push((pkg_uri, diagnostics));
         }
         results
@@ -446,7 +441,7 @@ mod tests {
     fn dot_completion_union_variants() {
         use crate::handlers::completion::dot_completions;
 
-        let source = "Maybe(x) is Some(x) or None";
+        let source = "Maybe[x] is Some(x) or None";
         let ast = parse_from_str(source);
         let ty_env = TyEnv::from_file_ast(&ast);
 

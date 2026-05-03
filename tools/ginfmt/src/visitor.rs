@@ -858,7 +858,7 @@ mod tests {
     fn test_comment_dash_alignment() {
         // Note: tree-sitter-gin grammar doesn't parse standalone comments
         // This test verifies the comment alignment when comments are parsed correctly
-        let source = "# Maybe(thing) is --- Used to represent values that may or may not be present.\n\
+        let source = "# Maybe[thing] is --- Used to represent values that may or may not be present.\n\
                       #     Some(thing) or --- has a value\n\
                       #     None --- has no value\n";
 

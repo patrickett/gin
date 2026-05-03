@@ -10,7 +10,7 @@ use super::ExprFn;
 use super::control::parse_return;
 use crate::cursor::TokenCursor;
 use crate::path::{parse_id, parse_tag_variant_path};
-use crate::tag::parse_type_expr;
+use crate::tag::{parse_tag_type_params, parse_type_expr};
 
 type ReturnTypePart = (
     Option<Intern<String>>,
@@ -350,13 +350,34 @@ fn parse_return_type_part(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Retu
         _ => return (None, None, None, None),
     };
 
+    if cursor.is_at(&Token::BracketOpen) {
+        let params = parse_tag_type_params(cursor, expr_parser);
+        if !params.is_empty() {
+            let end_span = cursor.last_consumed_span();
+            let span = cursor.merge_span(name_span, end_span);
+            return (
+                None,
+                Some(Box::new(Spanned(
+                    Expr::TypeGeneric {
+                        name,
+                        params: params.into_iter().collect(),
+                        span,
+                    },
+                    span,
+                ))),
+                None,
+                None,
+            );
+        }
+    }
+
     if cursor.is_at(&Token::ParenOpen) {
         let args = parse_type_annotation_args(cursor, expr_parser);
         if !args.is_empty() {
             // If the args are all type-like (bare identifiers or tags), promote
             // to a `TypeGeneric` return tag so the typechecker sees a uniform
             // type-surface shape (matching how receivers are stored). Examples:
-            //   `Range(x)` → return_tag = TypeGeneric { Range, [x: Generic] }
+            //   `Range[x]` → return_tag = TypeGeneric { Range, [x: Generic] }
             //   `Maybe(3)` → falls through to `type_annotation` (value annotation)
             if let Some(type_params) = try_args_as_type_params(&args) {
                 return (
@@ -396,8 +417,8 @@ fn try_args_as_type_params(args: &[Spanned<Expr>]) -> Option<Vec<(Intern<String>
     let mut out = Vec::with_capacity(args.len());
     for Spanned(arg, span) in args {
         match arg {
-            // Bare lowercase identifier, e.g. `x` in `Range(x)` → type-variable
-            // *introduction* (matches how `Range(x)` parses in receiver and
+            // Bare lowercase identifier, e.g. `x` in `Range[x]` → type-variable
+            // *introduction* (matches how `Range[x]` parses in receiver and
             // declaration positions). Stored as `Generic` so the typechecker
             // doesn't report `x` as an undeclared tag.
             Expr::FnCall(call) if call.path.segments.is_empty() && call.args.is_none() => {

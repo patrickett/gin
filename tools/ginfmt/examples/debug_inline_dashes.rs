@@ -1,7 +1,7 @@
 use tree_sitter::Parser;
 
 fn main() {
-    let source = "Maybe(x) is  --- Used to represent values that may or may not be present.
+    let source = "Maybe[x] is  --- Used to represent values that may or may not be present.
     Some(x) or --- has a value
     None  --- has no value
 ";

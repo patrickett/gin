@@ -264,38 +264,34 @@ fn parse_atom(cursor: &mut TokenCursor) -> Spanned<Expr> {
 }
 
 /// Heuristic: does the current position look like the start of a bind?
-/// True when we see `id :`, `id :=`, `id(...) :`, `id Tag :`, or `id Tag(...) :` patterns.
+/// True when we see `id :`, `id :=`, `id(...) :`, `id Tag :`, or `id Tag[...] :` patterns.
 fn looks_like_bind(cursor: &TokenCursor) -> bool {
     // id: or id:=  → definitely a bind
     if matches!(cursor.peek_at(1), Some(Token::Colon) | Some(Token::ColonEq)) {
         return true;
     }
 
-    // id Tag or id Tag(...) followed by `:`/`:=`  → typed bind (e.g. `val Maybe(3): Some(3)`)
+    // id Tag or id Tag[...] followed by `:`/`:=`  → typed bind (e.g. `val Maybe[Int]: Some(3)`)
     if matches!(cursor.peek_at(1), Some(Token::Tag(_))) {
         let mut offset = 2; // skip past id and Tag
-        // Skip optional parenthesised args on the Tag
-        if cursor.peek_at(offset) == Some(&Token::ParenOpen) {
-            let mut depth = 0;
-            loop {
-                match cursor.peek_at(offset) {
-                    Some(Token::ParenOpen) => {
-                        depth += 1;
-                        offset += 1;
-                    }
-                    Some(Token::ParenClose) => {
-                        depth -= 1;
-                        offset += 1;
-                    }
-                    Some(_) => {
-                        offset += 1;
-                    }
+        // Skip optional type-argument brackets on the Tag.
+        if cursor.peek_at(offset) == Some(&Token::BracketOpen) {
+            offset = match skip_balanced_delimiters(
+                cursor,
+                offset,
+                Token::BracketOpen,
+                Token::BracketClose,
+            ) {
+                Some(offset) => offset,
+                None => return false,
+            };
+        } else if cursor.peek_at(offset) == Some(&Token::ParenOpen) {
+            offset =
+                match skip_balanced_delimiters(cursor, offset, Token::ParenOpen, Token::ParenClose)
+                {
+                    Some(offset) => offset,
                     None => return false,
-                }
-                if depth == 0 {
-                    break;
-                }
-            }
+                };
         }
         return matches!(
             cursor.peek_at(offset),
@@ -336,6 +332,34 @@ fn looks_like_bind(cursor: &TokenCursor) -> bool {
     }
 
     false
+}
+
+fn skip_balanced_delimiters(
+    cursor: &TokenCursor,
+    mut offset: usize,
+    open: Token<'static>,
+    close: Token<'static>,
+) -> Option<usize> {
+    let mut depth = 0;
+    loop {
+        match cursor.peek_at(offset) {
+            Some(tok) if tok == &open => {
+                depth += 1;
+                offset += 1;
+            }
+            Some(tok) if tok == &close => {
+                depth -= 1;
+                offset += 1;
+            }
+            Some(_) => {
+                offset += 1;
+            }
+            None => return None,
+        }
+        if depth == 0 {
+            return Some(offset);
+        }
+    }
 }
 
 // ─── Id-based Atoms: BufSet, TupleSet, FnCall ─────────────────────────────────

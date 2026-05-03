@@ -24,7 +24,7 @@ pub(crate) fn fmt_type_expr_surface(e: &Expr, f: &mut fmt::Formatter<'_>) -> fmt
             Ok(())
         }
         Expr::TypeGeneric { name, params, .. } => {
-            write!(f, "{}(", name.as_str())?;
+            write!(f, "{}[", name.as_str())?;
             let mut first = true;
             for (k, v) in params.iter() {
                 if !first {
@@ -33,7 +33,7 @@ pub(crate) fn fmt_type_expr_surface(e: &Expr, f: &mut fmt::Formatter<'_>) -> fmt
                 first = false;
                 write!(f, "{}{v}", k.as_str())?;
             }
-            write!(f, ")")
+            write!(f, "]")
         }
         _ => write!(f, "<type>"),
     }

@@ -3,7 +3,7 @@ use lexer::Lexer;
 
 fn small_source() -> &'static str {
     r#"
-Maybe(x) is Some(x) or None
+Maybe[x] is Some(x) or None
 
 main:
     val Maybe(3): Some(3)
@@ -126,7 +126,7 @@ fn large_mixed_source() -> String {
     // type definitions
     for i in 0..20 {
         s.push_str(&format!(
-            "--- Variant {i} of the result type.\nResult_{i}(x) is Some(x) or None\n\n"
+            "--- Variant {i} of the result type.\nResult_{i}[x] is Some(x) or None\n\n"
         ));
     }
 

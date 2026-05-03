@@ -163,13 +163,13 @@ fn hash_type_expr(hasher: &mut Sha256, e: &Expr) {
             let _ = write!(hasher, "N:{}", name);
         }
         Expr::TypeGeneric { name, params, .. } => {
-            let _ = write!(hasher, "G:{}(", name);
+            let _ = write!(hasher, "G:{}[", name);
             for (param_name, kind) in params.iter() {
                 let _ = write!(hasher, "{param_name}:");
                 hash_param_kind(hasher, kind);
                 let _ = write!(hasher, ",");
             }
-            let _ = write!(hasher, ")");
+            let _ = write!(hasher, "]");
         }
         Expr::TypeQualified(path) => {
             let _ = write!(hasher, "Q:{}", path.root);

@@ -74,7 +74,9 @@ fn byte_offset_to_line_col(line_starts: &[usize], byte: usize) -> (usize, usize)
         return (1, 1);
     }
     let line_idx = line_starts.partition_point(|&s| s <= byte);
-    let line_idx = line_idx.saturating_sub(1).min(line_starts.len().saturating_sub(1));
+    let line_idx = line_idx
+        .saturating_sub(1)
+        .min(line_starts.len().saturating_sub(1));
     let line_start = line_starts[line_idx];
     let line_no = line_idx + 1;
     let col = byte.saturating_sub(line_start) + 1;
@@ -673,7 +675,9 @@ impl<'c> Lower<'c> for Expr {
             }
             Expr::Cast { expr, ty } => {
                 let val = expr.lower(ctx, block, symtab)?;
-                let src_ty = expr.0.infer_ty(&ctx.ty_env.infer_env(&*ctx.var_types.borrow()));
+                let src_ty = expr
+                    .0
+                    .infer_ty(&ctx.ty_env.infer_env(&*ctx.var_types.borrow()));
                 let dst_ty = ctx.ty_env.lookup_tag(*ty).cloned().unwrap_or(Ty::Int {
                     width: 64,
                     signed: true,
@@ -686,7 +690,10 @@ impl<'c> Lower<'c> for Expr {
             }
             Expr::Deref(inner) => {
                 let ptr = inner.lower(ctx, block, symtab)?;
-                let pointee_ty = match inner.0.infer_ty(&ctx.ty_env.infer_env(&*ctx.var_types.borrow())) {
+                let pointee_ty = match inner
+                    .0
+                    .infer_ty(&ctx.ty_env.infer_env(&*ctx.var_types.borrow()))
+                {
                     Ty::Ptr { inner } | Ty::Ref { inner } => *inner,
                     _ => Ty::Int {
                         width: 64,
@@ -729,7 +736,7 @@ impl<'c> Lower<'c> for Expr {
 ///
 /// Used to decide whether a method-like bind (one with a `receiver_type`)
 /// should take an implicit `self` parameter at codegen time. Constructors
-/// like `Range.new(start x, end x) Range(x): (start, end)` have a receiver
+/// like `Range.new(start x, end x) Range[x]: (start, end)` have a receiver
 /// type for namespacing/dispatch but don't use `self`, so they should be
 /// emitted as static functions taking only their declared params.
 fn bind_value_uses_self(value: &BindValue) -> bool {
@@ -737,7 +744,11 @@ fn bind_value_uses_self(value: &BindValue) -> bool {
         BindValue::Expr(e) => spanned_uses_self(e),
         BindValue::Body { exprs, ret } => {
             exprs.iter().any(spanned_uses_self)
-                || ret.0.as_ref().map(|sp| spanned_uses_self(sp)).unwrap_or(false)
+                || ret
+                    .0
+                    .as_ref()
+                    .map(|sp| spanned_uses_self(sp))
+                    .unwrap_or(false)
         }
         BindValue::Extern => false,
     }
@@ -765,9 +776,7 @@ fn expr_uses_self(expr: &Expr) -> bool {
         Expr::TupleLit(elems) => elems.iter().any(spanned_uses_self),
         Expr::TupleAlloc { init, .. } => spanned_uses_self(init),
         Expr::TupleGet { base, .. } => spanned_uses_self(base),
-        Expr::TupleSet { base, value, .. } => {
-            spanned_uses_self(base) || spanned_uses_self(value)
-        }
+        Expr::TupleSet { base, value, .. } => spanned_uses_self(base) || spanned_uses_self(value),
         Expr::BufGet { buf, index } => spanned_uses_self(buf) || spanned_uses_self(index),
         Expr::BufSet { buf, index, value } => {
             spanned_uses_self(buf) || spanned_uses_self(index) || spanned_uses_self(value)
@@ -778,7 +787,10 @@ fn expr_uses_self(expr: &Expr) -> bool {
         Expr::Cast { expr: e, .. } => spanned_uses_self(e),
         Expr::Bind(b) => bind_value_uses_self(b.value()),
         Expr::When(w) => {
-            w.subject.as_ref().map(|s| spanned_uses_self(s)).unwrap_or(false)
+            w.subject
+                .as_ref()
+                .map(|s| spanned_uses_self(s))
+                .unwrap_or(false)
                 || w.arms.iter().any(|arm| match arm {
                     ::ast::WhenArm::Cond { condition, body } => {
                         spanned_uses_self(condition) || spanned_uses_self(body)
