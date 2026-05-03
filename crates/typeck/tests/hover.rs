@@ -940,3 +940,12 @@ fn hover_main_gin_main_function() {
     let src = main_gin_source().replace("main:", "†main:");
     assert_hover(&src, &["main"]);
 }
+
+#[test]
+fn hover_const_bind_union_variant() {
+    // `false := Bool.False` — const bind should show the fully qualified variant.
+    assert_hover(
+        "Bool is True or False\n\nfalse := Bool.False\n\n†false\n",
+        &["false Bool.False"],
+    );
+}

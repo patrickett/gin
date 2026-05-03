@@ -100,8 +100,17 @@ impl<'a> FlowAnalyzer<'a> {
                 for arg in &call.args {
                     args.push(self.eval_const(&arg.0)?);
                 }
+                let qual_path = call.qual_path.as_ref().map(|p| {
+                    let mut s = p.root.as_str().to_string();
+                    for seg in &p.segments {
+                        s.push('.');
+                        s.push_str(seg.as_str());
+                    }
+                    s
+                });
                 Some(ConstValue::Tag {
                     name: call.name,
+                    qual_path,
                     args,
                 })
             }
@@ -178,6 +187,7 @@ impl<'a> FlowAnalyzer<'a> {
         if let ConstValue::Tag {
             name: val_name,
             args: val_args,
+            ..
         } = const_val
             && val_name == tag_name
             && val_args.len() == params.len()
@@ -231,6 +241,13 @@ impl<'a> FlowAnalyzer<'a> {
                 }
             }
             BindValue::Expr(expr) => {
+                // Track constant value for top-level const binds.
+                if bind.is_const
+                    && let Some(const_val) = self.eval_const(&expr.0)
+                {
+                    self.current_context_mut()
+                        .set_constant(bind.name(), const_val);
+                }
                 self.analyze_spanned_expr(expr);
             }
             BindValue::Extern => {}

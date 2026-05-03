@@ -9,6 +9,11 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
     let word = crate::source::word_at_byte_offset(source, byte_pos)?;
     let ty_env = crate::TyEnv::from_file_ast(ast);
 
+    // Run flow analysis once for const-value and narrowing lookups.
+    let mut analyzer = crate::FlowAnalyzer::new(&ty_env);
+    analyzer.analyze_file(ast);
+    let flow = analyzer.into_result();
+
     // Look for tag definitions
     for (name, decl) in ast.tags() {
         if name.as_str() == word {
@@ -33,7 +38,7 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
             continue;
         }
         let display_name = name.as_str().to_string();
-        return Some(format_bind_hover(name, bind, &display_name, &ty_env));
+        return Some(format_bind_hover(name, bind, &display_name, &ty_env, &flow));
     }
 
     // Look for parameter names across all defs
@@ -48,9 +53,6 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
             };
 
             // Check for flow narrowing at the cursor position
-            let mut analyzer = crate::FlowAnalyzer::new(&ty_env);
-            analyzer.analyze_file(ast);
-            let flow = analyzer.into_result();
             let narrowed = narrowed_at_position(ast, &flow, byte_pos, &word);
 
             if let Some(constraint) = &narrowed {
@@ -94,9 +96,6 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
 
     // Look for body-level binds inside function bodies
     if let Some(body_bind) = find_body_bind(ast, &word) {
-        let mut analyzer = crate::FlowAnalyzer::new(&ty_env);
-        analyzer.analyze_file(ast);
-        let flow = analyzer.into_result();
         let narrowed = narrowed_at_position(ast, &flow, byte_pos, &word);
         let const_val = const_at_position(ast, &flow, byte_pos, &word);
 
@@ -158,9 +157,6 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
 
     // Look for in-scope variables with known constant values or comparison constraints
     {
-        let mut analyzer = crate::FlowAnalyzer::new(&ty_env);
-        analyzer.analyze_file(ast);
-        let flow = analyzer.into_result();
         let narrowed = narrowed_at_position(ast, &flow, byte_pos, &word);
         let const_val = const_at_position(ast, &flow, byte_pos, &word);
 
@@ -188,6 +184,7 @@ fn format_bind_hover(
     bind: &Bind,
     display_name: &str,
     ty_env: &crate::TyEnv,
+    flow: &crate::FlowAnalysis,
 ) -> String {
     let mut result = format!("```gin\n{}", display_name);
     if let Some(params) = bind.params() {
@@ -196,12 +193,19 @@ fn format_bind_hover(
     if let Some(sp) = &bind.return_tag {
         result.push_str(&format!(" {}", format_type_surface(&sp.0)));
     }
+    // For parameterless const binds, show the constant value.
+    let is_function = bind.params().is_some();
+    if !is_function && bind.is_const {
+        let var = Intern::<String>::from_ref(display_name);
+        if let Some(const_val) = flow.final_context.get_constant(&var) {
+            result.push_str(&format!(" {}", const_val.to_hover_string()));
+        }
+    }
     result.push_str("\n```");
     if let Some(doc) = bind.doc_comment() {
         result.push_str(&format!("\n\n---\n\n{}", doc.0));
     }
     let mut meta_parts = Vec::new();
-    let is_function = bind.params().is_some();
     if !is_function {
         if let Some(ty) = ty_env.fn_return_ty(def_name) {
             meta_parts.push(format!("size = {}", crate::ty_byte_size_static(ty)));

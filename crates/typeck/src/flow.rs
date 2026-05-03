@@ -143,6 +143,8 @@ pub enum ConstValue {
     String(String),
     Tag {
         name: Intern<String>,
+        /// Fully qualified path (e.g., `Bool.False`), if known.
+        qual_path: Option<String>,
         args: Vec<ConstValue>,
     },
 }
@@ -190,12 +192,17 @@ impl ConstValue {
             ConstValue::Int(i) => i.to_string(),
             ConstValue::Float(f) => f.to_string(),
             ConstValue::String(s) => format!("\"{s}\""),
-            ConstValue::Tag { name, args } => {
+            ConstValue::Tag {
+                name,
+                qual_path,
+                args,
+            } => {
+                let display_name = qual_path.as_deref().unwrap_or_else(|| name.as_str());
                 if args.is_empty() {
-                    name.as_str().to_string()
+                    display_name.to_string()
                 } else {
                     let parts: Vec<String> = args.iter().map(|a| a.to_hover_string()).collect();
-                    format!("{}({})", name.as_str(), parts.join(", "))
+                    format!("{}({})", display_name, parts.join(", "))
                 }
             }
         }
