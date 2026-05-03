@@ -1,15 +1,15 @@
 use crate::TyInfer;
-use crate::resolve::is_type_surface;
 use crate::flow::{
     Bound, CmpOp, ConstValue, FlowAnalysis, FlowContext, ImpossibleCheck, IndexOutOfBounds,
     TypeConstraint,
 };
+use crate::resolve::is_type_surface;
 use crate::{Ty, TyEnv};
 use ast::SpanId;
 use ast::Spanned;
 use ast::{
-    type_surface_mangle_name, Bind, BindValue, Expr, FileAst, FnCall, IfCondition, IfExpr, Loop,
-    WhenArm, WhenExpr, for_loop_pattern_names, pattern_type_binding_names,
+    Bind, BindValue, Expr, FileAst, FnCall, IfCondition, IfExpr, Loop, WhenArm, WhenExpr,
+    for_loop_pattern_names, pattern_type_binding_names, type_surface_mangle_name,
 };
 use internment::Intern;
 use std::collections::{HashMap, HashSet};
@@ -351,9 +351,7 @@ impl<'a> FlowAnalyzer<'a> {
             Expr::SelfRef(_) => {}
 
             // Only appears as `if`/`when` pattern, bind type payload, or type-parameter syntax.
-            Expr::TypeNominal(..)
-            | Expr::TypeQualified(_)
-            | Expr::TypeGeneric { .. } => {}
+            Expr::TypeNominal(..) | Expr::TypeQualified(_) | Expr::TypeGeneric { .. } => {}
 
             // Literals and other expressions.
             Expr::Lit(_) => {}

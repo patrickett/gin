@@ -353,16 +353,76 @@ fn parse_return_type_part(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Retu
     if cursor.is_at(&Token::ParenOpen) {
         let args = parse_type_annotation_args(cursor, expr_parser);
         if !args.is_empty() {
+            // If the args are all type-like (bare identifiers or tags), promote
+            // to a `TypeGeneric` return tag so the typechecker sees a uniform
+            // type-surface shape (matching how receivers are stored). Examples:
+            //   `Range(x)` → return_tag = TypeGeneric { Range, [x: Generic] }
+            //   `Maybe(3)` → falls through to `type_annotation` (value annotation)
+            if let Some(type_params) = try_args_as_type_params(&args) {
+                return (
+                    None,
+                    Some(Box::new(Spanned(
+                        Expr::TypeGeneric {
+                            name,
+                            params: type_params,
+                            span: name_span,
+                        },
+                        name_span,
+                    ))),
+                    None,
+                    None,
+                );
+            }
             return (None, None, Some((name, args)), None);
         }
     }
 
     (
         None,
-        Some(Box::new(Spanned(Expr::TypeNominal(name, name_span), name_span))),
+        Some(Box::new(Spanned(
+            Expr::TypeNominal(name, name_span),
+            name_span,
+        ))),
         None,
         None,
     )
+}
+
+/// If every arg is a "type-like" expression (bare lowercase identifier, bare
+/// tag, qualified type, or already a type expression), convert to declaration
+/// parameters suitable for `Expr::TypeGeneric`. Otherwise return `None` so the
+/// caller can fall back to the value-annotation path (e.g., `Maybe(3)`).
+fn try_args_as_type_params(args: &[Spanned<Expr>]) -> Option<Vec<(Intern<String>, ParameterKind)>> {
+    let mut out = Vec::with_capacity(args.len());
+    for Spanned(arg, span) in args {
+        match arg {
+            // Bare lowercase identifier, e.g. `x` in `Range(x)` → type-variable
+            // *introduction* (matches how `Range(x)` parses in receiver and
+            // declaration positions). Stored as `Generic` so the typechecker
+            // doesn't report `x` as an undeclared tag.
+            Expr::FnCall(call) if call.path.segments.is_empty() && call.args.is_none() => {
+                out.push((call.path.root, ParameterKind::Generic));
+            }
+            // Bare capitalized tag, e.g. `Int` in `Range(Int)` → concrete
+            // instantiation. Tagged so the typechecker resolves and validates it.
+            Expr::AnonymousTag(n, s) => {
+                let sp = Spanned(Expr::TypeNominal(*n, *s), *s);
+                out.push((*n, ParameterKind::Tagged(Box::new(sp))));
+            }
+            // Already a type-surface expression.
+            Expr::TypeNominal(n, _) => {
+                let sp = Spanned(arg.clone(), *span);
+                out.push((*n, ParameterKind::Tagged(Box::new(sp))));
+            }
+            Expr::TypeGeneric { name, .. }
+            | Expr::TypeQualified(ast::ModPath { root: name, .. }) => {
+                let sp = Spanned(arg.clone(), *span);
+                out.push((*name, ParameterKind::Tagged(Box::new(sp))));
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
 }
 
 fn parse_type_annotation_args(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Vec<Spanned<Expr>> {
@@ -460,7 +520,7 @@ fn parse_one_param(
         return Some((key, ParameterKind::Tagged(Box::new(sp))));
     }
 
-    // Named: id [Tag | : expr]
+    // Named: id [Tag | id | : expr]
     let name = match cursor.peek() {
         Some(Token::Id(n)) => {
             let id = cursor.intern(n);
@@ -470,23 +530,10 @@ fn parse_one_param(
         _ => return None,
     };
 
-    // id Tag → tagged parameter
-    if matches!(cursor.peek(), Some(Token::Tag(_))) {
-        let sp = parse_type_expr(cursor, expr_parser)?;
-        return Some((name, ParameterKind::Tagged(Box::new(sp))));
-    }
-
-    // id: expr → default value
-    if cursor.eat(&Token::Colon) {
-        let expr = expr_parser(cursor);
-        return Some((name, ParameterKind::Default(expr)));
-    }
-
-    // id → generic parameter
-    Some((name, ParameterKind::Generic))
+    crate::params::parse_param_after_name(cursor, expr_parser, name)
 }
 
-fn parse_doc_comment(cursor: &mut TokenCursor) -> Option<DocComment> {
+pub(crate) fn parse_doc_comment(cursor: &mut TokenCursor) -> Option<DocComment> {
     let first = match cursor.peek()? {
         Token::DocComment(text) => {
             let stripped = text

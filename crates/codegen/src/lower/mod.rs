@@ -725,6 +725,95 @@ impl<'c> Lower<'c> for Expr {
     }
 }
 
+/// True if any expression reachable from `bind_value` references `self`.
+///
+/// Used to decide whether a method-like bind (one with a `receiver_type`)
+/// should take an implicit `self` parameter at codegen time. Constructors
+/// like `Range.new(start x, end x) Range(x): (start, end)` have a receiver
+/// type for namespacing/dispatch but don't use `self`, so they should be
+/// emitted as static functions taking only their declared params.
+fn bind_value_uses_self(value: &BindValue) -> bool {
+    match value {
+        BindValue::Expr(e) => spanned_uses_self(e),
+        BindValue::Body { exprs, ret } => {
+            exprs.iter().any(spanned_uses_self)
+                || ret.0.as_ref().map(|sp| spanned_uses_self(sp)).unwrap_or(false)
+        }
+        BindValue::Extern => false,
+    }
+}
+
+fn spanned_uses_self(sp: &Spanned<Expr>) -> bool {
+    expr_uses_self(&sp.0)
+}
+
+fn expr_uses_self(expr: &Expr) -> bool {
+    match expr {
+        Expr::SelfRef(_) => true,
+        Expr::Binary(b) => spanned_uses_self(&b.lhs) || spanned_uses_self(&b.rhs),
+        Expr::FnCall(c) => {
+            // `self.x` and `self.method(args)` start with `self` as the path root.
+            if c.path.root.as_str() == "self" {
+                return true;
+            }
+            c.args
+                .as_ref()
+                .map(|a| a.iter().any(spanned_uses_self))
+                .unwrap_or(false)
+        }
+        Expr::TagCall(tc) => tc.args.iter().any(spanned_uses_self),
+        Expr::TupleLit(elems) => elems.iter().any(spanned_uses_self),
+        Expr::TupleAlloc { init, .. } => spanned_uses_self(init),
+        Expr::TupleGet { base, .. } => spanned_uses_self(base),
+        Expr::TupleSet { base, value, .. } => {
+            spanned_uses_self(base) || spanned_uses_self(value)
+        }
+        Expr::BufGet { buf, index } => spanned_uses_self(buf) || spanned_uses_self(index),
+        Expr::BufSet { buf, index, value } => {
+            spanned_uses_self(buf) || spanned_uses_self(index) || spanned_uses_self(value)
+        }
+        Expr::TakePtr(e) | Expr::TakeRef(e) | Expr::Deref(e) | Expr::Negate(e) => {
+            spanned_uses_self(e)
+        }
+        Expr::Cast { expr: e, .. } => spanned_uses_self(e),
+        Expr::Bind(b) => bind_value_uses_self(b.value()),
+        Expr::When(w) => {
+            w.subject.as_ref().map(|s| spanned_uses_self(s)).unwrap_or(false)
+                || w.arms.iter().any(|arm| match arm {
+                    ::ast::WhenArm::Cond { condition, body } => {
+                        spanned_uses_self(condition) || spanned_uses_self(body)
+                    }
+                    ::ast::WhenArm::Is { body, .. } => spanned_uses_self(body),
+                    ::ast::WhenArm::Else(body) => spanned_uses_self(body),
+                })
+        }
+        Expr::If(if_expr) => {
+            let cond_uses_self = match &if_expr.condition {
+                ::ast::IfCondition::Bool(c) => spanned_uses_self(c),
+                ::ast::IfCondition::Pattern { subject, .. } => spanned_uses_self(subject),
+            };
+            cond_uses_self || if_expr.body.iter().any(spanned_uses_self)
+        }
+        Expr::Loop(loop_expr) => match loop_expr {
+            ::ast::Loop::ForIn(f) => {
+                spanned_uses_self(&f.iter) || f.exprs.iter().any(spanned_uses_self)
+            }
+            ::ast::Loop::While(w) => {
+                spanned_uses_self(&w.cond) || w.exprs.iter().any(spanned_uses_self)
+            }
+        },
+        Expr::FormatString(fs) => fs.parts.iter().any(|p| match p {
+            ::ast::FormatPart::Expr(e) => spanned_uses_self(e),
+            _ => false,
+        }),
+        // Inline asm operand expressions: a use of `self` here is unusual but
+        // not rejected. Conservatively scan the operand strings (none today
+        // hold expressions; this is a placeholder for future expansion).
+        Expr::Asm(_) => false,
+        _ => false,
+    }
+}
+
 /// Lower a function definition to MLIR func.func operation.
 pub fn lower_function<'c>(
     ctx: &CodegenContext<'_, 'c>,
@@ -734,11 +823,22 @@ pub fn lower_function<'c>(
     let name = def_name.as_str();
     let loc = ctx.location();
 
-    // Build owned param list, prepending `self` for methods.
+    // Build owned param list, prepending `self` for instance methods only.
+    //
+    // A bind on a type acts as either:
+    //   - an instance method (uses `self` in the body) — prepended `self` arg
+    //     is required (e.g. `Bool.to_string Str := when self then ...`).
+    //   - a static / associated function (e.g. constructor `Range.new`) —
+    //     does not reference `self`; should not take an implicit self.
+    //
+    // Detect by scanning the body for `Expr::SelfRef`. This keeps both call
+    // shapes working without changing the surface syntax: `b.to_string` and
+    // `Range.new(12, 1200)` both just dispatch to the mangled name.
     let param_info_ref = ctx.ty_env.param_types(bind);
     let mut param_info: Vec<(Intern<String>, Ty)> =
         param_info_ref.into_iter().map(|(n, t)| (*n, t)).collect();
     if let Some(sp) = bind.receiver_type_surface()
+        && bind_value_uses_self(bind.value())
         && let Some(self_ty) = ctx.ty_env.resolve_type_surface(&sp.0)
     {
         param_info.insert(0, (Intern::<String>::from_ref("self"), self_ty));

@@ -65,8 +65,7 @@ impl GinCompiler {
             if args.dependencies.is_empty()
                 && let Some(config) = FlaskConfig::from_directory(&entry_dir)
             {
-                args.dependencies =
-                    resolve::resolve_flask_path_dependencies(&config, &entry_dir);
+                args.dependencies = resolve::resolve_flask_path_dependencies(&config, &entry_dir);
             }
             resolve::resolve_imports(files, Some(&args.dependencies))
         } else {
@@ -100,9 +99,14 @@ impl GinCompiler {
 
         match args.emit {
             crate::cli::Emit::Mlir => emit_mlir(&files, &merged_ast, &checked.ty_env),
-            crate::cli::Emit::Obj | crate::cli::Emit::Exe => {
-                emit_native(&files, &merged_ast, &checked.ty_env, args, &path, is_library)
-            }
+            crate::cli::Emit::Obj | crate::cli::Emit::Exe => emit_native(
+                &files,
+                &merged_ast,
+                &checked.ty_env,
+                args,
+                &path,
+                is_library,
+            ),
             crate::cli::Emit::Tokens => unreachable!(),
         }
     }
@@ -186,11 +190,7 @@ fn path_for_diagnostic_report(path: &Path) -> String {
             .strip_prefix(&base)
             .map(|p| {
                 let s = p.display().to_string();
-                if s.is_empty() {
-                    ".".to_string()
-                } else {
-                    s
-                }
+                if s.is_empty() { ".".to_string() } else { s }
             })
             .unwrap_or_else(|_| abs.display().to_string()),
         _ => path.display().to_string(),
@@ -310,10 +310,7 @@ fn print_codegen_diagnostics(files: &[ParsedFile], symptoms: &[Diagnostic]) {
 /// Print MLIR text to stdout.
 fn emit_mlir(files: &[ParsedFile], merged_ast: &FileAst, ty_env: &TyEnv) {
     let (source, label) = match files.first() {
-        Some(f) => (
-            f.source.as_str(),
-            path_for_diagnostic_report(&f.path),
-        ),
+        Some(f) => (f.source.as_str(), path_for_diagnostic_report(&f.path)),
         None => ("", "<stdin>".to_string()),
     };
     let (result, symptoms) = emit::build_module_text(merged_ast, source, &label, ty_env);
@@ -338,10 +335,18 @@ fn emit_native(
     is_library: bool,
 ) {
     let obj_path = if is_library {
-        args.output.clone().unwrap_or_else(|| {
+        // Folder packages reuse `args.output` only for `-o exe`/`link` destinations.
+        // When emitting Exe we always stage `.o` under `<pkg>/target/` so `-o foo`
+        // is never scribbled onto as raw object contents (which corrupts linkage).
+        if matches!(args.emit, crate::cli::Emit::Exe) {
             let pkg_name = path.file_name().unwrap_or_default().to_string_lossy();
-            path.join("target").join(format!("{}.o", pkg_name))
-        })
+            path.join("target").join(format!("{pkg_name}.o"))
+        } else {
+            args.output.clone().unwrap_or_else(|| {
+                let pkg_name = path.file_name().unwrap_or_default().to_string_lossy();
+                path.join("target").join(format!("{}.o", pkg_name))
+            })
+        }
     } else if matches!(args.emit, crate::cli::Emit::Exe) {
         args.output
             .clone()
@@ -358,10 +363,7 @@ fn emit_native(
     }
 
     let (source, label) = match files.first() {
-        Some(f) => (
-            f.source.as_str(),
-            path_for_diagnostic_report(&f.path),
-        ),
+        Some(f) => (f.source.as_str(), path_for_diagnostic_report(&f.path)),
         None => ("", path.to_string_lossy().into_owned()),
     };
     let profile = args.profile.into();

@@ -4,7 +4,10 @@ use ast::{Bind, BindValue, Expr, FileAst, ParameterKind};
 use internment::Intern;
 use std::collections::HashMap;
 
-use crate::resolve::{is_type_surface, resolve_type_expr_from_map, resolve_name_from_files};
+use crate::resolve::{
+    is_type_surface, resolve_name_from_files, resolve_type_expr_from_map,
+    resolve_type_expr_with_subst,
+};
 use crate::ty::{Ty, str_record_ty};
 use crate::{LocalTypes, TyInfer, TyInferEnv};
 
@@ -17,6 +20,17 @@ pub(crate) type VariantMap = HashMap<Intern<String>, Vec<VariantMapEntry>>;
 /// Type alias for variant lookup result: (union_name, discriminant, field_slice)
 pub(crate) type VariantLookupResult<'a> = (Intern<String>, usize, &'a [(Intern<String>, Ty)]);
 
+/// Resolved parameter info for a top-level function or method, used to check
+/// argument compatibility at call sites with type-variable unification.
+#[derive(Clone, PartialEq)]
+pub struct FnParamInfo {
+    /// Positional parameter types in declaration order.
+    pub params: Vec<(Intern<String>, Ty)>,
+    /// Method-scoped type variables introduced by the receiver, e.g. `x` in
+    /// `Range(x).new`. Empty for non-method binds.
+    pub typevars: HashMap<Intern<String>, Ty>,
+}
+
 /// Type environment built from a `FileAst`. Resolves tag names to `Ty` and infers
 /// function parameter / return types.
 #[derive(PartialEq)]
@@ -26,6 +40,10 @@ pub struct TyEnv {
     /// Reverse map: variant name → [(parent_union_name, discriminant_index, payload_fields)]
     /// A variant may appear in multiple unions if names collide; shape-based disambiguation is TODO.
     pub variant_map: VariantMap,
+    /// Per-function parameter info — populated from each `Bind` so that call
+    /// sites can run argument-vs-parameter unification (and reject mismatches
+    /// like `Range.new(1, "hi")` where `x` cannot be both `Int` and `Str`).
+    pub fn_params: HashMap<Intern<String>, FnParamInfo>,
 }
 
 impl TyEnv {
@@ -91,10 +109,42 @@ impl TyEnv {
             }
         }
 
+        // Collect per-function parameter info for call-site unification.
+        let mut fn_params: HashMap<Intern<String>, FnParamInfo> = HashMap::new();
+        for ast in files {
+            for (name, bind) in &ast.defs {
+                if !bind.attributes().matches_current_platform() {
+                    continue;
+                }
+                let typevars = bind
+                    .receiver_type_surface()
+                    .map(|sp| crate::resolve::typevars_from_receiver(&sp.0))
+                    .unwrap_or_default();
+                let params: Vec<(Intern<String>, Ty)> = match bind.params() {
+                    None => Vec::new(),
+                    Some(ps) => ps
+                        .iter()
+                        .map(|(n, kind)| {
+                            let ty = crate::infer::resolve_parameter_kind_with_subst(
+                                *n,
+                                kind,
+                                &tag_types,
+                                &fn_return_types,
+                                &typevars,
+                            );
+                            (*n, ty)
+                        })
+                        .collect(),
+                };
+                fn_params.insert(*name, FnParamInfo { params, typevars });
+            }
+        }
+
         TyEnv {
             tag_types,
             fn_return_types,
             variant_map,
+            fn_params,
         }
     }
 
@@ -108,21 +158,31 @@ impl TyEnv {
         is_type_surface(e).then(|| resolve_type_expr_from_map(e, &self.tag_types))
     }
 
-    /// Resolve a `ParameterKind` to a `Ty`.
-    pub(crate) fn resolve_parameter_kind(&self, kind: &ParameterKind) -> Ty {
+    /// Resolve a `ParameterKind` to a `Ty`, consulting a method-scoped
+    /// type-variable substitution map.
+    ///
+    /// `subst` lets `start x` and `end x` in
+    /// `Range(x).new(start x, end x) Range(x): ...` both resolve to the same
+    /// `Ty::Opaque(x)`. Pass an empty map for non-method binds.
+    pub(crate) fn resolve_parameter_kind_with_subst(
+        &self,
+        name: Intern<String>,
+        kind: &ParameterKind,
+        subst: &HashMap<Intern<String>, Ty>,
+    ) -> Ty {
         match kind {
             ParameterKind::Tagged(sp) => {
                 if is_type_surface(&sp.0) {
-                    self.resolve_type_expr(&sp.0)
+                    resolve_type_expr_with_subst(&sp.0, &self.tag_types, subst)
                 } else {
                     Ty::Opaque(Intern::<String>::from_ref("?"))
                 }
             }
-            ParameterKind::Generic => Ty::Int {
-                width: 64,
-                signed: true,
-                value: None,
-            },
+            // Bare-id (`Generic`) params resolve as a fresh per-param type
+            // variable `Ty::Opaque(name)` so each call argument can bind it
+            // independently. Use `name x` to share a type variable across
+            // params (see `Range(x).new(start x, end x)`).
+            ParameterKind::Generic => Ty::Opaque(name),
             ParameterKind::Default(expr) => {
                 let empty: HashMap<Intern<String>, Ty> = HashMap::new();
                 expr.infer_ty(&self.infer_env(&empty))
@@ -135,10 +195,21 @@ impl TyEnv {
     pub fn param_types<'a>(&self, bind: &'a Bind) -> Vec<(&'a Intern<String>, Ty)> {
         match bind.params().as_ref() {
             None => vec![],
-            Some(params) => params
-                .iter()
-                .map(|(name, kind)| (name, self.resolve_parameter_kind(kind)))
-                .collect(),
+            Some(params) => {
+                let subst = bind
+                    .receiver_type_surface()
+                    .map(|sp| crate::resolve::typevars_from_receiver(&sp.0))
+                    .unwrap_or_default();
+                params
+                    .iter()
+                    .map(|(name, kind)| {
+                        (
+                            name,
+                            self.resolve_parameter_kind_with_subst(*name, kind, &subst),
+                        )
+                    })
+                    .collect()
+            }
         }
     }
 

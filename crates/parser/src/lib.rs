@@ -9,6 +9,7 @@ pub mod declare;
 pub mod expr;
 mod impl_block;
 pub mod module;
+pub mod params;
 pub mod path;
 pub mod query;
 pub mod tag;

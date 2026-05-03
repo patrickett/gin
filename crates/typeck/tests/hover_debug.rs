@@ -2,9 +2,9 @@
 //!
 //! Run with: cargo test -p analyze --test hover_debug -- --nocapture
 
+use parser::expr::parse_source;
 use typeck::hover_at;
 use typeck::word_at_byte_offset;
-use parser::expr::parse_source;
 
 fn debug_hover_at_marker(source: &str) -> Option<String> {
     let count = source.matches('†').count();

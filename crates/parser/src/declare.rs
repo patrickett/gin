@@ -315,7 +315,7 @@ fn parse_one_declare_param(
         return Some((key, ParameterKind::Tagged(Box::new(sp))));
     }
 
-    // Named: id [Tag | : expr]
+    // Named: id [Tag | id | : expr]
     let name = match cursor.peek() {
         Some(Token::Id(n)) => {
             let id = cursor.intern(n);
@@ -325,31 +325,7 @@ fn parse_one_declare_param(
         _ => return None,
     };
 
-    // id Tag → tagged
-    if matches!(cursor.peek(), Some(Token::Tag(_))) {
-        let sp = parse_type_expr(cursor, expr_parser)?;
-        return Some((name, ParameterKind::Tagged(Box::new(sp))));
-    }
-
-    // id id → tagged type variable (generic type parameter reference)
-    //
-    // This allows record declarations like:
-    // `Range(x) has (start x, end x)`
-    // where `x` is a type parameter (lowercase) used in field positions.
-    if let Some(Token::Id(t)) = cursor.peek() {
-        let span = cursor.peek_span()?;
-        let ty_name = cursor.intern(t);
-        cursor.advance();
-        let sp = Spanned(Expr::TypeNominal(ty_name, span), span);
-        return Some((name, ParameterKind::Tagged(Box::new(sp))));
-    }
-
-    // id: expr → default
-    if cursor.eat(&Token::Colon) {
-        let expr = expr_parser(cursor);
-        return Some((name, ParameterKind::Default(expr)));
-    }
-
-    // id → generic
-    Some((name, ParameterKind::Generic))
+    // Shared helper supports `id Tag`, `id id` (type variable, e.g.
+    // `Range(x) has (start x, end x)`), `id: expr`, and bare `id` (generic).
+    crate::params::parse_param_after_name(cursor, expr_parser, name)
 }

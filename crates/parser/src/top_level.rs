@@ -11,6 +11,7 @@ use internment::Intern;
 
 use crate::cursor::TokenCursor;
 use crate::expr::ExprFn;
+use crate::expr::bind::parse_doc_comment;
 
 pub fn parse_file(cursor: &mut TokenCursor, expr_parser: ExprFn) -> FileAst {
     let module_doc = parse_module_doc(cursor);
@@ -251,6 +252,14 @@ fn dispatch_tag_element(
         return parse_method_bind(cursor, expr_parser);
     }
 
+    // Tag(...).Id → generic-receiver method_bind (skip a balanced () after the tag)
+    if let Some(after_parens) = skip_balanced_parens_offset(cursor, after_tag)
+        && matches!(cursor.peek_at(after_parens), Some(Token::Dot))
+        && matches!(cursor.peek_at(after_parens + 1), Some(Token::Id(_)))
+    {
+        return parse_method_bind(cursor, expr_parser);
+    }
+
     // Tag [params] is/has → declare (deterministic: no checkpoint/rewind needed)
     if is_declare_from_offset(cursor, tag_offset) {
         return crate::declare::parse_declare(cursor, expr_parser).map(TopLevelValue::Tag);
@@ -261,6 +270,33 @@ fn dispatch_tag_element(
     Some(TopLevelValue::Expr(expr, span))
 }
 
+/// If the token at `offset` is `(`, return the offset just past the matching `)`.
+/// Returns `None` if there is no `(` at `offset` or the parens are unbalanced.
+fn skip_balanced_parens_offset(cursor: &TokenCursor, offset: usize) -> Option<usize> {
+    if !matches!(cursor.peek_at(offset), Some(Token::ParenOpen)) {
+        return None;
+    }
+    let mut o = offset + 1;
+    let mut depth = 1;
+    while depth > 0 {
+        match cursor.peek_at(o) {
+            Some(Token::ParenOpen) => {
+                depth += 1;
+                o += 1;
+            }
+            Some(Token::ParenClose) => {
+                depth -= 1;
+                o += 1;
+            }
+            None => return None,
+            _ => {
+                o += 1;
+            }
+        }
+    }
+    Some(o)
+}
+
 fn parse_element_line(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<TopLevelValue> {
     let el = parse_top_level_element(cursor, expr_parser)?;
     Some(el)
@@ -268,13 +304,16 @@ fn parse_element_line(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<T
 
 fn parse_method_bind(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<TopLevelValue> {
     // skip past any metadata (indent, doc comments, attributes) to reach the Tag
+    let mut doc_before = None;
     loop {
         match cursor.peek() {
             Some(Token::Indent) => {
                 cursor.advance();
             }
             Some(Token::DocComment(_)) => {
-                cursor.advance();
+                if let Some(doc) = parse_doc_comment(cursor) {
+                    doc_before = Some(doc);
+                }
             }
             Some(Token::Pound) => {
                 cursor.advance();
@@ -295,25 +334,17 @@ fn parse_method_bind(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<To
         }
     }
 
-    let (recv_name, recv_span) = match cursor.peek() {
-        Some(Token::Tag(n)) => {
-            let name = cursor.intern(n);
-            let span = cursor.peek_span()?;
-            cursor.advance();
-            (name, span)
-        }
-        _ => return None,
-    };
+    // Receiver may be a bare Tag, a generic Tag(args), or a qualified Mod.Tag.
+    let recv = crate::tag::parse_type_expr(cursor, expr_parser)?;
 
     if !cursor.eat(&Token::Dot) {
         return None;
     }
 
-    let bind = crate::expr::bind::parse_bind(cursor, expr_parser)?;
-    let bind = bind.with_receiver_type(Some(Box::new(Spanned(
-        Expr::TypeNominal(recv_name, recv_span),
-        recv_span,
-    ))));
+    let mut bind = crate::expr::bind::parse_bind(cursor, expr_parser)?;
+    let doc = bind.doc_comment().cloned().or(doc_before);
+    bind = bind.with_doc(doc);
+    let bind = bind.with_receiver_type(Some(Box::new(recv)));
 
     Some(TopLevelValue::Bind(Box::new(bind)))
 }

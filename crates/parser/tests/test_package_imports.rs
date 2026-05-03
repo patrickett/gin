@@ -67,7 +67,10 @@ fn test_package_import_no_segments_collects_flat_gin_only() {
     let pkg = TempPackage::new("all");
     pkg.add_flask_root("core");
     pkg.add_file("io.gin", "print(s Str):\nreturn\n");
-    pkg.add_file("sys.gin", "write(fd Int, buf Int, len Int) Int:\nreturn 0\n");
+    pkg.add_file(
+        "sys.gin",
+        "write(fd Int, buf Int, len Int) Int:\nreturn 0\n",
+    );
     pkg.add_file("readme.md", "not a gin file");
     pkg.add_nested_flask("nested", "nested");
     pkg.add_file("nested/x.gin", "x\n");
@@ -107,7 +110,10 @@ fn test_package_import_multiple_package_uses() {
     let pkg = TempPackage::new("multi");
     pkg.add_flask_root("core");
     pkg.add_file("io.gin", "print(s Str):\nreturn\n");
-    pkg.add_file("sys.gin", "write(fd Int, buf Int, len Int) Int:\nreturn 0\n");
+    pkg.add_file(
+        "sys.gin",
+        "write(fd Int, buf Int, len Int) Int:\nreturn 0\n",
+    );
 
     let src = "use core\nuse core\nmain:\nreturn\n";
     let ast = parse_from_str(src);

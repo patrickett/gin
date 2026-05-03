@@ -1,7 +1,7 @@
 use internment::Intern;
 use lexer::Token;
 
-use ast::{type_surface_mangle_name, Expr, ParameterKind, Parameters, Spanned, TagCall};
+use ast::{Expr, ParameterKind, Parameters, Spanned, TagCall, type_surface_mangle_name};
 
 use crate::cursor::TokenCursor;
 use crate::expr::ExprFn;

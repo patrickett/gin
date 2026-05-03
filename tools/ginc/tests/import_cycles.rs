@@ -49,4 +49,3 @@ fn import_cycle_is_a_fatal_flaw() {
 
     let _ = fs::remove_dir_all(&dir);
 }
-

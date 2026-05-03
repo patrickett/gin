@@ -15,8 +15,8 @@
 //! }
 //! ```
 
-use typeck::hover_at;
 use parser::expr::parse_source;
+use typeck::hover_at;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
@@ -153,6 +153,23 @@ fn hover_function_with_complexity_before_doc_comment() {
     assert_hover(
         "#[complexity(Constant)]\n--- Always returns 42.\n†magic(x Int) Int:\nreturn 42\n",
         &["magic(x Int) Int", "O(1)", "Always returns 42."],
+    );
+}
+
+#[test]
+fn hover_method_name_on_call_shows_doc_comment() {
+    assert_hover(
+        "\
+Range(x) has (start x, end x)
+
+--- create a new range
+Range(x).new(start x, end x) Range(x): (start, end)
+
+main:
+    r := Range.†new(12, 1200)
+return
+",
+        &["Range.new(start x, end x) Range(x)", "create a new range"],
     );
 }
 

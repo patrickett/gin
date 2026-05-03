@@ -29,11 +29,18 @@ pub fn parse_path(cursor: &mut TokenCursor) -> Option<ModPath> {
     let mut segments = Vec::new();
     let mut end_span = start_span;
 
-    while cursor.is_at(&Token::Dot) && matches!(cursor.peek_at(1), Some(Token::Id(_))) {
+    while cursor.is_at(&Token::Dot)
+        && matches!(cursor.peek_at(1), Some(Token::Id(_)) | Some(Token::Tag(_)))
+    {
         cursor.advance(); // consume Dot
-        if let Some((Token::Id(name), span)) = cursor.advance() {
-            segments.push(cursor.intern(name));
-            end_span = span;
+        if let Some((token, span)) = cursor.advance() {
+            match token {
+                Token::Id(name) | Token::Tag(name) => {
+                    segments.push(cursor.intern(name));
+                    end_span = span;
+                }
+                _ => break,
+            }
         }
     }
 

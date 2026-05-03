@@ -22,7 +22,7 @@ use ast::{
 };
 use internment::Intern;
 
-use crate::resolve::{is_type_surface, resolve_type_expr_from_map};
+use crate::resolve::{is_type_surface, resolve_type_expr_with_subst, typevars_from_receiver};
 use crate::{Ty, str_record_ty};
 
 /// Abstracts over different "local variable" type representations.
@@ -218,10 +218,19 @@ impl TyInfer for FnCall {
 
 impl TyInfer for Bind {
     fn infer_ty(&self, env: &TyInferEnv) -> Ty {
+        // Build the method-scoped type-variable map. For
+        // `Range(x).new(start x, end x) Range(x): ...`, this yields
+        // `{ x -> Ty::Opaque(x) }` so each occurrence of `x` in params, body,
+        // and return type resolves to the same opaque tag (and unifies trivially).
+        let subst: HashMap<Intern<String>, Ty> = self
+            .receiver_type_surface()
+            .map(|sp| typevars_from_receiver(&sp.0))
+            .unwrap_or_default();
+
         if let Some(sp) = &self.return_tag
             && is_type_surface(&sp.0)
         {
-            return resolve_type_expr_from_map(&sp.0, env.tag_types);
+            return resolve_type_expr_with_subst(&sp.0, env.tag_types, &subst);
         }
 
         let mut locals: HashMap<Intern<String>, Ty> = match self.params().as_ref() {
@@ -231,7 +240,13 @@ impl TyInfer for Bind {
                 .map(|(name, kind)| {
                     (
                         *name,
-                        resolve_parameter_kind_with(kind, env.tag_types, env.fn_return_types),
+                        resolve_parameter_kind_with_subst(
+                            *name,
+                            kind,
+                            env.tag_types,
+                            env.fn_return_types,
+                            &subst,
+                        ),
                     )
                 })
                 .collect(),
@@ -239,7 +254,7 @@ impl TyInfer for Bind {
         if let Some(sp) = self.receiver_type_surface()
             && is_type_surface(&sp.0)
         {
-            let recv_ty = resolve_type_expr_from_map(&sp.0, env.tag_types);
+            let recv_ty = resolve_type_expr_with_subst(&sp.0, env.tag_types, &subst);
             locals.insert(Intern::<String>::from_ref("self"), recv_ty);
         }
 
@@ -414,28 +429,36 @@ impl TyInfer for Spanned<Expr> {
     }
 }
 
-/// Resolve a `ParameterKind` to a `Ty` for use in standalone functions.
+/// Resolve a `ParameterKind` to a `Ty`, consulting a method-scoped
+/// type-variable substitution map. Takes the parameter `name` so bare-id
+/// (`Generic`) params can be resolved as a fresh `Ty::Opaque(name)`
+/// type variable rather than the legacy `Int64` fallback.
 ///
-/// This is the non-method version of `TyEnv::resolve_parameter_kind`,
-/// used when we don't have a `TyEnv` available but have the raw maps.
-fn resolve_parameter_kind_with(
+/// This makes `start` and `end` in `CustomRange has (start, end)` (and the
+/// matching `CustomRange.new(start, end) ...` method) into independent fresh
+/// type variables — call sites can then bind each to any type without
+/// rejecting mixed inputs (`CustomRange.new(1, "hi")`). For shared-type
+/// parameters use `start x, end x` with an explicit type-variable name.
+///
+/// `subst` lets `start x` and `end x` in
+/// `Range(x).new(start x, end x) Range(x): ...` both resolve to the same
+/// `Ty::Opaque(x)`. Pass an empty map for non-method binds.
+pub(crate) fn resolve_parameter_kind_with_subst(
+    name: Intern<String>,
     kind: &ParameterKind,
     tag_types: &HashMap<Intern<String>, Ty>,
     fn_return_types: &HashMap<Intern<String>, Ty>,
+    subst: &HashMap<Intern<String>, Ty>,
 ) -> Ty {
     match kind {
         ParameterKind::Tagged(sp) => {
             if is_type_surface(&sp.0) {
-                resolve_type_expr_from_map(&sp.0, tag_types)
+                resolve_type_expr_with_subst(&sp.0, tag_types, subst)
             } else {
                 Ty::Opaque(Intern::<String>::from_ref("?"))
             }
         }
-        ParameterKind::Generic => Ty::Int {
-            width: 64,
-            signed: true,
-            value: None,
-        },
+        ParameterKind::Generic => Ty::Opaque(name),
         ParameterKind::Default(expr) => {
             let env = TyInferEnv {
                 tag_types,

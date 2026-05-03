@@ -160,10 +160,7 @@ fn missing_nested_package_is_a_fatal_import_flaw() {
         &dir.join("dep/flask.jsonc"),
         r#"{"name":"dep","version":"0.0.0","authors":[]}"#,
     );
-    write_file(
-        &dir.join("main.gin"),
-        "use dep.io\n\nmain:\n    return 0\n",
-    );
+    write_file(&dir.join("main.gin"), "use dep.io\n\nmain:\n    return 0\n");
 
     let exe = dir.join("out.exe");
     let mut args = Args {

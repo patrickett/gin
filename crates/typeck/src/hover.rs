@@ -1,6 +1,7 @@
 //! Hover and related semantic helpers (engine layer).
 
-use ast::{HasSpanId, ParameterKind, Parameters};
+use ast::{Bind, HasSpanId, ParameterKind, Parameters, format_type_surface};
+use internment::Intern;
 
 /// Return markdown hover text for the word at `byte_pos` in the given AST.
 /// Returns `None` if there is nothing hover-able at that position.
@@ -28,33 +29,11 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
 
     // Look for function definitions
     for (name, bind) in ast.defs() {
-        if name.as_str() != word {
+        if name.as_str() != word && bind.name().as_str() != word {
             continue;
         }
-        let mut result = format!("```gin\n{}", name.as_str());
-        if let Some(params) = bind.params() {
-            result.push_str(&format_params(params));
-        }
-        if let Some(sp) = &bind.return_tag {
-            result.push_str(&format!(" {}", ast::format_type_surface(&sp.0)));
-        }
-        result.push_str("\n```");
-        if let Some(doc) = bind.doc_comment() {
-            result.push_str(&format!("\n\n---\n\n{}", doc.0));
-        }
-        let mut meta_parts = Vec::new();
-        let is_function = bind.params().is_some();
-        if !is_function && let Some(ty) = ty_env.fn_return_ty(name) {
-            meta_parts.push(format!("size = {}", crate::ty_byte_size_static(ty)));
-            meta_parts.push(format!("align = {}", crate::ty_alignment(ty)));
-        }
-        if let Some(complexity) = bind.attributes().complexity.as_ref() {
-            meta_parts.push(format!("complexity = {}", complexity.display_big_o()));
-        }
-        if !meta_parts.is_empty() {
-            result.push_str(&format!("\n\n---\n\n{}", meta_parts.join(", ")));
-        }
-        return Some(result);
+        let display_name = name.as_str().to_string();
+        return Some(format_bind_hover(name, bind, &display_name, &ty_env));
     }
 
     // Look for parameter names across all defs
@@ -204,6 +183,40 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
     Some(format!("```gin\n{word}\n```"))
 }
 
+fn format_bind_hover(
+    def_name: &Intern<String>,
+    bind: &Bind,
+    display_name: &str,
+    ty_env: &crate::TyEnv,
+) -> String {
+    let mut result = format!("```gin\n{}", display_name);
+    if let Some(params) = bind.params() {
+        result.push_str(&format_params(params));
+    }
+    if let Some(sp) = &bind.return_tag {
+        result.push_str(&format!(" {}", format_type_surface(&sp.0)));
+    }
+    result.push_str("\n```");
+    if let Some(doc) = bind.doc_comment() {
+        result.push_str(&format!("\n\n---\n\n{}", doc.0));
+    }
+    let mut meta_parts = Vec::new();
+    let is_function = bind.params().is_some();
+    if !is_function {
+        if let Some(ty) = ty_env.fn_return_ty(def_name) {
+            meta_parts.push(format!("size = {}", crate::ty_byte_size_static(ty)));
+            meta_parts.push(format!("align = {}", crate::ty_alignment(ty)));
+        }
+    }
+    if let Some(complexity) = bind.attributes().complexity.as_ref() {
+        meta_parts.push(format!("complexity = {}", complexity.display_big_o()));
+    }
+    if !meta_parts.is_empty() {
+        result.push_str(&format!("\n\n---\n\n{}", meta_parts.join(", ")));
+    }
+    result
+}
+
 /// Return the union type reachable via a dot expression at `byte_pos`.
 pub fn dot_type_at(
     source: &str,
@@ -295,7 +308,10 @@ pub fn find_definition_span(ast: &ast::FileAst, name: &str) -> Option<std::ops::
 /// off-file to the dependency.
 ///
 /// Returns `None` when `name` is not introduced by any `use` in this file.
-pub fn find_import_definition_span(ast: &ast::FileAst, name: &str) -> Option<std::ops::Range<usize>> {
+pub fn find_import_definition_span(
+    ast: &ast::FileAst,
+    name: &str,
+) -> Option<std::ops::Range<usize>> {
     let span_table = ast.span_table();
     let key = internment::Intern::<String>::from_ref(name);
     for imp in ast.uses() {

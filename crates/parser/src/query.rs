@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use crate::expr;
 use ast::{BindValue, Expr, FileAst, FnCall, ImportSource};
 use flask::{
-    list_package_gin_files, resolve_nested_package_path, NestedPackageTarget, PACKAGE_CONFIG_NAME,
+    NestedPackageTarget, PACKAGE_CONFIG_NAME, list_package_gin_files, resolve_nested_package_path,
 };
 
 // TODO: change ParseOutput to a Vec<Diagnostic> or some vec of enum so we dont need the different
@@ -46,7 +46,8 @@ pub fn parse_source_full(src: &str) -> ParseOutput {
         .copied()
         .collect();
 
-    let (mut ast, hw_parse_errors) = expr::parse_tokens_with_errors(&filtered_tokens, &mut span_table);
+    let (mut ast, hw_parse_errors) =
+        expr::parse_tokens_with_errors(&filtered_tokens, &mut span_table);
     ast.span_table = span_table;
 
     let mut symptoms: Vec<Diagnostic> = Vec::new();
@@ -96,10 +97,7 @@ pub fn parse_source_full(src: &str) -> ParseOutput {
         symptoms.push(ParseSymptom::UnusedValue { value }.into_diagnostic(span_id));
     }
 
-    ParseOutput {
-        ast,
-        symptoms,
-    }
+    ParseOutput { ast, symptoms }
 }
 
 /// Extract locally-imported `.gin` file paths from the AST (quoted `use '...gin'` only).
@@ -162,8 +160,7 @@ pub fn extract_package_import_paths(
                         continue;
                     }
 
-                    let segs: Vec<&str> =
-                        mod_path.segments.iter().map(|s| s.as_str()).collect();
+                    let segs: Vec<&str> = mod_path.segments.iter().map(|s| s.as_str()).collect();
                     if let Ok(NestedPackageTarget::FolderModule(dir)) =
                         resolve_nested_package_path(dep_dir, &segs)
                     {

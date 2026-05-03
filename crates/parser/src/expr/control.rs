@@ -1,7 +1,9 @@
 use lexer::Token;
 
-use ast::{Expr, FnCall, ForInLoop, IfCondition, IfExpr, Loop, ModPath, Return, Spanned, WhenArm,
-    WhenExpr, WhileLoop};
+use ast::{
+    Expr, FnCall, ForInLoop, IfCondition, IfExpr, Loop, ModPath, Return, Spanned, WhenArm,
+    WhenExpr, WhileLoop,
+};
 
 use super::ExprFn;
 use crate::cursor::TokenCursor;
