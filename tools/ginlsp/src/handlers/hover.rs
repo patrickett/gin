@@ -1,14 +1,13 @@
 use crate::Backend;
 #[cfg(test)]
 use ast::DeclareValue;
+use ast::Literal;
 use database::semantic_queries::hover_markdown;
 
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use typeck::{
-    byte_offset_to_position, get_char_at_position, get_number_at_position,
-    get_range_literal_at_position, get_string_literal_at, is_in_comment, position_to_byte_offset,
-    word_at_byte_offset,
+    byte_offset_to_position, get_char_at_position, is_in_comment, position_to_byte_offset,
 };
 
 impl Backend {
@@ -48,126 +47,168 @@ impl Backend {
 
         let dot_hover_range = compute_dot_hover_range(&source, byte_pos);
 
-        if let Some(range_lit) =
-            get_range_literal_at_position(&source, position.line, position.character)
-        {
-            if dot_hover_range.is_some() {
-                return Ok(Some(Hover {
-                    contents: HoverContents::Markup(MarkupContent {
-                        kind: MarkupKind::Markdown,
-                        value: String::from(
-                            "```gin\n...\n```\n\n---\n\n\
-                            Creates a `core.range.Range` from `start...end`.\n\n\
-                            - `start`: lower bound\n\
-                            - `end`: upper bound\n\n\
-                            Example:\n\n\
-                            ```gin\n\
-                            r Range(Int) := 12...1200\n\
-                            ```",
-                        ),
-                    }),
-                    range: dot_hover_range,
-                }));
-            }
-            return Ok(Some(Hover {
-                contents: HoverContents::Markup(MarkupContent {
-                    kind: MarkupKind::Markdown,
-                    value: format!("```gin\n{range_lit}\n```"),
-                }),
-                range: dot_hover_range,
-            }));
-        }
-
-        if let Some(num) = get_number_at_position(&source, position.line, position.character) {
-            return Ok(Some(Hover {
-                contents: HoverContents::Markup(MarkupContent {
-                    kind: MarkupKind::Markdown,
-                    value: format!("```gin\n{num}\n```"),
-                }),
-                range: None,
-            }));
-        }
-
-        if let Some(info) = get_string_literal_at(&source, byte_pos) {
-            let (start_line, start_char) = byte_offset_to_position(info.range.start, &source);
-            let (end_line, end_char) = byte_offset_to_position(info.range.end, &source);
-            let range = Range {
-                start: Position {
-                    line: start_line,
-                    character: start_char,
-                },
-                end: Position {
-                    line: end_line,
-                    character: end_char,
-                },
-            };
-            return Ok(Some(Hover {
-                contents: HoverContents::Markup(MarkupContent {
-                    kind: MarkupKind::Markdown,
-                    value: format!("```gin\nvalue of literal: '{}'\n```", info.content),
-                }),
-                range: Some(range),
-            }));
-        }
-
-        if let Some(word) = word_at_byte_offset(&source, byte_pos) {
-            if word == "use" {
-                return Ok(Some(Hover {
-                    contents: HoverContents::Markup(MarkupContent {
-                        kind: MarkupKind::Markdown,
-                        value: String::from(
-                            "```gin\nuse\n```\n\n\
-                            ---\n\n\
-                            Import items from other modules.\n\n\
-                            **Local imports** — single-quoted path relative to the current file:\n\n\
-                            ```gin\n\
-                            use './math' as math\n\
-                            use '../shared/utils'\n\
-                            ```\n\n\
-                            The path resolves to a module folder. All `.gin` files inside are \
-                            included. Do not include the `.gin` extension.\n\n\
-                            **Package imports** — dotted name from `flask.jsonc` dependencies:\n\n\
-                            ```gin\n\
-                            use core.io\n\
-                            use http.web as web\n\
-                            ```\n\n\
-                            The root name (`core`, `http`) must be declared in `flask.jsonc` \
-                            under `dependencies`. Subsequent segments resolve to files within \
-                            the dependency directory.",
-                        ),
-                    }),
-                    range: None,
-                }));
-            }
-        }
-
-        let import_hover = self
-            .run_blocking_request("hover_import", move |this| {
+        // Single blocking request for AST-based hover: range, number, string,
+        // use-keyword, and import resolution.
+        let hover = self
+            .run_blocking_request("hover", move |this| {
                 let snapshot = this.snapshot();
                 let output = database::file_parse_output(&snapshot.db, file);
                 let ast = &output.ast;
 
+                // Phase 1: literal detection via AST.
+                if let Some((expr, sid)) = ast.expr_at_byte(byte_pos) {
+                    match expr {
+                        // Range literal: `start...end`
+                        ast::Expr::Range(_) => {
+                            if dot_hover_range.is_some() {
+                                return Some(Hover {
+                                    contents: HoverContents::Markup(MarkupContent {
+                                        kind: MarkupKind::Markdown,
+                                        value: String::from(
+                                            "```gin\n...\n```\n\n---\n\n\
+                                            Creates a `core.range.Range` from `start...end`.\n\n\
+                                            - `start`: lower bound\n\
+                                            - `end`: upper bound\n\n\
+                                            Example:\n\n\
+                                            ```gin\n\
+                                            r Range(Int) := 12...1200\n\
+                                            ```",
+                                        ),
+                                    }),
+                                    range: dot_hover_range,
+                                });
+                            }
+                            let span = ast.span_table().get(sid);
+                            let range_text = span.extract(&source);
+                            return Some(Hover {
+                                contents: HoverContents::Markup(MarkupContent {
+                                    kind: MarkupKind::Markdown,
+                                    value: format!("```gin\n{range_text}\n```"),
+                                }),
+                                range: dot_hover_range,
+                            });
+                        }
+                        // Numeric literal
+                        ast::Expr::Lit(Literal::Number(n)) => {
+                            return Some(Hover {
+                                contents: HoverContents::Markup(MarkupContent {
+                                    kind: MarkupKind::Markdown,
+                                    value: format!("```gin\n{n}\n```"),
+                                }),
+                                range: None,
+                            });
+                        }
+                        ast::Expr::Lit(Literal::Int(i)) => {
+                            return Some(Hover {
+                                contents: HoverContents::Markup(MarkupContent {
+                                    kind: MarkupKind::Markdown,
+                                    value: format!("```gin\n{i}\n```"),
+                                }),
+                                range: None,
+                            });
+                        }
+                        ast::Expr::Lit(Literal::Float(f)) => {
+                            return Some(Hover {
+                                contents: HoverContents::Markup(MarkupContent {
+                                    kind: MarkupKind::Markdown,
+                                    value: format!("```gin\n{f}\n```"),
+                                }),
+                                range: None,
+                            });
+                        }
+                        // String literal: show content + highlighted range
+                        ast::Expr::Lit(Literal::String(s)) => {
+                            let span = ast.span_table().get(sid);
+                            let (start_line, start_char) =
+                                byte_offset_to_position(span.start, &source);
+                            let (end_line, end_char) =
+                                byte_offset_to_position(span.end, &source);
+                            let range = Range {
+                                start: Position {
+                                    line: start_line,
+                                    character: start_char,
+                                },
+                                end: Position {
+                                    line: end_line,
+                                    character: end_char,
+                                },
+                            };
+                            return Some(Hover {
+                                contents: HoverContents::Markup(MarkupContent {
+                                    kind: MarkupKind::Markdown,
+                                    value: format!("```gin\nvalue of literal: '{}'\n```", s),
+                                }),
+                                range: Some(range),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Phase 2: "use" keyword hover.
+                let word = ast.word_at_byte(byte_pos, &source)
+                    .or_else(|| typeck::word_at_byte_offset(&source, byte_pos));
+                if word.as_deref() == Some("use") {
+                    return Some(Hover {
+                        contents: HoverContents::Markup(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value: String::from(
+                                "```gin\nuse\n```\n\n\
+                                ---\n\n\
+                                Import items from other modules.\n\n\
+                                **Local imports** — single-quoted path relative to the current file:\n\n\
+                                ```gin\n\
+                                use './math' as math\n\
+                                use '../shared/utils'\n\
+                                ```\n\n\
+                                The path resolves to a module folder. All `.gin` files inside are \
+                                included. Do not include the `.gin` extension.\n\n\
+                                **Package imports** — dotted name from `flask.jsonc` dependencies:\n\n\
+                                ```gin\n\
+                                use core.io\n\
+                                use http.web as web\n\
+                                ```\n\n\
+                                The root name (`core`, `http`) must be declared in `flask.jsonc` \
+                                under `dependencies`. Subsequent segments resolve to files within \
+                                the dependency directory.",
+                            ),
+                        }),
+                        range: None,
+                    });
+                }
+
+                // Phase 3: import resolution.
                 match resolve::resolve_import_at(ast, &source, byte_pos) {
                     Some(resolve::ImportTarget::DepRoot { dep_name }) => {
-                        hover_for_dependency_root(&uri, &dep_name)
+                        return hover_for_dependency_root(&uri, &dep_name).map(|hover_text| Hover {
+                            contents: HoverContents::Markup(MarkupContent {
+                                kind: MarkupKind::Markdown,
+                                value: hover_text,
+                            }),
+                            range: None,
+                        });
                     }
                     Some(resolve::ImportTarget::DepSymbol { dep_name, symbol })
                     | Some(resolve::ImportTarget::BodySymbol { dep_name, symbol }) => {
-                        resolve_import_hover(&uri, &dep_name, &symbol)
+                        return resolve_import_hover(&uri, &dep_name, &symbol).map(
+                            |hover_text| Hover {
+                                contents: HoverContents::Markup(MarkupContent {
+                                    kind: MarkupKind::Markdown,
+                                    value: hover_text,
+                                }),
+                                range: None,
+                            },
+                        );
                     }
-                    None => None,
+                    None => {}
                 }
+
+                None
             })
             .await;
 
-        if let Some(hover_text) = import_hover.flatten() {
-            return Ok(Some(Hover {
-                contents: HoverContents::Markup(MarkupContent {
-                    kind: MarkupKind::Markdown,
-                    value: hover_text,
-                }),
-                range: None,
-            }));
+        if let Some(Some(h)) = hover {
+            return Ok(Some(h));
         }
 
         // General hover hits hover_markdown, which runs the parser via Salsa.
@@ -176,7 +217,7 @@ impl Backend {
             return Ok(None);
         };
         let value = self
-            .run_blocking_request("hover", move |this| {
+            .run_blocking_request("hover_markdown", move |this| {
                 let snapshot = this.snapshot();
                 let markdown = hover_markdown(&snapshot.db, file, byte_pos_u32)?;
 

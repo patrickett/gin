@@ -33,7 +33,6 @@ pub use completions::{
 
 pub mod source;
 pub use source::{
-    StringLiteralInfo, byte_offset_to_position, get_char_at_position, get_number_at_position,
-    get_range_literal_at_position, get_string_literal_at, get_word_at_position, is_identifier_char,
-    is_in_comment, position_to_byte_offset, word_at_byte_offset,
+    byte_offset_to_position, get_char_at_position, is_identifier_char, is_in_comment,
+    position_to_byte_offset, word_at_byte_offset,
 };

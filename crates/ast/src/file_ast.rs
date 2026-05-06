@@ -455,6 +455,67 @@ impl FileAst {
         }
         None
     }
+
+    /// Extract the meaningful identifier name at `byte_pos`, using AST structure
+    /// instead of scanning source bytes.
+    ///
+    /// Returns the name for:
+    /// - `AnonymousTag` / `TypeNominal` / `TypeQualified` → the tag/variant name
+    /// - `SelfRef` → `"self"`
+    /// - `TagCall` → the variant constructor name
+    /// - `FnCall` → the word under the cursor within the path (handles `obj.method`)
+    /// - `Bind` → the bind name (only when `byte_pos` falls within `name_span`)
+    ///
+    /// Returns `None` for expressions that don't carry an identifier word
+    /// (e.g. literals, binaries, ranges). Callers can fall back to
+    /// source-text-based `word_at_byte_offset` when this returns `None`.
+    pub fn word_at_byte(&self, byte_pos: usize, source: &str) -> Option<String> {
+        let (expr, _span_id) = self.expr_at_byte(byte_pos)?;
+        match expr {
+            Expr::AnonymousTag(name, _)
+            | Expr::TypeNominal(name, _)
+            | Expr::TypeQualified(ModPath { root: name, .. }) => Some(name.as_str().to_string()),
+            Expr::SelfRef(_) => Some("self".to_string()),
+            Expr::TagCall(tc) => Some(tc.name.as_str().to_string()),
+            Expr::FnCall(call) => {
+                // For method calls like `obj.method`, extract the precise word
+                // under the cursor within the path span.
+                let span = self.span_table.get(call.path.span);
+                if span.contains(byte_pos) {
+                    let path_text = span.extract(source);
+                    let rel_pos = byte_pos - span.start;
+                    let bytes = path_text.as_bytes();
+                    let mut start = rel_pos;
+                    let mut end = rel_pos;
+                    fn is_word_char(b: u8) -> bool {
+                        (b as char).is_alphanumeric() || b == b'_'
+                    }
+                    while start > 0 && is_word_char(bytes[start - 1]) {
+                        start -= 1;
+                    }
+                    while end < bytes.len() && is_word_char(bytes[end]) {
+                        end += 1;
+                    }
+                    if start < end {
+                        Some(path_text[start..end].to_string())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            Expr::Bind(bind) => {
+                let name_span = self.span_table.get(bind.name_span);
+                if name_span.contains(byte_pos) {
+                    Some(bind.name().as_str().to_string())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Recursively find the innermost `(Expr, SpanId)` containing `byte_pos`.
@@ -547,10 +608,10 @@ fn find_expr_at_byte<'a>(
                     return find_expr_at_byte(st, &e.0, e.span_id(), byte_pos);
                 }
             }
-            if let Some(ret_expr) = &ifx.ret.0 {
-                if st.contains(ret_expr.span_id(), byte_pos) {
-                    return find_expr_at_byte(st, &ret_expr.0, ret_expr.span_id(), byte_pos);
-                }
+            if let Some(ret_expr) = &ifx.ret.0
+                && st.contains(ret_expr.span_id(), byte_pos)
+            {
+                return find_expr_at_byte(st, &ret_expr.0, ret_expr.span_id(), byte_pos);
             }
             Some((expr, span_id))
         }
@@ -590,10 +651,10 @@ fn find_expr_at_byte<'a>(
         }
         Expr::FormatString(fs) => {
             for part in &fs.parts {
-                if let FormatPart::Expr(e) = part {
-                    if st.contains(e.span_id(), byte_pos) {
-                        return find_expr_at_byte(st, &e.0, e.span_id(), byte_pos);
-                    }
+                if let FormatPart::Expr(e) = part
+                    && st.contains(e.span_id(), byte_pos)
+                {
+                    return find_expr_at_byte(st, &e.0, e.span_id(), byte_pos);
                 }
             }
             Some((expr, span_id))
@@ -694,10 +755,10 @@ fn find_expr_in_bind_value<'a>(
                     return find_expr_at_byte(st, &e.0, e.span_id(), byte_pos);
                 }
             }
-            if let Some(ret_expr) = &ret.0 {
-                if st.contains(ret_expr.span_id(), byte_pos) {
-                    return find_expr_at_byte(st, &ret_expr.0, ret_expr.span_id(), byte_pos);
-                }
+            if let Some(ret_expr) = &ret.0
+                && st.contains(ret_expr.span_id(), byte_pos)
+            {
+                return find_expr_at_byte(st, &ret_expr.0, ret_expr.span_id(), byte_pos);
             }
             None
         }

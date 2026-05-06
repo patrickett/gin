@@ -6,8 +6,7 @@ use diagnostic::SpanId;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use typeck::{
-    find_definition_span, find_import_definition_span, get_word_at_position, is_identifier_char,
-    position_to_byte_offset, word_at_byte_offset,
+    find_definition_span, find_import_definition_span, is_identifier_char, position_to_byte_offset,
 };
 
 fn zero_location(uri: Url) -> Location {
@@ -225,25 +224,31 @@ impl Backend {
                     // in the body. `use core.true` is syntactic sugar for
                     // `use core.true as true`, making the bare name available
                     // throughout the file.
-                    if let Some(word) = word_at_byte_offset(&source, byte_pos) {
+                    if let Some(word) = ast
+                        .word_at_byte(byte_pos, &source)
+                        .or_else(|| typeck::word_at_byte_offset(&source, byte_pos))
+                    {
                         if let Some(link) = this.resolve_body_import_at(&uri, &ast, &source, &word)
                         {
                             return Some(GotoDefinitionResponse::Link(vec![link]));
                         }
                     }
-                }
 
-                if let Some(word) = get_word_at_position(&source, position.line, position.character)
-                {
-                    let range = find_definition_span(&ast, &word)
-                        .map(|span| span_to_range(span.start, span.end, &source))
-                        .unwrap_or_default();
-                    if range != Range::default() {
-                        return Some(GotoDefinitionResponse::Scalar(Location { uri, range }));
-                    }
-                    if let Some(span) = find_import_definition_span(&ast, &word) {
-                        let range = span_to_range(span.start, span.end, &source);
-                        return Some(GotoDefinitionResponse::Scalar(Location { uri, range }));
+                    // Phase 3: cursor is on a definition or import reference.
+                    if let Some(word) = ast
+                        .word_at_byte(byte_pos, &source)
+                        .or_else(|| typeck::word_at_byte_offset(&source, byte_pos))
+                    {
+                        let range = find_definition_span(&ast, &word)
+                            .map(|span| span_to_range(span.start, span.end, &source))
+                            .unwrap_or_default();
+                        if range != Range::default() {
+                            return Some(GotoDefinitionResponse::Scalar(Location { uri, range }));
+                        }
+                        if let Some(span) = find_import_definition_span(&ast, &word) {
+                            let range = span_to_range(span.start, span.end, &source);
+                            return Some(GotoDefinitionResponse::Scalar(Location { uri, range }));
+                        }
                     }
                 }
 

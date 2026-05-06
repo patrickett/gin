@@ -6,8 +6,12 @@ edition = "2024"
 [dependencies]
 ginc = {workspace = true}
 
-tree-sitter-gin = { path = "../../editors/tree-sitter-gin" }
-tree-sitter = "0.26"
+parser = { workspace = true }
+ast = { workspace = true }
+span = { workspace = true }
+resolve = { workspace = true }
+typeck = { workspace = true }
+internment = "0.8"
+
 lexer = { workspace = true }
 diagnostic = { workspace = true }
-span = { workspace = true }

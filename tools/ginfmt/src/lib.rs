@@ -1,22 +1,21 @@
-pub mod align;
 pub mod align_ast;
+pub mod ast_formatter;
 pub mod config;
-pub mod mods;
-pub mod visitor;
 
+pub use ast_formatter::AstFormatter;
 pub use config::Config;
-pub use visitor::FmtVisitor;
 
-// TODO: change this to a trait that can be implemented for each ast node
-// trait CodeFormat format()
-use visitor::format as format_internal;
-
-/// Format Gin source code using default configuration.
+/// Format Gin source code using the Gin AST parser.
+///
+/// Parses the source into an `ast::FileAst`, walks it to build formatted
+/// output, then applies alignment and line wrapping.
 pub fn format(source: &str) -> String {
-    format_internal(source, Config::default())
+    format_with_config(source, Config::default())
 }
 
 /// Format Gin source code using the provided configuration.
 pub fn format_with_config(source: &str, config: Config) -> String {
-    format_internal(source, config)
+    let output = parser::parse_source_full(source);
+    let mut formatter = AstFormatter::new(source, &config, output.ast.span_table());
+    formatter.format_file(&output.ast)
 }

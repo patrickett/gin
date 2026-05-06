@@ -187,15 +187,8 @@ pub fn resolve_import_at(ast: &FileAst, source: &str, byte_pos: usize) -> Option
     }
 
     // Phase 2: bare word matching an import's effective name.
-    // Prefer AST-based lookup via expr_at_byte for tag/type names.
     let word = ast
-        .expr_at_byte(byte_pos)
-        .and_then(|(expr, _)| match expr {
-            ast::Expr::AnonymousTag(name, _) | ast::Expr::TypeNominal(name, _) => {
-                Some(name.as_str().to_string())
-            }
-            _ => None,
-        })
+        .word_at_byte(byte_pos, source)
         .or_else(|| typeck::word_at_byte_offset(source, byte_pos));
 
     if let Some(word) = word {

@@ -48,7 +48,9 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
 
     // Fall back to word-based lookup for identifiers not captured by expr_at_byte
     // (e.g. function names, parameter names, body-level binds).
-    let word = crate::source::word_at_byte_offset(source, byte_pos)?;
+    let word = ast
+        .word_at_byte(byte_pos, source)
+        .or_else(|| crate::source::word_at_byte_offset(source, byte_pos))?;
     let ty_env = crate::TyEnv::from_file_ast(ast);
 
     let mut analyzer = FlowAnalyzer::new(&ty_env);
@@ -331,7 +333,9 @@ pub fn is_variant_at(
     }
 
     // Fall back to word-based lookup.
-    let word = crate::source::word_at_byte_offset(source, byte_pos)?;
+    let word = ast
+        .word_at_byte(byte_pos, source)
+        .or_else(|| crate::source::word_at_byte_offset(source, byte_pos))?;
     for (tag_name, decl) in ast.tags() {
         let variants = match decl.value() {
             DeclareValue::Union { variants } => variants,
