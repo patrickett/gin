@@ -306,6 +306,7 @@ impl<'a> AstFormatter<'a> {
     }
 
     fn format_bind(&mut self, name: &Intern<String>, bind: &ast::Bind) {
+        let _ = name;
         if let Some(doc) = bind.doc_comment() {
             self.emit_doc_comment(doc);
         }
