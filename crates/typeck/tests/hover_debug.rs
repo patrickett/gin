@@ -84,7 +84,7 @@ fn debug_hover_at_marker(source: &str) -> Option<String> {
 
     // Run flow analysis
     let ty_env = typeck::TyEnv::from_file_ast(&ast);
-    let mut analyzer = typeck::FlowAnalyzer::new(&ty_env);
+    let mut analyzer = typeck::flow_analyzer::FlowAnalyzer::new(&ty_env);
     analyzer.analyze_file(&ast);
     let flow = analyzer.into_result();
     let span_table = ast.span_table();

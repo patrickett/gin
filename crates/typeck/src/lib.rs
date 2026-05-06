@@ -1,35 +1,39 @@
-pub mod flow;
-pub use flow::*;
-
-pub mod flow_analyzer;
-pub use flow_analyzer::*;
-
-pub mod analysis;
-pub use analysis::*;
-
-pub mod infer;
-pub use infer::*;
-
 mod ty;
-pub use ty::*;
-
-mod resolve;
-pub use resolve::*;
+pub use ty::{Ty, ty_alignment, ty_byte_size_static, ty_union_discriminant_size};
 
 mod env;
-pub use env::*;
+pub use env::{FnParamInfo, TyEnv};
+
+mod infer;
+pub use infer::{LocalTypes, TyInfer, TyInferEnv};
+
+mod resolve;
+
+pub mod flow;
+pub mod flow_analyzer;
 
 mod check;
 
 mod salsa_update;
 
-pub mod completions;
-pub mod hover;
-pub mod source;
+mod analysis;
+pub use analysis::analyze_file_with_ty_env;
 
-pub use completions::*;
+pub mod hover;
 pub use hover::{
     dot_type_at, find_definition_span, find_import_definition_span, find_references, hover_at,
     is_variant_at,
 };
-pub use source::*;
+
+pub mod completions;
+pub use completions::{
+    CompletionCandidate, CompletionKind, SignatureInfo, completions_for_ast, fn_call_at,
+    format_params, signature_for_fn,
+};
+
+pub mod source;
+pub use source::{
+    StringLiteralInfo, byte_offset_to_position, get_char_at_position, get_number_at_position,
+    get_range_literal_at_position, get_string_literal_at, get_word_at_position, is_identifier_char,
+    is_in_comment, position_to_byte_offset, word_at_byte_offset,
+};

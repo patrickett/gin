@@ -1,6 +1,8 @@
 //! Hover and related semantic helpers (engine layer).
 
 use ast::{Bind, DeclareValue, HasSpanId, ParameterKind, Parameters, Variant, format_type_surface};
+use crate::flow::{Bound, ConstValue, FlowAnalysis, TypeConstraint};
+use crate::flow_analyzer::FlowAnalyzer;
 use internment::Intern;
 
 /// Return markdown hover text for the word at `byte_pos` in the given AST.
@@ -10,7 +12,7 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
     let ty_env = crate::TyEnv::from_file_ast(ast);
 
     // Run flow analysis once for const-value and narrowing lookups.
-    let mut analyzer = crate::FlowAnalyzer::new(&ty_env);
+    let mut analyzer = FlowAnalyzer::new(&ty_env);
     analyzer.analyze_file(ast);
     let flow = analyzer.into_result();
 
@@ -62,10 +64,10 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
 
             if let Some(constraint) = &narrowed {
                 let suffix = match constraint {
-                    crate::TypeConstraint::IsVariant(_, variant) => {
+                    TypeConstraint::IsVariant(_, variant) => {
                         Some(variant.as_str().to_string())
                     }
-                    crate::TypeConstraint::IsNotVariant(union, excluded) => {
+                    TypeConstraint::IsNotVariant(union, excluded) => {
                         if let Some(variants) = flow.union_to_variants.get(union) {
                             let remaining: Vec<_> =
                                 variants.iter().filter(|v| *v != excluded).collect();
@@ -82,10 +84,10 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
                             None
                         }
                     }
-                    crate::TypeConstraint::Compare { op, bound } => {
+                    TypeConstraint::Compare { op, bound } => {
                         let bound_str = match bound {
-                            crate::Bound::Variable(name) => name.as_str().to_string(),
-                            crate::Bound::Constant(val) => val.to_hover_string(),
+                            Bound::Variable(name) => name.as_str().to_string(),
+                            Bound::Constant(val) => val.to_hover_string(),
                         };
                         Some(format!("{} {}", op.symbol(), bound_str))
                     }
@@ -106,8 +108,8 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
 
         let mut result = format!("```gin\n{word}");
         match &narrowed {
-            Some(crate::TypeConstraint::IsVariant(_, variant)) => match &const_val {
-                Some(crate::ConstValue::Tag { name, .. }) if name == variant => {
+            Some(TypeConstraint::IsVariant(_, variant)) => match &const_val {
+                Some(ConstValue::Tag { name, .. }) if name == variant => {
                     result.push_str(&format!(
                         " {}",
                         const_val.as_ref().unwrap().to_hover_string()
@@ -117,7 +119,7 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
                     result.push_str(&format!(" {}", variant.as_str()));
                 }
             },
-            Some(crate::TypeConstraint::IsNotVariant(union, excluded)) => {
+            Some(TypeConstraint::IsNotVariant(union, excluded)) => {
                 if let Some(variants) = flow.union_to_variants.get(union) {
                     let remaining: Vec<_> = variants.iter().filter(|v| *v != excluded).collect();
                     if remaining.len() == 1 {
@@ -129,10 +131,10 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
                     }
                 }
             }
-            Some(crate::TypeConstraint::Compare { op, bound }) => {
+            Some(TypeConstraint::Compare { op, bound }) => {
                 let bound_str = match bound {
-                    crate::Bound::Variable(name) => name.as_str().to_string(),
-                    crate::Bound::Constant(val) => val.to_hover_string(),
+                    Bound::Variable(name) => name.as_str().to_string(),
+                    Bound::Constant(val) => val.to_hover_string(),
                 };
                 result.push_str(&format!(" {} {}", op.symbol(), bound_str));
             }
@@ -165,10 +167,10 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
         let narrowed = narrowed_at_position(ast, &flow, byte_pos, &word);
         let const_val = const_at_position(ast, &flow, byte_pos, &word);
 
-        if let Some(crate::TypeConstraint::Compare { op, bound }) = &narrowed {
+        if let Some(TypeConstraint::Compare { op, bound }) = &narrowed {
             let bound_str = match bound {
-                crate::Bound::Variable(name) => name.as_str().to_string(),
-                crate::Bound::Constant(val) => val.to_hover_string(),
+                Bound::Variable(name) => name.as_str().to_string(),
+                Bound::Constant(val) => val.to_hover_string(),
             };
             return Some(format!("```gin\n{word} {} {}\n```", op.symbol(), bound_str,));
         }
@@ -189,7 +191,7 @@ fn format_bind_hover(
     bind: &Bind,
     display_name: &str,
     ty_env: &crate::TyEnv,
-    flow: &crate::FlowAnalysis,
+    flow: &FlowAnalysis,
 ) -> String {
     let mut result = format!("```gin\n{}", display_name);
     if let Some(params) = bind.params() {
@@ -717,7 +719,7 @@ fn search_expr(expr: &ast::Expr, name: internment::Intern<String>) -> Option<&as
 /// Find the innermost (smallest) expression index whose span contains `byte_pos`.
 fn innermost_expr_index(
     ast: &ast::FileAst,
-    analysis: &crate::FlowAnalysis,
+    analysis: &FlowAnalysis,
     byte_pos: usize,
 ) -> Option<usize> {
     let span_table = ast.span_table();
@@ -741,10 +743,10 @@ fn innermost_expr_index(
 /// Find the narrowed type constraint for `var_name` at a given byte position.
 fn narrowed_at_position(
     ast: &ast::FileAst,
-    analysis: &crate::FlowAnalysis,
+    analysis: &FlowAnalysis,
     byte_pos: usize,
     var_name: &str,
-) -> Option<crate::TypeConstraint> {
+) -> Option<TypeConstraint> {
     let idx = innermost_expr_index(ast, analysis, byte_pos)?;
     analysis.narrowed_at(idx, var_name).cloned()
 }
@@ -752,10 +754,10 @@ fn narrowed_at_position(
 /// Find the known constant value for `var_name` at a given byte position.
 fn const_at_position(
     ast: &ast::FileAst,
-    analysis: &crate::FlowAnalysis,
+    analysis: &FlowAnalysis,
     byte_pos: usize,
     var_name: &str,
-) -> Option<crate::ConstValue> {
+) -> Option<ConstValue> {
     let idx = innermost_expr_index(ast, analysis, byte_pos)?;
     for offset in 0..3 {
         if let Some(val) = analysis.value_at(idx + offset, var_name) {

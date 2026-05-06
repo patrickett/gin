@@ -13,9 +13,10 @@ use diagnostic::DiagnosticLike;
 use internment::Intern;
 
 use crate::env::TyEnv;
+use crate::infer::LayeredLocals;
 use crate::resolve::{is_type_surface, mangled_fn_call_name};
 use crate::ty::Ty;
-use crate::{LayeredLocals, LocalTypes, TyInfer, TyInferEnv};
+use crate::{LocalTypes, TyInfer, TyInferEnv};
 
 use ControlFlow::Continue;
 

@@ -23,7 +23,8 @@ use ast::{
 use internment::Intern;
 
 use crate::resolve::{is_type_surface, resolve_type_expr_with_subst, typevars_from_receiver};
-use crate::{Ty, str_record_ty};
+use crate::ty::str_record_ty;
+use crate::Ty;
 
 /// Abstracts over different "local variable" type representations.
 ///
@@ -43,24 +44,24 @@ impl LocalTypes for HashMap<Intern<String>, Ty> {
 /// A layered local-types overlay: wraps a parent with a small Vec of new bindings.
 ///
 /// Avoids cloning the entire parent HashMap when entering a new scope.
-pub struct LayeredLocals<'a> {
+pub(crate) struct LayeredLocals<'a> {
     parent: &'a dyn LocalTypes,
     bindings: Vec<(Intern<String>, Ty)>,
 }
 
 impl<'a> LayeredLocals<'a> {
-    pub fn new(parent: &'a dyn LocalTypes) -> Self {
+    pub(crate) fn new(parent: &'a dyn LocalTypes) -> Self {
         Self {
             parent,
             bindings: Vec::new(),
         }
     }
 
-    pub fn insert(&mut self, name: Intern<String>, ty: Ty) {
+    pub(crate) fn insert(&mut self, name: Intern<String>, ty: Ty) {
         self.bindings.push((name, ty));
     }
 
-    pub fn contains_key(&self, name: &Intern<String>) -> bool {
+    pub(crate) fn contains_key(&self, name: &Intern<String>) -> bool {
         self.bindings.iter().rev().any(|(n, _)| n == name) || self.parent.get_type(name).is_some()
     }
 }
@@ -168,7 +169,7 @@ impl TyInfer for FnCall {
             if let Some(local_ty) = env.locals.get_type(&name) {
                 return local_ty;
             }
-            let mangled = crate::mangled_fn_call_name(self);
+            let mangled = crate::resolve::mangled_fn_call_name(self);
             return env
                 .fn_return_types
                 .get(&mangled)
@@ -204,7 +205,7 @@ impl TyInfer for FnCall {
             return ty;
         }
 
-        let mangled = crate::mangled_fn_call_name(self);
+        let mangled = crate::resolve::mangled_fn_call_name(self);
         env.fn_return_types
             .get(&mangled)
             .cloned()

@@ -1,6 +1,7 @@
 //! Analysis pipeline — single entry point for type checking and flow analysis.
 
-use crate::{FlowAnalyzer, TyEnv};
+use crate::flow_analyzer::FlowAnalyzer;
+use crate::TyEnv;
 use ast::{FileAst, HasSpanId};
 use diagnostic::DiagnosticLike;
 use diagnostic::type_::TypeSymptom;
@@ -36,7 +37,7 @@ pub fn analyze_file_with_ty_env(ast: &FileAst, ty_env: &TyEnv) -> Vec<diagnostic
     symptoms
 }
 
-pub fn analyze_file(ast: &FileAst, all_asts: &[FileAst]) -> Vec<diagnostic::Diagnostic> {
+pub(crate) fn analyze_file(ast: &FileAst, all_asts: &[FileAst]) -> Vec<diagnostic::Diagnostic> {
     let ty_env = TyEnv::from_multiple_file_asts(all_asts);
     analyze_file_with_ty_env(ast, &ty_env)
 }
@@ -44,7 +45,7 @@ pub fn analyze_file(ast: &FileAst, all_asts: &[FileAst]) -> Vec<diagnostic::Diag
 /// Analyze a package of pre-parsed ASTs.
 ///
 /// Returns all collected symptoms from all files.
-pub fn analyze_package(asts: &[FileAst]) -> Vec<diagnostic::Diagnostic> {
+pub(crate) fn analyze_package(asts: &[FileAst]) -> Vec<diagnostic::Diagnostic> {
     let mut all_symptoms = Vec::new();
     for ast in asts {
         all_symptoms.extend(analyze_file(ast, asts));

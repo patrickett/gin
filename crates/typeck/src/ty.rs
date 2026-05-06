@@ -102,18 +102,18 @@ impl Ty {
         matches!(self, Ty::Record { .. })
     }
 
-    pub fn is_unit(&self) -> bool {
+    pub(crate) fn is_unit(&self) -> bool {
         matches!(self, Ty::Unit)
     }
 }
 
 /// Type alias for union variant fields: (field_name, field_type)
 #[allow(dead_code)]
-pub type UnionFields = Vec<(Intern<String>, Box<Ty>)>;
+pub(crate) type UnionFields = Vec<(Intern<String>, Box<Ty>)>;
 
 /// Type alias for union variants: (variant_name, fields)
 #[allow(dead_code)]
-pub type UnionVariants = Vec<(Intern<String>, UnionFields)>;
+pub(crate) type UnionVariants = Vec<(Intern<String>, UnionFields)>;
 
 /// Type alias for union variant fields: (variant_name, [(field_name, field_type)])
 type UnionVariant<'a> = (Intern<String>, Vec<(Intern<String>, Box<Ty>)>);
@@ -195,7 +195,7 @@ pub fn ty_byte_size_static(ty: &Ty) -> usize {
 /// Canonical `Str` record type: `{ pointer: Ptr(Byte), len: Int }`.
 static STR_RECORD_TY: std::sync::OnceLock<Ty> = std::sync::OnceLock::new();
 
-pub fn str_record_ty() -> Ty {
+pub(crate) fn str_record_ty() -> Ty {
     STR_RECORD_TY
         .get_or_init(|| Ty::Record {
             name: Intern::<String>::from_ref("Str"),

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use crate::ty::Ty;
 
 /// Symbol name for a callee: `foo` or `io.print` (matches codegen).
-pub fn mangled_fn_call_name(call: &FnCall) -> Intern<String> {
+pub(crate) fn mangled_fn_call_name(call: &FnCall) -> Intern<String> {
     if call.path.segments.is_empty() {
         call.path.root
     } else {

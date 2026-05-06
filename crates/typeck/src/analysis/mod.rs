@@ -2,4 +2,4 @@
 
 mod pipeline;
 
-pub use pipeline::{analyze_file, analyze_file_with_ty_env, analyze_package};
+pub use pipeline::analyze_file_with_ty_env;
