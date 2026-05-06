@@ -4,23 +4,59 @@ pub use definition::{dot_type_at, find_definition_span, find_import_definition_s
 mod references;
 pub use references::find_references;
 
-use ast::{Bind, DeclareValue, ParameterKind, Parameters, Variant, format_type_surface};
 use crate::flow::{Bound, ConstValue, FlowAnalysis, TypeConstraint};
 use crate::flow_analyzer::FlowAnalyzer;
+use ast::{Bind, DeclareValue, ParameterKind, Parameters, Variant, format_type_surface};
 use internment::Intern;
 
-/// Return markdown hover text for the word at `byte_pos` in the given AST.
+/// Return markdown hover text for the expression at `byte_pos` in the given AST.
 /// Returns `None` if there is nothing hover-able at that position.
 pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<String> {
+    // Try AST-based lookup first — find the expression at this position.
+    if let Some((expr, _span_id)) = ast.expr_at_byte(byte_pos)
+        && let ast::Expr::AnonymousTag(name, _) | ast::Expr::TypeNominal(name, _) = expr
+    {
+        let word = name.as_str();
+        let ty_env = crate::TyEnv::from_file_ast(ast);
+        let mut analyzer = FlowAnalyzer::new(&ty_env);
+        analyzer.analyze_file(ast);
+        let _flow = analyzer.into_result();
+
+        // Look for tag definitions
+        if let Some(decl) = ast.tags().get(name) {
+            let mut result = format!("```gin\n{decl}\n```");
+            if let Some(doc) = decl.doc_comment() {
+                result.push_str(&format!("\n\n---\n\n{}", doc.0));
+            }
+            if let Some(ty) = ty_env.lookup_tag(*name) {
+                result.push_str(&format!(
+                    "\n\n---\n\nsize = {}, align = {}",
+                    crate::ty_byte_size_static(ty),
+                    crate::ty_alignment(ty),
+                ));
+            }
+            return Some(result);
+        }
+
+        // Look for variant names
+        if let Some(variant_hover) = hover_for_variant(ast, word) {
+            return Some(variant_hover);
+        }
+
+        return Some(format!("```gin\n{word}\n```"));
+    }
+
+    // Fall back to word-based lookup for identifiers not captured by expr_at_byte
+    // (e.g. function names, parameter names, body-level binds).
     let word = crate::source::word_at_byte_offset(source, byte_pos)?;
     let ty_env = crate::TyEnv::from_file_ast(ast);
 
-    // Run flow analysis once for const-value and narrowing lookups.
     let mut analyzer = FlowAnalyzer::new(&ty_env);
     analyzer.analyze_file(ast);
     let flow = analyzer.into_result();
 
-    // Look for tag definitions
+    // Look for tag definitions (also done above for expr_at_byte hits,
+    // but needed here for when the cursor is on a tag name not wrapped in an Expr)
     for (name, decl) in ast.tags() {
         if name.as_str() == word {
             let mut result = format!("```gin\n{decl}\n```");
@@ -63,14 +99,11 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
                 ParameterKind::Generic => word.clone(),
             };
 
-            // Check for flow narrowing at the cursor position
             let narrowed = narrowed_at_position(ast, &flow, byte_pos, &word);
 
             if let Some(constraint) = &narrowed {
                 let suffix = match constraint {
-                    TypeConstraint::IsVariant(_, variant) => {
-                        Some(variant.as_str().to_string())
-                    }
+                    TypeConstraint::IsVariant(_, variant) => Some(variant.as_str().to_string()),
                     TypeConstraint::IsNotVariant(union, excluded) => {
                         if let Some(variants) = flow.union_to_variants.get(union) {
                             let remaining: Vec<_> =
@@ -166,7 +199,6 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
         return Some(result);
     }
 
-    // Look for in-scope variables with known constant values or comparison constraints
     {
         let narrowed = narrowed_at_position(ast, &flow, byte_pos, &word);
         let const_val = const_at_position(ast, &flow, byte_pos, &word);
@@ -278,6 +310,27 @@ pub fn is_variant_at(
     ast: &ast::FileAst,
     byte_pos: usize,
 ) -> Option<(String, String)> {
+    // Try AST-based lookup first.
+    if let Some((expr, _span_id)) = ast.expr_at_byte(byte_pos)
+        && let ast::Expr::AnonymousTag(name, _) | ast::Expr::TypeNominal(name, _) = expr
+    {
+        let word = name.as_str();
+        for (tag_name, decl) in ast.tags() {
+            let variants = match decl.value() {
+                DeclareValue::Union { variants } => variants,
+                _ => continue,
+            };
+            for variant in variants {
+                let shape = variant.shape();
+                let vname = variant_base_name(&shape.0)?;
+                if vname == word {
+                    return Some((word.to_string(), tag_name.as_str().to_string()));
+                }
+            }
+        }
+    }
+
+    // Fall back to word-based lookup.
     let word = crate::source::word_at_byte_offset(source, byte_pos)?;
     for (tag_name, decl) in ast.tags() {
         let variants = match decl.value() {
@@ -288,7 +341,7 @@ pub fn is_variant_at(
             let shape = variant.shape();
             let name = variant_base_name(&shape.0)?;
             if name == word {
-                return Some((word.to_string(), tag_name.as_str().to_string()));
+                return Some((word, tag_name.as_str().to_string()));
             }
         }
     }
@@ -382,10 +435,7 @@ fn find_body_bind<'a>(ast: &'a ast::FileAst, word: &str) -> Option<&'a ast::Bind
     None
 }
 
-fn search_bind_value(
-    value: &ast::BindValue,
-    name: Intern<String>,
-) -> Option<&ast::Bind> {
+fn search_bind_value(value: &ast::BindValue, name: Intern<String>) -> Option<&ast::Bind> {
     match value {
         ast::BindValue::Expr(e) => search_expr(&e.0, name),
         ast::BindValue::Body { exprs, ret } => {

@@ -1,5 +1,5 @@
-use crate::prelude::*;
 use crate::path::ModPath;
+use crate::prelude::*;
 use crate::span::{SpanId, SpanTable};
 use indexmap::IndexMap;
 use std::{
@@ -432,5 +432,275 @@ impl FileAst {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         self.hash(&mut hasher);
         hasher.finish()
+    }
+
+    /// Find the innermost expression at the given byte position.
+    ///
+    /// Returns a reference to the expression and its span ID. Searches top-level
+    /// expressions and all bind bodies. Returns the most deeply nested expression
+    /// containing `byte_pos`.
+    pub fn expr_at_byte(&self, byte_pos: usize) -> Option<(&Expr, SpanId)> {
+        // Search top-level expressions
+        for (expr, span_id) in &self.exprs {
+            if self.span_table.contains(*span_id, byte_pos) {
+                return find_expr_at_byte(&self.span_table, expr, *span_id, byte_pos);
+            }
+        }
+        // Search def bodies
+        for bind in self.defs.values() {
+            let result = find_expr_in_bind_value(&self.span_table, bind.value(), byte_pos);
+            if result.is_some() {
+                return result;
+            }
+        }
+        None
+    }
+}
+
+/// Recursively find the innermost `(Expr, SpanId)` containing `byte_pos`.
+fn find_expr_at_byte<'a>(
+    st: &SpanTable,
+    expr: &'a Expr,
+    span_id: SpanId,
+    byte_pos: usize,
+) -> Option<(&'a Expr, SpanId)> {
+    match expr {
+        // Leaf nodes — return self
+        Expr::Lit(_)
+        | Expr::SelfRef(_)
+        | Expr::AnonymousTag(..)
+        | Expr::TypeNominal(..)
+        | Expr::TypeQualified(..) => Some((expr, span_id)),
+
+        // Nested: check children, then return self as innermost
+        Expr::Bind(bind) => {
+            let result = find_expr_in_bind_value(st, bind.value(), byte_pos);
+            result.or(Some((expr, span_id)))
+        }
+        Expr::FnCall(call) => {
+            if let Some(args) = &call.args {
+                for arg in args {
+                    if st.contains(arg.span_id(), byte_pos) {
+                        return find_expr_at_byte(st, &arg.0, arg.span_id(), byte_pos);
+                    }
+                }
+            }
+            Some((expr, span_id))
+        }
+        Expr::Binary(bin) => {
+            if st.contains(bin.lhs.span_id(), byte_pos) {
+                return find_expr_at_byte(st, &bin.lhs.0, bin.lhs.span_id(), byte_pos);
+            }
+            if st.contains(bin.rhs.span_id(), byte_pos) {
+                return find_expr_at_byte(st, &bin.rhs.0, bin.rhs.span_id(), byte_pos);
+            }
+            Some((expr, span_id))
+        }
+        Expr::When(when) => {
+            if let Some(subject) = &when.subject
+                && st.contains(subject.span_id(), byte_pos)
+            {
+                return find_expr_at_byte(st, &subject.0, subject.span_id(), byte_pos);
+            }
+            for arm in &when.arms {
+                match arm {
+                    WhenArm::Cond { condition, body } => {
+                        for child in [condition.as_ref(), body.as_ref()] {
+                            if st.contains(child.span_id(), byte_pos) {
+                                return find_expr_at_byte(st, &child.0, child.span_id(), byte_pos);
+                            }
+                        }
+                    }
+                    WhenArm::Is { pattern, body } => {
+                        for child in [pattern.as_ref(), body.as_ref()] {
+                            if st.contains(child.span_id(), byte_pos) {
+                                return find_expr_at_byte(st, &child.0, child.span_id(), byte_pos);
+                            }
+                        }
+                    }
+                    WhenArm::Else(body) => {
+                        if st.contains(body.span_id(), byte_pos) {
+                            return find_expr_at_byte(st, &body.0, body.span_id(), byte_pos);
+                        }
+                    }
+                }
+            }
+            Some((expr, span_id))
+        }
+        Expr::If(ifx) => {
+            match &ifx.condition {
+                IfCondition::Bool(e) => {
+                    if st.contains(e.span_id(), byte_pos) {
+                        return find_expr_at_byte(st, &e.0, e.span_id(), byte_pos);
+                    }
+                }
+                IfCondition::Pattern { subject, pattern } => {
+                    for child in [subject.as_ref(), pattern.as_ref()] {
+                        if st.contains(child.span_id(), byte_pos) {
+                            return find_expr_at_byte(st, &child.0, child.span_id(), byte_pos);
+                        }
+                    }
+                }
+            }
+            for e in &ifx.body {
+                if st.contains(e.span_id(), byte_pos) {
+                    return find_expr_at_byte(st, &e.0, e.span_id(), byte_pos);
+                }
+            }
+            if let Some(ret_expr) = &ifx.ret.0 {
+                if st.contains(ret_expr.span_id(), byte_pos) {
+                    return find_expr_at_byte(st, &ret_expr.0, ret_expr.span_id(), byte_pos);
+                }
+            }
+            Some((expr, span_id))
+        }
+        Expr::Loop(loop_val) => match loop_val {
+            LoopEnum::While(w) => {
+                if st.contains(w.cond.span_id(), byte_pos) {
+                    return find_expr_at_byte(st, &w.cond.0, w.cond.span_id(), byte_pos);
+                }
+                for e in &w.exprs {
+                    if st.contains(e.span_id(), byte_pos) {
+                        return find_expr_at_byte(st, &e.0, e.span_id(), byte_pos);
+                    }
+                }
+                Some((expr, span_id))
+            }
+            LoopEnum::ForIn(f) => {
+                for child in [&f.pat, &f.iter] {
+                    if st.contains(child.span_id(), byte_pos) {
+                        return find_expr_at_byte(st, &child.0, child.span_id(), byte_pos);
+                    }
+                }
+                for e in &f.exprs {
+                    if st.contains(e.span_id(), byte_pos) {
+                        return find_expr_at_byte(st, &e.0, e.span_id(), byte_pos);
+                    }
+                }
+                Some((expr, span_id))
+            }
+        },
+        Expr::TagCall(tc) => {
+            for arg in &tc.args {
+                if st.contains(arg.span_id(), byte_pos) {
+                    return find_expr_at_byte(st, &arg.0, arg.span_id(), byte_pos);
+                }
+            }
+            Some((expr, span_id))
+        }
+        Expr::FormatString(fs) => {
+            for part in &fs.parts {
+                if let FormatPart::Expr(e) = part {
+                    if st.contains(e.span_id(), byte_pos) {
+                        return find_expr_at_byte(st, &e.0, e.span_id(), byte_pos);
+                    }
+                }
+            }
+            Some((expr, span_id))
+        }
+        Expr::Range(r) => {
+            for child in [&r.start, &r.end] {
+                if st.contains(child.span_id(), byte_pos) {
+                    return find_expr_at_byte(st, &child.0, child.span_id(), byte_pos);
+                }
+            }
+            Some((expr, span_id))
+        }
+        Expr::Asm(a) => {
+            for op in &a.operands {
+                if st.contains(op.span_id(), byte_pos) {
+                    return find_expr_at_byte(st, &op.0, op.span_id(), byte_pos);
+                }
+            }
+            Some((expr, span_id))
+        }
+        Expr::TypeGeneric { params, .. } => {
+            for (_, pk) in params {
+                match pk {
+                    ParameterKind::Tagged(e) => {
+                        if st.contains(e.span_id(), byte_pos) {
+                            return find_expr_at_byte(st, &e.0, e.span_id(), byte_pos);
+                        }
+                    }
+                    ParameterKind::Default(e) => {
+                        if st.contains(e.span_id(), byte_pos) {
+                            return find_expr_at_byte(st, &e.0, e.span_id(), byte_pos);
+                        }
+                    }
+                    ParameterKind::Generic => {}
+                }
+            }
+            Some((expr, span_id))
+        }
+        Expr::TupleLit(elems) => {
+            for e in elems {
+                if st.contains(e.span_id(), byte_pos) {
+                    return find_expr_at_byte(st, &e.0, e.span_id(), byte_pos);
+                }
+            }
+            Some((expr, span_id))
+        }
+        Expr::TupleAlloc { init, .. }
+        | Expr::TakePtr(init)
+        | Expr::TakeRef(init)
+        | Expr::Deref(init)
+        | Expr::Negate(init) => {
+            if st.contains(init.span_id(), byte_pos) {
+                return find_expr_at_byte(st, &init.0, init.span_id(), byte_pos);
+            }
+            Some((expr, span_id))
+        }
+        Expr::TupleGet { base, .. }
+        | Expr::Cast { expr: base, .. }
+        | Expr::BufGet { buf: base, .. } => {
+            if st.contains(base.span_id(), byte_pos) {
+                return find_expr_at_byte(st, &base.0, base.span_id(), byte_pos);
+            }
+            Some((expr, span_id))
+        }
+        Expr::TupleSet { base, value, .. }
+        | Expr::BufSet {
+            buf: base,
+            index: value,
+            ..
+        } => {
+            for child in [base.as_ref(), value.as_ref()] {
+                if st.contains(child.span_id(), byte_pos) {
+                    return find_expr_at_byte(st, &child.0, child.span_id(), byte_pos);
+                }
+            }
+            Some((expr, span_id))
+        }
+    }
+}
+
+/// Recursively find an expression at `byte_pos` inside a `BindValue`.
+fn find_expr_in_bind_value<'a>(
+    st: &SpanTable,
+    val: &'a BindValue,
+    byte_pos: usize,
+) -> Option<(&'a Expr, SpanId)> {
+    match val {
+        BindValue::Expr(expr) => {
+            if st.contains(expr.span_id(), byte_pos) {
+                find_expr_at_byte(st, &expr.0, expr.span_id(), byte_pos)
+            } else {
+                None
+            }
+        }
+        BindValue::Body { exprs, ret } => {
+            for e in exprs {
+                if st.contains(e.span_id(), byte_pos) {
+                    return find_expr_at_byte(st, &e.0, e.span_id(), byte_pos);
+                }
+            }
+            if let Some(ret_expr) = &ret.0 {
+                if st.contains(ret_expr.span_id(), byte_pos) {
+                    return find_expr_at_byte(st, &ret_expr.0, ret_expr.span_id(), byte_pos);
+                }
+            }
+            None
+        }
+        BindValue::Extern => None,
     }
 }

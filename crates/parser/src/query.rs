@@ -5,13 +5,13 @@
 //! infrastructure.
 
 use ast::span::{HasSpanId, SpanId};
-use ast::visit::{walk_file_ast, walk_fn_call, Visitor};
-use std::ops::ControlFlow;
+use ast::visit::{Visitor, walk_file_ast, walk_fn_call};
 use diagnostic::LexSymptom;
 use diagnostic::parse::ParseSymptom;
 use diagnostic::{Diagnostic, DiagnosticLike};
 use lexer::{Lexer, Token};
 use std::collections::HashMap;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 use crate::expr;
@@ -210,13 +210,11 @@ struct EmptyParenCollector {
 
 impl Visitor for EmptyParenCollector {
     fn visit_fn_call(&mut self, call: &ast::FnCall) -> ControlFlow<()> {
-        if let Some(args) = &call.args {
-            if args.is_empty() {
-                self.hints.push((
-                    fmt_call_without_parens(call),
-                    call.path.span_id(),
-                ));
-            }
+        if let Some(args) = &call.args
+            && args.is_empty()
+        {
+            self.hints
+                .push((fmt_call_without_parens(call), call.path.span_id()));
         }
         walk_fn_call(self, call)
     }

@@ -187,7 +187,18 @@ pub fn resolve_import_at(ast: &FileAst, source: &str, byte_pos: usize) -> Option
     }
 
     // Phase 2: bare word matching an import's effective name.
-    if let Some(word) = typeck::word_at_byte_offset(source, byte_pos) {
+    // Prefer AST-based lookup via expr_at_byte for tag/type names.
+    let word = ast
+        .expr_at_byte(byte_pos)
+        .and_then(|(expr, _)| match expr {
+            ast::Expr::AnonymousTag(name, _) | ast::Expr::TypeNominal(name, _) => {
+                Some(name.as_str().to_string())
+            }
+            _ => None,
+        })
+        .or_else(|| typeck::word_at_byte_offset(source, byte_pos));
+
+    if let Some(word) = word {
         for import in ast.uses() {
             for mi in &import.0 {
                 let imported_name = mi
@@ -978,9 +989,9 @@ mod tests {
         };
 
         let files = resolve(graph, &mut |path| {
-            if path == PathBuf::from("/dep.gin") {
+            if path == "/dep.gin" {
                 Some(dep_pf.clone())
-            } else if path == PathBuf::from("/main.gin") {
+            } else if path == "/main.gin" {
                 Some(entry_pf.clone())
             } else {
                 None
@@ -1026,7 +1037,7 @@ mod tests {
         };
 
         let files = resolve(graph, &mut |path| {
-            if path == PathBuf::from("/main.gin") {
+            if path == "/main.gin" {
                 Some(entry_pf.clone())
             } else {
                 None
@@ -1093,7 +1104,7 @@ mod tests {
         };
 
         let files = resolve(graph, &mut |path| {
-            if path == PathBuf::from("/main.gin") {
+            if path == "/main.gin" {
                 Some(pf.clone())
             } else {
                 None
