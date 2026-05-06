@@ -26,6 +26,7 @@ pub struct BugInfo {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[non_exhaustive]
 #[serde(untagged)]
 pub enum DependencyKind {
     Version { version: String },
@@ -166,7 +167,13 @@ impl FlaskConfig {
     }
 
     pub fn from_current_directory() -> Option<FlaskConfig> {
-        let mut path = std::env::current_dir().expect("able to get current_dir");
+        let mut path = match std::env::current_dir() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("error: cannot get current directory: {e}");
+                return None;
+            }
+        };
         path.push(PACKAGE_CONFIG_NAME);
 
         #[cfg(debug_assertions)]
@@ -174,8 +181,13 @@ impl FlaskConfig {
 
         match std::fs::read_to_string(&path) {
             Ok(raw) => {
-                let config: FlaskConfig =
-                    json5::from_str(&raw).expect("if we have the json expect to read it");
+                let config: FlaskConfig = match json5::from_str(&raw) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("error: failed to parse {PACKAGE_CONFIG_NAME}: {e}");
+                        return None;
+                    }
+                };
                 return Some(config);
             }
             Err(err) => match err.kind() {
@@ -200,8 +212,13 @@ impl FlaskConfig {
                     match found_path {
                         Some(found) => match std::fs::read_to_string(found) {
                             Ok(raw) => {
-                                let config: FlaskConfig = json5::from_str(&raw)
-                                    .expect("if we have the json expect to read it");
+                                let config: FlaskConfig = match json5::from_str(&raw) {
+                                    Ok(c) => c,
+                                    Err(e) => {
+                                        eprintln!("error: failed to parse {PACKAGE_CONFIG_NAME}: {e}");
+                                        return None;
+                                    }
+                                };
                                 return Some(config);
                             }
                             Err(_) => eprintln!(

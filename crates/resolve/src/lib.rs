@@ -1,3 +1,5 @@
+#![deny(unsafe_code)]
+#![warn(clippy::correctness, clippy::suspicious, clippy::style, clippy::complexity, clippy::perf)]
 pub mod resolve;
 pub use resolve::{
     check_public_def_in_package, collect_gin_files, collect_gin_files_recursive,

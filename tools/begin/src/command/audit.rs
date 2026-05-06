@@ -11,5 +11,5 @@ pub fn begin_audit(_config: FlaskConfig) {
     // 3. Match dependency versions against advisories
     // 4. Report any vulnerabilities found
 
-    todo!("flasks.io security advisory endpoint not yet implemented");
+    eprintln!("warning: `begin audit` is not yet implemented");
 }

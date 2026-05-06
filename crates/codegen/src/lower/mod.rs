@@ -383,7 +383,7 @@ pub fn addressof_string_global<'c>(
         block
             .append_operation(addressof_op)
             .result(0)
-            .unwrap()
+            .expect("result 0 should exist on append_operation")
             .into(),
     )
 }

@@ -343,7 +343,7 @@ fn parse_return_type_part(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Retu
     let (name, name_span) = match cursor.peek() {
         Some(Token::Tag(n)) => {
             let name = cursor.intern(n);
-            let span = cursor.peek_span().unwrap();
+            let span = cursor.peek_span().expect("peek confirmed Tag token, peek_span should succeed");
             cursor.advance();
             (name, span)
         }

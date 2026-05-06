@@ -1,6 +1,7 @@
 use crate::{Category, Diagnostic, DiagnosticLike, SpanTable};
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, strum::AsRefStr)]
+#[non_exhaustive]
 pub enum LexSymptom {
     #[strum(serialize = "lex-unclosed-string")]
     UnclosedString,

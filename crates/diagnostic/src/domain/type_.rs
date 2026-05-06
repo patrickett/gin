@@ -1,6 +1,7 @@
 use crate::{Category, DiagnosticLike};
 
 #[derive(Debug, Clone, PartialEq, Eq, strum::AsRefStr)]
+#[non_exhaustive]
 pub enum TypeSymptom {
     #[strum(serialize = "type-mismatch")]
     Mismatch,

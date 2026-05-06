@@ -1,3 +1,5 @@
+#![deny(unsafe_code)]
+#![warn(clippy::correctness, clippy::suspicious, clippy::style, clippy::complexity, clippy::perf)]
 //! Persistent inputs and low-level Salsa queries (for example parsing).
 //! Semantic analysis and editor integration live in the `typeck` crate.
 pub mod input_database;

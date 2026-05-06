@@ -1,3 +1,3 @@
 pub fn bump() {
-    todo!("bumping version");
+    eprintln!("warning: `begin version bump` is not yet implemented");
 }

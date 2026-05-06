@@ -12,8 +12,9 @@ pub fn begin_build(config: FlaskConfig, input: Option<PathBuf>) {
         None => {
             let cwd = match std::env::current_dir() {
                 Ok(d) => d,
-                Err(_) => {
-                    todo!("fancy error message for bad path")
+                Err(e) => {
+                    eprintln!("error: cannot get current directory: {e}");
+                    return;
                 }
             };
 
@@ -27,11 +28,18 @@ pub fn begin_build(config: FlaskConfig, input: Option<PathBuf>) {
     };
 
     if !path.exists() {
-        todo!("fancy error message for path 404")
+        eprintln!("error: path does not exist: {}", path.display());
+        return;
     }
 
     // Resolve path dependencies relative to cwd (where flask.jsonc lives).
-    let config_dir = std::env::current_dir().unwrap_or_default();
+    let config_dir = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: cannot get current directory: {e}");
+            return;
+        }
+    };
     let dependencies = super::resolve_path_dependencies(&config, &config_dir);
 
     // For libraries, use package name as output

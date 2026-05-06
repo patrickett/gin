@@ -487,12 +487,13 @@ pub fn resolve(
         symptoms,
     } = graph;
 
-    let mut files: Vec<ParsedFile> = Vec::with_capacity(nodes.len());
+    let mut files: Vec<Option<ParsedFile>> = Vec::with_capacity(nodes.len());
 
     for (i, node) in nodes.iter().enumerate() {
         let mut parsed = match file_reader(&node.path) {
             Some(f) => f,
             None => {
+                files.push(None);
                 continue;
             }
         };
@@ -508,16 +509,16 @@ pub fn resolve(
             parsed.output.ast.symbol_aliases.clear();
         }
 
-        files.push(parsed);
+        files.push(Some(parsed));
     }
 
     for (node_idx, diag) in symptoms {
-        if node_idx < files.len() {
-            files[node_idx].output.symptoms.push(diag);
+        if let Some(ref mut f) = files[node_idx] {
+            f.output.symptoms.push(diag);
         }
     }
 
-    files
+    files.into_iter().flatten().collect()
 }
 
 pub fn resolve_flask_path_dependencies(
@@ -907,11 +908,21 @@ fn resolve_package_like_import(
 pub fn merge_asts_checked(files: &[ParsedFile]) -> Result<FileAst, Vec<Diagnostic>> {
     let mut merged = FileAst::default();
     let mut errors = Vec::new();
-    let span = SpanId::INVALID;
     for file in files {
         if let Err(conflict) = merged.merge_from_checked(file.output.ast.clone()) {
-            let symbol = match conflict {
-                MergeConflict::Tag { name } | MergeConflict::Def { name } => name.to_string(),
+            let (symbol, span) = match &conflict {
+                MergeConflict::Tag { name } => {
+                    let span = file.output.ast.tags().get(name)
+                        .map(|t| t.name_span)
+                        .unwrap_or(SpanId::INVALID);
+                    (name.to_string(), span)
+                }
+                MergeConflict::Def { name } => {
+                    let span = file.output.ast.defs().get(name)
+                        .map(|d| d.name_span)
+                        .unwrap_or(SpanId::INVALID);
+                    (name.to_string(), span)
+                }
             };
             errors.push(UseSymptom::DuplicateTopLevel { symbol }.into_diagnostic(span));
         }

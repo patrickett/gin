@@ -637,7 +637,7 @@ fn parse_tuple_lit_or_alloc_or_group(cursor: &mut TokenCursor) -> Spanned<Expr> 
 }
 
 fn parse_take_ptr(cursor: &mut TokenCursor) -> Spanned<Expr> {
-    let (_, start_span) = cursor.advance().unwrap(); // @
+    let (_, start_span) = cursor.advance().expect("peek confirmed '@' token before parse_take_ptr"); // @
     let inner = parse_expression(cursor);
     let end_span = inner.1;
     Spanned(
@@ -647,7 +647,7 @@ fn parse_take_ptr(cursor: &mut TokenCursor) -> Spanned<Expr> {
 }
 
 fn parse_take_ref(cursor: &mut TokenCursor) -> Spanned<Expr> {
-    let (_, start_span) = cursor.advance().unwrap(); // ^
+    let (_, start_span) = cursor.advance().expect("peek confirmed '^' token before parse_take_ref"); // ^
     let inner = parse_expression(cursor);
     let end_span = inner.1;
     Spanned(
@@ -657,7 +657,7 @@ fn parse_take_ref(cursor: &mut TokenCursor) -> Spanned<Expr> {
 }
 
 fn parse_deref(cursor: &mut TokenCursor) -> Spanned<Expr> {
-    let (_, start_span) = cursor.advance().unwrap(); // *
+    let (_, start_span) = cursor.advance().expect("peek confirmed '*' token before parse_deref"); // *
     let inner = parse_expression(cursor);
     let end_span = inner.1;
     Spanned(
@@ -667,7 +667,7 @@ fn parse_deref(cursor: &mut TokenCursor) -> Spanned<Expr> {
 }
 
 fn parse_self_ref(cursor: &mut TokenCursor) -> Spanned<Expr> {
-    let (_, span) = cursor.advance().unwrap(); // self
+    let (_, span) = cursor.advance().expect("peek confirmed 'self' token before parse_self_ref"); // self
     let start = span;
 
     // self.field

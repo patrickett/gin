@@ -1,3 +1,5 @@
+#![deny(unsafe_code)]
+#![warn(clippy::correctness, clippy::suspicious, clippy::style, clippy::complexity, clippy::perf)]
 //! AST type definitions for the Gin compiler.
 
 pub mod expr;

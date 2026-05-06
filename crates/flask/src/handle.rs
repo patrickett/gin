@@ -8,6 +8,7 @@ use std::{
 };
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ConfigError {
     Io(std::io::Error),
     NotFound { searched_from: PathBuf },
@@ -119,23 +120,28 @@ impl FlaskConfigHandle {
 
     pub fn read(&self) -> FlaskConfigReadGuard<'_> {
         FlaskConfigReadGuard {
-            guard: self.inner.read().unwrap(),
+            guard: self.inner.read().expect("FlaskConfig RwLock should not be poisoned"),
         }
     }
 
     pub fn write(&self) -> FlaskConfigWriteGuard<'_> {
         FlaskConfigWriteGuard {
-            guard: self.inner.write().unwrap(),
+            guard: self.inner.write().expect("FlaskConfig RwLock should not be poisoned"),
         }
     }
 
     pub fn source_dir(&self) -> PathBuf {
-        self.inner.read().unwrap().source_dir.clone()
+        self.inner.read().expect("FlaskConfig RwLock should not be poisoned").source_dir.clone()
     }
 
     pub fn save(&self) -> Result<(), ConfigError> {
         let config = self.read().config.clone();
-        let json = json5::to_string(&config).expect("failed to serialize config");
+        let json = json5::to_string(&config).map_err(|_| {
+            ConfigError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "failed to serialize config",
+            ))
+        })?;
         let source_dir = self.source_dir();
         let mut file =
             File::create(source_dir.join(PACKAGE_CONFIG_NAME)).map_err(ConfigError::Io)?;

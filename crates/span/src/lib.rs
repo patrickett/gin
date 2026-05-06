@@ -1,3 +1,5 @@
+#![deny(unsafe_code)]
+#![warn(clippy::correctness, clippy::suspicious, clippy::style, clippy::complexity, clippy::perf)]
 //! Span handling with ID-based optimization.
 //!
 //! This crate provides a memory-efficient span representation using [`SpanId`]
@@ -22,16 +24,22 @@ impl SpanId {
     pub const INVALID: Self = Self(u32::MAX);
 
     /// Create a new SpanId from a raw u32 value.
+    #[inline]
+    #[must_use]
     pub const fn new(id: u32) -> Self {
         Self(id)
     }
 
     /// Get the raw u32 value.
+    #[inline]
+    #[must_use]
     pub const fn into_inner(self) -> u32 {
         self.0
     }
 
     /// Check if this SpanId is valid (not INVALID).
+    #[inline]
+    #[must_use]
     pub const fn is_valid(self) -> bool {
         self.0 != u32::MAX
     }
@@ -54,11 +62,15 @@ pub struct Span {
 
 impl Span {
     /// Create a new span with start and end positions.
+    #[inline]
+    #[must_use]
     pub const fn new(start: usize, end: usize) -> Self {
         Self { start, end }
     }
 
     /// Create a span from a byte range.
+    #[inline]
+    #[must_use]
     pub fn from_range(range: std::ops::Range<usize>) -> Self {
         Self {
             start: range.start,
@@ -67,16 +79,22 @@ impl Span {
     }
 
     /// Get the length of the span in bytes.
+    #[inline]
+    #[must_use]
     pub fn len(&self) -> usize {
         self.end.saturating_sub(self.start)
     }
 
     /// Check if the span is empty.
+    #[inline]
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.start >= self.end
     }
 
     /// Merge two spans into a larger span that covers both.
+    #[inline]
+    #[must_use]
     pub fn merge(self, other: Span) -> Span {
         Span {
             start: self.start.min(other.start),
@@ -85,18 +103,23 @@ impl Span {
     }
 
     /// Check if a byte position falls within this span.
+    #[inline]
+    #[must_use]
     pub fn contains(&self, byte_pos: usize) -> bool {
-        self.start <= byte_pos && byte_pos <= self.end
+        self.start <= byte_pos && byte_pos < self.end
     }
 
     /// Convert this span to a Range for use with string slicing.
-    pub fn as_range(&self) -> std::ops::Range<usize> {
+    #[inline]
+    #[must_use]
+    pub fn to_range(&self) -> std::ops::Range<usize> {
         self.start..self.end
     }
 
     /// Extract the substring from source text that this span covers.
+    #[inline]
     pub fn extract(self, source: &str) -> &str {
-        &source[self.as_range()]
+        &source[self.to_range()]
     }
 }
 
@@ -112,6 +135,7 @@ pub struct SpanTable {
 
 impl SpanTable {
     /// Create a new empty span table.
+    #[inline]
     pub fn new() -> Self {
         Self::default()
     }
@@ -161,11 +185,13 @@ impl SpanTable {
     }
 
     /// Get the total number of spans in the table.
+    #[inline]
     pub fn len(&self) -> usize {
         self.spans.len()
     }
 
     /// Check if the table is empty.
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.spans.is_empty()
     }
@@ -191,57 +217,67 @@ pub struct Spanned<T>(pub T, pub SpanId);
 
 impl<T> Spanned<T> {
     /// Create a new Spanned value.
+    #[inline]
     pub fn new(value: T, span_id: SpanId) -> Self {
         Self(value, span_id)
     }
 
     /// Split into the value and span ID.
+    #[inline]
     pub fn into_parts(self) -> (T, SpanId) {
         (self.0, self.1)
     }
 
     /// Get a reference to the inner value.
+    #[inline]
     pub fn value(&self) -> &T {
         &self.0
     }
 
     /// Get the inner value by value.
+    #[inline]
     pub fn into_value(self) -> T {
         self.0
     }
 
     /// Get the span ID.
+    #[inline]
     pub fn span_id(&self) -> SpanId {
         self.1
     }
 
     /// Map the inner value while preserving the span ID.
+    #[inline]
     pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Spanned<U> {
         Spanned(f(self.0), self.1)
     }
 
     /// Map the inner value with a fallible function while preserving the span ID.
+    #[inline]
     pub fn try_map<U, E>(self, f: impl FnOnce(T) -> Result<U, E>) -> Result<Spanned<U>, E> {
         Ok(Spanned(f(self.0)?, self.1))
     }
 
     /// Create a Spanned value by inserting a span into the table.
-    /// This is useful when you have access to a SpanTable.
+    #[inline]
     pub fn with_span(table: &mut SpanTable, value: T, span: Span) -> Self {
         Self(value, table.insert(span))
     }
 
     /// Create a Spanned value from a byte range.
+    #[inline]
     pub fn with_range(table: &mut SpanTable, value: T, range: std::ops::Range<usize>) -> Self {
         Self(value, table.insert_range(range))
     }
 
     /// Get the actual span data from a span table.
+    #[inline]
     pub fn resolve_span(&self, table: &SpanTable) -> Span {
         table.get(self.1)
     }
 
     /// Extract the source text this span covers.
+    #[inline]
     pub fn extract_source<'src>(&self, table: &SpanTable, source: &'src str) -> &'src str {
         self.resolve_span(table).extract(source)
     }
@@ -281,7 +317,7 @@ mod tests {
         assert!(span.contains(15));
         assert!(!span.contains(5));
         assert!(!span.contains(25));
-        assert_eq!(span.as_range(), 10..20);
+        assert_eq!(span.to_range(), 10..20);
     }
 
     #[test]

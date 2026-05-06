@@ -1,3 +1,4 @@
+#![warn(clippy::correctness, clippy::suspicious, clippy::style, clippy::complexity, clippy::perf)]
 mod ty;
 pub use ty::{Ty, ty_alignment, ty_byte_size_static, ty_union_discriminant_size};
 

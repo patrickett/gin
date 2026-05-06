@@ -130,7 +130,7 @@ impl BeginCommand {
                 begin_run(config, input.to_owned(), watch.unwrap_or(false))
             }
             BeginCommand::Version(cmd) => version(cmd),
-            _ => todo!(),
+            _ => eprintln!("warning: command not yet implemented"),
         }
     }
 }

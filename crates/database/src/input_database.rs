@@ -29,12 +29,16 @@ impl Db for InputDatabase {
         Ok(match self.files.entry(path.clone()) {
             Entry::Occupied(entry) => *entry.get(),
             Entry::Vacant(entry) => {
-                let watcher = &mut *self.file_watcher.lock().unwrap();
+                let watcher = &mut *self
+                    .file_watcher
+                    .lock()
+                    .expect("file_watcher mutex should not be poisoned");
                 watcher
                     .watcher()
                     .watch(&path, RecursiveMode::NonRecursive)
-                    .unwrap();
-                let contents = std::fs::read_to_string(&path).unwrap();
+                    .map_err(|e| format!("cannot watch {path:?}: {e}"))?;
+                let contents =
+                    std::fs::read_to_string(&path).map_err(|e| format!("cannot read {path:?}: {e}"))?;
                 // Files loaded via import are always modules
                 *entry.insert(File::new(self, path, contents))
             }
@@ -68,7 +72,8 @@ impl InputDatabase {
             }))),
             files: DashMap::new(),
             file_watcher: Arc::new(Mutex::new(
-                new_debouncer(Duration::from_secs(1), tx).unwrap(),
+                new_debouncer(Duration::from_secs(1), tx)
+                    .expect("failed to create file watcher debouncer"),
             )),
         }
     }

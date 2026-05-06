@@ -1,3 +1,5 @@
+#![deny(unsafe_code)]
+#![warn(clippy::correctness, clippy::suspicious, clippy::style, clippy::complexity, clippy::perf)]
 //! Unified diagnostics for the ginc compiler.
 //!
 //! This module provides a single `Diagnostic` type that encompasses all
@@ -40,24 +42,29 @@ pub struct Diagnostic {
 /// The `into_diagnostic` default impl wraps them into a [`Diagnostic`].
 pub trait DiagnosticLike: Sized {
     /// The primary message for this diagnostic.
+    #[must_use]
     fn message(&self) -> String;
 
     /// Optional help text suggesting how to fix the issue.
+    #[must_use]
     fn help(&self) -> Option<String> {
         None
     }
 
     /// Optional text on the span underline in terminal output (see [`Diagnostic::help_on_span`]).
+    #[must_use]
     fn help_on_span(&self) -> Option<String> {
         None
     }
 
     /// The severity category. Defaults to `Category::Flaw`.
+    #[must_use]
     fn category(&self) -> Category {
         Category::Flaw
     }
 
     /// Convert into a full `Diagnostic` anchored at the given span.
+    #[must_use]
     fn into_diagnostic(self, span_id: SpanId) -> Diagnostic
     where
         Self: Into<DiagnosticCode>,
@@ -80,6 +87,7 @@ pub trait DiagnosticLike: Sized {
 }
 
 impl Diagnostic {
+    #[must_use]
     pub fn error_code(&self) -> &str {
         self.code.slug()
     }

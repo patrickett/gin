@@ -146,7 +146,7 @@ impl<'c> OperationBuilderExt<'c> for &'c Context {
             .add_attributes(&[(value_id, attr.into())])
             .add_results(&[ty])
             .build()
-            .unwrap()
+            .expect("arith.constant build should succeed")
     }
 
     fn int_const(&self, ty: Type<'c>, value: i128) -> Operation<'c> {
@@ -170,7 +170,7 @@ impl<'c> OperationBuilderExt<'c> for &'c Context {
             .add_attributes(&[(value_id, attr)])
             .add_results(&[ty])
             .build()
-            .unwrap()
+            .expect("arith.constant build should succeed")
     }
 
     fn const_op(&self, attr: Attribute<'c>, ty: Type<'c>) -> Operation<'c> {
@@ -179,7 +179,7 @@ impl<'c> OperationBuilderExt<'c> for &'c Context {
             .add_attributes(&[(value_id, attr)])
             .add_results(&[ty])
             .build()
-            .unwrap()
+            .expect("arith.constant build should succeed")
     }
 
     fn build_binop(
@@ -193,7 +193,7 @@ impl<'c> OperationBuilderExt<'c> for &'c Context {
             .add_operands(&[lhs, rhs])
             .add_results(&[result_ty])
             .build()
-            .unwrap()
+            .expect("arith.constant build should succeed")
     }
 
     fn build_cmpi(&self, predicate: u64, lhs: Value<'c, 'c>, rhs: Value<'c, 'c>) -> Operation<'c> {
@@ -204,7 +204,7 @@ impl<'c> OperationBuilderExt<'c> for &'c Context {
             .add_operands(&[lhs, rhs])
             .add_results(&[self.i1()])
             .build()
-            .unwrap()
+            .expect("arith.constant build should succeed")
     }
 
     fn build_cmpf(&self, predicate: u64, lhs: Value<'c, 'c>, rhs: Value<'c, 'c>) -> Operation<'c> {
@@ -215,7 +215,7 @@ impl<'c> OperationBuilderExt<'c> for &'c Context {
             .add_operands(&[lhs, rhs])
             .add_results(&[self.i1()])
             .build()
-            .unwrap()
+            .expect("arith.constant build should succeed")
     }
 
     fn llvm_undef(&self, ty: Type<'c>) -> Operation<'c> {
@@ -321,7 +321,7 @@ pub trait BlockExt<'c> {
 impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
     fn append_op(&self, op: Operation<'c>) -> Value<'c, 'c> {
         let op_ref = self.append_operation(op);
-        op_ref.result(0).unwrap().into()
+        op_ref.result(0).expect("append_operation result 0 should exist").into()
     }
 
     fn const_i64(&self, ctx: &'c Context, value: i64) -> Value<'c, 'c> {
@@ -375,7 +375,7 @@ impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
                 .add_attributes(&[(callee_id, symbol_ref)])
                 .add_operands(args)
                 .build()
-                .unwrap(),
+                .expect("func.call build should succeed"),
         );
     }
 
@@ -395,7 +395,7 @@ impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
                 .add_operands(args)
                 .add_results(&[return_type])
                 .build()
-                .unwrap(),
+                .expect("func.call build should succeed"),
         )
     }
 

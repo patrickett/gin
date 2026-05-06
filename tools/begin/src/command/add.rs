@@ -24,6 +24,7 @@ pub fn begin_add(_config: FlaskConfig, args: AddArgs) {
             DependencyKind::Version { version } => format!("registry version {version}"),
             DependencyKind::Path { path } => format!("local path {path}"),
             DependencyKind::Git { url } => format!("git repository {url}"),
+            _ => "unknown".to_string(),
         }
     );
 
@@ -33,7 +34,7 @@ pub fn begin_add(_config: FlaskConfig, args: AddArgs) {
     // 3. Add new dependency to dependencies map
     // 4. Write updated config back to flask.jsonc
 
-    todo!("Add dependency to flask.jsonc: {dep_name}")
+    eprintln!("warning: `begin add` is not yet implemented (would add dependency `{dep_name}`)");
 }
 
 fn parse_package(package: &str) -> Dependency {
@@ -83,5 +84,6 @@ fn extract_package_name(dependency: &Dependency) -> String {
             let name_part = url.rsplit('/').next().unwrap_or(url);
             name_part.replace(".git", "")
         }
+        _ => "unknown".to_string(),
     }
 }
