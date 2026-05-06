@@ -1,5 +1,5 @@
 use crate::{prelude::*, ty_to_mlir};
-use ast::{type_surface_mangle_name, Expr};
+use ast::{Expr, type_surface_mangle_name};
 use typeck::{Ty, TyInfer};
 
 impl<'c> Lower<'c> for WhenExpr {
@@ -7,7 +7,7 @@ impl<'c> Lower<'c> for WhenExpr {
         &self,
         ctx: &CodegenContext<'_, 'c>,
         block: &BlockRef<'c, 'c>,
-        symtab: &mut RuntimeSymbolTable<'c>,
+        symtab: &mut ScopedSymbolTable<'c>,
     ) -> Option<Value<'c, 'c>> {
         // Infer the result type from the else arm, falling back to the first arm.
         let result_ty = {
@@ -100,7 +100,7 @@ impl<'c> Lower<'c> for WhenExpr {
 fn lower_boolean_when<'c>(
     ctx: &CodegenContext<'_, 'c>,
     outer_block: &BlockRef<'c, 'c>,
-    symtab: &mut RuntimeSymbolTable<'c>,
+    symtab: &mut ScopedSymbolTable<'c>,
     arms: &[WhenArm],
     result_ty: Type<'c>,
 ) -> Option<Value<'c, 'c>> {
@@ -176,7 +176,7 @@ fn lower_boolean_when<'c>(
 fn lower_pattern_when<'c>(
     ctx: &CodegenContext<'_, 'c>,
     outer_block: &BlockRef<'c, 'c>,
-    symtab: &mut RuntimeSymbolTable<'c>,
+    symtab: &mut ScopedSymbolTable<'c>,
     subject: Value<'c, 'c>,
     disc: Value<'c, 'c>,
     arms: &[WhenArm],
@@ -204,8 +204,7 @@ fn lower_pattern_when<'c>(
             ) {
                 return None;
             }
-            let variant_name =
-                Intern::<String>::from_ref(type_surface_mangle_name(&pattern.0));
+            let variant_name = Intern::<String>::from_ref(type_surface_mangle_name(&pattern.0));
             // Note: unknown variant diagnostics are emitted by typeck; codegen just fails gracefully.
             let (_, expected_disc, _) = ctx.ty_env.lookup_variant(variant_name)?;
 

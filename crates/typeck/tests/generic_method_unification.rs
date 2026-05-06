@@ -81,7 +81,7 @@ fn range_new_body_tuple_satisfies_record_return_without_literal() {
     // Tuple-IS-record: just declaring the method (whose body is `(start, end)`
     // returned against the record `Range[x]`) should typecheck cleanly. No
     // diagnostic should be emitted for the tuple literal vs. record return.
-    let src = format!("{RANGE_DECL}");
+    let src = RANGE_DECL.to_string();
     let out = parse_source_full(&src);
     let env = TyEnv::from_file_ast(&out.ast);
     let mut symptoms = Vec::new();

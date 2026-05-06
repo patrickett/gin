@@ -24,9 +24,7 @@ fn codegen_to_mlir_text(source: &str, filename: &str) -> (String, Vec<Diagnostic
     let mlir_text = module
         .expect("codegen should succeed")
         .as_operation()
-        .to_string_with_flags(
-            OperationPrintingFlags::new().enable_debug_info(true, false),
-        )
+        .to_string_with_flags(OperationPrintingFlags::new().enable_debug_info(true, false))
         .expect("MLIR print");
     (mlir_text, symptoms)
 }

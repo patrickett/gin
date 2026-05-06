@@ -2,16 +2,20 @@ mod diagnostics;
 mod handlers;
 mod state;
 
+use ast::ImportSource;
 use dashmap::DashMap;
 use database::Diagnostics;
 use database::File;
 use database::{file_parse_output, package_typecheck_symptoms, sorted_package_files, PackageFiles};
+use diagnostic::{DiagnosticLike, UseSymptom};
 use diagnostics::symptoms_to_diagnostics;
 use futures::FutureExt;
+use resolve::{check_public_def_in_package, is_folder_module_dir, resolve_flask_path_dependencies};
 use state::{DocumentState, GinHost, JsonDocumentState};
+use std::collections::HashMap;
 use std::ops::Deref;
 use std::panic::AssertUnwindSafe;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -250,14 +254,23 @@ impl Backend {
         if self.is_shutdown() || self.is_stale(my_gen) {
             return;
         }
-        let pkg_root = self.package_root_for_uri(&uri);
+        let config_handle = self.get_or_load_config(&uri);
+        let pkg_root = config_handle
+            .as_ref()
+            .map(|handle| handle.source_dir())
+            .or_else(|| {
+                uri.to_file_path()
+                    .ok()
+                    .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+            });
 
         let this = self.clone();
         let blocking = tokio::task::spawn_blocking(move || -> Vec<(Url, Vec<Diagnostic>)> {
             // `Err(salsa::Cancelled)` → empty payload → publish nothing; the
             // newer worker that triggered the cancellation will publish.
-            let work =
-                AssertUnwindSafe(move || this.compute_package_diagnostics(pkg_root, trigger_file));
+            let work = AssertUnwindSafe(move || {
+                this.compute_package_diagnostics(pkg_root, config_handle.clone(), trigger_file)
+            });
             salsa::Cancelled::catch(work).unwrap_or_default()
         });
 
@@ -296,12 +309,21 @@ impl Backend {
     /// scheduled it.
     fn compute_package_diagnostics(
         &self,
-        pkg_root: Option<std::path::PathBuf>,
+        pkg_root: Option<PathBuf>,
+        config_handle: Option<flask::FlaskConfigHandle>,
         trigger_file: File,
     ) -> Vec<(Url, Vec<Diagnostic>)> {
         if self.is_shutdown() {
             return Vec::new();
         }
+
+        let dependency_dirs = config_handle
+            .as_ref()
+            .map(|h| {
+                let cfg = h.read();
+                resolve_flask_path_dependencies(&cfg.config, &h.source_dir())
+            })
+            .unwrap_or_default();
 
         let all_files: Vec<File> = if let Some(root) = &pkg_root {
             let mut host = self.lock_host();
@@ -336,6 +358,9 @@ impl Backend {
             let source = pkg_file.contents(&snapshot.db).to_string();
             let mut symptoms = parse.symptoms.clone();
             symptoms.extend(typecheck_symptoms[i].iter().cloned());
+            if !dependency_dirs.is_empty() {
+                symptoms.extend(collect_bundle_import_symptoms(&parse.ast, &dependency_dirs));
+            }
 
             let wrapped: Vec<Diagnostics> = symptoms.into_iter().map(Diagnostics).collect();
             let symptom_refs: Vec<&Diagnostics> = wrapped.iter().collect();
@@ -431,10 +456,49 @@ async fn main() {
     Server::new(stdin, stdout, socket).serve(service).await;
 }
 
+fn collect_bundle_import_symptoms(
+    ast: &ast::FileAst,
+    dependencies: &HashMap<String, PathBuf>,
+) -> Vec<diagnostic::Diagnostic> {
+    if dependencies.is_empty() {
+        return Vec::new();
+    }
+
+    let mut symptoms = Vec::new();
+    for import in ast.uses() {
+        for module_import in &import.0 {
+            if let ImportSource::LocalBundle(bundle) = &module_import.source {
+                let root = bundle.root.as_str();
+                let Some(dep_dir) = dependencies.get(root) else {
+                    continue;
+                };
+                if !is_folder_module_dir(dep_dir) {
+                    continue;
+                }
+                for member in &bundle.members {
+                    if !check_public_def_in_package(dep_dir, member.export.as_str()) {
+                        symptoms.push(
+                            UseSymptom::NotExported {
+                                symbol: member.export.to_string(),
+                                module: root.to_string(),
+                            }
+                            .into_diagnostic(member.span),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    symptoms
+}
+
 #[cfg(test)]
 mod tests {
+    use super::collect_bundle_import_symptoms;
     use internment::Intern;
     use parser::parse_from_str;
+    use parser::parse_source_full;
+    use std::collections::HashMap;
     use typeck::TyEnv;
 
     #[test]
@@ -458,5 +522,50 @@ mod tests {
 
         let some_item = items.iter().find(|i| i.label == "Some(x)").unwrap();
         assert_eq!(some_item.detail.as_ref().unwrap(), &"Maybe.Some(x)");
+    }
+
+    #[test]
+    fn missing_bundle_import_symbol_flaw() {
+        // Set up a temp directory mimicking a package with a core dependency.
+        let dir =
+            std::env::temp_dir().join(format!("gin_missing_bundle_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("core")).unwrap();
+
+        let write_file = |path: &std::path::Path, contents: &str| {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, contents).unwrap();
+        };
+
+        write_file(
+            &dir.join("core/flask.jsonc"),
+            r#"{"name":"core","version":"0.0.0","authors":[]}"#,
+        );
+        // core exports `true` but NOT `super_cool_thing`
+        write_file(
+            &dir.join("core/bool.gin"),
+            r"Bool is True or False
+
+false := Bool.False
+true  := Bool.True
+",
+        );
+
+        // Parse a main file that imports `super_cool_thing` (not exported) alongside `true`
+        let source =
+            "use core.(true, super_cool_thing)\n\nuse core.true\n\nmain:\n    true\nreturn\n";
+        let output = parse_source_full(source);
+        let mut dependencies = HashMap::new();
+        dependencies.insert("core".to_string(), dir.join("core"));
+
+        let symptoms = collect_bundle_import_symptoms(&output.ast, &dependencies);
+        assert!(
+            symptoms.iter().any(|d| d.code.slug() == "use-not-exported"),
+            "expected import symbol missing symptom"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

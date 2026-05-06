@@ -108,6 +108,7 @@ fn parse_bundle_export_list(cursor: &mut TokenCursor) -> Option<Vec<BundleExport
     }
 
     loop {
+        let export_span = cursor.peek_span()?;
         let export = parse_id(cursor)?;
         let alias = if cursor.is_at(&Token::As) {
             cursor.advance();
@@ -115,7 +116,13 @@ fn parse_bundle_export_list(cursor: &mut TokenCursor) -> Option<Vec<BundleExport
         } else {
             None
         };
-        members.push(BundleExportImport { export, alias });
+        let end_span = cursor.last_consumed_span();
+        let span = cursor.merge_span(export_span, end_span);
+        members.push(BundleExportImport {
+            export,
+            alias,
+            span,
+        });
 
         if cursor.eat(&Token::Comma) {
             if cursor.is_at(&Token::ParenClose) {

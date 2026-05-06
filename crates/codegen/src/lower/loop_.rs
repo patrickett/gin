@@ -5,7 +5,7 @@ impl<'c> Lower<'c> for Loop {
         &self,
         ctx: &CodegenContext<'_, 'c>,
         block: &BlockRef<'c, 'c>,
-        symtab: &mut RuntimeSymbolTable<'c>,
+        symtab: &mut ScopedSymbolTable<'c>,
     ) -> Option<Value<'c, 'c>> {
         match self {
             Loop::ForIn(for_loop) => for_loop.lower(ctx, block, symtab),

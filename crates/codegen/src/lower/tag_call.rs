@@ -6,7 +6,7 @@ impl<'c> Lower<'c> for TagCall {
         &self,
         ctx: &CodegenContext<'_, 'c>,
         block: &BlockRef<'c, 'c>,
-        symtab: &mut RuntimeSymbolTable<'c>,
+        symtab: &mut ScopedSymbolTable<'c>,
     ) -> Option<Value<'c, 'c>> {
         // Try union variant construction first.
         if let Some((union_name, discriminant, payload_fields)) =

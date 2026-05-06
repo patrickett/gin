@@ -19,16 +19,14 @@ pub(crate) fn use_completions(
     if let Some(quote_pos) = before_cursor.rfind('\'') {
         let partial = &before_cursor[quote_pos + 1..];
         return Some(complete_local_paths(
-            source,
-            file_uri,
-            position,
-            quote_pos,
-            partial,
+            source, file_uri, position, quote_pos, partial,
         ));
     }
 
     // Non-quoted path: dependency root (`use dep`) or nested folder modules (`use dep.seg1.seg2`).
-    Some(complete_package_paths(file_uri, config, line_text, position))
+    Some(complete_package_paths(
+        file_uri, config, line_text, position,
+    ))
 }
 
 fn complete_package_paths(

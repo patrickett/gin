@@ -2,8 +2,8 @@ use internment::Intern;
 
 use crate::expr::Expr;
 use crate::path::ModPath;
-use crate::span::{HasSpanId, SpanId};
 use crate::span::Spanned;
+use crate::span::{HasSpanId, SpanId};
 
 /// A capitalized variant constructor call, e.g. `Some(5)` or `Maybe.Some(3)`.
 ///

@@ -9,6 +9,9 @@ use crate::path::ModPath;
 pub struct BundleExportImport {
     pub export: Intern<String>,
     pub alias: Option<Intern<String>>,
+    /// The span of the export name (with alias if present) within the
+    /// `.(...)` group. Used for per-member diagnostics and goto-def.
+    pub span: SpanId,
 }
 
 /// `use dep.(a, b as c)` — dependency `dep` must be in `flask.jsonc`; each member is a nested folder module under the dependency root.

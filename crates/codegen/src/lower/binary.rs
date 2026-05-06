@@ -7,7 +7,7 @@ impl<'c> Lower<'c> for Binary {
         &self,
         ctx: &CodegenContext<'_, 'c>,
         block: &BlockRef<'c, 'c>,
-        symtab: &mut RuntimeSymbolTable<'c>,
+        symtab: &mut ScopedSymbolTable<'c>,
     ) -> Option<Value<'c, 'c>> {
         let lhs = self.lhs.lower(ctx, block, symtab)?;
         let rhs = self.rhs.lower(ctx, block, symtab)?;

@@ -139,33 +139,33 @@ fn parse_is_rhs(
     let checkpoint = cursor.checkpoint();
     let first_doc = parse_doc_comment(cursor);
 
-    if let Some(first_shape) = parse_pattern_type_expr(cursor, expr_parser) {
-        if cursor.is_at(&Token::Or) {
-            // Union: Tag (or Tag)+
-            let first_post_doc = parse_doc_comment(cursor);
+    if let Some(first_shape) = parse_pattern_type_expr(cursor, expr_parser)
+        && cursor.is_at(&Token::Or)
+    {
+        // Union: Tag (or Tag)+
+        let first_post_doc = parse_doc_comment(cursor);
 
-            let first_variant = make_variant(first_doc, first_shape, first_post_doc);
-            let mut variants = vec![first_variant];
+        let first_variant = make_variant(first_doc, first_shape, first_post_doc);
+        let mut variants = vec![first_variant];
 
-            while cursor.eat(&Token::Or) {
-                let doc_on_or_line = parse_doc_comment(cursor);
-                cursor.eat(&Token::Indent);
+        while cursor.eat(&Token::Or) {
+            let doc_on_or_line = parse_doc_comment(cursor);
+            cursor.eat(&Token::Indent);
 
-                match parse_variant(cursor, expr_parser) {
-                    Some(next_variant) => {
-                        attach_doc_to_previous(&mut variants, doc_on_or_line);
-                        variants.push(next_variant);
-                    }
-                    None => {
-                        cursor.error("expected variant after 'or'", cursor.current_span());
-                        break;
-                    }
+            match parse_variant(cursor, expr_parser) {
+                Some(next_variant) => {
+                    attach_doc_to_previous(&mut variants, doc_on_or_line);
+                    variants.push(next_variant);
+                }
+                None => {
+                    cursor.error("expected variant after 'or'", cursor.current_span());
+                    break;
                 }
             }
-
-            let post_doc = parse_doc_comment(cursor);
-            return (DeclareValue::Union { variants }, post_doc);
         }
+
+        let post_doc = parse_doc_comment(cursor);
+        return (DeclareValue::Union { variants }, post_doc);
     }
 
     // Not a union — rewind to before any doc comment and try as alias

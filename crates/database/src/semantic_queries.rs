@@ -3,8 +3,8 @@
 //! Migrated from the `analyze` crate. These queries wrap `typeck` functions
 //! with Salsa caching for IDE use.
 
-use crate::{Db, File};
 use crate::package::PackageFiles;
+use crate::{Db, File};
 use diagnostic::Diagnostic;
 use std::sync::Arc;
 

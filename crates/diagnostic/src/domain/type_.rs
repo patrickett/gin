@@ -54,32 +54,34 @@ impl DiagnosticLike for TypeSymptom {
             Self::NotExpr { name } => format!("'{name}' is not an expression"),
             Self::UnknownTag { name } => format!("use of undeclared tag `{name}`"),
             Self::InferenceFailed => "failed to infer type".into(),
-            Self::ConstraintViolation { param, expected, got } => format!(
-                "type parameter `{param}` requires `{expected}`, got `{got}`"
-            ),
+            Self::ConstraintViolation {
+                param,
+                expected,
+                got,
+            } => format!("type parameter `{param}` requires `{expected}`, got `{got}`"),
             Self::UnresolvedTypeParam { name } => format!("unresolved type parameter `{name}`"),
-            Self::ArityMismatch { name, expected, got } => format!(
-                "`{name}` expects {expected} type argument(s), got {got}"
-            ),
-            Self::IndexOutOfBounds { index, size } => format!(
-                "index out of bounds: the len is {size} but the index is {index}"
-            ),
+            Self::ArityMismatch {
+                name,
+                expected,
+                got,
+            } => format!("`{name}` expects {expected} type argument(s), got {got}"),
+            Self::IndexOutOfBounds { index, size } => {
+                format!("index out of bounds: the len is {size} but the index is {index}")
+            }
             Self::UnusedBinding { name } => format!("unused binding `{name}`"),
-            Self::NotAVariant { name, union_name } => format!(
-                "`{name}` is not a variant of `{union_name}`"
-            ),
+            Self::NotAVariant { name, union_name } => {
+                format!("`{name}` is not a variant of `{union_name}`")
+            }
             Self::SelfOutsideMethod => "self used outside method".into(),
-            Self::EmptyReturn { expected_type } => format!(
-                "empty return in function declared to return `{expected_type}`"
-            ),
+            Self::EmptyReturn { expected_type } => {
+                format!("empty return in function declared to return `{expected_type}`")
+            }
         }
     }
 
     fn help_on_span(&self) -> Option<String> {
         match self {
-            Self::UnknownBinding { .. } => {
-                Some("import or define bind before using it".into())
-            }
+            Self::UnknownBinding { .. } => Some("import or define bind before using it".into()),
             _ => None,
         }
     }
@@ -93,7 +95,9 @@ impl DiagnosticLike for TypeSymptom {
             Self::Mismatch => Some("types do not match".into()),
             Self::UnknownTag { .. } => Some("declare the tag before using it".into()),
             Self::InferenceFailed => Some("could not infer the type".into()),
-            Self::ConstraintViolation { param, expected, .. } => Some(format!(
+            Self::ConstraintViolation {
+                param, expected, ..
+            } => Some(format!(
                 "ensure the type argument for `{param}` satisfies the `{expected}` constraint"
             )),
             Self::UnresolvedTypeParam { name } => Some(format!(
@@ -110,9 +114,9 @@ impl DiagnosticLike for TypeSymptom {
                 "expected one of the variants declared in `{union_name}`"
             )),
             Self::SelfOutsideMethod => Some("self can only be used inside methods".into()),
-            Self::EmptyReturn { expected_type } => Some(format!(
-                "expected a variant of `{expected_type}`"
-            )),
+            Self::EmptyReturn { expected_type } => {
+                Some(format!("expected a variant of `{expected_type}`"))
+            }
         }
     }
 

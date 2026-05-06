@@ -29,11 +29,8 @@ use std::{
     collections::{HashMap, HashSet},
 };
 
-/// Runtime symbol table for MLIR values during codegen.
-/// This is separate from the compile-time SymbolTable which tracks metadata.
+/// ScopedSymbolTable is defined in `crate::ScopedSymbolTable` (the struct in lib.rs).
 use i256::I256;
-
-pub type RuntimeSymbolTable<'c> = HashMap<String, Value<'c, 'c>>;
 
 #[derive(Debug, Clone)]
 pub struct TypeInfo {
@@ -199,7 +196,7 @@ pub trait Lower<'c> {
         &self,
         ctx: &CodegenContext<'_, 'c>,
         block: &BlockRef<'c, 'c>,
-        symtab: &mut RuntimeSymbolTable<'c>,
+        symtab: &mut ScopedSymbolTable<'c>,
     ) -> Option<Value<'c, 'c>>;
 }
 
@@ -406,7 +403,7 @@ fn emit_tuple_lit_global<'c>(
     region.append_block(init_block);
     let blk = region.first_block().unwrap();
 
-    let mut symtab: RuntimeSymbolTable<'c> = HashMap::new();
+    let mut symtab: ScopedSymbolTable<'c> = ScopedSymbolTable::new();
     let elem_vals: Vec<Value<'c, 'c>> = elems
         .iter()
         .map(|e| e.lower(ctx, &blk, &mut symtab))
@@ -563,7 +560,7 @@ impl<'c> Lower<'c> for Spanned<Expr> {
         &self,
         ctx: &CodegenContext<'_, 'c>,
         block: &BlockRef<'c, 'c>,
-        symtab: &mut RuntimeSymbolTable<'c>,
+        symtab: &mut ScopedSymbolTable<'c>,
     ) -> Option<Value<'c, 'c>> {
         ctx.current_span.set(self.1);
         self.0.lower(ctx, block, symtab)
@@ -575,7 +572,7 @@ impl<'c> Lower<'c> for Expr {
         &self,
         ctx: &CodegenContext<'_, 'c>,
         block: &BlockRef<'c, 'c>,
-        symtab: &mut RuntimeSymbolTable<'c>,
+        symtab: &mut ScopedSymbolTable<'c>,
     ) -> Option<Value<'c, 'c>> {
         match self {
             Expr::Lit(lit) => lit.lower(ctx, block, symtab),
@@ -592,7 +589,7 @@ impl<'c> Lower<'c> for Expr {
                 );
                 None
             }
-            Expr::SelfRef(span) => symtab.get("self").copied().or_else(|| {
+            Expr::SelfRef(span) => symtab.get("self").or_else(|| {
                 ctx.current_span.set(*span);
                 ctx.emit_symptom(TypeSymptom::SelfOutsideMethod);
                 None
@@ -905,7 +902,7 @@ pub fn lower_function<'c>(
         region.append_block(block);
         let block = region.first_block().unwrap();
 
-        let mut symtab: RuntimeSymbolTable<'c> = HashMap::new();
+        let mut symtab: ScopedSymbolTable<'c> = ScopedSymbolTable::new();
         for (i, (param_name, param_ty)) in param_info.iter().enumerate() {
             let arg = block.argument(i).unwrap();
             symtab.insert(param_name.as_str().to_string(), arg.into());
@@ -947,7 +944,7 @@ pub fn lower_function<'c>(
 fn lower_take_ptr<'c>(
     ctx: &CodegenContext<'_, 'c>,
     block: &BlockRef<'c, 'c>,
-    symtab: &mut RuntimeSymbolTable<'c>,
+    symtab: &mut ScopedSymbolTable<'c>,
     inner: &Spanned<Expr>,
 ) -> Option<Value<'c, 'c>> {
     // For a bare variable reference, check if it already lives in a mutable slot.
@@ -966,7 +963,7 @@ fn lower_take_ptr<'c>(
                 // pointer itself — evaluate normally to load it from the slot.
                 return inner.lower(ctx, block, symtab);
             }
-            if let Some(&ptr) = symtab.get(name.as_str()) {
+            if let Some(ptr) = symtab.get(name.as_str()) {
                 return Some(ptr);
             }
         }
@@ -1007,7 +1004,7 @@ fn elem_ty_of_array_expr(base: &Spanned<Expr>, ctx: &CodegenContext) -> Ty {
 fn lower_tuple_alloc<'c>(
     ctx: &CodegenContext<'_, 'c>,
     block: &BlockRef<'c, 'c>,
-    symtab: &mut RuntimeSymbolTable<'c>,
+    symtab: &mut ScopedSymbolTable<'c>,
     init: &Spanned<Expr>,
     size: usize,
 ) -> Option<Value<'c, 'c>> {
@@ -1040,7 +1037,7 @@ fn lower_tuple_alloc<'c>(
 fn lower_tuple_get<'c>(
     ctx: &CodegenContext<'_, 'c>,
     block: &BlockRef<'c, 'c>,
-    symtab: &mut RuntimeSymbolTable<'c>,
+    symtab: &mut ScopedSymbolTable<'c>,
     base: &Spanned<Expr>,
     index: usize,
 ) -> Option<Value<'c, 'c>> {
@@ -1082,7 +1079,7 @@ fn lower_tuple_get<'c>(
 fn lower_tuple_set<'c>(
     ctx: &CodegenContext<'_, 'c>,
     block: &BlockRef<'c, 'c>,
-    symtab: &mut RuntimeSymbolTable<'c>,
+    symtab: &mut ScopedSymbolTable<'c>,
     base: &Spanned<Expr>,
     index: usize,
     value: &Spanned<Expr>,
@@ -1110,7 +1107,7 @@ fn lower_bind_value<'c>(
     ctx: &CodegenContext<'_, 'c>,
     block: &BlockRef<'c, 'c>,
     bind_value: &BindValue,
-    symtab: &RuntimeSymbolTable<'c>,
+    symtab: &ScopedSymbolTable<'c>,
 ) -> Option<Option<Value<'c, 'c>>> {
     match bind_value {
         BindValue::Expr(expr) => {

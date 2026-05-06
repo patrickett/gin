@@ -1,6 +1,6 @@
 //! Hover and related semantic helpers (engine layer).
 
-use ast::{Bind, HasSpanId, ParameterKind, Parameters, format_type_surface};
+use ast::{Bind, DeclareValue, HasSpanId, ParameterKind, Parameters, Variant, format_type_surface};
 use internment::Intern;
 
 /// Return markdown hover text for the word at `byte_pos` in the given AST.
@@ -30,6 +30,11 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
             }
             return Some(result);
         }
+    }
+
+    // Look for variant names inside tag declarations (e.g. `Some`, `None` in `Maybe`)
+    if let Some(variant_hover) = hover_for_variant(ast, &word) {
+        return Some(variant_hover);
     }
 
     // Look for function definitions
@@ -206,11 +211,9 @@ fn format_bind_hover(
         result.push_str(&format!("\n\n---\n\n{}", doc.0));
     }
     let mut meta_parts = Vec::new();
-    if !is_function {
-        if let Some(ty) = ty_env.fn_return_ty(def_name) {
-            meta_parts.push(format!("size = {}", crate::ty_byte_size_static(ty)));
-            meta_parts.push(format!("align = {}", crate::ty_alignment(ty)));
-        }
+    if !is_function && let Some(ty) = ty_env.fn_return_ty(def_name) {
+        meta_parts.push(format!("size = {}", crate::ty_byte_size_static(ty)));
+        meta_parts.push(format!("align = {}", crate::ty_alignment(ty)));
     }
     if let Some(complexity) = bind.attributes().complexity.as_ref() {
         meta_parts.push(format!("complexity = {}", complexity.display_big_o()));
@@ -219,6 +222,71 @@ fn format_bind_hover(
         result.push_str(&format!("\n\n---\n\n{}", meta_parts.join(", ")));
     }
     result
+}
+
+/// Extract the base name from a variant's shape expression.
+fn variant_base_name(expr: &ast::Expr) -> Option<&str> {
+    match expr {
+        ast::Expr::TypeGeneric { name, .. } => Some(name.as_str()),
+        ast::Expr::TypeNominal(name, _) => Some(name.as_str()),
+        ast::Expr::AnonymousTag(name, _) => Some(name.as_str()),
+        _ => None,
+    }
+}
+
+/// Look for a variant name inside any tag declaration's union variants.
+/// If found, return hover text showing the parent tag and variant doc.
+fn hover_for_variant(ast: &ast::FileAst, word: &str) -> Option<String> {
+    for (tag_name, decl) in ast.tags() {
+        let variants = match decl.value() {
+            DeclareValue::Union { variants } => variants,
+            _ => continue,
+        };
+
+        for variant in variants {
+            let shape = variant.shape();
+            let name = variant_base_name(&shape.0)?;
+            if name != word {
+                continue;
+            }
+
+            let mut result = format!("```gin\n{tag_name}\n\n{variant}\n```");
+
+            if let Variant::Local { doc_comment, .. } = variant
+                && let Some(doc) = doc_comment
+            {
+                result.push_str(&format!("\n\n---\n\n{}", doc.0));
+            }
+
+            return Some(result);
+        }
+    }
+
+    None
+}
+
+/// Check if the word at `byte_pos` is a variant name inside a tag declaration.
+/// If so, return `(variant_name, parent_tag_name)`.
+pub fn is_variant_at(
+    source: &str,
+    ast: &ast::FileAst,
+    byte_pos: usize,
+) -> Option<(String, String)> {
+    let word = crate::source::word_at_byte_offset(source, byte_pos)?;
+    for (tag_name, decl) in ast.tags() {
+        let variants = match decl.value() {
+            DeclareValue::Union { variants } => variants,
+            _ => continue,
+        };
+        for variant in variants {
+            let shape = variant.shape();
+            let name = variant_base_name(&shape.0)?;
+            if name == word {
+                return Some((word.to_string(), tag_name.as_str().to_string()));
+            }
+        }
+    }
+    None
 }
 
 /// Return the union type reachable via a dot expression at `byte_pos`.

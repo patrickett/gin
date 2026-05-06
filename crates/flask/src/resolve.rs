@@ -10,11 +10,18 @@ pub enum NestedPackageTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NestedPackageResolveError {
-    MissingConfig { dir: PathBuf },
+    MissingConfig {
+        dir: PathBuf,
+    },
     /// Expected `parent/segment/` to be a directory with `flask.jsonc`.
-    NestedPackageNotFound { parent: PathBuf, segment: String },
+    NestedPackageNotFound {
+        parent: PathBuf,
+        segment: String,
+    },
     /// A non-final segment exists but is not a folder module.
-    IntermediateNotFolderModule { path: PathBuf },
+    IntermediateNotFolderModule {
+        path: PathBuf,
+    },
 }
 
 fn is_folder_module_dir(path: &Path) -> bool {
@@ -135,4 +142,3 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 }
-

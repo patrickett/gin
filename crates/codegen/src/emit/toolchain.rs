@@ -66,10 +66,7 @@ pub(crate) fn find_cc(symptoms: &mut Vec<Diagnostic>) -> Option<String> {
 }
 
 /// Translate LLVM-dialect MLIR text to LLVM IR using `mlir-translate`.
-pub(crate) fn mlir_to_llvm_ir(
-    mlir_text: &str,
-    symptoms: &mut Vec<Diagnostic>,
-) -> Option<String> {
+pub(crate) fn mlir_to_llvm_ir(mlir_text: &str, symptoms: &mut Vec<Diagnostic>) -> Option<String> {
     let mlir_translate = find_tool("mlir-translate", symptoms)?;
 
     let mut cmd = Command::new(&mlir_translate);

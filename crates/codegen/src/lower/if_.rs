@@ -1,5 +1,5 @@
 use crate::{prelude::*, ty_to_mlir};
-use ast::{type_surface_mangle_name, Expr};
+use ast::{Expr, type_surface_mangle_name};
 use internment::Intern;
 use typeck::{Ty, TyInfer};
 
@@ -8,7 +8,7 @@ impl<'c> Lower<'c> for IfExpr {
         &self,
         ctx: &CodegenContext<'_, 'c>,
         block: &BlockRef<'c, 'c>,
-        symtab: &mut RuntimeSymbolTable<'c>,
+        symtab: &mut ScopedSymbolTable<'c>,
     ) -> Option<Value<'c, 'c>> {
         let loc = ctx.location();
 
@@ -76,8 +76,7 @@ impl<'c> Lower<'c> for IfExpr {
                 && let Expr::TypeGeneric { params, .. } = &pattern.0
             {
                 let subject_val = subject.lower(ctx, block, symtab)?;
-                let variant_name =
-                    Intern::<String>::from_ref(type_surface_mangle_name(&pattern.0));
+                let variant_name = Intern::<String>::from_ref(type_surface_mangle_name(&pattern.0));
                 let payload_fields = ctx
                     .ty_env
                     .lookup_variant(variant_name)

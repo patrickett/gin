@@ -7,6 +7,9 @@ pub use expr::*;
 mod file_ast;
 pub use file_ast::*;
 
+mod import_alias;
+pub use import_alias::apply_symbol_aliases;
+
 mod module_qualify;
 pub use module_qualify::qualify_module_defs;
 
@@ -37,18 +40,22 @@ pub use impl_block::*;
 pub mod signature;
 pub use signature::*;
 
+pub mod folder;
+pub mod visit;
+
 pub mod prelude {
     pub use crate::declare::*;
     pub use crate::doc_comment::*;
     pub use crate::expr::*;
     pub use crate::file_ast::*;
+    pub use crate::folder::*;
     pub use crate::impl_block::*;
     pub use crate::parameter::*;
     pub use crate::path::*;
     pub use crate::pattern::*;
     pub use crate::span::*;
-
     pub use crate::variant::*;
+    pub use crate::visit::*;
 
     pub use internment::Intern;
 }

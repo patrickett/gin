@@ -21,16 +21,24 @@ impl DiagnosticLike for ParseSymptom {
             Self::Custom(msg) => msg.clone(),
             Self::EmptyParens { suggested: _ } => "empty parentheses are not needed".into(),
             Self::UnusedValue { value } => format!("unused value: `{value}`"),
-            Self::DirectFileImport { path } => format!("cannot import `.gin` files directly: `{}`", path),
+            Self::DirectFileImport { path } => {
+                format!("cannot import `.gin` files directly: `{}`", path)
+            }
         }
     }
 
     fn help(&self) -> Option<String> {
         match self {
             Self::UnexpectedToken | Self::Custom(_) => None,
-            Self::EmptyParens { suggested } => Some(format!("remove the parentheses: `{suggested}`")),
-            Self::UnusedValue { .. } => Some("did you mean to indent this as part of the previous expression?".into()),
-            Self::DirectFileImport { .. } => Some("remove the `.gin` extension and import the module folder instead".into()),
+            Self::EmptyParens { suggested } => {
+                Some(format!("remove the parentheses: `{suggested}`"))
+            }
+            Self::UnusedValue { .. } => {
+                Some("did you mean to indent this as part of the previous expression?".into())
+            }
+            Self::DirectFileImport { .. } => {
+                Some("remove the `.gin` extension and import the module folder instead".into())
+            }
         }
     }
 

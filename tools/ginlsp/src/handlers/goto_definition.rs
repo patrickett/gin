@@ -1,12 +1,14 @@
 use crate::diagnostics::span_to_range;
 use crate::Backend;
-use ast::{HasSpanId, ImportSource};
+use ast::{HasSpanId, ImportSource, LocalBundleImport};
 use database::file_parse_output;
-use typeck::{
-    find_definition_span, find_import_definition_span, get_word_at_position, position_to_byte_offset,
-};
+use diagnostic::SpanId;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
+use typeck::{
+    find_definition_span, find_import_definition_span, get_word_at_position, is_identifier_char,
+    position_to_byte_offset, word_at_byte_offset,
+};
 
 fn zero_location(uri: Url) -> Location {
     Location {
@@ -37,9 +39,7 @@ fn resolve_use_import_source_fs(base_uri: &Url, source: &ImportSource) -> Option
             if resolved.is_dir() {
                 let flask_jsonc_path = resolved.join(flask::PACKAGE_CONFIG_NAME);
                 if flask_jsonc_path.is_file() {
-                    return Some(zero_location(
-                        Url::from_file_path(&flask_jsonc_path).ok()?,
-                    ));
+                    return Some(zero_location(Url::from_file_path(&flask_jsonc_path).ok()?));
                 }
             }
 
@@ -136,20 +136,36 @@ fn resolve_package_part_location_fs(
         return None;
     }
 
-    resolve_nested_package_manifest_location(&dep_dir, &segments[..=seg_idx])
+    if let Some(loc) = resolve_nested_package_manifest_location(&dep_dir, &segments[..=seg_idx]) {
+        return Some(loc);
+    }
+
+    // When the last segment is not a nested sub-package, check if it's a
+    // public definition (symbol or tag) in the dependency package and
+    // navigate to the exact definition location (line, column).
+    if seg_idx == seg_count - 1 {
+        let symbol = segments[seg_idx].as_str();
+        if let Some((loc_uri, loc_range)) = resolve_symbol_location(&dep_dir, symbol) {
+            return Some(Location {
+                uri: loc_uri,
+                range: loc_range,
+            });
+        }
+    }
+
+    None
 }
 
 fn part_index_in_dotted_path(span_text: &str, byte_in_span: usize) -> Option<usize> {
-    let mut part = 0usize;
-    for (i, ch) in span_text.char_indices() {
-        if i >= byte_in_span {
-            break;
-        }
-        if ch == '.' {
-            part += 1;
-        }
-    }
-    Some(part)
+    Some(resolve::part_index_in_dotted_path(span_text, byte_in_span))
+}
+
+fn is_import_identifier_at(source: &str, byte_pos: usize) -> bool {
+    source
+        .get(byte_pos..)
+        .and_then(|tail| tail.chars().next())
+        .map(is_identifier_char)
+        .unwrap_or(false)
 }
 
 /// `flask.jsonc` for the folder module at `start_dir/seg1/.../segN/`.
@@ -200,13 +216,24 @@ impl Backend {
                 if let Some(byte_pos) =
                     position_to_byte_offset(&source, position.line, position.character)
                 {
+                    // Phase 1: cursor is directly inside a `use` statement.
                     if let Some(link) = this.resolve_use_import_at(&uri, &ast, &source, byte_pos) {
                         return Some(GotoDefinitionResponse::Link(vec![link]));
                     }
+
+                    // Phase 2: cursor is on an imported symbol used unqualified
+                    // in the body. `use core.true` is syntactic sugar for
+                    // `use core.true as true`, making the bare name available
+                    // throughout the file.
+                    if let Some(word) = word_at_byte_offset(&source, byte_pos) {
+                        if let Some(link) = this.resolve_body_import_at(&uri, &ast, &source, &word)
+                        {
+                            return Some(GotoDefinitionResponse::Link(vec![link]));
+                        }
+                    }
                 }
 
-                if let Some(word) =
-                    get_word_at_position(&source, position.line, position.character)
+                if let Some(word) = get_word_at_position(&source, position.line, position.character)
                 {
                     let range = find_definition_span(&ast, &word)
                         .map(|span| span_to_range(span.start, span.end, &source))
@@ -246,7 +273,26 @@ impl Backend {
                         (*span_id, ImportSource::Local(path.clone(), *span_id))
                     }
                     ImportSource::LocalBundle(b) => {
-                        (b.span_id(), ImportSource::LocalBundle(b.clone()))
+                        // Check per-member spans.  If the cursor is on a specific
+                        // bundle member we can resolve it individually.
+                        let mut found: Option<(SpanId, ImportSource)> = None;
+                        for member in &b.members {
+                            let mspan = span_table.get(member.span);
+                            if byte_pos >= mspan.start && byte_pos <= mspan.end {
+                                // Build a synthetic Local source that points to the
+                                // dependency's module root so the resolution opens
+                                // the dependency's flask.jsonc (or the file with the
+                                // definition for symbol imports).
+                                let lb = LocalBundleImport {
+                                    root: b.root,
+                                    members: vec![member.clone()],
+                                    span: member.span,
+                                };
+                                found = Some((member.span, ImportSource::LocalBundle(lb)));
+                                break;
+                            }
+                        }
+                        found.unwrap_or_else(|| (b.span_id(), ImportSource::LocalBundle(b.clone())))
                     }
                     ImportSource::Package(mod_path) => {
                         let _span = span_table.get(mod_path.span_id());
@@ -256,6 +302,10 @@ impl Backend {
 
                 let span = span_table.get(import_span);
                 if byte_pos < span.start || byte_pos > span.end {
+                    continue;
+                }
+
+                if !is_import_identifier_at(source, byte_pos) {
                     continue;
                 }
 
@@ -284,13 +334,72 @@ impl Backend {
 
         None
     }
+
+    /// When a bare word in the body matches an import's effective name (e.g.
+    /// `true` from `use core.true`), resolve it to the definition file.
+    /// This is Phase 2, used when the cursor is *outside* the `use` span.
+    fn resolve_body_import_at(
+        &self,
+        base_uri: &Url,
+        ast: &ast::FileAst,
+        source: &str,
+        word: &str,
+    ) -> Option<LocationLink> {
+        // Use the shared import resolution for Phase 2 (body word matching).
+        // We need a byte position; scan for the word.
+        let byte_pos = source.find(word)?;
+        match resolve::resolve_import_at(ast, source, byte_pos) {
+            Some(resolve::ImportTarget::BodySymbol { dep_name, symbol }) => {
+                let dep_dir = resolve_dep_dir_from_uri(base_uri, &dep_name)?;
+                let (target_uri, target_range) = resolve_symbol_location(&dep_dir, &symbol)?;
+                Some(LocationLink {
+                    origin_selection_range: None,
+                    target_uri,
+                    target_range,
+                    target_selection_range: target_range,
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Resolve the dependency directory for `dep_name` from the `flask.jsonc`
+/// found relative to the file at `uri`.
+fn resolve_dep_dir_from_uri(uri: &Url, dep_name: &str) -> Option<std::path::PathBuf> {
+    let base_path = uri.to_file_path().ok()?;
+    resolve::resolve_dep_dir(&base_path, dep_name)
+}
+
+/// Given a dependency directory and a symbol name, parse the definition file
+/// and return the exact `(Url, Range)` of the symbol's definition, so goto-def
+/// navigates to the correct line and column instead of the top of the file.
+fn resolve_symbol_location(dep_dir: &std::path::Path, symbol: &str) -> Option<(Url, Range)> {
+    let def_file = resolve::find_public_def_in_package(dep_dir, symbol)?;
+    let def_source = std::fs::read_to_string(&def_file).ok()?;
+    let def_output = parser::parse_source_full(&def_source);
+    let def_span = typeck::find_definition_span(&def_output.ast, symbol)?;
+    let (start_line, start_char) = typeck::byte_offset_to_position(def_span.start, &def_source);
+    let (end_line, end_char) = typeck::byte_offset_to_position(def_span.end, &def_source);
+    let uri = Url::from_file_path(&def_file).ok()?;
+    let range = Range {
+        start: Position {
+            line: start_line,
+            character: start_char,
+        },
+        end: Position {
+            line: end_line,
+            character: end_char,
+        },
+    };
+    Some((uri, range))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ast::{BundleExportImport, LocalBundleImport};
     use ast::ModPath;
+    use ast::{BundleExportImport, LocalBundleImport};
     use diagnostic::SpanId;
     use internment::Intern;
     use std::fs;
@@ -452,11 +561,7 @@ mod tests {
         write_file(&dir.join("main.gin"), "main:\n    return 0\n");
 
         let base_uri = Url::from_file_path(dir.join("main.gin")).unwrap();
-        let mp = ModPath::new(
-            Intern::<String>::from_ref("dep"),
-            vec![],
-            SpanId::new(0),
-        );
+        let mp = ModPath::new(Intern::<String>::from_ref("dep"), vec![], SpanId::new(0));
 
         let loc = resolve_use_import_source_fs(&base_uri, &ImportSource::Package(mp)).unwrap();
         assert_eq!(loc.uri.to_file_path().unwrap(), dir.join("dep/flask.jsonc"));
@@ -483,7 +588,10 @@ mod tests {
 }
 "#,
         );
-        write_file(&dir.join("main.gin"), "use utils.(io)\n\nmain:\n    return 0\n");
+        write_file(
+            &dir.join("main.gin"),
+            "use utils.(io)\n\nmain:\n    return 0\n",
+        );
         write_file(
             &dir.join("utils/flask.jsonc"),
             r#"{"name":"utils","version":"0.0.0","authors":[]}"#,
@@ -499,12 +607,16 @@ mod tests {
             members: vec![BundleExportImport {
                 export: Intern::<String>::from_ref("io"),
                 alias: None,
+                span: SpanId::new(0),
             }],
             span: SpanId::new(0),
         };
 
         let loc = resolve_use_import_source_fs(&base_uri, &ImportSource::LocalBundle(lb)).unwrap();
-        assert_eq!(loc.uri.to_file_path().unwrap(), dir.join("utils/flask.jsonc"));
+        assert_eq!(
+            loc.uri.to_file_path().unwrap(),
+            dir.join("utils/flask.jsonc")
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -564,7 +676,7 @@ mod tests {
         let loc_mid = resolve_package_part_location_fs(
             &base_uri,
             &Intern::<String>::from_ref("dep"),
-            &[seg_a.clone(), seg_b.clone()],
+            &[seg_a, seg_b],
             1,
         )
         .unwrap();
@@ -613,7 +725,10 @@ mod tests {
             r#"{"name":"io","version":"0.0.0","authors":[]}"#,
         );
         write_file(&dir.join("core/io/x.gin"), "x: 1\n");
-        write_file(&dir.join("main.gin"), "use core.io\n\nmain:\n    return 0\n");
+        write_file(
+            &dir.join("main.gin"),
+            "use core.io\n\nmain:\n    return 0\n",
+        );
 
         let base_uri = Url::from_file_path(dir.join("main.gin")).unwrap();
 
@@ -640,6 +755,337 @@ mod tests {
             loc_io.uri.to_file_path().unwrap(),
             dir.join("core/io/flask.jsonc")
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn import_identifier_guard_blocks_non_words() {
+        let source = "use core.(io, fs as store)";
+
+        let core = source.find("core").unwrap();
+        let io = source.find("io").unwrap();
+        let fs = source.find("fs").unwrap();
+        let store = source.find("store").unwrap();
+        let dot = source.find('.').unwrap();
+        let comma = source.find(',').unwrap();
+        let paren = source.find('(').unwrap();
+        let space = source.find(' ').unwrap();
+
+        assert!(is_import_identifier_at(source, core));
+        assert!(is_import_identifier_at(source, io));
+        assert!(is_import_identifier_at(source, fs));
+        assert!(is_import_identifier_at(source, store));
+
+        assert!(!is_import_identifier_at(source, dot));
+        assert!(!is_import_identifier_at(source, comma));
+        assert!(!is_import_identifier_at(source, paren));
+        assert!(!is_import_identifier_at(source, space));
+    }
+
+    #[test]
+    fn goto_def_dep_symbol_opens_definition_gin_file() {
+        let dir = unique_temp_dir("dep_symbol");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        write_file(
+            &dir.join("flask.jsonc"),
+            r#"
+{
+  "name": "root",
+  "version": "0.0.0",
+  "authors": [],
+  "dependencies": {
+    "core": { "path": "core" }
+  }
+}
+"#,
+        );
+        write_file(
+            &dir.join("core/flask.jsonc"),
+            r#"{"name":"core","version":"0.0.0","authors":[]}"#,
+        );
+        // core/bool.gin exports `true := Bool.True` (a public bind)
+        write_file(&dir.join("core/bool.gin"), "true := Bool.True\n");
+        write_file(
+            &dir.join("main.gin"),
+            "use core.true\n\nmain:\n    true\nreturn\n",
+        );
+
+        let base_uri = Url::from_file_path(dir.join("main.gin")).unwrap();
+
+        // part=0 → root "core" → should open core/flask.jsonc
+        let loc_root = resolve_package_part_location_fs(
+            &base_uri,
+            &Intern::<String>::from_ref("core"),
+            &[Intern::<String>::from_ref("true")],
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            loc_root.uri.to_file_path().unwrap(),
+            dir.join("core/flask.jsonc")
+        );
+
+        // part=1 → segment "true" → should open core/bool.gin (the definition file)
+        // at the exact line/column of `true`'s definition.
+        let loc_true = resolve_package_part_location_fs(
+            &base_uri,
+            &Intern::<String>::from_ref("core"),
+            &[Intern::<String>::from_ref("true")],
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            loc_true.uri.to_file_path().unwrap(),
+            dir.join("core/bool.gin")
+        );
+        // Verify the range points to the definition of `true` at
+        // line 0, col 0 (the only line in the file `true := Bool.True\n`)
+        assert_eq!(loc_true.range.start.line, 0, "should be line 0");
+        assert_eq!(loc_true.range.start.character, 0, "should start at col 0");
+        assert_eq!(loc_true.range.end.line, 0, "should end on line 0");
+        assert_eq!(
+            loc_true.range.end.character, 4,
+            "should end at col 4 (length of 'true')"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn goto_def_dep_nonexistent_symbol_returns_none() {
+        let dir = unique_temp_dir("dep_nonexistent_symbol");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        write_file(
+            &dir.join("flask.jsonc"),
+            r#"
+{
+  "name": "root",
+  "version": "0.0.0",
+  "authors": [],
+  "dependencies": {
+    "core": { "path": "core" }
+  }
+}
+"#,
+        );
+        write_file(
+            &dir.join("core/flask.jsonc"),
+            r#"{"name":"core","version":"0.0.0","authors":[]}"#,
+        );
+        write_file(&dir.join("core/bool.gin"), "true := Bool.True\n");
+        // Note: `false` is not exported
+        write_file(&dir.join("main.gin"), "main:\n    return 0\n");
+
+        let base_uri = Url::from_file_path(dir.join("main.gin")).unwrap();
+
+        // A symbol that doesn't exist in the dependency should return None
+        let loc = resolve_package_part_location_fs(
+            &base_uri,
+            &Intern::<String>::from_ref("core"),
+            &[Intern::<String>::from_ref("nonexistent")],
+            1,
+        );
+        assert!(loc.is_none(), "expected None for nonexistent symbol");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn goto_def_dep_symbol_among_nested_packages_prefers_sub_package() {
+        // When a segment matches both a sub-package (folder with flask.jsonc)
+        // and a public definition, the sub-package should be preferred.
+        let dir = unique_temp_dir("dep_symbol_vs_folder");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        write_file(
+            &dir.join("flask.jsonc"),
+            r#"
+{
+  "name": "root",
+  "version": "0.0.0",
+  "authors": [],
+  "dependencies": {
+    "dep": { "path": "dep" }
+  }
+}
+"#,
+        );
+        write_file(
+            &dir.join("dep/flask.jsonc"),
+            r#"{"name":"dep","version":"0.0.0","authors":[]}"#,
+        );
+        // Both a sub-package `dep/io/` and a symbol `io` in dep/io.gin
+        write_file(
+            &dir.join("dep/io/flask.jsonc"),
+            r#"{"name":"io","version":"0.0.0","authors":[]}"#,
+        );
+        write_file(&dir.join("dep/io.gin"), "io: 42\n");
+        write_file(&dir.join("main.gin"), "main:\n    return 0\n");
+
+        let base_uri = Url::from_file_path(dir.join("main.gin")).unwrap();
+
+        // Should prefer the sub-package (folder with flask.jsonc) over the symbol
+        let loc = resolve_package_part_location_fs(
+            &base_uri,
+            &Intern::<String>::from_ref("dep"),
+            &[Intern::<String>::from_ref("io")],
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            loc.uri.to_file_path().unwrap(),
+            dir.join("dep/io/flask.jsonc"),
+            "should prefer sub-package over symbol definition"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `resolve_symbol_location` must return the exact range of the symbol's
+    /// definition in the target file, not just line 0 / col 0.
+    #[test]
+    fn resolve_symbol_location_returns_exact_definition_span() {
+        let dir = unique_temp_dir("precise_location");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("core")).unwrap();
+
+        write_file(
+            &dir.join("core/flask.jsonc"),
+            r#"{"name":"core","version":"0.0.0","authors":[]}"#,
+        );
+        // Use the exact content from the user's bool.gin
+        write_file(
+            &dir.join("core/bool.gin"),
+            r#"Bool is True or False
+
+false := Bool.False
+true  := Bool.True
+"#,
+        );
+
+        // Resolve `true` — it's on line 3 (0-indexed), col 0, length 4
+        let (uri, range) = resolve_symbol_location(&dir.join("core"), "true")
+            .expect("should resolve 'true' location");
+        assert_eq!(
+            uri.to_file_path().unwrap(),
+            dir.join("core/bool.gin"),
+            "should point to bool.gin"
+        );
+        // bool.gin content (0-indexed):
+        //   line 0: Bool is True or False
+        //   line 1: (empty)
+        //   line 2: false := Bool.False
+        //   line 3: true  := Bool.True
+        assert_eq!(range.start.line, 3, "true definition starts on line 3");
+        assert_eq!(range.start.character, 0, "true definition starts at col 0");
+        assert_eq!(range.end.line, 3, "true definition ends on line 3");
+        assert_eq!(
+            range.end.character, 4,
+            "true definition ends at col 4 (length of 'true')"
+        );
+
+        // Resolve `false` — line 2, col 0, length 5
+        let (uri, range) = resolve_symbol_location(&dir.join("core"), "false")
+            .expect("should resolve 'false' location");
+        assert_eq!(
+            uri.to_file_path().unwrap(),
+            dir.join("core/bool.gin"),
+            "should point to bool.gin"
+        );
+        assert_eq!(range.start.line, 2, "false definition starts on line 2");
+        assert_eq!(range.start.character, 0, "false definition starts at col 0");
+        assert_eq!(range.end.line, 2, "false definition ends on line 2");
+        assert_eq!(
+            range.end.character, 5,
+            "false definition ends at col 5 (length of 'false')"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `resolve_body_import_at` on `true` (used unqualified in `main`'s body)
+    /// must resolve to the definition file `core/bool.gin`.
+    #[test]
+    fn goto_def_body_import_symbol_resolves_to_definition_file() {
+        let dir = unique_temp_dir("body_import");
+        let _ = fs::remove_dir_all(&dir);
+
+        write_file(
+            &dir.join("flask.jsonc"),
+            r#"
+{
+  "name": "root",
+  "version": "0.0.0",
+  "authors": [],
+  "dependencies": {
+    "core": { "path": "core" }
+  }
+}
+"#,
+        );
+        write_file(
+            &dir.join("core/flask.jsonc"),
+            r#"{"name":"core","version":"0.0.0","authors":[]}"#,
+        );
+        write_file(
+            &dir.join("core/bool.gin"),
+            r#"Bool is True or False
+
+false := Bool.False
+true  := Bool.True
+"#,
+        );
+        let main_path = dir.join("main.gin");
+        write_file(&main_path, "use core.true\n\nmain:\n    true\nreturn\n");
+
+        let base_uri = Url::from_file_path(&main_path).unwrap();
+        let source = std::fs::read_to_string(&main_path).unwrap();
+        let po = parser::parse_source_full(&source);
+        let file_ast = &po.ast;
+
+        // We cannot instantiate `Backend` in a unit test (it holds LSP state),
+        // so we test the core logic via the free function `resolve_dep_dir_from_uri`
+        // and then manually simulate what `resolve_body_import_at` does.
+
+        // Verify the dependency directory resolves correctly
+        let dep_dir = resolve_dep_dir_from_uri(&base_uri, "core").expect("dep dir should resolve");
+        assert!(dep_dir.join("bool.gin").exists());
+
+        // Verify `true` is a public definition in core
+        let def_file = resolve::find_public_def_in_package(&dep_dir, "true")
+            .expect("'true' should be a public def");
+        assert_eq!(def_file, dir.join("core/bool.gin"));
+
+        // Verify the effective_name of the import matches "true"
+        let mut found_import = false;
+        for imp in file_ast.uses() {
+            for mi in &imp.0 {
+                let imported_name: String = match mi.alias {
+                    Some(ref alias) => format!("{}", alias),
+                    None => mi.effective_name(),
+                };
+                if imported_name == "true" {
+                    found_import = true;
+                    // Must be a single-segment Package import
+                    if let ast::ImportSource::Package(mp) = &mi.source {
+                        assert_eq!(
+                            mp.segments.len(),
+                            1,
+                            "'true' import should have exactly one segment"
+                        );
+                    } else {
+                        panic!("expected Package import");
+                    }
+                }
+            }
+        }
+        assert!(found_import, "should have found import for 'true'");
 
         let _ = fs::remove_dir_all(&dir);
     }

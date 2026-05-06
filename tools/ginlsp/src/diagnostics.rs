@@ -1,5 +1,5 @@
 use database::Diagnostics;
-use diagnostic::{Category, DiagnosticCode, TypeSymptom};
+use diagnostic::{Category, DiagnosticCode, TypeSymptom, UseSymptom};
 use span::SpanTable;
 use tower_lsp::lsp_types::{
     Diagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, Location, NumberOrString,
@@ -51,6 +51,10 @@ fn diagnostic_quickfix_data(symptom: &Diagnostics) -> Option<serde_json::Value> 
             "oldName": name,
             "newName": suggested,
         })),
+        DiagnosticCode::Import(UseSymptom::NotExported { symbol, .. }) => Some(serde_json::json!({
+            "gincQuickFix": "remove-bundle-member",
+            "symbol": symbol,
+        })),
         _ => None,
     }
 }
@@ -99,7 +103,7 @@ pub fn symptoms_to_diagnostics(
             let message = lsp_diagnostic_message(&symptom.message);
             let related_information = diagnostic_related_information(
                 document_uri,
-                range.clone(),
+                range,
                 symptom.help_on_span.as_deref(),
                 symptom.help.as_deref(),
             );

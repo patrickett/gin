@@ -20,10 +20,13 @@ impl DiagnosticLike for IoSymptom {
     }
 
     fn help(&self) -> Option<String> {
-        Some(match self {
-            Self::ReadFailed => "check if the file exists and you have permission to read it",
-            Self::WriteFailed => "check if you have permission to write to this location",
-            Self::ResolutionFailed => "check if the import path is correct",
-        }.into())
+        Some(
+            match self {
+                Self::ReadFailed => "check if the file exists and you have permission to read it",
+                Self::WriteFailed => "check if you have permission to write to this location",
+                Self::ResolutionFailed => "check if the import path is correct",
+            }
+            .into(),
+        )
     }
 }

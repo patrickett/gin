@@ -1,6 +1,6 @@
 use crossbeam_channel::unbounded;
 use database::input_database::InputDatabase;
-use database::{Db, File, set_file_contents};
+use database::{set_file_contents, Db, File};
 use std::path::{Path, PathBuf};
 
 pub struct DocumentState {
@@ -61,7 +61,7 @@ impl GinHost {
     /// This mirrors the file-collection logic that `ginc` uses so that
     /// the LSP sees the same set of files as the CLI.
     pub fn load_package(&mut self, dir: &Path) -> PackageInfo {
-        let file_paths = collect_gin_files_recursive(dir);
+        let file_paths = resolve::collect_gin_files(dir);
         let files = file_paths
             .iter()
             .filter_map(|p| self.db.input(p.clone()).ok())
@@ -71,26 +71,4 @@ impl GinHost {
             root: dir.to_path_buf(),
         }
     }
-}
-
-/// Collect `.gin` file paths recursively, skipping `target/` directories.
-fn collect_gin_files_recursive(dir: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return files;
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if path.file_name().is_some_and(|n| n == "target") {
-                continue;
-            }
-            files.extend(collect_gin_files_recursive(&path));
-        } else if path.extension().is_some_and(|ext| ext == "gin") {
-            files.push(path);
-        }
-    }
-
-    files
 }

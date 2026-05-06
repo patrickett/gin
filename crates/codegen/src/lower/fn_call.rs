@@ -7,7 +7,7 @@ impl<'c> Lower<'c> for FnCall {
         &self,
         ctx: &CodegenContext<'_, 'c>,
         block: &BlockRef<'c, 'c>,
-        symtab: &mut RuntimeSymbolTable<'c>,
+        symtab: &mut ScopedSymbolTable<'c>,
     ) -> Option<Value<'c, 'c>> {
         if !self.path.segments.is_empty() {
             let root = self.path.root;
@@ -49,7 +49,7 @@ impl<'c> Lower<'c> for FnCall {
                             type_name.as_str(),
                             segment.as_str()
                         ));
-                        let self_val = match symtab.get(root_str).copied() {
+                        let self_val = match symtab.get(root_str) {
                             Some(v) => v,
                             None => {
                                 ctx.emit_internal(format!("Unknown variable '{root_str}'"));
@@ -86,7 +86,7 @@ impl<'c> Lower<'c> for FnCall {
                             type_name.as_str(),
                             method.as_str()
                         ));
-                        let self_val = match symtab.get(root_str).copied() {
+                        let self_val = match symtab.get(root_str) {
                             Some(v) => v,
                             None => {
                                 ctx.emit_internal(format!("Unknown variable '{root_str}'"));
@@ -135,7 +135,7 @@ impl<'c> Lower<'c> for FnCall {
                             let self_val = if ctx.mutable_slots.borrow().contains(root_str) {
                                 let elem_mlir_ty = ty_to_mlir(&record_ty, ctx.mlir);
                                 let loc = ctx.location();
-                                let ptr = match symtab.get(root_str).copied() {
+                                let ptr = match symtab.get(root_str) {
                                     Some(v) => v,
                                     None => {
                                         ctx.emit_internal(format!("Unknown variable '{root_str}'"));
@@ -144,7 +144,7 @@ impl<'c> Lower<'c> for FnCall {
                                 };
                                 block.load_typed(ctx, ptr, elem_mlir_ty, loc)?
                             } else {
-                                match symtab.get(root_str).copied() {
+                                match symtab.get(root_str) {
                                     Some(v) => v,
                                     None => {
                                         ctx.emit_internal(format!("Unknown variable '{root_str}'"));
@@ -193,7 +193,7 @@ impl<'c> Lower<'c> for FnCall {
             return addressof_string_global(ctx.mlir, block, func_name.as_str());
         }
 
-        if let Some(&ptr) = symtab.get(func_name.as_str()) {
+        if let Some(ptr) = symtab.get(func_name.as_str()) {
             if ctx.mutable_slots.borrow().contains(func_name.as_str()) {
                 // Mutable variable — load from alloca slot.
                 let ty = ctx
@@ -241,25 +241,19 @@ impl<'c> Lower<'c> for FnCall {
         let return_type = ret_ty
             .map(|ty| ty_to_mlir(&ty, ctx.mlir))
             .unwrap_or_else(|| ctx.mlir.i64());
-        Some(block.call(
-            ctx.mlir,
-            func_name.as_str(),
-            &args,
-            return_type,
-            loc,
-        ))
+        Some(block.call(ctx.mlir, func_name.as_str(), &args, return_type, loc))
     }
 }
 
 fn lower_field_access<'c>(
     ctx: &CodegenContext<'_, 'c>,
     block: &BlockRef<'c, 'c>,
-    symtab: &RuntimeSymbolTable<'c>,
+    symtab: &ScopedSymbolTable<'c>,
     root: &str,
     segments: &[Intern<String>],
     ty: Ty,
 ) -> Option<Value<'c, 'c>> {
-    let slot = match symtab.get(root).copied() {
+    let slot = match symtab.get(root) {
         Some(v) => v,
         None => {
             ctx.emit_internal(format!("Unknown variable '{root}'"));

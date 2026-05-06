@@ -1,4 +1,5 @@
 use crate::prelude::*;
+use crate::path::ModPath;
 use crate::span::{SpanId, SpanTable};
 use indexmap::IndexMap;
 use std::{
@@ -237,6 +238,12 @@ impl SymbolTable {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SymbolAlias {
+    pub alias: Intern<String>,
+    pub target: ModPath,
+}
+
 /// Output of parsing a gin file.
 #[derive(Debug, Clone, Default)]
 pub struct FileAst {
@@ -248,6 +255,8 @@ pub struct FileAst {
     pub private_defs: HashSet<Intern<String>>,
     pub private_tags: HashSet<Intern<String>>,
     pub exprs: Vec<(Expr, SpanId)>,
+    pub symbol_aliases: Vec<SymbolAlias>,
+    pub symbol_alias_spans: Vec<SpanId>,
     /// Span table mapping SpanId → Span (byte ranges).
     /// Populated during parsing; excluded from Hash/Eq.
     pub span_table: SpanTable,
@@ -382,6 +391,8 @@ impl PartialEq for FileAst {
             && self.private_defs == other.private_defs
             && self.private_tags == other.private_tags
             && self.exprs == other.exprs
+            && self.symbol_aliases == other.symbol_aliases
+            && self.symbol_alias_spans == other.symbol_alias_spans
             && self.span_table == other.span_table
     }
 }
@@ -408,6 +419,8 @@ impl Hash for FileAst {
             self.private_defs.contains(k).hash(state);
         }
         self.exprs.hash(state);
+        self.symbol_aliases.hash(state);
+        self.symbol_alias_spans.hash(state);
         self.span_table.hash(state);
     }
 }

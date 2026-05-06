@@ -1,7 +1,7 @@
 use internment::Intern;
 
-use crate::span::SpanId;
 use crate::span::HasSpanId;
+use crate::span::SpanId;
 
 /// A multi‑segment identifier.
 ///

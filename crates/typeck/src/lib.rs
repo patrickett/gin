@@ -30,5 +30,6 @@ pub mod source;
 pub use completions::*;
 pub use hover::{
     dot_type_at, find_definition_span, find_import_definition_span, find_references, hover_at,
+    is_variant_at,
 };
 pub use source::*;

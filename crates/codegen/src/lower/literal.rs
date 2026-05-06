@@ -5,7 +5,7 @@ impl<'c> Lower<'c> for Literal {
         &self,
         ctx: &CodegenContext<'_, 'c>,
         block: &BlockRef<'c, 'c>,
-        _symtab: &mut RuntimeSymbolTable<'c>,
+        _symtab: &mut ScopedSymbolTable<'c>,
     ) -> Option<Value<'c, 'c>> {
         Some(match self {
             // Emit integer constants at the width implied by the value.

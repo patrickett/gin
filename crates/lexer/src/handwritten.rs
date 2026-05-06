@@ -583,7 +583,9 @@ impl<'src> Lexer<'src> {
                         (Some(b'-'), Some(b'|')) => {
                             Some(self.lex_comment(start, 2, CommentKind::ModuleDoc))
                         }
-                        (Some(b'-'), Some(b'-')) => Some(self.lex_comment(start, 2, CommentKind::Doc)),
+                        (Some(b'-'), Some(b'-')) => {
+                            Some(self.lex_comment(start, 2, CommentKind::Doc))
+                        }
                         (Some(b'-'), _) => Some(self.lex_comment(start, 1, CommentKind::Line)),
                         (Some(b'>'), _) => {
                             self.pos += 1;

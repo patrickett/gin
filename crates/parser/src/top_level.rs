@@ -1,10 +1,15 @@
-use ast::span::{SpanId, SpanTable};
-use lexer::Token;
 use std::collections::HashSet;
+use std::ops::ControlFlow;
+
+use ast::span::{SpanId, SpanTable};
+use ast::visit::{walk_bind_value, walk_expr, Visitor};
+use lexer::Token;
+
+use ControlFlow::Continue;
 
 use ast::{
     Bind, Declare, DeclareValue, Expr, FileAst, ImplBlock, ParameterKind, Spanned, Variant,
-    WhenArm, collapse_defs_for_platform, type_surface_mangle_name,
+    collapse_defs_for_platform, type_surface_mangle_name,
 };
 use indexmap::IndexMap;
 use internment::Intern;
@@ -95,6 +100,8 @@ pub fn parse_file(cursor: &mut TokenCursor, expr_parser: ExprFn) -> FileAst {
         private_defs,
         private_tags,
         exprs,
+        symbol_aliases: Vec::new(),
+        symbol_alias_spans: Vec::new(),
         span_table: SpanTable::new(),
     }
 }
@@ -499,32 +506,20 @@ fn is_declare_from_offset(cursor: &TokenCursor, tag_offset: usize) -> bool {
 }
 
 fn extract_anonymous_tags_from_bind(bind: &Bind, tags: &mut Vec<(Intern<String>, SpanId)>) {
-    use ast::BindValue;
-
+    let mut collector = AnonymousTagCollector { collected: Vec::new() };
+    
     if let Some(sp) = bind.receiver_type_surface() {
-        extract_anonymous_tags_from_type_surface(&sp.0, tags);
+        collect_type_surface_tags(&sp.0, &mut collector.collected);
     }
     if let Some(sp) = &bind.return_tag {
-        extract_anonymous_tags_from_type_surface(&sp.0, tags);
+        collect_type_surface_tags(&sp.0, &mut collector.collected);
     }
 
-    match bind.value() {
-        BindValue::Expr(expr) => {
-            extract_anonymous_tags_from_expr(expr, tags);
-        }
-        BindValue::Body { exprs, ret } => {
-            for expr in exprs {
-                extract_anonymous_tags_from_expr(expr, tags);
-            }
-            if let Some(expr) = &ret.0 {
-                extract_anonymous_tags_from_expr(expr, tags);
-            }
-        }
-        BindValue::Extern => {}
-    }
+    let _ = walk_bind_value(&mut collector, bind.value());
+    tags.extend(collector.collected);
 }
 
-fn extract_anonymous_tags_from_type_surface(expr: &Expr, tags: &mut Vec<(Intern<String>, SpanId)>) {
+fn collect_type_surface_tags(expr: &Expr, tags: &mut Vec<(Intern<String>, SpanId)>) {
     match expr {
         Expr::TypeNominal(name, span) => {
             tags.push((*name, *span));
@@ -533,9 +528,13 @@ fn extract_anonymous_tags_from_type_surface(expr: &Expr, tags: &mut Vec<(Intern<
         Expr::TypeGeneric { params, .. } => {
             for (_, pk) in params {
                 match pk {
-                    ParameterKind::Default(e) => extract_anonymous_tags_from_expr(e, tags),
+                    ParameterKind::Default(e) => {
+                        let mut inner = AnonymousTagCollector { collected: Vec::new() };
+                        let _ = walk_expr(&mut inner, e);
+                        tags.extend(inner.collected);
+                    }
                     ParameterKind::Tagged(sp) => {
-                        extract_anonymous_tags_from_type_surface(&sp.0, tags);
+                        collect_type_surface_tags(&sp.0, tags);
                     }
                     ParameterKind::Generic => {}
                 }
@@ -545,78 +544,37 @@ fn extract_anonymous_tags_from_type_surface(expr: &Expr, tags: &mut Vec<(Intern<
     }
 }
 
-fn extract_anonymous_tags_from_expr(expr: &Expr, tags: &mut Vec<(Intern<String>, SpanId)>) {
-    match expr {
-        Expr::AnonymousTag(name, span) => {
-            tags.push((*name, *span));
-        }
-        Expr::FnCall(call) => {
-            if let Some(args) = &call.args {
-                for arg in args {
-                    extract_anonymous_tags_from_expr(arg, tags);
-                }
+struct AnonymousTagCollector {
+    collected: Vec<(Intern<String>, SpanId)>,
+}
+
+impl Visitor for AnonymousTagCollector {
+    fn visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
+        match expr {
+            Expr::AnonymousTag(name, span) => {
+                self.collected.push((*name, *span));
+                Continue(())
             }
-        }
-        Expr::Binary(bin) => {
-            extract_anonymous_tags_from_expr(&bin.lhs, tags);
-            extract_anonymous_tags_from_expr(&bin.rhs, tags);
-        }
-        Expr::Loop(loop_expr) => {
-            use ast::Loop;
-            match loop_expr {
-                Loop::ForIn(for_loop) => {
-                    for e in &for_loop.exprs {
-                        extract_anonymous_tags_from_expr(e, tags);
-                    }
-                    extract_anonymous_tags_from_expr(&for_loop.iter, tags);
-                }
-                Loop::While(while_loop) => {
-                    for e in &while_loop.exprs {
-                        extract_anonymous_tags_from_expr(e, tags);
-                    }
-                    extract_anonymous_tags_from_expr(&while_loop.cond, tags);
-                }
+            Expr::TypeNominal(name, span) => {
+                self.collected.push((*name, *span));
+                Continue(())
             }
-        }
-        Expr::When(when_expr) => {
-            if let Some(subject) = &when_expr.subject {
-                extract_anonymous_tags_from_expr(subject, tags);
-            }
-            for arm in &when_expr.arms {
-                match arm {
-                    WhenArm::Cond { condition, body } => {
-                        extract_anonymous_tags_from_expr(condition, tags);
-                        extract_anonymous_tags_from_expr(body, tags);
-                    }
-                    WhenArm::Is { body, .. } => {
-                        extract_anonymous_tags_from_expr(body, tags);
-                    }
-                    WhenArm::Else(body) => {
-                        extract_anonymous_tags_from_expr(body, tags);
+            Expr::TypeQualified(_) => Continue(()),
+            Expr::TypeGeneric { params, .. } => {
+                for (_, pk) in params {
+                    match pk {
+                        ParameterKind::Default(e) => {
+                            let _ = self.visit_expr(e);
+                        }
+                        ParameterKind::Tagged(sp) => {
+                            collect_type_surface_tags(&sp.0, &mut self.collected);
+                        }
+                        ParameterKind::Generic => {}
                     }
                 }
+                Continue(())
             }
+            _ => walk_expr(self, expr),
         }
-        Expr::Bind(bind) => {
-            use ast::expr::BindValue;
-            match bind.value() {
-                BindValue::Expr(e) => {
-                    extract_anonymous_tags_from_expr(e, tags);
-                }
-                BindValue::Body { exprs, ret } => {
-                    for e in exprs {
-                        extract_anonymous_tags_from_expr(e, tags);
-                    }
-                    if let Some(e) = &ret.0 {
-                        extract_anonymous_tags_from_expr(e, tags);
-                    }
-                }
-                BindValue::Extern => {}
-            }
-        }
-        Expr::TypeNominal(..) | Expr::TypeQualified(_) | Expr::TypeGeneric { .. } => {
-            extract_anonymous_tags_from_type_surface(expr, tags);
-        }
-        _ => {}
     }
 }

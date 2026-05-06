@@ -29,7 +29,8 @@ impl Backend {
         };
 
         if let Some(file) = file {
-            self.documents.insert(uri, DocumentState { source: text, file });
+            self.documents
+                .insert(uri, DocumentState { source: text, file });
             self.spawn_publish_diagnostics(uri_for_diag, file);
         }
 
@@ -68,7 +69,8 @@ impl Backend {
             };
 
             if let Some(file) = file {
-                self.documents.insert(uri, DocumentState { source: text, file });
+                self.documents
+                    .insert(uri, DocumentState { source: text, file });
                 self.spawn_publish_diagnostics(uri_for_diag, file);
             }
         }

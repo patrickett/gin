@@ -5,7 +5,7 @@ impl<'c> Lower<'c> for ast::expr::AsmExpr {
         &self,
         ctx: &CodegenContext<'_, 'c>,
         block: &BlockRef<'c, 'c>,
-        symtab: &mut RuntimeSymbolTable<'c>,
+        symtab: &mut ScopedSymbolTable<'c>,
     ) -> Option<Value<'c, 'c>> {
         let loc = ctx.location();
 

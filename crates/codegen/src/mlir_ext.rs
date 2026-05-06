@@ -265,7 +265,13 @@ pub trait BlockExt<'c> {
     /// Return a unit/void value
     fn unit_value(&self, ctx: &CodegenContext<'_, 'c>) -> Value<'c, 'c>;
     fn ret(&self, ctx: &'c Context, values: &[Value<'c, 'c>], loc: Location<'c>) -> Operation<'c>;
-    fn call_void(&self, ctx: &'c Context, func_name: &str, args: &[Value<'c, 'c>], loc: Location<'c>);
+    fn call_void(
+        &self,
+        ctx: &'c Context,
+        func_name: &str,
+        args: &[Value<'c, 'c>],
+        loc: Location<'c>,
+    );
     fn call(
         &self,
         ctx: &'c Context,
@@ -355,7 +361,13 @@ impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
         melior::dialect::func::r#return(values, loc)
     }
 
-    fn call_void(&self, ctx: &'c Context, func_name: &str, args: &[Value<'c, 'c>], loc: Location<'c>) {
+    fn call_void(
+        &self,
+        ctx: &'c Context,
+        func_name: &str,
+        args: &[Value<'c, 'c>],
+        loc: Location<'c>,
+    ) {
         let callee_id = Identifier::new(ctx, "callee");
         let symbol_ref = ctx.symbol_ref_attr(func_name);
         self.append_operation(

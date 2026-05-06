@@ -1,14 +1,16 @@
 //! Persistent inputs and low-level Salsa queries (for example parsing).
 //! Semantic analysis and editor integration live in the `typeck` crate.
 pub mod input_database;
-pub mod queries;
 pub mod package;
+pub mod queries;
 pub mod semantic_queries;
 
 pub use input_database::{Db, InputDatabase};
+pub use package::{PackageFiles, intern_package_files, sorted_package_files};
 pub use queries::{file_parse_output, parse_file, set_file_contents};
-pub use package::{sorted_package_files, intern_package_files, PackageFiles};
-pub use semantic_queries::{hover_markdown, package_ty_env, package_typecheck_symptoms, ty_env_for_file};
+pub use semantic_queries::{
+    hover_markdown, package_ty_env, package_typecheck_symptoms, ty_env_for_file,
+};
 
 use diagnostic::{Diagnostic, DiagnosticCode, DiagnosticLike};
 use span::SpanId;

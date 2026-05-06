@@ -2,8 +2,8 @@ use crate::span::SpanId;
 use internment::Intern;
 
 use crate::doc_comment::DocComment;
-use crate::parameter::fmt_type_expr_surface;
 use crate::parameter::Parameters;
+use crate::parameter::fmt_type_expr_surface;
 use crate::path::ModPath;
 use crate::span::Spanned;
 

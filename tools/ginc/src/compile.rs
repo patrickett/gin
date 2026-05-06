@@ -4,7 +4,7 @@ use crate::cli::Args;
 use ast::FileAst;
 use codegen::emit;
 use diagnostic::{Category, Diagnostic};
-use flask::{FlaskConfig, PACKAGE_CONFIG_NAME};
+use flask::FlaskConfig;
 use internment::Intern;
 use lexer::debug_tokens;
 use parser::parse_source_full;
@@ -138,40 +138,9 @@ fn typecheck(files: &[ParsedFile]) -> TypecheckResult {
     TypecheckResult { ty_env, symptoms }
 }
 
-/// Collect `.gin` file paths under `root`, skipping `target/` directories.
-///
-/// If `root` is a folder module (contains `flask.jsonc`), only immediate `*.gin` files are used.
+// Delegates to resolve::collect_gin_files (single source of truth).
 fn collect_gin_files(root: &Path) -> Vec<PathBuf> {
-    if root.is_dir() {
-        if root.join(PACKAGE_CONFIG_NAME).is_file() {
-            flask::list_package_gin_files(root)
-        } else {
-            collect_gin_files_recursive(root)
-        }
-    } else {
-        vec![root.to_path_buf()]
-    }
-}
-
-fn collect_gin_files_recursive(dir: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return files;
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if path.file_name().is_some_and(|n| n == "target") {
-                continue;
-            }
-            files.extend(collect_gin_files_recursive(&path));
-        } else if path.extension().is_some_and(|ext| ext == "gin") {
-            files.push(path);
-        }
-    }
-
-    files
+    resolve::collect_gin_files(root)
 }
 
 /// Read file contents from disk, skipping files that can't be read.

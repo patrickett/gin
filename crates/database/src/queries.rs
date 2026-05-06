@@ -28,4 +28,3 @@ pub fn set_file_contents(db: &mut InputDatabase, file: File, contents: String) {
     use salsa::Setter;
     file.set_contents(db).to(contents);
 }
-

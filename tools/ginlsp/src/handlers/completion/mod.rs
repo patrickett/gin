@@ -3,11 +3,11 @@ mod path;
 
 use crate::Backend;
 use ast::FileAst;
-use database::{file_parse_output, sorted_package_files, intern_package_files, package_ty_env};
-use typeck::{completions_for_ast, dot_type_at, position_to_byte_offset, CompletionKind};
+use database::{file_parse_output, intern_package_files, package_ty_env, sorted_package_files};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use typeck::Ty;
+use typeck::{completions_for_ast, dot_type_at, position_to_byte_offset, CompletionKind};
 
 impl Backend {
     pub(crate) async fn handle_completion(

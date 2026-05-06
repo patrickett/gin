@@ -1,8 +1,8 @@
-use crate::{CodegenSymptom, ImportSymptom, IoSymptom, LexSymptom, ParseSymptom, TypeSymptom};
+use crate::{CodegenSymptom, IoSymptom, LexSymptom, ParseSymptom, TypeSymptom, UseSymptom};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiagnosticCode {
-    Import(ImportSymptom),
+    Import(UseSymptom),
     Lex(LexSymptom),
     Parse(ParseSymptom),
     Type(TypeSymptom),
@@ -10,23 +10,35 @@ pub enum DiagnosticCode {
     Codegen(CodegenSymptom),
 }
 
-impl From<ImportSymptom> for DiagnosticCode {
-    fn from(v: ImportSymptom) -> Self { DiagnosticCode::Import(v) }
+impl From<UseSymptom> for DiagnosticCode {
+    fn from(v: UseSymptom) -> Self {
+        DiagnosticCode::Import(v)
+    }
 }
 impl From<LexSymptom> for DiagnosticCode {
-    fn from(v: LexSymptom) -> Self { DiagnosticCode::Lex(v) }
+    fn from(v: LexSymptom) -> Self {
+        DiagnosticCode::Lex(v)
+    }
 }
 impl From<ParseSymptom> for DiagnosticCode {
-    fn from(v: ParseSymptom) -> Self { DiagnosticCode::Parse(v) }
+    fn from(v: ParseSymptom) -> Self {
+        DiagnosticCode::Parse(v)
+    }
 }
 impl From<TypeSymptom> for DiagnosticCode {
-    fn from(v: TypeSymptom) -> Self { DiagnosticCode::Type(v) }
+    fn from(v: TypeSymptom) -> Self {
+        DiagnosticCode::Type(v)
+    }
 }
 impl From<IoSymptom> for DiagnosticCode {
-    fn from(v: IoSymptom) -> Self { DiagnosticCode::Io(v) }
+    fn from(v: IoSymptom) -> Self {
+        DiagnosticCode::Io(v)
+    }
 }
 impl From<CodegenSymptom> for DiagnosticCode {
-    fn from(v: CodegenSymptom) -> Self { DiagnosticCode::Codegen(v) }
+    fn from(v: CodegenSymptom) -> Self {
+        DiagnosticCode::Codegen(v)
+    }
 }
 
 impl DiagnosticCode {

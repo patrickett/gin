@@ -5,8 +5,8 @@
 // jump instead of a call.
 // maybe also greedy-shuffling to minimize argument-copying overhead in tail calls.
 
-use super::toolchain;
 use super::Profile;
+use super::toolchain;
 use crate::build_module_with_context;
 use ast::FileAst;
 use diagnostic::codegen::CodegenSymptom;

@@ -6,7 +6,7 @@ impl<'c> Lower<'c> for Bind {
         &self,
         ctx: &CodegenContext<'_, 'c>,
         block: &BlockRef<'c, 'c>,
-        symtab: &mut RuntimeSymbolTable<'c>,
+        symtab: &mut ScopedSymbolTable<'c>,
     ) -> Option<Value<'c, 'c>> {
         match &self.value() {
             BindValue::Body { exprs: _, ret: _ } => {
@@ -31,7 +31,7 @@ impl<'c> Lower<'c> for Bind {
                     let name_str = name.as_str().to_string();
                     if ctx.mutable_slots.borrow().contains(&name_str) {
                         // Rebind (`:`) of an existing mutable variable — store new value.
-                        let ptr = match symtab.get(&name_str).copied() {
+                        let ptr = match symtab.get(&name_str) {
                             Some(p) => p,
                             None => {
                                 ctx.emit_internal(format!(

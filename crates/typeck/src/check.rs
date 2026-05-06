@@ -1,29 +1,74 @@
 //! AST validation — unknown-reference checking and unused-binding detection.
 
-use ast::{
-    Bind, BindValue, Expr, FileAst, FormatPart, HasSpanId, IfCondition, Loop, ParameterKind,
-    Spanned, WhenArm, type_surface_mangle_name,
-};
-use internment::Intern;
 use std::collections::{HashMap, HashSet};
+use std::ops::ControlFlow;
+
+use ast::visit::{walk_bind_value, walk_expr, walk_fn_call, Visitor};
+use ast::{
+    Bind, BindValue, Expr, FileAst, HasSpanId, IfCondition, ParameterKind,
+    SpanId, Spanned, WhenArm, type_surface_mangle_name,
+};
+use diagnostic::type_::TypeSymptom;
+use diagnostic::DiagnosticLike;
+use internment::Intern;
 
 use crate::env::TyEnv;
 use crate::resolve::{is_type_surface, mangled_fn_call_name};
 use crate::ty::Ty;
 use crate::{LayeredLocals, LocalTypes, TyInfer, TyInferEnv};
 
-/// Value-level names brought into scope by `use` (package root, last segment, or `as` alias).
-fn collect_import_names(ast: &FileAst) -> HashSet<Intern<String>> {
-    let mut out = HashSet::new();
+use ControlFlow::Continue;
+
+/// Import information for the current file.
+struct ImportSet {
+    all: HashSet<Intern<String>>,
+    bundle_members: HashSet<Intern<String>>,
+    module_prefixes: HashSet<Intern<String>>,
+    alias_spans: HashSet<SpanId>,
+}
+
+/// Collect import names and bundle member names from the AST.
+fn collect_import_names(ast: &FileAst) -> ImportSet {
+    let mut all = HashSet::new();
+    let mut bundle_members = HashSet::new();
+    let mut module_prefixes = HashSet::new();
+    let alias_spans: HashSet<SpanId> = ast.symbol_alias_spans.iter().copied().collect();
     for imp in ast.uses() {
         for mi in &imp.0 {
             let name = mi
                 .alias
                 .unwrap_or_else(|| Intern::<String>::new(mi.effective_name()));
-            out.insert(name);
+            all.insert(name);
+            if let ast::ImportSource::LocalBundle(b) = &mi.source {
+                for member in &b.members {
+                    let member_name = member.alias.unwrap_or(member.export);
+                    all.insert(member_name);
+                    bundle_members.insert(member_name);
+                }
+            } else if let ast::ImportSource::Package(mp) = &mi.source
+                && !mp.segments.is_empty()
+            {
+                bundle_members.insert(name);
+            }
+            if let ast::ImportSource::Package(mp) = &mi.source
+                && mp.segments.is_empty()
+            {
+                let prefix = mi.alias.unwrap_or(mp.root);
+                module_prefixes.insert(prefix);
+            }
+            if let ast::ImportSource::Local(_, _) = &mi.source
+                && let Some(alias) = mi.alias
+            {
+                module_prefixes.insert(alias);
+            }
         }
     }
-    out
+    ImportSet {
+        all,
+        bundle_members,
+        module_prefixes,
+        alias_spans,
+    }
 }
 
 /// Levenshtein distance for short identifiers (imports, bind names).
@@ -52,7 +97,6 @@ fn levenshtein(a: &str, b: &str) -> usize {
 }
 
 impl TyEnv {
-    /// Best single-character-edit match among imports, top-level functions, and declared tags.
     fn suggest_typo_for_identifier(
         &self,
         unknown: &str,
@@ -104,9 +148,6 @@ impl TyEnv {
             if !bind.attributes().matches_current_platform() {
                 continue;
             }
-            // Method-scoped type variables introduced by a generic receiver
-            // (e.g. `x` in `Range[x].new`). Treated as opaque while checking
-            // this method's own body.
             let subst = bind
                 .receiver_type_surface()
                 .map(|sp| crate::resolve::typevars_from_receiver(&sp.0))
@@ -120,8 +161,6 @@ impl TyEnv {
                     );
                 }
             }
-            // `self` resolves against the same subst so methods can reference
-            // their own receiver's record fields with the type variable bound.
             if let Some(sp) = bind.receiver_type_surface()
                 && is_type_surface(&sp.0)
             {
@@ -138,7 +177,7 @@ impl TyEnv {
         bind: &Bind,
         symptoms: &mut Vec<diagnostic::Diagnostic>,
         locals: &dyn LocalTypes,
-        imports: &HashSet<Intern<String>>,
+        imports: &ImportSet,
     ) {
         if let Some(sp) = &bind.return_tag
             && is_type_surface(&sp.0)
@@ -154,18 +193,18 @@ impl TyEnv {
                 check_return_variants(bind, &valid_variants, *union_name, symptoms);
             }
         }
-        // Body-vs-return-tag tuple-IS-record check: when the return tag is a
-        // record (e.g. `Range[x]`) and the body produces a tuple of matching
-        // arity (e.g. `(start, end)`), accept it without requiring an explicit
-        // record-literal syntax. This is the first step toward fully unifying
-        // `Ty::Tuple` and `Ty::Record` per the design intent.
         self.check_body_matches_return(bind, symptoms, locals);
         match bind.value() {
-            BindValue::Expr(expr) => self.check_expr(expr, symptoms, locals, imports),
+            BindValue::Expr(expr) => {
+                let mut checker = UnknownRefChecker {
+                    ty_env: self,
+                    symptoms,
+                    locals,
+                    imports,
+                };
+                let _ = checker.visit_expr(expr);
+            }
             BindValue::Body { exprs, ret } => {
-                use diagnostic::DiagnosticLike;
-                use diagnostic::type_::TypeSymptom;
-
                 let mut body_locals = LayeredLocals::new(locals);
                 for expr in exprs.iter() {
                     if let Expr::Bind(inner) = &**expr {
@@ -179,16 +218,29 @@ impl TyEnv {
                             inner.infer_ty(&env)
                         });
                     } else {
-                        self.check_expr(expr, symptoms, &body_locals, imports);
+                        let mut checker = UnknownRefChecker {
+                            ty_env: self,
+                            symptoms,
+                            locals: &body_locals,
+                            imports,
+                        };
+                        let _ = checker.visit_expr(expr);
                     }
                 }
                 if let Some(ret_expr) = &ret.0 {
-                    self.check_expr(ret_expr, symptoms, &body_locals, imports);
+                    let mut checker = UnknownRefChecker {
+                        ty_env: self,
+                        symptoms,
+                        locals: &body_locals,
+                        imports,
+                    };
+                    let _ = checker.visit_expr(ret_expr);
                 }
 
                 let mut suffix_refs: HashSet<Intern<String>> = HashSet::new();
                 if let Some(e) = &ret.0 {
-                    collect_referenced_names(e, &mut suffix_refs);
+                    let mut collector = RefCollector { refs: &mut suffix_refs };
+                    let _ = walk_expr(&mut collector, e);
                 }
                 let mut unused_spans: Vec<_> = Vec::new();
                 for expr in exprs.iter().rev() {
@@ -197,9 +249,11 @@ impl TyEnv {
                         if !suffix_refs.contains(&name) && !name.starts_with('_') {
                             unused_spans.push((name, inner.name_span));
                         }
-                        collect_bind_value_refs(inner, &mut suffix_refs);
+                        let mut collector = RefCollector { refs: &mut suffix_refs };
+                        let _ = walk_bind_value(&mut collector, inner.value());
                     } else {
-                        collect_referenced_names(expr, &mut suffix_refs);
+                        let mut collector = RefCollector { refs: &mut suffix_refs };
+                        let _ = walk_expr(&mut collector, expr);
                     }
                 }
                 for (name, span) in unused_spans.into_iter().rev() {
@@ -215,262 +269,7 @@ impl TyEnv {
         }
     }
 
-    fn check_expr(
-        &self,
-        expr: &Expr,
-        symptoms: &mut Vec<diagnostic::Diagnostic>,
-        locals: &dyn LocalTypes,
-        imports: &HashSet<Intern<String>>,
-    ) {
-        use diagnostic::DiagnosticLike;
-        use diagnostic::type_::TypeSymptom;
-
-        match expr {
-            Expr::FnCall(call) => {
-                let name = call.path.root;
-                let mangled = mangled_fn_call_name(call);
-                if let Some(args) = &call.args {
-                    if self.fn_return_ty(&mangled).is_none() {
-                        let mangled_str = mangled.to_string();
-                        let suggestion = if !mangled_str.contains('.') {
-                            self.suggest_typo_for_identifier(&mangled_str, imports)
-                        } else {
-                            None
-                        };
-                        symptoms.push(
-                            TypeSymptom::UnknownBinding {
-                                name: mangled_str,
-                                did_you_mean: suggestion,
-                            }
-                            .into_diagnostic(call.path.span_id()),
-                        );
-                    }
-                    for arg in args {
-                        self.check_expr(arg, symptoms, locals, imports);
-                    }
-                    // Argument-vs-parameter unification: if the called function
-                    // has a known param signature, walk the args and check each
-                    // one against the corresponding param type. Type-variable
-                    // unification (`x` shared across `start x, end x`) is what
-                    // catches `Range.new(1, "hi")`.
-                    self.check_call_args(&mangled, call, args, symptoms, locals);
-                } else if call.path.segments.is_empty()
-                    && locals.get_type(&name).is_none()
-                    && self.fn_return_ty(&mangled).is_none()
-                    && !imports.contains(&name)
-                {
-                    let suggestion = self.suggest_typo_for_identifier(name.as_str(), imports);
-                    symptoms.push(
-                        TypeSymptom::UnknownBinding {
-                            name: mangled.to_string(),
-                            did_you_mean: suggestion,
-                        }
-                        .into_diagnostic(call.path.span_id()),
-                    );
-                } else if call.path.segments.is_empty()
-                    && call.args.is_none()
-                    && locals.get_type(&name).is_none()
-                    && self.fn_return_ty(&mangled).is_none()
-                    && imports.contains(&name)
-                {
-                    symptoms.push(
-                        TypeSymptom::NotExpr {
-                            name: name.to_string(),
-                        }
-                        .into_diagnostic(call.path.span_id()),
-                    );
-                }
-            }
-            Expr::Bind(bind) => self.check_bind(bind, symptoms, locals, imports),
-            Expr::Binary(bin) => {
-                self.check_expr(&bin.lhs, symptoms, locals, imports);
-                self.check_expr(&bin.rhs, symptoms, locals, imports);
-            }
-            Expr::When(w) => {
-                let subject_ty = w
-                    .subject
-                    .as_ref()
-                    .map(|s| s.infer_ty(&self.infer_env(locals)));
-                if let Some(subject) = &w.subject {
-                    self.check_expr(subject, symptoms, locals, imports);
-                }
-                for arm in &w.arms {
-                    match arm {
-                        WhenArm::Cond { condition, body } => {
-                            self.check_expr(condition, symptoms, locals, imports);
-                            self.check_expr(body, symptoms, locals, imports);
-                        }
-                        WhenArm::Is { pattern, body } => {
-                            if is_type_surface(&pattern.0) {
-                                let surface_name = type_surface_mangle_name(&pattern.0);
-                                let variant_name = Intern::<String>::from_ref(surface_name);
-                                match &subject_ty {
-                                    Some(Ty::Union {
-                                        name: union_name,
-                                        variants,
-                                    }) => {
-                                        if !variants.iter().any(|(vname, _)| vname == &variant_name)
-                                        {
-                                            symptoms.push(
-                                                TypeSymptom::NotAVariant {
-                                                    name: surface_name.to_string(),
-                                                    union_name: union_name.to_string(),
-                                                }
-                                                .into_diagnostic(pattern.1),
-                                            );
-                                        }
-                                    }
-                                    _ => {
-                                        if self.lookup_variant(variant_name).is_none() {
-                                            symptoms.push(
-                                                TypeSymptom::UnknownTag {
-                                                    name: surface_name.to_string(),
-                                                }
-                                                .into_diagnostic(pattern.1),
-                                            );
-                                        }
-                                    }
-                                }
-                                check_type_pattern_default_exprs(&pattern.0, &mut |e| {
-                                    self.check_expr(e, symptoms, locals, imports);
-                                });
-                            } else {
-                                symptoms.push(
-                                    TypeSymptom::UnknownTag {
-                                        name: "invalid is-pattern".to_string(),
-                                    }
-                                    .into_diagnostic(pattern.1),
-                                );
-                            }
-                            self.check_expr(body, symptoms, locals, imports);
-                        }
-                        WhenArm::Else(body) => {
-                            self.check_expr(body, symptoms, locals, imports);
-                        }
-                    }
-                }
-            }
-            Expr::If(if_expr) => match &if_expr.condition {
-                IfCondition::Bool(cond) => {
-                    self.check_expr(cond, symptoms, locals, imports);
-                    for e in &if_expr.body {
-                        self.check_expr(e, symptoms, locals, imports);
-                    }
-                }
-                IfCondition::Pattern { subject, pattern } => {
-                    self.check_expr(subject, symptoms, locals, imports);
-                    let mut if_locals = LayeredLocals::new(locals);
-                    if is_type_surface(&pattern.0) {
-                        if let Expr::TypeGeneric { params, .. } = &pattern.0 {
-                            for (k, _) in params.iter() {
-                                if k.as_str() != "_" {
-                                    if_locals.insert(*k, Ty::Opaque(*k));
-                                }
-                            }
-                        }
-                        check_type_pattern_default_exprs(&pattern.0, &mut |e| {
-                            self.check_expr(e, symptoms, locals, imports);
-                        });
-                    } else {
-                        symptoms.push(
-                            TypeSymptom::UnknownTag {
-                                name: "invalid is-pattern".to_string(),
-                            }
-                            .into_diagnostic(pattern.1),
-                        );
-                    }
-                    for e in &if_expr.body {
-                        self.check_expr(e, symptoms, &if_locals, imports);
-                    }
-                }
-            },
-            Expr::Loop(loop_expr) => match loop_expr {
-                Loop::While(w) => {
-                    self.check_expr(&w.cond, symptoms, locals, imports);
-                    for e in &w.exprs {
-                        self.check_expr(e, symptoms, locals, imports);
-                    }
-                }
-                Loop::ForIn(f) => {
-                    self.check_expr(&f.iter, symptoms, locals, imports);
-                    for e in &f.exprs {
-                        self.check_expr(e, symptoms, locals, imports);
-                    }
-                }
-            },
-            Expr::TupleLit(elems) => {
-                for e in elems {
-                    self.check_expr(e, symptoms, locals, imports);
-                }
-            }
-            Expr::TupleAlloc { init, .. } => self.check_expr(init, symptoms, locals, imports),
-            Expr::TupleGet { base, .. } => self.check_expr(base, symptoms, locals, imports),
-            Expr::TupleSet { base, value, .. } => {
-                self.check_expr(base, symptoms, locals, imports);
-                self.check_expr(value, symptoms, locals, imports);
-            }
-            Expr::BufGet { buf, index, .. } => {
-                self.check_expr(buf, symptoms, locals, imports);
-                self.check_expr(index, symptoms, locals, imports);
-            }
-            Expr::BufSet {
-                buf, index, value, ..
-            } => {
-                self.check_expr(buf, symptoms, locals, imports);
-                self.check_expr(index, symptoms, locals, imports);
-                self.check_expr(value, symptoms, locals, imports);
-            }
-            Expr::Cast { expr, .. } => self.check_expr(expr, symptoms, locals, imports),
-            Expr::TakePtr(e) | Expr::TakeRef(e) | Expr::Deref(e) | Expr::Negate(e) => {
-                self.check_expr(e, symptoms, locals, imports);
-            }
-            Expr::AnonymousTag(name, span) => {
-                if self.lookup_variant(*name).is_none() {
-                    symptoms.push(
-                        TypeSymptom::UnknownTag {
-                            name: name.to_string(),
-                        }
-                        .into_diagnostic(*span),
-                    );
-                }
-            }
-            Expr::TagCall(tc) => {
-                if let Some(path) = &tc.qual_path {
-                    if self.lookup_tag(path.root).is_none() {
-                        symptoms.push(
-                            TypeSymptom::UnknownTag {
-                                name: path.root.to_string(),
-                            }
-                            .into_diagnostic(path.span_id()),
-                        );
-                    }
-                } else if self.lookup_variant(tc.name).is_none() {
-                    symptoms.push(
-                        TypeSymptom::UnknownTag {
-                            name: tc.name.to_string(),
-                        }
-                        .into_diagnostic(tc.span_id()),
-                    );
-                }
-                for arg in &tc.args {
-                    self.check_expr(arg, symptoms, locals, imports);
-                }
-            }
-            Expr::TypeNominal(..) | Expr::TypeQualified(_) | Expr::TypeGeneric { .. } => {
-                self.check_type_expr(expr, symptoms);
-            }
-            Expr::Lit(_)
-            | Expr::SelfRef(_)
-            | Expr::Range(_)
-            | Expr::FormatString(_)
-            | Expr::Asm(_) => {}
-        }
-    }
-
     fn check_type_expr(&self, e: &Expr, symptoms: &mut Vec<diagnostic::Diagnostic>) {
-        use diagnostic::DiagnosticLike;
-        use diagnostic::type_::TypeSymptom;
-
         match e {
             Expr::TypeNominal(name, span) if self.lookup_tag(*name).is_none() => {
                 symptoms.push(
@@ -509,21 +308,12 @@ impl TyEnv {
         }
     }
 
-    /// Verify the bind's body type is compatible with its declared return type.
-    ///
-    /// Today this only covers the tuple-IS-record case for top-level binds with
-    /// a record-shaped return tag (`Range[x]: (start, end)`). Callers rely on
-    /// this to lock in that a positional tuple value satisfies a same-arity
-    /// record return without an explicit record-literal in the body.
     fn check_body_matches_return(
         &self,
         bind: &Bind,
         symptoms: &mut Vec<diagnostic::Diagnostic>,
         locals: &dyn LocalTypes,
     ) {
-        use diagnostic::DiagnosticLike;
-        use diagnostic::type_::TypeSymptom;
-
         let Some(return_tag) = &bind.return_tag else {
             return;
         };
@@ -557,14 +347,6 @@ impl TyEnv {
         }
     }
 
-    /// Check each argument of a function call against the called function's
-    /// parameter types, sharing a single type-variable substitution so that
-    /// `Range.new(1, "hi")` rejects (`x` cannot be both `Int` and `Str`) while
-    /// `Range.new(12, 1200)` accepts.
-    ///
-    /// Silently no-ops when the called function isn't in the env (e.g.,
-    /// imported from a not-yet-resolved module) — the unknown-binding check
-    /// already covered that case.
     fn check_call_args(
         &self,
         mangled: &Intern<String>,
@@ -573,17 +355,11 @@ impl TyEnv {
         symptoms: &mut Vec<diagnostic::Diagnostic>,
         locals: &dyn LocalTypes,
     ) {
-        use diagnostic::DiagnosticLike;
-        use diagnostic::type_::TypeSymptom;
-
         let Some(info) = self.fn_params.get(mangled) else {
             return;
         };
-        // For methods, the first parameter is the implicit `self`. Calls to
-        // `Range.new(...)` don't pass it explicitly, so skip it.
         let mut params = info.params.iter();
         let mut bindings: HashMap<Intern<String>, Ty> = info.typevars.clone();
-        // Mismatched arity is reported elsewhere; we just stop unifying.
         for arg in args {
             let Some((_, param_ty)) = params.next() else {
                 break;
@@ -593,26 +369,285 @@ impl TyEnv {
                 symptoms.push(TypeSymptom::Mismatch.into_diagnostic(arg.1));
             }
         }
-        // Suppress dead_code on `call` for now — the parameter is here so we
-        // can later attach richer diagnostics (named-argument hints, etc.).
         let _ = call;
+    }
+}
+
+struct UnknownRefChecker<'a, 'b, 'c> {
+    ty_env: &'a TyEnv,
+    symptoms: &'b mut Vec<diagnostic::Diagnostic>,
+    locals: &'c dyn LocalTypes,
+    imports: &'a ImportSet,
+}
+
+impl Visitor for UnknownRefChecker<'_, '_, '_> {
+    fn visit_fn_call(&mut self, call: &ast::FnCall) -> ControlFlow<()> {
+        if !call.path.segments.is_empty()
+            && !self.imports.module_prefixes.contains(&call.path.root)
+            && !self.imports.alias_spans.contains(&call.path.span_id())
+        {
+            let mangled = mangled_fn_call_name(call);
+            let is_method = self.ty_env.fn_return_ty(&mangled).is_some();
+            let is_field_access = call.args.is_none()
+                && self.locals.get_type(&call.path.root).is_some_and(|ty| {
+                    is_field_of_type(&ty, call.path.segments.last().unwrap())
+                });
+
+            if !is_method && !is_field_access {
+                let name = fmt_call_without_parens(call);
+                self.symptoms.push(
+                    TypeSymptom::UnknownBinding {
+                        name,
+                        did_you_mean: None,
+                    }
+                    .into_diagnostic(call.path.span_id()),
+                );
+                return Continue(());
+            }
+        }
+        let name = call.path.root;
+        let mangled = mangled_fn_call_name(call);
+        if let Some(args) = &call.args {
+            if self.ty_env.fn_return_ty(&mangled).is_none() {
+                let mangled_str = mangled.to_string();
+                let suggestion = if !mangled_str.contains('.') {
+                    self.ty_env
+                        .suggest_typo_for_identifier(&mangled_str, &self.imports.all)
+                } else {
+                    None
+                };
+                self.symptoms.push(
+                    TypeSymptom::UnknownBinding {
+                        name: mangled_str,
+                        did_you_mean: suggestion,
+                    }
+                    .into_diagnostic(call.path.span_id()),
+                );
+            }
+            for arg in args {
+                let _ = self.visit_expr(arg);
+            }
+            self.ty_env
+                .check_call_args(&mangled, call, args, self.symptoms, self.locals);
+        } else if call.path.segments.is_empty()
+            && self.locals.get_type(&name).is_none()
+            && self.ty_env.fn_return_ty(&mangled).is_none()
+            && !self.imports.all.contains(&name)
+        {
+            let suggestion = self
+                .ty_env
+                .suggest_typo_for_identifier(name.as_str(), &self.imports.all);
+            self.symptoms.push(
+                TypeSymptom::UnknownBinding {
+                    name: mangled.to_string(),
+                    did_you_mean: suggestion,
+                }
+                .into_diagnostic(call.path.span_id()),
+            );
+        } else if call.path.segments.is_empty()
+            && call.args.is_none()
+            && self.locals.get_type(&name).is_none()
+            && self.ty_env.fn_return_ty(&mangled).is_none()
+            && self.imports.all.contains(&name)
+            && !self.imports.bundle_members.contains(&name)
+        {
+            self.symptoms.push(
+                TypeSymptom::NotExpr {
+                    name: name.to_string(),
+                }
+                .into_diagnostic(call.path.span_id()),
+            );
+        }
+        Continue(())
+    }
+
+    fn visit_when_expr(&mut self, when: &ast::WhenExpr) -> ControlFlow<()> {
+        let subject_ty = when
+            .subject
+            .as_ref()
+            .map(|s| s.infer_ty(&self.ty_env.infer_env(self.locals)));
+        if let Some(subject) = &when.subject {
+            let _ = self.visit_expr(subject);
+        }
+        for arm in &when.arms {
+            match arm {
+                WhenArm::Cond { condition, body } => {
+                    let _ = self.visit_expr(condition);
+                    let _ = self.visit_expr(body);
+                }
+                WhenArm::Is { pattern, body } => {
+                    if is_type_surface(&pattern.0) {
+                        let surface_name = type_surface_mangle_name(&pattern.0);
+                        let variant_name = Intern::<String>::from_ref(surface_name);
+                        match &subject_ty {
+                            Some(Ty::Union {
+                                name: union_name,
+                                variants,
+                            }) => {
+                                if !variants.iter().any(|(vname, _)| vname == &variant_name) {
+                                    self.symptoms.push(
+                                        TypeSymptom::NotAVariant {
+                                            name: surface_name.to_string(),
+                                            union_name: union_name.to_string(),
+                                        }
+                                        .into_diagnostic(pattern.1),
+                                    );
+                                }
+                            }
+                            _ => {
+                                if self.ty_env.lookup_variant(variant_name).is_none() {
+                                    self.symptoms.push(
+                                        TypeSymptom::UnknownTag {
+                                            name: surface_name.to_string(),
+                                        }
+                                        .into_diagnostic(pattern.1),
+                                    );
+                                }
+                            }
+                        }
+                        check_type_pattern_default_exprs(&pattern.0, &mut |e| {
+                            let _ = self.visit_expr(e);
+                        });
+                    } else {
+                        self.symptoms.push(
+                            TypeSymptom::UnknownTag {
+                                name: "invalid is-pattern".to_string(),
+                            }
+                            .into_diagnostic(pattern.1),
+                        );
+                    }
+                    let _ = self.visit_expr(body);
+                }
+                WhenArm::Else(body) => {
+                    let _ = self.visit_expr(body);
+                }
+            }
+        }
+        Continue(())
+    }
+
+    fn visit_if_expr(&mut self, if_expr: &ast::IfExpr) -> ControlFlow<()> {
+        match &if_expr.condition {
+            IfCondition::Bool(cond) => {
+                let _ = self.visit_expr(cond);
+                for e in &if_expr.body {
+                    let _ = self.visit_expr(e);
+                }
+            }
+            IfCondition::Pattern { subject, pattern } => {
+                let _ = self.visit_expr(subject);
+                let mut if_locals = LayeredLocals::new(self.locals);
+                if is_type_surface(&pattern.0) {
+                    if let Expr::TypeGeneric { params, .. } = &pattern.0 {
+                        for (k, _) in params.iter() {
+                            if k.as_str() != "_" {
+                                if_locals.insert(*k, Ty::Opaque(*k));
+                            }
+                        }
+                    }
+                    check_type_pattern_default_exprs(&pattern.0, &mut |e| {
+                        let _ = self.visit_expr(e);
+                    });
+                } else {
+                    self.symptoms.push(
+                        TypeSymptom::UnknownTag {
+                            name: "invalid is-pattern".to_string(),
+                        }
+                        .into_diagnostic(pattern.1),
+                    );
+                }
+                for e in &if_expr.body {
+                    // Use a new checker with the enriched if_locals
+                    let mut inner = UnknownRefChecker {
+                        ty_env: self.ty_env,
+                        symptoms: &mut *self.symptoms,
+                        locals: &if_locals,
+                        imports: self.imports,
+                    };
+                    let _ = inner.visit_expr(e);
+                }
+            }
+        }
+        Continue(())
+    }
+
+    fn visit_tag_call(&mut self, tc: &ast::TagCall) -> ControlFlow<()> {
+        if let Some(path) = &tc.qual_path {
+            if self.ty_env.lookup_tag(path.root).is_none() {
+                self.symptoms.push(
+                    TypeSymptom::UnknownTag {
+                        name: path.root.to_string(),
+                    }
+                    .into_diagnostic(path.span_id()),
+                );
+            }
+        } else if self.ty_env.lookup_variant(tc.name).is_none() {
+            self.symptoms.push(
+                TypeSymptom::UnknownTag {
+                    name: tc.name.to_string(),
+                }
+                .into_diagnostic(tc.span_id()),
+            );
+        }
+        for arg in &tc.args {
+            let _ = self.visit_expr(arg);
+        }
+        Continue(())
+    }
+
+    fn visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
+        match expr {
+            Expr::AnonymousTag(name, span) => {
+                if self.ty_env.lookup_variant(*name).is_none() {
+                    self.symptoms.push(
+                        TypeSymptom::UnknownTag {
+                            name: name.to_string(),
+                        }
+                        .into_diagnostic(*span),
+                    );
+                }
+                Continue(())
+            }
+            Expr::TypeNominal(..) | Expr::TypeQualified(_) | Expr::TypeGeneric { .. } => {
+                self.ty_env.check_type_expr(expr, self.symptoms);
+                Continue(())
+            }
+            Expr::Lit(_)
+            | Expr::SelfRef(_)
+            | Expr::Range(_)
+            | Expr::FormatString(_)
+            | Expr::Asm(_) => Continue(()),
+            _ => walk_expr(self, expr),
+        }
+    }
+}
+
+/// Check whether `segment` names a field of the given type.
+fn is_field_of_type(ty: &Ty, segment: &Intern<String>) -> bool {
+    match ty {
+        Ty::Record { fields, .. } => fields.iter().any(|(name, _)| name == segment),
+        Ty::Ptr { inner } | Ty::Ref { inner } if inner.is_record() => {
+            if let Ty::Record { fields, .. } = inner.as_ref() {
+                fields.iter().any(|(name, _)| name == segment)
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+fn fmt_call_without_parens(call: &ast::FnCall) -> String {
+    if call.path.segments.is_empty() {
+        call.path.root.as_str().to_string()
+    } else {
+        let segs: Vec<&str> = call.path.segments.iter().map(|s| s.as_str()).collect();
+        format!("{}.{}", call.path.root.as_str(), segs.join("."))
     }
 }
 
 /// One-way structural unification check between an actual type and an expected
 /// type, with type-variable bindings collected in `bindings`.
-///
-/// Tuple-IS-record: a `Ty::Tuple` matches a `Ty::Record` of the same arity by
-/// positional field comparison (declaration order). This is the first step
-/// toward fully unifying the two variants per the design intent that "tuple
-/// is a record in Gin".
-///
-/// Type variables are represented by `Ty::Opaque(name)` on the *expected*
-/// side. The first concrete type seen for a given name is bound; later
-/// occurrences must match the bound type or unification fails. This is what
-/// makes `Range.new(1, "hi")` reject (the second arg's `Str` cannot satisfy
-/// `Opaque(x)` after the first arg already bound `x = Int`), while
-/// `Range.new(12, 1200)` succeeds (`x = Int` for both).
 pub(crate) fn ty_unifies_with(
     actual: &Ty,
     expected: &Ty,
@@ -622,11 +657,6 @@ pub(crate) fn ty_unifies_with(
         return true;
     }
     match (actual, expected) {
-        // Type-variable on the expected side: bind on first sight, then enforce
-        // identity on subsequent occurrences. An identity binding (`x ->
-        // Opaque(x)`) is treated as unbound — methods are typechecked with
-        // identity bindings seeded so type-vars are visible, and call sites
-        // need to overwrite them with concrete arg types.
         (_, Ty::Opaque(name)) => {
             let is_unbound = match bindings.get(name) {
                 None => true,
@@ -634,9 +664,6 @@ pub(crate) fn ty_unifies_with(
                 _ => false,
             };
             if is_unbound {
-                // Strip the literal `value` field so later occurrences compare
-                // by structure, not constant value (otherwise `Range.new(12, 1200)`
-                // would reject because Int{value:12} != Int{value:1200}).
                 bindings.insert(*name, strip_literal(actual));
                 return true;
             }
@@ -645,10 +672,7 @@ pub(crate) fn ty_unifies_with(
                 .map(|prev| tys_equivalent(prev, actual))
                 .unwrap_or(false)
         }
-        // Symmetric: opaque on the actual side (e.g. self-typed param) matches
-        // anything for now (we don't yet do full bidirectional inference).
         (Ty::Opaque(_), _) => true,
-        // Tuple-IS-record: positional match against declaration order.
         (Ty::Tuple(elems), Ty::Record { fields, .. }) => {
             if elems.len() != fields.len() {
                 return false;
@@ -658,7 +682,6 @@ pub(crate) fn ty_unifies_with(
                 .zip(fields.iter())
                 .all(|(e, (_, f))| ty_unifies_with(e, f, bindings))
         }
-        // Symmetric record-vs-tuple, in case the actual side ends up that way.
         (Ty::Record { fields, .. }, Ty::Tuple(elems)) => {
             if fields.len() != elems.len() {
                 return false;
@@ -693,16 +716,11 @@ pub(crate) fn ty_unifies_with(
         }
         (Ty::Ptr { inner: a }, Ty::Ptr { inner: b })
         | (Ty::Ref { inner: a }, Ty::Ref { inner: b }) => ty_unifies_with(a, b, bindings),
-        // Both sides are concrete ints/floats: require structural equality.
-        // (Width and signedness are intentionally strict; users can `as` cast.)
         _ => false,
     }
 }
 
 /// Structural type equivalence ignoring literal `value` fields on Int/Float.
-///
-/// Constant folding stores literal values on `Ty::Int { value: Some(12) }` and
-/// `Ty::Float`; for unification we only care about the carrier type.
 fn tys_equivalent(a: &Ty, b: &Ty) -> bool {
     match (a, b) {
         (
@@ -744,8 +762,6 @@ fn tys_equivalent(a: &Ty, b: &Ty) -> bool {
     }
 }
 
-/// Strip literal `value` constants from `Int`/`Float` types so a binding
-/// captured from one literal call argument doesn't reject the next one.
 fn strip_literal(ty: &Ty) -> Ty {
     match ty {
         Ty::Int { width, signed, .. } => Ty::Int {
@@ -783,154 +799,14 @@ fn check_type_surface_defaults(e: &Expr, check: &mut impl FnMut(&Spanned<Expr>))
     }
 }
 
-fn collect_referenced_names(expr: &Expr, out: &mut HashSet<Intern<String>>) {
-    match expr {
-        Expr::FnCall(call) => {
-            // The root identifier of any call/path access counts as a use of
-            // that name. Field accesses (`r.start`) and method calls
-            // (`r.method(args)`) both flow through `FnCall` with a non-empty
-            // `segments` list, so we always insert the root regardless.
-            out.insert(call.path.root);
-            if let Some(args) = &call.args {
-                for a in args {
-                    collect_referenced_names(a, out);
-                }
-            }
-        }
-        Expr::Bind(bind) => collect_bind_value_refs(bind, out),
-        Expr::Binary(bin) => {
-            collect_referenced_names(&bin.lhs, out);
-            collect_referenced_names(&bin.rhs, out);
-        }
-        Expr::When(w) => {
-            if let Some(s) = &w.subject {
-                collect_referenced_names(s, out);
-            }
-            for arm in &w.arms {
-                match arm {
-                    WhenArm::Cond { condition, body } => {
-                        collect_referenced_names(condition, out);
-                        collect_referenced_names(body, out);
-                    }
-                    WhenArm::Is { pattern, body } => {
-                        collect_type_pattern_refs(&pattern.0, out);
-                        collect_referenced_names(&body.0, out);
-                    }
-                    WhenArm::Else(body) => collect_referenced_names(body, out),
-                }
-            }
-        }
-        Expr::If(if_expr) => {
-            match &if_expr.condition {
-                IfCondition::Bool(c) => collect_referenced_names(c, out),
-                IfCondition::Pattern { subject, pattern } => {
-                    collect_referenced_names(subject, out);
-                    collect_type_pattern_refs(&pattern.0, out);
-                }
-            }
-            for e in &if_expr.body {
-                collect_referenced_names(e, out);
-            }
-        }
-        Expr::Loop(loop_expr) => match loop_expr {
-            Loop::While(w) => {
-                collect_referenced_names(&w.cond, out);
-                for e in &w.exprs {
-                    collect_referenced_names(e, out);
-                }
-            }
-            Loop::ForIn(f) => {
-                collect_referenced_names(&f.iter, out);
-                for e in &f.exprs {
-                    collect_referenced_names(e, out);
-                }
-            }
-        },
-        Expr::TupleLit(elems) => {
-            for e in elems {
-                collect_referenced_names(e, out);
-            }
-        }
-        Expr::TupleAlloc { init, .. } => collect_referenced_names(init, out),
-        Expr::TupleGet { base, .. } => collect_referenced_names(base, out),
-        Expr::TupleSet { base, value, .. } => {
-            collect_referenced_names(base, out);
-            collect_referenced_names(value, out);
-        }
-        Expr::BufGet { buf, index, .. } => {
-            collect_referenced_names(buf, out);
-            collect_referenced_names(index, out);
-        }
-        Expr::BufSet {
-            buf, index, value, ..
-        } => {
-            collect_referenced_names(buf, out);
-            collect_referenced_names(index, out);
-            collect_referenced_names(value, out);
-        }
-        Expr::Cast { expr, .. } => collect_referenced_names(expr, out),
-        Expr::TakePtr(e) | Expr::TakeRef(e) | Expr::Deref(e) | Expr::Negate(e) => {
-            collect_referenced_names(e, out);
-        }
-        Expr::FormatString(fs) => {
-            for p in &fs.parts {
-                if let FormatPart::Expr(e) = p {
-                    collect_referenced_names(e, out);
-                }
-            }
-        }
-        Expr::Range(range) => {
-            collect_referenced_names(&range.start, out);
-            collect_referenced_names(&range.end, out);
-        }
-        Expr::TypeGeneric { .. } => collect_type_surface_refs(expr, out),
-        Expr::Lit(_)
-        | Expr::SelfRef(_)
-        | Expr::AnonymousTag(..)
-        | Expr::TagCall(_)
-        | Expr::Asm(_)
-        | Expr::TypeNominal(..)
-        | Expr::TypeQualified(_) => {}
-    }
+struct RefCollector<'a> {
+    refs: &'a mut HashSet<Intern<String>>,
 }
 
-fn collect_bind_value_refs(bind: &Bind, out: &mut HashSet<Intern<String>>) {
-    match bind.value() {
-        BindValue::Expr(e) => collect_referenced_names(e, out),
-        BindValue::Body { exprs, ret } => {
-            for e in exprs {
-                collect_referenced_names(e, out);
-            }
-            if let Some(e) = &ret.0 {
-                collect_referenced_names(e, out);
-            }
-        }
-        BindValue::Extern => {}
-    }
-}
-
-fn collect_type_pattern_refs(surface: &Expr, out: &mut HashSet<Intern<String>>) {
-    let Expr::TypeGeneric { params, .. } = surface else {
-        return;
-    };
-    for (_, pk) in params {
-        match pk {
-            ParameterKind::Default(e) => collect_referenced_names(&e.0, out),
-            ParameterKind::Tagged(sp) => collect_type_surface_refs(&sp.0, out),
-            ParameterKind::Generic => {}
-        }
-    }
-}
-
-fn collect_type_surface_refs(e: &Expr, out: &mut HashSet<Intern<String>>) {
-    if let Expr::TypeGeneric { params, .. } = e {
-        for (_, pk) in params {
-            match pk {
-                ParameterKind::Default(e) => collect_referenced_names(&e.0, out),
-                ParameterKind::Tagged(sp) => collect_type_surface_refs(&sp.0, out),
-                ParameterKind::Generic => {}
-            }
-        }
+impl Visitor for RefCollector<'_> {
+    fn visit_fn_call(&mut self, call: &ast::FnCall) -> ControlFlow<()> {
+        self.refs.insert(call.path.root);
+        walk_fn_call(self, call)
     }
 }
 
@@ -940,9 +816,6 @@ fn check_return_variants(
     union_name: Intern<String>,
     symptoms: &mut Vec<diagnostic::Diagnostic>,
 ) {
-    use diagnostic::DiagnosticLike;
-    use diagnostic::type_::TypeSymptom;
-
     fn check_expr(
         expr: &Spanned<Expr>,
         valid_variants: &[Intern<String>],

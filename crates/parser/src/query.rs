@@ -5,6 +5,8 @@
 //! infrastructure.
 
 use ast::span::{HasSpanId, SpanId};
+use ast::visit::{walk_file_ast, walk_fn_call, Visitor};
+use std::ops::ControlFlow;
 use diagnostic::LexSymptom;
 use diagnostic::parse::ParseSymptom;
 use diagnostic::{Diagnostic, DiagnosticLike};
@@ -13,7 +15,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::expr;
-use ast::{BindValue, Expr, FileAst, FnCall, ImportSource};
+use ast::{Expr, FileAst, FnCall, ImportSource};
 use flask::{
     NestedPackageTarget, PACKAGE_CONFIG_NAME, list_package_gin_files, resolve_nested_package_path,
 };
@@ -197,73 +199,26 @@ pub fn extract_package_import_paths(
 
 /// Walk every expression in the AST and collect empty-paren call hints.
 fn collect_empty_paren_hints(ast: &FileAst) -> Vec<(String, SpanId)> {
-    let mut hints = Vec::new();
-    for bind in ast.defs().values() {
-        match bind.value() {
-            BindValue::Expr(e) => scan_expr(e, &mut hints),
-            BindValue::Body { exprs, ret } => {
-                for e in exprs {
-                    scan_expr(e, &mut hints);
-                }
-                if let Some(e) = &ret.0 {
-                    scan_expr(e, &mut hints);
-                }
-            }
-            BindValue::Extern => {}
-        }
-    }
-    hints
+    let mut collector = EmptyParenCollector { hints: Vec::new() };
+    let _ = walk_file_ast(&mut collector, ast);
+    collector.hints
 }
 
-fn scan_expr(expr: &Expr, hints: &mut Vec<(String, SpanId)>) {
-    match expr {
-        Expr::FnCall(call) => {
-            if let Some(args) = &call.args {
-                if args.is_empty() {
-                    hints.push((fmt_call_without_parens(call), call.path.span_id()));
-                }
-                for arg in args {
-                    scan_expr(arg, hints);
-                }
+struct EmptyParenCollector {
+    hints: Vec<(String, SpanId)>,
+}
+
+impl Visitor for EmptyParenCollector {
+    fn visit_fn_call(&mut self, call: &ast::FnCall) -> ControlFlow<()> {
+        if let Some(args) = &call.args {
+            if args.is_empty() {
+                self.hints.push((
+                    fmt_call_without_parens(call),
+                    call.path.span_id(),
+                ));
             }
         }
-        Expr::Binary(b) => {
-            scan_expr(&b.lhs, hints);
-            scan_expr(&b.rhs, hints);
-        }
-        Expr::Bind(b) => match b.value() {
-            BindValue::Expr(e) => scan_expr(e, hints),
-            BindValue::Body { exprs, ret } => {
-                for e in exprs {
-                    scan_expr(e, hints);
-                }
-                if let Some(e) = &ret.0 {
-                    scan_expr(e, hints);
-                }
-            }
-            BindValue::Extern => {}
-        },
-        Expr::When(w) => {
-            use ast::WhenArm;
-            if let Some(s) = &w.subject {
-                scan_expr(s, hints);
-            }
-            for arm in &w.arms {
-                match arm {
-                    WhenArm::Cond { condition, body } => {
-                        scan_expr(condition, hints);
-                        scan_expr(body, hints);
-                    }
-                    WhenArm::Is { body, .. } | WhenArm::Else(body) => scan_expr(body, hints),
-                }
-            }
-        }
-        Expr::TagCall(tc) => {
-            for arg in &tc.args {
-                scan_expr(arg, hints);
-            }
-        }
-        _ => {}
+        walk_fn_call(self, call)
     }
 }
 
