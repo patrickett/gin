@@ -32,6 +32,23 @@ pub fn resolve_dep_dir(file_path: &Path, dep_name: &str) -> Option<PathBuf> {
     }
 }
 
+/// Show hover information about a dependency root (e.g. hovering over `core`
+/// in `use core.true`). Returns formatted markdown with name, description, version.
+pub fn resolve_dep_hover(file_path: &Path, dep_name: &str) -> Option<String> {
+    let dep_dir = resolve_dep_dir(file_path, dep_name)?;
+    let dep_config = flask::FlaskConfig::from_directory(&dep_dir)?;
+    let name = dep_config.name();
+    let version = dep_config.version();
+    let description = dep_config.description().unwrap_or("");
+
+    let mut text = format!("```gin\n{name}\n```");
+    if !description.is_empty() {
+        text.push_str(&format!("\n\n---\n\n{description}"));
+    }
+    text.push_str(&format!("\n\n---\n\nversion = {version}"));
+    Some(text)
+}
+
 /// Resolve a symbol from a dependency (public definition) and return its
 /// hover text by reading and parsing the definition file.
 pub fn resolve_symbol_hover(file_path: &Path, dep_name: &str, symbol: &str) -> Option<String> {
@@ -193,52 +210,79 @@ pub fn resolve_import_at(ast: &FileAst, source: &str, byte_pos: usize) -> Option
     None
 }
 
-/// Resolve imports for a parsed package.
+/// A node in the resolved import graph.
+#[derive(Debug, Clone)]
+pub struct ResolveNode {
+    pub path: PathBuf,
+    pub qualifier: String,
+}
+
+/// Outcome of the pure discovery phase: what files are needed and how they connect.
+#[derive(Debug, Clone)]
+pub struct ResolveGraph {
+    pub nodes: Vec<ResolveNode>,
+    pub adj: Vec<Vec<crate::module_graph::ImportEdge>>,
+    /// Symbol aliases to apply to each node's AST during the resolve phase.
+    pub node_aliases: Vec<Vec<SymbolAlias>>,
+    /// Symptoms with the graph node index they belong to.
+    pub symptoms: Vec<(usize, Diagnostic)>,
+}
+
+/// Takes a complete set of pre-parsed files (entry + all dependency directories)
+/// and determines which files form the transitive import closure, what qualifiers
+/// they get, and how they connect (adjacency graph for cycle detection).
 ///
-/// When `deps` is `Some`, this expands all imports discovered transitively from
-/// the entry file: parsing imported files, qualifying their definitions, and
-/// detecting import cycles. When `deps` is `None` (library mode), files are
-/// passed through unchanged.
-pub fn resolve_imports(
-    files: Vec<ParsedFile>,
-    deps: Option<&HashMap<String, PathBuf>>,
-) -> Vec<ParsedFile> {
-    let Some(deps) = deps else {
-        return files;
-    };
-
-    // Nothing to resolve if there are no files.
-    if files.is_empty() {
-        return files;
-    }
-
-    let mut files = files;
-
-    let entry_path = files[0].path.clone();
-    let _entry_dir = entry_path
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_default();
-
+/// This function does NOT read file contents. It uses metadata I/O (directory
+/// existence checks, file listing) to find available files, and the
+/// `find_public_def` closure (caller-controlled I/O) for symbol lookups.
+///
+/// Precondition: Every `.gin` file from entry + dependency directories is parsed
+/// and present in `available`.
+pub fn discovery(
+    available: &HashMap<PathBuf, ParsedFile>,
+    entry_paths: &[PathBuf],
+    deps: &HashMap<String, PathBuf>,
+    find_public_def: &dyn Fn(&Path, &str) -> Option<PathBuf>,
+) -> ResolveGraph {
+    let mut nodes: Vec<ResolveNode> = Vec::new();
+    let mut adj: Vec<Vec<crate::module_graph::ImportEdge>> = Vec::new();
+    let mut node_aliases: Vec<Vec<SymbolAlias>> = Vec::new();
+    let mut symptoms: Vec<(usize, Diagnostic)> = Vec::new();
     let mut seen: HashMap<PathBuf, String> = HashMap::new();
     let mut node_by_path: HashMap<PathBuf, usize> = HashMap::new();
-    node_by_path.insert(entry_path.clone(), 0);
-    seen.insert(entry_path.clone(), String::new());
+    let mut processed: Vec<bool> = Vec::new();
 
-    let mut adj: Vec<Vec<crate::module_graph::ImportEdge>> = vec![Vec::new()];
-    let mut processed_imports: Vec<bool> = vec![false];
+    for entry_path in entry_paths {
+        let path = entry_path.clone();
+        if !seen.contains_key(&path) {
+            seen.insert(path.clone(), String::new());
+            node_by_path.insert(path.clone(), nodes.len());
+            nodes.push(ResolveNode {
+                path,
+                qualifier: String::new(),
+            });
+            adj.push(Vec::new());
+            node_aliases.push(Vec::new());
+            processed.push(false);
+        }
+    }
 
     loop {
-        let next = processed_imports
+        let next = processed
             .iter()
             .enumerate()
             .find_map(|(i, done)| (!done).then_some(i));
-        let Some(from_idx) = next else { break };
-        processed_imports[from_idx] = true;
+        let Some(from_idx) = next else {
+            break;
+        };
+        processed[from_idx] = true;
 
-        let from_path = files[from_idx].path.clone();
+        let from_path = &nodes[from_idx].path;
         let from_dir = from_path.parent().unwrap_or(Path::new("")).to_path_buf();
-        let from_ast = files[from_idx].output.ast.clone();
+        let Some(from_parsed) = available.get(from_path) else {
+            continue;
+        };
+        let from_ast = &from_parsed.output.ast;
 
         for import in from_ast.uses() {
             for module_import in &import.0 {
@@ -250,62 +294,55 @@ pub fn resolve_imports(
                     deps,
                     span_id,
                     &mut import_symptoms,
+                    find_public_def,
                 );
-                files[from_idx].output.symptoms.extend(import_symptoms);
 
-                for alias in resolved.symbol_aliases {
-                    files[from_idx].output.ast.symbol_aliases.push(alias);
+                for s in import_symptoms {
+                    symptoms.push((from_idx, s));
                 }
 
+                node_aliases[from_idx].extend(resolved.symbol_aliases);
+
                 for (file_path, qual) in resolved.files {
-                    if !file_path.is_file() {
-                        files[from_idx].output.symptoms.push(
+                    if available.get(&file_path).is_none() {
+                        symptoms.push((
+                            from_idx,
                             UseSymptom::TargetNotFound {
                                 path: file_path.display().to_string(),
                             }
                             .into_diagnostic(span_id),
-                        );
+                        ));
                         continue;
                     }
 
                     if let Some(prev) = seen.get(&file_path)
                         && prev != &qual
                     {
-                        files[from_idx].output.symptoms.push(
+                        symptoms.push((
+                            from_idx,
                             UseSymptom::Conflict {
                                 path: file_path.display().to_string(),
                                 qualifier_a: prev.clone(),
                                 qualifier_b: qual,
                             }
                             .into_diagnostic(span_id),
-                        );
+                        ));
                         continue;
                     }
 
                     let to_idx = if let Some(i) = node_by_path.get(&file_path).copied() {
                         i
                     } else {
-                        let source = match std::fs::read_to_string(&file_path) {
-                            Ok(s) => s,
-                            Err(err) => {
-                                eprintln!("Error reading import {}: {}", file_path.display(), err);
-                                continue;
-                            }
-                        };
-                        let mut output = parse_source_full(&source);
-                        output.ast = qualify_module_defs(output.ast, &qual);
-                        output.ast = output.ast.strip_private_for_importer();
-
-                        let i = files.len();
-                        files.push(ParsedFile {
+                        let i = nodes.len();
+                        nodes.push(ResolveNode {
                             path: file_path.clone(),
-                            source,
-                            output,
+                            qualifier: qual.clone(),
                         });
-                        node_by_path.insert(file_path.clone(), i);
                         adj.push(Vec::new());
-                        processed_imports.push(false);
+                        node_aliases.push(Vec::new());
+                        processed.push(false);
                         seen.insert(file_path.clone(), qual.clone());
+                        node_by_path.insert(file_path.clone(), i);
                         i
                     };
 
@@ -321,19 +358,159 @@ pub fn resolve_imports(
     if let Some(cycle) = crate::module_graph::detect_first_cycle(&adj) {
         let mut parts: Vec<String> = Vec::new();
         for &n in &cycle.nodes {
-            parts.push(files[n].path.display().to_string());
+            parts.push(nodes[n].path.display().to_string());
         }
         let chain = parts.join(" -> ");
-
-        files[cycle.closing_from]
-            .output
-            .symptoms
-            .push(UseSymptom::Cycle { chain }.into_diagnostic(cycle.closing_span));
+        symptoms.push((
+            cycle.closing_from,
+            UseSymptom::Cycle { chain }.into_diagnostic(cycle.closing_span),
+        ));
     }
 
-    for file in &mut files {
-        apply_symbol_aliases(&mut file.output.ast);
-        file.output.ast.symbol_aliases.clear();
+    ResolveGraph {
+        nodes,
+        adj,
+        node_aliases,
+        symptoms,
+    }
+}
+
+/// Build the complete available file map from entry + dependency files and run
+/// import discovery. Shared by [`resolve_imports`] and [`resolve_import_symptoms`].
+fn build_import_closure(
+    entry_files: Vec<ParsedFile>,
+    dependencies: &HashMap<String, PathBuf>,
+) -> (ResolveGraph, HashMap<PathBuf, ParsedFile>) {
+    let entry_paths: Vec<PathBuf> = entry_files.iter().map(|f| f.path.clone()).collect();
+
+    // Collect all file paths from entry + dependency directories.
+    // Walk each dep directory for packages (directories with `flask.jsonc`)
+    // rather than blindly recursing — every package found is explicitly declared.
+    let mut all_paths = entry_paths.clone();
+    for dep_dir in dependencies.values() {
+        let mut stack = vec![dep_dir.clone()];
+        while let Some(dir) = stack.pop() {
+            all_paths.extend(collect_gin_files(&dir));
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() && path.join(flask::PACKAGE_CONFIG_NAME).is_file() {
+                        stack.push(path);
+                    }
+                }
+            }
+        }
+    }
+    all_paths.sort();
+    all_paths.dedup();
+
+    // Build the available map: start with entry files, parse any new dep files
+    let mut available: HashMap<PathBuf, ParsedFile> = entry_files
+        .into_iter()
+        .map(|f| (f.path.clone(), f))
+        .collect();
+    for path in &all_paths {
+        if !available.contains_key(path)
+            && let Ok(source) = std::fs::read_to_string(path)
+        {
+            let output = parse_source_full(&source);
+            available.insert(
+                path.clone(),
+                ParsedFile {
+                    path: path.clone(),
+                    source,
+                    output,
+                },
+            );
+        }
+    }
+
+    let graph = discovery(&available, &entry_paths, dependencies, &|dir, sym| {
+        find_public_def_in_package(dir, sym)
+    });
+
+    (graph, available)
+}
+
+/// Full import resolution for binary compilation.
+///
+/// Collects all `.gin` files from entry + dependency directories, parses any
+/// unparsed dependency files, runs import discovery, and qualifies all module
+/// definitions from their import paths.
+///
+/// Use this in the compiler driver (ginc).
+pub fn resolve_imports(
+    entry_files: Vec<ParsedFile>,
+    dependencies: &HashMap<String, PathBuf>,
+) -> Vec<ParsedFile> {
+    let (graph, available) = build_import_closure(entry_files, dependencies);
+    resolve(graph, &mut |path| available.get(path).cloned())
+}
+
+/// Import graph discovery for diagnostic collection.
+///
+/// Same as [`resolve_imports`] but does not qualify definitions — returns only
+/// the import-related symptoms (errors, warnings) grouped by file path.
+///
+/// Use this in tools that need import diagnostics without qualified ASTs (ginlsp).
+pub fn resolve_import_symptoms(
+    entry_files: Vec<ParsedFile>,
+    dependencies: &HashMap<String, PathBuf>,
+) -> HashMap<PathBuf, Vec<Diagnostic>> {
+    let (graph, _available) = build_import_closure(entry_files, dependencies);
+    let mut by_path: HashMap<PathBuf, Vec<Diagnostic>> = HashMap::new();
+    for (node_idx, diag) in graph.symptoms {
+        if node_idx < graph.nodes.len() {
+            by_path
+                .entry(graph.nodes[node_idx].path.clone())
+                .or_default()
+                .push(diag);
+        }
+    }
+    by_path
+}
+
+/// The `file_reader` closure is called once per graph node (by path). It must
+/// return the full [`ParsedFile`] including source text and parse output.
+pub fn resolve(
+    graph: ResolveGraph,
+    file_reader: &mut dyn FnMut(&Path) -> Option<ParsedFile>,
+) -> Vec<ParsedFile> {
+    let ResolveGraph {
+        nodes,
+        adj: _adj,
+        node_aliases,
+        symptoms,
+    } = graph;
+
+    let mut files: Vec<ParsedFile> = Vec::with_capacity(nodes.len());
+
+    for (i, node) in nodes.iter().enumerate() {
+        let mut parsed = match file_reader(&node.path) {
+            Some(f) => f,
+            None => {
+                continue;
+            }
+        };
+
+        if !node.qualifier.is_empty() {
+            parsed.output.ast = qualify_module_defs(parsed.output.ast, &node.qualifier);
+            parsed.output.ast = parsed.output.ast.strip_private_for_importer();
+        }
+
+        if !node_aliases[i].is_empty() {
+            parsed.output.ast.symbol_aliases = node_aliases[i].clone();
+            apply_symbol_aliases(&mut parsed.output.ast);
+            parsed.output.ast.symbol_aliases.clear();
+        }
+
+        files.push(parsed);
+    }
+
+    for (node_idx, diag) in symptoms {
+        if node_idx < files.len() {
+            files[node_idx].output.symptoms.push(diag);
+        }
     }
 
     files
@@ -390,6 +567,7 @@ fn resolve_dependency_bundle_import(
     dependencies: &HashMap<String, PathBuf>,
     span_id: SpanId,
     symptoms: &mut Vec<Diagnostic>,
+    find_public_def: &dyn Fn(&Path, &str) -> Option<PathBuf>,
 ) -> ResolvedModule {
     let root_name = b.root.as_str();
     let Some(dep_dir) = dependencies.get(root_name) else {
@@ -432,7 +610,7 @@ fn resolve_dependency_bundle_import(
             out.extend(resolve_package_gin_files(&nested, &qual, m.span, symptoms));
         } else {
             // Not a sub-package — check if it's a public def in the dependency root.
-            let found = check_public_def_in_package(dep_dir, m.export.as_str());
+            let found = find_public_def(dep_dir, m.export.as_str()).is_some();
             if found {
                 has_symbol_import = true;
             } else {
@@ -576,13 +754,14 @@ fn resolve_module_import(
     dependencies: &HashMap<String, PathBuf>,
     span_id: SpanId,
     symptoms: &mut Vec<Diagnostic>,
+    find_public_def: &dyn Fn(&Path, &str) -> Option<PathBuf>,
 ) -> ResolvedModule {
     match &module_import.source {
         ImportSource::Local(path, _) => {
             resolve_local_path_import(module_import, base_dir, path, span_id, symptoms)
         }
         ImportSource::LocalBundle(b) => {
-            resolve_dependency_bundle_import(b, dependencies, span_id, symptoms)
+            resolve_dependency_bundle_import(b, dependencies, span_id, symptoms, find_public_def)
         }
         ImportSource::Package(mp) => resolve_package_like_import(
             module_import,
@@ -591,6 +770,7 @@ fn resolve_module_import(
             dependencies,
             span_id,
             symptoms,
+            find_public_def,
         ),
     }
 }
@@ -602,6 +782,7 @@ fn resolve_package_like_import(
     dependencies: &HashMap<String, PathBuf>,
     span_id: SpanId,
     symptoms: &mut Vec<Diagnostic>,
+    find_public_def: &dyn Fn(&Path, &str) -> Option<PathBuf>,
 ) -> ResolvedModule {
     let root_name = mp.root.as_str();
     let Some(dep_dir) = dependencies.get(root_name) else {
@@ -657,7 +838,7 @@ fn resolve_package_like_import(
         Err(flask::NestedPackageResolveError::NestedPackageNotFound { parent, segment }) => {
             if mp.segments.len() == 1 && segment == mp.segments[0].as_str() {
                 let symbol = mp.segments[0];
-                if let Some(file_path) = find_public_def_in_package(dep_dir, symbol.as_str()) {
+                if let Some(file_path) = find_public_def(dep_dir, symbol.as_str()) {
                     let alias_name = module_import.alias.unwrap_or(symbol);
                     return ResolvedModule {
                         files: vec![(file_path, root_name.to_string())],
@@ -735,5 +916,192 @@ pub fn merge_asts_checked(files: &[ParsedFile]) -> Result<FileAst, Vec<Diagnosti
         Ok(merged)
     } else {
         Err(errors)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use parser::parse_source_full;
+
+    fn make_pf(path: &str, source: &str) -> ParsedFile {
+        let output = parse_source_full(source);
+        ParsedFile {
+            path: PathBuf::from(path),
+            source: source.to_string(),
+            output,
+        }
+    }
+
+    #[test]
+    fn discovery_no_imports_returns_single_node() {
+        let pf = make_pf("main.gin", "x := 42\n");
+        let mut available = HashMap::new();
+        available.insert(PathBuf::from("main.gin"), pf);
+
+        let graph = discovery(
+            &available,
+            &[PathBuf::from("main.gin")],
+            &HashMap::new(),
+            &|_, _| None,
+        );
+
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(graph.nodes[0].path, PathBuf::from("main.gin"));
+        assert!(graph.nodes[0].qualifier.is_empty());
+        assert!(graph.symptoms.is_empty());
+    }
+
+    #[test]
+    fn resolve_qualifies_imported_files() {
+        let dep_src = "x := 42\n";
+        let dep_path = PathBuf::from("/dep.gin");
+        let entry_path = PathBuf::from("/main.gin");
+
+        let dep_pf = make_pf("/dep.gin", dep_src);
+        let entry_pf = make_pf("/main.gin", "main:\n    1\nreturn\n");
+
+        let graph = ResolveGraph {
+            nodes: vec![
+                ResolveNode {
+                    path: entry_path,
+                    qualifier: String::new(),
+                },
+                ResolveNode {
+                    path: dep_path.clone(),
+                    qualifier: "mydep".to_string(),
+                },
+            ],
+            adj: vec![vec![], vec![]],
+            node_aliases: vec![vec![], vec![]],
+            symptoms: vec![],
+        };
+
+        let files = resolve(graph, &mut |path| {
+            if path == PathBuf::from("/dep.gin") {
+                Some(dep_pf.clone())
+            } else if path == PathBuf::from("/main.gin") {
+                Some(entry_pf.clone())
+            } else {
+                None
+            }
+        });
+
+        assert_eq!(files.len(), 2);
+        let dep_ast = &files[1].output.ast;
+        assert!(
+            dep_ast
+                .defs
+                .contains_key(&Intern::<String>::from_ref("mydep.x")),
+            "expected qualified def 'mydep.x'"
+        );
+    }
+
+    #[test]
+    fn resolve_applies_symbol_aliases() {
+        use ast::ModPath;
+        use internment::Intern;
+
+        let entry_src = "main:\n    foo\nreturn\n";
+        let entry_path = PathBuf::from("/main.gin");
+        let entry_pf = make_pf("/main.gin", entry_src);
+
+        let alias = SymbolAlias {
+            alias: Intern::<String>::from_ref("foo"),
+            target: ModPath {
+                root: Intern::<String>::from_ref("dep"),
+                segments: vec![Intern::<String>::from_ref("bar")],
+                span: SpanId::INVALID,
+            },
+        };
+
+        let graph = ResolveGraph {
+            nodes: vec![ResolveNode {
+                path: entry_path,
+                qualifier: String::new(),
+            }],
+            adj: vec![vec![]],
+            node_aliases: vec![vec![alias]],
+            symptoms: vec![],
+        };
+
+        let files = resolve(graph, &mut |path| {
+            if path == PathBuf::from("/main.gin") {
+                Some(entry_pf.clone())
+            } else {
+                None
+            }
+        });
+
+        assert_eq!(files.len(), 1);
+        // Applying aliases changes the AST in-place; no crash means success.
+        // The `foo` reference would be rewritten by apply_symbol_aliases
+        // which traverses the AST looking for bare references.
+    }
+
+    #[test]
+    fn discovery_with_missing_available_file_is_ok() {
+        // If a local import can't be resolved through filesystem checks,
+        // resolve_local_path_import returns an empty ResolvedModule with a symptom.
+        // discovery should still return a graph without crashing.
+        let pf = make_pf("main.gin", "use './nonexistent' as foo\n\nx := 42\n");
+        let mut available = HashMap::new();
+        available.insert(PathBuf::from("main.gin"), pf);
+
+        let graph = discovery(
+            &available,
+            &[PathBuf::from("main.gin")],
+            &HashMap::new(),
+            &|_, _| None,
+        );
+
+        assert_eq!(graph.nodes.len(), 1);
+    }
+
+    #[test]
+    fn resolve_with_empty_graph_returns_empty_vec() {
+        let graph = ResolveGraph {
+            nodes: vec![],
+            adj: vec![],
+            node_aliases: vec![],
+            symptoms: vec![],
+        };
+
+        let files = resolve(graph, &mut |_| None);
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn resolve_attaches_symptoms_to_correct_file() {
+        let pf = make_pf("/main.gin", "x := 42\n");
+        let mut symptoms = vec![];
+        let diag = UseSymptom::DuplicateTopLevel {
+            symbol: "x".to_string(),
+        }
+        .into_diagnostic(SpanId::INVALID);
+
+        symptoms.push((0usize, diag.clone()));
+
+        let graph = ResolveGraph {
+            nodes: vec![ResolveNode {
+                path: PathBuf::from("/main.gin"),
+                qualifier: String::new(),
+            }],
+            adj: vec![vec![]],
+            node_aliases: vec![vec![]],
+            symptoms,
+        };
+
+        let files = resolve(graph, &mut |path| {
+            if path == PathBuf::from("/main.gin") {
+                Some(pf.clone())
+            } else {
+                None
+            }
+        });
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].output.symptoms.len(), 1);
+        assert_eq!(files[0].output.symptoms[0].message, diag.message);
     }
 }

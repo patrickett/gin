@@ -2,15 +2,13 @@ mod diagnostics;
 mod handlers;
 mod state;
 
-use ast::ImportSource;
 use dashmap::DashMap;
 use database::Diagnostics;
 use database::File;
 use database::{file_parse_output, package_typecheck_symptoms, sorted_package_files, PackageFiles};
-use diagnostic::{DiagnosticLike, UseSymptom};
 use diagnostics::symptoms_to_diagnostics;
 use futures::FutureExt;
-use resolve::{check_public_def_in_package, is_folder_module_dir, resolve_flask_path_dependencies};
+use resolve::{resolve_flask_path_dependencies, ParsedFile};
 use state::{DocumentState, GinHost, JsonDocumentState};
 use std::collections::HashMap;
 use std::ops::Deref;
@@ -346,6 +344,28 @@ impl Backend {
             return Vec::new();
         }
 
+        let import_symptoms_by_path: HashMap<PathBuf, Vec<diagnostic::Diagnostic>> =
+            if !dependency_dirs.is_empty() {
+                // Convert Salsa-tracked files to ParsedFiles for the shared resolver
+                let entry_files: Vec<ParsedFile> = package_files
+                    .iter()
+                    .map(|&pf| {
+                        let path = pf.path(&snapshot.db);
+                        let parse = file_parse_output(&snapshot.db, pf);
+                        let source = pf.contents(&snapshot.db).to_string();
+                        ParsedFile {
+                            path,
+                            source,
+                            output: (*parse).clone(),
+                        }
+                    })
+                    .collect();
+
+                resolve::resolve_import_symptoms(entry_files, &dependency_dirs)
+            } else {
+                HashMap::<PathBuf, Vec<diagnostic::Diagnostic>>::new()
+            };
+
         let mut results = Vec::with_capacity(package_files.len());
         for (i, &pkg_file) in package_files.iter().enumerate() {
             let pkg_path = pkg_file.path(&snapshot.db);
@@ -358,8 +378,8 @@ impl Backend {
             let source = pkg_file.contents(&snapshot.db).to_string();
             let mut symptoms = parse.symptoms.clone();
             symptoms.extend(typecheck_symptoms[i].iter().cloned());
-            if !dependency_dirs.is_empty() {
-                symptoms.extend(collect_bundle_import_symptoms(&parse.ast, &dependency_dirs));
+            if let Some(import_syms) = import_symptoms_by_path.get(&pkg_path) {
+                symptoms.extend(import_syms.iter().cloned());
             }
 
             let wrapped: Vec<Diagnostics> = symptoms.into_iter().map(Diagnostics).collect();
@@ -456,49 +476,10 @@ async fn main() {
     Server::new(stdin, stdout, socket).serve(service).await;
 }
 
-fn collect_bundle_import_symptoms(
-    ast: &ast::FileAst,
-    dependencies: &HashMap<String, PathBuf>,
-) -> Vec<diagnostic::Diagnostic> {
-    if dependencies.is_empty() {
-        return Vec::new();
-    }
-
-    let mut symptoms = Vec::new();
-    for import in ast.uses() {
-        for module_import in &import.0 {
-            if let ImportSource::LocalBundle(bundle) = &module_import.source {
-                let root = bundle.root.as_str();
-                let Some(dep_dir) = dependencies.get(root) else {
-                    continue;
-                };
-                if !is_folder_module_dir(dep_dir) {
-                    continue;
-                }
-                for member in &bundle.members {
-                    if !check_public_def_in_package(dep_dir, member.export.as_str()) {
-                        symptoms.push(
-                            UseSymptom::NotExported {
-                                symbol: member.export.to_string(),
-                                module: root.to_string(),
-                            }
-                            .into_diagnostic(member.span),
-                        );
-                    }
-                }
-            }
-        }
-    }
-    symptoms
-}
-
 #[cfg(test)]
 mod tests {
-    use super::collect_bundle_import_symptoms;
     use internment::Intern;
     use parser::parse_from_str;
-    use parser::parse_source_full;
-    use std::collections::HashMap;
     use typeck::TyEnv;
 
     #[test]
@@ -522,50 +503,5 @@ mod tests {
 
         let some_item = items.iter().find(|i| i.label == "Some(x)").unwrap();
         assert_eq!(some_item.detail.as_ref().unwrap(), &"Maybe.Some(x)");
-    }
-
-    #[test]
-    fn missing_bundle_import_symbol_flaw() {
-        // Set up a temp directory mimicking a package with a core dependency.
-        let dir =
-            std::env::temp_dir().join(format!("gin_missing_bundle_test_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("core")).unwrap();
-
-        let write_file = |path: &std::path::Path, contents: &str| {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).unwrap();
-            }
-            std::fs::write(path, contents).unwrap();
-        };
-
-        write_file(
-            &dir.join("core/flask.jsonc"),
-            r#"{"name":"core","version":"0.0.0","authors":[]}"#,
-        );
-        // core exports `true` but NOT `super_cool_thing`
-        write_file(
-            &dir.join("core/bool.gin"),
-            r"Bool is True or False
-
-false := Bool.False
-true  := Bool.True
-",
-        );
-
-        // Parse a main file that imports `super_cool_thing` (not exported) alongside `true`
-        let source =
-            "use core.(true, super_cool_thing)\n\nuse core.true\n\nmain:\n    true\nreturn\n";
-        let output = parse_source_full(source);
-        let mut dependencies = HashMap::new();
-        dependencies.insert("core".to_string(), dir.join("core"));
-
-        let symptoms = collect_bundle_import_symptoms(&output.ast, &dependencies);
-        assert!(
-            symptoms.iter().any(|d| d.code.slug() == "use-not-exported"),
-            "expected import symbol missing symptom"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

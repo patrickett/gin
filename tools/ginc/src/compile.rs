@@ -67,7 +67,8 @@ impl GinCompiler {
             {
                 args.dependencies = resolve::resolve_flask_path_dependencies(&config, &entry_dir);
             }
-            resolve::resolve_imports(files, Some(&args.dependencies))
+
+            resolve::resolve_imports(files, &args.dependencies)
         } else {
             files
         };

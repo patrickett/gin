@@ -220,13 +220,6 @@ fn resolve_import_hover(uri: &Url, dep_name: &str, symbol: &str) -> Option<Strin
     resolve::resolve_symbol_hover(&base_path, dep_name, symbol)
 }
 
-/// Resolve the dependency directory for `dep_name` from the `flask.jsonc`
-/// found relative to the file at `uri`.
-fn resolve_dep_dir_from_uri(uri: &Url, dep_name: &str) -> Option<std::path::PathBuf> {
-    let base_path = uri.to_file_path().ok()?;
-    resolve::resolve_dep_dir(&base_path, dep_name)
-}
-
 /// Read the package name from `flask.jsonc` for the package containing `file_path`.
 fn package_name_for_file(file_path: &std::path::Path) -> Option<String> {
     let dir = file_path.parent()?;
@@ -235,20 +228,10 @@ fn package_name_for_file(file_path: &std::path::Path) -> Option<String> {
 }
 
 /// Show hover information about a dependency root (e.g. hovering over `core`
-/// in `use core.true`).
+/// in `use core.true`). Delegates to the shared resolver.
 fn hover_for_dependency_root(uri: &Url, dep_name: &str) -> Option<String> {
-    let dep_dir = resolve_dep_dir_from_uri(uri, dep_name)?;
-    let dep_config = flask::FlaskConfig::from_directory(&dep_dir)?;
-    let name = dep_config.name();
-    let version = dep_config.version();
-    let description = dep_config.description().unwrap_or("");
-
-    let mut text = format!("```gin\n{name}\n```");
-    if !description.is_empty() {
-        text.push_str(&format!("\n\n---\n\n{description}"));
-    }
-    text.push_str(&format!("\n\n---\n\nversion = {version}"));
-    Some(text)
+    let base_path = uri.to_file_path().ok()?;
+    resolve::resolve_dep_hover(&base_path, dep_name)
 }
 
 fn compute_dot_hover_range(source: &str, byte_pos: usize) -> Option<Range> {
