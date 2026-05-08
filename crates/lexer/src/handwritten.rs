@@ -199,7 +199,7 @@ impl<'src> Lexer<'src> {
         let bytes = self.source.as_bytes();
         while self.pos < bytes.len() {
             match bytes[self.pos] {
-                b'a'..=b'z' | b'_' => self.pos += 1,
+                b'a'..=b'z' | b'0'..=b'9' | b'_' => self.pos += 1,
                 _ => break,
             }
         }

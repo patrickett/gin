@@ -29,10 +29,14 @@ pub fn find_definition_span(ast: &ast::FileAst, name: &str) -> Option<std::ops::
 /// root-only path, local basename, bundle root, or `as` alias), for goto-definition before jumping
 /// off-file to the dependency.
 ///
+/// For package imports with segments (e.g. `use core.println`), returns the span of just the
+/// last segment (`println`) rather than the whole dotted path.
+///
 /// Returns `None` when `name` is not introduced by any `use` in this file.
 pub fn find_import_definition_span(
     ast: &ast::FileAst,
     name: &str,
+    source: &str,
 ) -> Option<std::ops::Range<usize>> {
     let span_table = ast.span_table();
     let key = Intern::<String>::from_ref(name);
@@ -44,6 +48,21 @@ pub fn find_import_definition_span(
             if imported != key {
                 continue;
             }
+
+            // For Package imports with segments, return the span of the last segment only.
+            if let ast::ImportSource::Package(mod_path) = &mi.source
+                && let Some(last_seg) = mod_path.segments.last()
+            {
+                let path_span = span_table.get(mod_path.span_id());
+                let path_text = source.get(path_span.start..path_span.end)?;
+                // Find the last '.' in the path text; the last segment starts after it.
+                let dot_pos = path_text.rfind('.')?;
+                let seg_start = path_span.start + dot_pos + 1;
+                let seg_end = seg_start + last_seg.len();
+                return Some(seg_start..seg_end);
+            }
+
+            // Non-package or root-only: use the full source span.
             let span = span_table.get(mi.source.span_id());
             return Some(span.start..span.end);
         }

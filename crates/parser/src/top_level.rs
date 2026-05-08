@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::ops::ControlFlow;
 
 use ast::span::{SpanId, SpanTable};
-use ast::visit::{walk_bind_value, walk_expr, Visitor};
+use ast::visit::{Visitor, walk_bind_value, walk_expr};
 use lexer::Token;
 
 use ControlFlow::Continue;
@@ -56,14 +56,14 @@ pub fn parse_file(cursor: &mut TokenCursor, expr_parser: ExprFn) -> FileAst {
         }
     }
 
-    let mut tags = ast::TagMap::new();
+    let mut tags_scratch: IndexMap<Intern<String>, Vec<Declare>> = IndexMap::new();
     let mut defs_scratch: IndexMap<Intern<String>, Vec<Bind>> = IndexMap::new();
     let mut private_defs = HashSet::new();
     let mut private_tags = HashSet::new();
     let mut exprs = Vec::new();
 
     for el in public_elements {
-        collect_top_level(el, &mut tags, &mut defs_scratch, &mut exprs);
+        collect_top_level(el, &mut tags_scratch, &mut defs_scratch, &mut exprs);
     }
 
     for el in private_elements {
@@ -86,9 +86,10 @@ pub fn parse_file(cursor: &mut TokenCursor, expr_parser: ExprFn) -> FileAst {
             }
             TopLevelValue::Expr(..) => {}
         }
-        collect_top_level(el, &mut tags, &mut defs_scratch, &mut exprs);
+        collect_top_level(el, &mut tags_scratch, &mut defs_scratch, &mut exprs);
     }
 
+    let mut tags = collapse_tags_for_platform(tags_scratch);
     let defs = collapse_defs_for_platform(defs_scratch);
     generate_return_type_unions(&defs, &mut tags, &private_defs);
 
@@ -388,16 +389,42 @@ fn parse_method_bind(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<To
     Some(TopLevelValue::Bind(Box::new(bind)))
 }
 
+fn collapse_tags_for_platform(multi: IndexMap<Intern<String>, Vec<Declare>>) -> ast::TagMap {
+    let mut tags = ast::TagMap::new();
+    for (name, declares) in multi {
+        if let Some(decl) = pick_tag_for_platform(declares) {
+            tags.insert(name, decl);
+        }
+    }
+    tags
+}
+
+fn pick_tag_for_platform(declares: Vec<Declare>) -> Option<Declare> {
+    if declares.is_empty() {
+        return None;
+    }
+    let mut matching: Vec<Declare> = declares
+        .into_iter()
+        .filter(|d| d.attributes().matches_current_platform())
+        .collect();
+    if matching.is_empty() {
+        None
+    } else {
+        // If several overloads match (misconfiguration), keep the first.
+        Some(matching.remove(0))
+    }
+}
+
 fn collect_top_level(
     el: TopLevelValue,
-    tags: &mut ast::TagMap,
+    tags: &mut IndexMap<Intern<String>, Vec<Declare>>,
     defs: &mut IndexMap<Intern<String>, Vec<Bind>>,
     exprs: &mut Vec<(Expr, SpanId)>,
 ) {
     match el {
         TopLevelValue::Tag(decl) => {
             let name = decl.name();
-            tags.insert(name, decl);
+            tags.entry(name).or_default().push(decl);
         }
         TopLevelValue::Bind(bind) => {
             let name = if let Some(sp) = bind.receiver_type_surface() {
@@ -437,6 +464,8 @@ fn generate_return_type_unions(
     tags: &mut ast::TagMap,
     _private_defs: &HashSet<Intern<String>>,
 ) {
+    // Skip tags that were already filtered out by platform (they won't be in the map,
+    // but this function only adds new tags, so it's already correct).
     let mut tag_buffer = Vec::new(); // reused across iterations
     for bind in defs.values() {
         tag_buffer.clear();
@@ -506,8 +535,10 @@ fn is_declare_from_offset(cursor: &TokenCursor, tag_offset: usize) -> bool {
 }
 
 fn extract_anonymous_tags_from_bind(bind: &Bind, tags: &mut Vec<(Intern<String>, SpanId)>) {
-    let mut collector = AnonymousTagCollector { collected: Vec::new() };
-    
+    let mut collector = AnonymousTagCollector {
+        collected: Vec::new(),
+    };
+
     if let Some(sp) = bind.receiver_type_surface() {
         collect_type_surface_tags(&sp.0, &mut collector.collected);
     }
@@ -529,7 +560,9 @@ fn collect_type_surface_tags(expr: &Expr, tags: &mut Vec<(Intern<String>, SpanId
             for (_, pk) in params {
                 match pk {
                     ParameterKind::Default(e) => {
-                        let mut inner = AnonymousTagCollector { collected: Vec::new() };
+                        let mut inner = AnonymousTagCollector {
+                            collected: Vec::new(),
+                        };
                         let _ = walk_expr(&mut inner, e);
                         tags.extend(inner.collected);
                     }

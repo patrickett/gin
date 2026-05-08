@@ -13,6 +13,7 @@ use lexer::Token;
 /// asd
 pub fn parse_declare(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Declare> {
     let doc_before = parse_doc_comment(cursor);
+    let attrs = parse_declare_attributes(cursor);
     cursor.eat(&Token::Indent);
 
     let (name, name_span) = match cursor.peek()? {
@@ -35,11 +36,13 @@ pub fn parse_declare(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<De
         cursor.eat(&Token::Dedent);
 
         let doc = doc_after_value.or(doc_after_is).or(doc_before);
-        Some(
-            Declare::new(name, name_span, value)
-                .with_params(params)
-                .with_doc(doc),
-        )
+        let mut decl = Declare::new(name, name_span, value)
+            .with_params(params)
+            .with_doc(doc);
+        if let Some(a) = attrs {
+            decl = decl.with_attributes(a);
+        }
+        Some(decl)
     } else if cursor.eat(&Token::Has) {
         parse_doc_comment(cursor);
         cursor.eat(&Token::Indent);
@@ -47,20 +50,57 @@ pub fn parse_declare(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<De
         let value = parse_has_rhs(cursor, expr_parser);
         cursor.eat(&Token::Dedent);
 
-        Some(
-            Declare::new(name, name_span, value)
-                .with_params(params)
-                .with_doc(doc_before),
-        )
+        let mut decl = Declare::new(name, name_span, value)
+            .with_params(params)
+            .with_doc(doc_before);
+        if let Some(a) = attrs {
+            decl = decl.with_attributes(a);
+        }
+        Some(decl)
     } else {
         cursor.error("expected 'is' or 'has'", cursor.current_span());
         None
     }
 }
 
-#[allow(dead_code)]
-fn parse_declare_attributes(_cursor: &mut TokenCursor) -> Option<ast::DeclareAttributes> {
-    None
+fn parse_declare_attributes(cursor: &mut TokenCursor) -> Option<ast::DeclareAttributes> {
+    if !cursor.is_at(&Token::Pound) {
+        return None;
+    }
+    cursor.advance();
+
+    cursor.expect(&Token::BracketOpen)?;
+
+    let mut attrs = ast::DeclareAttributes::default();
+
+    if cursor.eat(&Token::BracketClose) {
+        return Some(attrs);
+    }
+
+    loop {
+        if let Some(attr) = crate::expr::bind::parse_one_attribute(cursor) {
+            if attr.os.is_some() {
+                attrs.os = attr.os;
+            }
+            if attr.arch.is_some() {
+                attrs.arch = attr.arch;
+            }
+        }
+
+        if cursor.eat(&Token::Comma) {
+            continue;
+        }
+        if cursor.eat(&Token::BracketClose) {
+            break;
+        }
+        cursor.error(
+            "expected ',' or ']' in attribute list",
+            cursor.current_span(),
+        );
+        break;
+    }
+
+    Some(attrs)
 }
 
 fn parse_doc_comment(cursor: &mut TokenCursor) -> Option<DocComment> {

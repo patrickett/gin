@@ -1,4 +1,10 @@
-#![warn(clippy::correctness, clippy::suspicious, clippy::style, clippy::complexity, clippy::perf)]
+#![warn(
+    clippy::correctness,
+    clippy::suspicious,
+    clippy::style,
+    clippy::complexity,
+    clippy::perf
+)]
 mod ty;
 pub use ty::{Ty, ty_alignment, ty_byte_size_static, ty_union_discriminant_size};
 
@@ -35,5 +41,5 @@ pub use completions::{
 pub mod source;
 pub use source::{
     byte_offset_to_position, get_char_at_position, is_identifier_char, is_in_comment,
-    position_to_byte_offset, word_at_byte_offset,
+    position_to_byte_offset, word_at_byte_offset, word_byte_range,
 };

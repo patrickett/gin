@@ -303,11 +303,103 @@ pub fn format_params(params: &Parameters) -> String {
     }
     let parts: Vec<String> = params
         .iter()
-        .map(|(name, kind)| match kind {
-            ParameterKind::Generic => name.to_string(),
-            ParameterKind::Tagged(_) => format!("{name}{kind}"),
-            ParameterKind::Default(expr) => format!("{name}: {expr:?}"),
+        .map(|(name, kind)| {
+            // If the parameter name matches its type name (case-insensitive),
+            // shorten the parameter name to its first character.
+            if let ParameterKind::Tagged(sp) = kind
+                && let Expr::TypeNominal(type_name, _) = &sp.0
+                && name.eq_ignore_ascii_case(type_name.as_str())
+            {
+                let short = name.chars().next().unwrap_or('p').to_string();
+                return format!("{short}{kind}");
+            }
+            match kind {
+                ParameterKind::Generic => name.to_string(),
+                ParameterKind::Tagged(_) => format!("{name}{kind}"),
+                ParameterKind::Default(expr) => format!("{name}: {expr:?}"),
+            }
         })
         .collect();
     format!("({})", parts.join(", "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ast::SpanId;
+    use ast::{Literal, Spanned};
+    use indexmap::IndexMap;
+    use internment::Intern;
+
+    fn intern(s: &str) -> Intern<String> {
+        Intern::new(s.to_owned())
+    }
+
+    fn make_params(items: Vec<(Intern<String>, ParameterKind)>) -> Parameters {
+        let mut map = IndexMap::new();
+        for (name, kind) in items {
+            map.insert(name, kind);
+        }
+        map
+    }
+
+    fn tagged_param(name: &str, type_name: &str) -> (Intern<String>, ParameterKind) {
+        let expr = Expr::TypeNominal(intern(type_name), SpanId::new(0));
+        (
+            intern(name),
+            ParameterKind::Tagged(Box::new(Spanned(expr, SpanId::new(0)))),
+        )
+    }
+
+    #[test]
+    fn format_params_shortens_param_matching_type_name() {
+        let params = make_params(vec![tagged_param("str", "Str")]);
+        assert_eq!(format_params(&params), "(s Str)");
+    }
+
+    #[test]
+    fn format_params_does_not_shorten_different_name() {
+        let params = make_params(vec![tagged_param("string", "Str")]);
+        assert_eq!(format_params(&params), "(string Str)");
+    }
+
+    #[test]
+    fn format_params_shortens_case_insensitive_match() {
+        let params = make_params(vec![tagged_param("STR", "Str")]);
+        assert_eq!(format_params(&params), "(S Str)");
+    }
+
+    #[test]
+    fn format_params_empty_params() {
+        let params: Parameters = IndexMap::new();
+        assert_eq!(format_params(&params), "");
+    }
+
+    #[test]
+    fn format_params_multiple_mixed() {
+        let params = make_params(vec![
+            tagged_param("str", "Str"),
+            tagged_param("count", "Int"),
+        ]);
+        assert_eq!(format_params(&params), "(s Str, count Int)");
+    }
+
+    #[test]
+    fn format_params_generic() {
+        let params = make_params(vec![(intern("T"), ParameterKind::Generic)]);
+        assert_eq!(format_params(&params), "(T)");
+    }
+
+    #[test]
+    fn format_params_default() {
+        let expr = Expr::Lit(Literal::Number(42));
+        let params = make_params(vec![(
+            intern("x"),
+            ParameterKind::Default(Spanned(expr, SpanId::new(0))),
+        )]);
+        assert_eq!(
+            format_params(&params),
+            "(x: Spanned(Lit(Number(42)), SpanId(0)))"
+        );
+    }
 }

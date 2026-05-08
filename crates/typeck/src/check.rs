@@ -3,13 +3,13 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 
-use ast::visit::{walk_bind_value, walk_expr, walk_fn_call, Visitor};
+use ast::visit::{Visitor, walk_bind_value, walk_expr, walk_fn_call};
 use ast::{
-    Bind, BindValue, Expr, FileAst, HasSpanId, IfCondition, ParameterKind,
-    SpanId, Spanned, WhenArm, type_surface_mangle_name,
+    Bind, BindValue, Expr, FileAst, HasSpanId, IfCondition, ParameterKind, SpanId, Spanned,
+    WhenArm, type_surface_mangle_name,
 };
-use diagnostic::type_::TypeSymptom;
 use diagnostic::DiagnosticLike;
+use diagnostic::type_::TypeSymptom;
 use internment::Intern;
 
 use crate::env::TyEnv;
@@ -240,7 +240,9 @@ impl TyEnv {
 
                 let mut suffix_refs: HashSet<Intern<String>> = HashSet::new();
                 if let Some(e) = &ret.0 {
-                    let mut collector = RefCollector { refs: &mut suffix_refs };
+                    let mut collector = RefCollector {
+                        refs: &mut suffix_refs,
+                    };
                     let _ = walk_expr(&mut collector, e);
                 }
                 let mut unused_spans: Vec<_> = Vec::new();
@@ -250,10 +252,14 @@ impl TyEnv {
                         if !suffix_refs.contains(&name) && !name.starts_with('_') {
                             unused_spans.push((name, inner.name_span));
                         }
-                        let mut collector = RefCollector { refs: &mut suffix_refs };
+                        let mut collector = RefCollector {
+                            refs: &mut suffix_refs,
+                        };
                         let _ = walk_bind_value(&mut collector, inner.value());
                     } else {
-                        let mut collector = RefCollector { refs: &mut suffix_refs };
+                        let mut collector = RefCollector {
+                            refs: &mut suffix_refs,
+                        };
                         let _ = walk_expr(&mut collector, expr);
                     }
                 }
@@ -357,16 +363,27 @@ impl TyEnv {
         locals: &dyn LocalTypes,
     ) {
         let Some(info) = self.fn_params.get(mangled) else {
+            eprintln!(
+                "DEBUG check_call_args: {mangled} NOT in fn_params, keys: {:?}",
+                self.fn_params
+                    .keys()
+                    .map(|k| k.as_str())
+                    .collect::<Vec<_>>()
+            );
             return;
         };
         let mut params = info.params.iter();
         let mut bindings: HashMap<Intern<String>, Ty> = info.typevars.clone();
         for arg in args {
-            let Some((_, param_ty)) = params.next() else {
+            let Some((pname, param_ty)) = params.next() else {
                 break;
             };
             let arg_ty = arg.infer_ty(&self.infer_env(locals));
+            eprintln!(
+                "DEBUG check_call_args[{mangled}]: param={pname} param_ty={param_ty:?} arg_ty={arg_ty:?}"
+            );
             if !ty_unifies_with(&arg_ty, param_ty, &mut bindings) {
+                eprintln!("DEBUG check_call_args[{mangled}]: MISMATCH");
                 symptoms.push(TypeSymptom::Mismatch.into_diagnostic(arg.1));
             }
         }
@@ -390,9 +407,10 @@ impl Visitor for UnknownRefChecker<'_, '_, '_> {
             let mangled = mangled_fn_call_name(call);
             let is_method = self.ty_env.fn_return_ty(&mangled).is_some();
             let is_field_access = call.args.is_none()
-                && self.locals.get_type(&call.path.root).is_some_and(|ty| {
-                    is_field_of_type(&ty, call.path.segments.last().unwrap())
-                });
+                && self
+                    .locals
+                    .get_type(&call.path.root)
+                    .is_some_and(|ty| is_field_of_type(&ty, call.path.segments.last().unwrap()));
 
             if !is_method && !is_field_access {
                 let name = fmt_call_without_parens(call);

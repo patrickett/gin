@@ -77,6 +77,13 @@ impl GinCompiler {
             return;
         }
 
+        // eprintln!(
+        //     "DEBUG resolved files: {:?}",
+        //     files
+        //         .iter()
+        //         .map(|f| f.path.display().to_string())
+        //         .collect::<Vec<_>>()
+        // );
         let checked = typecheck(&files);
 
         if print_typecheck_diagnostics(&files, &checked) {

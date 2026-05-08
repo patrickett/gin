@@ -10,7 +10,7 @@ pub enum OsTarget {
 }
 
 impl OsTarget {
-    fn is_current_host(&self) -> bool {
+    pub(crate) fn is_current_host(&self) -> bool {
         match self {
             OsTarget::Linux => cfg!(target_os = "linux"),
             OsTarget::MacOS => cfg!(target_os = "macos"),
@@ -29,7 +29,7 @@ pub enum ArchTarget {
 }
 
 impl ArchTarget {
-    fn is_current_host(&self) -> bool {
+    pub(crate) fn is_current_host(&self) -> bool {
         match self {
             ArchTarget::X86_64 => cfg!(target_arch = "x86_64"),
             ArchTarget::Arm64 => cfg!(target_arch = "aarch64"),

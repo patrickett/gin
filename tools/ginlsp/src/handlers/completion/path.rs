@@ -80,10 +80,14 @@ fn complete_package_paths(
     };
 
     let base_prefix = &token[..token.rfind('.').unwrap_or(token.len()) + 1];
-    nested_folder_module_names(&base_pkg_dir)
-        .into_iter()
-        .filter(|k| k.starts_with(partial))
-        .map(|k| CompletionItem {
+    let mut items: Vec<CompletionItem> = Vec::new();
+
+    // Add nested folder modules (sub-packages with flask.jsonc).
+    for k in nested_folder_module_names(&base_pkg_dir) {
+        if !k.starts_with(partial) {
+            continue;
+        }
+        items.push(CompletionItem {
             label: k.clone(),
             kind: Some(CompletionItemKind::MODULE),
             detail: Some("nested package".to_string()),
@@ -100,8 +104,35 @@ fn complete_package_paths(
                 },
             )),
             ..Default::default()
-        })
-        .collect()
+        });
+    }
+
+    // Add public symbols (defs and tags) from .gin files in the package.
+    for sym in resolve::list_public_symbols(&base_pkg_dir) {
+        if !sym.starts_with(partial) {
+            continue;
+        }
+        items.push(CompletionItem {
+            label: sym.clone(),
+            kind: Some(CompletionItemKind::FUNCTION),
+            detail: Some("public symbol".to_string()),
+            text_edit: Some(tower_lsp::lsp_types::CompletionTextEdit::Edit(
+                tower_lsp::lsp_types::TextEdit {
+                    range: Range {
+                        start: Position {
+                            line: position.line,
+                            character: token_start as u32,
+                        },
+                        end: position,
+                    },
+                    new_text: format!("{base_prefix}{sym}"),
+                },
+            )),
+            ..Default::default()
+        });
+    }
+
+    items
 }
 
 fn nested_folder_module_names(package_dir: &std::path::Path) -> Vec<String> {
@@ -516,6 +547,126 @@ mod tests {
         // Dependency name completion is currently unfiltered; ensure the deps appear.
         assert!(labels.contains(&"core"));
         assert!(labels.contains(&"dep"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn use_completion_shows_public_symbols() {
+        let dir = unique_temp_dir("public_syms");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        write_file(
+            &dir.join("flask.jsonc"),
+            r#"
+{
+  "name": "root",
+  "version": "0.0.0",
+  "authors": [],
+  "dependencies": { "dep": { "path": "dep" } }
+}
+"#,
+        );
+        write_file(
+            &dir.join("dep/flask.jsonc"),
+            r#"
+{
+  "name": "dep",
+  "version": "0.0.0",
+  "authors": []
+}
+"#,
+        );
+        write_file(
+            &dir.join("dep/io.gin"),
+            "println(s Str): s\nprint(s Str): s\n",
+        );
+        write_file(&dir.join("dep/maybe.gin"), "Maybe is Some(value) or None\n");
+        write_file(&dir.join("main.gin"), "use dep.\n");
+
+        let uri = Url::from_file_path(dir.join("main.gin")).unwrap();
+        let src = "use dep.\n";
+        let pos = Position {
+            line: 0,
+            character: "use dep.".len() as u32,
+        };
+        let items = use_completions(src, pos, &uri, None).unwrap();
+        let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"println"),
+            "println not in labels: {:?}",
+            labels
+        );
+        assert!(
+            labels.contains(&"print"),
+            "print not in labels: {:?}",
+            labels
+        );
+        assert!(
+            labels.contains(&"Maybe"),
+            "Maybe not in labels: {:?}",
+            labels
+        );
+        for item in &items {
+            if item.label == "println" || item.label == "print" || item.label == "Maybe" {
+                assert_eq!(
+                    item.kind,
+                    Some(CompletionItemKind::FUNCTION),
+                    "expected FUNCTION kind for {}",
+                    item.label
+                );
+            }
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn use_completion_filters_public_symbols_by_partial() {
+        let dir = unique_temp_dir("public_syms_partial");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        write_file(
+            &dir.join("flask.jsonc"),
+            r#"
+{
+  "name": "root",
+  "version": "0.0.0",
+  "authors": [],
+  "dependencies": { "dep": { "path": "dep" } }
+}
+"#,
+        );
+        write_file(
+            &dir.join("dep/flask.jsonc"),
+            r#"
+{
+  "name": "dep",
+  "version": "0.0.0",
+  "authors": []
+}
+"#,
+        );
+        write_file(
+            &dir.join("dep/io.gin"),
+            "println(s Str): s\nprint(s Str): s\n",
+        );
+        write_file(&dir.join("dep/maybe.gin"), "Maybe is Some(value) or None\n");
+        write_file(&dir.join("main.gin"), "use dep.p\n");
+
+        let uri = Url::from_file_path(dir.join("main.gin")).unwrap();
+        let src = "use dep.p\n";
+        let pos = Position {
+            line: 0,
+            character: "use dep.p".len() as u32,
+        };
+        let items = use_completions(src, pos, &uri, None).unwrap();
+        let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"println"));
+        assert!(labels.contains(&"print"));
+        assert!(!labels.contains(&"Maybe"));
 
         let _ = fs::remove_dir_all(&dir);
     }

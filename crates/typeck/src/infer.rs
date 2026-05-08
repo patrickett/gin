@@ -22,9 +22,9 @@ use ast::{
 };
 use internment::Intern;
 
+use crate::Ty;
 use crate::resolve::{is_type_surface, resolve_type_expr_with_subst, typevars_from_receiver};
 use crate::ty::str_record_ty;
-use crate::Ty;
 
 /// Abstracts over different "local variable" type representations.
 ///
@@ -94,7 +94,7 @@ pub trait TyInfer {
 // ---------------------------------------------------------------------------
 
 impl TyInfer for Literal {
-    fn infer_ty(&self, _env: &TyInferEnv) -> Ty {
+    fn infer_ty(&self, env: &TyInferEnv) -> Ty {
         match self {
             Literal::Int(n) => Ty::Int {
                 width: 64,
@@ -107,7 +107,11 @@ impl TyInfer for Literal {
                 value: Some(*n as i128),
             },
             Literal::Float(f) => Ty::Float { value: Some(*f) },
-            Literal::String(_) => str_record_ty(),
+            Literal::String(_) => env
+                .tag_types
+                .get(&Intern::<String>::from_ref("Str"))
+                .cloned()
+                .unwrap_or_else(str_record_ty),
         }
     }
 }

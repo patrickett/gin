@@ -245,7 +245,7 @@ impl Backend {
                         if range != Range::default() {
                             return Some(GotoDefinitionResponse::Scalar(Location { uri, range }));
                         }
-                        if let Some(span) = find_import_definition_span(&ast, &word) {
+                        if let Some(span) = find_import_definition_span(&ast, &word, &source) {
                             let range = span_to_range(span.start, span.end, &source);
                             return Some(GotoDefinitionResponse::Scalar(Location { uri, range }));
                         }

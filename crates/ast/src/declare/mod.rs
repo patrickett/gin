@@ -57,6 +57,15 @@ impl Declare {
     pub fn value(&self) -> &DeclareValue {
         &self.value
     }
+
+    pub fn attributes(&self) -> &DeclareAttributes {
+        &self.attributes
+    }
+
+    pub fn with_attributes(mut self, attrs: DeclareAttributes) -> Self {
+        self.attributes = attrs;
+        self
+    }
 }
 
 impl std::fmt::Display for Declare {

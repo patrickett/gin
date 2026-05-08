@@ -47,6 +47,22 @@ impl Backend {
 
         let dot_hover_range = compute_dot_hover_range(&source, byte_pos);
 
+        // Compute the word range at the cursor position for use in hover responses.
+        let word_range = typeck::word_byte_range(&source, byte_pos).map(|(start, end)| {
+            let (sl, sc) = byte_offset_to_position(start, &source);
+            let (el, ec) = byte_offset_to_position(end, &source);
+            Range {
+                start: Position {
+                    line: sl,
+                    character: sc,
+                },
+                end: Position {
+                    line: el,
+                    character: ec,
+                },
+            }
+        });
+
         // Single blocking request for AST-based hover: range, number, string,
         // use-keyword, and import resolution.
         let hover = self
@@ -145,6 +161,8 @@ impl Backend {
                     }
                 }
 
+                let word_range = word_range.clone();
+
                 // Phase 2: "use" keyword hover.
                 let word = ast.word_at_byte(byte_pos, &source)
                     .or_else(|| typeck::word_at_byte_offset(&source, byte_pos));
@@ -173,7 +191,7 @@ impl Backend {
                                 the dependency directory.",
                             ),
                         }),
-                        range: None,
+                        range: word_range,
                     });
                 }
 
@@ -185,7 +203,7 @@ impl Backend {
                                 kind: MarkupKind::Markdown,
                                 value: hover_text,
                             }),
-                            range: None,
+                            range: word_range,
                         });
                     }
                     Some(resolve::ImportTarget::DepSymbol { dep_name, symbol })
@@ -196,7 +214,7 @@ impl Backend {
                                     kind: MarkupKind::Markdown,
                                     value: hover_text,
                                 }),
-                                range: None,
+                                range: word_range,
                             },
                         );
                     }
@@ -249,7 +267,7 @@ impl Backend {
                 kind: MarkupKind::Markdown,
                 value,
             }),
-            range: None,
+            range: word_range,
         }))
     }
 }

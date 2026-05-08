@@ -130,7 +130,7 @@ pub fn parse_bind_attributes(cursor: &mut TokenCursor) -> Option<BindAttributes>
     Some(attrs)
 }
 
-fn parse_one_attribute(cursor: &mut TokenCursor) -> Option<BindAttributes> {
+pub(crate) fn parse_one_attribute(cursor: &mut TokenCursor) -> Option<BindAttributes> {
     match cursor.peek()? {
         Token::Id("os") => {
             cursor.advance();
@@ -264,7 +264,7 @@ fn parse_one_attribute(cursor: &mut TokenCursor) -> Option<BindAttributes> {
     }
 }
 
-fn parse_os_target(cursor: &mut TokenCursor) -> Option<OsTarget> {
+pub(crate) fn parse_os_target(cursor: &mut TokenCursor) -> Option<OsTarget> {
     match cursor.peek()? {
         Token::Id("linux") => {
             cursor.advance();
@@ -286,7 +286,7 @@ fn parse_os_target(cursor: &mut TokenCursor) -> Option<OsTarget> {
     }
 }
 
-fn parse_arch_target(cursor: &mut TokenCursor) -> Option<ArchTarget> {
+pub(crate) fn parse_arch_target(cursor: &mut TokenCursor) -> Option<ArchTarget> {
     match cursor.peek()? {
         Token::Id("x86_64") => {
             cursor.advance();
@@ -343,7 +343,9 @@ fn parse_return_type_part(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Retu
     let (name, name_span) = match cursor.peek() {
         Some(Token::Tag(n)) => {
             let name = cursor.intern(n);
-            let span = cursor.peek_span().expect("peek confirmed Tag token, peek_span should succeed");
+            let span = cursor
+                .peek_span()
+                .expect("peek confirmed Tag token, peek_span should succeed");
             cursor.advance();
             (name, span)
         }

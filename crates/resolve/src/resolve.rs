@@ -447,7 +447,28 @@ pub fn resolve_imports(
     entry_files: Vec<ParsedFile>,
     dependencies: &HashMap<String, PathBuf>,
 ) -> Vec<ParsedFile> {
-    let (graph, available) = build_import_closure(entry_files, dependencies);
+    let (mut graph, available) = build_import_closure(entry_files, dependencies);
+
+    // Ensure all .gin files from dependency directories are included in the graph.
+    // Gin modules share a type environment across all their files, so when any
+    // symbol is imported from a module, all files must be typechecked together.
+    for dep_dir in dependencies.values() {
+        for file_path in collect_gin_files(dep_dir) {
+            if !graph.nodes.iter().any(|n| n.path == file_path) {
+                let qual = dep_dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                graph.nodes.push(ResolveNode {
+                    path: file_path,
+                    qualifier: qual,
+                });
+                graph.adj.push(Vec::new());
+                graph.node_aliases.push(Vec::new());
+            }
+        }
+    }
+
     resolve(graph, &mut |path| available.get(path).cloned())
 }
 
@@ -643,6 +664,32 @@ fn resolve_dependency_bundle_import(
         files: out,
         symbol_aliases: Vec::new(),
     }
+}
+
+/// List all public (exported) symbol names in any `.gin` file under `package_dir`,
+/// including both defs and tags.
+pub fn list_public_symbols(package_dir: &Path) -> Vec<String> {
+    let paths = flask::list_package_gin_files(package_dir);
+    let mut symbols = Vec::new();
+    for path in &paths {
+        let Ok(source) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let output = parse_source_full(&source);
+        for (key, _) in &output.ast.defs {
+            if !output.ast.private_defs.contains(key) {
+                symbols.push(key.as_str().to_string());
+            }
+        }
+        for key in output.ast.tags.keys() {
+            if !output.ast.private_tags.contains(key) {
+                symbols.push(key.as_str().to_string());
+            }
+        }
+    }
+    symbols.sort();
+    symbols.dedup();
+    symbols
 }
 
 /// Check whether `symbol_name` is a public (exported) definition in any `.gin`
@@ -912,13 +959,21 @@ pub fn merge_asts_checked(files: &[ParsedFile]) -> Result<FileAst, Vec<Diagnosti
         if let Err(conflict) = merged.merge_from_checked(file.output.ast.clone()) {
             let (symbol, span) = match &conflict {
                 MergeConflict::Tag { name } => {
-                    let span = file.output.ast.tags().get(name)
+                    let span = file
+                        .output
+                        .ast
+                        .tags()
+                        .get(name)
                         .map(|t| t.name_span)
                         .unwrap_or(SpanId::INVALID);
                     (name.to_string(), span)
                 }
                 MergeConflict::Def { name } => {
-                    let span = file.output.ast.defs().get(name)
+                    let span = file
+                        .output
+                        .ast
+                        .defs()
+                        .get(name)
                         .map(|d| d.name_span)
                         .unwrap_or(SpanId::INVALID);
                     (name.to_string(), span)
@@ -1118,5 +1173,69 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].output.symptoms.len(), 1);
         assert_eq!(files[0].output.symptoms[0].message, diag.message);
+    }
+
+    // Helper: creates a temporary directory that cleans up on Drop.
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let path =
+                std::env::temp_dir().join(format!("resolve_test_{name}_{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+
+        fn add_file(&self, name: &str, contents: &str) {
+            std::fs::write(self.path.join(name), contents).unwrap();
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn list_public_symbols_returns_defs_and_tags() {
+        let tmp = TempDir::new("list_public_symbols");
+        let pkg_dir = tmp.path.clone();
+
+        // Create flask.jsonc (required by list_package_gin_files).
+        let config = r#"{"name":"testpkg","version":"0.0.0","authors":[]}"#;
+        tmp.add_file("flask.jsonc", config);
+
+        // Create a .gin file with public tag, public def, and private def.
+        // The `private` keyword marks subsequent definitions as private.
+        tmp.add_file(
+            "util.gin",
+            r#"Color is Red or Green
+
+help := 42
+
+private
+private_helper:
+    return
+"#,
+        );
+
+        let symbols = list_public_symbols(&pkg_dir);
+
+        assert!(
+            symbols.contains(&"Color".to_string()),
+            "expected 'Color' to be listed as a public tag"
+        );
+        assert!(
+            symbols.contains(&"help".to_string()),
+            "expected 'help' to be listed as a public def"
+        );
+        assert!(
+            !symbols.contains(&"private_helper".to_string()),
+            "expected 'private_helper' to be excluded as a private def"
+        );
     }
 }
