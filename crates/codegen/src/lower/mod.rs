@@ -680,6 +680,10 @@ impl<'c> Lower<'c> for Expr {
                     signed: true,
                     value: None,
                 });
+                // TODO: Handle ConstUnion → base type coercion (e.g. LogLevel → Str).
+                // This requires emitting a global string table that maps each
+                // ConstUnion discriminant to a Str struct {ptr, len}, then
+                // GEP + load at the discriminant offset. See `create_string_global`.
                 lower_cast(ctx, block, val, &src_ty, &dst_ty)
             }
             Expr::TakePtr(inner) | Expr::TakeRef(inner) => {

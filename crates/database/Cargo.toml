@@ -10,6 +10,7 @@ salsa = { workspace = true }
 ast = { workspace = true }
 parser = { workspace = true }
 typeck = { workspace = true }
+flask = { workspace = true }
 dashmap = { workspace = true }
 crossbeam-channel = { workspace = true }
 notify-debouncer-mini = "0.4.1"

@@ -2,7 +2,7 @@ pub(crate) mod bind;
 pub(crate) mod body_trivia;
 pub(crate) mod control;
 pub(crate) mod r#import;
-mod literal;
+pub(crate) mod literal;
 
 // TODO: Split `control.rs` into per-construct files for better co-location of
 // parsing logic with its corresponding AST type. Target structure:
@@ -637,7 +637,9 @@ fn parse_tuple_lit_or_alloc_or_group(cursor: &mut TokenCursor) -> Spanned<Expr> 
 }
 
 fn parse_take_ptr(cursor: &mut TokenCursor) -> Spanned<Expr> {
-    let (_, start_span) = cursor.advance().expect("peek confirmed '@' token before parse_take_ptr"); // @
+    let (_, start_span) = cursor
+        .advance()
+        .expect("peek confirmed '@' token before parse_take_ptr"); // @
     let inner = parse_expression(cursor);
     let end_span = inner.1;
     Spanned(
@@ -647,7 +649,9 @@ fn parse_take_ptr(cursor: &mut TokenCursor) -> Spanned<Expr> {
 }
 
 fn parse_take_ref(cursor: &mut TokenCursor) -> Spanned<Expr> {
-    let (_, start_span) = cursor.advance().expect("peek confirmed '^' token before parse_take_ref"); // ^
+    let (_, start_span) = cursor
+        .advance()
+        .expect("peek confirmed '^' token before parse_take_ref"); // ^
     let inner = parse_expression(cursor);
     let end_span = inner.1;
     Spanned(
@@ -657,7 +661,9 @@ fn parse_take_ref(cursor: &mut TokenCursor) -> Spanned<Expr> {
 }
 
 fn parse_deref(cursor: &mut TokenCursor) -> Spanned<Expr> {
-    let (_, start_span) = cursor.advance().expect("peek confirmed '*' token before parse_deref"); // *
+    let (_, start_span) = cursor
+        .advance()
+        .expect("peek confirmed '*' token before parse_deref"); // *
     let inner = parse_expression(cursor);
     let end_span = inner.1;
     Spanned(
@@ -667,7 +673,9 @@ fn parse_deref(cursor: &mut TokenCursor) -> Spanned<Expr> {
 }
 
 fn parse_self_ref(cursor: &mut TokenCursor) -> Spanned<Expr> {
-    let (_, span) = cursor.advance().expect("peek confirmed 'self' token before parse_self_ref"); // self
+    let (_, span) = cursor
+        .advance()
+        .expect("peek confirmed 'self' token before parse_self_ref"); // self
     let start = span;
 
     // self.field

@@ -1,5 +1,5 @@
 use crate::{lower_function, prelude::*, ty_to_mlir};
-use typeck::TyInfer;
+use typeck::{Ty, TyInfer, flow::ConstValue};
 
 impl<'c> Lower<'c> for Bind {
     fn lower(
@@ -18,14 +18,25 @@ impl<'c> Lower<'c> for Bind {
             }
             BindValue::Expr(expr) => {
                 let name = self.name();
+                // Infer the target type — uses return_tag for typed binds (e.g.
+                // `level LogLevel: 'debug'` resolves to ConstUnion, not Str).
+                let ty = self.infer_ty(&ctx.ty_env.infer_env(&*ctx.var_types.borrow()));
+
+                // Lower the value. If the target type is a ConstUnion and the
+                // expression is a literal, emit just the discriminant integer
+                // instead of a full base-type value (e.g. i8 not Str).
+                let init_val = if let Ty::ConstUnion { values, .. } = &ty {
+                    lower_const_union_literal(ctx, block, expr, values)
+                        .or_else(|| expr.lower(ctx, block, symtab))
+                } else {
+                    expr.lower(ctx, block, symtab)
+                }?;
+
                 if self.is_const {
                     // Const bind (`:=`): direct SSA value in symtab — no alloca.
-                    let value = expr.lower(ctx, block, symtab)?;
-                    symtab.insert(name.as_str().to_string(), value);
-                    let ty =
-                        expr.infer_ty(&ctx.ty_env.infer_env(&std::collections::HashMap::new()));
+                    symtab.insert(name.as_str().to_string(), init_val);
                     ctx.var_types.borrow_mut().insert(name, ty);
-                    Some(value)
+                    Some(init_val)
                 } else {
                     let loc = ctx.location();
                     let name_str = name.as_str().to_string();
@@ -40,15 +51,12 @@ impl<'c> Lower<'c> for Bind {
                                 return None;
                             }
                         };
-                        let new_val = expr.lower(ctx, block, symtab)?;
-                        block.store_typed(ctx, ptr, new_val, loc)?;
+                        block.store_typed(ctx, ptr, init_val, loc)?;
                         Some(block.const_i64(ctx.mlir, 0))
                     } else {
                         // First mutable bind (`:`) — alloca + store.
-                        let ty = expr.infer_ty(&ctx.ty_env.infer_env(&*ctx.var_types.borrow()));
                         let elem_mlir_ty = ty_to_mlir(&ty, ctx.mlir);
                         let slot = block.alloca_typed(ctx.mlir, elem_mlir_ty, loc);
-                        let init_val = expr.lower(ctx, block, symtab)?;
                         block.store_typed(ctx, slot, init_val, loc)?;
                         symtab.insert(name_str.clone(), slot);
                         ctx.var_types.borrow_mut().insert(name, ty);
@@ -64,4 +72,46 @@ impl<'c> Lower<'c> for Bind {
             }
         }
     }
+}
+
+/// Lower a literal to a ConstUnion discriminant integer.
+/// Returns `None` if the expression isn't a literal or the value isn't in the set.
+fn lower_const_union_literal<'c>(
+    ctx: &CodegenContext<'_, 'c>,
+    block: &BlockRef<'c, 'c>,
+    expr: &Spanned<Expr>,
+    values: &[ConstValue],
+) -> Option<Value<'c, 'c>> {
+    use ast::Literal;
+    let lit = match &expr.0 {
+        Expr::Lit(lit) => lit,
+        _ => return None,
+    };
+    let disc = match lit {
+        Literal::String(s) => values
+            .iter()
+            .position(|v| matches!(v, ConstValue::String(vs) if vs == s)),
+        Literal::Int(n) => values
+            .iter()
+            .position(|v| matches!(v, ConstValue::Int(vn) if *vn == *n as i128)),
+        Literal::Float(f) => values
+            .iter()
+            .position(|v| matches!(v, ConstValue::Float(vf) if vf.to_bits() == f.to_bits())),
+        Literal::Number(n) => values
+            .iter()
+            .position(|v| matches!(v, ConstValue::Int(vn) if *vn == *n as i128)),
+    };
+    let disc = disc? as i64;
+    let variant_count = values.len();
+    Some(if variant_count == 2 {
+        let i1_ty = IntegerType::new(ctx.mlir, 1).into();
+        let i1_attr = melior::ir::attribute::IntegerAttribute::new(i1_ty, disc).into();
+        block.append_op(ctx.mlir.const_op(i1_attr, i1_ty))
+    } else if variant_count <= 256 {
+        let i8_ty = IntegerType::new(ctx.mlir, 8).into();
+        let i8_attr = melior::ir::attribute::IntegerAttribute::new(i8_ty, disc).into();
+        block.append_op(ctx.mlir.const_op(i8_attr, i8_ty))
+    } else {
+        block.const_i64(ctx.mlir, disc)
+    })
 }

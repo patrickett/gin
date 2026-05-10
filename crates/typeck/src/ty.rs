@@ -1,5 +1,6 @@
 //! Type representation and layout calculations.
 
+use crate::flow::ConstValue;
 use internment::Intern;
 
 /// Resolved type — the canonical representation after resolving declared type names against declarations.
@@ -44,6 +45,15 @@ pub enum Ty {
     },
     /// Positional tuple VALUE — used for tuple literals `(e1, e2, …)`. Maps to an LLVM struct.
     Tuple(Vec<Ty>),
+    /// A closed set of compile-time-known literal values of a shared base type.
+    /// Runtime representation is a small integer discriminant.
+    ConstUnion {
+        name: Intern<String>,
+        /// The base type that all values inhabit (e.g. `str_record_ty()` for strings).
+        base: Box<Ty>,
+        /// The literal values in discriminant order.
+        values: Vec<ConstValue>,
+    },
 }
 
 impl Ty {
@@ -98,6 +108,10 @@ impl Ty {
         matches!(self, Ty::Union { .. })
     }
 
+    pub fn is_const_union(&self) -> bool {
+        matches!(self, Ty::ConstUnion { .. })
+    }
+
     pub fn is_record(&self) -> bool {
         matches!(self, Ty::Record { .. })
     }
@@ -143,7 +157,8 @@ pub fn ty_alignment(ty: &Ty) -> usize {
         Ty::Int { width: 32, .. } => 4,
         Ty::Int { width: 128, .. } => 16,
         Ty::Int { .. } | Ty::Float { .. } | Ty::Array { .. } | Ty::Ptr { .. } | Ty::Ref { .. } => 8,
-        Ty::Unit | Ty::Opaque(_) => 8,
+        Ty::Unit => 1,
+        Ty::Opaque(_) => 8,
         Ty::Record { fields, .. } => fields
             .iter()
             .map(|(_, ft)| ty_alignment(ft))
@@ -161,6 +176,7 @@ pub fn ty_alignment(ty: &Ty) -> usize {
                     .unwrap_or(8)
             }
         }
+        Ty::ConstUnion { .. } => 1,
         Ty::Tuple(fields) => fields.iter().map(ty_alignment).max().unwrap_or(1),
     }
 }
@@ -174,7 +190,8 @@ pub fn ty_byte_size_static(ty: &Ty) -> usize {
         Ty::Int { width: 128, .. } => 16,
         Ty::Int { .. } | Ty::Float { .. } => 8,
         Ty::Array { .. } | Ty::Ptr { .. } | Ty::Ref { .. } => 8,
-        Ty::Unit | Ty::Opaque(_) => 8,
+        Ty::Unit => 0,
+        Ty::Opaque(_) => 8,
         Ty::Record { fields, .. } => fields.iter().map(|(_, ft)| ty_byte_size_static(ft)).sum(),
         Ty::Union { variants, .. } => {
             let all_empty = variants.iter().all(|(_, fields)| fields.is_empty());
@@ -186,6 +203,13 @@ pub fn ty_byte_size_static(ty: &Ty) -> usize {
                 let discriminant_size = ty_union_discriminant_size(variants.len());
                 let max_field_size = ty_union_max_field_size(variants);
                 discriminant_size + max_field_size
+            }
+        }
+        Ty::ConstUnion { values, .. } => {
+            if values.len() <= 256 {
+                1
+            } else {
+                ty_union_discriminant_size(values.len())
             }
         }
         Ty::Tuple(fields) => fields.iter().map(ty_byte_size_static).sum(),

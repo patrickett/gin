@@ -161,8 +161,6 @@ impl Backend {
                     }
                 }
 
-                let word_range = word_range.clone();
-
                 // Phase 2: "use" keyword hover.
                 let word = ast.word_at_byte(byte_pos, &source)
                     .or_else(|| typeck::word_at_byte_offset(&source, byte_pos));

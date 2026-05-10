@@ -218,6 +218,13 @@ fn parse_top_level_element(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Opt
                     return Some(TopLevelValue::Bind(Box::new(bind)));
                 }
                 cursor.rewind(checkpoint);
+            } else if matches!(cursor.peek_at(start_offset + 1), Some(Token::Tag(_))) {
+                // id Tag := expr or id Tag : expr — typed bind with inline type annotation
+                let checkpoint = cursor.checkpoint();
+                if let Some(bind) = crate::expr::bind::parse_bind(cursor, expr_parser) {
+                    return Some(TopLevelValue::Bind(Box::new(bind)));
+                }
+                cursor.rewind(checkpoint);
             }
             // else: bare identifier or expression — no bind speculation needed
             let Spanned(expr, span) = expr_parser(cursor);

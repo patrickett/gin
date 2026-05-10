@@ -1,5 +1,6 @@
 use crate::cursor::TokenCursor;
 use crate::expr::ExprFn;
+use crate::expr::literal::parse_literal;
 use ast::expr::Expr;
 use ast::span::SpanId;
 use ast::{Declare, DeclareValue, DocComment, ParameterKind, Parameters, Variant};
@@ -175,13 +176,39 @@ fn parse_is_rhs(
         cursor.rewind(checkpoint);
     }
 
-    // Union or Alias: starts with optional doc then Tag
+    // Union or Alias: starts with optional doc then a type pattern or literal
     let checkpoint = cursor.checkpoint();
     let first_doc = parse_doc_comment(cursor);
 
-    if let Some(first_shape) = parse_pattern_type_expr(cursor, expr_parser)
-        && cursor.is_at(&Token::Or)
-    {
+    // Try literal variant first (e.g. 'debug'), then tag pattern (e.g. Some(x))
+    let first_shape: Option<Spanned<Expr>> = 'union_check: {
+        // Check if we're at a literal that could be a union variant
+        if matches!(
+            cursor.peek(),
+            Some(Token::String(_)) | Some(Token::Int(_)) | Some(Token::Float(_))
+        ) {
+            let cp = cursor.checkpoint();
+            if let Some(spanned_lit) = parse_literal(cursor)
+                && cursor.is_at(&Token::Or)
+            {
+                let sp = Spanned(Expr::Lit(spanned_lit.0), spanned_lit.1);
+                break 'union_check Some(sp);
+            }
+            // Not a union — rewind and try tag pattern
+            cursor.rewind(cp);
+        }
+        // Standard checkpoint approach for tag patterns
+        let cp = cursor.checkpoint();
+        if let Some(shape) = parse_pattern_type_expr(cursor, expr_parser)
+            && cursor.is_at(&Token::Or)
+        {
+            break 'union_check Some(shape);
+        }
+        cursor.rewind(cp);
+        None
+    };
+
+    if let Some(first_shape) = first_shape {
         // Union: Tag (or Tag)+
         let first_post_doc = parse_doc_comment(cursor);
 
@@ -211,6 +238,28 @@ fn parse_is_rhs(
     // Not a union — rewind to before any doc comment and try as alias
     cursor.rewind(checkpoint);
 
+    // Single literal variant (e.g., `X0 is 'x0'`, `Status is 'ready'`)
+    if matches!(
+        cursor.peek(),
+        Some(Token::String(_)) | Some(Token::Int(_)) | Some(Token::Float(_))
+    ) && let Some(variant) = parse_variant(cursor, expr_parser)
+    {
+        let doc = parse_doc_comment(cursor);
+        return (
+            DeclareValue::Union {
+                variants: vec![variant],
+            },
+            doc,
+        );
+    }
+
+    // Try tuple/grouped expression first (e.g. `()` as unit type alias)
+    if cursor.is_at(&Token::ParenOpen) {
+        let sp = expr_parser(cursor);
+        let doc = parse_doc_comment(cursor);
+        return (DeclareValue::Alias(Box::new(sp)), doc);
+    }
+
     if let Some(sp) = parse_type_expr(cursor, expr_parser) {
         let doc = parse_doc_comment(cursor);
         return (DeclareValue::Alias(Box::new(sp)), doc);
@@ -232,6 +281,25 @@ fn parse_is_rhs(
 fn parse_variant(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Variant> {
     let doc_before = parse_doc_comment(cursor);
 
+    // Try literal variant first (string, int, or float)
+    if matches!(
+        cursor.peek(),
+        Some(Token::String(_)) | Some(Token::Int(_)) | Some(Token::Float(_))
+    ) && let Some(Spanned(lit, span)) = parse_literal(cursor)
+    {
+        let shape = Box::new(Spanned(Expr::Lit(lit), span));
+        let doc_after = parse_doc_comment(cursor);
+        let doc = doc_after.or(doc_before);
+        return Some(match doc.filter(|d| !d.is_empty()) {
+            Some(d) => Variant::Local {
+                doc_comment: Some(d),
+                shape,
+            },
+            None => Variant::External(shape),
+        });
+    }
+
+    // Fall through to tag-based pattern
     let shape = parse_pattern_type_expr(cursor, expr_parser)?;
     let sp = Box::new(shape);
 

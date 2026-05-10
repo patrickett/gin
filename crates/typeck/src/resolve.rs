@@ -1,11 +1,15 @@
 //! Name resolution — translating AST type declarations into resolved [`Ty`] values.
 
-use ast::{DeclareValue, Expr, FnCall, ParameterKind, type_surface_mangle_name};
+use ast::{
+    DeclareValue, Expr, FnCall, Literal, ParameterKind, literal_value_from_expr,
+    type_surface_mangle_name,
+};
 use i256::I256;
 use internment::Intern;
 use std::collections::HashMap;
 
-use crate::ty::Ty;
+use crate::flow::ConstValue;
+use crate::ty::{Ty, str_record_ty};
 
 /// Symbol name for a callee: `foo` or `io.print` (matches codegen).
 pub(crate) fn mangled_fn_call_name(call: &FnCall) -> Intern<String> {
@@ -25,7 +29,7 @@ pub(crate) fn is_type_surface(e: &Expr) -> bool {
     matches!(
         e,
         Expr::TypeNominal(..) | Expr::TypeQualified(_) | Expr::TypeGeneric { .. }
-    )
+    ) || matches!(e, Expr::TupleLit(elems) if elems.is_empty())
 }
 
 /// Collect every type-parameter name introduced by a method's receiver type
@@ -125,6 +129,7 @@ pub(crate) fn resolve_type_expr_with_subst(
             .get(&path.root)
             .cloned()
             .unwrap_or(Ty::Opaque(path.root)),
+        Expr::TupleLit(elems) if elems.is_empty() => Ty::Unit,
         _ => Ty::Opaque(Intern::<String>::from_ref("?")),
     }
 }
@@ -215,6 +220,7 @@ fn resolve_type_expr_ref(
     recursion_depth: usize,
 ) -> Ty {
     match e {
+        Expr::TupleLit(elems) if elems.is_empty() => Ty::Unit,
         Expr::TypeNominal(name, _) => resolve_name(*name, raw, recursion_depth),
         Expr::TypeGeneric { name, params, .. } => match name.as_str() {
             "Ptr" | "Ref" => {
@@ -310,13 +316,22 @@ fn resolve_name(
             Ty::Record { name, fields }
         }
         Some(DeclareValue::Union { variants }) => {
-            let resolved = variants
-                .iter()
-                .filter_map(|v| {
-                    let shape = &v.shape().0;
-                    if !is_type_surface(shape) {
-                        return None;
+            // Separate literal variants from tag variants
+            let mut lit_values = Vec::new();
+            let mut lit_base: Option<Ty> = None;
+            let mut tag_variants = Vec::new();
+
+            for v in variants {
+                let shape = &v.shape().0;
+                if let Some(lit) = literal_value_from_expr(shape) {
+                    // This is a literal variant (e.g. 'debug', 42, 3.14)
+                    if let Some(cv) = const_value_from_literal(&lit) {
+                        let base_ty = base_ty_for_const_value(&cv);
+                        lit_base.get_or_insert_with(|| base_ty.clone());
+                        lit_values.push(cv);
                     }
+                } else if is_type_surface(shape) {
+                    // This is a tag variant (e.g. Some(x), None)
                     let variant_name = Intern::<String>::from_ref(type_surface_mangle_name(shape));
                     let fields = match shape {
                         Expr::TypeGeneric { params, .. } if !params.is_empty() => params
@@ -338,14 +353,54 @@ fn resolve_name(
                             .collect(),
                         _ => vec![],
                     };
-                    Some((variant_name, fields))
-                })
-                .collect();
-            Ty::Union {
-                name,
-                variants: resolved,
+                    tag_variants.push((variant_name, fields));
+                }
+                // Skip non-type-surface, non-literal variants (shouldn't happen)
+            }
+
+            if !lit_values.is_empty() {
+                // ConstUnion — all literal values
+                Ty::ConstUnion {
+                    name,
+                    base: Box::new(lit_base.unwrap_or(Ty::Int {
+                        width: 64,
+                        signed: true,
+                        value: None,
+                    })),
+                    values: lit_values,
+                }
+            } else {
+                // Pure tag union (existing behavior)
+                Ty::Union {
+                    name,
+                    variants: tag_variants,
+                }
             }
         }
         _ => Ty::Opaque(name),
+    }
+}
+
+/// Convert an AST literal to a `ConstValue` for use in `ConstUnion`.
+fn const_value_from_literal(lit: &Literal) -> Option<ConstValue> {
+    match lit {
+        Literal::String(s) => Some(ConstValue::String(s.clone())),
+        Literal::Int(n) => Some(ConstValue::Int(*n as i128)),
+        Literal::Float(f) => Some(ConstValue::Float(*f)),
+        Literal::Number(n) => Some(ConstValue::Int(*n as i128)),
+    }
+}
+
+/// Determine the base `Ty` for a `ConstValue` (the runtime type that all values inhabit).
+fn base_ty_for_const_value(cv: &ConstValue) -> Ty {
+    match cv {
+        ConstValue::String(_) => str_record_ty(),
+        ConstValue::Int(_) => Ty::Int {
+            width: 64,
+            signed: true,
+            value: None,
+        },
+        ConstValue::Float(_) => Ty::Float { value: None },
+        ConstValue::Tag { .. } => Ty::Opaque(Intern::<String>::from_ref("Tag")),
     }
 }

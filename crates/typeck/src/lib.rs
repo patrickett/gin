@@ -19,7 +19,7 @@ mod resolve;
 pub mod flow;
 pub mod flow_analyzer;
 
-mod check;
+pub mod check;
 
 mod salsa_update;
 
@@ -29,7 +29,7 @@ pub use analysis::analyze_file_with_ty_env;
 pub mod hover;
 pub use hover::{
     dot_type_at, find_definition_span, find_import_definition_span, find_references, hover_at,
-    is_variant_at,
+    hover_at_with_source, is_variant_at,
 };
 
 pub mod completions;

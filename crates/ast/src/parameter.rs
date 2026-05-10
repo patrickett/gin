@@ -35,6 +35,7 @@ pub(crate) fn fmt_type_expr_surface(e: &Expr, f: &mut fmt::Formatter<'_>) -> fmt
             }
             write!(f, "]")
         }
+        Expr::TupleLit(elems) if elems.is_empty() => write!(f, "()"),
         _ => write!(f, "<type>"),
     }
 }

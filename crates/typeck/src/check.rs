@@ -5,14 +5,15 @@ use std::ops::ControlFlow;
 
 use ast::visit::{Visitor, walk_bind_value, walk_expr, walk_fn_call};
 use ast::{
-    Bind, BindValue, Expr, FileAst, HasSpanId, IfCondition, ParameterKind, SpanId, Spanned,
-    WhenArm, type_surface_mangle_name,
+    Bind, BindValue, Expr, FileAst, HasSpanId, IfCondition, Literal, ParameterKind, SpanId,
+    Spanned, WhenArm, type_surface_mangle_name,
 };
 use diagnostic::DiagnosticLike;
 use diagnostic::type_::TypeSymptom;
 use internment::Intern;
 
 use crate::env::TyEnv;
+use crate::flow::ConstValue;
 use crate::infer::LayeredLocals;
 use crate::resolve::{is_type_surface, mangled_fn_call_name};
 use crate::ty::Ty;
@@ -350,7 +351,21 @@ impl TyEnv {
 
         let mut bindings: HashMap<Intern<String>, Ty> = HashMap::new();
         if !ty_unifies_with(&body_ty, &expected, &mut bindings) {
-            symptoms.push(TypeSymptom::Mismatch.into_diagnostic(span));
+            // Special case: a literal that matches a ConstUnion variant is valid
+            let is_valid_const_union_lit = match &expected {
+                Ty::ConstUnion { values, .. } => {
+                    let value_expr = match bind.value() {
+                        BindValue::Expr(expr) => Some(&expr.0),
+                        BindValue::Body { ret, .. } => ret.0.as_ref().map(|spanned| &spanned.0),
+                        _ => None,
+                    };
+                    value_expr.is_some_and(|e| literal_matches_const_union(e, values))
+                }
+                _ => false,
+            };
+            if !is_valid_const_union_lit {
+                symptoms.push(TypeSymptom::Mismatch.into_diagnostic(span));
+            }
         }
     }
 
@@ -488,60 +503,134 @@ impl Visitor for UnknownRefChecker<'_, '_, '_> {
         if let Some(subject) = &when.subject {
             let _ = self.visit_expr(subject);
         }
+
+        // Check exhaustiveness: a `when` expression must have an `else` clause.
+        let mut has_else = false;
+
         for arm in &when.arms {
             match arm {
                 WhenArm::Cond { condition, body } => {
                     let _ = self.visit_expr(condition);
+
+                    // Check that the condition resolves to Bool.
+                    let cond_ty = condition.infer_ty(&self.ty_env.infer_env(self.locals));
+                    let bool_ty = self.ty_env.lookup_tag(Intern::<String>::from_ref("Bool"));
+                    let is_bool = bool_ty.is_some_and(|bt| tys_equivalent(&cond_ty, bt));
+                    if !is_bool {
+                        // Format a short description of the condition's type.
+                        let got = type_name_for_display(&cond_ty);
+                        self.symptoms.push(
+                            TypeSymptom::ConditionNotBool { got }.into_diagnostic(condition.1),
+                        );
+                    }
+
                     let _ = self.visit_expr(body);
                 }
                 WhenArm::Is { pattern, body } => {
-                    if is_type_surface(&pattern.0) {
-                        let surface_name = type_surface_mangle_name(&pattern.0);
-                        let variant_name = Intern::<String>::from_ref(surface_name);
-                        match &subject_ty {
-                            Some(Ty::Union {
-                                name: union_name,
-                                variants,
-                            }) => {
-                                if !variants.iter().any(|(vname, _)| vname == &variant_name) {
-                                    self.symptoms.push(
-                                        TypeSymptom::NotAVariant {
-                                            name: surface_name.to_string(),
-                                            union_name: union_name.to_string(),
-                                        }
-                                        .into_diagnostic(pattern.1),
-                                    );
+                    match &pattern.0 {
+                        // String literal pattern: `is 'debug'`
+                        Expr::Lit(Literal::String(s)) => {
+                            let variant_name = Intern::<String>::from_ref(s.as_str());
+                            let valid = match &subject_ty {
+                                Some(Ty::ConstUnion {
+                                    name: union_name,
+                                    values,
+                                    ..
+                                }) => {
+                                    let in_set = values
+                                        .iter()
+                                        .any(|v| matches!(v, ConstValue::String(vs) if vs == s));
+                                    if !in_set {
+                                        self.symptoms.push(
+                                            TypeSymptom::NotAVariant {
+                                                name: s.clone(),
+                                                union_name: union_name.to_string(),
+                                            }
+                                            .into_diagnostic(pattern.1),
+                                        );
+                                    }
+                                    in_set
                                 }
-                            }
-                            _ => {
-                                if self.ty_env.lookup_variant(variant_name).is_none() {
-                                    self.symptoms.push(
-                                        TypeSymptom::UnknownTag {
-                                            name: surface_name.to_string(),
-                                        }
-                                        .into_diagnostic(pattern.1),
-                                    );
+                                _ => {
+                                    // Fall through to lookup_variant for backwards compat
+                                    self.ty_env.lookup_variant(variant_name).is_some()
                                 }
+                            };
+                            if !valid {
+                                self.symptoms.push(
+                                    TypeSymptom::UnknownTag { name: s.clone() }
+                                        .into_diagnostic(pattern.1),
+                                );
                             }
                         }
-                        check_type_pattern_default_exprs(&pattern.0, &mut |e| {
-                            let _ = self.visit_expr(e);
-                        });
-                    } else {
-                        self.symptoms.push(
-                            TypeSymptom::UnknownTag {
-                                name: "invalid is-pattern".to_string(),
+                        // Tag-type pattern: `is Some(x)`
+                        e if is_type_surface(e) => {
+                            let surface_name = type_surface_mangle_name(e);
+                            let variant_name = Intern::<String>::from_ref(surface_name);
+                            match &subject_ty {
+                                Some(Ty::Union {
+                                    name: union_name,
+                                    variants,
+                                }) => {
+                                    if !variants.iter().any(|(vname, _)| vname == &variant_name) {
+                                        self.symptoms.push(
+                                            TypeSymptom::NotAVariant {
+                                                name: surface_name.to_string(),
+                                                union_name: union_name.to_string(),
+                                            }
+                                            .into_diagnostic(pattern.1),
+                                        );
+                                    }
+                                }
+                                _ => {
+                                    if self.ty_env.lookup_variant(variant_name).is_none() {
+                                        self.symptoms.push(
+                                            TypeSymptom::UnknownTag {
+                                                name: surface_name.to_string(),
+                                            }
+                                            .into_diagnostic(pattern.1),
+                                        );
+                                    }
+                                }
                             }
-                            .into_diagnostic(pattern.1),
-                        );
+                            check_type_pattern_default_exprs(e, &mut |expr| {
+                                let _ = self.visit_expr(expr);
+                            });
+                        }
+                        _ => {
+                            self.symptoms.push(
+                                TypeSymptom::UnknownTag {
+                                    name: "invalid is-pattern".to_string(),
+                                }
+                                .into_diagnostic(pattern.1),
+                            );
+                        }
                     }
                     let _ = self.visit_expr(body);
                 }
                 WhenArm::Else(body) => {
+                    has_else = true;
                     let _ = self.visit_expr(body);
                 }
             }
         }
+
+        // Emit missing-else diagnostic for boolean when expressions.
+        if !has_else && when.subject.is_none() {
+            // Use the span of the `when` keyword if available, otherwise the start of the exprs.
+            let span = when
+                .arms
+                .first()
+                .map(|a| match a {
+                    WhenArm::Cond { condition, .. } => condition.1,
+                    WhenArm::Is { pattern, .. } => pattern.1,
+                    WhenArm::Else(body) => body.1,
+                })
+                .unwrap_or(SpanId::INVALID);
+            self.symptoms
+                .push(TypeSymptom::MissingElseArm.into_diagnostic(span));
+        }
+
         Continue(())
     }
 
@@ -667,7 +756,7 @@ fn fmt_call_without_parens(call: &ast::FnCall) -> String {
 
 /// One-way structural unification check between an actual type and an expected
 /// type, with type-variable bindings collected in `bindings`.
-pub(crate) fn ty_unifies_with(
+pub fn ty_unifies_with(
     actual: &Ty,
     expected: &Ty,
     bindings: &mut HashMap<Intern<String>, Ty>,
@@ -733,8 +822,32 @@ pub(crate) fn ty_unifies_with(
                     .zip(bf.iter())
                     .all(|((_, a), (_, b))| ty_unifies_with(a, b, bindings))
         }
-        (Ty::Ptr { inner: a }, Ty::Ptr { inner: b })
+        (Ty::Ptr { inner: a }, Ty::Ref { inner: b })
+        | (Ty::Ref { inner: a }, Ty::Ptr { inner: b })
+        | (Ty::Ptr { inner: a }, Ty::Ptr { inner: b })
         | (Ty::Ref { inner: a }, Ty::Ref { inner: b }) => ty_unifies_with(a, b, bindings),
+        // ConstUnion ↔ ConstUnion: subset check on values, same base type
+        (
+            Ty::ConstUnion {
+                values: av,
+                base: ab,
+                ..
+            },
+            Ty::ConstUnion {
+                values: bv,
+                base: bb,
+                ..
+            },
+        ) => {
+            let base_match = match (ab.as_ref(), bb.as_ref()) {
+                (Ty::Int { .. }, Ty::Int { .. }) => true,
+                (Ty::Float { .. }, Ty::Float { .. }) => true,
+                _ => tys_equivalent(ab, bb),
+            };
+            base_match && av.iter().all(|v| bv.contains(v))
+        }
+        // ConstUnion ↔ base type: REJECTED — runtime Str/Int/Float is not a ConstUnion
+        (Ty::ConstUnion { .. }, _) | (_, Ty::ConstUnion { .. }) => false,
         _ => false,
     }
 }
@@ -814,6 +927,27 @@ fn check_type_surface_defaults(e: &Expr, check: &mut impl FnMut(&Spanned<Expr>))
                 ParameterKind::Tagged(sp) => check_type_surface_defaults(&sp.0, check),
                 ParameterKind::Generic => {}
             }
+        }
+    }
+}
+
+/// Produce a human-readable type name for use in diagnostics.
+fn type_name_for_display(ty: &Ty) -> String {
+    match ty {
+        Ty::Int { .. } => "Int".into(),
+        Ty::Float { .. } => "Float".into(),
+        Ty::Bool => "Bool".into(),
+        Ty::Unit => "Unit".into(),
+        Ty::Record { name, .. } | Ty::Union { name, .. } | Ty::ConstUnion { name, .. } => {
+            name.as_str().to_string()
+        }
+        Ty::Opaque(name) => name.as_str().to_string(),
+        Ty::Array { .. } => "Array".into(),
+        Ty::Ptr { .. } => "Ptr".into(),
+        Ty::Ref { .. } => "Ref".into(),
+        Ty::Tuple(fields) => {
+            let inner: Vec<String> = fields.iter().map(type_name_for_display).collect();
+            format!("({})", inner.join(", "))
         }
     }
 }
@@ -937,5 +1071,24 @@ fn check_return_variants(
             }
         }
         BindValue::Extern => {}
+    }
+}
+
+/// Check whether an expression is a literal whose value belongs to a ConstUnion's value set.
+fn literal_matches_const_union(expr: &Expr, values: &[ConstValue]) -> bool {
+    match expr {
+        Expr::Lit(Literal::String(s)) => values
+            .iter()
+            .any(|v| matches!(v, ConstValue::String(vs) if vs == s)),
+        Expr::Lit(Literal::Int(n)) => values
+            .iter()
+            .any(|v| matches!(v, ConstValue::Int(vn) if *vn == *n as i128)),
+        Expr::Lit(Literal::Float(f)) => values
+            .iter()
+            .any(|v| matches!(v, ConstValue::Float(vf) if vf.to_bits() == f.to_bits())),
+        Expr::Lit(Literal::Number(n)) => values
+            .iter()
+            .any(|v| matches!(v, ConstValue::Int(vn) if *vn == *n as i128)),
+        _ => false,
     }
 }

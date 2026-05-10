@@ -76,6 +76,17 @@ impl TyEnv {
                         .or_default()
                         .push((*union_name, i, field_tys));
                 }
+            } else if let Ty::ConstUnion {
+                name: _, values, ..
+            } = ty
+            {
+                for (i, cv) in values.iter().enumerate() {
+                    let vname = cv.display_name();
+                    variant_map
+                        .entry(vname)
+                        .or_default()
+                        .push((*union_name, i, Vec::new()));
+                }
             }
         }
 
@@ -259,7 +270,7 @@ impl TyEnv {
     /// Resolve the union type reachable via a dot expression from `name`.
     pub fn resolve_dot_type(&self, ast: &FileAst, name: Intern<String>) -> Option<Ty> {
         if let Some(ty) = self.lookup_tag(name)
-            && ty.is_union()
+            && (ty.is_union() || ty.is_const_union())
         {
             return Some(ty.clone());
         }

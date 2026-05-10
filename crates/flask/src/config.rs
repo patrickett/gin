@@ -151,13 +151,20 @@ impl FlaskConfig {
     }
 
     pub fn from_directory(dir: &std::path::Path) -> Option<FlaskConfig> {
+        Self::find_package_config(dir).map(|(cfg, _root)| cfg)
+    }
+
+    /// Find the package configuration and its root directory by walking up from `dir`.
+    /// Returns `Some((config, root_dir))` when a `flask.jsonc` is found.
+    pub fn find_package_config(dir: &std::path::Path) -> Option<(FlaskConfig, std::path::PathBuf)> {
         let mut search = dir.to_path_buf();
         loop {
             search.push(PACKAGE_CONFIG_NAME);
             if let Ok(raw) = std::fs::read_to_string(&search)
                 && let Ok(config) = json5::from_str::<FlaskConfig>(&raw)
             {
-                return Some(config);
+                search.pop(); // remove flask.jsonc
+                return Some((config, search));
             }
             search.pop(); // remove flask.jsonc
             if !search.pop() {
@@ -215,7 +222,9 @@ impl FlaskConfig {
                                 let config: FlaskConfig = match json5::from_str(&raw) {
                                     Ok(c) => c,
                                     Err(e) => {
-                                        eprintln!("error: failed to parse {PACKAGE_CONFIG_NAME}: {e}");
+                                        eprintln!(
+                                            "error: failed to parse {PACKAGE_CONFIG_NAME}: {e}"
+                                        );
                                         return None;
                                     }
                                 };

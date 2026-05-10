@@ -7,6 +7,7 @@ use ast::{
 
 use super::ExprFn;
 use crate::cursor::TokenCursor;
+use crate::expr::literal::parse_literal;
 use crate::tag::parse_pattern_type_expr;
 
 fn can_start_expr(token: &Token) -> bool {
@@ -184,6 +185,21 @@ pub fn parse_when_expr(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<
 
     let initial_expr = expr_parser(cursor);
 
+    // Check for a continuation indent before `then`/`else`:
+    //   when day == Friday
+    //                 then 'yes'
+    //                 else 'no'
+    // The `then`/`else` are at a higher column than `when`, so the lexer
+    // emits an Indent token. We consume it here and eat the matching Dedent
+    // after parsing both branches.
+    cursor.skip_newlines();
+    let continuation_cp = cursor.checkpoint();
+    let had_continuation_indent =
+        cursor.eat(&Token::Indent) && matches!(cursor.peek(), Some(Token::Then));
+    if !had_continuation_indent {
+        cursor.rewind(continuation_cp);
+    }
+
     match cursor.peek() {
         Some(Token::Then) => {
             cursor.advance();
@@ -194,6 +210,8 @@ pub fn parse_when_expr(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<
                 body: Box::new(first_result),
             }];
 
+            // Look for the else arm (newlines auto-skipped by peek)
+            cursor.skip_newlines();
             if cursor.eat(&Token::Indent) {
                 parse_when_boolean_arms(cursor, expr_parser, &mut arms);
                 cursor.eat(&Token::Dedent);
@@ -203,12 +221,23 @@ pub fn parse_when_expr(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<
                 arms.push(WhenArm::Else(Box::new(body)));
             }
 
+            // If we consumed a continuation Indent, eat the matching Dedent
+            if had_continuation_indent {
+                cursor.skip_newlines();
+                cursor.eat(&Token::Dedent);
+            }
+
             Some(WhenExpr {
                 subject: None,
                 arms,
             })
         }
         Some(Token::Is) => {
+            // Revert any continuation-indent consumption (is-pattern form)
+            // before proceeding with the normal is-arm parsing.
+            if had_continuation_indent {
+                cursor.rewind(continuation_cp);
+            }
             let arms = parse_when_is_arms(cursor, expr_parser)?;
             Some(WhenExpr {
                 subject: Some(Box::new(initial_expr)),
@@ -216,6 +245,11 @@ pub fn parse_when_expr(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<
             })
         }
         Some(Token::Indent) => {
+            // Revert any continuation-indent consumption before parsing the
+            // indented is-pattern form (`when subject\n    is ...`).
+            if had_continuation_indent {
+                cursor.rewind(continuation_cp);
+            }
             cursor.advance();
             let arms = parse_when_is_arms(cursor, expr_parser)?;
             cursor.eat(&Token::Dedent);
@@ -275,12 +309,25 @@ fn parse_when_is_arms(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<V
             break;
         }
 
-        let pattern = parse_pattern_type_expr(cursor, expr_parser)?;
+        // Try literal pattern first (e.g. `is 'debug'`), then tag pattern (e.g. `is Some(x)`)
+        let pattern = if matches!(
+            cursor.peek(),
+            Some(Token::String(_)) | Some(Token::Int(_)) | Some(Token::Float(_))
+        ) {
+            if let Some(Spanned(lit, span)) = parse_literal(cursor) {
+                Spanned(Expr::Lit(lit), span)
+            } else {
+                parse_pattern_type_expr(cursor, expr_parser)?
+            }
+        } else {
+            parse_pattern_type_expr(cursor, expr_parser)?
+        };
 
         let indented = cursor.eat(&Token::Indent);
 
-        if !cursor.eat(&Token::Then) {
-            cursor.error("expected 'then'", cursor.current_span());
+        // Accept either `then` (single-line `is x then y`) or `:` (multi-line `is x: y`)
+        if !cursor.eat(&Token::Then) && !cursor.eat(&Token::Colon) {
+            cursor.error("expected 'then' or ':'", cursor.current_span());
             return None;
         }
 

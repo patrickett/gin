@@ -3,7 +3,7 @@
 use std::hash::{Hash, Hasher};
 
 use crate::doc_comment::DocComment;
-use crate::expr::Expr;
+use crate::expr::{Expr, Literal};
 use crate::parameter::fmt_type_expr_surface;
 use crate::span::Spanned;
 
@@ -48,6 +48,12 @@ fn fmt_variant_shape_surface(e: &Expr, f: &mut std::fmt::Formatter<'_>) -> std::
             }
             write!(f, ")")
         }
+        Expr::Lit(lit) => match lit {
+            Literal::String(s) => write!(f, "'{s}'"),
+            Literal::Int(n) => write!(f, "{n}"),
+            Literal::Float(v) => write!(f, "{v}"),
+            Literal::Number(n) => write!(f, "{n}"),
+        },
         _ => fmt_type_expr_surface(e, f),
     }
 }

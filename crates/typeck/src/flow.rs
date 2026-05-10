@@ -207,6 +207,17 @@ impl ConstValue {
             }
         }
     }
+
+    /// Return a display name for this constant value, used as the variant name
+    /// in the variant map for pattern matching.
+    pub fn display_name(&self) -> Intern<String> {
+        match self {
+            ConstValue::String(s) => Intern::new(s.clone()),
+            ConstValue::Int(i) => Intern::new(i.to_string()),
+            ConstValue::Float(f) => Intern::new(f.to_string()),
+            ConstValue::Tag { name, .. } => *name,
+        }
+    }
 }
 
 /// Flow-sensitive type information at a program point.

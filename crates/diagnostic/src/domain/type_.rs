@@ -45,6 +45,12 @@ pub enum TypeSymptom {
     SelfOutsideMethod,
     #[strum(serialize = "type-empty-return")]
     EmptyReturn { expected_type: String },
+    /// A `when` expression is missing its required `else` clause.
+    #[strum(serialize = "type-missing-else-arm")]
+    MissingElseArm,
+    /// A `when` condition does not resolve to `Bool`.
+    #[strum(serialize = "type-condition-not-bool")]
+    ConditionNotBool { got: String },
 }
 
 impl DiagnosticLike for TypeSymptom {
@@ -76,6 +82,10 @@ impl DiagnosticLike for TypeSymptom {
             Self::SelfOutsideMethod => "self used outside method".into(),
             Self::EmptyReturn { expected_type } => {
                 format!("empty return in function declared to return `{expected_type}`")
+            }
+            Self::MissingElseArm => "`when` expression requires an `else` clause".into(),
+            Self::ConditionNotBool { got } => {
+                format!("`when` condition must be `Bool`, got `{got}`")
             }
         }
     }
@@ -118,6 +128,11 @@ impl DiagnosticLike for TypeSymptom {
             Self::EmptyReturn { expected_type } => {
                 Some(format!("expected a variant of `{expected_type}`"))
             }
+            Self::MissingElseArm => Some("add an `else` clause that covers all other cases".into()),
+            Self::ConditionNotBool { .. } => Some(
+                "the condition must be a `Bool` value (e.g. `x == y` or some `Bool` expression)"
+                    .into(),
+            ),
         }
     }
 

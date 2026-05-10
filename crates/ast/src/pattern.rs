@@ -11,7 +11,7 @@
 
 use internment::Intern;
 
-use crate::expr::{Expr, FnCall};
+use crate::expr::{Expr, FnCall, Literal};
 use crate::span::Spanned;
 
 /// `for` loop patterns are a subset of expressions:
@@ -57,7 +57,16 @@ pub fn type_surface_mangle_name(e: &Expr) -> &str {
             .last()
             .map(|s| s.as_str())
             .unwrap_or(path.root.as_str()),
+        Expr::Lit(Literal::String(s)) => s.as_str(),
         _ => "_",
+    }
+}
+
+/// Extract the literal value from a union variant shape (if it is a literal).
+pub fn literal_value_from_expr(e: &Expr) -> Option<crate::Literal> {
+    match e {
+        Expr::Lit(lit) => Some(lit.clone()),
+        _ => None,
     }
 }
 

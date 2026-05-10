@@ -3,7 +3,7 @@
 
 use ast::{BindValue, DeclareValue, Expr, FileAst, HasSpanId, SpanId, SpanTable};
 use serde_json::Value;
-use typeck::Ty;
+use typeck::{flow::ConstValue, Ty};
 
 /// Serialize a resolved `Ty` to a JSON structure with kind, fields, size, and alignment.
 pub fn ty_to_json(ty: &Ty) -> Value {
@@ -63,6 +63,23 @@ pub fn ty_to_json(ty: &Ty) -> Value {
         Ty::Ref { inner } => serde_json::json!({
             "kind": "Ref", "inner": ty_to_json(inner),
         }),
+        Ty::ConstUnion { name, base, values } => {
+            let vals: Vec<Value> = values
+                .iter()
+                .map(|v| match v {
+                    ConstValue::String(s) => serde_json::json!(s),
+                    ConstValue::Int(n) => serde_json::json!(n),
+                    ConstValue::Float(f) => serde_json::json!(f),
+                    ConstValue::Tag { name: tn, .. } => serde_json::json!(tn.as_str()),
+                })
+                .collect();
+            serde_json::json!({
+                "kind": "ConstUnion", "name": name.as_str(),
+                "base": ty_to_json(base), "values": vals,
+                "size": typeck::ty_byte_size_static(ty),
+                "align": typeck::ty_alignment(ty),
+            })
+        }
         Ty::Tuple(items) => {
             let items_json: Vec<Value> = items.iter().map(ty_to_json).collect();
             serde_json::json!({ "kind": "Tuple", "items": items_json })

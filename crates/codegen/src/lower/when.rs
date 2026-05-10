@@ -1,5 +1,5 @@
 use crate::{prelude::*, ty_to_mlir};
-use ast::{Expr, type_surface_mangle_name};
+use ast::{Expr, Literal, type_surface_mangle_name};
 use typeck::{Ty, TyInfer};
 
 impl<'c> Lower<'c> for WhenExpr {
@@ -39,50 +39,20 @@ impl<'c> Lower<'c> for WhenExpr {
             let subject = subject_expr.lower(ctx, block, symtab)?;
 
             // Check if this is an optimized union (simple integer representation)
-            let subject_ty =
-                subject_expr.infer_ty(&ctx.ty_env.infer_env(&std::collections::HashMap::new()));
+            let subject_ty = subject_expr.infer_ty(&ctx.ty_env.infer_env(&*ctx.var_types.borrow()));
 
             let disc = match &subject_ty {
+                Ty::ConstUnion { values, .. } => {
+                    // ConstUnion is always payloadless — subject IS the discriminant
+                    let variant_count = values.len();
+                    emit_disc_extend(ctx, block, subject, variant_count)
+                }
                 Ty::Union { variants, .. }
                     if variants.iter().all(|(_, fields)| fields.is_empty()) =>
                 {
                     // Optimized union: subject IS the discriminant
                     let variant_count = variants.len();
-
-                    if variant_count == 2 {
-                        // Convert i1 to i64
-                        let loc = ctx.location();
-                        let extend_op = match OperationBuilder::new("arith.extui", loc)
-                            .add_operands(&[subject])
-                            .add_results(&[ctx.mlir.i64()])
-                            .build()
-                        {
-                            Ok(op) => op,
-                            Err(e) => {
-                                ctx.emit_internal(format!("extui build failed: {e}"));
-                                return None;
-                            }
-                        };
-                        block.append_op(extend_op)
-                    } else if variant_count <= 256 {
-                        // Convert i8 to i64
-                        let loc = ctx.location();
-                        let extend_op = match OperationBuilder::new("arith.extsi", loc)
-                            .add_operands(&[subject])
-                            .add_results(&[ctx.mlir.i64()])
-                            .build()
-                        {
-                            Ok(op) => op,
-                            Err(e) => {
-                                ctx.emit_internal(format!("extsi build failed: {e}"));
-                                return None;
-                            }
-                        };
-                        block.append_op(extend_op)
-                    } else {
-                        // Already i64
-                        subject
-                    }
+                    emit_disc_extend(ctx, block, subject, variant_count)
                 }
                 _ => {
                     // Standard union: extract discriminant from struct at index 0
@@ -166,6 +136,45 @@ fn lower_boolean_when<'c>(
     }
 }
 
+/// Extract the discriminant from an optimized union / ConstUnion and extend to i64.
+fn emit_disc_extend<'c>(
+    ctx: &CodegenContext<'_, 'c>,
+    block: &BlockRef<'c, 'c>,
+    subject: Value<'c, 'c>,
+    variant_count: usize,
+) -> Value<'c, 'c> {
+    let loc = ctx.location();
+    if variant_count == 2 {
+        let extend_op = match OperationBuilder::new("arith.extui", loc)
+            .add_operands(&[subject])
+            .add_results(&[ctx.mlir.i64()])
+            .build()
+        {
+            Ok(op) => op,
+            Err(e) => {
+                ctx.emit_internal(format!("extui build failed: {e}"));
+                return subject;
+            }
+        };
+        block.append_op(extend_op)
+    } else if variant_count <= 256 {
+        let extend_op = match OperationBuilder::new("arith.extsi", loc)
+            .add_operands(&[subject])
+            .add_results(&[ctx.mlir.i64()])
+            .build()
+        {
+            Ok(op) => op,
+            Err(e) => {
+                ctx.emit_internal(format!("extsi build failed: {e}"));
+                return subject;
+            }
+        };
+        block.append_op(extend_op)
+    } else {
+        subject
+    }
+}
+
 /// Lower a pattern-matching `when` expression.
 ///
 /// `subject` is the full union value (always `union_type()`).
@@ -198,17 +207,27 @@ fn lower_pattern_when<'c>(
         }
 
         WhenArm::Is { pattern, body } => {
-            if !matches!(
-                &pattern.0,
-                Expr::TypeNominal(..) | Expr::TypeQualified(_) | Expr::TypeGeneric { .. }
-            ) {
-                return None;
-            }
-            let variant_name = Intern::<String>::from_ref(type_surface_mangle_name(&pattern.0));
-            // Note: unknown variant diagnostics are emitted by typeck; codegen just fails gracefully.
-            let (_, expected_disc, _) = ctx.ty_env.lookup_variant(variant_name)?;
+            let expected_disc: i64 = match &pattern.0 {
+                // String literal pattern: `is 'debug'` — look up via variant map
+                Expr::Lit(Literal::String(s)) => {
+                    let variant_name = Intern::<String>::new(s.clone());
+                    let (_, disc, _) = ctx.ty_env.lookup_variant(variant_name)?;
+                    disc as i64
+                }
+                // Tag pattern: `is Some(x)`
+                e if matches!(
+                    e,
+                    Expr::TypeNominal(..) | Expr::TypeQualified(_) | Expr::TypeGeneric { .. }
+                ) =>
+                {
+                    let variant_name = Intern::<String>::from_ref(type_surface_mangle_name(e));
+                    let (_, expected_disc, _) = ctx.ty_env.lookup_variant(variant_name)?;
+                    expected_disc as i64
+                }
+                _ => return None,
+            };
 
-            let expected_val = outer_block.const_i64(ctx.mlir, expected_disc as i64);
+            let expected_val = outer_block.const_i64(ctx.mlir, expected_disc);
             let cond =
                 outer_block.append_op(ctx.mlir.build_cmpi(Predicates::EQ, disc, expected_val));
 
@@ -223,6 +242,8 @@ fn lower_pattern_when<'c>(
                 let mut inner_symtab = symtab.clone();
 
                 if let Expr::TypeGeneric { params, .. } = &pattern.0 {
+                    let variant_name =
+                        Intern::<String>::from_ref(type_surface_mangle_name(&pattern.0));
                     let payload_fields = ctx
                         .ty_env
                         .lookup_variant(variant_name)

@@ -104,3 +104,135 @@ fn test_compile_lone_quote() {
     let src = "y: '\n";
     let _ast = parse_from_str(src);
 }
+
+#[test]
+fn test_compile_const_union_string() {
+    let src = "LogLevel is 'debug' or 'info' or 'warn' or 'error'
+
+main:
+    level LogLevel: 'debug'
+    return 0
+return
+";
+    let (mlir_text, symptoms) = codegen_to_mlir_text(src, "test_const_union.gin");
+    assert!(
+        symptoms.is_empty(),
+        "expected no codegen symptoms for ConstUnion: {symptoms:?}"
+    );
+    assert!(!mlir_text.is_empty(), "should produce MLIR output");
+    // The ConstUnion should produce a simple integer constant, not a struct
+    assert!(
+        mlir_text.contains("arith.constant"),
+        "should contain integer constant: {mlir_text}"
+    );
+}
+
+#[test]
+fn test_compile_const_union_function_arg() {
+    let src = "LogLevel is 'debug' or 'info' or 'warn' or 'error'
+
+set_log_level(level LogLevel):
+    return 0
+
+main:
+    set_log_level(LogLevel('warn'))
+    return 0
+return
+";
+    let (mlir_text, symptoms) = codegen_to_mlir_text(src, "test_const_union_fn.gin");
+    assert!(
+        symptoms.is_empty(),
+        "expected no codegen symptoms for ConstUnion fn arg: {symptoms:?}"
+    );
+    assert!(!mlir_text.is_empty(), "should produce MLIR output");
+}
+
+#[test]
+fn test_when_basic_ternary() {
+    // Basic single-line ternary
+    let src = "
+main:
+    level LogLevel: 'debug'
+    result: when 1 == 1 then 42 else 0
+    return result
+return
+";
+    let (mlir_text, symptoms) = codegen_to_mlir_text(src, "test_const_union_when.gin");
+    assert!(symptoms.is_empty(), "expected no symptoms: {symptoms:?}");
+    assert!(!mlir_text.is_empty(), "should produce MLIR");
+    assert!(
+        mlir_text.contains("scf.if"),
+        "should have scf.if for ternary: {mlir_text}"
+    );
+}
+
+#[test]
+fn test_when_hanging_indent() {
+    // Hanging indent: then/else align with the condition, not with `when`
+    // The condition `1 == 1` starts at column 18.
+    // `then` at column 18 (18 spaces) is past `when` at column 14 → triggers Indent.
+    let src = "
+main:
+    result: when 1 == 1
+                  then 42
+                  else 0
+    return result
+return
+";
+    let (mlir_text, symptoms) = codegen_to_mlir_text(src, "test_when_hanging.gin");
+    assert!(symptoms.is_empty(), "expected no symptoms: {symptoms:?}");
+    assert!(!mlir_text.is_empty(), "should produce MLIR");
+    assert!(
+        mlir_text.contains("scf.if"),
+        "should have scf.if for ternary: {mlir_text}"
+    );
+}
+
+#[test]
+fn test_when_multi_line_same_indent() {
+    // Multi-line with then/else at same indent as when
+    let src = "
+main:
+    result: when 1 == 1
+    then 42
+    else 0
+    return result
+return
+";
+    let (mlir_text, symptoms) = codegen_to_mlir_text(src, "test_when_multiline.gin");
+    assert!(symptoms.is_empty(), "expected no symptoms: {symptoms:?}");
+    assert!(!mlir_text.is_empty(), "should produce MLIR");
+    assert!(
+        mlir_text.contains("scf.if"),
+        "should have scf.if for ternary: {mlir_text}"
+    );
+}
+
+#[test]
+fn test_compile_const_union_in_when() {
+    // Multi-line when form with `:`
+    let src = "LogLevel is 'debug' or 'info' or 'warn' or 'error'
+
+main:
+    level LogLevel: 'debug'
+    result: when level
+        is 'debug': 1
+        is 'info': 2
+        is 'warn': 3
+        is 'error': 4
+        else 0
+    return result
+return
+";
+    let (mlir_text, symptoms) = codegen_to_mlir_text(src, "test_const_union_when.gin");
+    assert!(
+        symptoms.is_empty(),
+        "expected no codegen symptoms for ConstUnion when: {symptoms:?}"
+    );
+    assert!(!mlir_text.is_empty(), "should produce MLIR output");
+    // The when should lower into scf.if with arith.cmpi on the discriminant
+    assert!(
+        mlir_text.contains("scf.if"),
+        "should contain scf.if for pattern match, got: {mlir_text}"
+    );
+}

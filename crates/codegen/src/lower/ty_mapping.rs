@@ -55,6 +55,19 @@ pub fn ty_to_mlir<'c>(ty: &Ty, ctx: &'c Context) -> Type<'c> {
                 fields.iter().map(|(_, ft)| ty_to_mlir(ft, ctx)).collect();
             r#type::r#struct(ctx, &field_types, false)
         }
+        Ty::ConstUnion { values, .. } => {
+            if values.len() <= 256 {
+                if values.len() == 2 {
+                    ctx.i1()
+                } else {
+                    IntegerType::new(ctx, 8).into()
+                }
+            } else if values.len() <= 65536 {
+                IntegerType::new(ctx, 16).into()
+            } else {
+                ctx.i64()
+            }
+        }
         Ty::Unit | Ty::Opaque(_) => ctx.i64(),
         Ty::Array { .. } | Ty::Ptr { .. } | Ty::Ref { .. } => ctx.llvm_ptr(),
         Ty::Tuple(fields) => {

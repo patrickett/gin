@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use ast::{Expr, SpanId};
 use internment::Intern;
 use parser::parse_from_str;
@@ -178,6 +180,229 @@ fn test_three_variant_union_optimization() {
     assert_eq!(
         align, 1,
         "Color union with 3 variants and no fields should have alignment = 1 (not 8)"
+    );
+}
+
+// ── ConstUnion (string literal union) tests ──
+
+#[test]
+fn test_string_literal_union_resolves_to_const_union() {
+    let src = "LogLevel is 'debug' or 'info' or 'warn' or 'error'";
+
+    let ast = parse_from_str(src);
+    let ty_env = TyEnv::from_file_ast(&ast);
+    let ty = ty_env.resolve_type_expr(&Expr::TypeNominal(
+        Intern::<String>::from_ref("LogLevel"),
+        SpanId::INVALID,
+    ));
+
+    assert!(
+        ty.is_const_union(),
+        "LogLevel should resolve to ConstUnion, got: {ty:?}"
+    );
+
+    if let Ty::ConstUnion { name, base, values } = &ty {
+        assert_eq!(name.as_str(), "LogLevel");
+        assert_eq!(values.len(), 4);
+        assert!(matches!(values[0], ConstValue::String(ref s) if s == "debug"));
+        assert!(matches!(values[1], ConstValue::String(ref s) if s == "info"));
+        assert!(matches!(values[2], ConstValue::String(ref s) if s == "warn"));
+        assert!(matches!(values[3], ConstValue::String(ref s) if s == "error"));
+        // base should be Str (record with pointer + len)
+        assert!(base.is_record());
+        if let Ty::Record { name: rn, .. } = base.as_ref() {
+            assert_eq!(rn.as_str(), "Str");
+        }
+    } else {
+        panic!("Expected ConstUnion");
+    }
+}
+
+#[test]
+fn test_const_union_size_and_alignment() {
+    let src = "LogLevel is 'debug' or 'info' or 'warn' or 'error'";
+
+    let ast = parse_from_str(src);
+    let ty_env = TyEnv::from_file_ast(&ast);
+    let ty = ty_env.resolve_type_expr(&Expr::TypeNominal(
+        Intern::<String>::from_ref("LogLevel"),
+        SpanId::INVALID,
+    ));
+
+    let size = ty_byte_size_static(&ty);
+    let align = ty_alignment(&ty);
+
+    assert_eq!(
+        size, 1,
+        "ConstUnion with 4 values should have size = 1 (i8 discriminant)"
+    );
+    assert_eq!(
+        align, 1,
+        "ConstUnion should have alignment = 1 (small integer)"
+    );
+}
+
+#[test]
+fn test_const_union_two_values_uses_i1() {
+    let src = "Flag is 'on' or 'off'";
+
+    let ast = parse_from_str(src);
+    let ty_env = TyEnv::from_file_ast(&ast);
+    let ty = ty_env.resolve_type_expr(&Expr::TypeNominal(
+        Intern::<String>::from_ref("Flag"),
+        SpanId::INVALID,
+    ));
+
+    let size = ty_byte_size_static(&ty);
+    assert_eq!(
+        size, 1,
+        "Flag with 2 values should have size = 1 (i1, still stored as 1 byte)"
+    );
+}
+
+#[test]
+fn test_const_union_variant_map() {
+    let src = "LogLevel is 'debug' or 'info' or 'warn' or 'error'";
+
+    let ast = parse_from_str(src);
+    let ty_env = TyEnv::from_file_ast(&ast);
+
+    // Each string value should be findable via lookup_variant
+    let debug = ty_env.lookup_variant(Intern::<String>::new("debug".to_string()));
+    assert!(debug.is_some(), "'debug' should be a valid variant");
+    if let Some((union, disc, fields)) = debug {
+        assert_eq!(union.as_str(), "LogLevel");
+        assert_eq!(disc, 0);
+        assert!(
+            fields.is_empty(),
+            "ConstUnion variants have no payload fields"
+        );
+    }
+
+    let error = ty_env.lookup_variant(Intern::<String>::new("error".to_string()));
+    assert!(error.is_some(), "'error' should be a valid variant");
+    if let Some((_union, disc, _)) = error {
+        assert_eq!(disc, 3);
+    }
+
+    // Unknown value should not be found
+    let unknown = ty_env.lookup_variant(Intern::<String>::new("unknown".to_string()));
+    assert!(unknown.is_none(), "'unknown' should not be a valid variant");
+}
+
+#[test]
+fn test_const_union_all_variants() {
+    let src = "LogLevel is 'debug' or 'info' or 'warn' or 'error'";
+
+    let ast = parse_from_str(src);
+    let ty_env = TyEnv::from_file_ast(&ast);
+    let union_name = Intern::<String>::from_ref("LogLevel");
+
+    let variants = ty_env.all_variants_of(union_name);
+    assert_eq!(variants.len(), 4);
+
+    let names: Vec<String> = variants.iter().map(|v| v.to_string()).collect();
+    assert!(
+        names.contains(&"debug".to_string()),
+        "variants should include 'debug': {names:?}"
+    );
+    assert!(
+        names.contains(&"info".to_string()),
+        "variants should include 'info': {names:?}"
+    );
+}
+
+#[test]
+fn test_nothing_is_unit() {
+    let src = "Nothing is ()";
+    let ast = parse_from_str(src);
+    let ty_env = TyEnv::from_file_ast(&ast);
+    let ty = ty_env.resolve_type_expr(&Expr::TypeNominal(
+        Intern::<String>::from_ref("Nothing"),
+        SpanId::INVALID,
+    ));
+
+    assert_eq!(ty, Ty::Unit, "Nothing is () should resolve to Ty::Unit");
+
+    let size = ty_byte_size_static(&ty);
+    let align = ty_alignment(&ty);
+    assert_eq!(size, 0, "Unit should have size 0");
+    assert_eq!(align, 1, "Unit should have alignment 1");
+}
+
+#[test]
+fn test_const_union_unifies_with_itself() {
+    let src = "LogLevel is 'debug' or 'info' or 'warn' or 'error'";
+    let ast = parse_from_str(src);
+    let ty_env = TyEnv::from_file_ast(&ast);
+    let ty = ty_env.resolve_type_expr(&Expr::TypeNominal(
+        Intern::<String>::from_ref("LogLevel"),
+        SpanId::INVALID,
+    ));
+
+    let mut bindings = HashMap::new();
+    assert!(
+        typeck::check::ty_unifies_with(&ty, &ty, &mut bindings),
+        "ConstUnion should unify with itself"
+    );
+}
+
+#[test]
+fn test_const_union_rejects_str() {
+    // A bare Str should NOT unify with a ConstUnion.
+    let src = "LogLevel is 'debug' or 'info' or 'warn' or 'error'";
+    let ast = parse_from_str(src);
+    let ty_env = TyEnv::from_file_ast(&ast);
+    let loglevel = ty_env.resolve_type_expr(&Expr::TypeNominal(
+        Intern::<String>::from_ref("LogLevel"),
+        SpanId::INVALID,
+    ));
+
+    let str_ty = ty_env.resolve_type_expr(&Expr::TypeNominal(
+        Intern::<String>::from_ref("Str"),
+        SpanId::INVALID,
+    ));
+
+    let mut bindings = HashMap::new();
+    assert!(
+        !typeck::check::ty_unifies_with(&str_ty, &loglevel, &mut bindings),
+        "Str should NOT unify with ConstUnion"
+    );
+    assert!(
+        !typeck::check::ty_unifies_with(&loglevel, &str_ty, &mut bindings),
+        "ConstUnion should NOT unify with Str"
+    );
+}
+
+#[test]
+fn test_const_union_rejects_wrong_subset() {
+    let src = "
+LogLevel is 'debug' or 'info' or 'warn' or 'error'
+SubLevel is 'debug' or 'error'
+";
+    let ast = parse_from_str(src);
+    let ty_env = TyEnv::from_file_ast(&ast);
+    let loglevel = ty_env.resolve_type_expr(&Expr::TypeNominal(
+        Intern::<String>::from_ref("LogLevel"),
+        SpanId::INVALID,
+    ));
+    let sublevel = ty_env.resolve_type_expr(&Expr::TypeNominal(
+        Intern::<String>::from_ref("SubLevel"),
+        SpanId::INVALID,
+    ));
+
+    let mut bindings = HashMap::new();
+    // SubLevel (values in LogLevel) should unify with LogLevel
+    assert!(
+        typeck::check::ty_unifies_with(&sublevel, &loglevel, &mut bindings),
+        "SubLevel ('debug', 'error') should unify with LogLevel (all values present)"
+    );
+
+    // LogLevel has values not in SubLevel, so LogLevel should NOT unify with SubLevel
+    let mut bindings2 = HashMap::new();
+    assert!(
+        !typeck::check::ty_unifies_with(&loglevel, &sublevel, &mut bindings2),
+        "LogLevel has more values than SubLevel, should NOT unify"
     );
 }
 

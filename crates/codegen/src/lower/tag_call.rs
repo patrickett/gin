@@ -1,5 +1,5 @@
 use crate::{prelude::*, ty_to_mlir};
-use typeck::Ty;
+use typeck::{Ty, flow::ConstValue};
 
 impl<'c> Lower<'c> for TagCall {
     fn lower(
@@ -8,6 +8,61 @@ impl<'c> Lower<'c> for TagCall {
         block: &BlockRef<'c, 'c>,
         symtab: &mut ScopedSymbolTable<'c>,
     ) -> Option<Value<'c, 'c>> {
+        // Try ConstUnion construction first (e.g. LogLevel('debug')).
+        if let Some(Ty::ConstUnion { values, .. }) = ctx.ty_env.lookup_tag(self.name) {
+            if let Some(arg) = self.args.first() {
+                let arg_lit = match &arg.0 {
+                    ast::Expr::Lit(lit) => lit,
+                    _ => {
+                        // TODO: Support non-literal ConstUnion construction (e.g.
+                        // passing a runtime string through pattern matching). This
+                        // would need a runtime string comparison against each value
+                        // to find the matching discriminant.
+                        ctx.emit_internal(format!(
+                            "ConstUnion '{}' requires a literal argument",
+                            self.name.as_str()
+                        ));
+                        return None;
+                    }
+                };
+                let disc = match arg_lit {
+                    ast::Literal::String(s) => values
+                        .iter()
+                        .position(|v| matches!(v, ConstValue::String(vs) if vs == s)),
+                    ast::Literal::Int(n) => values
+                        .iter()
+                        .position(|v| matches!(v, ConstValue::Int(vn) if *vn == *n as i128)),
+                    ast::Literal::Float(f) => values.iter().position(
+                        |v| matches!(v, ConstValue::Float(vf) if vf.to_bits() == f.to_bits()),
+                    ),
+                    ast::Literal::Number(n) => values
+                        .iter()
+                        .position(|v| matches!(v, ConstValue::Int(vn) if *vn == *n as i128)),
+                };
+                let disc = disc? as i64;
+                let variant_count = values.len();
+                return if variant_count == 2 {
+                    let i1_attr = melior::ir::attribute::IntegerAttribute::new(
+                        IntegerType::new(ctx.mlir, 1).into(),
+                        disc,
+                    )
+                    .into();
+                    Some(block.append_op(ctx.mlir.const_op(i1_attr, ctx.mlir.i1())))
+                } else if variant_count <= 256 {
+                    let i8_ty = IntegerType::new(ctx.mlir, 8).into();
+                    let i8_attr = melior::ir::attribute::IntegerAttribute::new(i8_ty, disc).into();
+                    Some(block.append_op(ctx.mlir.const_op(i8_attr, i8_ty)))
+                } else {
+                    Some(block.const_i64(ctx.mlir, disc))
+                };
+            }
+            ctx.emit_internal(format!(
+                "ConstUnion '{}' requires exactly one argument",
+                self.name.as_str()
+            ));
+            return None;
+        }
+
         // Try union variant construction first.
         if let Some((union_name, discriminant, payload_fields)) =
             ctx.ty_env.lookup_variant(self.name)

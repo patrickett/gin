@@ -949,3 +949,35 @@ fn hover_const_bind_union_variant() {
         &["false Bool.False"],
     );
 }
+
+#[test]
+fn hover_tag_shows_source_name() {
+    // `hover_at_with_source` should include the source name in the tag hover output.
+    let source = "Nothing is ()\n";
+    let ast = parse_source(source);
+    let result = typeck::hover_at_with_source(source, &ast, 0, Some("core")).unwrap();
+    assert!(
+        result.contains("`core`"),
+        "expected hover to contain `core`, got:\n{result}"
+    );
+    assert!(
+        result.contains("Nothing is ()"),
+        "expected hover to contain declaration, got:\n{result}"
+    );
+}
+
+#[test]
+fn hover_tag_without_source_name() {
+    // `hover_at` without source name should NOT include a module header.
+    let source = "Nothing is ()\n";
+    let ast = parse_source(source);
+    let result = typeck::hover_at(source, &ast, 0).unwrap();
+    assert!(
+        !result.contains("`core`"),
+        "expected hover to NOT contain `core`, got:\n{result}"
+    );
+    assert!(
+        result.contains("Nothing is ()"),
+        "expected hover to contain declaration, got:\n{result}"
+    );
+}

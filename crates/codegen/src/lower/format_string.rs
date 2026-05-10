@@ -7,7 +7,10 @@ fn to_string_fn_name(ty: &Ty) -> String {
         Ty::Float { .. } => "Float.to_string".to_string(),
         Ty::Bool => "Bool.to_string".to_string(),
         Ty::Unit => "Unit.to_string".to_string(),
-        Ty::Opaque(name) | Ty::Record { name, .. } | Ty::Union { name, .. } => {
+        Ty::Opaque(name)
+        | Ty::Record { name, .. }
+        | Ty::Union { name, .. }
+        | Ty::ConstUnion { name, .. } => {
             format!("{}.to_string", name.as_str())
         }
         Ty::Array { .. } | Ty::Ptr { .. } | Ty::Ref { .. } => "Ptr.to_string".to_string(),

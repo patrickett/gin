@@ -12,6 +12,17 @@ use internment::Intern;
 /// Return markdown hover text for the expression at `byte_pos` in the given AST.
 /// Returns `None` if there is nothing hover-able at that position.
 pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<String> {
+    hover_at_with_source(source, ast, byte_pos, None)
+}
+
+/// Like [`hover_at`], but includes the `source_name` (e.g. module path or filename)
+/// in the hover output for top-level declarations.
+pub fn hover_at_with_source(
+    source: &str,
+    ast: &ast::FileAst,
+    byte_pos: usize,
+    source_name: Option<&str>,
+) -> Option<String> {
     // Try AST-based lookup first — find the expression at this position.
     if let Some((expr, _span_id)) = ast.expr_at_byte(byte_pos)
         && let ast::Expr::AnonymousTag(name, _) | ast::Expr::TypeNominal(name, _) = expr
@@ -24,7 +35,11 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
 
         // Look for tag definitions
         if let Some(decl) = ast.tags().get(name) {
-            let mut result = format!("```gin\n{decl}\n```");
+            let mut result = String::new();
+            if let Some(sn) = source_name {
+                result.push_str(&format!("`{sn}`\n\n"));
+            }
+            result.push_str(&format!("```gin\n{decl}\n```"));
             if let Some(doc) = decl.doc_comment() {
                 result.push_str(&format!("\n\n---\n\n{}", doc.0));
             }
@@ -61,7 +76,11 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
     // but needed here for when the cursor is on a tag name not wrapped in an Expr)
     for (name, decl) in ast.tags() {
         if name.as_str() == word {
-            let mut result = format!("```gin\n{decl}\n```");
+            let mut result = String::new();
+            if let Some(sn) = source_name {
+                result.push_str(&format!("`{sn}`\n\n"));
+            }
+            result.push_str(&format!("```gin\n{decl}\n```"));
             if let Some(doc) = decl.doc_comment() {
                 result.push_str(&format!("\n\n---\n\n{}", doc.0));
             }
@@ -87,7 +106,14 @@ pub fn hover_at(source: &str, ast: &ast::FileAst, byte_pos: usize) -> Option<Str
             continue;
         }
         let display_name = name.as_str().to_string();
-        return Some(format_bind_hover(name, bind, &display_name, &ty_env, &flow));
+        return Some(format_bind_hover(
+            name,
+            bind,
+            &display_name,
+            ast,
+            &ty_env,
+            &flow,
+        ));
     }
 
     // Look for parameter names across all defs
@@ -228,6 +254,7 @@ fn format_bind_hover(
     def_name: &Intern<String>,
     bind: &Bind,
     display_name: &str,
+    ast: &ast::FileAst,
     ty_env: &crate::TyEnv,
     flow: &FlowAnalysis,
 ) -> String {
@@ -235,15 +262,43 @@ fn format_bind_hover(
     if let Some(params) = bind.params() {
         result.push_str(&format_params(params));
     }
-    if let Some(sp) = &bind.return_tag {
-        result.push_str(&format!(" {}", format_type_surface(&sp.0)));
-    }
-    // For parameterless const binds, show the constant value.
     let is_function = bind.params().is_some();
     if !is_function && bind.is_const {
         let var = Intern::<String>::from_ref(display_name);
         if let Some(const_val) = flow.final_context.get_constant(&var) {
-            result.push_str(&format!(" {}", const_val.to_hover_string()));
+            // Known const value at compile time.
+            // If the declared type is a single-variant union, the type itself adds no
+            // information — show the value using gin syntax from the variant instead
+            // (e.g., `x0 'x0'` rather than `x0 X0 "x0"`).
+            let is_single_variant = bind.return_tag.as_ref().is_some_and(|sp| match &sp.0 {
+                ast::Expr::TypeNominal(name, _) => ast.tags().get(name).is_some_and(|decl| {
+                    matches!(decl.value(), ast::DeclareValue::Union { variants } if variants.len() == 1)
+                }),
+                _ => false,
+            });
+
+            if is_single_variant {
+                if let Some(sp) = &bind.return_tag
+                    && let ast::Expr::TypeNominal(name, _) = &sp.0
+                    && let Some(decl) = ast.tags().get(name)
+                    && let ast::DeclareValue::Union { variants } = decl.value()
+                    && let Some(variant) = variants.first()
+                {
+                    result.push_str(&format!(" {variant}"));
+                }
+            } else {
+                result.push_str(&format!(" {}", const_val.to_hover_string()));
+            }
+        } else {
+            // No known const value — show just the type.
+            if let Some(sp) = &bind.return_tag {
+                result.push_str(&format!(" {}", format_type_surface(&sp.0)));
+            }
+        }
+    } else {
+        // Non-const or function: show the type annotation if present.
+        if let Some(sp) = &bind.return_tag {
+            result.push_str(&format!(" {}", format_type_surface(&sp.0)));
         }
     }
     result.push_str("\n```");
