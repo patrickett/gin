@@ -274,7 +274,7 @@ impl Backend {
 /// from the definition file.
 fn resolve_import_hover(uri: &Url, dep_name: &str, symbol: &str) -> Option<String> {
     let base_path = uri.to_file_path().ok()?;
-    resolve::resolve_symbol_hover(&base_path, dep_name, symbol)
+    resolve::resolve_symbol_hover(&base_path, dep_name, symbol, &resolve::default_file_reader)
 }
 
 /// Read the package name from `flask.jsonc` for the package containing `file_path`.

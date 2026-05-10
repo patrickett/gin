@@ -6,10 +6,6 @@ use ast::FileAst;
 use parser::ParseOutput;
 use typeck::Ty;
 
-// ---------------------------------------------------------------------------
-// Re-exported types that ginmcp needs
-// ---------------------------------------------------------------------------
-
 /// A 0‑based position in source text.
 #[derive(Debug, Clone, Copy)]
 pub struct Pos {
@@ -279,6 +275,7 @@ pub fn resolve_symbol_def_span(file_path: &str, byte_pos: usize) -> Option<Span>
                     std::path::Path::new(file_path),
                     &dep_name,
                     &symbol,
+                    &resolve::default_file_reader,
                 )?;
                 Some(Span {
                     start: r.start,
@@ -313,6 +310,7 @@ pub fn hover_at_with_imports(source: &str, file_path: &str, byte_pos: usize) -> 
                     std::path::Path::new(file_path),
                     &dep_name,
                     &symbol,
+                    &resolve::default_file_reader,
                 );
             }
         }
