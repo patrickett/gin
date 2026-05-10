@@ -23,16 +23,14 @@ impl Backend {
             return;
         }
 
-        let file = {
+        {
             let mut host = self.lock_host();
-            host.upsert_file(path, text.clone())
-        };
-
-        if let Some(file) = file {
-            self.documents
-                .insert(uri, DocumentState { source: text, file });
-            self.spawn_publish_diagnostics(uri_for_diag, file);
+            host.upsert_file(path.clone(), text.clone());
         }
+
+        self.documents
+            .insert(uri, DocumentState { source: text, file_path: path.clone() });
+        self.spawn_publish_diagnostics(uri_for_diag, path);
 
         #[cfg(debug_assertions)]
         self.client
@@ -63,16 +61,14 @@ impl Backend {
 
         if let Some(change) = params.content_changes.first() {
             let text = change.text.clone();
-            let file = {
+            {
                 let mut host = self.lock_host();
-                host.upsert_file(path, text.clone())
-            };
-
-            if let Some(file) = file {
-                self.documents
-                    .insert(uri, DocumentState { source: text, file });
-                self.spawn_publish_diagnostics(uri_for_diag, file);
+                host.upsert_file(path.clone(), text.clone());
             }
+
+            self.documents
+                .insert(uri, DocumentState { source: text, file_path: path.clone() });
+            self.spawn_publish_diagnostics(uri_for_diag, path);
         }
 
         #[cfg(debug_assertions)]
@@ -103,21 +99,19 @@ impl Backend {
         }
 
         if let Some(ref text) = params.text {
-            let file = {
+            {
                 let mut host = self.lock_host();
-                host.upsert_file(path, text.clone())
-            };
-
-            if let Some(file) = file {
-                self.documents.insert(
-                    uri,
-                    DocumentState {
-                        source: text.clone(),
-                        file,
-                    },
-                );
-                self.spawn_publish_diagnostics(uri_for_diag, file);
+                host.upsert_file(path.clone(), text.clone());
             }
+
+            self.documents.insert(
+                uri,
+                DocumentState {
+                    source: text.clone(),
+                    file_path: path.clone(),
+                },
+            );
+            self.spawn_publish_diagnostics(uri_for_diag, path);
         }
 
         #[cfg(debug_assertions)]

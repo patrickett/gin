@@ -2,7 +2,6 @@ use crate::Backend;
 #[cfg(test)]
 use ast::DeclareValue;
 use ast::Literal;
-use database::semantic_queries::hover_markdown;
 
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
@@ -23,10 +22,10 @@ impl Backend {
             .clone();
         let position = params.text_document_position_params.position;
 
-        // Snapshot source + file id, drop DashMap ref before any spawn_blocking
+        // Snapshot source + file path, drop DashMap ref before any spawn_blocking
         // await: `Ref` holds a shard read-lock and is `!Send`.
-        let (source, file) = match self.documents.get(&uri.to_string()) {
-            Some(state) => (state.source.clone(), state.file),
+        let (source, file_path) = match self.documents.get(&uri.to_string()) {
+            Some(state) => (state.source.clone(), state.file_path.clone()),
             None => return Ok(None),
         };
 
@@ -65,10 +64,11 @@ impl Backend {
 
         // Single blocking request for AST-based hover: range, number, string,
         // use-keyword, and import resolution.
+        let fp = file_path.clone();
         let hover = self
             .run_blocking_request("hover", move |this| {
                 let snapshot = this.snapshot();
-                let output = database::file_parse_output(&snapshot.db, file);
+                let output = snapshot.engine.parse_output(&fp)?;
                 let ast = &output.ast;
 
                 // Phase 1: literal detection via AST.
@@ -232,19 +232,19 @@ impl Backend {
         let Some(byte_pos_u32) = u32::try_from(byte_pos).ok() else {
             return Ok(None);
         };
+        let file_path2 = file_path.clone();
         let value = self
             .run_blocking_request("hover_markdown", move |this| {
                 let snapshot = this.snapshot();
-                let markdown = hover_markdown(&snapshot.db, file, byte_pos_u32)?;
+                let markdown = snapshot.engine.hover(&file_path2, byte_pos_u32)?;
 
                 // Check if this is a variant hover — if so, prepend the
                 // package-qualified path (e.g. `core.Maybe` instead of `Maybe`).
-                let output = database::file_parse_output(&snapshot.db, file);
-                let source = file.contents(&snapshot.db);
+                let (source, output) = snapshot.engine.source_and_parse(&file_path2)?;
                 if let Some((_, parent_tag)) =
                     typeck::is_variant_at(source.as_str(), &output.ast, byte_pos)
                 {
-                    if let Some(qualifier) = package_name_for_file(&file.path(&snapshot.db)) {
+                    if let Some(qualifier) = package_name_for_file(&file_path) {
                         let qualified = format!("{qualifier}.{parent_tag}");
                         let modified = markdown.replacen(
                             &format!("\n{parent_tag}\n"),

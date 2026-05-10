@@ -1,9 +1,12 @@
 pub(crate) mod json;
 mod path;
 
+use std::path::PathBuf;
+
 use crate::Backend;
 use ast::FileAst;
-use database::{file_parse_output, intern_package_files, package_ty_env, sorted_package_files};
+
+
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use typeck::Ty;
@@ -44,8 +47,8 @@ impl Backend {
 
         // Snapshot what we need from the document store and drop the DashMap
         // ref before any await: `Ref` holds a shard read-lock and is `!Send`.
-        let (source, file) = match self.documents.get(&uri) {
-            Some(state) => (state.source.clone(), state.file),
+        let (source, file_path) = match self.documents.get(&uri) {
+            Some(state) => (state.source.clone(), state.file_path.clone()),
             None => {
                 #[cfg(debug_assertions)]
                 self.client
@@ -69,7 +72,7 @@ impl Backend {
         // Salsa query (e.g. parser hang on `core.`) cannot pin an async worker.
         let result = self
             .run_blocking_request("completion", move |this| {
-                compute_completions(&this, doc_uri, source, file, position)
+                compute_completions(&this, doc_uri, source, file_path, position)
             })
             .await;
 
@@ -82,23 +85,25 @@ fn compute_completions(
     backend: &Backend,
     doc_uri: Url,
     source: String,
-    file: database::File,
+    file_path: PathBuf,
     position: Position,
 ) -> Vec<CompletionItem> {
     let snapshot = backend.snapshot();
-    let ast = file_parse_output(&snapshot.db, file).ast.clone();
+    let output = match snapshot.engine.parse_output(&file_path) {
+        Some(o) => o,
+        None => return Vec::new(),
+    };
+    let ast = &output.ast;
 
     if let Some(byte_pos) = position_to_byte_offset(&source, position.line, position.character) {
         let pkg_root = backend.package_root_for_uri(&doc_uri);
-        let all_files = if let Some(root) = &pkg_root {
+        let all_file_paths: Vec<PathBuf> = if let Some(root) = &pkg_root {
             let mut host = backend.lock_host();
-            host.load_package(root).files
+            host.load_package(root).file_paths
         } else {
-            vec![file]
+            vec![file_path.clone()]
         };
-        let package_files = sorted_package_files(&snapshot.db, &all_files);
-        let pkg = intern_package_files(&snapshot.db, package_files);
-        let ty_env = package_ty_env(&snapshot.db, pkg);
+        let ty_env = snapshot.engine.package_ty_env(&all_file_paths);
 
         if let Some(ty) = dot_type_at(&source, &ast, &ty_env, byte_pos) {
             let items = dot_completions(ty);

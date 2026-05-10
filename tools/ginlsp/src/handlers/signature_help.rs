@@ -1,6 +1,6 @@
 use crate::Backend;
 use ast::FileAst;
-use database::file_parse_output;
+
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use typeck::{fn_call_at, position_to_byte_offset, signature_for_fn};
@@ -24,15 +24,15 @@ impl Backend {
         // Drop the DashMap ref before the spawn_blocking await: it is `!Send`
         // and would prevent the future from being scheduled. `file_parse_output`
         // runs the parser via Salsa and is the part that can hang on bad input.
-        let (source, file) = match self.documents.get(&uri) {
-            Some(state) => (state.source.clone(), state.file),
+        let (source, file_path) = match self.documents.get(&uri) {
+            Some(state) => (state.source.clone(), state.file_path.clone()),
             None => return Ok(None),
         };
 
         let result = self
             .run_blocking_request("signature_help", move |this| {
                 let snapshot = this.snapshot();
-                let ast = file_parse_output(&snapshot.db, file).ast.clone();
+                let ast = snapshot.engine.parse_output(&file_path)?.ast.clone();
                 build_signature_help(&source, &ast, position)
             })
             .await;

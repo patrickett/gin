@@ -1,12 +1,24 @@
 #![deny(unsafe_code)]
 #![warn(clippy::correctness, clippy::suspicious, clippy::style, clippy::complexity, clippy::perf)]
-//! Persistent inputs and low-level Salsa queries (for example parsing).
-//! Semantic analysis and editor integration live in the `typeck` crate.
+
+pub mod engine;
+pub mod salsa_engine;
+
+// Internal Salsa infrastructure — modules are pub for macro codegen but
+// their types should NOT be imported by external crates. Use QueryEngine instead.
 pub mod input_database;
 pub mod package;
 pub mod queries;
 pub mod semantic_queries;
 
+// Re-export only the QueryEngine seam.
+pub use engine::QueryEngine;
+pub use salsa_engine::SalsaQueryEngine;
+
+// ---------------------------------------------------------------------------
+// Salsa types (kept for backward compat during migration; new code should use
+// QueryEngine instead).
+// ---------------------------------------------------------------------------
 pub use input_database::{Db, InputDatabase};
 pub use package::{PackageFiles, intern_package_files, sorted_package_files};
 pub use queries::{file_parse_output, parse_file, set_file_contents};
@@ -26,11 +38,6 @@ pub struct File {
     pub contents: String,
 }
 
-/// Salsa accumulator for diagnostics.
-///
-/// Defined here (rather than in `diagnostic`) so that the `diagnostic` crate
-/// doesn't need to depend on `salsa`. Use [`EmitDiagnostic::emit`] at call sites
-/// and `accumulated::<Diagnostics>` to retrieve accumulated diagnostics.
 #[salsa::accumulator]
 #[derive(Debug, Clone)]
 pub struct Diagnostics(pub Diagnostic);
@@ -43,14 +50,6 @@ impl Deref for Diagnostics {
     }
 }
 
-/// Extension trait that provides the `.emit()` convenience method for
-/// accumulating diagnostics into a Salsa database.
-///
-/// Import this trait wherever you need to emit diagnostics:
-/// ```ignore
-/// use database::EmitDiagnostic;
-/// SomeSymptom.emit(db, span_id);
-/// ```
 pub trait EmitDiagnostic: DiagnosticLike {
     fn emit<D: salsa::Database + ?Sized>(self, db: &D, span_id: SpanId)
     where

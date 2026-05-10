@@ -5,9 +5,7 @@ mod handlers;
 mod state;
 
 use dashmap::DashMap;
-use database::Diagnostics;
-use database::File;
-use database::{file_parse_output, package_typecheck_symptoms, sorted_package_files, PackageFiles};
+
 use diagnostics::symptoms_to_diagnostics;
 use futures::FutureExt;
 use resolve::{resolve_flask_path_dependencies, ParsedFile};
@@ -23,20 +21,9 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
-/// Final safety net for a single package-wide diagnostic computation. Salsa
-/// cancellation already aborts in-flight work as soon as a new edit arrives
-/// (see [`Backend::run_blocking_request`] for the read-request equivalent),
-/// and the parser is now structurally guaranteed to terminate. This timeout
-/// only catches truly pathological compute that the type-checker hasn't been
-/// audited for yet — it should virtually never fire in practice.
 const DIAGNOSTIC_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Final safety net for a single read request. Edit-during-compute is handled
-/// by Salsa cancellation, so this only fires on type-checker pathologies.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Canonical directory containing `flask.jsonc` for `from_dir`, if any (walks upward like
-/// [`flask::FlaskConfigHandle::load`]).
 fn package_root_containing(from_dir: &Path) -> Option<std::path::PathBuf> {
     let mut search = from_dir.to_path_buf();
     loop {
@@ -52,21 +39,13 @@ fn package_root_containing(from_dir: &Path) -> Option<std::path::PathBuf> {
     }
 }
 
-/// Shared LSP state. Heavy work (package diagnostics) runs on the blocking
-/// pool so panicking/spinning parsers cannot starve the async runtime, and
-/// stale results are filtered via a monotonic generation counter rather than
-/// `JoinHandle::abort` (which is a no-op for sync CPU loops).
 pub(crate) struct GinLspBackend {
     pub(crate) client: Client,
     pub(crate) host: Arc<Mutex<GinHost>>,
     pub(crate) documents: DashMap<String, DocumentState>,
     pub(crate) json_documents: DashMap<String, JsonDocumentState>,
-    /// One cached [`flask::FlaskConfigHandle`] per package root (`flask.jsonc` directory).
-    /// Unlike a single global handle, this stays correct in multi-package workspaces.
     pub(crate) package_configs: DashMap<std::path::PathBuf, flask::FlaskConfigHandle>,
     pub(crate) shutdown: AtomicBool,
-    /// Bumped on every `spawn_publish_diagnostics`. A worker that observes a
-    /// newer value than the one it was spawned with discards its results.
     pub(crate) latest_diagnostic_gen: AtomicU64,
 }
 
@@ -94,19 +73,14 @@ impl Backend {
         }))
     }
 
-    /// Bump the diagnostic generation and kick off a worker for it. The
-    /// caller must have already written the new file contents to the host
-    /// database (via [`state::GinHost::upsert_file`] in the document-sync
-    /// handlers); this is what arms Salsa cancellation against any earlier
-    /// in-flight worker.
-    pub(crate) fn spawn_publish_diagnostics(&self, uri: Url, file: File) {
+    pub(crate) fn spawn_publish_diagnostics(&self, uri: Url, file_path: PathBuf) {
         let my_gen = self
             .latest_diagnostic_gen
             .fetch_add(1, Ordering::SeqCst)
             .wrapping_add(1);
         let this = self.clone();
         tokio::spawn(async move {
-            this.publish_diagnostics_for(uri, file, my_gen).await;
+            this.publish_diagnostics_for(uri, file_path, my_gen).await;
         });
     }
 
@@ -114,28 +88,10 @@ impl Backend {
         self.shutdown.load(Ordering::SeqCst)
     }
 
-    /// True if a newer `spawn_publish_diagnostics` has been issued since `my_gen`.
     fn is_stale(&self, my_gen: u64) -> bool {
         self.latest_diagnostic_gen.load(Ordering::SeqCst) != my_gen
     }
 
-    /// Run a Salsa-touching request on the blocking pool with cooperative
-    /// cancellation. Returns `None` on shutdown, cancellation, panic, or
-    /// timeout — the LSP handler maps that to "no result" so the editor's
-    /// spinner clears.
-    ///
-    /// Cancellation flow: every Salsa setter call (e.g. `set_file_contents`
-    /// from `did_change`) bumps the database revision. In-flight queries on
-    /// snapshot clones detect the bumped revision at their next query
-    /// boundary and panic with [`salsa::Cancelled::PendingWrite`]. We catch
-    /// that here as a clean `Err` so the worker thread returns immediately
-    /// instead of running stale-and-doomed work to completion. This is the
-    /// idiomatic Salsa pattern and the reason rust-analyzer stays snappy on
-    /// large crates while you type.
-    ///
-    /// The wall-clock [`REQUEST_TIMEOUT`] is a final safety net for the case
-    /// where compute is slow but no edit has arrived to cancel it (e.g. an
-    /// unbounded type-checker recursion); it should virtually never fire.
     async fn run_blocking_request<F, T>(&self, name: &'static str, f: F) -> Option<T>
     where
         F: FnOnce(Backend) -> T + Send + 'static,
@@ -146,21 +102,12 @@ impl Backend {
         }
         let this = self.clone();
         let blocking = tokio::task::spawn_blocking(move || -> Option<T> {
-            // `Backend` contains `Mutex` / `RwLock` which poison on panic;
-            // catching `salsa::Cancelled` here cannot leave shared state in
-            // an unsafe limbo, so `AssertUnwindSafe` is sound. Same pattern
-            // as the existing `Backend::catch_request` panic handler.
-            // `Err(salsa::Cancelled)` means a new edit invalidated our
-            // snapshot — normal operation, not an error. The next request
-            // will be served from the fresher revision.
             let work = AssertUnwindSafe(move || f(this));
             salsa::Cancelled::catch(work).ok()
         });
         match tokio::time::timeout(REQUEST_TIMEOUT, blocking).await {
             Ok(Ok(value)) => value,
             Ok(Err(join_err)) => {
-                // Non-cancellation panic (real bug). Cancellations are
-                // converted to `None` inside the closure above.
                 eprintln!("[ginlsp] '{name}' worker panicked: {join_err}");
                 None
             }
@@ -204,32 +151,27 @@ impl Backend {
                 .map(|s| s.as_str())
                 .or_else(|| payload.downcast_ref::<&str>().copied())
                 .unwrap_or("unknown panic");
-            eprintln!("[ginlsp] notification handler '{}' panicked: {}", name, msg);
+            eprintln!("[ginlsp] notification '{}' panicked: {}", name, msg);
         }
     }
 
     fn snapshot(&self) -> state::GinSnapshot {
         let host = self.lock_host();
-
         host.snapshot()
     }
 
     fn get_or_load_config(&self, file_uri: &Url) -> Option<flask::FlaskConfigHandle> {
         let file_path = file_uri.to_file_path().ok()?;
         let file_dir = file_path.parent()?;
-
         let cache_key = package_root_containing(file_dir)?;
-
         if let Some(existing) = self.package_configs.get(&cache_key) {
             return Some(existing.clone());
         }
-
         let loaded = flask::FlaskConfigHandle::load(file_dir).ok()?;
         self.package_configs.insert(cache_key, loaded.clone());
         Some(loaded)
     }
 
-    /// Determine the package root directory for a file URI.
     fn package_root_for_uri(&self, uri: &Url) -> Option<std::path::PathBuf> {
         if let Some(handle) = self.get_or_load_config(uri) {
             return Some(handle.source_dir());
@@ -239,18 +181,7 @@ impl Backend {
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
     }
 
-    /// Collect and publish diagnostics for every `.gin` file in the package
-    /// that contains `trigger_file`.
-    ///
-    /// Cancellation: the worker runs on the blocking pool inside
-    /// [`salsa::Cancelled::catch`]. When a fresh `did_change` arrives during
-    /// compute, that handler's `set_file_contents` call bumps the database
-    /// revision and our worker's next Salsa query unwinds via Cancelled. We
-    /// observe an empty payload and publish nothing — the new edit will spawn
-    /// its own worker for the fresher state. [`DIAGNOSTIC_TIMEOUT`] only
-    /// triggers when compute is slow but no edit arrived to cancel it (e.g.
-    /// type-checker pathologies); in steady state it should never fire.
-    async fn publish_diagnostics_for(&self, uri: Url, trigger_file: File, my_gen: u64) {
+    async fn publish_diagnostics_for(&self, uri: Url, trigger_path: PathBuf, my_gen: u64) {
         if self.is_shutdown() || self.is_stale(my_gen) {
             return;
         }
@@ -265,11 +196,9 @@ impl Backend {
             });
 
         let this = self.clone();
-        let blocking = tokio::task::spawn_blocking(move || -> Vec<(Url, Vec<Diagnostic>)> {
-            // `Err(salsa::Cancelled)` → empty payload → publish nothing; the
-            // newer worker that triggered the cancellation will publish.
+        let blocking = tokio::task::spawn_blocking(move || -> Vec<(Url, Vec<tower_lsp::lsp_types::Diagnostic>)> {
             let work = AssertUnwindSafe(move || {
-                this.compute_package_diagnostics(pkg_root, config_handle.clone(), trigger_file)
+                this.compute_package_diagnostics(pkg_root, config_handle.clone(), trigger_path)
             });
             salsa::Cancelled::catch(work).unwrap_or_default()
         });
@@ -297,22 +226,12 @@ impl Backend {
         }
     }
 
-    /// Synchronous half of [`publish_diagnostics_for`]: discover package files,
-    /// run parse + typecheck on a Salsa snapshot, and assemble per-file
-    /// diagnostics. Cancellation is delivered by Salsa unwinding through this
-    /// function — the caller [`salsa::Cancelled::catch`]es it.
-    ///
-    /// Note: the trigger file's contents were already written to the host
-    /// database in `handle_did_change` before this worker spawned; we do not
-    /// re-write them here, both to avoid a redundant revision bump and to
-    /// ensure this worker's snapshot is consistent with the edit that
-    /// scheduled it.
     fn compute_package_diagnostics(
         &self,
         pkg_root: Option<PathBuf>,
         config_handle: Option<flask::FlaskConfigHandle>,
-        trigger_file: File,
-    ) -> Vec<(Url, Vec<Diagnostic>)> {
+        trigger_path: PathBuf,
+    ) -> Vec<(Url, Vec<tower_lsp::lsp_types::Diagnostic>)> {
         if self.is_shutdown() {
             return Vec::new();
         }
@@ -325,11 +244,11 @@ impl Backend {
             })
             .unwrap_or_default();
 
-        let all_files: Vec<File> = if let Some(root) = &pkg_root {
+        let all_file_paths: Vec<PathBuf> = if let Some(root) = &pkg_root {
             let mut host = self.lock_host();
-            host.load_package(root).files
+            host.load_package(root).file_paths
         } else {
-            vec![trigger_file]
+            vec![trigger_path.clone()]
         };
 
         let snapshot = self.snapshot();
@@ -338,9 +257,7 @@ impl Backend {
             return Vec::new();
         }
 
-        let package_files = sorted_package_files(&snapshot.db, &all_files);
-        let pkg = PackageFiles::new(&snapshot.db, package_files.clone());
-        let typecheck_symptoms = package_typecheck_symptoms(&snapshot.db, pkg);
+        let typecheck_symptoms = snapshot.engine.typecheck_package(&all_file_paths);
 
         if self.is_shutdown() {
             return Vec::new();
@@ -348,47 +265,50 @@ impl Backend {
 
         let import_symptoms_by_path: HashMap<PathBuf, Vec<diagnostic::Diagnostic>> =
             if !dependency_dirs.is_empty() {
-                // Convert Salsa-tracked files to ParsedFiles for the shared resolver
-                let entry_files: Vec<ParsedFile> = package_files
+                let entry_files: Vec<ParsedFile> = all_file_paths
                     .iter()
-                    .map(|&pf| {
-                        let path = pf.path(&snapshot.db);
-                        let parse = file_parse_output(&snapshot.db, pf);
-                        let source = pf.contents(&snapshot.db).to_string();
-                        ParsedFile {
-                            path,
+                    .filter_map(|path| {
+                        let (source, parse) = snapshot.engine.source_and_parse(path)?;
+                        Some(ParsedFile {
+                            path: path.clone(),
                             source,
                             output: (*parse).clone(),
-                        }
+                        })
                     })
                     .collect();
 
                 resolve::resolve_import_symptoms(entry_files, &dependency_dirs)
             } else {
-                HashMap::<PathBuf, Vec<diagnostic::Diagnostic>>::new()
+                HashMap::new()
             };
 
-        let mut results = Vec::with_capacity(package_files.len());
-        for (i, &pkg_file) in package_files.iter().enumerate() {
-            let pkg_path = pkg_file.path(&snapshot.db);
-            let pkg_uri = match Url::from_file_path(&pkg_path) {
+        let mut results = Vec::with_capacity(all_file_paths.len());
+        for (i, pkg_path) in all_file_paths.iter().enumerate() {
+            let pkg_uri = match Url::from_file_path(pkg_path) {
                 Ok(u) => u,
                 Err(_) => continue,
             };
 
-            let parse = file_parse_output(&snapshot.db, pkg_file);
-            let source = pkg_file.contents(&snapshot.db).to_string();
-            let mut symptoms = parse.symptoms.clone();
-            symptoms.extend(typecheck_symptoms[i].iter().cloned());
-            if let Some(import_syms) = import_symptoms_by_path.get(&pkg_path) {
-                symptoms.extend(import_syms.iter().cloned());
+            let mut symptoms = Vec::new();
+            if let Some(diags) = import_symptoms_by_path.get(pkg_path) {
+                symptoms.extend(diags.iter().cloned());
+            }
+            if i < typecheck_symptoms.len() {
+                symptoms.extend(typecheck_symptoms[i].iter().cloned());
             }
 
-            let wrapped: Vec<Diagnostics> = symptoms.into_iter().map(Diagnostics).collect();
-            let symptom_refs: Vec<&Diagnostics> = wrapped.iter().collect();
+            let source_and_span = snapshot
+                .engine
+                .source_and_parse(pkg_path)
+                .map(|(s, po)| (s, po.ast.span_table().clone()));
 
-            let diagnostics =
-                symptoms_to_diagnostics(&source, parse.ast.span_table(), &symptom_refs, &pkg_uri);
+            let diagnostics = match source_and_span {
+                Some((source, span_table)) => {
+                    symptoms_to_diagnostics(&source, &span_table, &symptoms, &pkg_uri)
+                }
+                None => Vec::new(),
+            };
+
             results.push((pkg_uri, diagnostics));
         }
         results

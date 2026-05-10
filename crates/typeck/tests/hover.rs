@@ -208,6 +208,16 @@ fn hover_tag_without_doc() {
     assert_hover("Bool is True or False\n\n†Bool\n", &["Bool"]);
 }
 
+#[test]
+fn hover_multiple_consecutive_tags_with_doc_comments() {
+    // Pattern from x86_64.gin: declare with doc, then bind, then another declare with doc.
+    // The second tag's doc comment should NOT be stolen by the preceding bind.
+    assert_hover(
+        "--- First register\nRax is 'rax'\nrax Rax := 'rax'\n\n--- Second register\n†Rbx is 'rbx'\nrbx Rbx := 'rbx'\n",
+        &["Rbx", "Second register"],
+    );
+}
+
 // ─── Size / Align metadata ───────────────────────────────────────────────
 
 #[test]

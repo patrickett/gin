@@ -231,7 +231,12 @@ fn parse_is_rhs(
             }
         }
 
-        let post_doc = parse_doc_comment(cursor);
+        // Only consume doc comment if immediately after last variant (same line)
+        let post_doc = if matches!(cursor.peek_at(0), Some(Token::DocComment(_))) {
+            parse_doc_comment(cursor)
+        } else {
+            None
+        };
         return (DeclareValue::Union { variants }, post_doc);
     }
 
@@ -244,7 +249,12 @@ fn parse_is_rhs(
         Some(Token::String(_)) | Some(Token::Int(_)) | Some(Token::Float(_))
     ) && let Some(variant) = parse_variant(cursor, expr_parser)
     {
-        let doc = parse_doc_comment(cursor);
+        // Only consume doc comment if immediately after the value (same line)
+        let doc = if matches!(cursor.peek_at(0), Some(Token::DocComment(_))) {
+            parse_doc_comment(cursor)
+        } else {
+            None
+        };
         return (
             DeclareValue::Union {
                 variants: vec![variant],
@@ -256,12 +266,20 @@ fn parse_is_rhs(
     // Try tuple/grouped expression first (e.g. `()` as unit type alias)
     if cursor.is_at(&Token::ParenOpen) {
         let sp = expr_parser(cursor);
-        let doc = parse_doc_comment(cursor);
+        let doc = if matches!(cursor.peek_at(0), Some(Token::DocComment(_))) {
+            parse_doc_comment(cursor)
+        } else {
+            None
+        };
         return (DeclareValue::Alias(Box::new(sp)), doc);
     }
 
     if let Some(sp) = parse_type_expr(cursor, expr_parser) {
-        let doc = parse_doc_comment(cursor);
+        let doc = if matches!(cursor.peek_at(0), Some(Token::DocComment(_))) {
+            parse_doc_comment(cursor)
+        } else {
+            None
+        };
         return (DeclareValue::Alias(Box::new(sp)), doc);
     }
 
@@ -288,7 +306,12 @@ fn parse_variant(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Varian
     ) && let Some(Spanned(lit, span)) = parse_literal(cursor)
     {
         let shape = Box::new(Spanned(Expr::Lit(lit), span));
-        let doc_after = parse_doc_comment(cursor);
+        // Only consume doc comment if immediately after the value (same line)
+        let doc_after = if matches!(cursor.peek_at(0), Some(Token::DocComment(_))) {
+            parse_doc_comment(cursor)
+        } else {
+            None
+        };
         let doc = doc_after.or(doc_before);
         return Some(match doc.filter(|d| !d.is_empty()) {
             Some(d) => Variant::Local {
@@ -303,7 +326,12 @@ fn parse_variant(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Varian
     let shape = parse_pattern_type_expr(cursor, expr_parser)?;
     let sp = Box::new(shape);
 
-    let doc_after = parse_doc_comment(cursor);
+    // Only consume doc comment if immediately after the variant (same line)
+    let doc_after = if matches!(cursor.peek_at(0), Some(Token::DocComment(_))) {
+        parse_doc_comment(cursor)
+    } else {
+        None
+    };
 
     let doc = doc_after.or(doc_before);
     Some(match doc.filter(|d| !d.is_empty()) {

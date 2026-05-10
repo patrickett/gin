@@ -1,6 +1,6 @@
 use crate::diagnostics::span_to_range;
 use crate::Backend;
-use database::file_parse_output;
+
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use typeck::{find_references, position_to_byte_offset};
@@ -17,8 +17,8 @@ impl Backend {
         let uri = params.text_document_position.text_document.uri.clone();
         let position = params.text_document_position.position;
 
-        let (source, file) = match self.documents.get(&uri.to_string()) {
-            Some(state) => (state.source.clone(), state.file),
+        let (source, file_path) = match self.documents.get(&uri.to_string()) {
+            Some(state) => (state.source.clone(), state.file_path.clone()),
             None => return Ok(None),
         };
 
@@ -26,7 +26,7 @@ impl Backend {
         let locations = self
             .run_blocking_request("references", move |this| {
                 let snapshot = this.snapshot();
-                let ast = file_parse_output(&snapshot.db, file).ast.clone();
+                let ast = snapshot.engine.parse_output(&file_path)?.ast.clone();
                 let word = position_to_byte_offset(&source, position.line, position.character)
                     .and_then(|byte_pos| {
                         ast.word_at_byte(byte_pos, &source)

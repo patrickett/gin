@@ -497,7 +497,13 @@ fn parse_bind_value(
 
     // Otherwise → single expression with optional postfix doc comment
     let expr = expr_parser(cursor);
-    let doc = parse_doc_comment(cursor);
+    // Only consume a doc comment if it's on the same line (no intervening newline),
+    // otherwise it belongs to the next top-level declaration.
+    let doc = if matches!(cursor.peek_at(0), Some(Token::DocComment(_))) {
+        parse_doc_comment(cursor)
+    } else {
+        None
+    };
 
     (BindValue::Expr(Box::new(expr)), doc)
 }

@@ -1,14 +1,11 @@
-use database::Diagnostics;
-use diagnostic::{Category, DiagnosticCode, TypeSymptom, UseSymptom};
+use diagnostic::{Category, Diagnostic, DiagnosticCode, TypeSymptom, UseSymptom};
 use span::SpanTable;
 use tower_lsp::lsp_types::{
-    Diagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, Location, NumberOrString,
-    Position, Range, Url,
+    Diagnostic as LspDiagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, Location,
+    NumberOrString, Position, Range, Url,
 };
 use typeck::byte_offset_to_position;
 
-/// One-line diagnostic text for the editor (Problems / hover): primary message. The
-/// `code` field surfaces `ginc(<slug>)` for hover panels that display it separately.
 fn lsp_diagnostic_message(message: &str) -> String {
     message.trim().to_string()
 }
@@ -41,7 +38,7 @@ fn diagnostic_related_information(
     (!items.is_empty()).then_some(items)
 }
 
-fn diagnostic_quickfix_data(symptom: &Diagnostics) -> Option<serde_json::Value> {
+fn diagnostic_quickfix_data(symptom: &Diagnostic) -> Option<serde_json::Value> {
     match &symptom.code {
         DiagnosticCode::Type(TypeSymptom::UnknownBinding {
             name,
@@ -63,7 +60,6 @@ pub fn span_to_range(start: usize, end: usize, source: &str) -> Range {
     let (start_line, start_col) = byte_offset_to_position(start, source);
     let (end_line, end_col) = byte_offset_to_position(end, source);
 
-    // Handle zero-length spans by including the previous character
     let (start, start_char) = if start == end && start > 0 {
         let (prev_line, prev_col) = byte_offset_to_position(start - 1, source);
         (prev_line, prev_col)
@@ -86,9 +82,9 @@ pub fn span_to_range(start: usize, end: usize, source: &str) -> Range {
 pub fn symptoms_to_diagnostics(
     source: &str,
     span_table: &SpanTable,
-    symptoms: &[&Diagnostics],
+    symptoms: &[Diagnostic],
     document_uri: &Url,
-) -> Vec<Diagnostic> {
+) -> Vec<LspDiagnostic> {
     symptoms
         .iter()
         .map(|symptom| {
@@ -107,7 +103,7 @@ pub fn symptoms_to_diagnostics(
                 symptom.help_on_span.as_deref(),
                 symptom.help.as_deref(),
             );
-            Diagnostic {
+            LspDiagnostic {
                 range,
                 severity: Some(severity),
                 code: Some(NumberOrString::String(slug)),

@@ -1,7 +1,7 @@
 use crate::diagnostics::span_to_range;
 use crate::Backend;
 use ast::{HasSpanId, ImportSource, LocalBundleImport};
-use database::file_parse_output;
+
 use diagnostic::SpanId;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
@@ -200,17 +200,17 @@ impl Backend {
             .clone();
         let position = params.text_document_position_params.position;
 
-        let (source, file) = match self.documents.get(&uri.to_string()) {
-            Some(state) => (state.source.clone(), state.file),
+        let (source, file_path) = match self.documents.get(&uri.to_string()) {
+            Some(state) => (state.source.clone(), state.file_path.clone()),
             None => return Ok(None),
         };
 
-        // `file_parse_output` runs the parser via Salsa; offload so a stuck
-        // parse cannot pin the async runtime.
-        let response = self
+        // parse runs the parser; offload so a stuck parser does not pin the async runtime.
+
+        let locations = self
             .run_blocking_request("goto_definition", move |this| {
                 let snapshot = this.snapshot();
-                let ast = file_parse_output(&snapshot.db, file).ast.clone();
+                let ast = snapshot.engine.parse_output(&file_path)?.ast.clone();
 
                 if let Some(byte_pos) =
                     position_to_byte_offset(&source, position.line, position.character)
@@ -256,7 +256,7 @@ impl Backend {
             })
             .await;
 
-        Ok(response.flatten())
+        Ok(locations.flatten())
     }
 }
 
