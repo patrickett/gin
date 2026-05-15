@@ -1,23 +1,23 @@
 use internment::Intern;
 use lexer::Token;
 
-use ast::{Expr, ParameterKind, Parameters, Spanned, TagCall, type_surface_mangle_name};
+use ast::{Expr, ParameterKind, Parameters, Spanned, TagCall, TypeExpr, type_surface_mangle_name};
 
 use crate::cursor::TokenCursor;
 use crate::expr::ExprFn;
 use crate::path::parse_tag_variant_path;
 
-/// Type surface after `is` in `if … is …` / `when … is …` — always [`ast::Expr`], not a parallel AST type.
+/// Type surface after `is` in `if … is …` / `when … is …` — structural [`TypeExpr`].
 #[inline]
 pub fn parse_is_pattern_tag(
     cursor: &mut TokenCursor,
     expr_parser: ExprFn,
-) -> Option<Spanned<Expr>> {
+) -> Option<Spanned<TypeExpr>> {
     parse_pattern_type_expr(cursor, expr_parser)
 }
 
-/// Parse a capitalized type path (`Str`, `Maybe[T]`, `Mod.Item`) into structural type [`Expr`].
-pub fn parse_type_expr(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Spanned<Expr>> {
+/// Parse a capitalized type path (`Str`, `Maybe[T]`, `Mod.Item`) into structural type [`TypeExpr`].
+pub fn parse_type_expr(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Spanned<TypeExpr>> {
     parse_type_expr_with(cursor, expr_parser, false)
 }
 
@@ -28,7 +28,7 @@ pub fn parse_type_expr(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<
 pub fn parse_pattern_type_expr(
     cursor: &mut TokenCursor,
     expr_parser: ExprFn,
-) -> Option<Spanned<Expr>> {
+) -> Option<Spanned<TypeExpr>> {
     parse_type_expr_with(cursor, expr_parser, true)
 }
 
@@ -36,7 +36,7 @@ fn parse_type_expr_with(
     cursor: &mut TokenCursor,
     expr_parser: ExprFn,
     allow_paren_params: bool,
-) -> Option<Spanned<Expr>> {
+) -> Option<Spanned<TypeExpr>> {
     let start_span = cursor.current_span();
 
     if cursor.peek_at(1) == Some(&Token::Dot) {
@@ -48,18 +48,21 @@ fn parse_type_expr_with(
                 let span = cursor.merge_span(start_span, end_span);
                 if !params.is_empty() {
                     let name = *path.segments.last().unwrap_or(&path.root);
-                    return Some(Spanned(
-                        Expr::TypeGeneric {
+                    return Some(Spanned {
+                        value: TypeExpr::Generic {
                             name,
                             params: params.into_iter().collect(),
                             span,
                         },
-                        span,
-                    ));
+                        span_id: span,
+                    });
                 }
             }
-            let span = path.span;
-            return Some(Spanned(Expr::TypeQualified(path), span));
+            let span = path.span_id;
+            return Some(Spanned {
+                value: TypeExpr::Qualified(path),
+                span_id: span,
+            });
         }
         cursor.rewind(qual_checkpoint);
     }
@@ -79,19 +82,25 @@ fn parse_type_expr_with(
         let end_span = cursor.last_consumed_span();
         let span = cursor.merge_span(name_span, end_span);
         if !params.is_empty() {
-            return Some(Spanned(
-                Expr::TypeGeneric {
+            return Some(Spanned {
+                value: TypeExpr::Generic {
                     name,
                     params: params.into_iter().collect(),
                     span,
                 },
-                span,
-            ));
+                span_id: span,
+            });
         }
-        return Some(Spanned(Expr::TypeNominal(name, span), span));
+        return Some(Spanned {
+            value: TypeExpr::Nominal(name, span),
+            span_id: span,
+        });
     }
 
-    Some(Spanned(Expr::TypeNominal(name, name_span), name_span))
+    Some(Spanned {
+        value: TypeExpr::Nominal(name, name_span),
+        span_id: name_span,
+    })
 }
 
 fn type_param_delimiters(
@@ -147,8 +156,14 @@ fn parse_one_tag_param(
 ) -> Option<(Intern<String>, ParameterKind)> {
     if matches!(cursor.peek(), Some(&Token::Tag(_))) {
         let sp = parse_type_expr(cursor, expr_parser)?;
-        let key = Intern::<String>::from_ref(type_surface_mangle_name(&sp.0));
-        return Some((key, ParameterKind::Tagged(Box::new(sp))));
+        let key = Intern::<String>::from_ref(type_surface_mangle_name(&sp.value));
+        return Some((
+            key,
+            ParameterKind::Tagged(Box::new(Spanned {
+                value: sp.value.into(),
+                span_id: sp.span_id,
+            })),
+        ));
     }
 
     let name = match cursor.peek()? {
@@ -162,7 +177,13 @@ fn parse_one_tag_param(
 
     if matches!(cursor.peek(), Some(&Token::Tag(_))) {
         let sp = parse_type_expr(cursor, expr_parser)?;
-        return Some((name, ParameterKind::Tagged(Box::new(sp))));
+        return Some((
+            name,
+            ParameterKind::Tagged(Box::new(Spanned {
+                value: sp.value.into(),
+                span_id: sp.span_id,
+            })),
+        ));
     }
 
     if cursor.eat(&Token::Colon) {
@@ -192,7 +213,7 @@ pub fn parse_tag_call(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<T
                     span,
                 });
             }
-            let span = path.span;
+            let span = path.span_id;
             return Some(TagCall {
                 name: variant_name,
                 qual_path: Some(path),

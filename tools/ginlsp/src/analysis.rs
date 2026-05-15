@@ -2,9 +2,9 @@
 //! and ginmcp (MCP). These are stateless helpers that take parsed ASTs and
 //! source text and return typed results.
 
+use ast::ty::Ty;
 use ast::FileAst;
 use parser::ParseOutput;
-use typeck::Ty;
 
 /// A 0‑based position in source text.
 #[derive(Debug, Clone, Copy)]
@@ -88,65 +88,17 @@ pub struct TypeAtResult {
 // ---------------------------------------------------------------------------
 
 fn byte_pos(source: &str, line: u32, character: u32) -> usize {
-    typeck::position_to_byte_offset(source, line, character).unwrap_or(0)
+    ast::position_to_byte_offset(source, line, character).unwrap_or(0)
 }
 
 fn byte_offset_to_position(offset: usize, source: &str) -> (u32, u32) {
-    typeck::byte_offset_to_position(offset, source)
+    ast::byte_offset_to_position(offset, source)
 }
 
-/// Parse optional scratchpad source and build a combined type environment.
-/// Returns (scratchpad_ast, combined_ty_env) if scratchpad was provided.
-fn build_scratchpad_env(
-    main_ast: &FileAst,
-    scratchpad_source: Option<&str>,
-) -> (Option<FileAst>, typeck::TyEnv) {
-    match scratchpad_source.filter(|s| !s.is_empty()) {
-        Some(sp_source) => {
-            let sp_po = parser::parse_source_full(sp_source);
-            let env =
-                typeck::TyEnv::from_multiple_file_asts(&[sp_po.ast.clone(), main_ast.clone()]);
-            (Some(sp_po.ast), env)
-        }
-        None => (None, typeck::TyEnv::from_file_ast(main_ast)),
-    }
-}
-
-/// Search for a symbol definition across multiple ASTs. Returns the span in the
-/// AST where the definition was found, or None.
-fn find_definition_multi(
-    word: &str,
-    main_ast: &FileAst,
-    scratchpad_ast: Option<&FileAst>,
-) -> Option<Span> {
-    typeck::find_definition_span(main_ast, word)
-        .or_else(|| scratchpad_ast.and_then(|sp| typeck::find_definition_span(sp, word)))
-        .map(|r| Span {
-            start: r.start,
-            end: r.end,
-        })
-}
-
-/// Compute hover text, searching the scratchpad AST if not found in the main AST.
-fn hover_multi(
-    source: &str,
-    main_ast: &FileAst,
-    scratchpad_ast: Option<&FileAst>,
-    scratchpad_source: Option<&str>,
-    byte_pos: usize,
-) -> Option<String> {
-    // Try the main AST first.
-    if let Some(result) = typeck::hover_at(source, main_ast, byte_pos) {
-        return Some(result);
-    }
-    // Not found — check if the symbol is defined in the scratchpad.
-    let word = typeck::word_at_byte_offset(source, byte_pos)?;
-    if let (Some(sp_ast), Some(sp_source)) = (scratchpad_ast, scratchpad_source) {
-        if let Some(def_span) = typeck::find_definition_span(sp_ast, &word) {
-            return typeck::hover_at(sp_source, sp_ast, def_span.start);
-        }
-    }
-    None
+/// Resolve types for a file.
+/// Returns an `Analysis` with types populated.
+fn resolve_ast(ast: &FileAst) -> ast::Analysis {
+    ast::resolve_types(ast, std::slice::from_ref(ast))
 }
 
 /// Check whether a resolved `Ty` is a built-in structural primitive (Int, Float, Bool, Unit).
@@ -166,21 +118,35 @@ pub fn hover(
     path: Option<&str>,
     scratchpad: Option<&str>,
 ) -> Vec<HoverResult> {
+    let main_analysis = if path.is_none() {
+        Some(resolve_ast(&po.ast))
+    } else {
+        None
+    };
     positions
         .iter()
         .map(|pos| {
             let bp = byte_pos(source, pos.line, pos.character);
-            match path {
-                Some(p) => {
-                    let text = hover_at_with_imports(source, p, bp);
-                    HoverResult { text, error: None }
-                }
+            let text = match path {
+                Some(p) => hover_at_with_imports(source, p, bp),
                 None => {
-                    let (sp_ast, _) = build_scratchpad_env(&po.ast, scratchpad);
-                    let text = hover_multi(source, &po.ast, sp_ast.as_ref(), scratchpad, bp);
-                    HoverResult { text, error: None }
+                    let analysis = main_analysis.as_ref().unwrap();
+                    let result = po.ast.hover_at(analysis, source, bp);
+                    if result.is_some() {
+                        result
+                    } else {
+                        scratchpad.filter(|s| !s.is_empty()).and_then(|sp_src| {
+                            let sp_po = parser::parse_source_full(sp_src);
+                            let all = [sp_po.ast, po.ast.clone()];
+                            let sp_analysis = ast::resolve_types(&po.ast, &all);
+                            let word = ast::word_at_byte_offset(source, bp)?;
+                            let def_span = ast::hover::definition_span(&po.ast, &word)?;
+                            po.ast.hover_at(&sp_analysis, source, def_span.start)
+                        })
+                    }
                 }
-            }
+            };
+            HoverResult { text, error: None }
         })
         .collect()
 }
@@ -197,10 +163,21 @@ pub fn goto_definition(
     let word = po
         .ast
         .word_at_byte(bp, source)
-        .or_else(|| typeck::word_at_byte_offset(source, bp))
+        .or_else(|| ast::word_at_byte_offset(source, bp))
         .unwrap_or_default();
-    let (sp_ast, _) = build_scratchpad_env(&po.ast, scratchpad);
-    let rng = find_definition_multi(&word, &po.ast, sp_ast.as_ref());
+    let rng = ast::hover::definition_span(&po.ast, &word)
+        .or_else(|| {
+            scratchpad.filter(|s| !s.is_empty()).and_then(|sp_src| {
+                let sp_po = parser::parse_source_full(sp_src);
+                let all = [sp_po.ast, po.ast.clone()];
+                let _analysis = ast::resolve_types(&po.ast, &all);
+                ast::hover::definition_span(&po.ast, &word)
+            })
+        })
+        .map(|r| Span {
+            start: r.start,
+            end: r.end,
+        });
     match rng {
         Some(r) => {
             let (a, b) = byte_offset_to_position(r.start, source);
@@ -243,7 +220,6 @@ pub fn goto_definition_with_imports(
 /// Resolve the import at `byte_pos` in `source` using filesystem
 /// import resolution and return the definition span.
 pub fn resolve_symbol_def_span(file_path: &str, byte_pos: usize) -> Option<Span> {
-    use ast::HasSpanId;
     use ast::ImportSource;
 
     let source = std::fs::read_to_string(file_path).ok()?;
@@ -282,13 +258,36 @@ pub fn resolve_symbol_def_span(file_path: &str, byte_pos: usize) -> Option<Span>
                     end: r.end,
                 })
             }
+            resolve::ImportTarget::LocalBundleSymbol { local_path, symbol } => {
+                let r = resolve::resolve_local_symbol_def_span(
+                    std::path::Path::new(file_path),
+                    &local_path,
+                    &symbol,
+                    &resolve::default_file_reader,
+                )?;
+                Some(Span {
+                    start: r.start,
+                    end: r.end,
+                })
+            }
+            resolve::ImportTarget::CurrentModuleSymbol { symbol } => {
+                let r = resolve::resolve_current_module_def_span(
+                    std::path::Path::new(file_path),
+                    &symbol,
+                    &resolve::default_file_reader,
+                )?;
+                Some(Span {
+                    start: r.start,
+                    end: r.end,
+                })
+            }
         }
     } else {
         let word = po
             .ast
             .word_at_byte(byte_pos, &source)
-            .or_else(|| typeck::word_at_byte_offset(&source, byte_pos))?;
-        typeck::find_definition_span(&po.ast, &word).map(|r| Span {
+            .or_else(|| ast::word_at_byte_offset(&source, byte_pos))?;
+        ast::hover::definition_span(&po.ast, &word).map(|r| Span {
             start: r.start,
             end: r.end,
         })
@@ -313,10 +312,26 @@ pub fn hover_at_with_imports(source: &str, file_path: &str, byte_pos: usize) -> 
                     &resolve::default_file_reader,
                 );
             }
+            resolve::ImportTarget::LocalBundleSymbol { local_path, symbol } => {
+                return resolve::resolve_local_symbol_hover(
+                    std::path::Path::new(file_path),
+                    &local_path,
+                    &symbol,
+                    &resolve::default_file_reader,
+                );
+            }
+            resolve::ImportTarget::CurrentModuleSymbol { symbol } => {
+                return resolve::resolve_current_module_hover(
+                    std::path::Path::new(file_path),
+                    &symbol,
+                    &resolve::default_file_reader,
+                );
+            }
         }
     }
 
-    typeck::hover_at(source, &po.ast, byte_pos)
+    let analysis = resolve_ast(&po.ast);
+    ast::hover::hover_at(source, &po.ast, &analysis, byte_pos)
 }
 
 /// Find all references to the symbol at the given position.
@@ -331,9 +346,9 @@ pub fn references(
     let word = po
         .ast
         .word_at_byte(bp, source)
-        .or_else(|| typeck::word_at_byte_offset(source, bp))
+        .or_else(|| ast::word_at_byte_offset(source, bp))
         .unwrap_or_default();
-    let mut refs: Vec<Range> = typeck::find_references(&po.ast, &word)
+    let mut refs: Vec<Range> = ast::hover::find_references(&po.ast, &word)
         .into_iter()
         .map(|r| {
             let (sl, sc) = byte_offset_to_position(r.start, source);
@@ -353,7 +368,7 @@ pub fn references(
     // Also search the scratchpad if provided.
     if let Some(sp_source) = scratchpad.filter(|s| !s.is_empty()) {
         let sp_po = parser::parse_source_full(sp_source);
-        let sp_refs: Vec<Range> = typeck::find_references(&sp_po.ast, &word)
+        let sp_refs: Vec<Range> = ast::hover::find_references(&sp_po.ast, &word)
             .into_iter()
             .map(|r| {
                 let (sl, sc) = byte_offset_to_position(r.start, sp_source);
@@ -377,7 +392,7 @@ pub fn references(
 
 /// Get auto-completion suggestions for Gin source code.
 pub fn completions(po: &ParseOutput, scratchpad: Option<&str>) -> Vec<CompletionItem> {
-    let mut completions: Vec<CompletionItem> = typeck::completions_for_ast(&po.ast)
+    let mut completions: Vec<CompletionItem> = ast::completions::completions_for_ast(&po.ast)
         .into_iter()
         .map(|c| CompletionItem {
             label: c.label,
@@ -389,7 +404,7 @@ pub fn completions(po: &ParseOutput, scratchpad: Option<&str>) -> Vec<Completion
     // Merge scratchpad completions.
     if let Some(sp_source) = scratchpad.filter(|s| !s.is_empty()) {
         let sp_po = parser::parse_source_full(sp_source);
-        let sp_items: Vec<CompletionItem> = typeck::completions_for_ast(&sp_po.ast)
+        let sp_items: Vec<CompletionItem> = ast::completions::completions_for_ast(&sp_po.ast)
             .into_iter()
             .map(|c| CompletionItem {
                 label: c.label,
@@ -419,19 +434,21 @@ pub fn diagnostics(po: &ParseOutput, source: &str, scratchpad: Option<&str>) -> 
             source: "parse",
         });
     }
-    // Build type env from main + scratchpad so cross-file references resolve.
-    let (_sp_ast, te) = build_scratchpad_env(&po.ast, scratchpad);
-    for d in &typeck::analyze_file_with_ty_env(&po.ast, &te) {
-        let sp = st.get(d.span_id);
-        let (l, c) = byte_offset_to_position(sp.start, source);
-        diags.push(DiagItem {
-            line: l,
-            character: c,
-            message: d.message.clone(),
-            category: format!("{:?}", d.category),
-            code: format!("{:?}", d.code),
-            source: "typeck",
-        });
+    // Resolve the AST once — diagnostics are in the Analysis.
+    {
+        let analysis = ast::resolve_types(&po.ast, std::slice::from_ref(&po.ast));
+        for d in &analysis.diagnostics {
+            let sp = st.get(d.span_id);
+            let (l, c) = byte_offset_to_position(sp.start, source);
+            diags.push(DiagItem {
+                line: l,
+                character: c,
+                message: d.message.clone(),
+                category: format!("{:?}", d.category),
+                code: format!("{:?}", d.code),
+                source: "typeck",
+            });
+        }
     }
     // Also include scratchpad parse symptoms.
     if let Some(sp_source) = scratchpad.filter(|s| !s.is_empty()) {
@@ -480,7 +497,7 @@ fn collect_symbols(a: &FileAst) -> Vec<SymbolItem> {
         let sig = b
             .params()
             .as_ref()
-            .map(|p| format!("{}{}", n.as_str(), typeck::format_params(p)));
+            .map(|p| format!("{}{}", n.as_str(), ast::completions::format_params(p)));
         syms.push(SymbolItem {
             name: n.as_str().into(),
             kind: if b.params().is_some() {
@@ -510,18 +527,18 @@ pub fn signature_help(
     scratchpad: Option<&str>,
 ) -> Option<SignatureInfo> {
     let bp = byte_pos(source, line, character);
-    let name = typeck::fn_call_at(&po.ast, bp).or_else(|| {
+    let name = ast::completions::fn_call_at(&po.ast, bp).or_else(|| {
         scratchpad.and_then(|sp_source| {
             let sp_po = parser::parse_source_full(sp_source);
-            typeck::fn_call_at(&sp_po.ast, bp)
+            ast::completions::fn_call_at(&sp_po.ast, bp)
         })
     });
     name.and_then(|n| {
-        typeck::signature_for_fn(&po.ast, &n)
+        ast::completions::signature_for_fn(&po.ast, &n)
             .or_else(|| {
                 scratchpad.and_then(|sp_source| {
                     let sp_po = parser::parse_source_full(sp_source);
-                    typeck::signature_for_fn(&sp_po.ast, &n)
+                    ast::completions::signature_for_fn(&sp_po.ast, &n)
                 })
             })
             .map(|info| SignatureInfo {
@@ -542,8 +559,7 @@ pub fn dot_type(
     scratchpad: Option<&str>,
 ) -> Option<String> {
     let bp = byte_pos(source, line, character);
-    let (_sp_ast, ty_env) = build_scratchpad_env(&po.ast, scratchpad);
-    typeck::dot_type_at(source, &po.ast, &ty_env, bp).map(|ty| format!("{:?}", ty))
+    ast::hover::dot_type_at(source, &po.ast, bp).map(|ty| format!("{:?}", ty))
 }
 
 /// Get structured type information at the given positions.
@@ -553,26 +569,33 @@ pub fn type_at(
     positions: &[Pos],
     scratchpad: Option<&str>,
 ) -> Vec<TypeAtResult> {
+    // Resolve the main AST once for all positions.
+    let analysis = ast::resolve_types(&po.ast, std::slice::from_ref(&po.ast));
+    // Build scratchpad-resolved analysis for origin detection.
+    let sp_analysis: Option<ast::Analysis> = scratchpad.filter(|s| !s.is_empty()).map(|sp_src| {
+        let sp_po = parser::parse_source_full(sp_src);
+        let all = [sp_po.ast, po.ast.clone()];
+        ast::resolve_types(&po.ast, &all)
+    });
     positions
         .iter()
         .map(|pos| {
             let bp = byte_pos(source, pos.line, pos.character);
-            let (sp_ast, ty_env) = build_scratchpad_env(&po.ast, scratchpad);
-            let word = typeck::word_at_byte_offset(source, bp);
+            let word = ast::word_at_byte_offset(source, bp);
             let ty = word.as_ref().and_then(|w| {
                 let interned = internment::Intern::from_ref(w);
-                ty_env.lookup_tag(interned).cloned()
+                analysis.tag_types.get(&interned).cloned()
             });
             let origin = word.as_ref().map(|w| {
                 let interned = internment::Intern::from_ref(w.as_str());
                 if po.ast.tags().contains_key(&interned) || po.ast.defs().contains_key(&interned) {
                     "local"
-                } else if sp_ast.as_ref().is_some_and(|sp| {
-                    sp.tags()
+                } else if sp_analysis.as_ref().is_some_and(|sp| {
+                    sp.tag_types
                         .contains_key(&internment::Intern::from_ref(w.as_str()))
                 }) {
                     "scratchpad"
-                } else if let Some(resolved_ty) = ty_env.lookup_tag(interned) {
+                } else if let Some(resolved_ty) = analysis.tag_types.get(&interned) {
                     if is_builtin_ty(resolved_ty) {
                         "builtin"
                     } else {

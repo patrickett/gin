@@ -1,5 +1,11 @@
 #![deny(unsafe_code)]
-#![warn(clippy::correctness, clippy::suspicious, clippy::style, clippy::complexity, clippy::perf)]
+#![warn(
+    clippy::correctness,
+    clippy::suspicious,
+    clippy::style,
+    clippy::complexity,
+    clippy::perf
+)]
 //! Span handling with ID-based optimization.
 //!
 //! This crate provides a memory-efficient span representation using [`SpanId`]
@@ -213,67 +219,82 @@ impl SpanTable {
 /// Instead of storing full span data (start, end) in every node, we store
 /// just a SpanId that references the span data in a SpanTable.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Spanned<T>(pub T, pub SpanId);
+pub struct Spanned<T> {
+    pub value: T,
+    pub span_id: SpanId,
+}
 
 impl<T> Spanned<T> {
     /// Create a new Spanned value.
     #[inline]
     pub fn new(value: T, span_id: SpanId) -> Self {
-        Self(value, span_id)
+        Self { span_id, value }
     }
 
     /// Split into the value and span ID.
     #[inline]
     pub fn into_parts(self) -> (T, SpanId) {
-        (self.0, self.1)
+        (self.value, self.span_id)
     }
 
     /// Get a reference to the inner value.
     #[inline]
     pub fn value(&self) -> &T {
-        &self.0
+        &self.value
     }
 
     /// Get the inner value by value.
     #[inline]
     pub fn into_value(self) -> T {
-        self.0
+        self.value
     }
 
     /// Get the span ID.
     #[inline]
     pub fn span_id(&self) -> SpanId {
-        self.1
+        self.span_id
     }
 
     /// Map the inner value while preserving the span ID.
     #[inline]
     pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Spanned<U> {
-        Spanned(f(self.0), self.1)
+        Spanned {
+            value: f(self.value),
+            span_id: self.span_id,
+        }
     }
 
     /// Map the inner value with a fallible function while preserving the span ID.
     #[inline]
     pub fn try_map<U, E>(self, f: impl FnOnce(T) -> Result<U, E>) -> Result<Spanned<U>, E> {
-        Ok(Spanned(f(self.0)?, self.1))
+        Ok(Spanned {
+            value: f(self.value)?,
+            span_id: self.span_id,
+        })
     }
 
     /// Create a Spanned value by inserting a span into the table.
     #[inline]
     pub fn with_span(table: &mut SpanTable, value: T, span: Span) -> Self {
-        Self(value, table.insert(span))
+        Self {
+            value,
+            span_id: table.insert(span),
+        }
     }
 
     /// Create a Spanned value from a byte range.
     #[inline]
     pub fn with_range(table: &mut SpanTable, value: T, range: std::ops::Range<usize>) -> Self {
-        Self(value, table.insert_range(range))
+        Self {
+            value,
+            span_id: table.insert_range(range),
+        }
     }
 
     /// Get the actual span data from a span table.
     #[inline]
     pub fn resolve_span(&self, table: &SpanTable) -> Span {
-        table.get(self.1)
+        table.get(self.span_id)
     }
 
     /// Extract the source text this span covers.
@@ -286,13 +307,13 @@ impl<T> Spanned<T> {
 impl<T> Deref for Spanned<T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.value
     }
 }
 
 impl<T> DerefMut for Spanned<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+        &mut self.value
     }
 }
 

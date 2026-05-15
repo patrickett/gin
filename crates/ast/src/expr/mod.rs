@@ -58,7 +58,7 @@ pub enum Expr {
     /// Type position: bare `Tag` (e.g. `Str` in `(x Str)`).
     TypeNominal(Intern<String>, SpanId),
     /// Type position: qualified path `Tag.Tag…`.
-    TypeQualified(ModPath),
+    TypeQualified(Spanned<ModPath>),
     /// Type position: `Tag(...)` with generic / named parameters.
     /// Stored as a vector (declaration order) so [`Hash`] can be derived despite the
     /// `ParameterKind` ↔ `Expr` recursion.
@@ -111,4 +111,35 @@ pub enum Expr {
     Asm(AsmExpr),
     /// Tuple literal: `(e1, e2, …)` — at least two elements.
     TupleLit(Vec<Spanned<Expr>>),
+    /// List literal: `[e1, e2, …]` — homogeneous compile-time list.
+    List(Vec<Spanned<Expr>>),
+}
+
+impl From<crate::TypeExpr> for Expr {
+    fn from(te: crate::TypeExpr) -> Self {
+        match te {
+            crate::TypeExpr::Nominal(name, span) => Expr::TypeNominal(name, span),
+            crate::TypeExpr::Qualified(path) => Expr::TypeQualified(path),
+            crate::TypeExpr::Generic { name, params, span } => {
+                Expr::TypeGeneric { name, params, span }
+            }
+            crate::TypeExpr::Literal(..) => Expr::Lit(crate::Literal::Number(0)),
+        }
+    }
+}
+
+impl Expr {
+    /// If this expression is a type-position variant, return the equivalent [`TypeExpr`].
+    pub fn as_type_expr(&self) -> Option<crate::TypeExpr> {
+        match self {
+            Expr::TypeNominal(name, span) => Some(crate::TypeExpr::Nominal(*name, *span)),
+            Expr::TypeQualified(path) => Some(crate::TypeExpr::Qualified(path.clone())),
+            Expr::TypeGeneric { name, params, span } => Some(crate::TypeExpr::Generic {
+                name: *name,
+                params: params.clone(),
+                span: *span,
+            }),
+            _ => None,
+        }
+    }
 }

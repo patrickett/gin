@@ -8,7 +8,6 @@ ast = { workspace = true }
 parser = { workspace = true }
 diagnostic = { workspace = true }
 span = { workspace = true }
-typeck = { workspace = true }
 i256 = { workspace = true }
 melior = "0.26.3"
 mlir-sys = "210.0.1"

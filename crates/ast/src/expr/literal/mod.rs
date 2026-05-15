@@ -1,3 +1,4 @@
+use std::fmt;
 use std::hash::Hash;
 
 #[derive(Debug, Clone)]
@@ -30,6 +31,17 @@ impl Hash for Literal {
             Self::Number(n) => n.hash(state),
             Self::Int(i) => i.hash(state),
             Self::String(s) => s.hash(state),
+        }
+    }
+}
+
+impl fmt::Display for Literal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Literal::Number(n) => write!(f, "{n}"),
+            Literal::Float(v) => write!(f, "{v}"),
+            Literal::Int(n) => write!(f, "{n}"),
+            Literal::String(s) => write!(f, "'{s}'"),
         }
     }
 }

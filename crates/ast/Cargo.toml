@@ -12,6 +12,8 @@ i256 = { workspace = true }
 sha2 = "0.10"
 serde = { workspace = true }
 semver = { workspace = true }
+salsa = { workspace = true }
+diagnostic = { workspace = true }
 
 [dev-dependencies]
 parser = { workspace = true }

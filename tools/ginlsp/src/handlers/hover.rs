@@ -3,11 +3,9 @@ use crate::Backend;
 use ast::DeclareValue;
 use ast::Literal;
 
+use ast::{byte_offset_to_position, get_char_at_position, is_in_comment, position_to_byte_offset};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
-use typeck::{
-    byte_offset_to_position, get_char_at_position, is_in_comment, position_to_byte_offset,
-};
 
 impl Backend {
     pub(crate) async fn handle_hover(&self, params: HoverParams) -> Result<Option<Hover>> {
@@ -47,7 +45,7 @@ impl Backend {
         let dot_hover_range = compute_dot_hover_range(&source, byte_pos);
 
         // Compute the word range at the cursor position for use in hover responses.
-        let word_range = typeck::word_byte_range(&source, byte_pos).map(|(start, end)| {
+        let word_range = ast::word_byte_range(&source, byte_pos).map(|(start, end)| {
             let (sl, sc) = byte_offset_to_position(start, &source);
             let (el, ec) = byte_offset_to_position(end, &source);
             Range {
@@ -163,7 +161,7 @@ impl Backend {
 
                 // Phase 2: "use" keyword hover.
                 let word = ast.word_at_byte(byte_pos, &source)
-                    .or_else(|| typeck::word_at_byte_offset(&source, byte_pos));
+                    .or_else(|| ast::word_at_byte_offset(&source, byte_pos));
                 if word.as_deref() == Some("use") {
                     return Some(Hover {
                         contents: HoverContents::Markup(MarkupContent {
@@ -216,6 +214,40 @@ impl Backend {
                             },
                         );
                     }
+                    Some(resolve::ImportTarget::LocalBundleSymbol {
+                        local_path,
+                        symbol,
+                    }) => {
+                        let base_path = uri.to_file_path().ok()?;
+                        return resolve::resolve_local_symbol_hover(
+                            &base_path,
+                            &local_path,
+                            &symbol,
+                            &resolve::default_file_reader,
+                        )
+                        .map(|hover_text| Hover {
+                            contents: HoverContents::Markup(MarkupContent {
+                                kind: MarkupKind::Markdown,
+                                value: hover_text,
+                            }),
+                            range: word_range,
+                        });
+                    }
+                    Some(resolve::ImportTarget::CurrentModuleSymbol { symbol }) => {
+                        let base_path = uri.to_file_path().ok()?;
+                        return resolve::resolve_current_module_hover(
+                            &base_path,
+                            &symbol,
+                            &resolve::default_file_reader,
+                        )
+                        .map(|hover_text| Hover {
+                            contents: HoverContents::Markup(MarkupContent {
+                                kind: MarkupKind::Markdown,
+                                value: hover_text,
+                            }),
+                            range: word_range,
+                        });
+                    }
                     None => {}
                 }
 
@@ -241,9 +273,7 @@ impl Backend {
                 // Check if this is a variant hover — if so, prepend the
                 // package-qualified path (e.g. `core.Maybe` instead of `Maybe`).
                 let (source, output) = snapshot.engine.source_and_parse(&file_path2)?;
-                if let Some((_, parent_tag)) =
-                    typeck::is_variant_at(source.as_str(), &output.ast, byte_pos)
-                {
+                if let Some((_, parent_tag)) = ast::hover::is_variant_at(&output.ast, byte_pos) {
                     if let Some(qualifier) = package_name_for_file(&file_path) {
                         let qualified = format!("{qualifier}.{parent_tag}");
                         let modified = markdown.replacen(
@@ -518,8 +548,10 @@ true  := Bool.True
         let bool_source = std::fs::read_to_string(dir.join("core/bool.gin")).unwrap();
         let bool_po = parser::parse_source_full(&bool_source);
         let true_def_byte: usize = bool_source.find("true  :=").unwrap();
-        let expected = typeck::hover_at(&bool_source, &bool_po.ast, true_def_byte)
-            .expect("must produce hover text from bool.gin");
+        let bool_analysis = ast::resolve_types(&bool_po.ast, &[bool_po.ast.clone()]);
+        let expected =
+            ast::hover::hover_at(&bool_source, &bool_po.ast, &bool_analysis, true_def_byte)
+                .expect("must produce hover text from bool.gin");
 
         // resolve_import_hover is the shared helper used by both Phase 1
         // (cursor in `use core.true`) and Phase 2 (cursor on `true` in body)
@@ -546,7 +578,8 @@ true  := Bool.True
 
         // Hover at "Maybe"
         let maybe_byte = source.find("Maybe").unwrap();
-        let hover = typeck::hover_at(source, &po.ast, maybe_byte)
+        let analysis = ast::resolve_types(&po.ast, &[po.ast.clone()]);
+        let hover = ast::hover::hover_at(source, &po.ast, &analysis, maybe_byte)
             .expect("hover_at should return text for `Maybe`");
 
         // Should contain the declaration
@@ -578,7 +611,8 @@ true  := Bool.True
 
         // Hover at "Some"
         let some_byte = source.find("Some").unwrap();
-        let hover = typeck::hover_at(source, &po.ast, some_byte)
+        let analysis = ast::resolve_types(&po.ast, &[po.ast.clone()]);
+        let hover = ast::hover::hover_at(source, &po.ast, &analysis, some_byte)
             .expect("hover_at should return text for `Some`");
 
         eprintln!("hover on Some produces: {hover:?}");
@@ -611,7 +645,8 @@ true  := Bool.True
 
         // Hover at "None"
         let none_byte = source.find("None").unwrap();
-        let hover = typeck::hover_at(source, &po.ast, none_byte)
+        let analysis = ast::resolve_types(&po.ast, &[po.ast.clone()]);
+        let hover = ast::hover::hover_at(source, &po.ast, &analysis, none_byte)
             .expect("hover_at should return text for `None`");
 
         eprintln!("hover on None produces: {hover:?}");
@@ -663,7 +698,10 @@ true  := Bool.True
             ast::Variant::External(_) => panic!("expected Local variant"),
         };
         assert!(some_doc.is_some(), "Some variant should have a doc comment");
-        assert_eq!(some_doc.as_ref().unwrap().0.as_str(), "Has some value `x`");
+        assert_eq!(
+            some_doc.as_ref().unwrap().value.as_str(),
+            "Has some value `x`"
+        );
 
         // Check the "None" variant
         let none_variant = &variants[1];
@@ -672,7 +710,7 @@ true  := Bool.True
             ast::Variant::External(_) => panic!("expected Local variant"),
         };
         assert!(none_doc.is_some(), "None variant should have a doc comment");
-        assert_eq!(none_doc.as_ref().unwrap().0.as_str(), "Has no value");
+        assert_eq!(none_doc.as_ref().unwrap().value.as_str(), "Has no value");
     }
 
     /// Verify that hovering on variants in a multi-variant tag works correctly.
@@ -691,7 +729,8 @@ true  := Bool.True
             ("Blue", "Pure blue"),
         ] {
             let byte = source.find(variant).unwrap();
-            let hover = typeck::hover_at(source, &po.ast, byte)
+            let analysis = ast::resolve_types(&po.ast, &[po.ast.clone()]);
+            let hover = ast::hover::hover_at(source, &po.ast, &analysis, byte)
                 .unwrap_or_else(|| panic!("hover_at should return text for `{variant}`"));
 
             assert!(

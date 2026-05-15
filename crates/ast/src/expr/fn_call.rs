@@ -4,6 +4,6 @@ use crate::span::Spanned;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FnCall {
-    pub path: ModPath,
+    pub path: Spanned<ModPath>,
     pub args: Option<Vec<Spanned<Expr>>>,
 }

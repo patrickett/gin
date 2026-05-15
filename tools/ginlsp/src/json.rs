@@ -1,9 +1,10 @@
 //! JSON serialization helpers for Gin types and ASTs.
 //! Used by ginmcp to format responses, and available to ginlsp when needed.
 
+use ast::flow::ConstValue;
+use ast::ty::Ty;
 use ast::{BindValue, DeclareValue, Expr, FileAst, HasSpanId, SpanId, SpanTable};
 use serde_json::Value;
-use typeck::{flow::ConstValue, Ty};
 
 /// Serialize a resolved `Ty` to a JSON structure with kind, fields, size, and alignment.
 pub fn ty_to_json(ty: &Ty) -> Value {
@@ -14,10 +15,10 @@ pub fn ty_to_json(ty: &Ty) -> Value {
             value: _,
         } => serde_json::json!({
             "kind": "Int", "width": width, "signed": signed,
-            "size": typeck::ty_byte_size_static(ty),
+            "size": ast::ty::ty_byte_size_static(ty),
         }),
         Ty::Float { .. } => serde_json::json!({
-            "kind": "Float", "size": typeck::ty_byte_size_static(ty),
+            "kind": "Float", "size": ast::ty::ty_byte_size_static(ty),
         }),
         Ty::Bool => serde_json::json!({ "kind": "Bool", "size": 1 }),
         Ty::Unit => serde_json::json!({ "kind": "Unit", "size": 0 }),
@@ -30,8 +31,8 @@ pub fn ty_to_json(ty: &Ty) -> Value {
                 .collect();
             serde_json::json!({
                 "kind": "Record", "name": name.as_str(),
-                "fields": flds, "size": typeck::ty_byte_size_static(ty),
-                "align": typeck::ty_alignment(ty),
+                "fields": flds, "size": ast::ty::ty_byte_size_static(ty),
+                "align": ast::ty::ty_alignment(ty),
             })
         }
         Ty::Union { name, variants } => {
@@ -49,8 +50,8 @@ pub fn ty_to_json(ty: &Ty) -> Value {
                 .collect();
             serde_json::json!({
                 "kind": "Union", "name": name.as_str(), "variants": vars,
-                "size": typeck::ty_byte_size_static(ty),
-                "align": typeck::ty_alignment(ty),
+                "size": ast::ty::ty_byte_size_static(ty),
+                "align": ast::ty::ty_alignment(ty),
             })
         }
         Ty::Opaque(name) => serde_json::json!({ "kind": "Opaque", "name": name.as_str() }),
@@ -71,13 +72,15 @@ pub fn ty_to_json(ty: &Ty) -> Value {
                     ConstValue::Int(n) => serde_json::json!(n),
                     ConstValue::Float(f) => serde_json::json!(f),
                     ConstValue::Tag { name: tn, .. } => serde_json::json!(tn.as_str()),
+                    ConstValue::Record { .. } => serde_json::json!("<record>"),
+                    ConstValue::List(_) => serde_json::json!("<list>"),
                 })
                 .collect();
             serde_json::json!({
                 "kind": "ConstUnion", "name": name.as_str(),
                 "base": ty_to_json(base), "values": vals,
-                "size": typeck::ty_byte_size_static(ty),
-                "align": typeck::ty_alignment(ty),
+                "size": ast::ty::ty_byte_size_static(ty),
+                "align": ast::ty::ty_alignment(ty),
             })
         }
         Ty::Tuple(items) => {
@@ -109,7 +112,7 @@ pub fn ast_to_json_with_depth(ast: &FileAst, source: &str, max_depth: Option<usi
                 obj["params"] = params_json(params);
             }
             if let Some(doc) = bind.doc_comment() {
-                obj["doc"] = Value::String(doc.0.clone());
+                obj["doc"] = Value::String(doc.value.clone());
             }
             obj["value"] = bind_val_json(bind.value(), span_table, source, 0, max_depth);
             obj
@@ -128,7 +131,7 @@ pub fn ast_to_json_with_depth(ast: &FileAst, source: &str, max_depth: Option<usi
                 obj["params"] = params_json(params);
             }
             if let Some(doc) = decl.doc_comment() {
-                obj["doc"] = Value::String(doc.0.clone());
+                obj["doc"] = Value::String(doc.value.clone());
             }
             obj["value"] = declare_value_json(decl.value(), span_table, source);
             obj
@@ -141,7 +144,7 @@ pub fn ast_to_json_with_depth(ast: &FileAst, source: &str, max_depth: Option<usi
         .flat_map(|import| {
             import.0.iter().map(|mi| {
                 let (sl, sc) =
-                    typeck::byte_offset_to_position(span_table.get(mi.span_id()).start, source);
+                    ast::byte_offset_to_position(span_table.get(mi.span_id()).start, source);
                 serde_json::json!({
                     "source": format!("{:?}", mi.source),
                     "alias": mi.alias.as_ref().map(|a| a.as_str()),
@@ -161,7 +164,7 @@ pub fn ast_to_json_with_depth(ast: &FileAst, source: &str, max_depth: Option<usi
         "defs": defs, "tags": tags, "uses": uses,
         "top_level_exprs": top_exprs,
         "has_module_doc": ast.module_doc().is_some(),
-        "module_doc": ast.module_doc().map(|d| d.0.as_str()),
+        "module_doc": ast.module_doc().map(|d| d.value.as_str()),
     })
 }
 
@@ -170,7 +173,7 @@ pub fn ast_to_json_with_depth(ast: &FileAst, source: &str, max_depth: Option<usi
 fn declare_value_json(value: &DeclareValue, span_table: &SpanTable, source: &str) -> Value {
     match value {
         DeclareValue::Alias(sp) => {
-            let span = span_table.get(sp.1);
+            let span = span_table.get(sp.span_id);
             let src = source.get(span.start..span.end).unwrap_or("<span err>");
             serde_json::json!({"kind": "alias", "type_expr": src})
         }
@@ -187,7 +190,7 @@ fn declare_value_json(value: &DeclareValue, span_table: &SpanTable, source: &str
             let vars: Vec<Value> = variants
                 .iter()
                 .map(|v| {
-                    let span = span_table.get(v.shape().1);
+                    let span = span_table.get(v.shape().span_id);
                     let shape_src = source.get(span.start..span.end).unwrap_or("<span err>");
                     let mut obj = serde_json::json!({
                         "shape": shape_src,
@@ -199,7 +202,7 @@ fn declare_value_json(value: &DeclareValue, span_table: &SpanTable, source: &str
                         ast::Variant::Local { doc_comment, .. } => {
                             obj["kind"] = Value::String("local".into());
                             if let Some(doc) = doc_comment {
-                                obj["doc"] = Value::String(doc.0.clone());
+                                obj["doc"] = Value::String(doc.value.clone());
                             }
                         }
                     }
@@ -237,16 +240,16 @@ fn bind_val_json(
     max_depth: Option<usize>,
 ) -> Value {
     match value {
-        BindValue::Expr(e) => expr_json(&e.0, e.1, span_table, source, depth, max_depth),
+        BindValue::Expr(e) => expr_json(&e.value, e.span_id, span_table, source, depth, max_depth),
         BindValue::Body { exprs, ret } => {
             let body: Vec<Value> = exprs
                 .iter()
-                .map(|e| expr_json(&e.0, e.1, span_table, source, depth, max_depth))
+                .map(|e| expr_json(&e.value, e.span_id, span_table, source, depth, max_depth))
                 .collect();
             let ret_val = ret
-                .0
+                .value
                 .as_ref()
-                .map(|e| expr_json(&e.0, e.1, span_table, source, depth, max_depth));
+                .map(|e| expr_json(&e.value, e.span_id, span_table, source, depth, max_depth));
             serde_json::json!({ "kind": "body", "body": body, "return": ret_val })
         }
         BindValue::Extern => serde_json::json!({ "kind": "extern" }),
@@ -280,15 +283,29 @@ fn expr_json(
             if let Some(args) = &call.args {
                 obj["args"] = Value::Array(
                     args.iter()
-                        .map(|a| expr_json(&a.0, a.1, span_table, source, nd, max_depth))
+                        .map(|a| expr_json(&a.value, a.span_id, span_table, source, nd, max_depth))
                         .collect(),
                 );
             }
         }
         Expr::Binary(bin) => {
             obj["op"] = Value::String(format!("{:?}", bin.op));
-            obj["lhs"] = expr_json(&bin.lhs.0, bin.lhs.1, span_table, source, nd, max_depth);
-            obj["rhs"] = expr_json(&bin.rhs.0, bin.rhs.1, span_table, source, nd, max_depth);
+            obj["lhs"] = expr_json(
+                &bin.lhs.value,
+                bin.lhs.span_id,
+                span_table,
+                source,
+                nd,
+                max_depth,
+            );
+            obj["rhs"] = expr_json(
+                &bin.rhs.value,
+                bin.rhs.span_id,
+                span_table,
+                source,
+                nd,
+                max_depth,
+            );
         }
         Expr::Bind(bind) => {
             obj["bind_name"] = Value::String(bind.name().as_str().to_string());
@@ -303,13 +320,13 @@ fn expr_json(
                 if_expr
                     .body
                     .iter()
-                    .map(|e| expr_json(&e.0, e.1, span_table, source, nd, max_depth))
+                    .map(|e| expr_json(&e.value, e.span_id, span_table, source, nd, max_depth))
                     .collect(),
             );
         }
         Expr::When(w) => {
             if let Some(s) = &w.subject {
-                obj["subject"] = expr_json(&s.0, s.1, span_table, source, nd, max_depth);
+                obj["subject"] = expr_json(&s.value, s.span_id, span_table, source, nd, max_depth);
             }
         }
         Expr::Loop(l) => {
@@ -337,9 +354,6 @@ fn expr_kind_name(expr: &Expr) -> &'static str {
         Expr::SelfRef(_) => "SelfRef",
         Expr::TagCall(_) => "TagCall",
         Expr::AnonymousTag(_, _) => "AnonymousTag",
-        Expr::TypeNominal(_, _) => "TypeNominal",
-        Expr::TypeQualified(_) => "TypeQualified",
-        Expr::TypeGeneric { .. } => "TypeGeneric",
         Expr::TupleAlloc { .. } => "TupleAlloc",
         Expr::TupleGet { .. } => "TupleGet",
         Expr::TupleSet { .. } => "TupleSet",
@@ -351,6 +365,10 @@ fn expr_kind_name(expr: &Expr) -> &'static str {
         Expr::Deref(_) => "Deref",
         Expr::Negate(_) => "Negate",
         Expr::Asm(_) => "Asm",
+        Expr::List(_) => "List",
         Expr::TupleLit(_) => "TupleLit",
+        Expr::TypeNominal(_, _) => "TypeNominal",
+        Expr::TypeQualified(_) => "TypeQualified",
+        Expr::TypeGeneric { .. } => "TypeGeneric",
     }
 }

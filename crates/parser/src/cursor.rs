@@ -248,6 +248,31 @@ impl<'src, 't> TokenCursor<'src, 't> {
             .unwrap_or(0)
     }
 
+    /// Peek at the next token past any intervening newlines AND indents,
+    /// without consuming them. Used for Indent-as-continuation in expressions.
+    #[inline]
+    pub fn peek_past_indent(&self) -> Option<&Token<'src>> {
+        let mut p = self.pos;
+        let tokens = self.tokens;
+        while p < tokens.len() && matches!(tokens[p].0, Token::Newline | Token::Indent) {
+            p += 1;
+        }
+        tokens.get(p).map(|(t, _)| t)
+    }
+
+    /// Skip past all leading newline and indent tokens.
+    /// Used when Indent should be treated as expression continuation.
+    #[inline]
+    pub fn skip_indents(&mut self) {
+        let tokens = self.tokens;
+        while self.pos < tokens.len()
+            && matches!(tokens[self.pos].0, Token::Newline | Token::Indent)
+        {
+            self.pos += 1;
+        }
+        self.invalidate_cache();
+    }
+
     #[inline(always)]
     pub fn skip_newlines(&mut self) {
         let tokens = self.tokens;
@@ -265,8 +290,6 @@ impl<'src, 't> TokenCursor<'src, 't> {
             span,
         });
     }
-
-    // ── Checkpoint / rewind ───────────────────────────────────────────────
 
     pub fn checkpoint(&self) -> usize {
         self.pos

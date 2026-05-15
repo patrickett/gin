@@ -8,7 +8,7 @@ use notify_debouncer_mini::DebounceEventResult;
 use crate::input_database::InputDatabase;
 use crate::package::{intern_package_files, sorted_package_files};
 use crate::queries::{file_parse_output, set_file_contents};
-use crate::semantic_queries::{hover_markdown, package_ty_env, package_typecheck_symptoms};
+use crate::semantic_queries::{hover_markdown, package_typecheck_symptoms};
 use crate::{Db, File, QueryEngine};
 
 /// Salsa-backed [`QueryEngine`] adapter.
@@ -72,10 +72,7 @@ impl QueryEngine for SalsaQueryEngine {
         Some(file_parse_output(&self.db, *file))
     }
 
-    fn typecheck_package(
-        &self,
-        paths: &[PathBuf],
-    ) -> Vec<Vec<diagnostic::Diagnostic>> {
+    fn typecheck_package(&self, paths: &[PathBuf]) -> Vec<Vec<diagnostic::Diagnostic>> {
         if paths.is_empty() {
             return Vec::new();
         }
@@ -95,17 +92,10 @@ impl QueryEngine for SalsaQueryEngine {
             let p = file.path(&self.db);
             by_path.entry(p).or_default().extend(symptoms[i].clone());
         }
-        paths.iter().map(|p| by_path.remove(p).unwrap_or_default()).collect()
-    }
-
-    fn package_ty_env(&self, paths: &[PathBuf]) -> Arc<typeck::TyEnv> {
-        let package_files: Vec<File> = paths
+        paths
             .iter()
-            .filter_map(|p| self.files.get(p).copied())
-            .collect();
-        let sorted = sorted_package_files(&self.db, &package_files);
-        let pkg = intern_package_files(&self.db, sorted);
-        package_ty_env(&self.db, pkg)
+            .map(|p| by_path.remove(p).unwrap_or_default())
+            .collect()
     }
 
     fn hover(&self, path: &Path, byte_pos: u32) -> Option<String> {

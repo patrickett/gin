@@ -3,12 +3,10 @@ use diagnostic::Diagnostic;
 use internment::Intern;
 use melior::Context;
 use parser::parse_from_str;
-use typeck::TyEnv;
 
 /// Helper to generate MLIR text from a source string.
 fn codegen_to_mlir_text(source: &str, filename: &str) -> (String, Vec<Diagnostic>) {
-    let ast = parse_from_str(source);
-    let ty_env = TyEnv::from_file_ast(&ast);
+    let mut ast = parse_from_str(source);
 
     let context = Context::new();
     melior::dialect::DialectHandle::llvm().register_dialect(&context);
@@ -17,7 +15,7 @@ fn codegen_to_mlir_text(source: &str, filename: &str) -> (String, Vec<Diagnostic
     context.get_or_load_dialect("scf");
     context.get_or_load_dialect("llvm");
 
-    let (module, symptoms) = build_module_with_context(&context, &ast, source, filename, &ty_env);
+    let (module, symptoms) = build_module_with_context(&context, &mut ast, source, filename);
     let mlir_text = module
         .expect("codegen should succeed")
         .as_operation()

@@ -1,5 +1,6 @@
 use crate::{addressof_string_global, prelude::*};
-use typeck::{Ty, TyInfer};
+use ast::TyInfer;
+use ast::ty::Ty;
 
 fn to_string_fn_name(ty: &Ty) -> String {
     match ty {
@@ -67,9 +68,9 @@ impl<'c> Lower<'c> for FormatString {
                     let len = block.const_i64(ctx.mlir, s.len() as i64);
                     parts.push((ptr, len));
                 }
-                FormatPart::Expr(e) => {
+                FormatPart::Expr(e, _) => {
                     let val = e.lower(ctx, block, symtab)?;
-                    let ty = e.infer_ty(&ctx.ty_env.infer_env(&std::collections::HashMap::new()));
+                    let ty = e.infer_ty(&ctx.infer_env(&std::collections::HashMap::new()));
                     let fn_name = to_string_fn_name(&ty);
                     let loc = ctx.location();
                     let str_val =

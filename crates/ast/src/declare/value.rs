@@ -1,4 +1,4 @@
-use crate::expr::Expr;
+use crate::TypeExpr;
 use crate::parameter::fmt_type_expr_surface;
 use crate::prelude::*;
 use crate::span::Spanned;
@@ -7,7 +7,7 @@ use std::hash::{Hash, Hasher};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeclareValue {
-    Alias(Box<Spanned<Expr>>),
+    Alias(Box<Spanned<TypeExpr>>),
     Record(Parameters),
     Union { variants: Vec<Variant> },
     Set(/* TODO */),
@@ -19,7 +19,7 @@ pub enum DeclareValue {
 impl std::fmt::Display for DeclareValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Alias(sp) => fmt_type_expr_surface(&sp.0, f),
+            Self::Alias(sp) => fmt_type_expr_surface(&sp.value, f),
             Self::Record(params) => {
                 write!(f, "(")?;
                 let mut first = true;

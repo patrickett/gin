@@ -4,6 +4,7 @@ use std::hash::{Hash, Hasher};
 
 use crate::doc_comment::DocComment;
 use crate::parameter::Parameters;
+use crate::ty::Ty;
 
 mod attributes;
 mod value;
@@ -12,22 +13,24 @@ pub use value::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Declare {
-    doc_comment: Option<DocComment>,
-    attributes: DeclareAttributes,
-    name: Intern<String>,
+    pub doc_comment: Option<DocComment>,
+    pub name: Intern<String>,
     pub name_span: SpanId,
-    params: Option<Parameters>,
-    value: DeclareValue,
+    pub params: Option<Parameters>,
+    pub resolved_type: Option<Ty>,
+    pub attributes: DeclareAttributes,
+    pub value: DeclareValue,
 }
 
 impl Declare {
     pub fn new(name: Intern<String>, name_span: SpanId, value: DeclareValue) -> Self {
         Declare {
             doc_comment: None,
-            attributes: DeclareAttributes::default(),
             name,
             name_span,
             params: None,
+            resolved_type: None,
+            attributes: DeclareAttributes::default(),
             value,
         }
     }

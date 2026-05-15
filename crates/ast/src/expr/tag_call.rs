@@ -14,7 +14,7 @@ pub struct TagCall {
     /// Simple variant name (e.g., "Some") - used for variant lookup
     pub name: Intern<String>,
     /// Optional qualified path (e.g., ModPath { root: "Maybe", segments: ["Some"] })
-    pub qual_path: Option<ModPath>,
+    pub qual_path: Option<Spanned<ModPath>>,
     pub args: Vec<Spanned<Expr>>,
     pub span: SpanId,
 }

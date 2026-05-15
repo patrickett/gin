@@ -15,7 +15,6 @@ flask = { workspace = true }
 ginfmt = { workspace = true }
 database = { workspace = true }
 ast = { workspace = true }
-typeck = { workspace = true }
 diagnostic = { workspace = true }
 lsp-types = { workspace = true }
 parser = { workspace = true }

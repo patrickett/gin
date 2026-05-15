@@ -579,14 +579,14 @@ fn hw_doc_comment_before_attribute() {
     // Doc comment should be attached to the bind, not lost
     let doc = bind.doc_comment().expect("should have a doc comment");
     assert!(
-        doc.0.contains("Find the index"),
+        doc.value.contains("Find the index"),
         "doc should contain 'Find the index', got: {:?}",
-        doc.0
+        doc.value
     );
     assert!(
-        doc.0.contains("Scans each byte"),
+        doc.value.contains("Scans each byte"),
         "doc should contain 'Scans each byte', got: {:?}",
-        doc.0
+        doc.value
     );
 
     // Complexity attribute should also be present
@@ -648,14 +648,14 @@ return
         .doc_comment()
         .expect("find_index should have a doc comment");
     assert!(
-        doc.0.contains("Find the index"),
+        doc.value.contains("Find the index"),
         "doc should contain 'Find the index', got: {:?}",
-        doc.0
+        doc.value
     );
     assert!(
-        doc.0.contains("Scans each byte"),
+        doc.value.contains("Scans each byte"),
         "doc should contain 'Scans each byte', got: {:?}",
-        doc.0
+        doc.value
     );
 
     let c = bind

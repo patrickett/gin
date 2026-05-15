@@ -7,7 +7,6 @@ pub use diagnostic;
 pub use ginfmt;
 pub use parser;
 pub use resolve;
-pub use typeck;
 
 pub mod analysis;
 pub mod json;

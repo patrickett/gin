@@ -1,5 +1,11 @@
 #![deny(unsafe_code)]
-#![warn(clippy::correctness, clippy::suspicious, clippy::style, clippy::complexity, clippy::perf)]
+#![warn(
+    clippy::correctness,
+    clippy::suspicious,
+    clippy::style,
+    clippy::complexity,
+    clippy::perf
+)]
 
 pub mod engine;
 pub mod salsa_engine;
@@ -22,9 +28,7 @@ pub use salsa_engine::SalsaQueryEngine;
 pub use input_database::{Db, InputDatabase};
 pub use package::{PackageFiles, intern_package_files, sorted_package_files};
 pub use queries::{file_parse_output, parse_file, set_file_contents};
-pub use semantic_queries::{
-    hover_markdown, package_ty_env, package_typecheck_symptoms, ty_env_for_file,
-};
+pub use semantic_queries::{hover_markdown, package_typecheck_symptoms};
 
 use diagnostic::{Diagnostic, DiagnosticCode, DiagnosticLike};
 use span::SpanId;

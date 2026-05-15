@@ -13,7 +13,7 @@ impl<'c> Lower<'c> for ForInLoop {
         let index_ty = Type::index(ctx.mlir);
 
         // Currently only range iterators (start...end) are supported.
-        let (start_expr, end_expr) = match &self.iter.0 {
+        let (start_expr, end_expr) = match &self.iter.value {
             Expr::Range(range) => (&range.start, &range.end),
             _ => {
                 ctx.emit_internal(
@@ -45,7 +45,7 @@ impl<'c> Lower<'c> for ForInLoop {
             let iv_i64 = loop_blk_ref.append_op(arith_dialect::index_cast(iv, ctx.mlir.i64(), loc));
 
             let mut loop_symtab = symtab.clone();
-            match for_loop_pattern_names(&self.pat.0).as_deref() {
+            match for_loop_pattern_names(&self.pat.value).as_deref() {
                 Some([name]) => {
                     loop_symtab.insert(name.as_str().to_string(), iv_i64);
                 }

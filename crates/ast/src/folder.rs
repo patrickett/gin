@@ -1,39 +1,70 @@
 use std::ops::ControlFlow;
 
-use internment::Intern;
-
 use crate::{
-    AsmExpr, Bind, BindValue, Binary, Expr, FileAst, ForInLoop, FormatPart, FormatString,
-    FnCall, IfCondition, IfExpr, Loop, ParameterKind, Range, Return, TagCall,
-    WhenArm, WhenExpr, WhileLoop,
+    AsmExpr, Binary, Bind, BindValue, Expr, FileAst, FnCall, ForInLoop, FormatPart, FormatString,
+    IfCondition, IfExpr, Loop, Range, Return, TagCall, WhenArm, WhenExpr, WhileLoop,
 };
 
 use ControlFlow::Continue;
 
 pub trait Folder: Sized {
-    fn fold_file_ast(&mut self, ast: &mut FileAst) -> ControlFlow<()> { walk_file_ast_mut(self, ast) }
-    fn fold_bind(&mut self, bind: &mut Bind) -> ControlFlow<()> { walk_bind_mut(self, bind) }
-    fn fold_bind_value(&mut self, val: &mut BindValue) -> ControlFlow<()> { walk_bind_value_mut(self, val) }
-    fn fold_expr(&mut self, expr: &mut Expr) -> ControlFlow<()> { walk_expr_mut(self, expr) }
-    fn fold_fn_call(&mut self, call: &mut FnCall) -> ControlFlow<()> { walk_fn_call_mut(self, call) }
-    fn fold_binary(&mut self, bin: &mut Binary) -> ControlFlow<()> { walk_binary_mut(self, bin) }
-    fn fold_when_expr(&mut self, when: &mut WhenExpr) -> ControlFlow<()> { walk_when_mut(self, when) }
-    fn fold_when_arm(&mut self, arm: &mut WhenArm) -> ControlFlow<()> { walk_when_arm_mut(self, arm) }
-    fn fold_if_expr(&mut self, ifx: &mut IfExpr) -> ControlFlow<()> { walk_if_mut(self, ifx) }
-    fn fold_if_condition(&mut self, c: &mut IfCondition) -> ControlFlow<()> { walk_if_condition_mut(self, c) }
-    fn fold_loop(&mut self, l: &mut Loop) -> ControlFlow<()> { walk_loop_mut(self, l) }
-    fn fold_while_loop(&mut self, w: &mut WhileLoop) -> ControlFlow<()> { walk_while_mut(self, w) }
-    fn fold_for_in_loop(&mut self, f: &mut ForInLoop) -> ControlFlow<()> { walk_for_in_mut(self, f) }
-    fn fold_tag_call(&mut self, tc: &mut TagCall) -> ControlFlow<()> { walk_tag_call_mut(self, tc) }
-    fn fold_format_string(&mut self, fs: &mut FormatString) -> ControlFlow<()> { walk_format_string_mut(self, fs) }
-    fn fold_format_part(&mut self, p: &mut FormatPart) -> ControlFlow<()> { walk_format_part_mut(self, p) }
-    fn fold_range(&mut self, r: &mut Range) -> ControlFlow<()> { walk_range_mut(self, r) }
-    fn fold_return(&mut self, r: &mut Return) -> ControlFlow<()> { walk_return_mut(self, r) }
-    fn fold_asm_expr(&mut self, a: &mut AsmExpr) -> ControlFlow<()> { walk_asm_mut(self, a) }
-    fn fold_type_generic(&mut self, _name: &mut Intern<String>, params: &mut [(Intern<String>, ParameterKind)]) -> ControlFlow<()> {
-        walk_type_generic_mut(self, params)
+    fn fold_file_ast(&mut self, ast: &mut FileAst) -> ControlFlow<()> {
+        walk_file_ast_mut(self, ast)
     }
-    fn fold_parameter_kind(&mut self, pk: &mut ParameterKind) -> ControlFlow<()> { walk_parameter_kind_mut(self, pk) }
+    fn fold_bind(&mut self, bind: &mut Bind) -> ControlFlow<()> {
+        walk_bind_mut(self, bind)
+    }
+    fn fold_bind_value(&mut self, val: &mut BindValue) -> ControlFlow<()> {
+        walk_bind_value_mut(self, val)
+    }
+    fn fold_expr(&mut self, expr: &mut Expr) -> ControlFlow<()> {
+        walk_expr_mut(self, expr)
+    }
+    fn fold_fn_call(&mut self, call: &mut FnCall) -> ControlFlow<()> {
+        walk_fn_call_mut(self, call)
+    }
+    fn fold_binary(&mut self, bin: &mut Binary) -> ControlFlow<()> {
+        walk_binary_mut(self, bin)
+    }
+    fn fold_when_expr(&mut self, when: &mut WhenExpr) -> ControlFlow<()> {
+        walk_when_mut(self, when)
+    }
+    fn fold_when_arm(&mut self, arm: &mut WhenArm) -> ControlFlow<()> {
+        walk_when_arm_mut(self, arm)
+    }
+    fn fold_if_expr(&mut self, ifx: &mut IfExpr) -> ControlFlow<()> {
+        walk_if_mut(self, ifx)
+    }
+    fn fold_if_condition(&mut self, c: &mut IfCondition) -> ControlFlow<()> {
+        walk_if_condition_mut(self, c)
+    }
+    fn fold_loop(&mut self, l: &mut Loop) -> ControlFlow<()> {
+        walk_loop_mut(self, l)
+    }
+    fn fold_while_loop(&mut self, w: &mut WhileLoop) -> ControlFlow<()> {
+        walk_while_mut(self, w)
+    }
+    fn fold_for_in_loop(&mut self, f: &mut ForInLoop) -> ControlFlow<()> {
+        walk_for_in_mut(self, f)
+    }
+    fn fold_tag_call(&mut self, tc: &mut TagCall) -> ControlFlow<()> {
+        walk_tag_call_mut(self, tc)
+    }
+    fn fold_format_string(&mut self, fs: &mut FormatString) -> ControlFlow<()> {
+        walk_format_string_mut(self, fs)
+    }
+    fn fold_format_part(&mut self, p: &mut FormatPart) -> ControlFlow<()> {
+        walk_format_part_mut(self, p)
+    }
+    fn fold_range(&mut self, r: &mut Range) -> ControlFlow<()> {
+        walk_range_mut(self, r)
+    }
+    fn fold_return(&mut self, r: &mut Return) -> ControlFlow<()> {
+        walk_return_mut(self, r)
+    }
+    fn fold_asm_expr(&mut self, a: &mut AsmExpr) -> ControlFlow<()> {
+        walk_asm_mut(self, a)
+    }
 }
 
 pub fn walk_file_ast_mut(v: &mut impl Folder, ast: &mut FileAst) -> ControlFlow<()> {
@@ -75,8 +106,7 @@ pub fn walk_expr_mut(v: &mut impl Folder, expr: &mut Expr) -> ControlFlow<()> {
         Expr::FormatString(fs) => v.fold_format_string(fs),
         Expr::Range(r) => v.fold_range(r),
         Expr::Asm(a) => v.fold_asm_expr(a),
-        Expr::TypeGeneric { name, params, .. } => v.fold_type_generic(name, params),
-        Expr::TupleLit(elems) => {
+        Expr::TupleLit(elems) | Expr::List(elems) => {
             for e in elems {
                 v.fold_expr(e)?;
             }
@@ -99,8 +129,12 @@ pub fn walk_expr_mut(v: &mut impl Folder, expr: &mut Expr) -> ControlFlow<()> {
         }
         Expr::Cast { expr: e, .. } => v.fold_expr(e),
         Expr::TakePtr(e) | Expr::TakeRef(e) | Expr::Deref(e) | Expr::Negate(e) => v.fold_expr(e),
-        Expr::Lit(_) | Expr::SelfRef(_) | Expr::AnonymousTag(..)
-            | Expr::TypeNominal(..) | Expr::TypeQualified(..) => Continue(()),
+        Expr::Lit(_)
+        | Expr::SelfRef(_)
+        | Expr::AnonymousTag(..)
+        | Expr::TypeNominal(..)
+        | Expr::TypeQualified(_)
+        | Expr::TypeGeneric { .. } => Continue(()),
     }
 }
 
@@ -130,15 +164,14 @@ pub fn walk_when_mut(v: &mut impl Folder, when: &mut WhenExpr) -> ControlFlow<()
 
 pub fn walk_when_arm_mut(v: &mut impl Folder, arm: &mut WhenArm) -> ControlFlow<()> {
     match arm {
-        WhenArm::Cond { condition, body } => {
+        WhenArm::Cond {
+            condition, body, ..
+        } => {
             v.fold_expr(condition)?;
             v.fold_expr(body)
         }
-        WhenArm::Is { pattern, body } => {
-            v.fold_expr(pattern)?;
-            v.fold_expr(body)
-        }
-        WhenArm::Else(body) => v.fold_expr(body),
+        WhenArm::Is { body, .. } => v.fold_expr(body),
+        WhenArm::Else(body, _) => v.fold_expr(body),
     }
 }
 
@@ -153,10 +186,7 @@ pub fn walk_if_mut(v: &mut impl Folder, ifx: &mut IfExpr) -> ControlFlow<()> {
 pub fn walk_if_condition_mut(v: &mut impl Folder, c: &mut IfCondition) -> ControlFlow<()> {
     match c {
         IfCondition::Bool(e) => v.fold_expr(e),
-        IfCondition::Pattern { subject, pattern } => {
-            v.fold_expr(subject)?;
-            v.fold_expr(pattern)
-        }
+        IfCondition::Pattern { subject, .. } => v.fold_expr(subject),
     }
 }
 
@@ -200,7 +230,7 @@ pub fn walk_format_string_mut(v: &mut impl Folder, fs: &mut FormatString) -> Con
 
 pub fn walk_format_part_mut(v: &mut impl Folder, p: &mut FormatPart) -> ControlFlow<()> {
     match p {
-        FormatPart::Expr(e) => v.fold_expr(e),
+        FormatPart::Expr(e, _) => v.fold_expr(e),
         FormatPart::Text(_) => Continue(()),
     }
 }
@@ -211,30 +241,18 @@ pub fn walk_range_mut(v: &mut impl Folder, r: &mut Range) -> ControlFlow<()> {
 }
 
 pub fn walk_return_mut(v: &mut impl Folder, r: &mut Return) -> ControlFlow<()> {
-    if let Some(e) = &mut r.0 {
+    if let Some(e) = &mut r.value {
         v.fold_expr(e)?;
     }
     Continue(())
 }
 
 pub fn walk_asm_mut(v: &mut impl Folder, a: &mut AsmExpr) -> ControlFlow<()> {
+    for c in &mut a.constraints {
+        v.fold_expr(c)?;
+    }
     for o in &mut a.operands {
         v.fold_expr(o)?;
     }
     Continue(())
-}
-
-pub fn walk_type_generic_mut(v: &mut impl Folder, params: &mut [(Intern<String>, ParameterKind)]) -> ControlFlow<()> {
-    for (_, pk) in params {
-        v.fold_parameter_kind(pk)?;
-    }
-    Continue(())
-}
-
-pub fn walk_parameter_kind_mut(v: &mut impl Folder, pk: &mut ParameterKind) -> ControlFlow<()> {
-    match pk {
-        ParameterKind::Generic => Continue(()),
-        ParameterKind::Tagged(sp) => v.fold_expr(sp),
-        ParameterKind::Default(e) => v.fold_expr(e),
-    }
 }

@@ -36,11 +36,12 @@ pub fn hover_markdown(db: &dyn Db, file: File, byte_pos: u32) -> Option<String> 
             .and_then(|s| s.to_str())
             .map(|s| s.to_owned())
     });
+    let analysis = ast::resolve_types(&output.ast, std::slice::from_ref(&output.ast));
     match source_name.as_deref() {
         Some(name) => {
-            typeck::hover_at_with_source(source, &output.ast, byte_pos as usize, Some(name))
+            ast::hover::hover_at_with_source(source, &output.ast, byte_pos as usize, Some(name))
         }
-        None => typeck::hover_at(source, &output.ast, byte_pos as usize),
+        None => ast::hover::hover_at(source, &output.ast, &analysis, byte_pos as usize),
     }
 }
 
@@ -49,44 +50,27 @@ pub fn file_parse_output(db: &dyn Db, file: File) -> Arc<parser::ParseOutput> {
     crate::file_parse_output(db, file)
 }
 
-/// Package-wide [`typeck::TyEnv`] (shared across all [`File`]s in `pkg`), Salsa-cached.
-///
-/// Build `pkg` with [`PackageFiles::new`](PackageFiles::new) after
-/// [`crate::package::sorted_package_files`].
-#[salsa::tracked]
-pub fn package_ty_env<'db>(db: &'db dyn Db, pkg: PackageFiles<'db>) -> Arc<typeck::TyEnv> {
-    let files = pkg.files(db);
-    let all_asts: Vec<ast::FileAst> = files
-        .iter()
-        .map(|&f| crate::file_parse_output(db, f).ast.clone())
-        .collect();
-    Arc::new(typeck::TyEnv::from_multiple_file_asts(&all_asts))
-}
-
 /// Type-check + flow-analysis symptoms for every file in the package, sharing one
-/// [`typeck::TyEnv`] built from all parsed ASTs (Salsa-cached).
+/// type environment built from all parsed ASTs.
 ///
-/// Uses [`package_ty_env`] so the environment is memoized independently of per-file checks.
+/// Diagnostics are embedded in each resolved FileAst via [`ast::FileAst::resolve_types`].
 #[salsa::tracked]
 pub fn package_typecheck_symptoms<'db>(
     db: &'db dyn Db,
     pkg: PackageFiles<'db>,
 ) -> Vec<Vec<Diagnostic>> {
-    let ty_env = package_ty_env(db, pkg);
     let files = pkg.files(db);
+    let all_asts: Vec<ast::FileAst> = files
+        .iter()
+        .map(|&f| crate::file_parse_output(db, f).ast.clone())
+        .collect();
     files
         .iter()
         .map(|&f| {
-            let ast = &crate::file_parse_output(db, f).ast;
-            typeck::analyze_file_with_ty_env(ast, &ty_env)
+            let mut ast = crate::file_parse_output(db, f).ast.clone();
+            let analysis = ast::resolve_types(&ast, &all_asts);
+            ast::populate_ast_types(&mut ast, &analysis);
+            analysis.diagnostics
         })
         .collect()
-}
-
-/// Type environment for a single file (from that file's AST only).
-///
-/// For a package-wide env, use [`package_ty_env`].
-pub fn ty_env_for_file(db: &dyn Db, file: File) -> Arc<typeck::TyEnv> {
-    let ast = &crate::file_parse_output(db, file).ast;
-    Arc::new(typeck::TyEnv::from_file_ast(ast))
 }

@@ -1,5 +1,7 @@
-use crate::{prelude::*, ty_to_mlir};
-use typeck::{Ty, flow::ConstValue};
+use crate::prelude::*;
+use crate::ty_to_mlir;
+use ast::flow::ConstValue;
+use ast::ty::Ty;
 
 impl<'c> Lower<'c> for TagCall {
     fn lower(
@@ -9,9 +11,9 @@ impl<'c> Lower<'c> for TagCall {
         symtab: &mut ScopedSymbolTable<'c>,
     ) -> Option<Value<'c, 'c>> {
         // Try ConstUnion construction first (e.g. LogLevel('debug')).
-        if let Some(Ty::ConstUnion { values, .. }) = ctx.ty_env.lookup_tag(self.name) {
+        if let Some(Ty::ConstUnion { values, .. }) = ctx.lookup_tag(self.name) {
             if let Some(arg) = self.args.first() {
-                let arg_lit = match &arg.0 {
+                let arg_lit = match &arg.value {
                     ast::Expr::Lit(lit) => lit,
                     _ => {
                         // TODO: Support non-literal ConstUnion construction (e.g.
@@ -25,36 +27,13 @@ impl<'c> Lower<'c> for TagCall {
                         return None;
                     }
                 };
-                let disc = match arg_lit {
-                    ast::Literal::String(s) => values
-                        .iter()
-                        .position(|v| matches!(v, ConstValue::String(vs) if vs == s)),
-                    ast::Literal::Int(n) => values
-                        .iter()
-                        .position(|v| matches!(v, ConstValue::Int(vn) if *vn == *n as i128)),
-                    ast::Literal::Float(f) => values.iter().position(
-                        |v| matches!(v, ConstValue::Float(vf) if vf.to_bits() == f.to_bits()),
-                    ),
-                    ast::Literal::Number(n) => values
-                        .iter()
-                        .position(|v| matches!(v, ConstValue::Int(vn) if *vn == *n as i128)),
-                };
-                let disc = disc? as i64;
-                let variant_count = values.len();
-                return if variant_count == 2 {
-                    let i1_attr = melior::ir::attribute::IntegerAttribute::new(
-                        IntegerType::new(ctx.mlir, 1).into(),
-                        disc,
-                    )
-                    .into();
-                    Some(block.append_op(ctx.mlir.const_op(i1_attr, ctx.mlir.i1())))
-                } else if variant_count <= 256 {
-                    let i8_ty = IntegerType::new(ctx.mlir, 8).into();
-                    let i8_attr = melior::ir::attribute::IntegerAttribute::new(i8_ty, disc).into();
-                    Some(block.append_op(ctx.mlir.const_op(i8_attr, i8_ty)))
-                } else {
-                    Some(block.const_i64(ctx.mlir, disc))
-                };
+                let disc = ConstValue::find_discriminant(arg_lit, values)? as i64;
+                return Some(super::emit_discriminant_constant(
+                    ctx,
+                    block,
+                    disc,
+                    values.len(),
+                ));
             }
             ctx.emit_internal(format!(
                 "ConstUnion '{}' requires exactly one argument",
@@ -64,10 +43,8 @@ impl<'c> Lower<'c> for TagCall {
         }
 
         // Try union variant construction first.
-        if let Some((union_name, discriminant, payload_fields)) =
-            ctx.ty_env.lookup_variant(self.name)
-        {
-            let union_ty = ctx.ty_env.lookup_tag(union_name);
+        if let Some((union_name, discriminant, payload_fields)) = ctx.lookup_variant(self.name) {
+            let union_ty = ctx.lookup_tag(union_name);
             let union_mlir_ty = union_ty
                 .as_ref()
                 .map(|ty| ty_to_mlir(ty, ctx.mlir))
@@ -79,7 +56,6 @@ impl<'c> Lower<'c> for TagCall {
             });
 
             if is_optimized_simple {
-                // For optimized unions (like Bool), create a simple integer constant
                 let variant_count = union_ty
                     .as_ref()
                     .and_then(|ty| {
@@ -90,26 +66,12 @@ impl<'c> Lower<'c> for TagCall {
                         }
                     })
                     .unwrap_or(2);
-
-                return if variant_count == 2 {
-                    // Use i1 for 2-variant unions like Bool
-                    let i1_attr = melior::ir::attribute::IntegerAttribute::new(
-                        IntegerType::new(ctx.mlir, 1).into(),
-                        discriminant as i64,
-                    )
-                    .into();
-                    Some(block.append_op(ctx.mlir.const_op(i1_attr, ctx.mlir.i1())))
-                } else if variant_count <= 256 {
-                    // Use i8 for 3-256 variant unions
-                    let i8_ty = IntegerType::new(ctx.mlir, 8).into();
-                    let i8_attr =
-                        melior::ir::attribute::IntegerAttribute::new(i8_ty, discriminant as i64)
-                            .into();
-                    Some(block.append_op(ctx.mlir.const_op(i8_attr, i8_ty)))
-                } else {
-                    // Fall back to i64 for larger unions
-                    Some(block.const_i64(ctx.mlir, discriminant as i64))
-                };
+                return Some(super::emit_discriminant_constant(
+                    ctx,
+                    block,
+                    discriminant as i64,
+                    variant_count,
+                ));
             }
 
             // Standard union construction with struct representation
@@ -145,7 +107,7 @@ impl<'c> Lower<'c> for TagCall {
 
         // Fall back to record construction.
         // Note: unknown tag diagnostics are emitted by typeck; codegen just fails gracefully.
-        let record_ty = ctx.ty_env.lookup_tag(self.name).cloned()?;
+        let record_ty = ctx.lookup_tag(self.name).cloned()?;
 
         match &record_ty {
             Ty::Record { .. } => {
@@ -154,10 +116,10 @@ impl<'c> Lower<'c> for TagCall {
                 let mut val = block.append_op(ctx.mlir.llvm_undef(struct_type));
 
                 // Named construction: `Tag(field: val, ...)` — args parse as Bind expressions.
-                let is_named = self.args.iter().any(|a| matches!(&a.0, Expr::Bind(_)));
+                let is_named = self.args.iter().any(|a| matches!(&a.value, Expr::Bind(_)));
                 if is_named {
                     for arg in &self.args {
-                        let Expr::Bind(bind) = &arg.0 else {
+                        let Expr::Bind(bind) = &arg.value else {
                             ctx.emit_internal(format!(
                                 "Mixed named/positional args in record '{}' constructor",
                                 self.name.as_str()

@@ -29,14 +29,23 @@ pub fn parse_param_after_name(
 ) -> Option<(Intern<String>, ParameterKind)> {
     if matches!(cursor.peek(), Some(Token::Tag(_))) {
         let sp = parse_type_expr(cursor, expr_parser)?;
-        return Some((name, ParameterKind::Tagged(Box::new(sp))));
+        return Some((
+            name,
+            ParameterKind::Tagged(Box::new(Spanned {
+                value: sp.value.into(),
+                span_id: sp.span_id,
+            })),
+        ));
     }
 
     if let Some(Token::Id(t)) = cursor.peek() {
         let span = cursor.peek_span()?;
         let ty_name = cursor.intern(t);
         cursor.advance();
-        let sp = Spanned(Expr::TypeNominal(ty_name, span), span);
+        let sp = Spanned {
+            value: Expr::TypeNominal(ty_name, span),
+            span_id: span,
+        };
         return Some((name, ParameterKind::Tagged(Box::new(sp))));
     }
 

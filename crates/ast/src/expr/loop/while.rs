@@ -1,4 +1,4 @@
-use crate::span::Spanned;
+use crate::span::{SpanId, Spanned};
 
 use crate::expr::Expr;
 
@@ -14,4 +14,5 @@ use crate::expr::Expr;
 pub struct WhileLoop {
     pub cond: Box<Spanned<Expr>>,
     pub exprs: Vec<Spanned<Expr>>,
+    pub span: SpanId,
 }

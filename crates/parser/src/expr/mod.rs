@@ -90,8 +90,14 @@ fn merge_spans(a: SpanId, b: SpanId, cursor: &mut TokenCursor) -> SpanId {
     cursor.merge_span(a, b)
 }
 
-fn parse_paren_args(cursor: &mut TokenCursor) -> Option<Vec<Spanned<Expr>>> {
+pub(crate) fn parse_paren_args(cursor: &mut TokenCursor) -> Option<Vec<Spanned<Expr>>> {
+    // Swift guardrail: if there's a raw newline before `(`, don't treat as call args.
+    // This prevents `foo\n(1)` from being parsed as `foo(1)` — the `(1)` on the next
+    // line is a parenthesized group, not a function call.
     if !cursor.is_at(&Token::ParenOpen) {
+        return None;
+    }
+    if matches!(cursor.peek_at(0), Some(Token::Newline)) {
         return None;
     }
     cursor.advance();
@@ -123,9 +129,16 @@ fn parse_expr_min_prec(cursor: &mut TokenCursor, min_prec: u8) -> Spanned<Expr> 
         None => {
             let span = cursor.current_span();
             cursor.error("expected expression", span);
-            return Spanned(Expr::AnonymousTag(cursor.intern("Error"), span), span);
+            return Spanned {
+                value: Expr::AnonymousTag(cursor.intern("Error"), span),
+                span_id: span,
+            };
         }
     };
+
+    // Track how many Indent tokens we've consumed via continuation-skipping
+    // so we can consume the matching Dedent tokens after the expression ends.
+    let mut consumed_indents: usize = 0;
 
     loop {
         cursor.advance_push();
@@ -147,17 +160,35 @@ fn parse_expr_min_prec(cursor: &mut TokenCursor, min_prec: u8) -> Spanned<Expr> 
             }
         };
 
+        // Feature 1: Indent-as-continuation.
+        // If we see Indent and the token after it is an infix operator,
+        // skip the Indent (treat it as expression continuation) and
+        // re-evaluate with the operator.
+        if matches!(token, Token::Indent) {
+            if let Some(next_tok) = cursor.peek_past_indent() {
+                let is_infix = try_infix_op(next_tok).is_some() || matches!(next_tok, Token::Infer);
+                if is_infix {
+                    cursor.skip_indents();
+                    consumed_indents += 1;
+                    cursor.advance_drop(); // pop the outer loop's push (progress is implicit)
+                    continue;
+                }
+            }
+            cursor.advance_drop();
+            break;
+        }
+
         // Range operator: `...` (precedence 2, left-associative)
         if matches!(token, Token::Infer) {
             if 2 >= min_prec {
                 cursor.advance();
-                let lhs_span = lhs.1;
+                let lhs_span = lhs.span_id;
                 let rhs = parse_expr_min_prec(cursor, 3);
-                let rhs_span = rhs.1;
-                lhs = Spanned(
-                    Expr::Range(Range::new(lhs, rhs)),
-                    merge_spans(lhs_span, rhs_span, cursor),
-                );
+                let rhs_span = rhs.span_id;
+                lhs = Spanned {
+                    value: Expr::Range(Range::new(lhs, rhs, cursor.merge_span(lhs_span, rhs_span))),
+                    span_id: merge_spans(lhs_span, rhs_span, cursor),
+                };
                 cursor.advance_pop();
                 continue;
             }
@@ -169,13 +200,18 @@ fn parse_expr_min_prec(cursor: &mut TokenCursor, min_prec: u8) -> Spanned<Expr> 
             && prec >= min_prec
         {
             cursor.advance();
-            let lhs_span = lhs.1;
+            let lhs_span = lhs.span_id;
             let rhs = parse_expr_min_prec(cursor, prec + 1);
-            let rhs_span = rhs.1;
-            lhs = Spanned(
-                Expr::Binary(Binary::new(lhs, binop, rhs)),
-                merge_spans(lhs_span, rhs_span, cursor),
-            );
+            let rhs_span = rhs.span_id;
+            lhs = Spanned {
+                value: Expr::Binary(Binary::new(
+                    lhs,
+                    binop,
+                    rhs,
+                    cursor.merge_span(lhs_span, rhs_span),
+                )),
+                span_id: merge_spans(lhs_span, rhs_span, cursor),
+            };
             cursor.advance_pop();
             continue;
         }
@@ -183,6 +219,16 @@ fn parse_expr_min_prec(cursor: &mut TokenCursor, min_prec: u8) -> Spanned<Expr> 
         cursor.advance_drop();
         break;
     }
+
+    // Consume trailing Dedent tokens matching the Indents we consumed.
+    for _ in 0..consumed_indents {
+        cursor.eat(&Token::Dedent);
+    }
+
+    // Feature 3: Adjacent expression check is done at the top-level parse,
+    // not inside parse_expr_min_prec, because block bodies legitimately
+    // have multiple consecutive expressions (statements).
+    // See parse_top_level_element for the top-level check.
 
     lhs
 }
@@ -195,11 +241,11 @@ fn parse_prefix(cursor: &mut TokenCursor) -> Option<Spanned<Expr>> {
         Token::Minus => {
             let (_, start_span) = cursor.advance()?;
             let inner = parse_expr_min_prec(cursor, 6);
-            let inner_span = inner.1;
-            Some(Spanned(
-                Expr::Negate(Box::new(inner)),
-                merge_spans(start_span, inner_span, cursor),
-            ))
+            let inner_span = inner.span_id;
+            Some(Spanned {
+                value: Expr::Negate(Box::new(inner)),
+                span_id: merge_spans(start_span, inner_span, cursor),
+            })
         }
         _ => {
             if matches!(
@@ -222,6 +268,7 @@ fn parse_atom(cursor: &mut TokenCursor) -> Spanned<Expr> {
         Some(Token::Caret) => parse_take_ref(cursor),
         Some(Token::Star) => parse_deref(cursor),
         Some(Token::SelfInstance) => parse_self_ref(cursor),
+        Some(Token::BracketOpen) => parse_list_lit(cursor),
         Some(Token::ParenOpen) => parse_tuple_lit_or_alloc_or_group(cursor),
         Some(Token::FormatStringDelim) => parse_format_string_expr(cursor),
         Some(Token::Asm) => parse_asm_expr(cursor),
@@ -240,10 +287,10 @@ fn parse_atom(cursor: &mut TokenCursor) -> Spanned<Expr> {
                     let start_span = cursor.span_at(checkpoint);
                     cursor.consume_trailing_newline();
                     let end_span = last_consumed_span(cursor);
-                    return Spanned(
-                        Expr::Bind(Box::new(bind)),
-                        merge_spans(start_span, end_span, cursor),
-                    );
+                    return Spanned {
+                        value: Expr::Bind(Box::new(bind)),
+                        span_id: merge_spans(start_span, end_span, cursor),
+                    };
                 }
                 cursor.rewind(checkpoint);
             }
@@ -251,14 +298,24 @@ fn parse_atom(cursor: &mut TokenCursor) -> Spanned<Expr> {
         }
         Some(Token::Tag(_)) => parse_tag_atom(cursor),
         _ => {
-            if let Some(Spanned(lit, span)) = literal::parse_literal(cursor) {
-                return Spanned(Expr::Lit(lit), span);
+            if let Some(Spanned {
+                value: lit,
+                span_id: span,
+            }) = literal::parse_literal(cursor)
+            {
+                return Spanned {
+                    value: Expr::Lit(lit),
+                    span_id: span,
+                };
             }
             let span = cursor.current_span();
             cursor.error("expected expression", span);
             // Advance past the unrecognised token so the caller makes progress
             cursor.advance();
-            Spanned(Expr::AnonymousTag(cursor.intern("Error"), span), span)
+            Spanned {
+                value: Expr::AnonymousTag(cursor.intern("Error"), span),
+                span_id: span,
+            }
         }
     }
 }
@@ -388,38 +445,38 @@ fn parse_id_atom(cursor: &mut TokenCursor) -> Spanned<Expr> {
             }
             let value = parse_expression(cursor);
             let end_span = last_consumed_span(cursor);
-            let base = Spanned(
-                Expr::FnCall(FnCall {
-                    path: ModPath::new(name, vec![], id_span),
+            let base = Spanned {
+                value: Expr::FnCall(FnCall {
+                    path: Spanned::new(ModPath::new(name, vec![]), id_span),
                     args: None,
                 }),
-                id_span,
-            );
-            return Spanned(
-                Expr::BufSet {
+                span_id: id_span,
+            };
+            return Spanned {
+                value: Expr::BufSet {
                     buf: Box::new(base),
                     index: Box::new(index),
                     value: Box::new(value),
                 },
-                merge_spans(id_span, end_span, cursor),
-            );
+                span_id: merge_spans(id_span, end_span, cursor),
+            };
         }
         // BufGet — return as expression
-        let base = Spanned(
-            Expr::FnCall(FnCall {
-                path: ModPath::new(name, vec![], id_span),
+        let base = Spanned {
+            value: Expr::FnCall(FnCall {
+                path: Spanned::new(ModPath::new(name, vec![]), id_span),
                 args: None,
             }),
-            id_span,
-        );
+            span_id: id_span,
+        };
         let end_span = last_consumed_span(cursor);
-        return Spanned(
-            Expr::BufGet {
+        return Spanned {
+            value: Expr::BufGet {
                 buf: Box::new(base),
                 index: Box::new(index),
             },
-            merge_spans(id_span, end_span, cursor),
-        );
+            span_id: merge_spans(id_span, end_span, cursor),
+        };
     }
 
     // ── TupleSet: name.N: value or TupleGet: name.N ──
@@ -445,55 +502,58 @@ fn parse_id_atom(cursor: &mut TokenCursor) -> Spanned<Expr> {
             }
             let value = parse_expression(cursor);
             let end_span = last_consumed_span(cursor);
-            let base = Spanned(
-                Expr::FnCall(FnCall {
-                    path: ModPath::new(name, vec![], id_span),
+            let base = Spanned {
+                value: Expr::FnCall(FnCall {
+                    path: Spanned::new(ModPath::new(name, vec![]), id_span),
                     args: None,
                 }),
-                id_span,
-            );
-            return Spanned(
-                Expr::TupleSet {
+                span_id: id_span,
+            };
+            return Spanned {
+                value: Expr::TupleSet {
                     base: Box::new(base),
                     index: idx as usize,
                     value: Box::new(value),
                 },
-                merge_spans(id_span, end_span, cursor),
-            );
+                span_id: merge_spans(id_span, end_span, cursor),
+            };
         }
         // TupleGet — return as expression
-        let base = Spanned(
-            Expr::FnCall(FnCall {
-                path: ModPath::new(name, vec![], id_span),
+        let base = Spanned {
+            value: Expr::FnCall(FnCall {
+                path: Spanned::new(ModPath::new(name, vec![]), id_span),
                 args: None,
             }),
-            id_span,
-        );
+            span_id: id_span,
+        };
         let end_span = last_consumed_span(cursor);
-        return Spanned(
-            Expr::TupleGet {
+        return Spanned {
+            value: Expr::TupleGet {
                 base: Box::new(base),
                 index: idx as usize,
             },
-            merge_spans(id_span, end_span, cursor),
-        );
+            span_id: merge_spans(id_span, end_span, cursor),
+        };
     }
 
     // ── FnCall: name, name(args), name.path(args) ──
     if let Some(path) = crate::path::parse_path(cursor) {
-        let path_span = path.span;
+        let path_span = path.span_id;
         let args = parse_paren_args(cursor);
         cursor.consume_trailing_newline();
         let end_span = last_consumed_span(cursor);
-        return Spanned(
-            Expr::FnCall(FnCall { path, args }),
-            merge_spans(path_span, end_span, cursor),
-        );
+        return Spanned {
+            value: Expr::FnCall(FnCall { path, args }),
+            span_id: merge_spans(path_span, end_span, cursor),
+        };
     }
 
     let span = cursor.current_span();
     cursor.error("expected identifier", span);
-    Spanned(Expr::AnonymousTag(cursor.intern("Error"), span), span)
+    Spanned {
+        value: Expr::AnonymousTag(cursor.intern("Error"), span),
+        span_id: span,
+    }
 }
 
 // ─── Tag-based Atoms: TagCall, AnonymousTag, Tag-rooted FnCall ────────────────
@@ -508,7 +568,7 @@ fn parse_tag_atom(cursor: &mut TokenCursor) -> Spanned<Expr> {
             && let Some(path) = crate::path::parse_tag_variant_path(cursor)
         {
             let variant_name = *path.segments.last().unwrap_or(&path.root);
-            let start_span = path.span;
+            let start_span = path.span_id;
             let args = if cursor.is_at(&Token::ParenOpen) {
                 parse_paren_args(cursor).unwrap_or_default()
             } else {
@@ -516,29 +576,29 @@ fn parse_tag_atom(cursor: &mut TokenCursor) -> Spanned<Expr> {
             };
             let end_span = last_consumed_span(cursor);
             let span = merge_spans(start_span, end_span, cursor);
-            return Spanned(
-                Expr::TagCall(TagCall {
+            return Spanned {
+                value: Expr::TagCall(TagCall {
                     name: variant_name,
                     qual_path: Some(path),
                     args,
                     span,
                 }),
-                span,
-            );
+                span_id: span,
+            };
         }
 
         // Tag-rooted method call: Tag.id[.id...][(args)]
         if matches!(cursor.peek_at(2), Some(Token::Id(_)))
             && let Some(path) = crate::path::parse_tag_path(cursor)
         {
-            let path_span = path.span;
+            let path_span = path.span_id;
             let args = parse_paren_args(cursor);
             cursor.consume_trailing_newline();
             let end_span = last_consumed_span(cursor);
-            return Spanned(
-                Expr::FnCall(FnCall { path, args }),
-                merge_spans(path_span, end_span, cursor),
-            );
+            return Spanned {
+                value: Expr::FnCall(FnCall { path, args }),
+                span_id: merge_spans(path_span, end_span, cursor),
+            };
         }
     }
 
@@ -550,26 +610,66 @@ fn parse_tag_atom(cursor: &mut TokenCursor) -> Spanned<Expr> {
             let args = parse_paren_args(cursor).unwrap_or_default();
             let end_span = last_consumed_span(cursor);
             let span = merge_spans(tag_span, end_span, cursor);
-            return Spanned(
-                Expr::TagCall(TagCall {
+            return Spanned {
+                value: Expr::TagCall(TagCall {
                     name: name_interned,
                     qual_path: None,
                     args,
                     span,
                 }),
-                span,
-            );
+                span_id: span,
+            };
         }
 
-        return Spanned(Expr::AnonymousTag(name_interned, tag_span), tag_span);
+        return Spanned {
+            value: Expr::AnonymousTag(name_interned, tag_span),
+            span_id: tag_span,
+        };
     }
 
     let span = cursor.current_span();
     cursor.error("expected tag", span);
-    Spanned(Expr::AnonymousTag(cursor.intern("Error"), span), span)
+    Spanned {
+        value: Expr::AnonymousTag(cursor.intern("Error"), span),
+        span_id: span,
+    }
 }
 
 // ─── Specific Atom Parsers (stub-mandated signatures) ─────────────────────────
+
+fn parse_list_lit(cursor: &mut TokenCursor) -> Spanned<Expr> {
+    let start_span = cursor.peek_span().unwrap_or_else(|| cursor.current_span());
+    cursor.advance(); // consume [
+
+    cursor.skip_newlines();
+
+    // Empty list
+    if cursor.is_at(&Token::BracketClose) {
+        cursor.advance();
+        let end_span = last_consumed_span(cursor);
+        return Spanned {
+            value: Expr::List(Vec::new()),
+            span_id: merge_spans(start_span, end_span, cursor),
+        };
+    }
+
+    let mut elems = Vec::new();
+    loop {
+        cursor.skip_newlines();
+        elems.push(parse_expression(cursor));
+        cursor.skip_newlines();
+        if !cursor.eat(&Token::Comma) {
+            break;
+        }
+    }
+
+    cursor.expect(&Token::BracketClose);
+    let end_span = last_consumed_span(cursor);
+    Spanned {
+        value: Expr::List(elems),
+        span_id: merge_spans(start_span, end_span, cursor),
+    }
+}
 
 fn parse_tuple_lit_or_alloc_or_group(cursor: &mut TokenCursor) -> Spanned<Expr> {
     let start_span = cursor.peek_span().unwrap_or_else(|| cursor.current_span());
@@ -581,10 +681,10 @@ fn parse_tuple_lit_or_alloc_or_group(cursor: &mut TokenCursor) -> Spanned<Expr> 
     if cursor.is_at(&Token::ParenClose) {
         cursor.advance();
         let end_span = last_consumed_span(cursor);
-        return Spanned(
-            Expr::TupleLit(Vec::new()),
-            merge_spans(start_span, end_span, cursor),
-        );
+        return Spanned {
+            value: Expr::TupleLit(Vec::new()),
+            span_id: merge_spans(start_span, end_span, cursor),
+        };
     }
 
     let first = parse_expression(cursor);
@@ -602,13 +702,13 @@ fn parse_tuple_lit_or_alloc_or_group(cursor: &mut TokenCursor) -> Spanned<Expr> 
         };
         cursor.expect(&Token::ParenClose);
         let end_span = last_consumed_span(cursor);
-        return Spanned(
-            Expr::TupleAlloc {
+        return Spanned {
+            value: Expr::TupleAlloc {
                 init: Box::new(first),
                 size,
             },
-            merge_spans(start_span, end_span, cursor),
-        );
+            span_id: merge_spans(start_span, end_span, cursor),
+        };
     }
 
     // Single element with no comma → grouped expression
@@ -630,10 +730,10 @@ fn parse_tuple_lit_or_alloc_or_group(cursor: &mut TokenCursor) -> Spanned<Expr> 
 
     cursor.expect(&Token::ParenClose);
     let end_span = last_consumed_span(cursor);
-    Spanned(
-        Expr::TupleLit(elems),
-        merge_spans(start_span, end_span, cursor),
-    )
+    Spanned {
+        value: Expr::TupleLit(elems),
+        span_id: merge_spans(start_span, end_span, cursor),
+    }
 }
 
 fn parse_take_ptr(cursor: &mut TokenCursor) -> Spanned<Expr> {
@@ -641,11 +741,11 @@ fn parse_take_ptr(cursor: &mut TokenCursor) -> Spanned<Expr> {
         .advance()
         .expect("peek confirmed '@' token before parse_take_ptr"); // @
     let inner = parse_expression(cursor);
-    let end_span = inner.1;
-    Spanned(
-        Expr::TakePtr(Box::new(inner)),
-        merge_spans(start_span, end_span, cursor),
-    )
+    let end_span = inner.span_id;
+    Spanned {
+        value: Expr::TakePtr(Box::new(inner)),
+        span_id: merge_spans(start_span, end_span, cursor),
+    }
 }
 
 fn parse_take_ref(cursor: &mut TokenCursor) -> Spanned<Expr> {
@@ -653,11 +753,11 @@ fn parse_take_ref(cursor: &mut TokenCursor) -> Spanned<Expr> {
         .advance()
         .expect("peek confirmed '^' token before parse_take_ref"); // ^
     let inner = parse_expression(cursor);
-    let end_span = inner.1;
-    Spanned(
-        Expr::TakeRef(Box::new(inner)),
-        merge_spans(start_span, end_span, cursor),
-    )
+    let end_span = inner.span_id;
+    Spanned {
+        value: Expr::TakeRef(Box::new(inner)),
+        span_id: merge_spans(start_span, end_span, cursor),
+    }
 }
 
 fn parse_deref(cursor: &mut TokenCursor) -> Spanned<Expr> {
@@ -665,11 +765,11 @@ fn parse_deref(cursor: &mut TokenCursor) -> Spanned<Expr> {
         .advance()
         .expect("peek confirmed '*' token before parse_deref"); // *
     let inner = parse_expression(cursor);
-    let end_span = inner.1;
-    Spanned(
-        Expr::Deref(Box::new(inner)),
-        merge_spans(start_span, end_span, cursor),
-    )
+    let end_span = inner.span_id;
+    Spanned {
+        value: Expr::Deref(Box::new(inner)),
+        span_id: merge_spans(start_span, end_span, cursor),
+    }
 }
 
 fn parse_self_ref(cursor: &mut TokenCursor) -> Spanned<Expr> {
@@ -683,11 +783,17 @@ fn parse_self_ref(cursor: &mut TokenCursor) -> Spanned<Expr> {
         && let Some((Token::Id(_field), field_span)) = cursor.advance()
     {
         let merged_span = merge_spans(start, field_span, cursor);
-        return Spanned(Expr::SelfRef(merged_span), merged_span);
+        return Spanned {
+            value: Expr::SelfRef(merged_span),
+            span_id: merged_span,
+        };
     }
 
     // Bare self
-    Spanned(Expr::SelfRef(start), start)
+    Spanned {
+        value: Expr::SelfRef(start),
+        span_id: start,
+    }
 }
 
 // ─── Infix / Postfix ─────────────────────────────────────────────────────────
@@ -728,14 +834,14 @@ fn apply_postfix(
         cursor.advance(); // Dot
         cursor.advance(); // Int
         let end_span = last_consumed_span(cursor);
-        let lhs_span = lhs.1;
-        return Ok(Spanned(
-            Expr::TupleGet {
+        let lhs_span = lhs.span_id;
+        return Ok(Spanned {
+            value: Expr::TupleGet {
                 base: Box::new(lhs),
                 index: n as usize,
             },
-            merge_spans(lhs_span, end_span, cursor),
-        ));
+            span_id: merge_spans(lhs_span, end_span, cursor),
+        });
     }
 
     // .(expr) → BufGet
@@ -745,14 +851,14 @@ fn apply_postfix(
         let index = parse_expression(cursor);
         cursor.expect(&Token::ParenClose);
         let end_span = last_consumed_span(cursor);
-        let lhs_span = lhs.1;
-        return Ok(Spanned(
-            Expr::BufGet {
+        let lhs_span = lhs.span_id;
+        return Ok(Spanned {
+            value: Expr::BufGet {
                 buf: Box::new(lhs),
                 index: Box::new(index),
             },
-            merge_spans(lhs_span, end_span, cursor),
-        ));
+            span_id: merge_spans(lhs_span, end_span, cursor),
+        });
     }
 
     // as Type → Cast
@@ -762,14 +868,14 @@ fn apply_postfix(
             Some((Token::Tag(name), _)) => {
                 let ty = cursor.intern(name);
                 let end_span = last_consumed_span(cursor);
-                let lhs_span = lhs.1;
-                return Ok(Spanned(
-                    Expr::Cast {
+                let lhs_span = lhs.span_id;
+                return Ok(Spanned {
+                    value: Expr::Cast {
                         expr: Box::new(lhs),
                         ty,
                     },
-                    merge_spans(lhs_span, end_span, cursor),
-                ));
+                    span_id: merge_spans(lhs_span, end_span, cursor),
+                });
             }
             _ => {
                 cursor.error("expected type name after 'as'", cursor.current_span());
@@ -787,27 +893,27 @@ fn parse_loop_or_control(cursor: &mut TokenCursor) -> Option<Spanned<Expr>> {
 
     if let Some(if_expr) = control::parse_if_expr(cursor, parse_expression as ExprFn) {
         let end_span = last_consumed_span(cursor);
-        return Some(Spanned(
-            Expr::If(if_expr),
-            merge_spans(start_span, end_span, cursor),
-        ));
+        return Some(Spanned {
+            value: Expr::If(if_expr),
+            span_id: merge_spans(start_span, end_span, cursor),
+        });
     }
 
     if let Some(when_expr) = control::parse_when_expr(cursor, parse_expression as ExprFn) {
         cursor.consume_trailing_newline();
         let end_span = last_consumed_span(cursor);
-        return Some(Spanned(
-            Expr::When(when_expr),
-            merge_spans(start_span, end_span, cursor),
-        ));
+        return Some(Spanned {
+            value: Expr::When(when_expr),
+            span_id: merge_spans(start_span, end_span, cursor),
+        });
     }
 
     if let Some(loop_expr) = control::parse_loop_expr(cursor, parse_expression as ExprFn) {
         let end_span = last_consumed_span(cursor);
-        return Some(Spanned(
-            Expr::Loop(loop_expr),
-            merge_spans(start_span, end_span, cursor),
-        ));
+        return Some(Spanned {
+            value: Expr::Loop(loop_expr),
+            span_id: merge_spans(start_span, end_span, cursor),
+        });
     }
 
     None
@@ -832,7 +938,8 @@ fn parse_format_string_expr(cursor: &mut TokenCursor) -> Spanned<Expr> {
             Some(Token::FormatInterpStart) => {
                 cursor.advance();
                 let expr = parse_expression(cursor);
-                parts.push(FormatPart::Expr(Box::new(expr)));
+                let expr_span = expr.span_id;
+                parts.push(FormatPart::Expr(Box::new(expr), expr_span));
                 cursor.expect(&Token::FormatInterpEnd);
                 cursor.advance_pop();
             }
@@ -840,19 +947,23 @@ fn parse_format_string_expr(cursor: &mut TokenCursor) -> Spanned<Expr> {
                 cursor.advance(); // consume closing "
                 cursor.advance_drop();
                 let end_span = last_consumed_span(cursor);
-                return Spanned(
-                    Expr::FormatString(FormatString { parts }),
-                    merge_spans(start_span, end_span, cursor),
-                );
+                let fmt_span = merge_spans(start_span, end_span, cursor);
+                return Spanned {
+                    value: Expr::FormatString(FormatString {
+                        parts,
+                        span: fmt_span,
+                    }),
+                    span_id: fmt_span,
+                };
             }
             Some(Token::UnterminatedFormatString) | None => {
                 cursor.advance_drop();
                 let span = cursor.current_span();
                 cursor.error("unterminated format string", span);
-                return Spanned(
-                    Expr::FormatString(FormatString { parts }),
-                    merge_spans(start_span, span, cursor),
-                );
+                return Spanned {
+                    value: Expr::FormatString(FormatString { parts, span }),
+                    span_id: merge_spans(start_span, span, cursor),
+                };
             }
             _ => {
                 let span = cursor.current_span();
@@ -871,73 +982,112 @@ fn parse_asm_expr(cursor: &mut TokenCursor) -> Spanned<Expr> {
     // expect (
     if !cursor.eat(&Token::ParenOpen) {
         cursor.error("expected '(' after 'asm'", cursor.current_span());
-        return Spanned(
-            Expr::AnonymousTag(cursor.intern("Error"), start_span),
-            start_span,
-        );
+        return Spanned {
+            value: Expr::AnonymousTag(cursor.intern("Error"), start_span),
+            span_id: start_span,
+        };
     }
 
-    // first string literal = template
+    // first argument = template string
     let template = match cursor.advance() {
         Some((Token::String(s), _span)) => Intern::<String>::from_ref(s),
         _ => {
             cursor.error("expected assembly template string", cursor.current_span());
-            return Spanned(
-                Expr::AnonymousTag(cursor.intern("Error"), start_span),
-                start_span,
-            );
+            return Spanned {
+                value: Expr::AnonymousTag(cursor.intern("Error"), start_span),
+                span_id: start_span,
+            };
         }
     };
 
-    // expect comma
-    if !cursor.eat(&Token::Comma) {
-        cursor.error("expected ',' after asm template", cursor.current_span());
-        return Spanned(
-            Expr::AnonymousTag(cursor.intern("Error"), start_span),
-            start_span,
-        );
-    }
-
-    // second string literal = constraints
-    let constraints = match cursor.advance() {
-        Some((Token::String(s), _span)) => Intern::<String>::from_ref(s),
-        _ => {
-            cursor.error("expected constraints string", cursor.current_span());
-            return Spanned(
-                Expr::AnonymousTag(cursor.intern("Error"), start_span),
-                start_span,
-            );
-        }
-    };
-
-    // parse optional comma-separated operand expressions
+    // parse optional comma-separated constraint list and operands
+    let mut constraints = Vec::new();
     let mut operands = Vec::new();
-    while cursor.eat(&Token::Comma) {
-        // allow trailing comma before )
-        if cursor.is_at(&Token::ParenClose) {
-            break;
+
+    if cursor.eat(&Token::Comma) {
+        // Skip indent/dedent tokens that appear after newlines (the
+        // indent-aware lexer produces these; significant_pos only skips
+        // Newline, not Indent/Dedent).
+        while matches!(cursor.peek(), Some(Token::Indent) | Some(Token::Dedent)) {
+            cursor.advance();
         }
-        operands.push(parse_expression(cursor));
+
+        // Try to parse a constraint list literal `[...]` first
+        if cursor.is_at(&Token::BracketOpen) {
+            // Parse constraint list: `[Constraint.Output(...), ...]`
+            cursor.advance(); // eat [
+            if !cursor.is_at(&Token::BracketClose) {
+                loop {
+                    // Skip indent/dedent tokens between constraints (multi-line list)
+                    while matches!(cursor.peek(), Some(Token::Indent) | Some(Token::Dedent)) {
+                        cursor.advance();
+                    }
+                    constraints.push(parse_expression(cursor));
+                    if !cursor.eat(&Token::Comma) {
+                        break;
+                    }
+                }
+            }
+            // Skip trailing indent/dedent before the closing bracket
+            while matches!(cursor.peek(), Some(Token::Indent) | Some(Token::Dedent)) {
+                cursor.advance();
+            }
+            cursor.expect(&Token::BracketClose);
+
+            // Parse remaining operands after the constraint list
+            while cursor.eat(&Token::Comma) {
+                // Skip indent tokens after commas
+                while matches!(cursor.peek(), Some(Token::Indent) | Some(Token::Dedent)) {
+                    cursor.advance();
+                }
+                if cursor.is_at(&Token::ParenClose) {
+                    break;
+                }
+                operands.push(parse_expression(cursor));
+            }
+        } else {
+            // No constraint list — everything after comma is operands
+            // Skip indent tokens that may appear after newlines
+            while matches!(cursor.peek(), Some(Token::Indent) | Some(Token::Dedent)) {
+                cursor.advance();
+            }
+            if !cursor.is_at(&Token::ParenClose) {
+                operands.push(parse_expression(cursor));
+                while cursor.eat(&Token::Comma) {
+                    if cursor.is_at(&Token::ParenClose) {
+                        break;
+                    }
+                    operands.push(parse_expression(cursor));
+                }
+            }
+        }
     }
 
     // expect )
     if !cursor.eat(&Token::ParenClose) {
         cursor.error("expected ')' after asm operands", cursor.current_span());
-        return Spanned(
-            Expr::AnonymousTag(cursor.intern("Error"), start_span),
-            start_span,
-        );
+        return Spanned {
+            value: Expr::AnonymousTag(cursor.intern("Error"), start_span),
+            span_id: start_span,
+        };
+    }
+
+    // Consume any trailing dedent tokens that were produced by the indent-aware lexer
+    // for arguments inside the `(...)`. These dedents should not leak out to the enclosing
+    // body parser.
+    while matches!(cursor.peek(), Some(Token::Dedent)) {
+        cursor.advance();
     }
 
     let end_span = last_consumed_span(cursor);
 
-    Spanned(
-        Expr::Asm(AsmExpr {
+    Spanned {
+        value: Expr::Asm(AsmExpr {
             template,
             constraints,
             operands,
             span: merge_spans(start_span, end_span, cursor),
         }),
-        merge_spans(start_span, end_span, cursor),
-    )
+        span_id: merge_spans(start_span, end_span, cursor),
+    }
 }

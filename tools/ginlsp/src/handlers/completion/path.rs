@@ -16,6 +16,41 @@ pub(crate) fn use_completions(
     let col = position.character as usize;
     let before_cursor = &line_text[..col.min(line_text.len())];
 
+    // Check for `.()` bundle pattern — cursor is inside/after `.()`
+    if let Some(dot_paren_pos) = before_cursor.rfind(".(") {
+        let module_path = &line_text[..dot_paren_pos].trim();
+        // Extract the module name: it's after `use ` and before `.()`
+        if let Some(use_end) = module_path.rfind("use ") {
+            let mod_name = module_path[use_end + 4..].trim();
+            let partial = &before_cursor[dot_paren_pos + 2..];
+            return Some(complete_bundle_members(
+                file_uri, config, mod_name, partial, position, false,
+            ));
+        }
+    }
+
+    // Check for `'.'` after a module path (e.g. `use 'arch'.|`).
+    // Offer public symbols from the module, wrapping selection in `.()`.
+    // Match when the cursor is right after `.` and there's a quoted module path before it.
+    let after_quote_dot = before_cursor
+        .strip_suffix(".")
+        .and_then(|s| s.rfind('\''))
+        .is_some();
+    if after_quote_dot {
+        // Find the module name between `use ` and the closing quote before `.`
+        if let Some(quote_start) = before_cursor.rfind('\'') {
+            let before_quote = before_cursor[..quote_start].trim();
+            if let Some(use_end) = before_quote.rfind("use ") {
+                let mod_name = before_quote[use_end + 4..].trim();
+                if !mod_name.is_empty() {
+                    return Some(complete_bundle_members(
+                        file_uri, config, mod_name, "", position, true,
+                    ));
+                }
+            }
+        }
+    }
+
     if let Some(quote_pos) = before_cursor.rfind('\'') {
         let partial = &before_cursor[quote_pos + 1..];
         return Some(complete_local_paths(
@@ -23,10 +58,120 @@ pub(crate) fn use_completions(
         ));
     }
 
+    // Determine the token currently being typed (after `use `).
+    let token_start = before_cursor
+        .rfind(|c: char| c.is_whitespace() || c == ',')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let token = before_cursor[token_start..].trim();
+
+    // Bare identifier (no dot, no quote): offer current-module public symbols
+    // alongside dependency names, unless the token matches a known dep exactly.
+    if !token.contains('.') {
+        let dep_names = dependency_names(file_uri, config);
+        let is_known_dep = !token.is_empty() && dep_names.iter().any(|n| n == token);
+        if !is_known_dep {
+            let mut items: Vec<CompletionItem> = dep_names
+                .into_iter()
+                .map(|name| CompletionItem {
+                    label: name.clone(),
+                    kind: Some(CompletionItemKind::MODULE),
+                    detail: Some("dependency".to_string()),
+                    ..Default::default()
+                })
+                .collect();
+            items.extend(complete_current_module_symbols(
+                file_uri,
+                position,
+                token_start,
+                token,
+            ));
+            return Some(items);
+        }
+    }
+
     // Non-quoted path: dependency root (`use dep`) or nested folder modules (`use dep.seg1.seg2`).
     Some(complete_package_paths(
         file_uri, config, line_text, position,
     ))
+}
+
+fn dependency_names(file_uri: &Url, config: Option<&flask::FlaskConfigHandle>) -> Vec<String> {
+    if let Some(handle) = config {
+        let cfg = handle.read();
+        return cfg
+            .dependency_names()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
+    }
+
+    let file_path = match file_uri.to_file_path() {
+        Ok(p) => p,
+        Err(_) => return vec![],
+    };
+    let file_dir = match file_path.parent() {
+        Some(d) => d,
+        None => return vec![],
+    };
+
+    match flask::FlaskConfig::from_directory(file_dir) {
+        Some(cfg) => cfg
+            .dependency_names()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect(),
+        None => vec![],
+    }
+}
+
+fn complete_current_module_symbols(
+    file_uri: &Url,
+    position: Position,
+    token_start: usize,
+    partial: &str,
+) -> Vec<CompletionItem> {
+    let file_path = match file_uri.to_file_path() {
+        Ok(p) => p,
+        Err(_) => return vec![],
+    };
+    let file_dir = match file_path.parent() {
+        Some(d) => d,
+        None => return vec![],
+    };
+
+    let (_cfg, pkg_dir) = match flask::FlaskConfig::find_package_config(file_dir) {
+        Some(result) => result,
+        None => return vec![],
+    };
+
+    let mut items: Vec<CompletionItem> = Vec::new();
+
+    for sym in resolve::list_public_symbols(&pkg_dir) {
+        if !sym.starts_with(partial) {
+            continue;
+        }
+        items.push(CompletionItem {
+            label: sym.clone(),
+            kind: Some(CompletionItemKind::FUNCTION),
+            detail: Some("public symbol".to_string()),
+            text_edit: Some(tower_lsp::lsp_types::CompletionTextEdit::Edit(
+                tower_lsp::lsp_types::TextEdit {
+                    range: Range {
+                        start: Position {
+                            line: position.line,
+                            character: token_start as u32,
+                        },
+                        end: position,
+                    },
+                    new_text: sym,
+                },
+            )),
+            ..Default::default()
+        });
+    }
+
+    items
 }
 
 fn complete_package_paths(
@@ -240,27 +385,13 @@ fn complete_local_paths(
         }
 
         let path = entry.path();
-        let is_dir = path.is_dir();
-        let is_gin = path.extension().is_some_and(|e| e == "gin");
-
-        if !is_dir && !is_gin {
+        if !path.is_dir() {
             continue;
         }
 
-        let insert_text = if is_dir {
-            format!("{prefix}{name}/")
-        } else {
-            let stem = path.file_stem().unwrap_or_default().to_string_lossy();
-            format!("{prefix}{stem}")
-        };
-
-        let label = insert_text.clone();
-
-        let kind = if is_dir {
-            CompletionItemKind::FOLDER
-        } else {
-            CompletionItemKind::FILE
-        };
+        let insert_text = format!("{prefix}{name}'");
+        let label = format!("{prefix}{name}");
+        let kind = CompletionItemKind::FOLDER;
 
         // The text edit range replaces only the partial path after the quote
         let text_edit_range = Range {
@@ -280,11 +411,124 @@ fn complete_local_paths(
                 },
             )),
             kind: Some(kind),
-            detail: Some(if is_dir {
-                "directory".to_string()
-            } else {
-                "gin module".to_string()
-            }),
+            detail: Some("module".to_string()),
+            ..Default::default()
+        });
+    }
+
+    items
+}
+
+/// Complete public symbols from a module for `.()` bundle syntax.
+/// `mod_name` is the module path before `.()` — can be a local path `'arch'`
+/// or a dependency name `core`.
+fn complete_bundle_members(
+    file_uri: &Url,
+    config: Option<&flask::FlaskConfigHandle>,
+    mod_name: &str,
+    partial: &str,
+    position: Position,
+    wrap_in_parens: bool,
+) -> Vec<CompletionItem> {
+    let file_path = match file_uri.to_file_path() {
+        Ok(p) => p,
+        Err(_) => return vec![],
+    };
+    let file_dir = match file_path.parent() {
+        Some(d) => d,
+        None => return vec![],
+    };
+
+    // Resolve the module directory — allow directories without flask.jsonc
+    let mod_dir = if mod_name.starts_with('\'') {
+        let inner = mod_name.trim_matches('\'');
+        file_dir.join(inner)
+    } else {
+        let dep_dir = resolve_dep_dir(file_uri, config, mod_name);
+        match dep_dir {
+            Some(d) => d,
+            None => return vec![],
+        }
+    };
+
+    if !mod_dir.is_dir() {
+        return vec![];
+    }
+
+    // When inside `.()`, parse the partial to find already-listed members
+    // and the current partial word being typed (after the last comma).
+    let (already_listed, current_partial, edit_start_col) = if !wrap_in_parens {
+        // Split by comma to find members already typed and the current partial
+        let parts: Vec<&str> = partial.split(',').map(|s| s.trim()).collect();
+        let (listed, cur) = if parts.is_empty() {
+            (vec![], "")
+        } else {
+            // All but the last are already-listed members
+            let already: Vec<String> = parts[..parts.len().saturating_sub(1)]
+                .iter()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect();
+            let current = parts.last().unwrap_or(&"").trim();
+            (already, current)
+        };
+        // Edit start is from the end of the last comma (or after `(` if no comma)
+        let after_last_comma = partial.rfind(',').map(|i| i + 1).unwrap_or(0);
+        let edit_start = position
+            .character
+            .saturating_sub((partial.len() - after_last_comma) as u32);
+        (listed, cur, edit_start)
+    } else {
+        (vec![], partial, position.character.saturating_sub(1))
+    };
+
+    let text_edit_range = if wrap_in_parens {
+        // Replace from the `.` before cursor to cursor with `.(name)`
+        Range {
+            start: Position {
+                line: position.line,
+                character: edit_start_col,
+            },
+            end: position,
+        }
+    } else {
+        // Replace the current partial word after the last comma / `(`
+        Range {
+            start: Position {
+                line: position.line,
+                character: edit_start_col,
+            },
+            end: position,
+        }
+    };
+
+    let mut items: Vec<CompletionItem> = Vec::new();
+    for sym in resolve::list_public_symbols(&mod_dir) {
+        if !sym.starts_with(current_partial) {
+            continue;
+        }
+        // Skip already-listed members
+        if already_listed.iter().any(|s| s.as_str() == sym.as_str()) {
+            continue;
+        }
+        let new_text = if wrap_in_parens {
+            format!(".({})", sym)
+        } else if partial.contains(',') {
+            // Already has items — space before the name after the comma
+            format!(" {}", sym)
+        } else {
+            sym.clone()
+        };
+        items.push(CompletionItem {
+            label: sym.clone(),
+            kind: Some(CompletionItemKind::FUNCTION),
+            detail: Some(format!("{}.{}", mod_name.trim_matches('\''), sym)),
+            text_edit: Some(tower_lsp::lsp_types::CompletionTextEdit::Edit(
+                tower_lsp::lsp_types::TextEdit {
+                    range: text_edit_range,
+                    new_text,
+                },
+            )),
             ..Default::default()
         });
     }

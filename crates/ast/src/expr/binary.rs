@@ -1,19 +1,21 @@
 use crate::expr::Expr;
-use crate::span::Spanned;
+use crate::span::{SpanId, Spanned};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Binary {
     pub lhs: Box<Spanned<Expr>>,
     pub op: BinOp,
     pub rhs: Box<Spanned<Expr>>,
+    pub span: SpanId,
 }
 
 impl Binary {
-    pub fn new(lhs: Spanned<Expr>, op: BinOp, rhs: Spanned<Expr>) -> Self {
+    pub fn new(lhs: Spanned<Expr>, op: BinOp, rhs: Spanned<Expr>, span: SpanId) -> Self {
         Self {
             lhs: Box::new(lhs),
             op,
             rhs: Box::new(rhs),
+            span,
         }
     }
 }
@@ -46,6 +48,27 @@ pub enum BinOp {
 }
 
 impl BinOp {
+    pub fn symbol(&self) -> &'static str {
+        match self {
+            BinOp::LessThan => "<",
+            BinOp::LessThanOrEqual => "<=",
+            BinOp::GreaterThan => ">",
+            BinOp::GreaterThanOrEqual => ">=",
+            BinOp::Equal => "==",
+            BinOp::NotEqual => "!=",
+            BinOp::Add => "+",
+            BinOp::Divide => "/",
+            BinOp::Multiply => "*",
+            BinOp::Subtract => "-",
+            BinOp::Modulo => "%",
+            BinOp::BitAnd => "&",
+            BinOp::BitOr => "|",
+            BinOp::BitXor => "^",
+            BinOp::ShiftLeft => "<<",
+            BinOp::ShiftRight => ">>",
+        }
+    }
+
     pub fn is_comparison(&self) -> bool {
         matches!(
             self,
@@ -56,5 +79,18 @@ impl BinOp {
                 | BinOp::GreaterThan
                 | BinOp::GreaterThanOrEqual
         )
+    }
+
+    /// Negate a comparison operator. Panics on non-comparison ops.
+    pub fn negate(&self) -> Self {
+        match self {
+            BinOp::LessThan => BinOp::GreaterThanOrEqual,
+            BinOp::LessThanOrEqual => BinOp::GreaterThan,
+            BinOp::GreaterThan => BinOp::LessThanOrEqual,
+            BinOp::GreaterThanOrEqual => BinOp::LessThan,
+            BinOp::Equal => BinOp::NotEqual,
+            BinOp::NotEqual => BinOp::Equal,
+            _ => panic!("negate called on non-comparison op: {self:?}"),
+        }
     }
 }

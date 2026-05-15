@@ -4,15 +4,15 @@ use std::ops::ControlFlow;
 use internment::Intern;
 
 use crate::{
+    Expr, FileAst, FnCall, SymbolAlias, TagCall,
     folder::*,
     path::ModPath,
-    span::SpanId,
-    Expr, FileAst, FnCall, SymbolAlias, TagCall,
+    span::{SpanId, Spanned},
 };
 
 use ControlFlow::Continue;
 
-type AliasMap = HashMap<Intern<String>, ModPath>;
+type AliasMap = HashMap<Intern<String>, Spanned<ModPath>>;
 
 /// Rewrite expressions so imported symbols can be referenced by their bare names.
 pub fn apply_symbol_aliases(ast: &mut FileAst) {
@@ -44,14 +44,13 @@ struct ImportAliasFolder {
 impl Folder for ImportAliasFolder {
     fn fold_expr(&mut self, expr: &mut Expr) -> ControlFlow<()> {
         match expr {
-            Expr::TypeNominal(name, _) => {
-                if let Some(target) = self.alias_map.get(name) {
-                    *expr = Expr::TypeQualified(target.clone());
+            Expr::AnonymousTag(name, span) => {
+                if let Some(_target) = self.alias_map.get(name) {
+                    self.alias_spans.push(*span);
+                    // Encode the target as the path of a TagCall or similar
+                    // expression position. Type expressions are handled in a
+                    // separate pass.
                 }
-                Continue(())
-            }
-            Expr::TypeQualified(path) => {
-                apply_alias_to_mod_path(path, &self.alias_map);
                 Continue(())
             }
             _ => walk_expr_mut(self, expr),
@@ -59,29 +58,28 @@ impl Folder for ImportAliasFolder {
     }
 
     fn fold_fn_call(&mut self, call: &mut FnCall) -> ControlFlow<()> {
-        if apply_alias_to_mod_path(&mut call.path, &self.alias_map) {
-            self.alias_spans.push(call.path.span);
+        if let Some(span) = apply_alias_to_mod_path(&mut call.path, &self.alias_map) {
+            self.alias_spans.push(span);
         }
         walk_fn_call_mut(self, call)
     }
 
     fn fold_tag_call(&mut self, tc: &mut TagCall) -> ControlFlow<()> {
-        if let Some(path) = tc.qual_path.as_mut() {
+        if let Some(path) = &mut tc.qual_path {
             apply_alias_to_mod_path(path, &self.alias_map);
         }
         walk_tag_call_mut(self, tc)
     }
 }
 
-fn apply_alias_to_mod_path(path: &mut ModPath, alias_map: &AliasMap) -> bool {
+fn apply_alias_to_mod_path(path: &mut ModPath, alias_map: &AliasMap) -> Option<SpanId> {
     if !path.segments.is_empty() {
-        return false;
+        return None;
     }
     if let Some(target) = alias_map.get(&path.root) {
         path.root = target.root;
         path.segments = target.segments.clone();
-        path.span = target.span;
-        return true;
+        return Some(target.span_id);
     }
-    false
+    None
 }

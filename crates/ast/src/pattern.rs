@@ -2,15 +2,16 @@
 //
 // - **Values** — [`Expr`] in `crates/ast/src/expr/mod.rs`.
 // - **For binders** — [`Expr`] on [`crate::expr::ForInLoop`] (`for_loop_pattern_names`).
-// - **`if` / `when` `is` patterns** — structural type [`Expr`] (`TypeNominal` / `TypeQualified` / `TypeGeneric`).
-// - **Bind return / receiver** — same structural type [`Expr`].
+// - **`if` / `when` `is` patterns** — structural [`TypeExpr`] (`Nominal` / `Qualified` / `Generic`).
+// - **Bind return / receiver** — same structural [`TypeExpr`].
 //
-// The parser builds these [`Expr`] nodes directly (`parser::tag::parse_type_expr`).
+// The parser builds these [`TypeExpr`] nodes directly (`parser::tag::parse_type_expr`).
 //
 // Ref: https://matklad.github.io/2025/08/09/zigs-lovely-syntax.html#Everything-Is-an-Expression
 
 use internment::Intern;
 
+use crate::TypeExpr;
 use crate::expr::{Expr, FnCall, Literal};
 use crate::span::Spanned;
 
@@ -26,8 +27,8 @@ pub fn for_loop_pattern_names(pat: &Expr) -> Option<Vec<Intern<String>>> {
         }
         Expr::TupleLit(elems) => {
             let mut out = Vec::with_capacity(elems.len());
-            for Spanned(e, _) in elems {
-                let Expr::FnCall(FnCall { path, args: None }) = e else {
+            for Spanned { value, .. } in elems {
+                let Expr::FnCall(FnCall { path, args: None }) = value else {
                     return None;
                 };
                 if !path.segments.is_empty() {
@@ -48,17 +49,21 @@ pub fn for_loop_single_binding(pat: &Expr) -> Option<Intern<String>> {
 }
 
 /// Root name used for mangling `Receiver.method` (nominal / generic name, or qualified last segment).
-pub fn type_surface_mangle_name(e: &Expr) -> &str {
+pub fn type_surface_mangle_name(e: &TypeExpr) -> &str {
     match e {
-        Expr::TypeNominal(n, _) => n.as_str(),
-        Expr::TypeGeneric { name, .. } => name.as_str(),
-        Expr::TypeQualified(path) => path
+        TypeExpr::Nominal(n, _) => n.as_str(),
+        TypeExpr::Generic { name, .. } => name.as_str(),
+        TypeExpr::Qualified(path) => path
             .segments
             .last()
             .map(|s| s.as_str())
             .unwrap_or(path.root.as_str()),
-        Expr::Lit(Literal::String(s)) => s.as_str(),
-        _ => "_",
+        TypeExpr::Literal(lit, _) => match lit {
+            Literal::String(s) => s.as_str(),
+            Literal::Int(_) => "__literal_int",
+            Literal::Float(_) => "__literal_float",
+            Literal::Number(_) => "__literal_number",
+        },
     }
 }
 
@@ -71,12 +76,11 @@ pub fn literal_value_from_expr(e: &Expr) -> Option<crate::Literal> {
 }
 
 /// Names bound by an `is <type>` pattern (`TypeGeneric` parameter keys), e.g. `Some(v)` → `[v]`.
-/// [`Expr::TypeNominal`] and [`Expr::TypeQualified`] bind no names.
-pub fn pattern_type_binding_names(expr: &Expr) -> Vec<Intern<String>> {
+/// [`TypeExpr::Nominal`] and [`TypeExpr::Qualified`] bind no names.
+pub fn pattern_type_binding_names(expr: &TypeExpr) -> Vec<Intern<String>> {
     match expr {
-        Expr::TypeGeneric { params, .. } => params.iter().map(|(k, _)| *k).collect(),
-        Expr::TypeNominal(..) | Expr::TypeQualified(_) => Vec::new(),
-        _ => Vec::new(),
+        TypeExpr::Generic { params, .. } => params.iter().map(|(k, _)| *k).collect(),
+        TypeExpr::Nominal(..) | TypeExpr::Qualified(_) | TypeExpr::Literal(..) => Vec::new(),
     }
 }
 
@@ -94,7 +98,7 @@ mod tests {
     fn simple_var(name: &str) -> Expr {
         let n = intern(name);
         Expr::FnCall(FnCall {
-            path: ModPath::new(n, Vec::new(), SpanId::new(0)),
+            path: Spanned::new(ModPath::new(n, Vec::new()), SpanId::new(0)),
             args: None,
         })
     }
@@ -109,8 +113,14 @@ mod tests {
     #[test]
     fn for_loop_pattern_tuple_names() {
         let e = Expr::TupleLit(vec![
-            Spanned(simple_var("a"), SpanId::new(1)),
-            Spanned(simple_var("b"), SpanId::new(2)),
+            Spanned {
+                value: simple_var("a"),
+                span_id: SpanId::new(1),
+            },
+            Spanned {
+                value: simple_var("b"),
+                span_id: SpanId::new(2),
+            },
         ]);
         assert_eq!(
             for_loop_pattern_names(&e),
@@ -123,7 +133,7 @@ mod tests {
     fn for_loop_pattern_rejects_calls() {
         let n = intern("f");
         let e = Expr::FnCall(FnCall {
-            path: ModPath::new(n, Vec::new(), SpanId::new(0)),
+            path: Spanned::new(ModPath::new(n, Vec::new()), SpanId::new(0)),
             args: Some(vec![]),
         });
         assert_eq!(for_loop_pattern_names(&e), None);
@@ -131,7 +141,7 @@ mod tests {
 
     #[test]
     fn pattern_type_binding_names_generic() {
-        let e = Expr::TypeGeneric {
+        let e = TypeExpr::Generic {
             name: intern("Some"),
             params: vec![(intern("v"), ParameterKind::Generic)],
             span: SpanId::new(0),
@@ -141,7 +151,7 @@ mod tests {
 
     #[test]
     fn type_surface_mangle_name_nominal() {
-        let e = Expr::TypeNominal(intern("U32"), SpanId::new(1));
+        let e = TypeExpr::Nominal(intern("U32"), SpanId::new(1));
         assert_eq!(type_surface_mangle_name(&e), "U32");
     }
 }

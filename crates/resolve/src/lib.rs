@@ -6,9 +6,9 @@
     clippy::complexity,
     clippy::perf
 )]
-pub mod package_resolver;
-pub mod import_query;
 pub mod file_helpers;
+pub mod import_query;
+pub mod package_resolver;
 
 mod module_graph;
 
@@ -19,8 +19,10 @@ pub use package_resolver::{
 
 // Re-export per-request queries
 pub use import_query::{
-    ImportTarget, default_file_reader, part_index_in_dotted_path, resolve_dep_dir,
-    resolve_dep_hover, resolve_import_at, resolve_symbol_def_span, resolve_symbol_hover,
+    ImportTarget, default_file_reader, find_package_root, part_index_in_dotted_path,
+    resolve_current_module_def_span, resolve_current_module_hover, resolve_dep_dir,
+    resolve_dep_hover, resolve_import_at, resolve_local_symbol_def_span,
+    resolve_local_symbol_hover, resolve_symbol_def_span, resolve_symbol_hover,
 };
 
 // Re-export file helpers

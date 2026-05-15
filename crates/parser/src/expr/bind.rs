@@ -2,8 +2,8 @@ use internment::Intern;
 use lexer::Token;
 
 use ast::{
-    ArchTarget, Bind, BindAttributes, BindValue, Complexity, ComplexityExpr, DocComment, Expr,
-    ModPath, OsTarget, ParameterKind, Parameters, Return, Spanned, type_surface_mangle_name,
+    AttributeItem, Bind, BindAttributes, BindValue, DocComment, Expr, ModPath, ParameterKind,
+    Parameters, Return, Spanned, TypeExpr, type_surface_mangle_name,
 };
 
 use super::ExprFn;
@@ -14,9 +14,9 @@ use crate::tag::{parse_tag_type_params, parse_type_expr};
 
 type ReturnTypePart = (
     Option<Intern<String>>,
-    Option<Box<Spanned<Expr>>>,
+    Option<Box<Spanned<TypeExpr>>>,
     Option<(Intern<String>, Vec<Spanned<Expr>>)>,
-    Option<ModPath>,
+    Option<Spanned<ModPath>>,
 );
 
 pub fn parse_bind(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Bind> {
@@ -57,8 +57,18 @@ pub fn parse_bind(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Bind>
             return None;
         };
 
-        let (value, postfix_doc) = parse_bind_value(cursor, expr_parser);
-        (value, postfix_doc, is_const)
+        // For `:=` (const) binds, Indent means expression continuation,
+        // not block body. For `:` (function) binds, Indent starts a block.
+        if is_const && cursor.is_at(&Token::Indent) {
+            // Const bind with Indent: skip Indent, parse as continuation expr.
+            cursor.skip_indents();
+            let expr = expr_parser(cursor);
+            cursor.eat(&Token::Dedent);
+            (BindValue::Expr(Box::new(expr)), None, true)
+        } else {
+            let (value, postfix_doc) = parse_bind_value(cursor, expr_parser);
+            (value, postfix_doc, is_const)
+        }
     };
 
     let doc = postfix_doc.or(doc_before);
@@ -86,219 +96,52 @@ pub fn parse_bind_attributes(cursor: &mut TokenCursor) -> Option<BindAttributes>
 
     cursor.expect(&Token::BracketOpen)?;
 
-    let mut attrs = BindAttributes::default();
+    let mut items: Vec<AttributeItem> = Vec::new();
 
-    if cursor.eat(&Token::BracketClose) {
-        return Some(attrs);
-    }
-
-    loop {
-        if let Some(attr) = parse_one_attribute(cursor) {
-            if attr.os.is_some() {
-                attrs.os = attr.os;
+    if !cursor.is_at(&Token::BracketClose) {
+        loop {
+            if let Some(item) = parse_one_attribute_item(cursor) {
+                items.push(item);
             }
-            if attr.arch.is_some() {
-                attrs.arch = attr.arch;
+            if cursor.eat(&Token::Comma) {
+                continue;
             }
-            if attr.debug_only {
-                attrs.debug_only = true;
-            }
-            if attr.test {
-                attrs.test = true;
-            }
-            if attr.inline_always {
-                attrs.inline_always = true;
-            }
-            if attr.complexity.is_some() {
-                attrs.complexity = attr.complexity;
-            }
-        }
-
-        if cursor.eat(&Token::Comma) {
-            continue;
-        }
-        if cursor.eat(&Token::BracketClose) {
             break;
         }
-        cursor.error(
-            "expected ',' or ']' in attribute list",
-            cursor.current_span(),
-        );
-        break;
     }
 
+    cursor.expect(&Token::BracketClose);
+
+    let mut attrs = BindAttributes {
+        raw_attributes: Some(items),
+        ..Default::default()
+    };
+    attrs.extract_intrinsic_attributes();
     Some(attrs)
 }
 
-pub(crate) fn parse_one_attribute(cursor: &mut TokenCursor) -> Option<BindAttributes> {
+pub(crate) fn parse_one_attribute_item(cursor: &mut TokenCursor) -> Option<AttributeItem> {
     match cursor.peek()? {
-        Token::Id("os") => {
+        Token::Id(name) => {
+            let name_interned = cursor.intern(name);
+            let name_span = cursor.peek_span()?;
             cursor.advance();
-            cursor.expect(&Token::ParenOpen)?;
-            cursor.expect(&Token::CurlyOpen)?;
 
-            let mut targets = Vec::new();
-            loop {
-                if cursor.is_at(&Token::CurlyClose) {
-                    break;
-                }
-                if let Some(target) = parse_os_target(cursor) {
-                    targets.push(target);
-                }
-                if !cursor.eat(&Token::Comma) {
-                    break;
-                }
+            // Id(...) → function call attribute
+            if cursor.is_at(&Token::ParenOpen) {
+                let args = crate::expr::parse_paren_args(cursor).unwrap_or_default();
+                Some(AttributeItem::Call {
+                    name: name_interned,
+                    name_span,
+                    args,
+                })
+            } else {
+                // bare Id → flag attribute
+                Some(AttributeItem::Flag {
+                    name: name_interned,
+                    span: name_span,
+                })
             }
-
-            cursor.expect(&Token::CurlyClose)?;
-            cursor.expect(&Token::ParenClose)?;
-
-            Some(BindAttributes {
-                os: Some(targets),
-                ..Default::default()
-            })
-        }
-        Token::Id("arch") => {
-            cursor.advance();
-            cursor.expect(&Token::ParenOpen)?;
-            cursor.expect(&Token::CurlyOpen)?;
-
-            let mut targets = Vec::new();
-            loop {
-                if cursor.is_at(&Token::CurlyClose) {
-                    break;
-                }
-                if let Some(target) = parse_arch_target(cursor) {
-                    targets.push(target);
-                }
-                if !cursor.eat(&Token::Comma) {
-                    break;
-                }
-            }
-
-            cursor.expect(&Token::CurlyClose)?;
-            cursor.expect(&Token::ParenClose)?;
-
-            Some(BindAttributes {
-                arch: Some(targets),
-                ..Default::default()
-            })
-        }
-        Token::Id("debug") => {
-            cursor.advance();
-            Some(BindAttributes {
-                debug_only: true,
-                ..Default::default()
-            })
-        }
-        Token::Id("test") => {
-            cursor.advance();
-            Some(BindAttributes {
-                test: true,
-                ..Default::default()
-            })
-        }
-        Token::Id("inline") => {
-            cursor.advance();
-            Some(BindAttributes {
-                inline_always: true,
-                ..Default::default()
-            })
-        }
-        Token::Id("complexity") => {
-            cursor.advance();
-            cursor.expect(&Token::ParenOpen)?;
-
-            let variant_ident = match cursor.peek() {
-                Some(Token::Id(n)) => {
-                    let id = cursor.intern(n);
-                    cursor.advance();
-                    id
-                }
-                Some(Token::Tag(n)) => {
-                    let id = cursor.intern(n);
-                    cursor.advance();
-                    id
-                }
-                _ => {
-                    cursor.error("expected complexity variant", cursor.current_span());
-                    return None;
-                }
-            };
-
-            let complexity = match variant_ident.as_str() {
-                "Constant" => Complexity::Constant,
-                "Logarithmic" | "Linear" | "LogLinear" | "Quadratic" | "Cubic" | "Exponential"
-                | "Factorial" => {
-                    cursor.expect(&Token::ParenOpen)?;
-                    let expr = parse_complexity_expr(cursor)?;
-                    cursor.expect(&Token::ParenClose)?;
-                    match variant_ident.as_str() {
-                        "Logarithmic" => Complexity::Logarithmic(expr),
-                        "Linear" => Complexity::Linear(expr),
-                        "LogLinear" => Complexity::LogLinear(expr),
-                        "Quadratic" => Complexity::Quadratic(expr),
-                        "Cubic" => Complexity::Cubic(expr),
-                        "Exponential" => Complexity::Exponential(expr),
-                        "Factorial" => Complexity::Factorial(expr),
-                        _ => unreachable!(),
-                    }
-                }
-                other => {
-                    cursor.error(
-                        format!("unknown complexity variant: {}", other),
-                        cursor.current_span(),
-                    );
-                    return None;
-                }
-            };
-
-            cursor.expect(&Token::ParenClose)?;
-
-            Some(BindAttributes {
-                complexity: Some(complexity),
-                ..Default::default()
-            })
-        }
-        _ => None,
-    }
-}
-
-pub(crate) fn parse_os_target(cursor: &mut TokenCursor) -> Option<OsTarget> {
-    match cursor.peek()? {
-        Token::Id("linux") => {
-            cursor.advance();
-            Some(OsTarget::Linux)
-        }
-        Token::Id("macos") => {
-            cursor.advance();
-            Some(OsTarget::MacOS)
-        }
-        Token::Id("windows") => {
-            cursor.advance();
-            Some(OsTarget::Windows)
-        }
-        Token::Id("unknown") => {
-            cursor.advance();
-            Some(OsTarget::Unknown)
-        }
-        _ => None,
-    }
-}
-
-pub(crate) fn parse_arch_target(cursor: &mut TokenCursor) -> Option<ArchTarget> {
-    match cursor.peek()? {
-        Token::Id("x86_64") => {
-            cursor.advance();
-            Some(ArchTarget::X86_64)
-        }
-        Token::Id("arm64") => {
-            cursor.advance();
-            Some(ArchTarget::Arm64)
-        }
-        Token::Id("wasm32") => {
-            cursor.advance();
-            Some(ArchTarget::Wasm32)
         }
         _ => None,
     }
@@ -328,10 +171,13 @@ fn parse_return_type_part(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Retu
                     return (None, None, Some((variant_name, args)), Some(path));
                 }
             }
-            let span = path.span;
+            let span = path.span_id;
             return (
                 None,
-                Some(Box::new(Spanned(Expr::TypeQualified(path), span))),
+                Some(Box::new(Spanned {
+                    value: TypeExpr::Qualified(path),
+                    span_id: span,
+                })),
                 None,
                 None,
             );
@@ -359,14 +205,14 @@ fn parse_return_type_part(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Retu
             let span = cursor.merge_span(name_span, end_span);
             return (
                 None,
-                Some(Box::new(Spanned(
-                    Expr::TypeGeneric {
+                Some(Box::new(Spanned {
+                    value: TypeExpr::Generic {
                         name,
                         params: params.into_iter().collect(),
                         span,
                     },
-                    span,
-                ))),
+                    span_id: span,
+                })),
                 None,
                 None,
             );
@@ -384,14 +230,14 @@ fn parse_return_type_part(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Retu
             if let Some(type_params) = try_args_as_type_params(&args) {
                 return (
                     None,
-                    Some(Box::new(Spanned(
-                        Expr::TypeGeneric {
+                    Some(Box::new(Spanned {
+                        value: TypeExpr::Generic {
                             name,
                             params: type_params,
                             span: name_span,
                         },
-                        name_span,
-                    ))),
+                        span_id: name_span,
+                    })),
                     None,
                     None,
                 );
@@ -402,22 +248,26 @@ fn parse_return_type_part(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Retu
 
     (
         None,
-        Some(Box::new(Spanned(
-            Expr::TypeNominal(name, name_span),
-            name_span,
-        ))),
+        Some(Box::new(Spanned {
+            value: TypeExpr::Nominal(name, name_span),
+            span_id: name_span,
+        })),
         None,
         None,
     )
 }
 
-/// If every arg is a "type-like" expression (bare lowercase identifier, bare
-/// tag, qualified type, or already a type expression), convert to declaration
-/// parameters suitable for `Expr::TypeGeneric`. Otherwise return `None` so the
-/// caller can fall back to the value-annotation path (e.g., `Maybe(3)`).
+/// If every arg is a "type-like" expression (bare lowercase identifier or bare
+/// tag), convert to declaration parameters suitable for `TypeExpr::Generic`.
+/// Otherwise return `None` so the caller can fall back to the value-annotation
+/// path (e.g., `Maybe(3)`).
 fn try_args_as_type_params(args: &[Spanned<Expr>]) -> Option<Vec<(Intern<String>, ParameterKind)>> {
     let mut out = Vec::with_capacity(args.len());
-    for Spanned(arg, span) in args {
+    for Spanned {
+        value: arg,
+        span_id: span,
+    } in args
+    {
         match arg {
             // Bare lowercase identifier, e.g. `x` in `Range[x]` → type-variable
             // *introduction* (matches how `Range[x]` parses in receiver and
@@ -428,19 +278,12 @@ fn try_args_as_type_params(args: &[Spanned<Expr>]) -> Option<Vec<(Intern<String>
             }
             // Bare capitalized tag, e.g. `Int` in `Range(Int)` → concrete
             // instantiation. Tagged so the typechecker resolves and validates it.
-            Expr::AnonymousTag(n, s) => {
-                let sp = Spanned(Expr::TypeNominal(*n, *s), *s);
+            Expr::AnonymousTag(n, _) => {
+                let sp = Spanned {
+                    value: Expr::TypeNominal(*n, *span),
+                    span_id: *span,
+                };
                 out.push((*n, ParameterKind::Tagged(Box::new(sp))));
-            }
-            // Already a type-surface expression.
-            Expr::TypeNominal(n, _) => {
-                let sp = Spanned(arg.clone(), *span);
-                out.push((*n, ParameterKind::Tagged(Box::new(sp))));
-            }
-            Expr::TypeGeneric { name, .. }
-            | Expr::TypeQualified(ast::ModPath { root: name, .. }) => {
-                let sp = Spanned(arg.clone(), *span);
-                out.push((*name, ParameterKind::Tagged(Box::new(sp))));
             }
             _ => return None,
         }
@@ -489,7 +332,10 @@ fn parse_bind_value(
 
         let ret = parse_return(cursor, expr_parser).unwrap_or_else(|| {
             cursor.error("expected 'return' after bind body", cursor.current_span());
-            Return(None)
+            Return {
+                value: None,
+                span_id: cursor.current_span(),
+            }
         });
 
         return (BindValue::Body { exprs, ret }, None);
@@ -545,8 +391,14 @@ fn parse_one_param(
     // Positional: bare Tag → (tag_name, ParameterKind::Tagged(tag))
     if matches!(cursor.peek(), Some(Token::Tag(_))) {
         let sp = parse_type_expr(cursor, expr_parser)?;
-        let key = Intern::<String>::from_ref(type_surface_mangle_name(&sp.0));
-        return Some((key, ParameterKind::Tagged(Box::new(sp))));
+        let key = Intern::<String>::from_ref(type_surface_mangle_name(&sp.value));
+        return Some((
+            key,
+            ParameterKind::Tagged(Box::new(Spanned {
+                value: sp.value.into(),
+                span_id: sp.span_id,
+            })),
+        ));
     }
 
     // Named: id [Tag | id | : expr]
@@ -578,7 +430,7 @@ pub(crate) fn parse_doc_comment(cursor: &mut TokenCursor) -> Option<DocComment> 
 
     // Fast path: single-line doc comment (most common)
     if !matches!(cursor.peek(), Some(Token::DocComment(_))) {
-        let doc = DocComment(first);
+        let doc = DocComment { value: first };
         return if doc.is_empty() { None } else { Some(doc) };
     }
 
@@ -594,7 +446,9 @@ pub(crate) fn parse_doc_comment(cursor: &mut TokenCursor) -> Option<DocComment> 
         lines.push(stripped);
     }
 
-    let doc = DocComment(lines.join("\n"));
+    let doc = DocComment {
+        value: lines.join("\n"),
+    };
     if doc.is_empty() { None } else { Some(doc) }
 }
 
@@ -615,10 +469,10 @@ fn parse_body_exprs(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Vec<Spanne
                             let start_span = cursor.span_at(start_pos);
                             cursor.consume_trailing_newline();
                             let end_span = cursor.last_consumed_span();
-                            exprs.push(Spanned(
-                                Expr::Bind(Box::new(bind)),
-                                cursor.merge_span(start_span, end_span),
-                            ));
+                            exprs.push(Spanned {
+                                value: Expr::Bind(Box::new(bind)),
+                                span_id: cursor.merge_span(start_span, end_span),
+                            });
                             continue;
                         }
                         // parse_bind failed on Id: — extremely rare, rewind and fall through
@@ -660,45 +514,4 @@ fn can_start_expr(token: &Token) -> bool {
             | Token::While
             | Token::FormatStringDelim
     )
-}
-
-fn parse_complexity_expr(cursor: &mut TokenCursor) -> Option<ComplexityExpr> {
-    let first = parse_complexity_var(cursor)?;
-
-    match cursor.peek() {
-        Some(Token::Star) => {
-            let mut vars = vec![first];
-            while cursor.eat(&Token::Star) {
-                vars.push(parse_complexity_var(cursor)?);
-            }
-            Some(ComplexityExpr::Product(vars))
-        }
-        Some(Token::Plus) => {
-            let mut vars = vec![first];
-            while cursor.eat(&Token::Plus) {
-                vars.push(parse_complexity_var(cursor)?);
-            }
-            Some(ComplexityExpr::Sum(vars))
-        }
-        _ => Some(ComplexityExpr::Var(first)),
-    }
-}
-
-fn parse_complexity_var(cursor: &mut TokenCursor) -> Option<Intern<String>> {
-    match cursor.peek() {
-        Some(Token::Id(n)) => {
-            let id = cursor.intern(n);
-            cursor.advance();
-            Some(id)
-        }
-        Some(Token::Tag(n)) => {
-            let id = cursor.intern(n);
-            cursor.advance();
-            Some(id)
-        }
-        _ => {
-            cursor.error("expected parameter name", cursor.current_span());
-            None
-        }
-    }
 }

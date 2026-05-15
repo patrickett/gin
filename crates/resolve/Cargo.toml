@@ -9,4 +9,3 @@ diagnostic = { workspace = true }
 parser = { workspace = true }
 flask = { workspace = true }
 internment = "0.8"
-typeck = { workspace = true }

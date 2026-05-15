@@ -7,7 +7,6 @@ edition = "2024"
 ast = { workspace = true }
 diagnostic = { workspace = true }
 lexer = { workspace = true }
-typeck = { workspace = true }
 codegen = { workspace = true }
 resolve = { workspace = true }
 ariadne = "0.5.1"

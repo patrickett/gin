@@ -1,5 +1,6 @@
 use crate::expr::Expr;
-use crate::span::Spanned;
+use crate::span::{SpanId, Spanned};
+use crate::TypeExpr;
 
 /// Exhaustive conditional expression.
 ///
@@ -23,20 +24,45 @@ pub struct WhenExpr {
     /// None for condition-based when
     pub subject: Option<Box<Spanned<Expr>>>,
     pub arms: Vec<WhenArm>,
+    pub span: SpanId,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WhenArm {
     /// Boolean condition: `<condition> then <body>`
     Cond {
         condition: Box<Spanned<Expr>>,
         body: Box<Spanned<Expr>>,
+        span: SpanId,
     },
-    /// Pattern match: `is <type> then <body>` — structural type [`Expr`](crate::Expr) on the pattern field.
+    /// Pattern match: `is <type> then <body>` — structural type [`TypeExpr`] on the pattern field.
     Is {
-        pattern: Box<Spanned<Expr>>,
+        pattern: Box<Spanned<TypeExpr>>,
         body: Box<Spanned<Expr>>,
+        span: SpanId,
     },
     /// Fallthrough: `else <body>`
-    Else(Box<Spanned<Expr>>),
+    Else(Box<Spanned<Expr>>, SpanId),
+}
+
+impl std::hash::Hash for WhenArm {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Self::Cond { condition, body, span } => {
+                condition.hash(state);
+                body.hash(state);
+                span.hash(state);
+            }
+            Self::Is { pattern, body, span } => {
+                pattern.hash(state);
+                body.hash(state);
+                span.hash(state);
+            }
+            Self::Else(body, span) => {
+                body.hash(state);
+                span.hash(state);
+            }
+        }
+    }
 }

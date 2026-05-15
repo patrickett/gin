@@ -1,6 +1,6 @@
 use crate::prelude::*;
 use ::ast::{BinOp, Binary};
-use typeck::TyInfer;
+use ast::TyInfer;
 
 impl<'c> Lower<'c> for Binary {
     fn lower(
@@ -18,7 +18,7 @@ impl<'c> Lower<'c> for Binary {
             && self
                 .lhs
                 .as_ref()
-                .infer_ty(&ctx.ty_env.infer_env(ctx))
+                .infer_ty(&ctx.infer_env(ctx))
                 .is_unsigned_int();
 
         Some(match self.op {

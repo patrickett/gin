@@ -1,7 +1,7 @@
 //! Parser tests for method binds with parameterized-type receivers,
 //! e.g. `Range[x].new(start x, end x) Range[x]: (start, end)`.
 
-use ast::{Expr, ParameterKind};
+use ast::{Expr, ParameterKind, TypeExpr};
 use internment::Intern;
 use parser::parse_from_str as parse_str;
 
@@ -32,8 +32,8 @@ fn parses_generic_method_bind_with_typevar_params_and_return() {
     let recv = bind
         .receiver_type_surface()
         .expect("Range.new must have a receiver_type");
-    match &recv.0 {
-        Expr::TypeGeneric { name, params, .. } => {
+    match &recv.value {
+        TypeExpr::Generic { name, params, .. } => {
             assert_eq!(name.as_str(), "Range");
             assert_eq!(params.len(), 1);
             assert_eq!(params[0].0.as_str(), "x");
@@ -52,8 +52,8 @@ fn parses_generic_method_bind_with_typevar_params_and_return() {
     assert_eq!(k1.as_str(), "end");
     for (k, v) in [(*k0, v0), (*k1, v1)] {
         match v {
-            ParameterKind::Tagged(sp) => match &sp.0 {
-                Expr::TypeNominal(n, _) => {
+            ParameterKind::Tagged(sp) => match sp.value.as_type_expr() {
+                Some(TypeExpr::Nominal(n, _)) => {
                     assert_eq!(n.as_str(), "x", "{} param type-var should be x", k.as_str());
                 }
                 other => panic!("{} param should be TypeNominal(x), got {:?}", k, other),
@@ -67,8 +67,8 @@ fn parses_generic_method_bind_with_typevar_params_and_return() {
         .return_tag
         .as_ref()
         .expect("Range.new must have return_tag");
-    match &ret.0 {
-        Expr::TypeGeneric { name, params, .. } => {
+    match &ret.value {
+        TypeExpr::Generic { name, params, .. } => {
             assert_eq!(name.as_str(), "Range");
             assert_eq!(params.len(), 1);
             assert_eq!(params[0].0.as_str(), "x");
@@ -90,8 +90,8 @@ fn parses_method_bind_with_nontypevar_params() {
         .expect("Bool.to_string should be present");
 
     let recv = bind.receiver_type_surface().expect("receiver must exist");
-    match &recv.0 {
-        Expr::TypeNominal(n, _) => assert_eq!(n.as_str(), "Bool"),
+    match &recv.value {
+        TypeExpr::Nominal(n, _) => assert_eq!(n.as_str(), "Bool"),
         other => panic!("receiver should be TypeNominal(Bool), got {:?}", other),
     }
 }
@@ -141,7 +141,7 @@ Range[x].new(start x, end x) Range[x]: (start, end)
         .get(&intern("Range.new"))
         .expect("Range.new bind should exist");
     assert_eq!(
-        bind.doc_comment().map(|doc| doc.0.as_str()),
+        bind.doc_comment().map(|doc| doc.value.as_str()),
         Some("create a new range")
     );
 }

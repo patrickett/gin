@@ -2,25 +2,25 @@
 
 use std::hash::{Hash, Hasher};
 
+use crate::TypeExpr;
 use crate::doc_comment::DocComment;
-use crate::expr::{Expr, Literal};
-use crate::parameter::fmt_type_expr_surface;
+use crate::parameter::{ParameterKind, fmt_type_expr_surface};
 use crate::span::Spanned;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Variant {
     /// this comes from somewhere else its just one of the possible values
     /// holds its own doc comments
-    External(Box<Spanned<Expr>>),
+    External(Box<Spanned<TypeExpr>>),
     /// defined within the current declare
     Local {
         doc_comment: Option<DocComment>,
-        shape: Box<Spanned<Expr>>,
+        shape: Box<Spanned<TypeExpr>>,
     },
 }
 
 impl Variant {
-    pub fn shape(&self) -> &Spanned<Expr> {
+    pub fn shape(&self) -> &Spanned<TypeExpr> {
         match self {
             Variant::External(sp) => sp,
             Variant::Local { shape, .. } => shape,
@@ -30,13 +30,13 @@ impl Variant {
 
 impl std::fmt::Display for Variant {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        fmt_variant_shape_surface(&self.shape().0, f)
+        fmt_variant_shape_surface(&self.shape().value, f)
     }
 }
 
-fn fmt_variant_shape_surface(e: &Expr, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+fn fmt_variant_shape_surface(e: &TypeExpr, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     match e {
-        Expr::TypeGeneric { name, params, .. } => {
+        TypeExpr::Generic { name, params, .. } => {
             write!(f, "{}(", name.as_str())?;
             let mut first = true;
             for (k, v) in params {
@@ -44,17 +44,27 @@ fn fmt_variant_shape_surface(e: &Expr, f: &mut std::fmt::Formatter<'_>) -> std::
                     write!(f, ", ")?;
                 }
                 first = false;
-                write!(f, "{}{v}", k.as_str())?;
+                match v {
+                    ParameterKind::Tagged(sp) => {
+                        if let Some(te) = sp.value.as_type_expr() {
+                            fmt_type_expr_surface(&te, f)?
+                        }
+                    }
+                    ParameterKind::Generic => write!(f, "{}", k.as_str())?,
+                    ParameterKind::Default(expr) => write!(f, "{}: {:?}", k.as_str(), expr)?,
+                }
             }
             write!(f, ")")
         }
-        Expr::Lit(lit) => match lit {
-            Literal::String(s) => write!(f, "'{s}'"),
-            Literal::Int(n) => write!(f, "{n}"),
-            Literal::Float(v) => write!(f, "{v}"),
-            Literal::Number(n) => write!(f, "{n}"),
-        },
-        _ => fmt_type_expr_surface(e, f),
+        TypeExpr::Nominal(name, _) => write!(f, "{}", name.as_str()),
+        TypeExpr::Qualified(path) => {
+            write!(f, "{}", path.root.as_str())?;
+            for seg in &path.segments {
+                write!(f, ".{}", seg.as_str())?;
+            }
+            Ok(())
+        }
+        TypeExpr::Literal(lit, _) => write!(f, "{lit}"),
     }
 }
 

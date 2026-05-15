@@ -10,10 +10,7 @@ use lexer::debug_tokens;
 use parser::parse_source_full;
 use resolve::ParsedFile;
 use std::path::{Path, PathBuf};
-use typeck::TyEnv;
-
 struct TypecheckResult {
-    ty_env: TyEnv,
     symptoms: Vec<Vec<Diagnostic>>,
 }
 
@@ -90,7 +87,7 @@ impl GinCompiler {
             return;
         }
 
-        let merged_ast = match resolve::merge_asts_checked(&files) {
+        let mut merged_ast = match resolve::merge_asts_checked(&files) {
             Ok(m) => m,
             Err(symptoms) => {
                 print_standalone_import_diagnostics(&files, &symptoms);
@@ -106,15 +103,10 @@ impl GinCompiler {
         }
 
         match args.emit {
-            crate::cli::Emit::Mlir => emit_mlir(&files, &merged_ast, &checked.ty_env),
-            crate::cli::Emit::Obj | crate::cli::Emit::Exe => emit_native(
-                &files,
-                &merged_ast,
-                &checked.ty_env,
-                args,
-                &path,
-                is_library,
-            ),
+            crate::cli::Emit::Mlir => emit_mlir(&files, &mut merged_ast),
+            crate::cli::Emit::Obj | crate::cli::Emit::Exe => {
+                emit_native(&files, &mut merged_ast, args, &path, is_library)
+            }
             crate::cli::Emit::Tokens => unreachable!(),
         }
     }
@@ -136,14 +128,18 @@ fn parse(sources: &[(PathBuf, String)]) -> Vec<ParsedFile> {
 
 fn typecheck(files: &[ParsedFile]) -> TypecheckResult {
     let asts: Vec<_> = files.iter().map(|f| f.output.ast.clone()).collect();
-    let ty_env = TyEnv::from_multiple_file_asts(&asts);
 
-    let symptoms = asts
+    // resolve_types embeds diagnostics in each FileAst.
+    // We clone each file, resolve it against the snapshot, then collect diagnostics.
+    let symptoms: Vec<Vec<diagnostic::Diagnostic>> = asts
         .iter()
-        .map(|ast| typeck::analyze_file_with_ty_env(ast, &ty_env))
+        .map(|ast| {
+            let analysis = ast::resolve_types(ast, &asts);
+            analysis.diagnostics
+        })
         .collect();
 
-    TypecheckResult { ty_env, symptoms }
+    TypecheckResult { symptoms }
 }
 
 // Delegates to resolve::collect_gin_files (single source of truth).
@@ -285,12 +281,12 @@ fn print_codegen_diagnostics(files: &[ParsedFile], symptoms: &[Diagnostic]) {
 }
 
 /// Print MLIR text to stdout.
-fn emit_mlir(files: &[ParsedFile], merged_ast: &FileAst, ty_env: &TyEnv) {
+fn emit_mlir(files: &[ParsedFile], merged_ast: &mut FileAst) {
     let (source, label) = match files.first() {
         Some(f) => (f.source.as_str(), path_for_diagnostic_report(&f.path)),
         None => ("", "<stdin>".to_string()),
     };
-    let (result, symptoms) = emit::build_module_text(merged_ast, source, &label, ty_env);
+    let (result, symptoms) = emit::build_module_text(merged_ast, source, &label);
     match result {
         Some(mlir_text) => {
             print_codegen_diagnostics(files, &symptoms);
@@ -305,8 +301,7 @@ fn emit_mlir(files: &[ParsedFile], merged_ast: &FileAst, ty_env: &TyEnv) {
 /// Compile to object file / executable.
 fn emit_native(
     files: &[ParsedFile],
-    merged_ast: &FileAst,
-    ty_env: &TyEnv,
+    merged_ast: &mut FileAst,
     args: &Args,
     path: &Path,
     is_library: bool,
@@ -344,8 +339,7 @@ fn emit_native(
         None => ("", path.to_string_lossy().into_owned()),
     };
     let profile = args.profile.into();
-    let (ok, symptoms) =
-        emit::compile_to_object(merged_ast, &obj_path, profile, source, &label, ty_env);
+    let (ok, symptoms) = emit::compile_to_object(merged_ast, &obj_path, profile, source, &label);
     if !ok {
         print_codegen_diagnostics(files, &symptoms);
         return;

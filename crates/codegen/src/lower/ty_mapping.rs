@@ -1,5 +1,6 @@
+use crate::lower::layout::{ty_byte_size_static, ty_union_discriminant_size};
 use crate::prelude::*;
-use typeck::{Ty, ty_byte_size_static, ty_union_discriminant_size};
+use ast::ty::Ty;
 
 /// Convert a resolved `Ty` to its MLIR `Type` representation.
 pub fn ty_to_mlir<'c>(ty: &Ty, ctx: &'c Context) -> Type<'c> {

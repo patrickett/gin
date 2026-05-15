@@ -2,8 +2,19 @@ use indexmap::IndexMap;
 use internment::Intern;
 use std::fmt;
 
+use crate::TypeExpr;
 use crate::expr::Expr;
 use crate::span::Spanned;
+use crate::ty_state::TyState;
+use crate::type_surface_mangle_name;
+
+/// A single value-level function parameter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParamSlot {
+    pub ty: TyState,
+    /// Default value expression, e.g. `x: 4` in `func(x: 4)`.
+    pub default: Option<Spanned<Expr>>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ParameterKind {
@@ -13,17 +24,17 @@ pub enum ParameterKind {
     Default(Spanned<Expr>),
 }
 
-pub(crate) fn fmt_type_expr_surface(e: &Expr, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+pub(crate) fn fmt_type_expr_surface(e: &TypeExpr, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match e {
-        Expr::TypeNominal(name, _) => write!(f, "{}", name.as_str()),
-        Expr::TypeQualified(path) => {
+        TypeExpr::Nominal(name, _) => write!(f, "{}", name.as_str()),
+        TypeExpr::Qualified(path) => {
             write!(f, "{}", path.root.as_str())?;
             for seg in &path.segments {
                 write!(f, ".{}", seg.as_str())?;
             }
             Ok(())
         }
-        Expr::TypeGeneric { name, params, .. } => {
+        TypeExpr::Generic { name, params, .. } => {
             write!(f, "{}[", name.as_str())?;
             let mut first = true;
             for (k, v) in params.iter() {
@@ -31,18 +42,38 @@ pub(crate) fn fmt_type_expr_surface(e: &Expr, f: &mut fmt::Formatter<'_>) -> fmt
                     write!(f, ", ")?;
                 }
                 first = false;
-                write!(f, "{}{v}", k.as_str())?;
+                match v {
+                    ParameterKind::Tagged(sp) => {
+                        if let Some(te) = sp.value.as_type_expr() {
+                            // Positional type arg (key equals mangled type name):
+                            // just show the type. Named param (key differs): show key + type.
+                            if type_surface_mangle_name(&te) == k.as_str() {
+                                fmt_type_expr_surface(&te, f)?;
+                            } else {
+                                write!(f, "{} ", k.as_str())?;
+                                fmt_type_expr_surface(&te, f)?;
+                            }
+                        } else {
+                            write!(f, "{} <type>", k.as_str())?;
+                        }
+                    }
+                    ParameterKind::Default(expr) => {
+                        write!(f, "{}: {expr:?}", k.as_str())?;
+                    }
+                    ParameterKind::Generic => {
+                        write!(f, "{}", k.as_str())?;
+                    }
+                }
             }
             write!(f, "]")
         }
-        Expr::TupleLit(elems) if elems.is_empty() => write!(f, "()"),
-        _ => write!(f, "<type>"),
+        TypeExpr::Literal(..) => write!(f, "<type>"),
     }
 }
 
-/// Pretty-print a type-surface [`Expr`] (`TypeNominal` / `TypeQualified` / `TypeGeneric`).
-pub fn format_type_surface(e: &Expr) -> String {
-    struct Fmt<'a>(&'a Expr);
+/// Pretty-print a type-surface [`TypeExpr`].
+pub fn format_type_surface(e: &TypeExpr) -> String {
+    struct Fmt<'a>(&'a TypeExpr);
     impl fmt::Display for Fmt<'_> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             fmt_type_expr_surface(self.0, f)
@@ -57,7 +88,11 @@ impl std::fmt::Display for ParameterKind {
             ParameterKind::Generic => Ok(()),
             ParameterKind::Tagged(sp) => {
                 write!(f, " ")?;
-                fmt_type_expr_surface(&sp.0, f)
+                if let Some(te) = sp.value.as_type_expr() {
+                    fmt_type_expr_surface(&te, f)
+                } else {
+                    write!(f, "<type>")
+                }
             }
             ParameterKind::Default(expr) => write!(f, ": {:?}", expr),
         }

@@ -15,7 +15,6 @@ use melior::{Context, dialect::DialectRegistry, ir::Module, pass, utility};
 use span::SpanId;
 use std::path::Path;
 use std::process::Command;
-use typeck::TyEnv;
 
 /// Create a fully-initialized MLIR context with all dialects and LLVM translations.
 fn create_native_context() -> Context {
@@ -229,15 +228,13 @@ pub fn native_from_module(
 ///
 /// Used for `--emit mlir` and other cases where only the textual IR is needed.
 pub fn build_module_text(
-    ast: &FileAst,
+    ast: &mut FileAst,
     source: &str,
     filename: &str,
-    ty_env: &TyEnv,
 ) -> (Option<String>, Vec<Diagnostic>) {
     let context = create_native_context();
 
-    let (source_module, symptoms) =
-        build_module_with_context(&context, ast, source, filename, ty_env);
+    let (source_module, symptoms) = build_module_with_context(&context, ast, source, filename);
 
     let text = source_module.map(|m| m.as_operation().to_string());
     (text, symptoms)
@@ -245,17 +242,16 @@ pub fn build_module_text(
 
 /// Build an MLIR module from the AST, lower to LLVM, and compile to an object file.
 pub fn compile_to_object(
-    ast: &FileAst,
+    ast: &mut FileAst,
     obj_path: &Path,
     profile: Profile,
     source: &str,
     filename: &str,
-    ty_env: &TyEnv,
 ) -> (bool, Vec<Diagnostic>) {
     let context = create_native_context();
 
     let (source_module, lower_symptoms) =
-        build_module_with_context(&context, ast, source, filename, ty_env);
+        build_module_with_context(&context, ast, source, filename);
 
     let mut symptoms = lower_symptoms;
 

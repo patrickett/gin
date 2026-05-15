@@ -1,5 +1,9 @@
 use crate::expr::Expr;
-use crate::span::Spanned;
+use crate::span::{SpanId, Spanned};
 
+// TODO: make this Spanned<Return>
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Return(pub Option<Box<Spanned<Expr>>>);
+pub struct Return {
+    pub value: Option<Box<Spanned<Expr>>>,
+    pub span_id: SpanId,
+}

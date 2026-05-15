@@ -387,7 +387,24 @@ fn resolve_module_import(
             resolve_local_path_import(module_import, base_dir, path, span_id, symptoms)
         }
         ImportSource::LocalBundle(b) => {
-            resolve_dependency_bundle_import(b, dependencies, span_id, symptoms, find_public_def)
+            if b.local_path.is_some() {
+                resolve_local_bundle_import(
+                    module_import,
+                    b,
+                    base_dir,
+                    span_id,
+                    symptoms,
+                    find_public_def,
+                )
+            } else {
+                resolve_dependency_bundle_import(
+                    b,
+                    dependencies,
+                    span_id,
+                    symptoms,
+                    find_public_def,
+                )
+            }
         }
         ImportSource::Package(mp) => resolve_package_like_import(
             module_import,
@@ -398,6 +415,62 @@ fn resolve_module_import(
             symptoms,
             find_public_def,
         ),
+        ImportSource::CurrentModule { member } => {
+            resolve_current_module_import(member, base_dir, span_id, symptoms, find_public_def)
+        }
+    }
+}
+
+fn resolve_current_module_import(
+    member: &ast::BundleExportImport,
+    base_dir: &Path,
+    _span_id: SpanId,
+    symptoms: &mut Vec<Diagnostic>,
+    find_public_def: &dyn Fn(&Path, &str) -> Option<PathBuf>,
+) -> ResolvedModule {
+    let pkg_root = match crate::import_query::find_package_root(base_dir) {
+        Some(r) => r,
+        None => {
+            return ResolvedModule {
+                files: vec![],
+                symbol_aliases: vec![],
+            };
+        }
+    };
+
+    let symbol = member.export.as_str();
+    if find_public_def(&pkg_root, symbol).is_none() {
+        symptoms.push(
+            UseSymptom::NotExported {
+                symbol: symbol.to_string(),
+                module: pkg_root.display().to_string(),
+            }
+            .into_diagnostic(member.span),
+        );
+        return ResolvedModule {
+            files: vec![],
+            symbol_aliases: vec![],
+        };
+    }
+
+    // Only create a SymbolAlias when there's an actual rename (`use Str as MyStr`)
+    let mut symbol_aliases = Vec::new();
+    if let Some(alias_name) = member.alias {
+        symbol_aliases.push(SymbolAlias {
+            alias: alias_name,
+            target: ast::Spanned::new(
+                ast::ModPath {
+                    root: member.export,
+                    segments: vec![],
+                },
+                member.span,
+            ),
+        });
+    }
+
+    ResolvedModule {
+        files: vec![],
+        symbol_aliases,
     }
 }
 
@@ -410,22 +483,30 @@ fn resolve_local_path_import(
 ) -> ResolvedModule {
     let full = base_dir.join(path);
 
-    if full.is_dir() && file_helpers::is_folder_module_dir(&full) {
-        if module_import.alias.is_none() {
+    if full.is_dir() {
+        let qual = module_import
+            .alias
+            .as_ref()
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| {
+                full.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            });
+        let gin_files: Vec<(PathBuf, String)> = flask::list_package_gin_files(&full)
+            .into_iter()
+            .map(|p| (p, qual.clone()))
+            .collect();
+        if gin_files.is_empty() {
             symptoms.push(
-                UseSymptom::LocalFolderRequiresAs {
-                    path: full.display().to_string(),
+                UseSymptom::PackageHasNoGinFiles {
+                    dir: full.display().to_string(),
                 }
                 .into_diagnostic(span_id),
             );
-            return ResolvedModule {
-                files: Vec::new(),
-                symbol_aliases: Vec::new(),
-            };
         }
-        let qual = module_import.alias.as_ref().unwrap().to_string();
         return ResolvedModule {
-            files: resolve_package_gin_files(&full, &qual, span_id, symptoms),
+            files: gin_files,
             symbol_aliases: Vec::new(),
         };
     }
@@ -475,6 +556,84 @@ fn resolve_local_path_import(
     ResolvedModule {
         files: vec![(gin_path, qual)],
         symbol_aliases: Vec::new(),
+    }
+}
+
+/// Resolve a local-path bundle import like `use 'arch'.(Constraint, Register, X0)`.
+/// Validates that each destructured member is a public symbol in the target module.
+fn resolve_local_bundle_import(
+    _module_import: &ModuleImport,
+    b: &LocalBundleImport,
+    base_dir: &Path,
+    span_id: SpanId,
+    symptoms: &mut Vec<Diagnostic>,
+    find_public_def: &dyn Fn(&Path, &str) -> Option<PathBuf>,
+) -> ResolvedModule {
+    let local_path = match &b.local_path {
+        Some(p) => p,
+        None => {
+            return ResolvedModule {
+                files: vec![],
+                symbol_aliases: vec![],
+            };
+        }
+    };
+
+    let full = base_dir.join(local_path);
+
+    if !full.is_dir() {
+        symptoms.push(
+            UseSymptom::LocalNotFound {
+                path: full.display().to_string(),
+            }
+            .into_diagnostic(span_id),
+        );
+        return ResolvedModule {
+            files: vec![],
+            symbol_aliases: vec![],
+        };
+    }
+
+    let qual = b
+        .local_path
+        .as_ref()
+        .and_then(|p| p.file_stem())
+        .and_then(|s| s.to_str())
+        .unwrap_or("unnamed")
+        .to_string();
+
+    // Validate each member exists as a public symbol in the target module.
+    let mut has_symbol_import = false;
+    for member in &b.members {
+        let member_name = member.export.as_str();
+        if find_public_def(&full, member_name).is_some() {
+            has_symbol_import = true;
+        } else {
+            symptoms.push(
+                UseSymptom::NotExported {
+                    symbol: member_name.to_string(),
+                    module: full.display().to_string(),
+                }
+                .into_diagnostic(member.span),
+            );
+        }
+    }
+
+    let gin_files: Vec<(PathBuf, String)> = flask::list_package_gin_files(&full)
+        .into_iter()
+        .map(|p| (p, qual.clone()))
+        .collect();
+
+    if has_symbol_import && !gin_files.is_empty() {
+        ResolvedModule {
+            files: gin_files,
+            symbol_aliases: Vec::new(),
+        }
+    } else {
+        ResolvedModule {
+            files: vec![],
+            symbol_aliases: Vec::new(),
+        }
     }
 }
 
@@ -554,7 +713,7 @@ fn resolve_dependency_bundle_import(
 
 fn resolve_package_like_import(
     module_import: &ModuleImport,
-    mp: &ast::ModPath,
+    mp: &ast::Spanned<ast::ModPath>,
     _base_dir: &Path,
     dependencies: &HashMap<String, PathBuf>,
     span_id: SpanId,
@@ -790,7 +949,7 @@ mod tests {
 
     #[test]
     fn resolve_applies_symbol_aliases() {
-        use ast::ModPath;
+        use ast::{ModPath, Spanned};
 
         let entry_src = "main:\n    foo\nreturn\n";
         let entry_path = PathBuf::from("/main.gin");
@@ -798,11 +957,13 @@ mod tests {
 
         let alias = SymbolAlias {
             alias: Intern::<String>::from_ref("foo"),
-            target: ModPath {
-                root: Intern::<String>::from_ref("dep"),
-                segments: vec![Intern::<String>::from_ref("bar")],
-                span: SpanId::INVALID,
-            },
+            target: Spanned::new(
+                ModPath {
+                    root: Intern::<String>::from_ref("dep"),
+                    segments: vec![Intern::<String>::from_ref("bar")],
+                },
+                SpanId::INVALID,
+            ),
         };
 
         let graph = ResolveGraph {

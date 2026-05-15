@@ -26,5 +26,8 @@ pub fn parse_literal(cursor: &mut TokenCursor) -> Option<Spanned<Literal>> {
         _ => unreachable!(),
     };
 
-    Some(Spanned(lit, span))
+    Some(Spanned {
+        value: lit,
+        span_id: span,
+    })
 }

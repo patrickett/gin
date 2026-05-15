@@ -115,7 +115,7 @@ fn range_new_pkg_folder_emits_mlir_with_repo_range_gin() {
     write_pkg_file(&dir.join("range.gin"), repo_range_gin);
     write_pkg_file(
         &dir.join("main.gin"),
-        "main:\n    r := Range.new(12, 1200)\n    return r.start\nreturn\n",
+        "use Range\n\nmain:\n    r := Range.new(12, 1200)\n    return r.start\nreturn\n",
     );
 
     // MLIR emits via println! inside the compiler; run ginc as a subprocess so we
@@ -154,7 +154,7 @@ fn range_new_pkg_folder_compiles_exe_with_output_flag() {
     write_pkg_file(&dir.join("range.gin"), repo_range_gin);
     write_pkg_file(
         &dir.join("main.gin"),
-        "main:\n    r := Range.new(12, 1200)\n    return r.start\nreturn\n",
+        "use Range\n\nmain:\n    r := Range.new(12, 1200)\n    return r.start\nreturn\n",
     );
 
     let exe_path = dir.join("runner_main");

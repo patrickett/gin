@@ -1,9 +1,10 @@
 use crate::diagnostics::span_to_range;
 use crate::Backend;
 
+use ast::hover::find_references;
+use ast::position_to_byte_offset;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
-use typeck::{find_references, position_to_byte_offset};
 
 impl Backend {
     pub(crate) async fn handle_references(
@@ -30,7 +31,7 @@ impl Backend {
                 let word = position_to_byte_offset(&source, position.line, position.character)
                     .and_then(|byte_pos| {
                         ast.word_at_byte(byte_pos, &source)
-                            .or_else(|| typeck::word_at_byte_offset(&source, byte_pos))
+                            .or_else(|| ast::word_at_byte_offset(&source, byte_pos))
                     })?;
                 Some(
                     find_references(&ast, &word)

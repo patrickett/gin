@@ -1,7 +1,8 @@
 use crate::{prelude::*, ty_to_mlir};
-use ast::{Expr, type_surface_mangle_name};
+use ast::TyInfer;
+use ast::ty::Ty;
+use ast::type_surface_mangle_name;
 use internment::Intern;
-use typeck::{Ty, TyInfer};
 
 impl<'c> Lower<'c> for IfExpr {
     fn lower(
@@ -32,9 +33,9 @@ impl<'c> Lower<'c> for IfExpr {
             }
             IfCondition::Pattern { subject, pattern } => {
                 let subject_val = subject.lower(ctx, block, symtab)?;
-                let surface_name = type_surface_mangle_name(&pattern.0);
+                let surface_name = type_surface_mangle_name(&pattern.value);
                 let variant_name = Intern::<String>::from_ref(surface_name);
-                let (_, expected_disc, _) = match ctx.ty_env.lookup_variant(variant_name) {
+                let (_, expected_disc, _) = match ctx.lookup_variant(variant_name) {
                     Some(v) => v,
                     None => {
                         ctx.emit_internal(format!(
@@ -51,17 +52,12 @@ impl<'c> Lower<'c> for IfExpr {
             }
         };
 
-        // Infer the return type from the if block's return expression
         let ret_ty = self
             .ret
-            .0
+            .value
             .as_ref()
-            .map(|e| e.infer_ty(&ctx.ty_env.infer_env(&std::collections::HashMap::new())))
-            .unwrap_or(Ty::Int {
-                width: 64,
-                signed: true,
-                value: None,
-            });
+            .map(|e| e.infer_ty(&ctx.infer_env(&std::collections::HashMap::new())))
+            .unwrap_or(Ty::i64());
         let result_mlir = ty_to_mlir(&ret_ty, ctx.mlir);
 
         let then_region = Region::new();
@@ -71,32 +67,15 @@ impl<'c> Lower<'c> for IfExpr {
             let blk_ref = then_region.first_block().unwrap();
             let mut inner_symtab = symtab.clone();
 
-            // Bind pattern variables if this is a pattern condition.
-            if let IfCondition::Pattern { subject, pattern } = &self.condition
-                && let Expr::TypeGeneric { params, .. } = &pattern.0
-            {
+            if let IfCondition::Pattern { subject, pattern } = &self.condition {
                 let subject_val = subject.lower(ctx, block, symtab)?;
-                let variant_name = Intern::<String>::from_ref(type_surface_mangle_name(&pattern.0));
-                let payload_fields = ctx
-                    .ty_env
-                    .lookup_variant(variant_name)
-                    .map(|(_, _, f)| f)
-                    .unwrap_or(&[]);
-                for (slot, (param_name, _)) in params.iter().enumerate() {
-                    if param_name.as_str() == "_" {
-                        continue;
-                    }
-                    let field_mlir_ty = payload_fields
-                        .get(slot)
-                        .map(|(_, ty)| ty_to_mlir(ty, ctx.mlir))
-                        .unwrap_or_else(|| ctx.mlir.i64());
-                    let extracted = blk_ref.append_op(ctx.mlir.llvm_extractvalue(
-                        subject_val,
-                        (slot + 1) as i64,
-                        field_mlir_ty,
-                    ));
-                    inner_symtab.insert(param_name.as_str().to_string(), extracted);
-                }
+                super::bind_pattern_payload_fields(
+                    ctx,
+                    &blk_ref,
+                    &pattern.value,
+                    subject_val,
+                    &mut inner_symtab,
+                );
             }
 
             // Execute body expressions
@@ -105,7 +84,7 @@ impl<'c> Lower<'c> for IfExpr {
             }
 
             // Yield the return value instead of calling llvm.return
-            let ret_val = match &self.ret.0 {
+            let ret_val = match &self.ret.value {
                 Some(expr) => expr.lower(ctx, &blk_ref, &mut inner_symtab)?,
                 None => blk_ref.unit_value(ctx),
             };

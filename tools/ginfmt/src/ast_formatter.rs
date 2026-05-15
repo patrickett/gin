@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use ast::{
     BindValue, Declare, DeclareValue, DocComment, Expr, FileAst, ImportSource, Literal,
-    ParameterKind, Parameters, SpanTable, Spanned, Variant,
+    ParameterKind, Parameters, SpanTable, Spanned, TypeExpr, Variant,
 };
 use internment::Intern;
 
@@ -116,7 +116,7 @@ impl<'a> AstFormatter<'a> {
     }
 
     fn emit_module_doc(&mut self, doc: &DocComment) {
-        for line in doc.0.lines() {
+        for line in doc.value.lines() {
             if line.trim().is_empty() {
                 self.buffer.push_str("--|\n");
             } else {
@@ -195,7 +195,9 @@ impl<'a> AstFormatter<'a> {
                 ParameterKind::Generic => {}
                 ParameterKind::Tagged(expr) => {
                     self.buffer.push(' ');
-                    self.buffer.push_str(&type_text(&expr.0));
+                    if let Some(te) = expr.value.as_type_expr() {
+                        self.buffer.push_str(&type_text(&te));
+                    }
                 }
                 ParameterKind::Default(expr) => {
                     let text = span_text(expr, st, src);
@@ -215,9 +217,9 @@ impl<'a> AstFormatter<'a> {
                 self.buffer.push_str(" or ");
             }
             let shape = variant.shape();
-            let name = variant_name(&shape.0);
+            let name = variant_name(&shape.value);
             self.buffer.push_str(&name);
-            if let Expr::TypeGeneric { params, .. } = &shape.0
+            if let TypeExpr::Generic { params, .. } = &shape.value
                 && !params.is_empty()
             {
                 self.buffer.push('(');
@@ -230,7 +232,9 @@ impl<'a> AstFormatter<'a> {
                     match fkind {
                         ParameterKind::Generic => {}
                         ParameterKind::Tagged(expr) => {
-                            self.buffer.push_str(&type_text(&expr.0));
+                            if let Some(te) = expr.value.as_type_expr() {
+                                self.buffer.push_str(&type_text(&te));
+                            }
                         }
                         ParameterKind::Default(expr) => {
                             let text = span_text(expr, st, src);
@@ -255,7 +259,9 @@ impl<'a> AstFormatter<'a> {
                 ParameterKind::Generic => {}
                 ParameterKind::Tagged(expr) => {
                     self.buffer.push(' ');
-                    self.buffer.push_str(&type_text(&expr.0));
+                    if let Some(te) = expr.value.as_type_expr() {
+                        self.buffer.push_str(&type_text(&te));
+                    }
                 }
                 ParameterKind::Default(expr) => {
                     let text = span_text(expr, st, src);
@@ -297,6 +303,13 @@ impl<'a> AstFormatter<'a> {
                     }
                     self.buffer.push(')');
                 }
+                ImportSource::CurrentModule { member } => {
+                    self.buffer.push_str(member.export.as_str());
+                    if let Some(alias) = &member.alias {
+                        self.buffer.push_str(" as ");
+                        self.buffer.push_str(alias.as_str());
+                    }
+                }
             }
             if let Some(alias) = &mi.alias {
                 self.buffer.push_str(" as ");
@@ -317,7 +330,7 @@ impl<'a> AstFormatter<'a> {
         let st = self.span_table;
         let src = self.source;
         if let Some(ret_tag) = &bind.return_tag {
-            let text = span_text(ret_tag, st, src);
+            let text = span_text_type(ret_tag, st, src);
             self.buffer.push(' ');
             self.buffer.push_str(&text);
         }
@@ -342,7 +355,7 @@ impl<'a> AstFormatter<'a> {
                     self.buffer.push_str(&text);
                     self.buffer.push('\n');
                 }
-                if let Some(ret_expr) = &ret.0 {
+                if let Some(ret_expr) = &ret.value {
                     let text = span_text(ret_expr, st, src);
                     self.emit_indent();
                     self.buffer.push_str("return ");
@@ -375,7 +388,7 @@ impl<'a> AstFormatter<'a> {
     }
 
     fn emit_doc_comment(&mut self, doc: &DocComment) {
-        for line in doc.0.lines() {
+        for line in doc.value.lines() {
             if line.trim().is_empty() {
                 self.buffer.push_str("---\n");
             } else {
@@ -451,29 +464,38 @@ fn span_text(expr: &Spanned<Expr>, st: &SpanTable, source: &str) -> String {
     if !span.is_empty() {
         span.extract(source).to_string()
     } else {
-        expr_fallback(&expr.0, st, source)
+        expr_fallback(&expr.value, st, source)
     }
 }
 
-/// Extract the variant name from a shape expression.
-fn variant_name(expr: &Expr) -> String {
+fn span_text_type(expr: &Spanned<TypeExpr>, st: &SpanTable, source: &str) -> String {
+    let span = st.get(expr.span_id());
+    if !span.is_empty() {
+        span.extract(source).to_string()
+    } else {
+        type_text(&expr.value)
+    }
+}
+
+/// Extract the variant name from a shape TypeExpr.
+fn variant_name(expr: &TypeExpr) -> String {
     match expr {
-        Expr::TypeNominal(name, _) => name.as_str().to_string(),
-        Expr::TypeQualified(path) => path
+        TypeExpr::Nominal(name, _) => name.as_str().to_string(),
+        TypeExpr::Qualified(path) => path
             .segments
             .last()
             .map(|s| s.as_str().to_string())
             .unwrap_or_else(|| path.root.as_str().to_string()),
-        Expr::TypeGeneric { name, .. } => name.as_str().to_string(),
-        _ => String::new(),
+        TypeExpr::Generic { name, .. } => name.as_str().to_string(),
+        TypeExpr::Literal(..) => String::new(),
     }
 }
 
 /// Format a type expression name.
-fn type_text(expr: &Expr) -> String {
+fn type_text(expr: &TypeExpr) -> String {
     match expr {
-        Expr::TypeNominal(name, _) => name.as_str().to_string(),
-        Expr::TypeQualified(path) => {
+        TypeExpr::Nominal(name, _) => name.as_str().to_string(),
+        TypeExpr::Qualified(path) => {
             let mut s = path.root.as_str().to_string();
             for seg in &path.segments {
                 s.push('.');
@@ -481,8 +503,8 @@ fn type_text(expr: &Expr) -> String {
             }
             s
         }
-        Expr::TypeGeneric { name, .. } => name.as_str().to_string(),
-        _ => "<type>".to_string(),
+        TypeExpr::Generic { name, .. } => name.as_str().to_string(),
+        TypeExpr::Literal(..) => String::new(),
     }
 }
 

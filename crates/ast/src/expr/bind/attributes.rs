@@ -1,3 +1,5 @@
+use crate::expr::{Expr, Literal};
+use crate::span::Spanned;
 use internment::Intern;
 
 /// Target operating systems for `#[os({ ... })]` cfg filters.
@@ -26,6 +28,7 @@ pub enum ArchTarget {
     X86_64,
     Arm64,
     Wasm32,
+    Unknown,
 }
 
 impl ArchTarget {
@@ -34,6 +37,7 @@ impl ArchTarget {
             ArchTarget::X86_64 => cfg!(target_arch = "x86_64"),
             ArchTarget::Arm64 => cfg!(target_arch = "aarch64"),
             ArchTarget::Wasm32 => cfg!(target_arch = "wasm32"),
+            ArchTarget::Unknown => false,
         }
     }
 }
@@ -139,6 +143,22 @@ impl Complexity {
     }
 }
 
+/// A single item inside `#[...]` — either a function call or a bare identifier flag.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum AttributeItem {
+    /// A call like `os(['linux'])`
+    Call {
+        name: Intern<String>,
+        name_span: crate::span::SpanId,
+        args: Vec<Spanned<Expr>>,
+    },
+    /// A bare identifier like `debug`, `test`, `inline`
+    Flag {
+        name: Intern<String>,
+        span: crate::span::SpanId,
+    },
+}
+
 #[derive(Default, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BindAttributes {
     /// Always run in tests (`#[test]`).
@@ -153,6 +173,10 @@ pub struct BindAttributes {
     pub debug_only: bool,
     /// Time complexity annotation (`#[complexity(...)]`). `None` means unannotated.
     pub complexity: Option<Complexity>,
+    /// Raw parsed attributes before semantic extraction.
+    /// `None` means no `#[...]` block was present at all.
+    /// `Some(vec![])` means an empty `#[]` was present.
+    pub raw_attributes: Option<Vec<AttributeItem>>,
 }
 
 impl BindAttributes {
@@ -169,5 +193,141 @@ impl BindAttributes {
             return false;
         }
         true
+    }
+
+    /// Extract compiler-known intrinsic attributes from `raw_attributes` into typed fields.
+    /// Leaves unknown attributes in `raw_attributes` for tooling to consume.
+    /// Should be called after parsing, before platform filtering.
+    pub fn extract_intrinsic_attributes(&mut self) {
+        let Some(items) = &self.raw_attributes else {
+            return;
+        };
+        if items.is_empty() {
+            return;
+        }
+
+        for item in items {
+            match item {
+                AttributeItem::Call { name, args, .. } => match name.as_str() {
+                    "os" => {
+                        self.os = extract_os_targets(args);
+                    }
+                    "arch" => {
+                        self.arch = extract_arch_targets(args);
+                    }
+                    "complexity" => {
+                        self.complexity = extract_complexity(args);
+                    }
+                    _ => {}
+                },
+                AttributeItem::Flag { name, .. } => match name.as_str() {
+                    "debug" => self.debug_only = true,
+                    "test" => self.test = true,
+                    "inline" => self.inline_always = true,
+                    _ => {}
+                },
+            }
+        }
+    }
+}
+
+pub(crate) fn extract_os_targets(args: &[Spanned<Expr>]) -> Option<Vec<OsTarget>> {
+    let list = args.first()?;
+    let exprs = match &list.value {
+        Expr::List(elems) => elems,
+        _ => return None,
+    };
+    let mut targets = Vec::with_capacity(exprs.len());
+    for elem in exprs {
+        match &elem.value {
+            Expr::Lit(Literal::String(s)) if *s == "linux" => targets.push(OsTarget::Linux),
+            Expr::Lit(Literal::String(s)) if *s == "macOS" => targets.push(OsTarget::MacOS),
+            Expr::Lit(Literal::String(s)) if *s == "windows" => targets.push(OsTarget::Windows),
+            _ => targets.push(OsTarget::Unknown),
+        }
+    }
+    Some(targets)
+}
+
+pub(crate) fn extract_arch_targets(args: &[Spanned<Expr>]) -> Option<Vec<ArchTarget>> {
+    let list = args.first()?;
+    let exprs = match &list.value {
+        Expr::List(elems) => elems,
+        _ => return None,
+    };
+    let mut targets = Vec::with_capacity(exprs.len());
+    for elem in exprs {
+        match &elem.value {
+            Expr::Lit(Literal::String(s)) if *s == "x86_64" => targets.push(ArchTarget::X86_64),
+            Expr::Lit(Literal::String(s)) if *s == "arm64" => targets.push(ArchTarget::Arm64),
+            Expr::Lit(Literal::String(s)) if *s == "wasm32" => targets.push(ArchTarget::Wasm32),
+            _ => targets.push(ArchTarget::Unknown),
+        }
+    }
+    Some(targets)
+}
+
+pub(crate) fn extract_complexity(args: &[Spanned<Expr>]) -> Option<Complexity> {
+    let variant = args.first()?;
+    match &variant.value {
+        Expr::TagCall(tc) => {
+            let variant_name = tc.name.as_str();
+            let expr = if tc.args.is_empty() {
+                None
+            } else if tc.args.len() == 1 {
+                extract_complexity_expr_from_expr(&tc.args[0].value)
+            } else {
+                // Multiple positional params — treat as product
+                let vars: Vec<Intern<String>> = tc
+                    .args
+                    .iter()
+                    .filter_map(|a| complexity_var_from_expr(&a.value))
+                    .collect();
+                if vars.is_empty() {
+                    None
+                } else {
+                    Some(ComplexityExpr::Product(vars))
+                }
+            };
+            match (variant_name, expr) {
+                ("Constant", _) => Some(Complexity::Constant),
+                ("Logarithmic", Some(e)) => Some(Complexity::Logarithmic(e)),
+                ("Linear", Some(e)) => Some(Complexity::Linear(e)),
+                ("LogLinear", Some(e)) => Some(Complexity::LogLinear(e)),
+                ("Quadratic", Some(e)) => Some(Complexity::Quadratic(e)),
+                ("Cubic", Some(e)) => Some(Complexity::Cubic(e)),
+                ("Exponential", Some(e)) => Some(Complexity::Exponential(e)),
+                ("Factorial", Some(e)) => Some(Complexity::Factorial(e)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Extract a `ComplexityExpr` from a single expression (e.g. `n` or `rows * cols`).
+fn extract_complexity_expr_from_expr(expr: &Expr) -> Option<ComplexityExpr> {
+    match expr {
+        Expr::FnCall(call) if call.args.is_none() => Some(ComplexityExpr::Var(call.path.root)),
+        Expr::AnonymousTag(n, _) => Some(ComplexityExpr::Var(*n)),
+        Expr::Binary(bin) => {
+            let left = complexity_var_from_expr(&bin.lhs.value)?;
+            let right = complexity_var_from_expr(&bin.rhs.value)?;
+            match bin.op {
+                crate::BinOp::Multiply => Some(ComplexityExpr::Product(vec![left, right])),
+                crate::BinOp::Add => Some(ComplexityExpr::Sum(vec![left, right])),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Extract a single variable name from an expression node.
+fn complexity_var_from_expr(expr: &Expr) -> Option<Intern<String>> {
+    match expr {
+        Expr::FnCall(call) if call.args.is_none() => Some(call.path.root),
+        Expr::AnonymousTag(n, _) => Some(*n),
+        _ => None,
     }
 }

@@ -1,6 +1,9 @@
+use crate::VariantMap;
+use crate::analysis::Analysis;
 use crate::path::ModPath;
 use crate::prelude::*;
-use crate::span::{SpanId, SpanTable};
+use crate::span::{SpanId, SpanTable, Spanned};
+use crate::ty::Ty;
 use indexmap::IndexMap;
 use std::{
     collections::{HashMap, HashSet},
@@ -241,11 +244,11 @@ impl SymbolTable {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SymbolAlias {
     pub alias: Intern<String>,
-    pub target: ModPath,
+    pub target: Spanned<ModPath>,
 }
 
 /// Output of parsing a gin file.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FileAst {
     /// Module-level doc comment collected from leading `--| ...` lines.
     pub module_doc: Option<DocComment>,
@@ -258,7 +261,6 @@ pub struct FileAst {
     pub symbol_aliases: Vec<SymbolAlias>,
     pub symbol_alias_spans: Vec<SpanId>,
     /// Span table mapping SpanId → Span (byte ranges).
-    /// Populated during parsing; excluded from Hash/Eq.
     pub span_table: SpanTable,
 }
 
@@ -330,6 +332,31 @@ impl FileAst {
     }
 }
 
+impl Hash for FileAst {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.module_doc.hash(state);
+        self.uses.hash(state);
+        let mut tag_keys: Vec<_> = self.tags.keys().collect();
+        tag_keys.sort();
+        for k in tag_keys {
+            k.hash(state);
+            self.tags[k].hash(state);
+            self.private_tags.contains(k).hash(state);
+        }
+        let mut def_keys: Vec<_> = self.defs.keys().collect();
+        def_keys.sort();
+        for k in def_keys {
+            k.hash(state);
+            self.defs[k].hash(state);
+            self.private_defs.contains(k).hash(state);
+        }
+        self.exprs.hash(state);
+        self.symbol_aliases.hash(state);
+        self.symbol_alias_spans.hash(state);
+        self.span_table.hash(state);
+    }
+}
+
 /// Duplicate top-level name when merging compilation units.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MergeConflict {
@@ -382,49 +409,6 @@ impl FileAst {
     }
 }
 
-impl PartialEq for FileAst {
-    fn eq(&self, other: &Self) -> bool {
-        self.module_doc == other.module_doc
-            && self.uses == other.uses
-            && self.tags == other.tags
-            && self.defs == other.defs
-            && self.private_defs == other.private_defs
-            && self.private_tags == other.private_tags
-            && self.exprs == other.exprs
-            && self.symbol_aliases == other.symbol_aliases
-            && self.symbol_alias_spans == other.symbol_alias_spans
-            && self.span_table == other.span_table
-    }
-}
-
-impl Eq for FileAst {}
-
-impl Hash for FileAst {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.module_doc.hash(state);
-        self.uses.hash(state);
-        // Sort keys for deterministic hashing
-        let mut tag_keys: Vec<_> = self.tags.keys().collect();
-        tag_keys.sort();
-        for k in tag_keys {
-            k.hash(state);
-            self.tags[k].hash(state);
-            self.private_tags.contains(k).hash(state);
-        }
-        let mut def_keys: Vec<_> = self.defs.keys().collect();
-        def_keys.sort();
-        for k in def_keys {
-            k.hash(state);
-            self.defs[k].hash(state);
-            self.private_defs.contains(k).hash(state);
-        }
-        self.exprs.hash(state);
-        self.symbol_aliases.hash(state);
-        self.symbol_alias_spans.hash(state);
-        self.span_table.hash(state);
-    }
-}
-
 impl FileAst {
     /// Compute a content-based hash for change detection within a compilation session.
     pub fn compute_content_hash(&self) -> u64 {
@@ -472,15 +456,13 @@ impl FileAst {
     pub fn word_at_byte(&self, byte_pos: usize, source: &str) -> Option<String> {
         let (expr, _span_id) = self.expr_at_byte(byte_pos)?;
         match expr {
-            Expr::AnonymousTag(name, _)
-            | Expr::TypeNominal(name, _)
-            | Expr::TypeQualified(ModPath { root: name, .. }) => Some(name.as_str().to_string()),
+            Expr::AnonymousTag(name, _) => Some(name.as_str().to_string()),
             Expr::SelfRef(_) => Some("self".to_string()),
             Expr::TagCall(tc) => Some(tc.name.as_str().to_string()),
             Expr::FnCall(call) => {
                 // For method calls like `obj.method`, extract the precise word
                 // under the cursor within the path span.
-                let span = self.span_table.get(call.path.span);
+                let span = self.span_table.get(call.path.span_id);
                 if span.contains(byte_pos) {
                     let path_text = span.extract(source);
                     let rel_pos = byte_pos - span.start;
@@ -516,6 +498,46 @@ impl FileAst {
             _ => None,
         }
     }
+
+    /// Compute hover markdown at a byte position.
+    pub fn hover_at(
+        &self,
+        analysis: &crate::analysis::Analysis,
+        source: &str,
+        byte_pos: usize,
+    ) -> Option<String> {
+        crate::hover::hover_at_with_flow(
+            source,
+            self,
+            Some(analysis),
+            &analysis.flow,
+            byte_pos,
+            None,
+        )
+    }
+
+    /// Like [`hover_at`](Self::hover_at) but includes a `source_name` prefix.
+    pub fn hover_at_with_source(
+        &self,
+        analysis: &crate::analysis::Analysis,
+        source: &str,
+        byte_pos: usize,
+        source_name: Option<&str>,
+    ) -> Option<String> {
+        crate::hover::hover_at_with_flow(
+            source,
+            self,
+            Some(analysis),
+            &analysis.flow,
+            byte_pos,
+            source_name,
+        )
+    }
+
+    /// Find the definition span of a symbol by name.
+    pub fn definition_span(&self, name: &str) -> Option<std::ops::Range<usize>> {
+        crate::hover::definition_span(self, name)
+    }
 }
 
 /// Recursively find the innermost `(Expr, SpanId)` containing `byte_pos`.
@@ -527,11 +549,7 @@ fn find_expr_at_byte<'a>(
 ) -> Option<(&'a Expr, SpanId)> {
     match expr {
         // Leaf nodes — return self
-        Expr::Lit(_)
-        | Expr::SelfRef(_)
-        | Expr::AnonymousTag(..)
-        | Expr::TypeNominal(..)
-        | Expr::TypeQualified(..) => Some((expr, span_id)),
+        Expr::Lit(_) | Expr::SelfRef(_) | Expr::AnonymousTag(..) => Some((expr, span_id)),
 
         // Nested: check children, then return self as innermost
         Expr::Bind(bind) => {
@@ -542,7 +560,7 @@ fn find_expr_at_byte<'a>(
             if let Some(args) = &call.args {
                 for arg in args {
                     if st.contains(arg.span_id(), byte_pos) {
-                        return find_expr_at_byte(st, &arg.0, arg.span_id(), byte_pos);
+                        return find_expr_at_byte(st, &arg.value, arg.span_id(), byte_pos);
                     }
                 }
             }
@@ -550,10 +568,10 @@ fn find_expr_at_byte<'a>(
         }
         Expr::Binary(bin) => {
             if st.contains(bin.lhs.span_id(), byte_pos) {
-                return find_expr_at_byte(st, &bin.lhs.0, bin.lhs.span_id(), byte_pos);
+                return find_expr_at_byte(st, &bin.lhs.value, bin.lhs.span_id(), byte_pos);
             }
             if st.contains(bin.rhs.span_id(), byte_pos) {
-                return find_expr_at_byte(st, &bin.rhs.0, bin.rhs.span_id(), byte_pos);
+                return find_expr_at_byte(st, &bin.rhs.value, bin.rhs.span_id(), byte_pos);
             }
             Some((expr, span_id))
         }
@@ -561,27 +579,32 @@ fn find_expr_at_byte<'a>(
             if let Some(subject) = &when.subject
                 && st.contains(subject.span_id(), byte_pos)
             {
-                return find_expr_at_byte(st, &subject.0, subject.span_id(), byte_pos);
+                return find_expr_at_byte(st, &subject.value, subject.span_id(), byte_pos);
             }
             for arm in &when.arms {
                 match arm {
-                    WhenArm::Cond { condition, body } => {
+                    WhenArm::Cond {
+                        condition, body, ..
+                    } => {
                         for child in [condition.as_ref(), body.as_ref()] {
                             if st.contains(child.span_id(), byte_pos) {
-                                return find_expr_at_byte(st, &child.0, child.span_id(), byte_pos);
+                                return find_expr_at_byte(
+                                    st,
+                                    &child.value,
+                                    child.span_id(),
+                                    byte_pos,
+                                );
                             }
                         }
                     }
-                    WhenArm::Is { pattern, body } => {
-                        for child in [pattern.as_ref(), body.as_ref()] {
-                            if st.contains(child.span_id(), byte_pos) {
-                                return find_expr_at_byte(st, &child.0, child.span_id(), byte_pos);
-                            }
-                        }
-                    }
-                    WhenArm::Else(body) => {
+                    WhenArm::Is { body, .. } => {
                         if st.contains(body.span_id(), byte_pos) {
-                            return find_expr_at_byte(st, &body.0, body.span_id(), byte_pos);
+                            return find_expr_at_byte(st, &body.value, body.span_id(), byte_pos);
+                        }
+                    }
+                    WhenArm::Else(body, _) => {
+                        if st.contains(body.span_id(), byte_pos) {
+                            return find_expr_at_byte(st, &body.value, body.span_id(), byte_pos);
                         }
                     }
                 }
@@ -592,37 +615,35 @@ fn find_expr_at_byte<'a>(
             match &ifx.condition {
                 IfCondition::Bool(e) => {
                     if st.contains(e.span_id(), byte_pos) {
-                        return find_expr_at_byte(st, &e.0, e.span_id(), byte_pos);
+                        return find_expr_at_byte(st, &e.value, e.span_id(), byte_pos);
                     }
                 }
-                IfCondition::Pattern { subject, pattern } => {
-                    for child in [subject.as_ref(), pattern.as_ref()] {
-                        if st.contains(child.span_id(), byte_pos) {
-                            return find_expr_at_byte(st, &child.0, child.span_id(), byte_pos);
-                        }
+                IfCondition::Pattern { subject, .. } => {
+                    if st.contains(subject.span_id(), byte_pos) {
+                        return find_expr_at_byte(st, &subject.value, subject.span_id(), byte_pos);
                     }
                 }
             }
             for e in &ifx.body {
                 if st.contains(e.span_id(), byte_pos) {
-                    return find_expr_at_byte(st, &e.0, e.span_id(), byte_pos);
+                    return find_expr_at_byte(st, &e.value, e.span_id(), byte_pos);
                 }
             }
-            if let Some(ret_expr) = &ifx.ret.0
+            if let Some(ret_expr) = &ifx.ret.value
                 && st.contains(ret_expr.span_id(), byte_pos)
             {
-                return find_expr_at_byte(st, &ret_expr.0, ret_expr.span_id(), byte_pos);
+                return find_expr_at_byte(st, &ret_expr.value, ret_expr.span_id(), byte_pos);
             }
             Some((expr, span_id))
         }
         Expr::Loop(loop_val) => match loop_val {
             LoopEnum::While(w) => {
                 if st.contains(w.cond.span_id(), byte_pos) {
-                    return find_expr_at_byte(st, &w.cond.0, w.cond.span_id(), byte_pos);
+                    return find_expr_at_byte(st, &w.cond.value, w.cond.span_id(), byte_pos);
                 }
                 for e in &w.exprs {
                     if st.contains(e.span_id(), byte_pos) {
-                        return find_expr_at_byte(st, &e.0, e.span_id(), byte_pos);
+                        return find_expr_at_byte(st, &e.value, e.span_id(), byte_pos);
                     }
                 }
                 Some((expr, span_id))
@@ -630,12 +651,12 @@ fn find_expr_at_byte<'a>(
             LoopEnum::ForIn(f) => {
                 for child in [&f.pat, &f.iter] {
                     if st.contains(child.span_id(), byte_pos) {
-                        return find_expr_at_byte(st, &child.0, child.span_id(), byte_pos);
+                        return find_expr_at_byte(st, &child.value, child.span_id(), byte_pos);
                     }
                 }
                 for e in &f.exprs {
                     if st.contains(e.span_id(), byte_pos) {
-                        return find_expr_at_byte(st, &e.0, e.span_id(), byte_pos);
+                        return find_expr_at_byte(st, &e.value, e.span_id(), byte_pos);
                     }
                 }
                 Some((expr, span_id))
@@ -644,17 +665,17 @@ fn find_expr_at_byte<'a>(
         Expr::TagCall(tc) => {
             for arg in &tc.args {
                 if st.contains(arg.span_id(), byte_pos) {
-                    return find_expr_at_byte(st, &arg.0, arg.span_id(), byte_pos);
+                    return find_expr_at_byte(st, &arg.value, arg.span_id(), byte_pos);
                 }
             }
             Some((expr, span_id))
         }
         Expr::FormatString(fs) => {
             for part in &fs.parts {
-                if let FormatPart::Expr(e) = part
+                if let FormatPart::Expr(e, _) = part
                     && st.contains(e.span_id(), byte_pos)
                 {
-                    return find_expr_at_byte(st, &e.0, e.span_id(), byte_pos);
+                    return find_expr_at_byte(st, &e.value, e.span_id(), byte_pos);
                 }
             }
             Some((expr, span_id))
@@ -662,7 +683,7 @@ fn find_expr_at_byte<'a>(
         Expr::Range(r) => {
             for child in [&r.start, &r.end] {
                 if st.contains(child.span_id(), byte_pos) {
-                    return find_expr_at_byte(st, &child.0, child.span_id(), byte_pos);
+                    return find_expr_at_byte(st, &child.value, child.span_id(), byte_pos);
                 }
             }
             Some((expr, span_id))
@@ -670,33 +691,15 @@ fn find_expr_at_byte<'a>(
         Expr::Asm(a) => {
             for op in &a.operands {
                 if st.contains(op.span_id(), byte_pos) {
-                    return find_expr_at_byte(st, &op.0, op.span_id(), byte_pos);
+                    return find_expr_at_byte(st, &op.value, op.span_id(), byte_pos);
                 }
             }
             Some((expr, span_id))
         }
-        Expr::TypeGeneric { params, .. } => {
-            for (_, pk) in params {
-                match pk {
-                    ParameterKind::Tagged(e) => {
-                        if st.contains(e.span_id(), byte_pos) {
-                            return find_expr_at_byte(st, &e.0, e.span_id(), byte_pos);
-                        }
-                    }
-                    ParameterKind::Default(e) => {
-                        if st.contains(e.span_id(), byte_pos) {
-                            return find_expr_at_byte(st, &e.0, e.span_id(), byte_pos);
-                        }
-                    }
-                    ParameterKind::Generic => {}
-                }
-            }
-            Some((expr, span_id))
-        }
-        Expr::TupleLit(elems) => {
+        Expr::TupleLit(elems) | Expr::List(elems) => {
             for e in elems {
                 if st.contains(e.span_id(), byte_pos) {
-                    return find_expr_at_byte(st, &e.0, e.span_id(), byte_pos);
+                    return find_expr_at_byte(st, &e.value, e.span_id(), byte_pos);
                 }
             }
             Some((expr, span_id))
@@ -707,7 +710,7 @@ fn find_expr_at_byte<'a>(
         | Expr::Deref(init)
         | Expr::Negate(init) => {
             if st.contains(init.span_id(), byte_pos) {
-                return find_expr_at_byte(st, &init.0, init.span_id(), byte_pos);
+                return find_expr_at_byte(st, &init.value, init.span_id(), byte_pos);
             }
             Some((expr, span_id))
         }
@@ -715,7 +718,7 @@ fn find_expr_at_byte<'a>(
         | Expr::Cast { expr: base, .. }
         | Expr::BufGet { buf: base, .. } => {
             if st.contains(base.span_id(), byte_pos) {
-                return find_expr_at_byte(st, &base.0, base.span_id(), byte_pos);
+                return find_expr_at_byte(st, &base.value, base.span_id(), byte_pos);
             }
             Some((expr, span_id))
         }
@@ -727,9 +730,12 @@ fn find_expr_at_byte<'a>(
         } => {
             for child in [base.as_ref(), value.as_ref()] {
                 if st.contains(child.span_id(), byte_pos) {
-                    return find_expr_at_byte(st, &child.0, child.span_id(), byte_pos);
+                    return find_expr_at_byte(st, &child.value, child.span_id(), byte_pos);
                 }
             }
+            Some((expr, span_id))
+        }
+        Expr::TypeNominal(..) | Expr::TypeQualified(_) | Expr::TypeGeneric { .. } => {
             Some((expr, span_id))
         }
     }
@@ -744,7 +750,7 @@ fn find_expr_in_bind_value<'a>(
     match val {
         BindValue::Expr(expr) => {
             if st.contains(expr.span_id(), byte_pos) {
-                find_expr_at_byte(st, &expr.0, expr.span_id(), byte_pos)
+                find_expr_at_byte(st, &expr.value, expr.span_id(), byte_pos)
             } else {
                 None
             }
@@ -752,16 +758,209 @@ fn find_expr_in_bind_value<'a>(
         BindValue::Body { exprs, ret } => {
             for e in exprs {
                 if st.contains(e.span_id(), byte_pos) {
-                    return find_expr_at_byte(st, &e.0, e.span_id(), byte_pos);
+                    return find_expr_at_byte(st, &e.value, e.span_id(), byte_pos);
                 }
             }
-            if let Some(ret_expr) = &ret.0
+            if let Some(ret_expr) = &ret.value
                 && st.contains(ret_expr.span_id(), byte_pos)
             {
-                return find_expr_at_byte(st, &ret_expr.0, ret_expr.span_id(), byte_pos);
+                return find_expr_at_byte(st, &ret_expr.value, ret_expr.span_id(), byte_pos);
             }
             None
         }
         BindValue::Extern => None,
+    }
+}
+
+/// Resolve tag types, return types, variant map, flow analysis, and
+/// diagnostics for a [`FileAst`], producing an [`Analysis`].
+///
+/// Uses declarations from `all_asts` for cross-file type resolution
+/// (aliases, generics, etc.).
+pub fn resolve_types(ast: &FileAst, all_asts: &[FileAst]) -> Analysis {
+    use crate::resolve_name_from_files;
+    use crate::{TyInfer, TyInferEnv};
+
+    // 1. Resolve tag types — collect from ALL compilation units so that
+    //    cross-file type references (e.g. `Int` from `int.gin` used in
+    //    `io.gin`) are visible during type-checking of the current file.
+    let mut tag_types: HashMap<Intern<String>, Ty> = HashMap::new();
+    let mut explicit_tag_names: HashSet<Intern<String>> = HashSet::new();
+    for file_ast in all_asts {
+        for name in file_ast.tags.keys() {
+            if explicit_tag_names.insert(*name) {
+                let ty = resolve_name_from_files(*name, all_asts, 0);
+                tag_types.insert(*name, ty);
+            }
+        }
+    }
+    tag_types
+        .entry(Intern::<String>::from_ref("Str"))
+        .or_insert_with(crate::ty::str_record_ty);
+
+    // 2. Build variant map from tag_types
+    let mut variant_map: VariantMap = HashMap::new();
+    for (union_name, ty) in &tag_types {
+        if let Ty::Union { variants, .. } = ty {
+            for (i, (variant_name, fields)) in variants.iter().enumerate() {
+                let field_tys: Vec<(Intern<String>, Ty)> =
+                    fields.iter().map(|(n, t)| (*n, *(*t).clone())).collect();
+                variant_map
+                    .entry(*variant_name)
+                    .or_default()
+                    .push((*union_name, i, field_tys));
+            }
+        } else if let Ty::ConstUnion { values, .. } = ty {
+            for (i, cv) in values.iter().enumerate() {
+                let vname = cv.display_name();
+                variant_map
+                    .entry(vname)
+                    .or_default()
+                    .push((*union_name, i, Vec::new()));
+            }
+        }
+    }
+
+    // 3. Infer return types (two passes for cross-function references)
+    let mut fn_return_types: HashMap<Intern<String>, Ty> = HashMap::new();
+    {
+        let empty_env = TyInferEnv {
+            tag_types: &tag_types,
+            fn_return_types: &HashMap::new(),
+            locals: &HashMap::new(),
+        };
+        for a in all_asts {
+            for (name, bind) in &a.defs {
+                if !bind.attributes().matches_current_platform() {
+                    continue;
+                }
+                let ret = bind.infer_ty(&empty_env);
+                fn_return_types.insert(*name, ret);
+            }
+        }
+    }
+    {
+        let mut second_pass: Vec<(Intern<String>, Ty)> = Vec::new();
+        let full_env = TyInferEnv {
+            tag_types: &tag_types,
+            fn_return_types: &fn_return_types,
+            locals: &HashMap::new(),
+        };
+        for a in all_asts {
+            for (name, bind) in &a.defs {
+                if !bind.attributes().matches_current_platform() {
+                    continue;
+                }
+                let ret = bind.infer_ty(&full_env);
+                second_pass.push((*name, ret));
+            }
+        }
+        // drop(full_env);
+        for (name, ret) in second_pass {
+            fn_return_types.insert(name, ret);
+        }
+    }
+
+    // 5. Build flow analysis
+    let flow = if !ast.defs.is_empty() {
+        let mut analyzer = crate::FlowAnalyzer::new(&tag_types, &fn_return_types, &variant_map);
+        analyzer.analyze_file(ast);
+        analyzer.into_result()
+    } else {
+        crate::FlowAnalysis::new()
+    };
+
+    // 6. Run type-check diagnostics
+    let mut diagnostics = Vec::new();
+    crate::analysis::check::check_unknowns(
+        ast,
+        &tag_types,
+        &explicit_tag_names,
+        &fn_return_types,
+        &variant_map,
+        &mut diagnostics,
+    );
+    for check in &flow.bounds_checks {
+        use diagnostic::DiagnosticLike;
+        use diagnostic::type_::TypeSymptom;
+        diagnostics.push(
+            TypeSymptom::IndexOutOfBounds {
+                index: check.index,
+                size: check.size,
+            }
+            .into_diagnostic(check.span_id()),
+        );
+    }
+
+    Analysis {
+        tag_types,
+        fn_return_types,
+        variant_map,
+        flow,
+        diagnostics,
+        explicit_tag_names,
+    }
+}
+
+/// Write resolved type information from an [`Analysis`] back into [`FileAst`]
+/// AST nodes.
+///
+/// Populates `tag.resolved_type`, `bind.return_type`, `bind.param_slots[*].ty`,
+/// and `bind.receiver_typevars` so consumers can read types directly from the
+/// AST instead of reaching into side-tables.
+///
+/// Call this after [`resolve_types`] on any AST you intend to mutate:
+///
+/// ```ignore
+/// let analysis = resolve_types(&ast, &[ast.clone()]);
+/// populate_ast_types(&mut ast, &analysis);
+/// ```
+pub fn populate_ast_types(ast: &mut FileAst, analysis: &Analysis) {
+    // Populate tag resolved_type
+    for (name, ty) in &analysis.tag_types {
+        if let Some(decl) = ast.tags.get_mut(name) {
+            decl.resolved_type = Some(ty.clone());
+        }
+    }
+
+    // Populate bind return_type and param/resolver info
+    for (name, bind) in &mut ast.defs {
+        // Return type
+        if let Some(ret_ty) = analysis.fn_return_types.get(name) {
+            bind.return_type = crate::TyState::Resolved(ret_ty.clone());
+        }
+
+        // Receiver typevars
+        {
+            let typevars = bind
+                .receiver_type_surface()
+                .map(|sp| crate::typevars_from_receiver(&sp.value))
+                .unwrap_or_default();
+            bind.receiver_typevars = typevars
+                .iter()
+                .map(|(k, v)| (*k, crate::TyState::Resolved(v.clone())))
+                .collect();
+
+            // Parameter types
+            if let Some(params) = bind.params() {
+                bind.param_slots = params
+                    .iter()
+                    .map(|(k, kind)| {
+                        let ty = crate::resolve_parameter_kind_with_subst(
+                            *k,
+                            kind,
+                            &analysis.tag_types,
+                            &analysis.fn_return_types,
+                            &typevars,
+                        );
+                        let slot = crate::ParamSlot {
+                            ty: crate::TyState::Resolved(ty.clone()),
+                            default: None,
+                        };
+                        (*k, slot)
+                    })
+                    .collect();
+            }
+        }
     }
 }

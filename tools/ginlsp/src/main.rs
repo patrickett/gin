@@ -1,5 +1,11 @@
 #![deny(unsafe_code)]
-#![warn(clippy::correctness, clippy::suspicious, clippy::style, clippy::complexity, clippy::perf)]
+#![warn(
+    clippy::correctness,
+    clippy::suspicious,
+    clippy::style,
+    clippy::complexity,
+    clippy::perf
+)]
 mod diagnostics;
 mod handlers;
 mod state;
@@ -196,12 +202,14 @@ impl Backend {
             });
 
         let this = self.clone();
-        let blocking = tokio::task::spawn_blocking(move || -> Vec<(Url, Vec<tower_lsp::lsp_types::Diagnostic>)> {
-            let work = AssertUnwindSafe(move || {
-                this.compute_package_diagnostics(pkg_root, config_handle.clone(), trigger_path)
-            });
-            salsa::Cancelled::catch(work).unwrap_or_default()
-        });
+        let blocking = tokio::task::spawn_blocking(
+            move || -> Vec<(Url, Vec<tower_lsp::lsp_types::Diagnostic>)> {
+                let work = AssertUnwindSafe(move || {
+                    this.compute_package_diagnostics(pkg_root, config_handle.clone(), trigger_path)
+                });
+                salsa::Cancelled::catch(work).unwrap_or_default()
+            },
+        );
 
         let payload = match tokio::time::timeout(DIAGNOSTIC_TIMEOUT, blocking).await {
             Ok(Ok(payload)) => payload,
@@ -402,18 +410,19 @@ async fn main() {
 mod tests {
     use internment::Intern;
     use parser::parse_from_str;
-    use typeck::TyEnv;
 
     #[test]
     fn dot_completion_union_variants() {
         use crate::handlers::completion::dot_completions;
 
         let source = "Maybe[x] is Some(x) or None";
-        let ast = parse_from_str(source);
-        let ty_env = TyEnv::from_file_ast(&ast);
+        let po = parse_from_str(source);
+        let analysis = ast::resolve_types(&po, &[po.clone()]);
 
-        let ty = ty_env
-            .resolve_dot_type(&ast, Intern::<String>::from_ref("Maybe"))
+        let ty = analysis
+            .tag_types
+            .get(&Intern::<String>::from_ref("Maybe"))
+            .cloned()
             .expect("Expected Maybe to resolve to a union type");
         let items = dot_completions(ty);
 

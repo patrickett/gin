@@ -9,7 +9,6 @@ span = { workspace = true }
 salsa = { workspace = true }
 ast = { workspace = true }
 parser = { workspace = true }
-typeck = { workspace = true }
 flask = { workspace = true }
 dashmap = { workspace = true }
 crossbeam-channel = { workspace = true }

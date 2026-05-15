@@ -340,3 +340,65 @@ fn test_has_any_files() {
     assert!(!tree.children.contains_key("empty"));
     assert!(tree.children.contains_key("has_some"));
 }
+
+#[test]
+fn test_use_path_bundle_file_parses() {
+    let src = "use './file.gin'.(Item1, Item2)\nmain:\nreturn\n";
+    let ast = parse_from_str(src);
+
+    assert_eq!(ast.uses().len(), 1);
+    let import = &ast.uses()[0];
+    assert_eq!(import.0.len(), 1);
+
+    match &import.0[0].source {
+        ImportSource::LocalBundle(b) => {
+            assert_eq!(b.local_path, Some(std::path::PathBuf::from("./file.gin")));
+            assert_eq!(b.root.as_str(), "");
+            assert_eq!(b.members.len(), 2);
+            assert_eq!(b.members[0].export.as_str(), "Item1");
+            assert!(b.members[0].alias.is_none());
+            assert_eq!(b.members[1].export.as_str(), "Item2");
+            assert!(b.members[1].alias.is_none());
+        }
+        _ => panic!("expected LocalBundle"),
+    }
+}
+
+#[test]
+fn test_use_path_bundle_folder_parses() {
+    let src = "use './folder'.(Item1)\nmain:\nreturn\n";
+    let ast = parse_from_str(src);
+
+    assert_eq!(ast.uses().len(), 1);
+    let import = &ast.uses()[0];
+
+    match &import.0[0].source {
+        ImportSource::LocalBundle(b) => {
+            assert_eq!(b.local_path, Some(std::path::PathBuf::from("./folder")));
+            assert_eq!(b.root.as_str(), "");
+            assert_eq!(b.members.len(), 1);
+            assert_eq!(b.members[0].export.as_str(), "Item1");
+            assert!(b.members[0].alias.is_none());
+        }
+        _ => panic!("expected LocalBundle"),
+    }
+}
+
+#[test]
+fn test_use_path_bundle_with_alias_parses() {
+    let src = "use './file.gin'.(Item as Alias)\nmain:\nreturn\n";
+    let ast = parse_from_str(src);
+
+    assert_eq!(ast.uses().len(), 1);
+    let import = &ast.uses()[0];
+
+    match &import.0[0].source {
+        ImportSource::LocalBundle(b) => {
+            assert_eq!(b.local_path, Some(std::path::PathBuf::from("./file.gin")));
+            assert_eq!(b.members.len(), 1);
+            assert_eq!(b.members[0].export.as_str(), "Item");
+            assert_eq!(b.members[0].alias.unwrap().as_str(), "Alias");
+        }
+        _ => panic!("expected LocalBundle"),
+    }
+}

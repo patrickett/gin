@@ -1,5 +1,5 @@
 use crate::cursor::TokenCursor;
-use ast::ModPath;
+use ast::{ModPath, Spanned};
 use internment::Intern;
 use lexer::Token;
 
@@ -14,7 +14,7 @@ pub fn parse_id(cursor: &mut TokenCursor) -> Option<Intern<String>> {
     }
 }
 
-pub fn parse_path(cursor: &mut TokenCursor) -> Option<ModPath> {
+pub fn parse_path(cursor: &mut TokenCursor) -> Option<Spanned<ModPath>> {
     let start_span = cursor.peek_span()?;
 
     let root = match cursor.peek()? {
@@ -50,14 +50,10 @@ pub fn parse_path(cursor: &mut TokenCursor) -> Option<ModPath> {
         start_span
     };
 
-    Some(ModPath {
-        root,
-        segments,
-        span,
-    })
+    Some(Spanned::new(ModPath { root, segments }, span))
 }
 
-pub fn parse_tag_path(cursor: &mut TokenCursor) -> Option<ModPath> {
+pub fn parse_tag_path(cursor: &mut TokenCursor) -> Option<Spanned<ModPath>> {
     let start_span = cursor.peek_span()?;
 
     let root = match cursor.peek()? {
@@ -96,14 +92,10 @@ pub fn parse_tag_path(cursor: &mut TokenCursor) -> Option<ModPath> {
         start_span
     };
 
-    Some(ModPath {
-        root,
-        segments,
-        span,
-    })
+    Some(Spanned::new(ModPath { root, segments }, span))
 }
 
-pub fn parse_tag_variant_path(cursor: &mut TokenCursor) -> Option<ModPath> {
+pub fn parse_tag_variant_path(cursor: &mut TokenCursor) -> Option<Spanned<ModPath>> {
     let start_span = cursor.peek_span()?;
 
     let root = match cursor.peek()? {
@@ -142,9 +134,5 @@ pub fn parse_tag_variant_path(cursor: &mut TokenCursor) -> Option<ModPath> {
         start_span
     };
 
-    Some(ModPath {
-        root,
-        segments,
-        span,
-    })
+    Some(Spanned::new(ModPath { root, segments }, span))
 }

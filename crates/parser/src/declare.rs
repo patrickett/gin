@@ -1,10 +1,11 @@
 use crate::cursor::TokenCursor;
 use crate::expr::ExprFn;
 use crate::expr::literal::parse_literal;
-use ast::expr::Expr;
 use ast::span::SpanId;
-use ast::{Declare, DeclareValue, DocComment, ParameterKind, Parameters, Variant};
-use ast::{Spanned, type_surface_mangle_name};
+use ast::{
+    Declare, DeclareValue, DocComment, ParameterKind, Parameters, Spanned, TypeExpr, Variant,
+    type_surface_mangle_name,
+};
 
 use crate::tag::{parse_pattern_type_expr, parse_type_expr};
 use i256::I256;
@@ -72,35 +73,27 @@ fn parse_declare_attributes(cursor: &mut TokenCursor) -> Option<ast::DeclareAttr
 
     cursor.expect(&Token::BracketOpen)?;
 
-    let mut attrs = ast::DeclareAttributes::default();
+    let mut items: Vec<ast::AttributeItem> = Vec::new();
 
-    if cursor.eat(&Token::BracketClose) {
-        return Some(attrs);
-    }
-
-    loop {
-        if let Some(attr) = crate::expr::bind::parse_one_attribute(cursor) {
-            if attr.os.is_some() {
-                attrs.os = attr.os;
+    if !cursor.is_at(&Token::BracketClose) {
+        loop {
+            if let Some(item) = crate::expr::bind::parse_one_attribute_item(cursor) {
+                items.push(item);
             }
-            if attr.arch.is_some() {
-                attrs.arch = attr.arch;
+            if cursor.eat(&Token::Comma) {
+                continue;
             }
-        }
-
-        if cursor.eat(&Token::Comma) {
-            continue;
-        }
-        if cursor.eat(&Token::BracketClose) {
             break;
         }
-        cursor.error(
-            "expected ',' or ']' in attribute list",
-            cursor.current_span(),
-        );
-        break;
     }
 
+    cursor.expect(&Token::BracketClose);
+
+    let mut attrs = ast::DeclareAttributes {
+        raw_attributes: Some(items),
+        ..Default::default()
+    };
+    attrs.extract_intrinsic_attributes();
     Some(attrs)
 }
 
@@ -129,7 +122,9 @@ fn parse_doc_comment(cursor: &mut TokenCursor) -> Option<DocComment> {
         lines.push(stripped);
     }
 
-    let doc = DocComment(lines.join("\n"));
+    let doc = DocComment {
+        value: lines.join("\n"),
+    };
     if doc.is_empty() { None } else { Some(doc) }
 }
 
@@ -181,28 +176,40 @@ fn parse_is_rhs(
     let first_doc = parse_doc_comment(cursor);
 
     // Try literal variant first (e.g. 'debug'), then tag pattern (e.g. Some(x))
-    let first_shape: Option<Spanned<Expr>> = 'union_check: {
+    let first_shape: Option<Spanned<TypeExpr>> = 'union_check: {
         // Check if we're at a literal that could be a union variant
         if matches!(
             cursor.peek(),
             Some(Token::String(_)) | Some(Token::Int(_)) | Some(Token::Float(_))
         ) {
             let cp = cursor.checkpoint();
-            if let Some(spanned_lit) = parse_literal(cursor)
-                && cursor.is_at(&Token::Or)
+            if let Some(Spanned {
+                value: lit,
+                span_id: span,
+            }) = parse_literal(cursor)
             {
-                let sp = Spanned(Expr::Lit(spanned_lit.0), spanned_lit.1);
-                break 'union_check Some(sp);
+                // Skip Indent/Dedent tokens that may precede a continuation `or`
+                while cursor.eat(&Token::Indent) || cursor.eat(&Token::Dedent) {}
+                if cursor.is_at(&Token::Or) {
+                    break 'union_check Some(Spanned {
+                        value: TypeExpr::Literal(lit, span),
+                        span_id: span,
+                    });
+                }
             }
             // Not a union — rewind and try tag pattern
             cursor.rewind(cp);
         }
         // Standard checkpoint approach for tag patterns
         let cp = cursor.checkpoint();
-        if let Some(shape) = parse_pattern_type_expr(cursor, expr_parser)
-            && cursor.is_at(&Token::Or)
-        {
-            break 'union_check Some(shape);
+        if let Some(shape) = parse_pattern_type_expr(cursor, expr_parser) {
+            // Skip Indent/Dedent tokens that may precede a continuation `or`
+            // on an indented line (e.g. `Type is Variant(x)
+            //                            or OtherVariant(y)`)
+            while cursor.eat(&Token::Indent) || cursor.eat(&Token::Dedent) {}
+            if cursor.is_at(&Token::Or) {
+                break 'union_check Some(shape);
+            }
         }
         cursor.rewind(cp);
         None
@@ -263,9 +270,8 @@ fn parse_is_rhs(
         );
     }
 
-    // Try tuple/grouped expression first (e.g. `()` as unit type alias)
-    if cursor.is_at(&Token::ParenOpen) {
-        let sp = expr_parser(cursor);
+    // Try pattern type expression (allows parens for params): `Register(value: 'rax')`
+    if let Some(sp) = parse_pattern_type_expr(cursor, expr_parser) {
         let doc = if matches!(cursor.peek_at(0), Some(Token::DocComment(_))) {
             parse_doc_comment(cursor)
         } else {
@@ -288,10 +294,10 @@ fn parse_is_rhs(
         cursor.current_span(),
     );
     (
-        DeclareValue::Alias(Box::new(Spanned(
-            Expr::TypeNominal(Intern::new(String::new()), cursor.current_span()),
-            cursor.current_span(),
-        ))),
+        DeclareValue::Alias(Box::new(Spanned {
+            value: TypeExpr::Nominal(Intern::new(String::new()), cursor.current_span()),
+            span_id: cursor.current_span(),
+        })),
         None,
     )
 }
@@ -303,9 +309,15 @@ fn parse_variant(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Varian
     if matches!(
         cursor.peek(),
         Some(Token::String(_)) | Some(Token::Int(_)) | Some(Token::Float(_))
-    ) && let Some(Spanned(lit, span)) = parse_literal(cursor)
+    ) && let Some(Spanned {
+        value: lit,
+        span_id: span,
+    }) = parse_literal(cursor)
     {
-        let shape = Box::new(Spanned(Expr::Lit(lit), span));
+        let shape = Box::new(Spanned {
+            value: TypeExpr::Literal(lit, span),
+            span_id: span,
+        });
         // Only consume doc comment if immediately after the value (same line)
         let doc_after = if matches!(cursor.peek_at(0), Some(Token::DocComment(_))) {
             parse_doc_comment(cursor)
@@ -345,7 +357,7 @@ fn parse_variant(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Varian
 
 fn make_variant(
     doc_before: Option<DocComment>,
-    shape: Spanned<Expr>,
+    shape: Spanned<TypeExpr>,
     doc_after: Option<DocComment>,
 ) -> Variant {
     let doc = doc_after.or(doc_before);
@@ -363,10 +375,10 @@ fn attach_doc_to_previous(variants: &mut [Variant], doc: Option<DocComment>) {
     if let Some(doc) = doc.filter(|d| !d.is_empty())
         && let Some(prev) = variants.last_mut()
     {
-        let placeholder = Variant::External(Box::new(Spanned(
-            Expr::TypeNominal(Intern::new(String::new()), SpanId::INVALID),
-            SpanId::INVALID,
-        )));
+        let placeholder = Variant::External(Box::new(Spanned {
+            value: TypeExpr::Nominal(Intern::new(String::new()), SpanId::INVALID),
+            span_id: SpanId::INVALID,
+        }));
         let prev_owned = std::mem::replace(prev, placeholder);
         *prev = match prev_owned {
             Variant::External(shape) => Variant::Local {
@@ -449,8 +461,14 @@ fn parse_one_declare_param(
     // Positional: bare Tag
     if matches!(cursor.peek(), Some(Token::Tag(_))) {
         let sp = parse_type_expr(cursor, expr_parser)?;
-        let key = Intern::<String>::from_ref(type_surface_mangle_name(&sp.0));
-        return Some((key, ParameterKind::Tagged(Box::new(sp))));
+        let key = Intern::<String>::from_ref(type_surface_mangle_name(&sp.value));
+        return Some((
+            key,
+            ParameterKind::Tagged(Box::new(Spanned {
+                value: sp.value.into(),
+                span_id: sp.span_id,
+            })),
+        ));
     }
 
     // Named: id [Tag | id | : expr]

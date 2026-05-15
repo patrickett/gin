@@ -81,6 +81,11 @@ pub fn list_public_symbols(package_dir: &Path) -> Vec<String> {
 
 /// Check whether `symbol_name` is a public (exported) definition in any
 /// `.gin` file under `package_dir`.
+///
+/// First searches the platform-filtered AST. When that fails (e.g. a
+/// `#[os({ linux })]` tag on a macOS host), falls back to a source-text
+/// search that checks whether the symbol appears as a top-level
+/// declaration (`Tag is …`, `Tag has …`, `name:` or `name :=`).
 pub fn find_public_def_in_package(package_dir: &Path, symbol_name: &str) -> Option<PathBuf> {
     let paths = flask::list_package_gin_files(package_dir);
     let target = Intern::<String>::from_ref(symbol_name);
@@ -95,8 +100,54 @@ pub fn find_public_def_in_package(package_dir: &Path, symbol_name: &str) -> Opti
         if !output.ast.private_tags.contains(&target) && output.ast.tags.contains_key(&target) {
             return Some(path.clone());
         }
+        // Fallback: platform-gated symbols (e.g. #[os({ linux })] on macOS)
+        // are dropped by collapse_tags_for_platform and won't appear in
+        // the AST. Scan the raw source for a top-level declaration.
+        if source_has_top_level_symbol(&source, symbol_name) {
+            return Some(path.clone());
+        }
     }
     None
+}
+
+/// Check whether `symbol` appears as a top-level declaration in `source`.
+///
+/// Looks for patterns like `Tag is …`, `Tag has …`, `name: …`, or
+/// `name := …` at the start of a logical line (possibly preceded by
+/// `#[…]` attributes and whitespace).
+fn source_has_top_level_symbol(source: &str, symbol: &str) -> bool {
+    let mut in_attrs = true;
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("--") {
+            continue;
+        }
+        // Skip attribute lines that precede a declaration.
+        if in_attrs && (trimmed.starts_with("#[") || trimmed.starts_with("@[")) {
+            continue;
+        }
+        in_attrs = false;
+        // Check for tag declaration: `Tag is …`, `Tag has …`,
+        // `Tag(params) is …`, `Tag[params] is …`.
+        if let Some(rest) = trimmed.strip_prefix(symbol) {
+            let rest = rest.trim_start();
+            if rest.starts_with("is ") || rest.starts_with("has ") || rest == "is" || rest == "has"
+            {
+                return true;
+            }
+            if rest.starts_with('(') || rest.starts_with('[') {
+                return true;
+            }
+        }
+        // Check for bind declaration: `name: …` or `name := …`.
+        if let Some(rest) = trimmed.strip_prefix(symbol) {
+            let rest = rest.trim_start();
+            if rest.starts_with(':') || rest.starts_with(":=") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 pub fn check_public_def_in_package(package_dir: &Path, symbol_name: &str) -> bool {

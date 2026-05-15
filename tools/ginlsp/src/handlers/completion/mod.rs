@@ -6,11 +6,12 @@ use std::path::PathBuf;
 use crate::Backend;
 use ast::FileAst;
 
-
+use ast::completions::{completions_for_ast, CompletionKind};
+use ast::hover::dot_type_at;
+use ast::position_to_byte_offset;
+use ast::ty::Ty;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
-use typeck::Ty;
-use typeck::{completions_for_ast, dot_type_at, position_to_byte_offset, CompletionKind};
 
 impl Backend {
     pub(crate) async fn handle_completion(
@@ -68,7 +69,7 @@ impl Backend {
             return Ok(Some(CompletionResponse::Array(items)));
         }
 
-        // Heavy section: parse + package-wide TyEnv. Off-load so a wedged
+        // Heavy section: parse + package-wide type resolution. Off-load so a wedged
         // Salsa query (e.g. parser hang on `core.`) cannot pin an async worker.
         let result = self
             .run_blocking_request("completion", move |this| {
@@ -103,9 +104,9 @@ fn compute_completions(
         } else {
             vec![file_path.clone()]
         };
-        let ty_env = snapshot.engine.package_ty_env(&all_file_paths);
-
-        if let Some(ty) = dot_type_at(&source, &ast, &ty_env, byte_pos) {
+        // Resolve tag types for dot_type lookup.
+        let _analysis = ast::resolve_types(ast, std::slice::from_ref(ast));
+        if let Some(ty) = dot_type_at(&source, ast, byte_pos) {
             let items = dot_completions(ty);
             if !items.is_empty() {
                 return items;
@@ -113,7 +114,7 @@ fn compute_completions(
         }
     }
 
-    build_completions(&ast)
+    build_completions(ast)
 }
 
 pub(crate) fn build_completions(ast: &FileAst) -> Vec<CompletionItem> {

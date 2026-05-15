@@ -4,6 +4,7 @@ mod bind;
 mod fn_call;
 mod format_string;
 mod if_;
+mod layout;
 mod literal;
 mod loop_;
 mod loop_for;
@@ -14,15 +15,18 @@ mod when;
 
 pub use ty_mapping::ty_to_mlir;
 
+use crate::lower::layout::ty_byte_size_static;
 use crate::prelude::*;
-use ::ast::{
-    Bind, BindValue, DeclareValue, Expr, FileAst, Spanned, SymbolTable as CompileTimeSymbolTable,
-};
 use ::span::{SpanId, SpanTable};
+use ast::ty::Ty;
+use ast::{
+    Bind, BindValue, DeclareValue, Expr, FileAst, Spanned, SymbolTable as CompileTimeSymbolTable,
+    TypeExpr, type_surface_mangle_name,
+};
+use ast::{LocalTypes, TyInfer, TyInferEnv};
 use diagnostic::codegen::CodegenSymptom;
 use diagnostic::{Diagnostic, DiagnosticCode, DiagnosticLike, TypeSymptom};
 use internment::Intern;
-use typeck::{LocalTypes, Ty, TyEnv, TyInfer, TyInferEnv, ty_byte_size_static};
 
 use std::{
     cell::{Cell, RefCell},
@@ -84,7 +88,9 @@ pub struct CodegenContext<'a, 'c> {
     pub mlir: &'c Context,
     pub type_info: &'a HashMap<Intern<String>, TypeInfo>,
     pub symbol_table: &'a CompileTimeSymbolTable,
-    pub ty_env: &'a TyEnv,
+    pub tag_types: &'a HashMap<Intern<String>, Ty>,
+    pub fn_return_types: &'a HashMap<Intern<String>, Ty>,
+    pub variant_map: &'a ast::VariantMap,
     pub string_literals: RefCell<Vec<String>>,
     pub string_symbols: RefCell<HashMap<String, String>>,
     pub string_counter: Cell<usize>,
@@ -108,7 +114,9 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         mlir: &'c Context,
         type_info: &'a HashMap<Intern<String>, TypeInfo>,
         symbol_table: &'a CompileTimeSymbolTable,
-        ty_env: &'a TyEnv,
+        tag_types: &'a HashMap<Intern<String>, Ty>,
+        fn_return_types: &'a HashMap<Intern<String>, Ty>,
+        variant_map: &'a ast::VariantMap,
         source: &'a str,
         filename: &str,
         span_table: &'a SpanTable,
@@ -117,7 +125,9 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
             mlir,
             type_info,
             symbol_table,
-            ty_env,
+            tag_types,
+            fn_return_types,
+            variant_map,
             string_literals: RefCell::new(Vec::new()),
             string_symbols: RefCell::new(HashMap::new()),
             string_counter: Cell::new(0),
@@ -130,6 +140,58 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
             source,
             span_table,
             line_starts: compute_line_starts(source),
+        }
+    }
+
+    pub fn lookup_tag(&self, name: Intern<String>) -> Option<&Ty> {
+        self.tag_types.get(&name)
+    }
+
+    pub fn lookup_variant(&self, name: Intern<String>) -> Option<ast::VariantLookupResult<'_>> {
+        let candidates = self.variant_map.get(&name)?;
+        candidates
+            .first()
+            .map(|(union, idx, fields)| (*union, *idx, fields.as_slice()))
+    }
+
+    pub fn fn_return_ty(&self, name: &Intern<String>) -> Option<&Ty> {
+        self.fn_return_types.get(name)
+    }
+
+    pub fn infer_env(&self, locals: &'a dyn LocalTypes) -> TyInferEnv<'a> {
+        TyInferEnv {
+            tag_types: self.tag_types,
+            fn_return_types: self.fn_return_types,
+            locals,
+        }
+    }
+
+    pub fn resolve_type_surface(&self, e: &TypeExpr) -> Option<Ty> {
+        ast::is_type_surface(e).then(|| ast::resolve_type_expr_from_map(e, self.tag_types))
+    }
+
+    pub fn param_types<'b>(&self, bind: &'b ast::Bind) -> Vec<(&'b Intern<String>, Ty)> {
+        match bind.params().as_ref() {
+            None => vec![],
+            Some(params) => {
+                let subst = bind
+                    .receiver_type_surface()
+                    .map(|sp| ast::typevars_from_receiver(&sp.value))
+                    .unwrap_or_default();
+                params
+                    .iter()
+                    .map(|(name, kind)| {
+                        let ty = ast::resolve_parameter_kind_with_subst(
+                            *name,
+                            kind,
+                            self.tag_types,
+                            self.fn_return_types,
+                            &subst,
+                        );
+                        (name, ty)
+                    })
+                    .collect()
+            }
         }
     }
 
@@ -204,11 +266,16 @@ pub trait Lower<'c> {
 /// This is used for native compilation where we need control over the context.
 pub fn build_module_with_context<'c>(
     context: &'c Context,
-    ast: &FileAst,
+    ast: &mut FileAst,
     source: &str,
     filename: &str,
-    ty_env: &TyEnv,
 ) -> (Option<Module<'c>>, Vec<Diagnostic>) {
+    // Resolve types if not already done.
+    let analysis = ast::resolve_types(ast, std::slice::from_ref(ast));
+    ast::populate_ast_types(ast, &analysis);
+    let tag_types = &analysis.tag_types;
+    let fn_return_types = &analysis.fn_return_types;
+    let variant_map = &analysis.variant_map;
     // Register dialects
     melior::dialect::DialectHandle::llvm().register_dialect(context);
     context.get_or_load_dialect("arith");
@@ -229,7 +296,9 @@ pub fn build_module_with_context<'c>(
         context,
         &type_info,
         &symbol_table,
-        ty_env,
+        tag_types,
+        fn_return_types,
+        variant_map,
         source,
         filename,
         ast.span_table(),
@@ -418,7 +487,7 @@ fn emit_tuple_lit_global<'c>(
 
     let locals: HashMap<Intern<String>, Ty> = HashMap::new();
     if let Some(first_elem) = elems.first() {
-        let elem_ty = first_elem.infer_ty(&ctx.ty_env.infer_env(&locals));
+        let elem_ty = first_elem.infer_ty(&ctx.infer_env(&locals));
         ctx.global_const_elems
             .borrow_mut()
             .insert(name.to_string(), elem_ty);
@@ -485,7 +554,7 @@ fn emit_tuple_alloc_global<'c>(
     let loc = context.unknown_loc();
 
     let locals: HashMap<Intern<String>, Ty> = HashMap::new();
-    let elem_ty = init.infer_ty(&ctx.ty_env.infer_env(&locals));
+    let elem_ty = init.infer_ty(&ctx.infer_env(&locals));
     let elem_mlir_ty = ty_to_mlir(&elem_ty, context);
     let array_mlir_ty = r#type::array(elem_mlir_ty, size as u32);
 
@@ -562,8 +631,8 @@ impl<'c> Lower<'c> for Spanned<Expr> {
         block: &BlockRef<'c, 'c>,
         symtab: &mut ScopedSymbolTable<'c>,
     ) -> Option<Value<'c, 'c>> {
-        ctx.current_span.set(self.1);
-        self.0.lower(ctx, block, symtab)
+        ctx.current_span.set(self.span_id);
+        self.value.lower(ctx, block, symtab)
     }
 }
 
@@ -598,9 +667,8 @@ impl<'c> Lower<'c> for Expr {
             Expr::AnonymousTag(tag_name, _) => {
                 // Bare capitalized tag — treat as a unit variant constructor.
                 // Note: unknown tag diagnostics are emitted by typeck; codegen just fails gracefully.
-                let (union_name, discriminant, _) = ctx.ty_env.lookup_variant(*tag_name)?;
+                let (union_name, discriminant, _) = ctx.lookup_variant(*tag_name)?;
                 let union_mlir_ty = ctx
-                    .ty_env
                     .lookup_tag(union_name)
                     .map(|ty| ty_to_mlir(ty, ctx.mlir))
                     .unwrap_or_else(|| ctx.mlir.union_type());
@@ -609,7 +677,7 @@ impl<'c> Lower<'c> for Expr {
                 Some(block.append_op(ctx.mlir.llvm_insertvalue(undef, disc_val, 0)))
             }
             Expr::Asm(asm_expr) => asm_expr.lower(ctx, block, symtab),
-            Expr::TupleLit(elems) => {
+            Expr::TupleLit(elems) | Expr::List(elems) => {
                 let elem_vals: Vec<Value<'c, 'c>> = elems
                     .iter()
                     .map(|e| e.lower(ctx, block, symtab))
@@ -673,9 +741,9 @@ impl<'c> Lower<'c> for Expr {
             Expr::Cast { expr, ty } => {
                 let val = expr.lower(ctx, block, symtab)?;
                 let src_ty = expr
-                    .0
-                    .infer_ty(&ctx.ty_env.infer_env(&*ctx.var_types.borrow()));
-                let dst_ty = ctx.ty_env.lookup_tag(*ty).cloned().unwrap_or(Ty::Int {
+                    .value
+                    .infer_ty(&ctx.infer_env(&*ctx.var_types.borrow()));
+                let dst_ty = ctx.lookup_tag(*ty).cloned().unwrap_or(Ty::Int {
                     width: 64,
                     signed: true,
                     value: None,
@@ -692,8 +760,8 @@ impl<'c> Lower<'c> for Expr {
             Expr::Deref(inner) => {
                 let ptr = inner.lower(ctx, block, symtab)?;
                 let pointee_ty = match inner
-                    .0
-                    .infer_ty(&ctx.ty_env.infer_env(&*ctx.var_types.borrow()))
+                    .value
+                    .infer_ty(&ctx.infer_env(&*ctx.var_types.borrow()))
                 {
                     Ty::Ptr { inner } | Ty::Ref { inner } => *inner,
                     _ => Ty::Int {
@@ -709,7 +777,7 @@ impl<'c> Lower<'c> for Expr {
             Expr::Negate(inner) => {
                 let val = inner.lower(ctx, block, symtab)?;
                 let loc = ctx.location();
-                let ty = inner.infer_ty(&ctx.ty_env.infer_env(&*ctx.var_types.borrow()));
+                let ty = inner.infer_ty(&ctx.infer_env(&*ctx.var_types.borrow()));
                 if ty.is_float() {
                     let neg_op = OperationBuilder::new("arith.negf", loc)
                         .add_operands(&[val])
@@ -723,12 +791,104 @@ impl<'c> Lower<'c> for Expr {
                     Some(block.append_op(ctx.mlir.build_binop(ArithOps::SUB, zero, val, val_ty)))
                 }
             }
-            Expr::TypeNominal(..) | Expr::TypeQualified(_) | Expr::TypeGeneric { .. } => {
-                ctx.emit_internal(
-                    "type/pattern syntax may only appear in pattern or type positions, not as a value",
-                );
-                None
+            Expr::TypeNominal(..) | Expr::TypeQualified(_) | Expr::TypeGeneric { .. } => None,
+        }
+    }
+}
+
+/// Emit an integer constant whose width matches the variant count:
+/// - 2 variants       → i1
+/// - 3..256 variants  → i8
+/// - >256 variants    → i64
+pub(crate) fn emit_discriminant_constant<'c>(
+    ctx: &CodegenContext<'_, 'c>,
+    block: &BlockRef<'c, 'c>,
+    disc: i64,
+    variant_count: usize,
+) -> Value<'c, 'c> {
+    if variant_count == 2 {
+        let i1_attr = IntegerAttribute::new(IntegerType::new(ctx.mlir, 1).into(), disc).into();
+        block.append_op(ctx.mlir.const_op(i1_attr, ctx.mlir.i1()))
+    } else if variant_count <= 256 {
+        let i8_ty = IntegerType::new(ctx.mlir, 8).into();
+        let i8_attr = IntegerAttribute::new(i8_ty, disc).into();
+        block.append_op(ctx.mlir.const_op(i8_attr, i8_ty))
+    } else {
+        block.const_i64(ctx.mlir, disc)
+    }
+}
+
+/// Extend a small integer (i1 or i8) to i64 for comparison.
+/// - 2 variants  → zero-extend (arith.extui)
+/// - 3..256      → sign-extend (arith.extsi)
+/// - >256        → already i64, no-op
+pub(crate) fn emit_discriminant_extend<'c>(
+    ctx: &CodegenContext<'_, 'c>,
+    block: &BlockRef<'c, 'c>,
+    subject: Value<'c, 'c>,
+    variant_count: usize,
+) -> Value<'c, 'c> {
+    let loc = ctx.location();
+    if variant_count == 2 {
+        let extend_op = match OperationBuilder::new("arith.extui", loc)
+            .add_operands(&[subject])
+            .add_results(&[ctx.mlir.i64()])
+            .build()
+        {
+            Ok(op) => op,
+            Err(e) => {
+                ctx.emit_internal(format!("extui build failed: {e}"));
+                return subject;
             }
+        };
+        block.append_op(extend_op)
+    } else if variant_count <= 256 {
+        let extend_op = match OperationBuilder::new("arith.extsi", loc)
+            .add_operands(&[subject])
+            .add_results(&[ctx.mlir.i64()])
+            .build()
+        {
+            Ok(op) => op,
+            Err(e) => {
+                ctx.emit_internal(format!("extsi build failed: {e}"));
+                return subject;
+            }
+        };
+        block.append_op(extend_op)
+    } else {
+        subject
+    }
+}
+
+/// Bind payload fields from a union variant into the symbol table.
+/// Shared between `if_` pattern conditions and `when` pattern arms.
+pub(crate) fn bind_pattern_payload_fields<'c>(
+    ctx: &CodegenContext<'_, 'c>,
+    block: &BlockRef<'c, 'c>,
+    pattern: &TypeExpr,
+    subject_val: Value<'c, 'c>,
+    symtab: &mut ScopedSymbolTable<'c>,
+) {
+    if let TypeExpr::Generic { params, .. } = pattern {
+        let variant_name = Intern::<String>::from_ref(type_surface_mangle_name(pattern));
+        let payload_fields = ctx
+            .lookup_variant(variant_name)
+            .map(|(_, _, f)| f)
+            .unwrap_or(&[]);
+        for (slot, (param_name, _)) in params.iter().enumerate() {
+            if param_name.as_str() == "_" {
+                continue;
+            }
+            let field_mlir_ty = payload_fields
+                .get(slot)
+                .map(|(_, ty)| ty_to_mlir(ty, ctx.mlir))
+                .unwrap_or_else(|| ctx.mlir.i64());
+            let extracted = block.append_op(ctx.mlir.llvm_extractvalue(
+                subject_val,
+                (slot + 1) as i64,
+                field_mlir_ty,
+            ));
+            symtab.insert(param_name.as_str().to_string(), extracted);
         }
     }
 }
@@ -746,7 +906,7 @@ fn bind_value_uses_self(value: &BindValue) -> bool {
         BindValue::Body { exprs, ret } => {
             exprs.iter().any(spanned_uses_self)
                 || ret
-                    .0
+                    .value
                     .as_ref()
                     .map(|sp| spanned_uses_self(sp))
                     .unwrap_or(false)
@@ -756,7 +916,7 @@ fn bind_value_uses_self(value: &BindValue) -> bool {
 }
 
 fn spanned_uses_self(sp: &Spanned<Expr>) -> bool {
-    expr_uses_self(&sp.0)
+    expr_uses_self(&sp.value)
 }
 
 fn expr_uses_self(expr: &Expr) -> bool {
@@ -774,7 +934,7 @@ fn expr_uses_self(expr: &Expr) -> bool {
                 .unwrap_or(false)
         }
         Expr::TagCall(tc) => tc.args.iter().any(spanned_uses_self),
-        Expr::TupleLit(elems) => elems.iter().any(spanned_uses_self),
+        Expr::TupleLit(elems) | Expr::List(elems) => elems.iter().any(spanned_uses_self),
         Expr::TupleAlloc { init, .. } => spanned_uses_self(init),
         Expr::TupleGet { base, .. } => spanned_uses_self(base),
         Expr::TupleSet { base, value, .. } => spanned_uses_self(base) || spanned_uses_self(value),
@@ -793,11 +953,11 @@ fn expr_uses_self(expr: &Expr) -> bool {
                 .map(|s| spanned_uses_self(s))
                 .unwrap_or(false)
                 || w.arms.iter().any(|arm| match arm {
-                    ::ast::WhenArm::Cond { condition, body } => {
-                        spanned_uses_self(condition) || spanned_uses_self(body)
-                    }
+                    ::ast::WhenArm::Cond {
+                        condition, body, ..
+                    } => spanned_uses_self(condition) || spanned_uses_self(body),
                     ::ast::WhenArm::Is { body, .. } => spanned_uses_self(body),
-                    ::ast::WhenArm::Else(body) => spanned_uses_self(body),
+                    ::ast::WhenArm::Else(body, _) => spanned_uses_self(body),
                 })
         }
         Expr::If(if_expr) => {
@@ -816,7 +976,7 @@ fn expr_uses_self(expr: &Expr) -> bool {
             }
         },
         Expr::FormatString(fs) => fs.parts.iter().any(|p| match p {
-            ::ast::FormatPart::Expr(e) => spanned_uses_self(e),
+            ::ast::FormatPart::Expr(e, _) => spanned_uses_self(e),
             _ => false,
         }),
         // Inline asm operand expressions: a use of `self` here is unusual but
@@ -847,12 +1007,12 @@ pub fn lower_function<'c>(
     // Detect by scanning the body for `Expr::SelfRef`. This keeps both call
     // shapes working without changing the surface syntax: `b.to_string` and
     // `Range.new(12, 1200)` both just dispatch to the mangled name.
-    let param_info_ref = ctx.ty_env.param_types(bind);
+    let param_info_ref = ctx.param_types(bind);
     let mut param_info: Vec<(Intern<String>, Ty)> =
         param_info_ref.into_iter().map(|(n, t)| (*n, t)).collect();
     if let Some(sp) = bind.receiver_type_surface()
         && bind_value_uses_self(bind.value())
-        && let Some(self_ty) = ctx.ty_env.resolve_type_surface(&sp.0)
+        && let Some(self_ty) = ctx.resolve_type_surface(&sp.value)
     {
         param_info.insert(0, (Intern::<String>::from_ref("self"), self_ty));
     }
@@ -863,8 +1023,8 @@ pub fn lower_function<'c>(
         .collect();
 
     let env = TyInferEnv {
-        tag_types: &ctx.ty_env.tag_types,
-        fn_return_types: &ctx.ty_env.fn_return_types,
+        tag_types: ctx.tag_types,
+        fn_return_types: ctx.fn_return_types,
         locals: &HashMap::new(),
     };
     let return_ty = bind.infer_ty(&env);
@@ -952,7 +1112,7 @@ fn lower_take_ptr<'c>(
     inner: &Spanned<Expr>,
 ) -> Option<Value<'c, 'c>> {
     // For a bare variable reference, check if it already lives in a mutable slot.
-    if let Expr::FnCall(call) = &inner.0
+    if let Expr::FnCall(call) = &inner.value
         && call.path.segments.is_empty()
         && call.args.is_none()
     {
@@ -973,8 +1133,8 @@ fn lower_take_ptr<'c>(
         }
     }
     // Otherwise evaluate the inner expression and spill to a fresh alloca.
-    let val = inner.0.lower(ctx, block, symtab)?;
-    let elem_ty = inner.infer_ty(&ctx.ty_env.infer_env(&*ctx.var_types.borrow()));
+    let val = inner.value.lower(ctx, block, symtab)?;
+    let elem_ty = inner.infer_ty(&ctx.infer_env(&*ctx.var_types.borrow()));
     let mlir_ty = ty_to_mlir(&elem_ty, ctx.mlir);
     let loc = ctx.location();
     let ptr = block.alloca_typed(ctx.mlir, mlir_ty, loc);
@@ -1015,7 +1175,7 @@ fn lower_tuple_alloc<'c>(
     let loc = ctx.location();
 
     // Infer element type from init expression.
-    let elem_ty = init.infer_ty(&ctx.ty_env.infer_env(&HashMap::new()));
+    let elem_ty = init.infer_ty(&ctx.infer_env(&HashMap::new()));
     let elem_bytes = ty_byte_size_static(&elem_ty);
     let total_bytes = size * elem_bytes;
 
@@ -1050,7 +1210,7 @@ fn lower_tuple_get<'c>(
 
     // If the base is a struct value (not a pointer), use extractvalue.
     if base_val.r#type() != ctx.mlir.llvm_ptr() {
-        let base_ty = base.infer_ty(&ctx.ty_env.infer_env(&*ctx.var_types.borrow()));
+        let base_ty = base.infer_ty(&ctx.infer_env(&*ctx.var_types.borrow()));
         let field_ty = match base_ty {
             Ty::Tuple(ref fields) => fields
                 .get(index)
@@ -1123,7 +1283,7 @@ fn lower_bind_value<'c>(
             for expr in exprs {
                 expr.lower(ctx, block, &mut local_symtab)?;
             }
-            match &ret.0 {
+            match &ret.value {
                 Some(expr) => {
                     let val = expr.lower(ctx, block, &mut local_symtab)?;
                     Some(Some(val))

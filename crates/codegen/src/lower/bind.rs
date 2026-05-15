@@ -1,5 +1,6 @@
 use crate::{lower_function, prelude::*, ty_to_mlir};
-use typeck::{Ty, TyInfer, flow::ConstValue};
+use ast::ty::Ty;
+use ast::{TyInfer, flow::ConstValue};
 
 impl<'c> Lower<'c> for Bind {
     fn lower(
@@ -20,7 +21,7 @@ impl<'c> Lower<'c> for Bind {
                 let name = self.name();
                 // Infer the target type — uses return_tag for typed binds (e.g.
                 // `level LogLevel: 'debug'` resolves to ConstUnion, not Str).
-                let ty = self.infer_ty(&ctx.ty_env.infer_env(&*ctx.var_types.borrow()));
+                let ty = self.infer_ty(&ctx.infer_env(&*ctx.var_types.borrow()));
 
                 // Lower the value. If the target type is a ConstUnion and the
                 // expression is a literal, emit just the discriminant integer
@@ -82,36 +83,15 @@ fn lower_const_union_literal<'c>(
     expr: &Spanned<Expr>,
     values: &[ConstValue],
 ) -> Option<Value<'c, 'c>> {
-    use ast::Literal;
-    let lit = match &expr.0 {
+    let lit = match &expr.value {
         Expr::Lit(lit) => lit,
         _ => return None,
     };
-    let disc = match lit {
-        Literal::String(s) => values
-            .iter()
-            .position(|v| matches!(v, ConstValue::String(vs) if vs == s)),
-        Literal::Int(n) => values
-            .iter()
-            .position(|v| matches!(v, ConstValue::Int(vn) if *vn == *n as i128)),
-        Literal::Float(f) => values
-            .iter()
-            .position(|v| matches!(v, ConstValue::Float(vf) if vf.to_bits() == f.to_bits())),
-        Literal::Number(n) => values
-            .iter()
-            .position(|v| matches!(v, ConstValue::Int(vn) if *vn == *n as i128)),
-    };
-    let disc = disc? as i64;
-    let variant_count = values.len();
-    Some(if variant_count == 2 {
-        let i1_ty = IntegerType::new(ctx.mlir, 1).into();
-        let i1_attr = melior::ir::attribute::IntegerAttribute::new(i1_ty, disc).into();
-        block.append_op(ctx.mlir.const_op(i1_attr, i1_ty))
-    } else if variant_count <= 256 {
-        let i8_ty = IntegerType::new(ctx.mlir, 8).into();
-        let i8_attr = melior::ir::attribute::IntegerAttribute::new(i8_ty, disc).into();
-        block.append_op(ctx.mlir.const_op(i8_attr, i8_ty))
-    } else {
-        block.const_i64(ctx.mlir, disc)
-    })
+    let disc = ConstValue::find_discriminant(lit, values)? as i64;
+    Some(super::emit_discriminant_constant(
+        ctx,
+        block,
+        disc,
+        values.len(),
+    ))
 }

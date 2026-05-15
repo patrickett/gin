@@ -24,13 +24,7 @@ pub trait QueryEngine: Send {
 
     /// Type-check a set of files sharing one type environment.
     /// Returns per-path diagnostics in the same order as `paths`.
-    fn typecheck_package(
-        &self,
-        paths: &[PathBuf],
-    ) -> Vec<Vec<diagnostic::Diagnostic>>;
-
-    /// Build a shared type environment for a set of files.
-    fn package_ty_env(&self, paths: &[PathBuf]) -> Arc<typeck::TyEnv>;
+    fn typecheck_package(&self, paths: &[PathBuf]) -> Vec<Vec<diagnostic::Diagnostic>>;
 
     /// Compute hover markdown at a byte position in a file.
     fn hover(&self, path: &Path, byte_pos: u32) -> Option<String>;

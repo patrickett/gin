@@ -1,14 +1,13 @@
 use internment::Intern;
 
-use ast::{apply_symbol_aliases, BindValue, Expr, FileAst, ModPath, SpanId, SymbolAlias};
+use ast::{BindValue, Expr, FileAst, ModPath, SpanId, Spanned, SymbolAlias, apply_symbol_aliases};
 use parser::parse_source_full;
 
 fn add_symbol_alias(ast: &mut FileAst, alias: &str, root: &str, symbol: &str) {
     ast.symbol_aliases.push(SymbolAlias {
         alias: Intern::from_ref(alias),
-        target: ModPath::new(
-            Intern::from_ref(root),
-            vec![Intern::from_ref(symbol)],
+        target: Spanned::new(
+            ModPath::new(Intern::from_ref(root), vec![Intern::from_ref(symbol)]),
             SpanId::INVALID,
         ),
     });
@@ -33,7 +32,7 @@ fn rewrites_function_call_alias() {
 
     let main = out.ast.defs().get(&Intern::from_ref("main")).unwrap();
     if let BindValue::Body { exprs, .. } = main.value() {
-        let first_expr = &exprs[0].0;
+        let first_expr = &exprs[0].value;
         assert_alias_fn_call(first_expr, "core", &["true"]);
     } else {
         panic!("unexpected binding for main");
@@ -41,19 +40,21 @@ fn rewrites_function_call_alias() {
 }
 
 #[test]
-fn rewrites_type_nominal_alias() {
+fn rewrites_anonymous_tag_alias() {
     let mut ast = FileAst::default();
-    ast.exprs
-        .push((Expr::TypeNominal(Intern::from_ref("Range"), SpanId::INVALID), SpanId::INVALID));
+    ast.exprs.push((
+        Expr::AnonymousTag(Intern::from_ref("Range"), SpanId::INVALID),
+        SpanId::INVALID,
+    ));
     add_symbol_alias(&mut ast, "Range", "core", "Range");
 
     apply_symbol_aliases(&mut ast);
 
+    // AnonymousTag is handled by a separate pass, so it remains unchanged.
     let expr = &ast.exprs[0].0;
-    if let Expr::TypeQualified(path) = expr {
-        assert_eq!(path.root, Intern::from_ref("core"));
-        assert_eq!(path.segments, vec![Intern::from_ref("Range")]);
-    } else {
-        panic!("expected TypeQualified expression after aliasing");
-    }
+    assert!(
+        matches!(expr, Expr::AnonymousTag(n, _) if n.as_str() == "Range"),
+        "expected AnonymousTag(Range), got {:?}",
+        expr,
+    );
 }

@@ -4,11 +4,7 @@ use std::ops::ControlFlow;
 
 use internment::Intern;
 
-use crate::{
-    folder::*,
-    path::ModPath,
-    AsmExpr, DefMap, Expr, FileAst, FnCall,
-};
+use crate::{AsmExpr, DefMap, Expr, FileAst, FnCall, folder::*, path::ModPath};
 
 use ControlFlow::Continue;
 
@@ -64,13 +60,10 @@ struct ModuleQualifyFolder {
 
 impl Folder for ModuleQualifyFolder {
     fn fold_expr(&mut self, expr: &mut Expr) -> ControlFlow<()> {
-        match expr {
-            Expr::TypeQualified(path) => {
-                maybe_rewrite_fn_path(path, &self.old_names, &self.qual_parts);
-                Continue(())
-            }
-            _ => walk_expr_mut(self, expr),
-        }
+        // Type expressions (TypeExpr) are now a separate enum and are not
+        // folded through the Expr Folder. Qualification of TypeExpr nodes
+        // will be handled in a separate pass.
+        walk_expr_mut(self, expr)
     }
 
     fn fold_fn_call(&mut self, call: &mut FnCall) -> ControlFlow<()> {
@@ -79,6 +72,9 @@ impl Folder for ModuleQualifyFolder {
     }
 
     fn fold_asm_expr(&mut self, a: &mut AsmExpr) -> ControlFlow<()> {
+        for c in &mut a.constraints {
+            self.fold_expr(c)?;
+        }
         for o in &mut a.operands {
             self.fold_expr(o)?;
         }
@@ -97,11 +93,9 @@ fn maybe_rewrite_fn_path(
     if !old_names.contains(&path.root) {
         return;
     }
-    let span = path.span;
     let old_root = path.root;
     let mut segments: Vec<Intern<String>> = qual_parts[1..].to_vec();
     segments.push(old_root);
     path.root = qual_parts[0];
     path.segments = segments;
-    path.span = span;
 }

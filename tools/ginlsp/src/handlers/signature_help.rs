@@ -1,9 +1,10 @@
 use crate::Backend;
 use ast::FileAst;
 
+use ast::completions::{fn_call_at, signature_for_fn};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
-use typeck::{fn_call_at, position_to_byte_offset, signature_for_fn};
+use ast::position_to_byte_offset;
 
 impl Backend {
     pub(crate) async fn handle_signature_help(

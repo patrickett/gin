@@ -2,12 +2,11 @@ use crate::diagnostics::span_to_range;
 use crate::Backend;
 use ast::{HasSpanId, ImportSource, LocalBundleImport};
 
+use ast::hover::{definition_span, find_import_definition_span};
+use ast::{is_identifier_char, position_to_byte_offset};
 use diagnostic::SpanId;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
-use typeck::{
-    find_definition_span, find_import_definition_span, is_identifier_char, position_to_byte_offset,
-};
 
 fn zero_location(uri: Url) -> Location {
     Location {
@@ -30,6 +29,7 @@ fn zero_location(uri: Url) -> Location {
 /// This function is intentionally side-effect free (filesystem reads only) so it can be unit tested.
 fn resolve_use_import_source_fs(base_uri: &Url, source: &ImportSource) -> Option<Location> {
     match source {
+        ImportSource::CurrentModule { .. } => Some(zero_location(base_uri.clone())),
         ImportSource::Local(path, _) => {
             let base_path = base_uri.to_file_path().ok()?;
             let base_dir = base_path.parent()?;
@@ -54,6 +54,16 @@ fn resolve_use_import_source_fs(base_uri: &Url, source: &ImportSource) -> Option
                 return None;
             }
             Some(zero_location(Url::from_file_path(&file_res).ok()?))
+        }
+        ImportSource::LocalBundle(b) if b.local_path.is_some() => {
+            let base_path = base_uri.to_file_path().ok()?;
+            let base_dir = base_path.parent()?;
+            let full = base_dir.join(b.local_path.as_ref().unwrap());
+            let flask_path = full.join(flask::PACKAGE_CONFIG_NAME);
+            if !flask_path.is_file() {
+                return None;
+            }
+            Some(zero_location(Url::from_file_path(&flask_path).ok()?))
         }
         ImportSource::LocalBundle(b) => {
             let base_path = base_uri.to_file_path().ok()?;
@@ -184,6 +194,55 @@ fn resolve_nested_package_manifest_location(
     }
 }
 
+/// Resolve a member of a local-path bundle import (`use './path'.(Member)`)
+/// to the actual definition location in the target file.
+fn resolve_local_bundle_member_location(
+    base_uri: &Url,
+    local_path: &std::path::Path,
+    symbol: &str,
+) -> Option<Location> {
+    let base_path = base_uri.to_file_path().ok()?;
+    let def_span = resolve::resolve_local_symbol_def_span(
+        &base_path,
+        local_path,
+        symbol,
+        &resolve::default_file_reader,
+    )?;
+
+    let resolved = base_path.parent()?.join(local_path);
+    let resolved = std::fs::canonicalize(&resolved).unwrap_or(resolved);
+
+    let target_file = if resolved.is_dir() {
+        resolve::find_public_def_in_package(&resolved, symbol)?
+    } else {
+        let parent = resolved.parent()?;
+        let def_file = resolve::find_public_def_in_package(parent, symbol)?;
+        let def_canonical = std::fs::canonicalize(&def_file).unwrap_or_else(|_| def_file.clone());
+        if std::fs::canonicalize(&resolved).unwrap_or_else(|_| resolved.clone()) != def_canonical {
+            return None;
+        }
+        def_file
+    };
+
+    let def_source = std::fs::read_to_string(&target_file).ok()?;
+    let (start_line, start_char) = ast::byte_offset_to_position(def_span.start, &def_source);
+    let (end_line, end_char) = ast::byte_offset_to_position(def_span.end, &def_source);
+    let uri = Url::from_file_path(&target_file).ok()?;
+    Some(Location {
+        uri,
+        range: Range {
+            start: Position {
+                line: start_line,
+                character: start_char,
+            },
+            end: Position {
+                line: end_line,
+                character: end_char,
+            },
+        },
+    })
+}
+
 impl Backend {
     pub(crate) async fn handle_goto_definition(
         &self,
@@ -226,7 +285,7 @@ impl Backend {
                     // throughout the file.
                     if let Some(word) = ast
                         .word_at_byte(byte_pos, &source)
-                        .or_else(|| typeck::word_at_byte_offset(&source, byte_pos))
+                        .or_else(|| ast::word_at_byte_offset(&source, byte_pos))
                     {
                         if let Some(link) = this.resolve_body_import_at(&uri, &ast, &source, &word)
                         {
@@ -237,9 +296,9 @@ impl Backend {
                     // Phase 3: cursor is on a definition or import reference.
                     if let Some(word) = ast
                         .word_at_byte(byte_pos, &source)
-                        .or_else(|| typeck::word_at_byte_offset(&source, byte_pos))
+                        .or_else(|| ast::word_at_byte_offset(&source, byte_pos))
                     {
-                        let range = find_definition_span(&ast, &word)
+                        let range = definition_span(&ast, &word)
                             .map(|span| span_to_range(span.start, span.end, &source))
                             .unwrap_or_default();
                         if range != Range::default() {
@@ -284,14 +343,11 @@ impl Backend {
                         for member in &b.members {
                             let mspan = span_table.get(member.span);
                             if byte_pos >= mspan.start && byte_pos <= mspan.end {
-                                // Build a synthetic Local source that points to the
-                                // dependency's module root so the resolution opens
-                                // the dependency's flask.jsonc (or the file with the
-                                // definition for symbol imports).
                                 let lb = LocalBundleImport {
                                     root: b.root,
                                     members: vec![member.clone()],
                                     span: member.span,
+                                    local_path: b.local_path.clone(),
                                 };
                                 found = Some((member.span, ImportSource::LocalBundle(lb)));
                                 break;
@@ -303,6 +359,12 @@ impl Backend {
                         let _span = span_table.get(mod_path.span_id());
                         (mod_path.span_id(), ImportSource::Package(mod_path.clone()))
                     }
+                    ImportSource::CurrentModule { member } => (
+                        member.span,
+                        ImportSource::CurrentModule {
+                            member: member.clone(),
+                        },
+                    ),
                 };
 
                 let span = span_table.get(import_span);
@@ -322,6 +384,34 @@ impl Backend {
                         let byte_in_span = byte_pos.saturating_sub(span.start);
                         let part = part_index_in_dotted_path(span_text, byte_in_span).unwrap_or(0);
                         resolve_package_part_location_fs(base_uri, &mp.root, &mp.segments, part)
+                    }
+                    ImportSource::LocalBundle(b) if b.local_path.is_some() => {
+                        let local_path = b.local_path.as_ref()?;
+                        let symbol = b.members.first()?.export.to_string();
+                        resolve_local_bundle_member_location(base_uri, local_path, &symbol)
+                    }
+                    ImportSource::CurrentModule { member } => {
+                        let base_path = base_uri.to_file_path().ok()?;
+                        let def_span = resolve::resolve_current_module_def_span(
+                            &base_path,
+                            member.export.as_str(),
+                            &resolve::default_file_reader,
+                        )?;
+                        let pkg_root = resolve::find_package_root(&base_path)?;
+                        let def_file =
+                            resolve::find_public_def_in_package(&pkg_root, member.export.as_str())?;
+                        let def_source = std::fs::read_to_string(&def_file).ok()?;
+                        let range = crate::diagnostics::span_to_range(
+                            def_span.start,
+                            def_span.end,
+                            &def_source,
+                        );
+                        let target_uri =
+                            tower_lsp::lsp_types::Url::from_file_path(&def_file).ok()?;
+                        Some(Location {
+                            uri: target_uri,
+                            range,
+                        })
                     }
                     _ => resolve_use_import_source_fs(base_uri, &source_ref),
                 };
@@ -364,6 +454,35 @@ impl Backend {
                     target_selection_range: target_range,
                 })
             }
+            Some(resolve::ImportTarget::LocalBundleSymbol { local_path, symbol }) => {
+                let loc = resolve_local_bundle_member_location(base_uri, &local_path, &symbol)?;
+                Some(LocationLink {
+                    origin_selection_range: None,
+                    target_uri: loc.uri,
+                    target_range: loc.range,
+                    target_selection_range: loc.range,
+                })
+            }
+            Some(resolve::ImportTarget::CurrentModuleSymbol { symbol }) => {
+                let base_path = base_uri.to_file_path().ok()?;
+                let def_span = resolve::resolve_current_module_def_span(
+                    &base_path,
+                    &symbol,
+                    &resolve::default_file_reader,
+                )?;
+                let pkg_root = resolve::find_package_root(&base_path)?;
+                let def_file = resolve::find_public_def_in_package(&pkg_root, &symbol)?;
+                let def_source = std::fs::read_to_string(&def_file).ok()?;
+                let range =
+                    crate::diagnostics::span_to_range(def_span.start, def_span.end, &def_source);
+                let target_uri = tower_lsp::lsp_types::Url::from_file_path(&def_file).ok()?;
+                Some(LocationLink {
+                    origin_selection_range: None,
+                    target_uri,
+                    target_range: range,
+                    target_selection_range: range,
+                })
+            }
             _ => None,
         }
     }
@@ -383,9 +502,9 @@ fn resolve_symbol_location(dep_dir: &std::path::Path, symbol: &str) -> Option<(U
     let def_file = resolve::find_public_def_in_package(dep_dir, symbol)?;
     let def_source = std::fs::read_to_string(&def_file).ok()?;
     let def_output = parser::parse_source_full(&def_source);
-    let def_span = typeck::find_definition_span(&def_output.ast, symbol)?;
-    let (start_line, start_char) = typeck::byte_offset_to_position(def_span.start, &def_source);
-    let (end_line, end_char) = typeck::byte_offset_to_position(def_span.end, &def_source);
+    let def_span = ast::hover::definition_span(&def_output.ast, symbol)?;
+    let (start_line, start_char) = ast::byte_offset_to_position(def_span.start, &def_source);
+    let (end_line, end_char) = ast::byte_offset_to_position(def_span.end, &def_source);
     let uri = Url::from_file_path(&def_file).ok()?;
     let range = Range {
         start: Position {
@@ -403,8 +522,8 @@ fn resolve_symbol_location(dep_dir: &std::path::Path, symbol: &str) -> Option<(U
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ast::ModPath;
     use ast::{BundleExportImport, LocalBundleImport};
+    use ast::{ModPath, Spanned};
     use diagnostic::SpanId;
     use internment::Intern;
     use std::fs;
@@ -466,9 +585,11 @@ mod tests {
         write_file(&dir.join("main.gin"), "main:\n    return 0\n");
 
         let base_uri = Url::from_file_path(dir.join("main.gin")).unwrap();
-        let mp = ModPath::new(
-            Intern::<String>::from_ref("dep"),
-            vec![Intern::<String>::from_ref("filemod")],
+        let mp = Spanned::new(
+            ModPath::new(
+                Intern::<String>::from_ref("dep"),
+                vec![Intern::<String>::from_ref("filemod")],
+            ),
             SpanId::new(0),
         );
 
@@ -518,9 +639,11 @@ mod tests {
         write_file(&dir.join("main.gin"), "main:\n    return 0\n");
 
         let base_uri = Url::from_file_path(dir.join("main.gin")).unwrap();
-        let mp = ModPath::new(
-            Intern::<String>::from_ref("dep"),
-            vec![Intern::<String>::from_ref("foldermod")],
+        let mp = Spanned::new(
+            ModPath::new(
+                Intern::<String>::from_ref("dep"),
+                vec![Intern::<String>::from_ref("foldermod")],
+            ),
             SpanId::new(0),
         );
 
@@ -566,7 +689,10 @@ mod tests {
         write_file(&dir.join("main.gin"), "main:\n    return 0\n");
 
         let base_uri = Url::from_file_path(dir.join("main.gin")).unwrap();
-        let mp = ModPath::new(Intern::<String>::from_ref("dep"), vec![], SpanId::new(0));
+        let mp = Spanned::new(
+            ModPath::new(Intern::<String>::from_ref("dep"), vec![]),
+            SpanId::new(0),
+        );
 
         let loc = resolve_use_import_source_fs(&base_uri, &ImportSource::Package(mp)).unwrap();
         assert_eq!(loc.uri.to_file_path().unwrap(), dir.join("dep/flask.jsonc"));
@@ -615,6 +741,7 @@ mod tests {
                 span: SpanId::new(0),
             }],
             span: SpanId::new(0),
+            local_path: None,
         };
 
         let loc = resolve_use_import_source_fs(&base_uri, &ImportSource::LocalBundle(lb)).unwrap();
@@ -661,12 +788,14 @@ mod tests {
         write_file(&dir.join("main.gin"), "main:\n    return 0\n");
 
         let base_uri = Url::from_file_path(dir.join("main.gin")).unwrap();
-        let mp = ModPath::new(
-            Intern::<String>::from_ref("dep"),
-            vec![
-                Intern::<String>::from_ref("a"),
-                Intern::<String>::from_ref("b"),
-            ],
+        let mp = Spanned::new(
+            ModPath::new(
+                Intern::<String>::from_ref("dep"),
+                vec![
+                    Intern::<String>::from_ref("a"),
+                    Intern::<String>::from_ref("b"),
+                ],
+            ),
             SpanId::new(0),
         );
 

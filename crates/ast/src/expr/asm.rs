@@ -7,8 +7,10 @@ use internment::Intern;
 pub struct AsmExpr {
     /// The assembly template string (e.g. "svc #0x80")
     pub template: Intern<String>,
-    /// The LLVM-style constraint string (e.g. "={x0},{x16},0,{x1},~{memory}")
-    pub constraints: Intern<String>,
+    /// Typed constraint expressions — values of the `Constraint` union type.
+    /// Each constraint describes how a register participates in the assembly block,
+    /// e.g. `Output[X0]`, `Input[X16]`, `ClobberMemory`.
+    pub constraints: Vec<Spanned<Expr>>,
     /// Input operand expressions
     pub operands: Vec<Spanned<Expr>>,
     /// Source span

@@ -1,15 +1,14 @@
-use std::collections::HashSet;
-use std::ops::ControlFlow;
-
 use ast::span::{SpanId, SpanTable};
 use ast::visit::{Visitor, walk_bind_value, walk_expr};
 use lexer::Token;
+use std::collections::HashSet;
+use std::ops::ControlFlow;
 
 use ControlFlow::Continue;
 
 use ast::{
-    Bind, Declare, DeclareValue, Expr, FileAst, ImplBlock, ParameterKind, Spanned, Variant,
-    collapse_defs_for_platform, type_surface_mangle_name,
+    Bind, Declare, DeclareValue, Expr, FileAst, ImplBlock, ParameterKind, Spanned, TypeExpr,
+    Variant, collapse_defs_for_platform, type_surface_mangle_name,
 };
 use indexmap::IndexMap;
 use internment::Intern;
@@ -125,7 +124,7 @@ fn parse_module_doc(cursor: &mut TokenCursor) -> Option<ast::DocComment> {
 
     // Fast path: single-line module doc
     if !matches!(cursor.peek(), Some(Token::ModuleDocComment(_))) {
-        let doc = ast::DocComment(first);
+        let doc = ast::DocComment { value: first };
         return if doc.is_empty() { None } else { Some(doc) };
     }
 
@@ -140,7 +139,9 @@ fn parse_module_doc(cursor: &mut TokenCursor) -> Option<ast::DocComment> {
         lines.push(stripped);
     }
 
-    let doc = ast::DocComment(lines.join("\n"));
+    let doc = ast::DocComment {
+        value: lines.join("\n"),
+    };
     if doc.is_empty() { None } else { Some(doc) }
 }
 
@@ -227,7 +228,19 @@ fn parse_top_level_element(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Opt
                 cursor.rewind(checkpoint);
             }
             // else: bare identifier or expression — no bind speculation needed
-            let Spanned(expr, span) = expr_parser(cursor);
+            let Spanned {
+                value: expr,
+                span_id: span,
+            } = expr_parser(cursor);
+            // Feature 3: Detect `{expr} {expr}` on the same line without an operator.
+            if let Some(next_tok) = cursor.peek_at(0)
+                && crate::expr::control::can_start_expr(next_tok)
+            {
+                cursor.error(
+                    format!("expected operator between expressions, found {next_tok:?}"),
+                    cursor.peek_span().unwrap_or(span),
+                );
+            }
             Some(TopLevelValue::Expr(expr, span))
         }
         Token::Pound => {
@@ -235,11 +248,17 @@ fn parse_top_level_element(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Opt
             if let Some(bind) = crate::expr::bind::parse_bind(cursor, expr_parser) {
                 return Some(TopLevelValue::Bind(Box::new(bind)));
             }
-            let Spanned(expr, span) = expr_parser(cursor);
+            let Spanned {
+                value: expr,
+                span_id: span,
+            } = expr_parser(cursor);
             Some(TopLevelValue::Expr(expr, span))
         }
         _ => {
-            let Spanned(expr, span) = expr_parser(cursor);
+            let Spanned {
+                value: expr,
+                span_id: span,
+            } = expr_parser(cursor);
             Some(TopLevelValue::Expr(expr, span))
         }
     }
@@ -288,7 +307,10 @@ fn dispatch_tag_element(
     }
 
     // fallback: expression (bare Tag, Tag(args), etc.)
-    let Spanned(expr, span) = expr_parser(cursor);
+    let Spanned {
+        value: expr,
+        span_id: span,
+    } = expr_parser(cursor);
     Some(TopLevelValue::Expr(expr, span))
 }
 
@@ -437,7 +459,7 @@ fn collect_top_level(
             let name = if let Some(sp) = bind.receiver_type_surface() {
                 Intern::<String>::new(format!(
                     "{}.{}",
-                    type_surface_mangle_name(&sp.0),
+                    type_surface_mangle_name(&sp.value),
                     bind.name()
                 ))
             } else {
@@ -446,10 +468,10 @@ fn collect_top_level(
             defs.entry(name).or_default().push(*bind);
         }
         TopLevelValue::ImplBlock(block) => {
-            let recv = Box::new(Spanned(
-                Expr::TypeNominal(block.type_name, block.type_name_span),
-                block.type_name_span,
-            ));
+            let recv = Box::new(Spanned {
+                value: TypeExpr::Nominal(block.type_name, block.type_name_span),
+                span_id: block.type_name_span,
+            });
             for (method_name, bind) in block.methods {
                 let bind = bind.with_receiver_type(Some(recv.clone()));
                 let mangled = Intern::<String>::new(format!(
@@ -485,7 +507,10 @@ fn generate_return_type_unions(
         let variants: Vec<Variant> = unique_tags
             .into_iter()
             .map(|(name, span)| {
-                Variant::External(Box::new(Spanned(Expr::TypeNominal(name, span), span)))
+                Variant::External(Box::new(Spanned {
+                    value: TypeExpr::Nominal(name, span),
+                    span_id: span,
+                }))
             })
             .collect();
 
@@ -547,23 +572,24 @@ fn extract_anonymous_tags_from_bind(bind: &Bind, tags: &mut Vec<(Intern<String>,
     };
 
     if let Some(sp) = bind.receiver_type_surface() {
-        collect_type_surface_tags(&sp.0, &mut collector.collected);
+        collect_type_surface_tags(&sp.value, &mut collector.collected);
     }
     if let Some(sp) = &bind.return_tag {
-        collect_type_surface_tags(&sp.0, &mut collector.collected);
+        collect_type_surface_tags(&sp.value, &mut collector.collected);
     }
 
     let _ = walk_bind_value(&mut collector, bind.value());
     tags.extend(collector.collected);
 }
 
-fn collect_type_surface_tags(expr: &Expr, tags: &mut Vec<(Intern<String>, SpanId)>) {
+fn collect_type_surface_tags(expr: &TypeExpr, tags: &mut Vec<(Intern<String>, SpanId)>) {
     match expr {
-        Expr::TypeNominal(name, span) => {
+        TypeExpr::Nominal(name, span) => {
             tags.push((*name, *span));
         }
-        Expr::TypeQualified(_) => {}
-        Expr::TypeGeneric { params, .. } => {
+        TypeExpr::Qualified(_) => {}
+        TypeExpr::Literal(..) => {}
+        TypeExpr::Generic { params, .. } => {
             for (_, pk) in params {
                 match pk {
                     ParameterKind::Default(e) => {
@@ -574,13 +600,14 @@ fn collect_type_surface_tags(expr: &Expr, tags: &mut Vec<(Intern<String>, SpanId
                         tags.extend(inner.collected);
                     }
                     ParameterKind::Tagged(sp) => {
-                        collect_type_surface_tags(&sp.0, tags);
+                        if let Some(te) = sp.value.as_type_expr() {
+                            collect_type_surface_tags(&te, tags);
+                        }
                     }
                     ParameterKind::Generic => {}
                 }
             }
         }
-        _ => {}
     }
 }
 
@@ -593,25 +620,6 @@ impl Visitor for AnonymousTagCollector {
         match expr {
             Expr::AnonymousTag(name, span) => {
                 self.collected.push((*name, *span));
-                Continue(())
-            }
-            Expr::TypeNominal(name, span) => {
-                self.collected.push((*name, *span));
-                Continue(())
-            }
-            Expr::TypeQualified(_) => Continue(()),
-            Expr::TypeGeneric { params, .. } => {
-                for (_, pk) in params {
-                    match pk {
-                        ParameterKind::Default(e) => {
-                            let _ = self.visit_expr(e);
-                        }
-                        ParameterKind::Tagged(sp) => {
-                            collect_type_surface_tags(&sp.0, &mut self.collected);
-                        }
-                        ParameterKind::Generic => {}
-                    }
-                }
                 Continue(())
             }
             _ => walk_expr(self, expr),

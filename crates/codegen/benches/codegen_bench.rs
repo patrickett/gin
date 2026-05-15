@@ -1,6 +1,5 @@
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use parser::parse_source_full;
-use typeck::TyEnv;
 
 fn codegen_source() -> String {
     let mut s = String::with_capacity(4096);
@@ -21,25 +20,20 @@ fn codegen_source() -> String {
 
 fn bench_codegen(c: &mut Criterion) {
     let source = codegen_source();
-    let output = parse_source_full(&source);
-    let ty_env = TyEnv::from_file_ast(&output.ast);
+    let mut output = parse_source_full(&source);
 
     let mut group = c.benchmark_group("codegen");
     group.throughput(criterion::Throughput::Bytes(source.len() as u64));
     group.sample_size(20);
 
-    group.bench_with_input(
-        BenchmarkId::new("build_module", "codegen_source"),
-        &(output.ast, ty_env),
-        |b, (ast, ty_env)| {
-            b.iter(|| {
-                let context = melior::Context::new();
-                let result =
-                    codegen::build_module_with_context(&context, ast, &source, "bench.gin", ty_env);
-                std::hint::black_box(&result);
-            });
-        },
-    );
+    group.bench_function("build_module/codegen_source", |b| {
+        b.iter(|| {
+            let context = melior::Context::new();
+            let result =
+                codegen::build_module_with_context(&context, &mut output.ast, &source, "bench.gin");
+            std::hint::black_box(&result);
+        });
+    });
 
     group.finish();
 }
@@ -55,10 +49,9 @@ mod tests {
         let source = codegen_source();
         let output = parse_source_full(&source);
         assert!(!output.ast.defs().is_empty());
-        let ty_env = TyEnv::from_file_ast(&output.ast);
         let context = melior::Context::new();
         let result =
-            codegen::build_module_with_context(&context, &output.ast, &source, "test.gin", &ty_env);
+            codegen::build_module_with_context(&context, &mut output.ast, &source, "test.gin");
         assert!(result.0.is_some(), "codegen should succeed");
     }
 }

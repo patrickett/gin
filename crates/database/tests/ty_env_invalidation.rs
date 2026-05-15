@@ -1,11 +1,10 @@
-use ast::prelude::Intern;
 use crossbeam_channel::unbounded;
-use database::SalsaQueryEngine;
 use database::QueryEngine;
+use database::SalsaQueryEngine;
 use std::path::PathBuf;
 
 #[test]
-fn package_ty_env_invalidates_on_file_change() {
+fn package_typecheck_symptoms_invalidate_on_file_change() {
     let (tx, _rx) = unbounded();
     let mut engine = SalsaQueryEngine::new(tx);
 
@@ -15,24 +14,15 @@ fn package_ty_env_invalidates_on_file_change() {
     let _ = engine.add_file(p1.clone());
     let _ = engine.add_file(p2.clone());
 
-    engine.set_contents(&p1, "Bool is True or False\n".to_string());
-    engine.set_contents(&p2, "Maybe[x] is Some(x) or None\n".to_string());
+    // Set up two files: a.gin defines `foo()`, b.gin calls it.
+    engine.set_contents(&p1, "foo Int: 42\n".to_string());
+    engine.set_contents(&p2, "main:\n    x: foo()\nreturn x\n".to_string());
 
-    let before = {
-        let ty_env = engine.package_ty_env(&[p1.clone(), p2.clone()]);
-        ty_env.tag_types.clone()
-    };
+    let before = engine.typecheck_package(&[p1.clone(), p2.clone()]);
 
-    // Change the set of declared tags in b.gin.
-    engine.set_contents(
-        &p2,
-        "Maybe[x] is Some(x) or None\nOther is X or Y\n".to_string(),
-    );
+    // Remove `foo` from b.gin's visible scope by pointing to a file without it.
+    engine.set_contents(&p1, "\n".to_string());
 
-    let after = {
-        let ty_env = engine.package_ty_env(&[p1.clone(), p2.clone()]);
-        ty_env.tag_types.clone()
-    };
+    let after = engine.typecheck_package(&[p1.clone(), p2.clone()]);
     assert_ne!(before, after);
-    assert!(after.contains_key(&Intern::<String>::from_ref("Other")));
 }

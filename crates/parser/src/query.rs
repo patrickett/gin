@@ -113,6 +113,7 @@ pub fn extract_local_import_paths(ast: &FileAst, base_dir: &Path) -> Vec<(PathBu
             match &module_import.source {
                 ImportSource::Package(_path) => {}
                 ImportSource::LocalBundle(_b) => {}
+                ImportSource::CurrentModule { .. } => {}
                 ImportSource::Local(path, span) => {
                     let p = base_dir.join(path);
                     if p.is_file() && p.extension().is_some_and(|e| e == "gin") {
@@ -190,6 +191,7 @@ pub fn extract_package_import_paths(
                     }
                 }
                 ImportSource::Local(_, _) => {}
+                ImportSource::CurrentModule { .. } => {}
             }
         }
     }

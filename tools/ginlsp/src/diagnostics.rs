@@ -1,10 +1,10 @@
+use ast::byte_offset_to_position;
 use diagnostic::{Category, Diagnostic, DiagnosticCode, TypeSymptom, UseSymptom};
 use span::SpanTable;
 use tower_lsp::lsp_types::{
     Diagnostic as LspDiagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, Location,
     NumberOrString, Position, Range, Url,
 };
-use typeck::byte_offset_to_position;
 
 fn lsp_diagnostic_message(message: &str) -> String {
     message.trim().to_string()

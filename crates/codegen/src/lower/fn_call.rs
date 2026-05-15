@@ -1,6 +1,6 @@
 use crate::{addressof_string_global, prelude::*, ty_to_mlir};
+use ast::ty::Ty;
 use internment::Intern;
-use typeck::Ty;
 
 impl<'c> Lower<'c> for FnCall {
     fn lower(
@@ -57,7 +57,6 @@ impl<'c> Lower<'c> for FnCall {
                             }
                         };
                         let return_type = ctx
-                            .ty_env
                             .fn_return_ty(&mangled)
                             .map(|t| ty_to_mlir(t, ctx.mlir))
                             .unwrap_or_else(|| ctx.mlir.i64());
@@ -98,7 +97,6 @@ impl<'c> Lower<'c> for FnCall {
                             args.push(expr.lower(ctx, block, symtab)?);
                         }
                         let return_type = ctx
-                            .ty_env
                             .fn_return_ty(&mangled)
                             .map(|t| ty_to_mlir(t, ctx.mlir))
                             .unwrap_or_else(|| ctx.mlir.i64());
@@ -122,7 +120,6 @@ impl<'c> Lower<'c> for FnCall {
                             other => other.clone(),
                         };
                         if let Some(type_name) = ctx
-                            .ty_env
                             .tag_types
                             .iter()
                             .find(|(_, ty)| **ty == canonical)
@@ -159,7 +156,6 @@ impl<'c> Lower<'c> for FnCall {
                                 }
                             }
                             let return_type = ctx
-                                .ty_env
                                 .fn_return_ty(&mangled)
                                 .map(|t| ty_to_mlir(t, ctx.mlir))
                                 .unwrap_or_else(|| ctx.mlir.i64());
@@ -201,11 +197,7 @@ impl<'c> Lower<'c> for FnCall {
                     .borrow()
                     .get(&func_name)
                     .cloned()
-                    .unwrap_or(Ty::Int {
-                        width: 64,
-                        signed: true,
-                        value: None,
-                    });
+                    .unwrap_or(Ty::i64());
                 let elem_mlir_ty = ty_to_mlir(&ty, ctx.mlir);
                 let loc = ctx.location();
                 return block.load_typed(ctx, ptr, elem_mlir_ty, loc);
@@ -232,7 +224,7 @@ impl<'c> Lower<'c> for FnCall {
             }
         }
 
-        let ret_ty = ctx.ty_env.fn_return_ty(&func_name).cloned();
+        let ret_ty = ctx.fn_return_ty(&func_name).cloned();
         let loc = ctx.location();
         if matches!(ret_ty, Some(Ty::Unit)) {
             block.call_void(ctx.mlir, func_name.as_str(), &args, loc);
