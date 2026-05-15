@@ -774,6 +774,7 @@ impl<'c> Lower<'c> for Expr {
                 let loc = ctx.location();
                 Some(block.load_typed(ctx, ptr, mlir_ty, loc)?)
             }
+            Expr::MutArg(inner) | Expr::OwnArg(inner) => inner.lower(ctx, block, symtab),
             Expr::Negate(inner) => {
                 let val = inner.lower(ctx, block, symtab)?;
                 let loc = ctx.location();
@@ -942,9 +943,12 @@ fn expr_uses_self(expr: &Expr) -> bool {
         Expr::BufSet { buf, index, value } => {
             spanned_uses_self(buf) || spanned_uses_self(index) || spanned_uses_self(value)
         }
-        Expr::TakePtr(e) | Expr::TakeRef(e) | Expr::Deref(e) | Expr::Negate(e) => {
-            spanned_uses_self(e)
-        }
+        Expr::TakePtr(e)
+        | Expr::TakeRef(e)
+        | Expr::Deref(e)
+        | Expr::Negate(e)
+        | Expr::MutArg(e)
+        | Expr::OwnArg(e) => spanned_uses_self(e),
         Expr::Cast { expr: e, .. } => spanned_uses_self(e),
         Expr::Bind(b) => bind_value_uses_self(b.value()),
         Expr::When(w) => {

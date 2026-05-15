@@ -29,6 +29,8 @@ impl<'src> fmt::Display for Token<'src> {
             Token::Return => write!(f, "[return]"),
             Token::Break => write!(f, "[break]"),
             Token::Loop => write!(f, "[loop]"),
+            Token::Mut => write!(f, "[mut]"),
+            Token::Own => write!(f, "[own]"),
             Token::Then => write!(f, "[then]"),
             Token::When => write!(f, "[when]"),
             Token::Else => write!(f, "[else]"),

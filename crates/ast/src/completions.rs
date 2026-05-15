@@ -276,7 +276,8 @@ fn find_call_in_expr(
             find_call_in_expr(&index.value, index.span_id, span_table, byte_pos, best);
             find_call_in_expr(&value.value, value.span_id, span_table, byte_pos, best);
         }
-        Expr::TakePtr(e) | Expr::TakeRef(e) | Expr::Deref(e) | Expr::Negate(e) => {
+        Expr::TakePtr(e) | Expr::TakeRef(e) | Expr::Deref(e) | Expr::Negate(e)
+        | Expr::MutArg(e) | Expr::OwnArg(e) => {
             find_call_in_expr(&e.value, e.span_id, span_table, byte_pos, best);
         }
         Expr::TupleLit(elems) | Expr::List(elems) => {

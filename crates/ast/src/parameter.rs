@@ -8,12 +8,26 @@ use crate::span::Spanned;
 use crate::ty_state::TyState;
 use crate::type_surface_mangle_name;
 
+/// How a parameter is passed to a function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ParamConvention {
+    /// Bare `s String` — passed as `&T` (readonly reference).
+    #[default]
+    Ref,
+    /// `mut s String` — passed as `&mut T` (mutable reference).
+    Mut,
+    /// `own s String` — passed as `T` (value, ownership transfer).
+    Own,
+}
+
 /// A single value-level function parameter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParamSlot {
     pub ty: TyState,
     /// Default value expression, e.g. `x: 4` in `func(x: 4)`.
     pub default: Option<Spanned<Expr>>,
+    /// Parameter passing convention.
+    pub convention: ParamConvention,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

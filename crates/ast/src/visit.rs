@@ -128,7 +128,8 @@ pub fn walk_expr(v: &mut impl Visitor, expr: &Expr) -> ControlFlow<()> {
             v.visit_expr(value)
         }
         Expr::Cast { expr: e, .. } => v.visit_expr(e),
-        Expr::TakePtr(e) | Expr::TakeRef(e) | Expr::Deref(e) | Expr::Negate(e) => v.visit_expr(e),
+        Expr::TakePtr(e) | Expr::TakeRef(e) | Expr::Deref(e) | Expr::Negate(e)
+        | Expr::MutArg(e) | Expr::OwnArg(e) => v.visit_expr(e),
         Expr::Lit(_)
         | Expr::SelfRef(_)
         | Expr::AnonymousTag(..)

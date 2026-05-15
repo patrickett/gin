@@ -1,9 +1,10 @@
+use indexmap::IndexMap;
 use internment::Intern;
 use lexer::Token;
 
 use ast::{
-    AttributeItem, Bind, BindAttributes, BindValue, DocComment, Expr, ModPath, ParameterKind,
-    Parameters, Return, Spanned, TypeExpr, type_surface_mangle_name,
+    AttributeItem, Bind, BindAttributes, BindValue, DocComment, Expr, ModPath, ParamConvention,
+    ParameterKind, Parameters, Return, Spanned, TypeExpr, type_surface_mangle_name,
 };
 
 use super::ExprFn;
@@ -39,7 +40,7 @@ pub fn parse_bind(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Bind>
         _ => return None,
     };
 
-    let params = parse_params(cursor, expr_parser);
+    let (params, conventions) = parse_params(cursor, expr_parser);
 
     let (return_type_name, return_tag, type_annotation, type_annotation_qual) =
         parse_return_type_part(cursor, expr_parser);
@@ -81,6 +82,7 @@ pub fn parse_bind(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Bind>
     if let Some(attrs) = attrs {
         bind = bind.with_attributes(attrs);
     }
+    bind.param_conventions = conventions;
     bind.return_tag = return_tag;
     bind.type_annotation = type_annotation;
     bind.type_annotation_qual = type_annotation_qual;
@@ -354,40 +356,53 @@ fn parse_bind_value(
     (BindValue::Expr(Box::new(expr)), doc)
 }
 
-fn parse_params(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Parameters> {
+fn parse_params(
+    cursor: &mut TokenCursor,
+    expr_parser: ExprFn,
+) -> (
+    Option<Parameters>,
+    IndexMap<Intern<String>, ParamConvention>,
+) {
     if !cursor.is_at(&Token::ParenOpen) {
-        return None;
+        return (None, IndexMap::new());
     }
 
     let mut params = Parameters::new();
+    let mut conventions = IndexMap::new();
     cursor.advance();
 
     if cursor.is_at(&Token::ParenClose) {
         cursor.advance();
-        return Some(params);
+        return (Some(params), conventions);
     }
 
-    if let Some((key, kind)) = parse_one_param(cursor, expr_parser) {
+    if let Some((key, kind, conv)) = parse_one_param(cursor, expr_parser) {
         params.insert(key, kind);
+        if conv != ParamConvention::Ref {
+            conventions.insert(key, conv);
+        }
     }
 
     while cursor.eat(&Token::Comma) {
         if cursor.is_at(&Token::ParenClose) {
             break;
         }
-        if let Some((key, kind)) = parse_one_param(cursor, expr_parser) {
+        if let Some((key, kind, conv)) = parse_one_param(cursor, expr_parser) {
             params.insert(key, kind);
+            if conv != ParamConvention::Ref {
+                conventions.insert(key, conv);
+            }
         }
     }
 
     cursor.expect(&Token::ParenClose);
-    Some(params)
+    (Some(params), conventions)
 }
 
 fn parse_one_param(
     cursor: &mut TokenCursor,
     expr_parser: ExprFn,
-) -> Option<(Intern<String>, ParameterKind)> {
+) -> Option<(Intern<String>, ParameterKind, ParamConvention)> {
     // Positional: bare Tag → (tag_name, ParameterKind::Tagged(tag))
     if matches!(cursor.peek(), Some(Token::Tag(_))) {
         let sp = parse_type_expr(cursor, expr_parser)?;
@@ -398,8 +413,20 @@ fn parse_one_param(
                 value: sp.value.into(),
                 span_id: sp.span_id,
             })),
+            ParamConvention::Ref,
         ));
     }
+
+    // Convention keyword before the parameter name:
+    // `mut name Type` → Mutable
+    // `own name Type` → Own
+    let convention = if cursor.eat(&Token::Mut) {
+        ParamConvention::Mut
+    } else if cursor.eat(&Token::Own) {
+        ParamConvention::Own
+    } else {
+        ParamConvention::Ref
+    };
 
     // Named: id [Tag | id | : expr]
     let name = match cursor.peek() {
@@ -411,7 +438,8 @@ fn parse_one_param(
         _ => return None,
     };
 
-    crate::params::parse_param_after_name(cursor, expr_parser, name)
+    let (name, kind) = crate::params::parse_param_after_name(cursor, expr_parser, name)?;
+    Some((name, kind, convention))
 }
 
 pub(crate) fn parse_doc_comment(cursor: &mut TokenCursor) -> Option<DocComment> {

@@ -417,7 +417,7 @@ mod tests {
 
         let source = "Maybe[x] is Some(x) or None";
         let po = parse_from_str(source);
-        let analysis = ast::resolve_types(&po, &[po.clone()]);
+        let analysis = ast::resolve_types(&po, std::slice::from_ref(&po));
 
         let ty = analysis
             .tag_types

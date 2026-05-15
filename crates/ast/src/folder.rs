@@ -128,7 +128,8 @@ pub fn walk_expr_mut(v: &mut impl Folder, expr: &mut Expr) -> ControlFlow<()> {
             v.fold_expr(value)
         }
         Expr::Cast { expr: e, .. } => v.fold_expr(e),
-        Expr::TakePtr(e) | Expr::TakeRef(e) | Expr::Deref(e) | Expr::Negate(e) => v.fold_expr(e),
+        Expr::TakePtr(e) | Expr::TakeRef(e) | Expr::Deref(e) | Expr::Negate(e)
+        | Expr::MutArg(e) | Expr::OwnArg(e) => v.fold_expr(e),
         Expr::Lit(_)
         | Expr::SelfRef(_)
         | Expr::AnonymousTag(..)

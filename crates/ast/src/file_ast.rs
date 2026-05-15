@@ -708,7 +708,9 @@ fn find_expr_at_byte<'a>(
         | Expr::TakePtr(init)
         | Expr::TakeRef(init)
         | Expr::Deref(init)
-        | Expr::Negate(init) => {
+        | Expr::Negate(init)
+        | Expr::MutArg(init)
+        | Expr::OwnArg(init) => {
             if st.contains(init.span_id(), byte_pos) {
                 return find_expr_at_byte(st, &init.value, init.span_id(), byte_pos);
             }
@@ -943,6 +945,12 @@ pub fn populate_ast_types(ast: &mut FileAst, analysis: &Analysis) {
 
             // Parameter types
             if let Some(params) = bind.params() {
+                let convention = |k: &Intern<String>| {
+                    bind.param_conventions
+                        .get(k)
+                        .copied()
+                        .unwrap_or(crate::ParamConvention::Ref)
+                };
                 bind.param_slots = params
                     .iter()
                     .map(|(k, kind)| {
@@ -956,6 +964,7 @@ pub fn populate_ast_types(ast: &mut FileAst, analysis: &Analysis) {
                         let slot = crate::ParamSlot {
                             ty: crate::TyState::Resolved(ty.clone()),
                             default: None,
+                            convention: convention(k),
                         };
                         (*k, slot)
                     })

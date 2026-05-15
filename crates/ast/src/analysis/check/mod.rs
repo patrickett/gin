@@ -23,7 +23,8 @@ use crate::visit::Visitor;
 use diagnostic::{DiagnosticLike, UseSymptom};
 
 use crate::{
-    Bind, BindValue, Expr, FileAst, HasSpanId, ImportSource, VariantMap, type_surface_mangle_name,
+    Bind, BindValue, DeclareValue, Expr, FileAst, ImportSource, ParameterKind, VariantMap,
+    type_surface_mangle_name,
 };
 use unknown_refs::UnknownRefChecker;
 use utils::{ImportSet, collect_import_names};
@@ -60,6 +61,40 @@ pub fn check_unknowns(
 
     let local_names: HashSet<Intern<String>> =
         ast.tags.keys().chain(ast.defs.keys()).copied().collect();
+    // Check tag field type annotations for unknown references.
+    for tag in ast.tags.values() {
+        let DeclareValue::Record(fields) = tag.value() else {
+            continue;
+        };
+
+        // Collect type variable names from the tag's own params
+        // (e.g. `x` in `List[x] has (pointer Ptr[x], length Int)`)
+        let mut type_vars: HashSet<Intern<String>> = HashSet::new();
+        if let Some(params) = &tag.params {
+            for (name, kind) in params {
+                if matches!(kind, ParameterKind::Generic) {
+                    type_vars.insert(*name);
+                }
+            }
+        }
+
+        for (_field_name, kind) in fields {
+            if let ParameterKind::Tagged(sp) = kind
+                && let Some(te) = sp.value.as_type_expr()
+                && is_type_surface(&te)
+            {
+                type_expr::check_type_expr(
+                    tag_types,
+                    &imports,
+                    &local_names,
+                    &type_vars,
+                    &te,
+                    symptoms,
+                );
+            }
+        }
+    }
+
     for bind in ast.defs.values() {
         if !bind.attributes().matches_current_platform() {
             continue;

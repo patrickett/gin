@@ -98,7 +98,7 @@ fn compute_completions(
 
     if let Some(byte_pos) = position_to_byte_offset(&source, position.line, position.character) {
         let pkg_root = backend.package_root_for_uri(&doc_uri);
-        let all_file_paths: Vec<PathBuf> = if let Some(root) = &pkg_root {
+        let _all_file_paths: Vec<PathBuf> = if let Some(root) = &pkg_root {
             let mut host = backend.lock_host();
             host.load_package(root).file_paths
         } else {

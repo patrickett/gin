@@ -159,7 +159,7 @@ impl Backend {
                     }
                 }
 
-                // Phase 2: "use" keyword hover.
+                // Phase 2: "use" / "is" / "has" keyword hover.
                 let word = ast.word_at_byte(byte_pos, &source)
                     .or_else(|| ast::word_at_byte_offset(&source, byte_pos));
                 if word.as_deref() == Some("use") {
@@ -185,6 +185,72 @@ impl Backend {
                                 The root name (`core`, `http`) must be declared in `flask.jsonc` \
                                 under `dependencies`. Subsequent segments resolve to files within \
                                 the dependency directory.",
+                            ),
+                        }),
+                        range: word_range,
+                    });
+                }
+                if word.as_deref() == Some("is") {
+                    return Some(Hover {
+                        contents: HoverContents::Markup(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value: String::from(
+                                "```gin\nis — defines a type alias\n```\n\n\
+                                ---\n\n\
+                                The left-hand name **is** shorthand for the right-hand shape.\n\n\
+                                ```gin\n\
+                                Pointer[x] is @x                     --- Pointer[x] = \u{27E8}pointer to x\u{27E9}\n\
+                                String is (bytes List[Byte])          --- String = \u{27E8}list of bytes\u{27E9}\n\
+                                ```\n\n\
+                                #### Also used for\n\n\
+                                **Unions** — the type is one of several variants:\n\n\
+                                ```gin\n\
+                                Bool is True or False\n\
+                                Maybe[x] is Some(x) or None\n\
+                                ```\n\n\
+                                **Ranges** — the type is an integer within bounds:\n\n\
+                                ```gin\n\
+                                Int is 0...4294967295\n\
+                                Byte is 0...255\n\
+                                ```\n\n\
+                                **Literal singletons** — a type with exactly one value:\n\n\
+                                ```gin\n\
+                                SysCallWrite is 4\n\
+                                Nothing is ()\n\
+                                ```\n\n\
+                                > **Contrast with** `has`, which defines an interface \
+                                (a type that other types implement).",
+                            ),
+                        }),
+                        range: word_range,
+                    });
+                }
+                if word.as_deref() == Some("has") {
+                    return Some(Hover {
+                        contents: HoverContents::Markup(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value: String::from(
+                                "```gin\nhas — defines an interface\n```\n\n\
+                                ---\n\n\
+                                The type describes what conforming types **have** — a set of \
+                                named fields. Any type that provides those fields can implement \
+                                this interface via an impl block.\n\n\
+                                ```gin\n\
+                                --- Define the interface\n\
+                                ToString has (to_string String)\n\
+                                ```\n\n\
+                                ```gin\n\
+                                --- Implement it on Bool\n\
+                                Bool.ToString(to_string: when self then \u{27}true\u{27} else \u{27}false\u{27})\n\
+                                ```\n\n\
+                                #### More examples\n\n\
+                                ```gin\n\
+                                Register has (value Str)                        --- \u{27}has a value\u{27} interface\n\
+                                List[x] has (pointer Pointer[x], length Length)  --- collection interface\n\
+                                Range[x] has (start x, end x)                    --- bounded-range interface\n\
+                                ```\n\n\
+                                > **Contrast with** `is`, which defines a type alias \
+                                (the name is shorthand for a shape).",
                             ),
                         }),
                         range: word_range,
@@ -272,7 +338,7 @@ impl Backend {
 
                 // Check if this is a variant hover — if so, prepend the
                 // package-qualified path (e.g. `core.Maybe` instead of `Maybe`).
-                let (source, output) = snapshot.engine.source_and_parse(&file_path2)?;
+                let (_source, output) = snapshot.engine.source_and_parse(&file_path2)?;
                 if let Some((_, parent_tag)) = ast::hover::is_variant_at(&output.ast, byte_pos) {
                     if let Some(qualifier) = package_name_for_file(&file_path) {
                         let qualified = format!("{qualifier}.{parent_tag}");
@@ -548,7 +614,7 @@ true  := Bool.True
         let bool_source = std::fs::read_to_string(dir.join("core/bool.gin")).unwrap();
         let bool_po = parser::parse_source_full(&bool_source);
         let true_def_byte: usize = bool_source.find("true  :=").unwrap();
-        let bool_analysis = ast::resolve_types(&bool_po.ast, &[bool_po.ast.clone()]);
+        let bool_analysis = ast::resolve_types(&bool_po.ast, std::slice::from_ref(&bool_po.ast));
         let expected =
             ast::hover::hover_at(&bool_source, &bool_po.ast, &bool_analysis, true_def_byte)
                 .expect("must produce hover text from bool.gin");
@@ -578,7 +644,7 @@ true  := Bool.True
 
         // Hover at "Maybe"
         let maybe_byte = source.find("Maybe").unwrap();
-        let analysis = ast::resolve_types(&po.ast, &[po.ast.clone()]);
+        let analysis = ast::resolve_types(&po.ast, std::slice::from_ref(&po.ast));
         let hover = ast::hover::hover_at(source, &po.ast, &analysis, maybe_byte)
             .expect("hover_at should return text for `Maybe`");
 
@@ -611,7 +677,7 @@ true  := Bool.True
 
         // Hover at "Some"
         let some_byte = source.find("Some").unwrap();
-        let analysis = ast::resolve_types(&po.ast, &[po.ast.clone()]);
+        let analysis = ast::resolve_types(&po.ast, std::slice::from_ref(&po.ast));
         let hover = ast::hover::hover_at(source, &po.ast, &analysis, some_byte)
             .expect("hover_at should return text for `Some`");
 
@@ -645,7 +711,7 @@ true  := Bool.True
 
         // Hover at "None"
         let none_byte = source.find("None").unwrap();
-        let analysis = ast::resolve_types(&po.ast, &[po.ast.clone()]);
+        let analysis = ast::resolve_types(&po.ast, std::slice::from_ref(&po.ast));
         let hover = ast::hover::hover_at(source, &po.ast, &analysis, none_byte)
             .expect("hover_at should return text for `None`");
 
@@ -729,7 +795,7 @@ true  := Bool.True
             ("Blue", "Pure blue"),
         ] {
             let byte = source.find(variant).unwrap();
-            let analysis = ast::resolve_types(&po.ast, &[po.ast.clone()]);
+            let analysis = ast::resolve_types(&po.ast, std::slice::from_ref(&po.ast));
             let hover = ast::hover::hover_at(source, &po.ast, &analysis, byte)
                 .unwrap_or_else(|| panic!("hover_at should return text for `{variant}`"));
 

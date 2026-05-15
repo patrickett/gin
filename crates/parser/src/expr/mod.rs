@@ -104,17 +104,36 @@ pub(crate) fn parse_paren_args(cursor: &mut TokenCursor) -> Option<Vec<Spanned<E
 
     let mut args = Vec::new();
     if !cursor.is_at(&Token::ParenClose) {
-        args.push(parse_expression(cursor));
+        args.push(parse_arg_expr(cursor));
         while cursor.eat(&Token::Comma) {
             if cursor.is_at(&Token::ParenClose) {
                 break;
             }
-            args.push(parse_expression(cursor));
+            args.push(parse_arg_expr(cursor));
         }
     }
 
     cursor.expect(&Token::ParenClose);
     Some(args)
+}
+
+/// Parse an argument expression, recognizing `mut expr` and `own expr` prefixes.
+fn parse_arg_expr(cursor: &mut TokenCursor) -> Spanned<Expr> {
+    if cursor.eat(&Token::Mut) {
+        let inner = parse_expression(cursor);
+        Spanned {
+            value: Expr::MutArg(Box::new(inner.clone())),
+            span_id: inner.span_id,
+        }
+    } else if cursor.eat(&Token::Own) {
+        let inner = parse_expression(cursor);
+        Spanned {
+            value: Expr::OwnArg(Box::new(inner.clone())),
+            span_id: inner.span_id,
+        }
+    } else {
+        parse_expression(cursor)
+    }
 }
 
 // ─── Main Entry Point ─────────────────────────────────────────────────────────

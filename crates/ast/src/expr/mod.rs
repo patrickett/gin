@@ -107,6 +107,10 @@ pub enum Expr {
     Deref(Box<Spanned<Expr>>),
     /// Unary negation: `-expr`.
     Negate(Box<Spanned<Expr>>),
+    /// Mutably-borrowed call argument: `mut expr`.
+    MutArg(Box<Spanned<Expr>>),
+    /// Owned call argument: `own expr`.
+    OwnArg(Box<Spanned<Expr>>),
     /// Inline assembly: `asm("template", "constraints", args...)`
     Asm(AsmExpr),
     /// Tuple literal: `(e1, e2, …)` — at least two elements.

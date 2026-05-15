@@ -1,5 +1,8 @@
+use diagnostic::{Category, Diagnostic, DiagnosticCode, TypeSymptom};
+
 use crate::analysis::flow::{
-    Bound, ConstValue, FlowAnalysis, FlowContext, ImpossibleCheck, IndexOutOfBounds, TypeConstraint,
+    Bound, Capability, ConstValue, FlowAnalysis, FlowContext, ImpossibleCheck, IndexOutOfBounds,
+    TypeConstraint, VarState,
 };
 use crate::analysis::resolve::is_type_surface;
 use crate::span::Spanned;
@@ -28,6 +31,10 @@ pub struct FlowAnalyzer<'a> {
     in_scope: HashSet<Intern<String>>,
     /// Track types of local variables for bounds checking.
     locals: HashMap<Intern<String>, Ty>,
+    /// Track which variables are const (`:=`) bindings (moved = permanent).
+    const_vars: HashSet<Intern<String>>,
+    /// Ownership-related diagnostics collected during flow analysis.
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 impl<'a> FlowAnalyzer<'a> {
@@ -46,6 +53,8 @@ impl<'a> FlowAnalyzer<'a> {
             expr_index: 0,
             in_scope: HashSet::new(),
             locals: HashMap::new(),
+            const_vars: HashSet::new(),
+            diagnostics: Vec::new(),
         }
     }
 
@@ -274,16 +283,34 @@ impl<'a> FlowAnalyzer<'a> {
         if let Some(params) = bind.params().as_ref() {
             for (name, _) in params.iter() {
                 self.in_scope.insert(*name);
+                // Parameters are alive with Own capability
+                self.current_context_mut()
+                    .set_var_state(*name, VarState::Alive);
+                self.current_context_mut()
+                    .set_capability(*name, Capability::Own);
+                // Assign a region to each parameter (its own name as region)
+                self.current_context_mut().set_region_owner(*name, *name);
             }
         }
         // Add self if this is a method
         if bind.is_method() {
-            self.in_scope.insert(Intern::<String>::from_ref("self"));
+            let self_name = Intern::<String>::from_ref("self");
+            self.in_scope.insert(self_name);
+            self.current_context_mut()
+                .set_var_state(self_name, VarState::Alive);
+            self.current_context_mut()
+                .set_capability(self_name, Capability::Own);
         }
     }
 
     fn analyze_bind(&mut self, bind: &Bind) {
         self.enter_bind(bind);
+
+        // Mark the binding itself as Alive with Own capability
+        self.current_context_mut()
+            .set_var_state(bind.name(), VarState::Alive);
+        self.current_context_mut()
+            .set_capability(bind.name(), Capability::Own);
 
         match bind.value() {
             BindValue::Body { exprs, ret } => {
@@ -330,9 +357,18 @@ impl<'a> FlowAnalyzer<'a> {
                 // Add binding name to scope
                 self.in_scope.insert(bind.name());
 
-                // Mutable reassignment resets narrowing
+                // Track const vars for ownership semantics
+                if bind.is_const {
+                    self.const_vars.insert(bind.name());
+                }
+
+                // Mutable reassignment resets narrowing and ownership
                 if !bind.is_const {
                     self.current_context_mut().reset(&bind.name());
+                    self.current_context_mut()
+                        .set_var_state(bind.name(), VarState::Alive);
+                    self.current_context_mut()
+                        .set_capability(bind.name(), Capability::Own);
                     self.reassigned.insert(bind.name());
                 }
 
@@ -365,6 +401,28 @@ impl<'a> FlowAnalyzer<'a> {
 
             // Function call - analyze arguments.
             Expr::FnCall(call) => {
+                // Check if this is a variable reference (no args, no path segments)
+                if call.args.is_none() && call.path.segments.is_empty() {
+                    let var_name = call.path.root;
+                    if self.in_scope.contains(&var_name) {
+                        let ctx = self.current_context();
+                        if let Some(VarState::Moved | VarState::MovedButSlotAlive) =
+                            ctx.get_var_state(&var_name)
+                        {
+                            self.diagnostics.push(Diagnostic {
+                                code: DiagnosticCode::Type(TypeSymptom::UseOfMovedValue {
+                                    name: var_name.as_str().to_string(),
+                                }),
+                                message: format!("use of moved value `{}`", var_name.as_str()),
+                                help_on_span: None,
+                                help: Some("value was moved into another owner".into()),
+                                span_id: crate::span::SpanId::INVALID,
+                                category: Category::Flaw,
+                                related: Vec::new(),
+                            });
+                        }
+                    }
+                }
                 self.analyze_fn_call(call);
             }
 
@@ -419,6 +477,68 @@ impl<'a> FlowAnalyzer<'a> {
             }
             Expr::Negate(inner) => {
                 self.analyze_spanned_expr(inner);
+            }
+            // Owned call argument: mark the referenced variable as Moved
+            Expr::OwnArg(inner) => {
+                self.analyze_spanned_expr(inner);
+                // If the inner expression is a simple variable reference, mark it as moved
+                if let Expr::FnCall(call) = &inner.value
+                    && call.args.is_none()
+                    && call.path.segments.is_empty()
+                {
+                    let var_name = call.path.root;
+                    if self.in_scope.contains(&var_name) {
+                        // Const (`:=`) bindings are permanently moved.
+                        // Slot (`:`) bindings and parameters can be reassigned.
+                        let state = if self.const_vars.contains(&var_name) {
+                            VarState::Moved
+                        } else {
+                            VarState::MovedButSlotAlive
+                        };
+                        self.current_context_mut().set_var_state(var_name, state);
+                        self.current_context_mut().consume_region(&var_name);
+                    }
+                }
+            }
+            // Mutable call argument: check that the variable has at least Write capability
+            Expr::MutArg(inner) => {
+                self.analyze_spanned_expr(inner);
+                // When passing as `mut`, downgrade the capability temporarily
+                if let Expr::FnCall(call) = &inner.value
+                    && call.args.is_none()
+                    && call.path.segments.is_empty()
+                {
+                    let var_name = call.path.root;
+                    if self.in_scope.contains(&var_name) {
+                        // Check that the variable has at least Write capability
+                        if let Some(cap) = self.current_context().get_capability(&var_name)
+                            && cap < Capability::Write
+                        {
+                            self.diagnostics.push(Diagnostic {
+                                    code: DiagnosticCode::Type(
+                                        TypeSymptom::CannotPassReadonlyAsMut {
+                                            name: var_name.as_str().to_string(),
+                                        },
+                                    ),
+                                    message: format!(
+                                        "cannot pass `{}` as `mut` because it is read-only",
+                                        var_name.as_str()
+                                    ),
+                                    help_on_span: None,
+                                    help: Some(
+                                        "declare the parameter with `mut` or bind with `:` instead of `:="
+                                            .into(),
+                                    ),
+                                    span_id: crate::span::SpanId::INVALID,
+                                    category: Category::Flaw,
+                                    related: Vec::new(),
+                                });
+                        }
+                        // Downgrade to Write while passed to callee
+                        self.current_context_mut()
+                            .set_capability(var_name, Capability::Write);
+                    }
+                }
             }
 
             // Tag operations.

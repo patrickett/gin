@@ -320,19 +320,21 @@ impl TyInfer for Expr {
                 _ => Ty::i64(),
             },
 
-            Expr::Negate(inner) => match inner.infer_ty(env) {
-                Ty::Int {
-                    value: Some(n),
-                    width,
-                    signed,
-                } => Ty::Int {
-                    width,
-                    signed,
-                    value: Some(-n),
-                },
-                Ty::Float { value: Some(f) } => Ty::Float { value: Some(-f) },
-                other => other,
-            },
+            Expr::MutArg(inner) | Expr::OwnArg(inner) | Expr::Negate(inner) => {
+                match inner.infer_ty(env) {
+                    Ty::Int {
+                        value: Some(n),
+                        width,
+                        signed,
+                    } => Ty::Int {
+                        width,
+                        signed,
+                        value: Some(-n),
+                    },
+                    Ty::Float { value: Some(f) } => Ty::Float { value: Some(-f) },
+                    other => other,
+                }
+            }
 
             Expr::TupleLit(elems) => Ty::Tuple(elems.iter().map(|e| e.infer_ty(env)).collect()),
             Expr::List(_) => Ty::Opaque(Intern::<String>::from_ref("List")),

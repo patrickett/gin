@@ -51,6 +51,15 @@ pub enum TypeSymptom {
     /// A `when` condition does not resolve to `Bool`.
     #[strum(serialize = "type-condition-not-bool")]
     ConditionNotBool { got: String },
+    /// Use of a moved value.
+    #[strum(serialize = "type-use-of-moved-value")]
+    UseOfMovedValue { name: String },
+    /// A `#[lin]` value was not consumed before scope exit.
+    #[strum(serialize = "type-lin-value-not-consumed")]
+    LinValueNotConsumed { name: String },
+    /// Cannot pass a readonly variable as `mut`.
+    #[strum(serialize = "type-cannot-pass-readonly-as-mut")]
+    CannotPassReadonlyAsMut { name: String },
 }
 
 impl DiagnosticLike for TypeSymptom {
@@ -86,6 +95,15 @@ impl DiagnosticLike for TypeSymptom {
             Self::MissingElseArm => "`when` expression requires an `else` clause".into(),
             Self::ConditionNotBool { got } => {
                 format!("`when` condition must be `Bool`, got `{got}`")
+            }
+            Self::UseOfMovedValue { name } => {
+                format!("use of moved value `{name}`")
+            }
+            Self::LinValueNotConsumed { name } => {
+                format!("`#[lin]` value `{name}` was not consumed before scope exit")
+            }
+            Self::CannotPassReadonlyAsMut { name } => {
+                format!("cannot pass `{name}` as `mut` because it is read-only")
             }
         }
     }
@@ -133,12 +151,23 @@ impl DiagnosticLike for TypeSymptom {
                 "the condition must be a `Bool` value (e.g. `x == y` or some `Bool` expression)"
                     .into(),
             ),
+            Self::UseOfMovedValue { .. } => {
+                Some("value was moved into another owner and cannot be used".into())
+            }
+            Self::LinValueNotConsumed { .. } => Some(
+                "consider passing the value to a consuming function (e.g. `commit(own txn)`)"
+                    .into(),
+            ),
+            Self::CannotPassReadonlyAsMut { .. } => {
+                Some("declare the parameter with `mut` or bind with `:` instead of `:=".into())
+            }
         }
     }
 
     fn category(&self) -> Category {
         match self {
             Self::UnusedBinding { .. } => Category::Help,
+            Self::LinValueNotConsumed { .. } => Category::Flaw,
             _ => Category::Flaw,
         }
     }

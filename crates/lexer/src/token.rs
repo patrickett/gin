@@ -53,6 +53,8 @@ pub enum Token<'src> {
     ModuleDocComment(&'src str),
     Dot,
     Else,
+    Mut,
+    Own,
     Eq,
     // Operators
     EqEq,

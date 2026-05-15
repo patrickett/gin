@@ -214,6 +214,8 @@ impl<'src> Lexer<'src> {
             "return" => Token::Return,
             "break" => Token::Break,
             "loop" => Token::Loop,
+            "mut" => Token::Mut,
+            "own" => Token::Own,
             "then" => Token::Then,
             "when" => Token::When,
             "else" => Token::Else,

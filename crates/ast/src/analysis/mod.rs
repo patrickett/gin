@@ -12,10 +12,15 @@ mod const_value;
 pub use const_value::{Bound, ConstValue, TypeConstraint};
 
 mod flow;
-pub use flow::{FlowAnalysis, FlowContext, ImpossibleCheck, IndexOutOfBounds};
+pub use flow::{
+    Capability, FlowAnalysis, FlowContext, ImpossibleCheck, IndexOutOfBounds, VarState,
+};
 
 mod flow_analyzer;
 pub use flow_analyzer::FlowAnalyzer;
+
+mod copy;
+pub use copy::{is_copyable, is_lin_type};
 
 mod resolve;
 pub use resolve::{

@@ -551,13 +551,7 @@ pub fn signature_help(
 }
 
 /// Resolve the type of an expression after a dot (`.`).
-pub fn dot_type(
-    po: &ParseOutput,
-    source: &str,
-    line: u32,
-    character: u32,
-    scratchpad: Option<&str>,
-) -> Option<String> {
+pub fn dot_type(po: &ParseOutput, source: &str, line: u32, character: u32) -> Option<String> {
     let bp = byte_pos(source, line, character);
     ast::hover::dot_type_at(source, &po.ast, bp).map(|ty| format!("{:?}", ty))
 }

@@ -65,38 +65,15 @@ pub fn resolve_type_expr_with_subst(
             }
             tag_types.get(name).cloned().unwrap_or(Ty::i64())
         }
-        TypeExpr::Generic { name, params, .. } => match name.as_str() {
-            "Ptr" | "Ref" => {
-                let inner = params
-                    .iter()
-                    .find_map(|(_, kind)| match kind {
-                        ParameterKind::Tagged(sp) => sp
-                            .value
-                            .as_type_expr()
-                            .map(|te| resolve_type_expr_with_subst(&te, tag_types, subst)),
-                        _ => None,
-                    })
-                    .unwrap_or(Ty::Opaque(*name));
-                if name.as_str() == "Ptr" {
-                    Ty::Ptr {
-                        inner: Box::new(inner),
-                    }
-                } else {
-                    Ty::Ref {
-                        inner: Box::new(inner),
-                    }
-                }
+        TypeExpr::Generic { name, params, .. } => {
+            let base = tag_types.get(name).cloned().unwrap_or(Ty::Opaque(*name));
+            let local_subst = build_subst_for_generic(params, tag_types, subst);
+            if local_subst.is_empty() {
+                base
+            } else {
+                substitute_in_ty(&base, &local_subst)
             }
-            _ => {
-                let base = tag_types.get(name).cloned().unwrap_or(Ty::Opaque(*name));
-                let local_subst = build_subst_for_generic(params, tag_types, subst);
-                if local_subst.is_empty() {
-                    base
-                } else {
-                    substitute_in_ty(&base, &local_subst)
-                }
-            }
-        },
+        }
         TypeExpr::Qualified(path) => tag_types
             .get(&path.root)
             .cloned()
@@ -227,30 +204,10 @@ fn resolve_type_expr_ref(
 ) -> Ty {
     match e {
         TypeExpr::Nominal(name, _) => resolve_name(*name, raw, recursion_depth),
-        TypeExpr::Generic { name, params, .. } => match name.as_str() {
-            "Ptr" | "Ref" => {
-                let inner = params
-                    .iter()
-                    .find_map(|(_, kind)| match kind {
-                        ParameterKind::Tagged(sp) => sp
-                            .value
-                            .as_type_expr()
-                            .map(|te| resolve_type_expr_ref(&te, raw, recursion_depth + 1)),
-                        _ => None,
-                    })
-                    .unwrap_or(Ty::Opaque(*name));
-                if name.as_str() == "Ptr" {
-                    Ty::Ptr {
-                        inner: Box::new(inner),
-                    }
-                } else {
-                    Ty::Ref {
-                        inner: Box::new(inner),
-                    }
-                }
-            }
-            _ => resolve_name(*name, raw, recursion_depth + 1),
-        },
+        TypeExpr::Generic { name, params, .. } => {
+            let _ = params; // params are part of the generic instantiation, resolved by the tag lookup
+            resolve_name(*name, raw, recursion_depth + 1)
+        }
         TypeExpr::Qualified(path) => resolve_name(path.root, raw, recursion_depth),
         TypeExpr::Literal(..) => Ty::Opaque(Intern::new(String::new())),
     }

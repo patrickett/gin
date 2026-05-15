@@ -1,10 +1,32 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::span::{HasSpanId, SpanId};
 
 use internment::Intern;
 
 pub use crate::analysis::const_value::{Bound, ConstValue, TypeConstraint};
+
+/// The state of a variable during flow analysis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VarState {
+    /// Variable is alive and usable.
+    Alive,
+    /// Variable has been moved (ownership consumed).
+    Moved,
+    /// Variable has been moved but the slot is alive (for `:` bindings, the slot can be reassigned).
+    MovedButSlotAlive,
+}
+
+/// Capability level for a variable's value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Capability {
+    /// Read capability — always held implicitly.
+    Read,
+    /// Write capability — acquired via `mut`.
+    Write,
+    /// Own capability — acquired via `own` or construction.
+    Own,
+}
 
 /// Flow-sensitive type information at a program point.
 #[derive(Debug, Clone)]
@@ -15,11 +37,22 @@ pub struct FlowContext {
     constants: HashMap<Intern<String>, ConstValue>,
     /// Parent context for nested scopes (blocks, loops, etc.).
     parent: Option<Box<FlowContext>>,
+    /// Track whether each variable is alive or moved.
+    var_states: HashMap<Intern<String>, VarState>,
+    /// Capabilities held for each variable.
+    capabilities: HashMap<Intern<String>, Capability>,
+    /// Maps each variable to its region identifier (for invalidation tracking).
+    region_owner: HashMap<Intern<String>, Intern<String>>,
+    /// Regions that have been consumed (variables moved out of).
+    consumed_regions: HashSet<Intern<String>>,
 }
 
 impl PartialEq for FlowContext {
     fn eq(&self, other: &Self) -> bool {
-        self.constraints == other.constraints && self.constants == other.constants
+        self.constraints == other.constraints
+            && self.constants == other.constants
+            && self.var_states == other.var_states
+            && self.capabilities == other.capabilities
     }
 }
 
@@ -29,6 +62,10 @@ impl FlowContext {
             constraints: HashMap::new(),
             constants: HashMap::new(),
             parent: None,
+            var_states: HashMap::new(),
+            capabilities: HashMap::new(),
+            region_owner: HashMap::new(),
+            consumed_regions: HashSet::new(),
         }
     }
 
@@ -37,6 +74,10 @@ impl FlowContext {
             constraints: HashMap::new(),
             constants: HashMap::new(),
             parent: Some(Box::new(parent)),
+            var_states: HashMap::new(),
+            capabilities: HashMap::new(),
+            region_owner: HashMap::new(),
+            consumed_regions: HashSet::new(),
         }
     }
 
@@ -70,6 +111,7 @@ impl FlowContext {
     pub fn reset(&mut self, var: &Intern<String>) {
         self.constraints.remove(var);
         self.constants.remove(var);
+        self.reset_ownership(var);
     }
 
     /// Check if this context has a local (non-inherited) constraint for a variable.
@@ -102,6 +144,67 @@ impl FlowContext {
     /// Get all variables with local constant values.
     pub fn local_constants(&self) -> impl Iterator<Item = (&Intern<String>, &ConstValue)> {
         self.constants.iter()
+    }
+
+    // --- Ownership tracking accessors ---
+
+    /// Set the state of a variable (Alive, Moved, etc.).
+    pub fn set_var_state(&mut self, var: Intern<String>, state: VarState) {
+        self.var_states.insert(var, state);
+    }
+
+    /// Get the state of a variable.
+    pub fn get_var_state(&self, var: &Intern<String>) -> Option<VarState> {
+        self.var_states
+            .get(var)
+            .copied()
+            .or_else(|| self.parent.as_ref().and_then(|p| p.get_var_state(var)))
+    }
+
+    /// Set the capability for a variable.
+    pub fn set_capability(&mut self, var: Intern<String>, cap: Capability) {
+        self.capabilities.insert(var, cap);
+    }
+
+    /// Get the capability for a variable.
+    pub fn get_capability(&self, var: &Intern<String>) -> Option<Capability> {
+        self.capabilities
+            .get(var)
+            .copied()
+            .or_else(|| self.parent.as_ref().and_then(|p| p.get_capability(var)))
+    }
+
+    /// Set the region owner for a variable.
+    pub fn set_region_owner(&mut self, var: Intern<String>, region: Intern<String>) {
+        self.region_owner.insert(var, region);
+    }
+
+    /// Get the region owner for a variable.
+    pub fn get_region_owner(&self, var: &Intern<String>) -> Option<&Intern<String>> {
+        self.region_owner
+            .get(var)
+            .or_else(|| self.parent.as_ref().and_then(|p| p.get_region_owner(var)))
+    }
+
+    /// Mark a region as consumed.
+    pub fn consume_region(&mut self, region: &Intern<String>) {
+        self.consumed_regions.insert(*region);
+    }
+
+    /// Check if a region has been consumed.
+    pub fn is_region_consumed(&self, region: &Intern<String>) -> bool {
+        self.consumed_regions.contains(region)
+            || self
+                .parent
+                .as_ref()
+                .is_some_and(|p| p.is_region_consumed(region))
+    }
+
+    /// Reset ownership tracking for a variable (on reassignment).
+    pub fn reset_ownership(&mut self, var: &Intern<String>) {
+        self.var_states.remove(var);
+        self.capabilities.remove(var);
+        self.region_owner.remove(var);
     }
 }
 

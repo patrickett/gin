@@ -64,7 +64,7 @@ pub fn hover_at_with_flow(
             continue;
         }
         let display_name = name.as_str().to_string();
-        return Some(format_bind_hover(name, bind, &display_name, ast, flow));
+        return Some(format_bind_hover(bind, &display_name, ast, flow));
     }
 
     // Check parameter names.
@@ -290,7 +290,6 @@ pub fn definition_span(ast: &crate::FileAst, name: &str) -> Option<std::ops::Ran
 // ── Format helpers ─────────────────────────────────────────────────────────
 
 fn format_bind_hover(
-    def_name: &Intern<String>,
     bind: &crate::Bind,
     display_name: &str,
     ast: &crate::FileAst,
@@ -529,10 +528,10 @@ pub fn dot_type_at(source: &str, ast: &crate::FileAst, byte_pos: usize) -> Optio
         return None;
     }
     let name = find_name_before_dot(ast, dot_pos)?;
-    resolve_dot_type(ast, name)
+    resolve_dot_type(name)
 }
 
-fn resolve_dot_type(ast: &crate::FileAst, name: Intern<String>) -> Option<crate::ty::Ty> {
+fn resolve_dot_type(name: Intern<String>) -> Option<crate::ty::Ty> {
     // With Analysis, we would use analysis.tag_types. Without it, fall back
     // to nothing (dot_type_at users should use the Analysis-aware variant if available).
     let _ = name;
@@ -616,11 +615,11 @@ pub fn find_import_definition_span(
                     }
                 }
             }
-            if let crate::ImportSource::CurrentModule { member } = &mi.source {
-                if member.alias.unwrap_or(member.export) == key {
-                    let mspan = span_table.get(member.span);
-                    return Some(mspan.start..mspan.end);
-                }
+            if let crate::ImportSource::CurrentModule { member } = &mi.source
+                && member.alias.unwrap_or(member.export) == key
+            {
+                let mspan = span_table.get(member.span);
+                return Some(mspan.start..mspan.end);
             }
             let span = span_table.get(mi.source.span_id());
             return Some(span.start..span.end);
@@ -791,7 +790,12 @@ fn collect_refs_expr(
             collect_refs_expr(index, name, span_table, out);
             collect_refs_expr(value, name, span_table, out);
         }
-        Expr::TakePtr(inner) | Expr::TakeRef(inner) | Expr::Deref(inner) | Expr::Negate(inner) => {
+        Expr::TakePtr(inner)
+        | Expr::TakeRef(inner)
+        | Expr::Deref(inner)
+        | Expr::Negate(inner)
+        | Expr::MutArg(inner)
+        | Expr::OwnArg(inner) => {
             collect_refs_expr(inner, name, span_table, out);
         }
         Expr::TupleLit(elems) | Expr::List(elems) => {

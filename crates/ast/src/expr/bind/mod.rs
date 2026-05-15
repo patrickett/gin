@@ -6,6 +6,7 @@ use internment::Intern;
 use crate::TypeExpr;
 use crate::doc_comment::DocComment;
 use crate::expr::Expr;
+use crate::parameter::ParamConvention;
 use crate::parameter::ParamSlot;
 use crate::parameter::Parameters;
 use crate::parameter::fmt_type_expr_surface;
@@ -40,6 +41,7 @@ pub struct Bind {
     pub name_span: SpanId,
     pub params: Option<Parameters>,
     pub param_slots: IndexMap<Intern<String>, ParamSlot>,
+    pub param_conventions: IndexMap<Intern<String>, ParamConvention>,
     pub attributes: BindAttributes,
     pub value: BindValue,
     /// Method receiver — structural [`TypeExpr`].
@@ -70,6 +72,7 @@ impl Bind {
             name_span,
             params: None,
             param_slots: IndexMap::new(),
+            param_conventions: IndexMap::new(),
             attributes: BindAttributes::default(),
             value,
             receiver_type: None,
@@ -206,6 +209,10 @@ impl std::hash::Hash for Bind {
         self.type_annotation.hash(state);
         self.type_annotation_qual.hash(state);
         self.value.hash(state);
+        for (k, v) in &self.param_conventions {
+            k.hash(state);
+            v.hash(state);
+        }
         // Exclude: param_slots, receiver_typevars, return_type (resolved metadata)
     }
 }

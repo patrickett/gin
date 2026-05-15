@@ -364,6 +364,8 @@ fn expr_kind_name(expr: &Expr) -> &'static str {
         Expr::TakeRef(_) => "TakeRef",
         Expr::Deref(_) => "Deref",
         Expr::Negate(_) => "Negate",
+        Expr::MutArg(_) => "MutArg",
+        Expr::OwnArg(_) => "OwnArg",
         Expr::Asm(_) => "Asm",
         Expr::List(_) => "List",
         Expr::TupleLit(_) => "TupleLit",

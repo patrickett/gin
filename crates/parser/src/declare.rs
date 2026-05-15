@@ -135,12 +135,8 @@ fn parse_has_rhs(cursor: &mut TokenCursor, expr_parser: ExprFn) -> DeclareValue 
         return DeclareValue::Record(params);
     }
 
-    if let Some(sp) = parse_type_expr(cursor, expr_parser) {
-        return DeclareValue::Alias(Box::new(sp));
-    }
-
     cursor.error(
-        "expected record parameters or tag after 'has'",
+        "expected record parameters after 'has'; use 'is' for type aliases, unions, and ranges",
         cursor.current_span(),
     );
     DeclareValue::Record(Parameters::new())
