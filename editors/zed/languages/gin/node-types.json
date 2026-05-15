@@ -570,6 +570,25 @@
     }
   },
   {
+    "type": "bundle_export",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "type_identifier",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "call_expression",
     "named": true,
     "fields": {
@@ -951,11 +970,11 @@
       "required": true,
       "types": [
         {
-          "type": "parameters",
+          "type": "type_identifier",
           "named": true
         },
         {
-          "type": "type_identifier",
+          "type": "type_parameters",
           "named": true
         }
       ]
@@ -1425,6 +1444,14 @@
         "required": true,
         "types": [
           {
+            "type": "generic_tag",
+            "named": true
+          },
+          {
+            "type": "qualified_tag",
+            "named": true
+          },
+          {
             "type": "type_identifier",
             "named": true
           }
@@ -1451,6 +1478,10 @@
       "required": true,
       "types": [
         {
+          "type": "bundle_export",
+          "named": true
+        },
+        {
           "type": "identifier",
           "named": true
         },
@@ -1460,6 +1491,10 @@
         },
         {
           "type": "string",
+          "named": true
+        },
+        {
+          "type": "type_identifier",
           "named": true
         }
       ]
@@ -1568,6 +1603,10 @@
         "types": [
           {
             "type": "tag",
+            "named": true
+          },
+          {
+            "type": "type_variable",
             "named": true
           }
         ]
@@ -2557,6 +2596,25 @@
     }
   },
   {
+    "type": "type_parameters",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "tag",
+          "named": true
+        },
+        {
+          "type": "type_variable",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "unary_expression",
     "named": true,
     "fields": {
@@ -3495,6 +3553,11 @@
     "named": false
   },
   {
+    "type": "module_doc_comment",
+    "named": true,
+    "extra": true
+  },
+  {
     "type": "or",
     "named": false
   },
@@ -3528,6 +3591,10 @@
   },
   {
     "type": "type_identifier",
+    "named": true
+  },
+  {
+    "type": "type_variable",
     "named": true
   },
   {

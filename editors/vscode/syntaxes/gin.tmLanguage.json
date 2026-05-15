@@ -9,7 +9,8 @@
     { "include": "#numbers" },
     { "include": "#keywords" },
     { "include": "#type-identifiers" },
-    { "include": "#method-names" }
+    { "include": "#method-names" },
+    { "include": "#identifiers" }
   ],
   "repository": {
     "comments": {
@@ -45,7 +46,9 @@
       "name": "string.quoted.single.gin",
       "begin": "'",
       "end": "'",
-      "patterns": [{ "name": "constant.character.escape.gin", "match": "\\\\." }]
+      "patterns": [
+        { "name": "constant.character.escape.gin", "match": "\\\\." }
+      ]
     },
     "numbers": {
       "patterns": [
@@ -86,6 +89,18 @@
     "method-names": {
       "name": "entity.name.function.method.gin",
       "match": "(?<=\\.)[a-z][A-Za-z0-9_]*(?=\\s*\\()"
+    },
+    "identifiers": {
+      "patterns": [
+        {
+          "name": "support.function.gin",
+          "match": "\\b[a-z_][a-zA-Z0-9_]*(?=\\s*\\()"
+        },
+        {
+          "name": "variable.other.gin",
+          "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
+        }
+      ]
     }
   }
 }
