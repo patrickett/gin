@@ -2,6 +2,100 @@ use crate::prelude::*;
 use crate::ty_to_mlir;
 use ast::flow::ConstValue;
 use ast::ty::Ty;
+use internment::Intern;
+
+/// Lower a typed tag call (from the typed expression arena) to an MLIR value.
+/// This is the ExprId-based equivalent of the `Lower for TagCall` impl.
+pub fn lower_typed_tag_call<'c>(
+    ctx: &CodegenContext<'_, 'c>,
+    _union_name: &Intern<String>,
+    variant_name: &Intern<String>,
+    discriminant: usize,
+    args: &[Value<'c, 'c>],
+    block: &BlockRef<'c, 'c>,
+    _symtab: &mut ScopedSymbolTable<'c>,
+) -> Option<Value<'c, 'c>> {
+    // Try ConstUnion construction first.
+    if let Some(Ty::ConstUnion { values, .. }) = ctx.lookup_tag(*variant_name) {
+        let disc = if !args.is_empty() {
+            discriminant as i64
+        } else {
+            ctx.emit_internal(format!(
+                "ConstUnion '{}' requires exactly one argument",
+                variant_name.as_str()
+            ));
+            return None;
+        };
+        return Some(super::emit_discriminant_constant(
+            ctx,
+            block,
+            disc,
+            values.len(),
+        ));
+    }
+
+    // Try union variant construction.
+    if let Some((union_name, disc, payload_fields)) = ctx.lookup_variant(*variant_name) {
+        let union_ty = ctx.lookup_tag(union_name);
+        let union_mlir_ty = union_ty
+            .as_ref()
+            .map(|ty| ty_to_mlir(ty, ctx.mlir))
+            .unwrap_or_else(|| ctx.mlir.union_type());
+
+        let is_optimized_simple = union_ty.as_ref().is_some_and(|ty| {
+            matches!(ty, Ty::Union { variants, .. } if variants.iter().all(|(_, fields)| fields.is_empty()))
+        });
+
+        if is_optimized_simple {
+            let variant_count = union_ty
+                .as_ref()
+                .and_then(|ty| {
+                    if let Ty::Union { variants, .. } = ty {
+                        Some(variants.len())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(2);
+            return Some(super::emit_discriminant_constant(
+                ctx,
+                block,
+                disc as i64,
+                variant_count,
+            ));
+        }
+
+        // Standard union construction.
+        let loc = ctx.location();
+        let disc_val = block.const_i64(ctx.mlir, disc as i64);
+        let mut val = block.append_op(ctx.mlir.llvm_undef(union_mlir_ty));
+        val = block.append_op(ctx.mlir.llvm_insertvalue(val, disc_val, 0));
+
+        for (slot, (arg, (_, field_ty))) in args.iter().zip(payload_fields.iter()).enumerate() {
+            let field_mlir_ty = ty_to_mlir(field_ty, ctx.mlir);
+            let coerced = if field_mlir_ty == ctx.mlir.i1() {
+                let extend_op = match OperationBuilder::new("arith.extui", loc)
+                    .add_operands(&[*arg])
+                    .add_results(&[ctx.mlir.i64()])
+                    .build()
+                {
+                    Ok(op) => op,
+                    Err(e) => {
+                        ctx.emit_internal(format!("extui build failed: {e}"));
+                        return None;
+                    }
+                };
+                block.append_op(extend_op)
+            } else {
+                *arg
+            };
+            val = block.append_op(ctx.mlir.llvm_insertvalue(val, coerced, (slot + 1) as i64));
+        }
+        return Some(val);
+    }
+
+    None
+}
 
 impl<'c> Lower<'c> for TagCall {
     fn lower(

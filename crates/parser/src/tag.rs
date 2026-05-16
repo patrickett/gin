@@ -1,7 +1,9 @@
 use internment::Intern;
 use lexer::Token;
 
-use ast::{Expr, ParameterKind, Parameters, Spanned, TagCall, TypeExpr, type_surface_mangle_name};
+use ast::{
+    Expr, ParameterKind, Parameters, Spanned, TagCall, TypeExpr, Typed, type_surface_mangle_name,
+};
 
 use crate::cursor::TokenCursor;
 use crate::expr::ExprFn;
@@ -127,17 +129,34 @@ fn parse_tag_type_params_delimited(
     }
 
     let mut params = Parameters::new();
+    let mut seen_default = false;
 
     if !cursor.is_at(&close_token) {
-        if let Some(param) = parse_one_tag_param(cursor, expr_parser) {
-            params.insert(param.0, param.1);
+        if let Some((name, kind)) = parse_one_tag_param(cursor, expr_parser) {
+            seen_default = matches!(kind, ParameterKind::Default(_));
+            params.insert(name, kind);
         }
         while cursor.eat(&Token::Comma) {
             if cursor.is_at(&close_token) {
                 break;
             }
-            if let Some(param) = parse_one_tag_param(cursor, expr_parser) {
-                params.insert(param.0, param.1);
+            if let Some((name, kind)) = parse_one_tag_param(cursor, expr_parser) {
+                // NOTE: Named type arguments (e.g. `Box(a: BumpAllocator)` to skip
+                // a defaulted positional param) would allow omitting defaults without
+                // triggering this flaw. Currently only positional type args are supported.
+                if seen_default && !matches!(kind, ParameterKind::Default(_)) {
+                    cursor.error(
+                        format!(
+                            "positional type parameter `{}` appears after a default parameter",
+                            name.as_str()
+                        ),
+                        cursor.current_span(),
+                    );
+                }
+                if matches!(kind, ParameterKind::Default(_)) {
+                    seen_default = true;
+                }
+                params.insert(name, kind);
             }
         }
     }
@@ -184,7 +203,7 @@ fn parse_one_tag_param(
 
     if cursor.eat(&Token::Colon) {
         let expr = expr_parser(cursor);
-        return Some((name, ParameterKind::Default(expr)));
+        return Some((name, ParameterKind::Default(Box::new(expr))));
     }
 
     Some((name, ParameterKind::Generic))
@@ -251,7 +270,7 @@ pub fn parse_tag_call(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<T
 }
 
 #[allow(dead_code)]
-fn parse_call_args(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Vec<Spanned<Expr>> {
+fn parse_call_args(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Vec<Typed<Expr>> {
     if cursor.expect(&Token::ParenOpen).is_none() {
         return Vec::new();
     }

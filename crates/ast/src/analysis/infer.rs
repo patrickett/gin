@@ -14,7 +14,7 @@ use crate::analysis::resolve::{
 };
 use crate::ty::{Ty, str_record_ty};
 use crate::{
-    BinOp, Binary, Bind, BindValue, Expr, FnCall, Literal, ParameterKind, Spanned, TagCall,
+    BinOp, Binary, Bind, BindValue, Expr, FnCall, Literal, ParameterKind, Parameters, TagCall,
     WhenArm, WhenExpr,
 };
 
@@ -38,6 +38,10 @@ pub struct TyInferEnv<'a> {
     pub tag_types: &'a HashMap<Intern<String>, Ty>,
     pub fn_return_types: &'a HashMap<Intern<String>, Ty>,
     pub locals: &'a dyn LocalTypes,
+    /// Declaration parameters for each tag. Used to fill default type arguments
+    /// when fewer args are provided at the use site (e.g. `Box(Int)` → `Box(Int, LibcAllocator)`).
+    /// `None` when defaults are not needed (inference, codegen).
+    pub tag_params: Option<&'a HashMap<Intern<String>, Parameters>>,
 }
 
 /// Each expression type implements this to know its own type.
@@ -175,7 +179,7 @@ impl TyInfer for Bind {
         if let Some(sp) = &self.return_tag
             && is_type_surface(&sp.value)
         {
-            return resolve_type_expr_with_subst(&sp.value, env.tag_types, &subst);
+            return resolve_type_expr_with_subst(&sp.value, env.tag_types, &subst, env.tag_params);
         }
 
         let mut locals: HashMap<Intern<String>, Ty> = match self.params().as_ref() {
@@ -191,6 +195,7 @@ impl TyInfer for Bind {
                             env.tag_types,
                             env.fn_return_types,
                             &subst,
+                            env.tag_params,
                         ),
                     )
                 })
@@ -199,7 +204,8 @@ impl TyInfer for Bind {
         if let Some(sp) = self.receiver_type_surface()
             && is_type_surface(&sp.value)
         {
-            let recv_ty = resolve_type_expr_with_subst(&sp.value, env.tag_types, &subst);
+            let recv_ty =
+                resolve_type_expr_with_subst(&sp.value, env.tag_types, &subst, env.tag_params);
             locals.insert(Intern::<String>::from_ref("self"), recv_ty);
         }
 
@@ -207,6 +213,7 @@ impl TyInfer for Bind {
             tag_types: env.tag_types,
             fn_return_types: env.fn_return_types,
             locals: &locals,
+            tag_params: env.tag_params,
         };
         match self.value() {
             BindValue::Expr(expr) => expr.infer_ty(&bind_env),
@@ -343,12 +350,6 @@ impl TyInfer for Expr {
     }
 }
 
-impl TyInfer for Spanned<Expr> {
-    fn infer_ty(&self, env: &TyInferEnv) -> Ty {
-        self.value.infer_ty(env)
-    }
-}
-
 /// Resolve a `ParameterKind` to a `Ty`, consulting a method-scoped
 /// type-variable substitution map. Takes the parameter `name` so bare-id
 /// (`Generic`) params can be resolved as a fresh `Ty::Opaque(name)`
@@ -369,13 +370,14 @@ pub fn resolve_parameter_kind_with_subst(
     tag_types: &HashMap<Intern<String>, Ty>,
     fn_return_types: &HashMap<Intern<String>, Ty>,
     subst: &HashMap<Intern<String>, Ty>,
+    tag_params: Option<&HashMap<Intern<String>, Parameters>>,
 ) -> Ty {
     match kind {
         ParameterKind::Tagged(sp) => {
             if let Some(te) = sp.value.as_type_expr()
                 && is_type_surface(&te)
             {
-                resolve_type_expr_with_subst(&te, tag_types, subst)
+                resolve_type_expr_with_subst(&te, tag_types, subst, tag_params)
             } else {
                 Ty::Opaque(Intern::<String>::from_ref("?"))
             }
@@ -386,6 +388,7 @@ pub fn resolve_parameter_kind_with_subst(
                 tag_types,
                 fn_return_types,
                 locals: &HashMap::new(),
+                tag_params,
             };
             expr.infer_ty(&env)
         }

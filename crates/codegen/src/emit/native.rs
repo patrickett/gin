@@ -224,8 +224,6 @@ pub fn native_from_module(
     (ok, symptoms)
 }
 
-/// Build an MLIR module from the AST and return the MLIR text.
-///
 /// Used for `--emit mlir` and other cases where only the textual IR is needed.
 pub fn build_module_text(
     ast: &mut FileAst,
@@ -233,14 +231,23 @@ pub fn build_module_text(
     filename: &str,
 ) -> (Option<String>, Vec<Diagnostic>) {
     let context = create_native_context();
-
-    let (source_module, symptoms) = build_module_with_context(&context, ast, source, filename);
-
+    let (source_module, symptoms) =
+        build_module_with_context(&context, ast, None, source, filename);
     let text = source_module.map(|m| m.as_operation().to_string());
     (text, symptoms)
 }
 
-/// Build an MLIR module from the AST, lower to LLVM, and compile to an object file.
+pub fn build_module_text_from_typed(
+    typed: &ast::typed::TypedFileAst,
+    source: &str,
+    filename: &str,
+) -> (Option<String>, Vec<Diagnostic>) {
+    let context = create_native_context();
+    let module = crate::lower::build_module_from_typed_ast(&context, typed, source, filename);
+    let text = module.map(|m| m.as_operation().to_string());
+    (text, Vec::new())
+}
+
 pub fn compile_to_object(
     ast: &mut FileAst,
     obj_path: &Path,
@@ -249,22 +256,39 @@ pub fn compile_to_object(
     filename: &str,
 ) -> (bool, Vec<Diagnostic>) {
     let context = create_native_context();
-
     let (source_module, lower_symptoms) =
-        build_module_with_context(&context, ast, source, filename);
-
+        build_module_with_context(&context, ast, None, source, filename);
     let mut symptoms = lower_symptoms;
-
     let Some(source_module) = source_module else {
         return (false, symptoms);
     };
-
     let (ok, more) = native_from_module(&context, &source_module, obj_path, profile);
     symptoms.extend(more);
     (ok, symptoms)
 }
 
-/// Link an object file into an executable using the system C compiler.
+pub fn compile_to_object_from_typed(
+    typed: &ast::typed::TypedFileAst,
+    obj_path: &Path,
+    profile: Profile,
+    source: &str,
+    filename: &str,
+) -> (bool, Vec<Diagnostic>) {
+    let context = create_native_context();
+    // Re-parse the source to get a FileAst, then use the well-tested codegen path
+    // with the typed AST for type resolution.
+    let mut file_ast = parser::parse_from_str(source);
+    let (module, symptoms) =
+        build_module_with_context(&context, &mut file_ast, Some(typed), source, filename);
+    let Some(module) = module else {
+        return (false, symptoms);
+    };
+    let (ok, more) = native_from_module(&context, &module, obj_path, profile);
+    let mut all = symptoms;
+    all.extend(more);
+    (ok, all)
+}
+
 pub fn link_executable(
     obj_path: &Path,
     output: &Path,

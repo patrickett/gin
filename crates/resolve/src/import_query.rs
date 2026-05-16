@@ -213,16 +213,11 @@ pub fn resolve_symbol_hover(
 ) -> Option<String> {
     let dep_dir = resolve_dep_dir(file_path, dep_name)?;
     let def_file = file_helpers::find_public_def_in_package(&dep_dir, symbol)?;
-    let mut parsed = file_reader(&def_file)?;
+    let parsed = file_reader(&def_file)?;
     let def_span = ast::hover::definition_span(&parsed.output.ast, symbol)?;
-    let analysis = ast::resolve_types(&parsed.output.ast, std::slice::from_ref(&parsed.output.ast));
-    ast::populate_ast_types(&mut parsed.output.ast, &analysis);
-    ast::hover::hover_at(
-        &parsed.source,
-        &parsed.output.ast,
-        &analysis,
-        def_span.start,
-    )
+    let typed = ast::typed::transform_file(parsed.output.ast.clone(), ast::typed::FileId(0));
+    let (line, character) = ast::byte_offset_to_position(def_span.start, &parsed.source);
+    typed.hover_at(&parsed.source, line, character)
 }
 
 pub fn resolve_symbol_def_span(
@@ -270,12 +265,12 @@ pub fn resolve_local_symbol_hover(
     symbol: &str,
     _file_reader: &dyn Fn(&Path) -> Option<ParsedFile>,
 ) -> Option<String> {
-    let (target_file, mut ast) = resolve_local_import_target(file_path, local_import_path, symbol)?;
+    let (target_file, ast) = resolve_local_import_target(file_path, local_import_path, symbol)?;
     let source = std::fs::read_to_string(&target_file).ok()?;
     let def_span = ast::hover::definition_span(&ast, symbol)?;
-    let analysis = ast::resolve_types(&ast, std::slice::from_ref(&ast));
-    ast::populate_ast_types(&mut ast, &analysis);
-    ast::hover::hover_at(&source, &ast, &analysis, def_span.start)
+    let typed = ast::typed::transform_file(ast.clone(), ast::typed::FileId(0));
+    let (line, character) = ast::byte_offset_to_position(def_span.start, &source);
+    typed.hover_at(&source, line, character)
 }
 
 pub fn resolve_local_symbol_def_span(
@@ -312,16 +307,11 @@ pub fn resolve_current_module_hover(
 ) -> Option<String> {
     let pkg_root = find_package_root(file_path)?;
     let def_file = file_helpers::find_public_def_in_package(&pkg_root, symbol)?;
-    let mut parsed = file_reader(&def_file)?;
+    let parsed = file_reader(&def_file)?;
     let def_span = ast::hover::definition_span(&parsed.output.ast, symbol)?;
-    let analysis = ast::resolve_types(&parsed.output.ast, std::slice::from_ref(&parsed.output.ast));
-    ast::populate_ast_types(&mut parsed.output.ast, &analysis);
-    ast::hover::hover_at(
-        &parsed.source,
-        &parsed.output.ast,
-        &analysis,
-        def_span.start,
-    )
+    let typed = ast::typed::transform_file(parsed.output.ast.clone(), ast::typed::FileId(0));
+    let (line, character) = ast::byte_offset_to_position(def_span.start, &parsed.source);
+    typed.hover_at(&parsed.source, line, character)
 }
 
 /// Resolve the definition span for a `use Symbol` import (current module).

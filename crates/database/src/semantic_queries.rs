@@ -5,14 +5,14 @@
 
 use crate::package::PackageFiles;
 use crate::{Db, File};
-use diagnostic::Diagnostic;
+use diagnostic::{Category, Diagnostic, DiagnosticCode, TypeSymptom};
 use std::sync::Arc;
 
-/// Compute hover markdown via Salsa, keyed by `(file, byte_pos)`.
-///
 /// This is a pure function of the file contents + cursor position, so Salsa
 /// caching is a natural fit. Parsing matches [`crate::file_parse_output`]
 /// (full lexer + parse diagnostics path).
+///
+/// Uses the new [`TypedFileAst`](ast::typed::TypedFileAst) API for hover info.
 #[salsa::tracked]
 pub fn hover_markdown(db: &dyn Db, file: File, byte_pos: u32) -> Option<String> {
     let source = file.contents(db);
@@ -36,41 +36,68 @@ pub fn hover_markdown(db: &dyn Db, file: File, byte_pos: u32) -> Option<String> 
             .and_then(|s| s.to_str())
             .map(|s| s.to_owned())
     });
-    let analysis = ast::resolve_types(&output.ast, std::slice::from_ref(&output.ast));
-    match source_name.as_deref() {
-        Some(name) => {
-            ast::hover::hover_at_with_source(source, &output.ast, byte_pos as usize, Some(name))
-        }
-        None => ast::hover::hover_at(source, &output.ast, &analysis, byte_pos as usize),
+
+    // Convert byte position to line/character for the typed AST hover API.
+    let (line, character) = ast::byte_offset_to_position(byte_pos as usize, source);
+
+    // Build the typed AST using the new transformation pipeline.
+    let typed = ast::typed::transform_file(output.ast.clone(), ast::typed::FileId(0));
+
+    let hover_text = typed.hover_at(source, line, character)?;
+
+    // Prefix with module path if available (mirrors old hover_at_with_source behavior).
+    match source_name {
+        Some(name) => Some(format!("`{name}`\n\n{hover_text}")),
+        None => Some(hover_text),
     }
 }
 
-/// Full parse output for `file` (shared with diagnostics / hover).
 pub fn file_parse_output(db: &dyn Db, file: File) -> Arc<parser::ParseOutput> {
     crate::file_parse_output(db, file)
 }
 
-/// Type-check + flow-analysis symptoms for every file in the package, sharing one
-/// type environment built from all parsed ASTs.
+/// Shares one type environment built from all parsed ASTs across files.
 ///
-/// Diagnostics are embedded in each resolved FileAst via [`ast::FileAst::resolve_types`].
+/// Uses the new [`TypedFileAst`](ast::typed::TypedFileAst) API. Each file is
+/// transformed with access to previously-transformed files via
+/// [`TransformCtx::from_typed_asts`](ast::typed::TransformCtx::from_typed_asts).
+/// TypeFlaws are collected and converted to `Diagnostic` for the existing API.
 #[salsa::tracked]
 pub fn package_typecheck_symptoms<'db>(
     db: &'db dyn Db,
     pkg: PackageFiles<'db>,
 ) -> Vec<Vec<Diagnostic>> {
     let files = pkg.files(db);
-    let all_asts: Vec<ast::FileAst> = files
-        .iter()
-        .map(|&f| crate::file_parse_output(db, f).ast.clone())
-        .collect();
-    files
-        .iter()
-        .map(|&f| {
-            let mut ast = crate::file_parse_output(db, f).ast.clone();
-            let analysis = ast::resolve_types(&ast, &all_asts);
-            ast::populate_ast_types(&mut ast, &analysis);
-            analysis.diagnostics
-        })
-        .collect()
+    let mut typed_asts: Vec<ast::typed::TypedFileAst> = Vec::new();
+    let mut results: Vec<Vec<Diagnostic>> = Vec::new();
+
+    for file in files.iter() {
+        let output = crate::file_parse_output(db, *file);
+        let parse_ast = ast::typed::ParseAst::from_file_ast(output.ast.clone());
+        let file_id = ast::typed::FileId(typed_asts.len() as u32);
+
+        // Build cross-file context from already-transformed files.
+        let ctx = ast::typed::TransformCtx::from_typed_asts(&typed_asts);
+        let typed = ast::typed::transform(parse_ast, file_id, &ctx);
+
+        // Collect flaws and convert to Diagnostic.
+        let mut file_diags: Vec<Diagnostic> = Vec::new();
+        for (_expr_id, flaw) in typed.all_flaws() {
+            let msg = format!("{:?}", flaw);
+            file_diags.push(Diagnostic {
+                span_id: span::SpanId::INVALID,
+                message: msg,
+                category: Category::Flaw,
+                code: DiagnosticCode::Type(TypeSymptom::Mismatch),
+                help_on_span: None,
+                help: None,
+                related: Vec::new(),
+            });
+        }
+
+        results.push(file_diags);
+        typed_asts.push(typed);
+    }
+
+    results
 }

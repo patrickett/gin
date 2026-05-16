@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 
 span = { workspace = true }
+soa_derive = "0.14"
 indexmap = { workspace = true }
 internment = "0.8"
 i256 = { workspace = true }

@@ -29,8 +29,13 @@ fn bench_codegen(c: &mut Criterion) {
     group.bench_function("build_module/codegen_source", |b| {
         b.iter(|| {
             let context = melior::Context::new();
-            let result =
-                codegen::build_module_with_context(&context, &mut output.ast, &source, "bench.gin");
+            let result = codegen::build_module_with_context(
+                &context,
+                &mut output.ast,
+                None,
+                &source,
+                "bench.gin",
+            );
             std::hint::black_box(&result);
         });
     });
@@ -50,8 +55,13 @@ mod tests {
         let output = parse_source_full(&source);
         assert!(!output.ast.defs().is_empty());
         let context = melior::Context::new();
-        let result =
-            codegen::build_module_with_context(&context, &mut output.ast, &source, "test.gin");
+        let result = codegen::build_module_with_context(
+            &context,
+            &mut output.ast,
+            None,
+            &source,
+            "test.gin",
+        );
         assert!(result.0.is_some(), "codegen should succeed");
     }
 }

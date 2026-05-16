@@ -232,6 +232,50 @@ pub fn ty_byte_size_static(ty: &Ty) -> usize {
     }
 }
 
+impl std::hash::Hash for Ty {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Ty::Int {
+                width,
+                signed,
+                value,
+            } => {
+                width.hash(state);
+                signed.hash(state);
+                value.hash(state);
+            }
+            Ty::Float { value } => {
+                // Hash raw bits so NaN values with different bit patterns are distinct.
+                value.map(f64::to_bits).hash(state);
+            }
+            Ty::Bool => {}
+            Ty::Unit => {}
+            Ty::Record { name, fields } => {
+                name.hash(state);
+                fields.hash(state);
+            }
+            Ty::Union { name, variants } => {
+                name.hash(state);
+                variants.hash(state);
+            }
+            Ty::Opaque(name) => name.hash(state),
+            Ty::Array { elem, size } => {
+                elem.hash(state);
+                size.hash(state);
+            }
+            Ty::Ptr { inner } => inner.hash(state),
+            Ty::Ref { inner } => inner.hash(state),
+            Ty::Tuple(fields) => fields.hash(state),
+            Ty::ConstUnion { name, base, values } => {
+                name.hash(state);
+                base.hash(state);
+                values.hash(state);
+            }
+        }
+    }
+}
+
 impl Eq for Ty {}
 
 /// Canonical `Str` record type: `{ pointer: Ptr(Byte), len: Int }`.

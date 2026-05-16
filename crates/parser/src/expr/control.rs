@@ -1,7 +1,7 @@
 use lexer::Token;
 
 use ast::{
-    Expr, FnCall, ForInLoop, IfCondition, IfExpr, Loop, ModPath, Return, Spanned, TypeExpr,
+    Expr, FnCall, ForInLoop, IfCondition, IfExpr, Loop, ModPath, Return, Spanned, TypeExpr, Typed,
     WhenArm, WhenExpr, WhileLoop,
 };
 
@@ -37,7 +37,7 @@ pub(crate) fn can_start_expr(token: &Token) -> bool {
 /// Parse a `for` binder using the same token shape as before (ids and `(id, …)` only).
 /// Produces `Expr` so the AST matches the unified-syntax direction without routing
 /// through the full expression parser (keeps `for` headers cheap on hot paths).
-fn parse_for_pattern(cursor: &mut TokenCursor) -> Option<Spanned<Expr>> {
+fn parse_for_pattern(cursor: &mut TokenCursor) -> Option<Typed<Expr>> {
     match cursor.peek()? {
         Token::Id(name) => {
             let name = *name;
@@ -46,18 +46,18 @@ fn parse_for_pattern(cursor: &mut TokenCursor) -> Option<Spanned<Expr>> {
             cursor.advance();
             let end_span = cursor.last_consumed_span();
             let span = cursor.merge_span(start_span, end_span);
-            Some(Spanned {
-                value: Expr::FnCall(FnCall {
+            Some(Typed::infer(
+                Expr::FnCall(FnCall {
                     path: Spanned::new(ModPath::new(id, Vec::new()), start_span),
                     args: None,
                 }),
-                span_id: span,
-            })
+                span,
+            ))
         }
         Token::ParenOpen => {
             let start_span = cursor.peek_span()?;
             cursor.advance();
-            let mut elems: Vec<Spanned<Expr>> = Vec::new();
+            let mut elems: Vec<Typed<Expr>> = Vec::new();
             loop {
                 match cursor.peek() {
                     Some(Token::Id(name)) => {
@@ -67,13 +67,13 @@ fn parse_for_pattern(cursor: &mut TokenCursor) -> Option<Spanned<Expr>> {
                         cursor.advance();
                         let end_id = cursor.last_consumed_span();
                         let elem_span = cursor.merge_span(id_span, end_id);
-                        elems.push(Spanned {
-                            value: Expr::FnCall(FnCall {
+                        elems.push(Typed::infer(
+                            Expr::FnCall(FnCall {
                                 path: Spanned::new(ModPath::new(id, Vec::new()), id_span),
                                 args: None,
                             }),
-                            span_id: elem_span,
-                        });
+                            elem_span,
+                        ));
                         if cursor.is_at(&Token::Comma) {
                             cursor.advance();
                         } else {
@@ -88,28 +88,19 @@ fn parse_for_pattern(cursor: &mut TokenCursor) -> Option<Spanned<Expr>> {
             let end_span = cursor.last_consumed_span();
             let merged = cursor.merge_span(start_span, end_span);
             match elems.len() {
-                0 => Some(Spanned {
-                    value: Expr::TupleLit(Vec::new()),
-                    span_id: merged,
-                }),
+                0 => Some(Typed::infer(Expr::TupleLit(Vec::new()), merged)),
                 1 => {
-                    let Spanned { value: e, .. } = elems.pop().unwrap();
-                    Some(Spanned {
-                        value: e,
-                        span_id: merged,
-                    })
+                    let Typed { value: e, .. } = elems.pop().unwrap();
+                    Some(Typed::infer(e, merged))
                 }
-                _ => Some(Spanned {
-                    value: Expr::TupleLit(elems),
-                    span_id: merged,
-                }),
+                _ => Some(Typed::infer(Expr::TupleLit(elems), merged)),
             }
         }
         _ => None,
     }
 }
 
-fn parse_body_exprs(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Vec<Spanned<Expr>> {
+fn parse_body_exprs(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Vec<Typed<Expr>> {
     let mut exprs = Vec::new();
     loop {
         super::body_trivia::skip_expr_body_trivia(cursor);
@@ -126,10 +117,10 @@ fn parse_body_exprs(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Vec<Spanne
                             let start_span = cursor.span_at(start_pos);
                             cursor.consume_trailing_newline();
                             let end_span = cursor.last_consumed_span();
-                            exprs.push(Spanned {
-                                value: Expr::Bind(Box::new(bind)),
-                                span_id: cursor.merge_span(start_span, end_span),
-                            });
+                            exprs.push(Typed::infer(
+                                Expr::Bind(Box::new(bind)),
+                                cursor.merge_span(start_span, end_span),
+                            ));
                             continue;
                         }
                         // parse_bind failed on Id: — extremely rare, rewind and fall through

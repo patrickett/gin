@@ -12,8 +12,7 @@
 use internment::Intern;
 
 use crate::TypeExpr;
-use crate::expr::{Expr, FnCall, Literal};
-use crate::span::Spanned;
+use crate::expr::{Expr, FnCall, Literal, Typed};
 
 /// `for` loop patterns are a subset of expressions:
 /// - a simple identifier (`x` → `Expr::FnCall` with an empty path tail), or
@@ -27,7 +26,7 @@ pub fn for_loop_pattern_names(pat: &Expr) -> Option<Vec<Intern<String>>> {
         }
         Expr::TupleLit(elems) => {
             let mut out = Vec::with_capacity(elems.len());
-            for Spanned { value, .. } in elems {
+            for Typed { value, .. } in elems {
                 let Expr::FnCall(FnCall { path, args: None }) = value else {
                     return None;
                 };
@@ -113,14 +112,8 @@ mod tests {
     #[test]
     fn for_loop_pattern_tuple_names() {
         let e = Expr::TupleLit(vec![
-            Spanned {
-                value: simple_var("a"),
-                span_id: SpanId::new(1),
-            },
-            Spanned {
-                value: simple_var("b"),
-                span_id: SpanId::new(2),
-            },
+            Typed::infer(simple_var("a"), SpanId::new(1)),
+            Typed::infer(simple_var("b"), SpanId::new(2)),
         ]);
         assert_eq!(
             for_loop_pattern_names(&e),

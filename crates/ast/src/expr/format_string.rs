@@ -1,10 +1,11 @@
 use crate::expr::Expr;
-use crate::span::{SpanId, Spanned};
+use crate::expr::Typed;
+use crate::span::SpanId;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FormatPart {
     Text(String),
-    Expr(Box<Spanned<Expr>>, SpanId),
+    Expr(Box<Typed<Expr>>, SpanId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

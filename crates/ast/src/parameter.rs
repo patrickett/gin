@@ -3,12 +3,11 @@ use internment::Intern;
 use std::fmt;
 
 use crate::TypeExpr;
-use crate::expr::Expr;
+use crate::expr::{Expr, Typed};
 use crate::span::Spanned;
 use crate::ty_state::TyState;
 use crate::type_surface_mangle_name;
 
-/// How a parameter is passed to a function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ParamConvention {
     /// Bare `s String` — passed as `&T` (readonly reference).
@@ -20,13 +19,11 @@ pub enum ParamConvention {
     Own,
 }
 
-/// A single value-level function parameter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParamSlot {
     pub ty: TyState,
     /// Default value expression, e.g. `x: 4` in `func(x: 4)`.
-    pub default: Option<Spanned<Expr>>,
-    /// Parameter passing convention.
+    pub default: Option<Typed<Expr>>,
     pub convention: ParamConvention,
 }
 
@@ -35,7 +32,7 @@ pub enum ParameterKind {
     Generic,
     /// Type annotation for this parameter, as expression-shaped type syntax.
     Tagged(Box<Spanned<Expr>>),
-    Default(Spanned<Expr>),
+    Default(Box<Typed<Expr>>),
 }
 
 pub(crate) fn fmt_type_expr_surface(e: &TypeExpr, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -85,7 +82,6 @@ pub(crate) fn fmt_type_expr_surface(e: &TypeExpr, f: &mut fmt::Formatter<'_>) ->
     }
 }
 
-/// Pretty-print a type-surface [`TypeExpr`].
 pub fn format_type_surface(e: &TypeExpr) -> String {
     struct Fmt<'a>(&'a TypeExpr);
     impl fmt::Display for Fmt<'_> {
@@ -118,7 +114,7 @@ pub enum ParamInfo {
     /// Represents a type tag for the parameter, e.g. `(p Person)`.
     Tag(Box<Spanned<Expr>>),
     /// Represents a default value expression for the parameter, e.g. `(p: 123)`.
-    Default(Spanned<Expr>),
+    Default(Box<Typed<Expr>>),
 }
 
 // TODO: store a SpanId per parameter so LSP rename/go-to-def/find-references

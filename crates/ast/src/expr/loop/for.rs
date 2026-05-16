@@ -1,5 +1,6 @@
 use crate::expr::Expr;
-use crate::span::{SpanId, Spanned};
+use crate::expr::Typed;
+use crate::span::SpanId;
 
 /// For-in loop: iterate over a range or collection
 ///
@@ -21,9 +22,9 @@ use crate::span::{SpanId, Spanned};
 pub struct ForInLoop {
     /// Loop binder: a `for`-pattern-shaped [`Expr`] (see [`crate::pattern`]).
     /// Boxed to avoid a recursive `Expr` → `Loop` → `ForInLoop` → `Expr` layout.
-    pub pat: Box<Spanned<Expr>>,
+    pub pat: Box<Typed<Expr>>,
     // TODO: check and make sure it accepts expression that can be iterated
-    pub iter: Box<Spanned<Expr>>,
-    pub exprs: Vec<Spanned<Expr>>,
+    pub iter: Box<Typed<Expr>>,
+    pub exprs: Vec<Typed<Expr>>,
     pub span: SpanId,
 }

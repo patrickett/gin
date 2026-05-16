@@ -1,6 +1,7 @@
 use internment::Intern;
 
 use crate::expr::Expr;
+use crate::expr::Typed;
 use crate::path::ModPath;
 use crate::span::Spanned;
 use crate::span::{HasSpanId, SpanId};
@@ -15,7 +16,7 @@ pub struct TagCall {
     pub name: Intern<String>,
     /// Optional qualified path (e.g., ModPath { root: "Maybe", segments: ["Some"] })
     pub qual_path: Option<Spanned<ModPath>>,
-    pub args: Vec<Spanned<Expr>>,
+    pub args: Vec<Typed<Expr>>,
     pub span: SpanId,
 }
 

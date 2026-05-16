@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use ast::{
     BindValue, Declare, DeclareValue, DocComment, Expr, FileAst, ImportSource, Literal,
-    ParameterKind, Parameters, SpanTable, Spanned, TypeExpr, Variant,
+    ParameterKind, Parameters, SpanTable, Spanned, TypeExpr, Typed, Variant,
 };
 use internment::Intern;
 
@@ -459,8 +459,8 @@ impl<'a> AstFormatter<'a> {
 }
 
 /// Get the source text for a spanned expression using the span table.
-fn span_text(expr: &Spanned<Expr>, st: &SpanTable, source: &str) -> String {
-    let span = st.get(expr.span_id());
+fn span_text(expr: &Typed<Expr>, st: &SpanTable, source: &str) -> String {
+    let span = st.get(expr.span_id);
     if !span.is_empty() {
         span.extract(source).to_string()
     } else {

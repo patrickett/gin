@@ -104,8 +104,6 @@ fn compute_completions(
         } else {
             vec![file_path.clone()]
         };
-        // Resolve tag types for dot_type lookup.
-        let _analysis = ast::resolve_types(ast, std::slice::from_ref(ast));
         if let Some(ty) = dot_type_at(&source, ast, byte_pos) {
             let items = dot_completions(ty);
             if !items.is_empty() {

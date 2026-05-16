@@ -81,12 +81,10 @@ impl FlowContext {
         }
     }
 
-    /// Narrow a variable based on a pattern match.
     pub fn narrow(&mut self, var: Intern<String>, constraint: TypeConstraint) {
         self.constraints.insert(var, constraint);
     }
 
-    /// Check if a narrowing is impossible given current constraints.
     pub fn is_impossible(&self, var: &Intern<String>, check_constraint: &TypeConstraint) -> bool {
         if let Some(existing) = self.constraints.get(var)
             && existing.contradicts(check_constraint)
@@ -100,7 +98,6 @@ impl FlowContext {
         }
     }
 
-    /// Get the constraint for a variable, if any.
     pub fn get_constraint(&self, var: &Intern<String>) -> Option<&TypeConstraint> {
         self.constraints
             .get(var)
@@ -119,17 +116,14 @@ impl FlowContext {
         self.constraints.contains_key(var)
     }
 
-    /// Get all variables with local constraints.
     pub fn local_constraints(&self) -> impl Iterator<Item = (&Intern<String>, &TypeConstraint)> {
         self.constraints.iter()
     }
 
-    /// Record a known constant value for a variable.
     pub fn set_constant(&mut self, var: Intern<String>, value: ConstValue) {
         self.constants.insert(var, value);
     }
 
-    /// Get the known constant value for a variable, if any.
     pub fn get_constant(&self, var: &Intern<String>) -> Option<&ConstValue> {
         self.constants
             .get(var)
@@ -141,19 +135,18 @@ impl FlowContext {
         self.constants.remove(var);
     }
 
-    /// Get all variables with local constant values.
     pub fn local_constants(&self) -> impl Iterator<Item = (&Intern<String>, &ConstValue)> {
         self.constants.iter()
     }
 
-    // --- Ownership tracking accessors ---
+    pub fn local_var_states(&self) -> impl Iterator<Item = (&Intern<String>, &VarState)> {
+        self.var_states.iter()
+    }
 
-    /// Set the state of a variable (Alive, Moved, etc.).
     pub fn set_var_state(&mut self, var: Intern<String>, state: VarState) {
         self.var_states.insert(var, state);
     }
 
-    /// Get the state of a variable.
     pub fn get_var_state(&self, var: &Intern<String>) -> Option<VarState> {
         self.var_states
             .get(var)
@@ -161,12 +154,10 @@ impl FlowContext {
             .or_else(|| self.parent.as_ref().and_then(|p| p.get_var_state(var)))
     }
 
-    /// Set the capability for a variable.
     pub fn set_capability(&mut self, var: Intern<String>, cap: Capability) {
         self.capabilities.insert(var, cap);
     }
 
-    /// Get the capability for a variable.
     pub fn get_capability(&self, var: &Intern<String>) -> Option<Capability> {
         self.capabilities
             .get(var)
@@ -174,24 +165,20 @@ impl FlowContext {
             .or_else(|| self.parent.as_ref().and_then(|p| p.get_capability(var)))
     }
 
-    /// Set the region owner for a variable.
     pub fn set_region_owner(&mut self, var: Intern<String>, region: Intern<String>) {
         self.region_owner.insert(var, region);
     }
 
-    /// Get the region owner for a variable.
     pub fn get_region_owner(&self, var: &Intern<String>) -> Option<&Intern<String>> {
         self.region_owner
             .get(var)
             .or_else(|| self.parent.as_ref().and_then(|p| p.get_region_owner(var)))
     }
 
-    /// Mark a region as consumed.
     pub fn consume_region(&mut self, region: &Intern<String>) {
         self.consumed_regions.insert(*region);
     }
 
-    /// Check if a region has been consumed.
     pub fn is_region_consumed(&self, region: &Intern<String>) -> bool {
         self.consumed_regions.contains(region)
             || self
@@ -256,50 +243,38 @@ impl FlowAnalysis {
         Self::default()
     }
 
-    /// Get the flow context at a given expression index.
     pub fn get_context(&self, index: usize) -> Option<&FlowContext> {
         self.expr_contexts.get(&index)
     }
 
-    /// Add a flow context for an expression at the given index.
     pub fn insert_context(&mut self, index: usize, ctx: FlowContext) {
         self.expr_contexts.insert(index, ctx);
     }
 
-    /// Record the SpanId for an expression index.
     pub fn insert_span(&mut self, span_id: SpanId, index: usize) {
         self.expr_spans.insert(span_id, index);
     }
 
-    /// Get the narrowed constraint for a variable at a given expression index.
-    ///
-    /// Returns `None` if there is no narrowing for that variable at that point.
     pub fn narrowed_at(&self, expr_index: usize, var_name: &str) -> Option<&TypeConstraint> {
         let ctx = self.expr_contexts.get(&expr_index)?;
         let var = Intern::<String>::from_ref(var_name);
         ctx.get_constraint(&var)
     }
 
-    /// Get the known constant value for a variable at a given expression index.
     pub fn value_at(&self, expr_index: usize, var_name: &str) -> Option<&ConstValue> {
         let ctx = self.expr_contexts.get(&expr_index)?;
         let var = Intern::<String>::from_ref(var_name);
         ctx.get_constant(&var)
     }
 
-    /// Add an impossible check to the diagnostics list.
     pub fn add_impossible_check(&mut self, check: ImpossibleCheck) {
         self.impossible_checks.push(check);
     }
 
-    /// Add an index out of bounds check to the diagnostics list.
     pub fn add_bounds_check(&mut self, check: IndexOutOfBounds) {
         self.bounds_checks.push(check);
     }
 
-    /// Get the display string for the narrowed type of `var_name` based on the final context.
-    ///
-    /// Returns `None` if no narrowing is in effect.
     pub fn narrowed_type_string(&self, var_name: &str) -> Option<String> {
         let var = Intern::<String>::from_ref(var_name);
         self.constraint_to_display(self.final_context.get_constraint(&var)?)

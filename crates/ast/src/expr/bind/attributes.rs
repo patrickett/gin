@@ -1,5 +1,4 @@
-use crate::expr::{Expr, Literal};
-use crate::span::Spanned;
+use crate::expr::{Expr, Literal, Typed};
 use internment::Intern;
 
 /// Target operating systems for `#[os({ ... })]` cfg filters.
@@ -150,7 +149,7 @@ pub enum AttributeItem {
     Call {
         name: Intern<String>,
         name_span: crate::span::SpanId,
-        args: Vec<Spanned<Expr>>,
+        args: Vec<Typed<Expr>>,
     },
     /// A bare identifier like `debug`, `test`, `inline`
     Flag {
@@ -231,7 +230,7 @@ impl BindAttributes {
     }
 }
 
-pub(crate) fn extract_os_targets(args: &[Spanned<Expr>]) -> Option<Vec<OsTarget>> {
+pub(crate) fn extract_os_targets(args: &[Typed<Expr>]) -> Option<Vec<OsTarget>> {
     let list = args.first()?;
     let exprs = match &list.value {
         Expr::List(elems) => elems,
@@ -249,7 +248,7 @@ pub(crate) fn extract_os_targets(args: &[Spanned<Expr>]) -> Option<Vec<OsTarget>
     Some(targets)
 }
 
-pub(crate) fn extract_arch_targets(args: &[Spanned<Expr>]) -> Option<Vec<ArchTarget>> {
+pub(crate) fn extract_arch_targets(args: &[Typed<Expr>]) -> Option<Vec<ArchTarget>> {
     let list = args.first()?;
     let exprs = match &list.value {
         Expr::List(elems) => elems,
@@ -267,9 +266,14 @@ pub(crate) fn extract_arch_targets(args: &[Spanned<Expr>]) -> Option<Vec<ArchTar
     Some(targets)
 }
 
-pub(crate) fn extract_complexity(args: &[Spanned<Expr>]) -> Option<Complexity> {
+pub(crate) fn extract_complexity(args: &[Typed<Expr>]) -> Option<Complexity> {
     let variant = args.first()?;
     match &variant.value {
+        // Bare tag (no parens) — e.g. `Constant`
+        Expr::AnonymousTag(n, _) => match n.as_str() {
+            "Constant" => Some(Complexity::Constant),
+            _ => None,
+        },
         Expr::TagCall(tc) => {
             let variant_name = tc.name.as_str();
             let expr = if tc.args.is_empty() {

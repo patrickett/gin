@@ -1,29 +1,15 @@
-//! Hover formatting — colocated markdown generation from a resolved [`FileAst`] and [`Analysis`].
-//!
-//! IDEs that want caching should cache the [`crate::Analysis`] and call the helpers
-//! directly; this module provides a one-shot [`hover_at`] for the common case.
+//! Hover formatting — colocated markdown generation from a resolved [`FileAst`] and [`TypedFileAst`].
 
 use crate::format_type_surface;
 use crate::{Bound, ConstValue, FlowAnalysis, HasSpanId, TypeConstraint};
 use internment::Intern;
+use std::collections::HashMap;
 
-// ── One-shot hover ─────────────────────────────────────────────────────────
-
-/// Compute hover markdown at `byte_pos` in `source` using a pre-built [`crate::Analysis`].
-pub fn hover_at(
-    source: &str,
-    ast: &crate::FileAst,
-    analysis: &crate::Analysis,
-    byte_pos: usize,
-) -> Option<String> {
-    hover_at_with_flow(source, ast, Some(analysis), &analysis.flow, byte_pos, None)
-}
-
-/// Like [`hover_at`] but accepts a pre-built [`FlowAnalysis`] for callers that cache it.
+/// Compute hover markdown at `byte_pos` using a pre-built [`FlowAnalysis`].
 pub fn hover_at_with_flow(
     source: &str,
     ast: &crate::FileAst,
-    analysis: Option<&crate::Analysis>,
+    tag_types: Option<&HashMap<crate::typed::TagId, crate::ty::Ty>>,
     flow: &FlowAnalysis,
     byte_pos: usize,
     source_name: Option<&str>,
@@ -42,13 +28,14 @@ pub fn hover_at_with_flow(
         if let Some(doc) = decl.doc_comment() {
             result.push_str(&format!("\n\n---\n\n{}", doc.value));
         }
-        // Show size/align when analysis is available.
-        if let Some(analysis) = analysis
-            && let Some(ty) = analysis.tag_types.get(&tag_key)
-        {
-            let size = crate::ty::ty_byte_size_static(ty);
-            let align = crate::ty::ty_alignment(ty);
-            result.push_str(&format!("\n\n---\n\nsize = {size}, align = {align}"));
+        // Show size/align when tag_types map is available.
+        if let Some(tag_types) = tag_types {
+            let tid = crate::typed::TagId(tag_key);
+            if let Some(ty) = tag_types.get(&tid) {
+                let size = crate::ty::ty_byte_size_static(ty);
+                let align = crate::ty::ty_alignment(ty);
+                result.push_str(&format!("\n\n---\n\nsize = {size}, align = {align}"));
+            }
         }
         return Some(result);
     }
@@ -84,8 +71,6 @@ pub fn hover_at_with_flow(
 
     Some(format!("```gin\n{word}\n```"))
 }
-
-// ── Variant hover ──────────────────────────────────────────────────────────
 
 /// If `word` is a variant name in any union, return the formatted hover.
 fn variant_hover_for_word(ast: &crate::FileAst, word: &str) -> Option<String> {
@@ -266,8 +251,6 @@ fn hover_narrowing(
     None
 }
 
-// ── Definition lookup ──────────────────────────────────────────────────────
-
 /// Find the definition span of a symbol by name.
 pub fn definition_span(ast: &crate::FileAst, name: &str) -> Option<std::ops::Range<usize>> {
     let span_table = ast.span_table();
@@ -286,8 +269,6 @@ pub fn definition_span(ast: &crate::FileAst, name: &str) -> Option<std::ops::Ran
         }
     })
 }
-
-// ── Format helpers ─────────────────────────────────────────────────────────
 
 fn format_bind_hover(
     bind: &crate::Bind,
@@ -373,7 +354,7 @@ fn format_params_pre(params: &crate::Parameters) -> String {
     s
 }
 
-fn format_type_annotation(type_name: &str, args: &[crate::Spanned<crate::Expr>]) -> String {
+fn format_type_annotation(type_name: &str, args: &[crate::Typed<crate::Expr>]) -> String {
     if args.is_empty() {
         return type_name.to_string();
     }
@@ -391,8 +372,6 @@ fn format_type_annotation(type_name: &str, args: &[crate::Spanned<crate::Expr>])
         .collect();
     format!("{}({})", type_name, parts.join(", "))
 }
-
-// ── Flow analysis helpers ──────────────────────────────────────────────────
 
 fn find_body_bind<'a>(ast: &'a crate::FileAst, word: &str) -> Option<&'a crate::Bind> {
     for bind in ast.defs().values() {
@@ -479,22 +458,19 @@ fn word_at_byte_offset(source: &str, byte_pos: usize) -> Option<String> {
     Some(source[start..end].to_string())
 }
 
-/// Convenience: resolve types, then hover with source name.
+/// Convenience: hover using a pre-built [`TypedFileAst`] instead of a raw parse AST.
 pub fn hover_at_with_source(
     source: &str,
-    ast: &crate::FileAst,
+    typed_ast: &crate::TypedFileAst,
     byte_pos: usize,
     source_name: Option<&str>,
 ) -> Option<String> {
-    let analysis = crate::resolve_types(ast, std::slice::from_ref(ast));
-    hover_at_with_flow(
-        source,
-        ast,
-        Some(&analysis),
-        &analysis.flow,
-        byte_pos,
-        source_name,
-    )
+    let (line, character) = crate::byte_offset_to_position(byte_pos, source);
+    let hover_text = typed_ast.hover_at(source, line, character)?;
+    match source_name {
+        Some(name) => Some(format!("`{name}`\n\n{hover_text}")),
+        None => Some(hover_text),
+    }
 }
 
 /// Check whether the word at `byte_pos` is a variant name (for LSP semantic tokens).
@@ -558,7 +534,7 @@ fn find_name_before_dot(ast: &crate::FileAst, dot_pos: usize) -> Option<Intern<S
 }
 
 fn find_name_in_expr(
-    expr: &crate::Spanned<crate::Expr>,
+    expr: &crate::Typed<crate::Expr>,
     dot_pos: usize,
     span_table: &crate::SpanTable,
 ) -> Option<Intern<String>> {

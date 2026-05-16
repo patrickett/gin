@@ -1,4 +1,5 @@
 use crate::TypeExpr;
+use crate::expr::Typed;
 use crate::expr::r#return::Return;
 use crate::span::SpanId;
 use crate::span::Spanned;
@@ -7,9 +8,9 @@ use crate::expr::Expr;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum IfCondition {
-    Bool(Box<Spanned<Expr>>),
+    Bool(Box<Typed<Expr>>),
     Pattern {
-        subject: Box<Spanned<Expr>>,
+        subject: Box<Typed<Expr>>,
         /// Parsed `is …` pattern — structural [`TypeExpr`] (`Nominal` / `Qualified` / `Generic`).
         pattern: Box<Spanned<TypeExpr>>,
     },
@@ -18,7 +19,7 @@ pub enum IfCondition {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IfExpr {
     pub condition: IfCondition,
-    pub body: Vec<Spanned<Expr>>,
+    pub body: Vec<Typed<Expr>>,
     pub ret: Return,
     pub span: SpanId,
 }

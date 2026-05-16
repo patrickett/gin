@@ -1,6 +1,5 @@
-// ginlsp library — shared analysis functions used by both ginlsp (LSP) and
-// ginmcp (MCP). This is the dogfooding layer: ginmcp depends on ginlsp
-// instead of calling the low‑level crates directly.
+// ginlsp library — shared analysis functions used by ginlsp (LSP).
+// This is the dogfooding layer that provides analysis primitives.
 
 pub use ast;
 pub use diagnostic;

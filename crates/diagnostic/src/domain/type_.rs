@@ -60,6 +60,11 @@ pub enum TypeSymptom {
     /// Cannot pass a readonly variable as `mut`.
     #[strum(serialize = "type-cannot-pass-readonly-as-mut")]
     CannotPassReadonlyAsMut { name: String },
+    /// A positional parameter appears after a parameter with a default value.
+    /// Once a default is present, all subsequent parameters must also have defaults
+    /// (or be named — see NOTE about named type arguments).
+    #[strum(serialize = "type-positional-after-default")]
+    PositionalAfterDefault { name: String },
 }
 
 impl DiagnosticLike for TypeSymptom {
@@ -104,6 +109,9 @@ impl DiagnosticLike for TypeSymptom {
             }
             Self::CannotPassReadonlyAsMut { name } => {
                 format!("cannot pass `{name}` as `mut` because it is read-only")
+            }
+            Self::PositionalAfterDefault { name } => {
+                format!("positional parameter `{name}` appears after a default parameter")
             }
         }
     }
@@ -160,7 +168,10 @@ impl DiagnosticLike for TypeSymptom {
             ),
             Self::CannotPassReadonlyAsMut { .. } => {
                 Some("declare the parameter with `mut` or bind with `:` instead of `:=".into())
-            }
+            },
+            Self::PositionalAfterDefault { .. } => Some(
+                "all parameters after a default must also have defaults (or use named arguments — see NOTE)".into(),
+            ),
         }
     }
 
@@ -168,6 +179,7 @@ impl DiagnosticLike for TypeSymptom {
         match self {
             Self::UnusedBinding { .. } => Category::Help,
             Self::LinValueNotConsumed { .. } => Category::Flaw,
+            Self::PositionalAfterDefault { .. } => Category::Flaw,
             _ => Category::Flaw,
         }
     }

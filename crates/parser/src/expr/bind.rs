@@ -4,7 +4,7 @@ use lexer::Token;
 
 use ast::{
     AttributeItem, Bind, BindAttributes, BindValue, DocComment, Expr, ModPath, ParamConvention,
-    ParameterKind, Parameters, Return, Spanned, TypeExpr, type_surface_mangle_name,
+    ParameterKind, Parameters, Return, Spanned, TypeExpr, Typed, type_surface_mangle_name,
 };
 
 use super::ExprFn;
@@ -16,7 +16,7 @@ use crate::tag::parse_type_expr;
 type ReturnTypePart = (
     Option<Intern<String>>,
     Option<Box<Spanned<TypeExpr>>>,
-    Option<(Intern<String>, Vec<Spanned<Expr>>)>,
+    Option<(Intern<String>, Vec<Typed<Expr>>)>,
     Option<Spanned<ModPath>>,
 );
 
@@ -244,11 +244,12 @@ fn parse_return_type_part(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Retu
 /// tag), convert to declaration parameters suitable for `TypeExpr::Generic`.
 /// Otherwise return `None` so the caller can fall back to the value-annotation
 /// path (e.g., `Maybe(3)`).
-fn try_args_as_type_params(args: &[Spanned<Expr>]) -> Option<Vec<(Intern<String>, ParameterKind)>> {
+fn try_args_as_type_params(args: &[Typed<Expr>]) -> Option<Vec<(Intern<String>, ParameterKind)>> {
     let mut out = Vec::with_capacity(args.len());
-    for Spanned {
+    for Typed {
         value: arg,
         span_id: span,
+        ..
     } in args
     {
         match arg {
@@ -274,7 +275,7 @@ fn try_args_as_type_params(args: &[Spanned<Expr>]) -> Option<Vec<(Intern<String>
     Some(out)
 }
 
-fn parse_type_annotation_args(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Vec<Spanned<Expr>> {
+fn parse_type_annotation_args(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Vec<Typed<Expr>> {
     if !cursor.eat(&Token::ParenOpen) {
         return Vec::new();
     }
@@ -350,6 +351,7 @@ fn parse_params(
 
     let mut params = Parameters::new();
     let mut conventions = IndexMap::new();
+    let mut seen_default = false;
     cursor.advance();
 
     if cursor.is_at(&Token::ParenClose) {
@@ -358,6 +360,7 @@ fn parse_params(
     }
 
     if let Some((key, kind, conv)) = parse_one_param(cursor, expr_parser) {
+        seen_default = matches!(kind, ParameterKind::Default(_));
         params.insert(key, kind);
         if conv != ParamConvention::Ref {
             conventions.insert(key, conv);
@@ -369,6 +372,18 @@ fn parse_params(
             break;
         }
         if let Some((key, kind, conv)) = parse_one_param(cursor, expr_parser) {
+            if seen_default && !matches!(kind, ParameterKind::Default(_)) {
+                cursor.error(
+                    format!(
+                        "positional parameter `{}` appears after a default parameter",
+                        key.as_str()
+                    ),
+                    cursor.current_span(),
+                );
+            }
+            if matches!(kind, ParameterKind::Default(_)) {
+                seen_default = true;
+            }
             params.insert(key, kind);
             if conv != ParamConvention::Ref {
                 conventions.insert(key, conv);
@@ -461,7 +476,7 @@ pub(crate) fn parse_doc_comment(cursor: &mut TokenCursor) -> Option<DocComment> 
     if doc.is_empty() { None } else { Some(doc) }
 }
 
-fn parse_body_exprs(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Vec<Spanned<Expr>> {
+fn parse_body_exprs(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Vec<Typed<Expr>> {
     let mut exprs = Vec::new();
     loop {
         super::body_trivia::skip_expr_body_trivia(cursor);
@@ -478,10 +493,10 @@ fn parse_body_exprs(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Vec<Spanne
                             let start_span = cursor.span_at(start_pos);
                             cursor.consume_trailing_newline();
                             let end_span = cursor.last_consumed_span();
-                            exprs.push(Spanned {
-                                value: Expr::Bind(Box::new(bind)),
-                                span_id: cursor.merge_span(start_span, end_span),
-                            });
+                            exprs.push(Typed::infer(
+                                Expr::Bind(Box::new(bind)),
+                                cursor.merge_span(start_span, end_span),
+                            ));
                             continue;
                         }
                         // parse_bind failed on Id: — extremely rare, rewind and fall through

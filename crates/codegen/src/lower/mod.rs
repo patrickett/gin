@@ -15,13 +15,101 @@ mod when;
 
 pub use ty_mapping::ty_to_mlir;
 
+/// Build an MLIR module from a `TypedFileAst` using the ExprId-based codegen path.
+///
+/// This creates proper `func.func` operations wrapping the lowered expressions.
+/// For each top-level def in the typed AST, a function is created with the def's
+/// name, and the lowered expression becomes the function body.
+pub fn build_module_from_typed_ast<'a, 'c>(
+    context: &'c Context,
+    typed: &'a ast::typed::TypedFileAst,
+    source: &'a str,
+    filename: &str,
+) -> Option<melior::ir::Module<'c>> {
+    use crate::prelude::*;
+    use melior::dialect::func;
+    use melior::ir::{Block, Region};
+    use std::collections::HashMap;
+
+    let empty: HashMap<_, _> = HashMap::new();
+    let sym_table = CompileTimeSymbolTable::new();
+    let ctx = crate::lower::CodegenContext::new(
+        context,
+        Some(typed),
+        &empty,
+        &sym_table,
+        source,
+        filename,
+        &typed.span_table,
+    );
+
+    let module = melior::ir::Module::new(context.unknown_loc());
+
+    for (def_id, bind) in &typed.defs {
+        let mut symtab = crate::ScopedSymbolTable::new();
+        let func_name = def_id.0.as_str();
+        let loc = context.unknown_loc();
+
+        // Create function body region and entry block.
+        let region = Region::new();
+        let block = Block::new(&[]);
+        region.append_block(block);
+        let blk = region.first_block().unwrap();
+
+        // Lower the body expression.
+        let result_val = match &bind.body {
+            ast::typed::BindBody::Expr(eid) => {
+                crate::lower::lower_typed_expr(&ctx, *eid, &blk, &mut symtab)
+            }
+            ast::typed::BindBody::Body { exprs, ret } => {
+                for eid in exprs {
+                    crate::lower::lower_typed_expr(&ctx, *eid, &blk, &mut symtab);
+                }
+                ret.and_then(|ret_id| {
+                    crate::lower::lower_typed_expr(&ctx, ret_id, &blk, &mut symtab)
+                })
+            }
+            ast::typed::BindBody::Extern => None,
+        };
+
+        // Emit return with the proper value and compute the function type.
+        let ret_types: Vec<melior::ir::Type<'c>> = match &result_val {
+            Some(val) => {
+                let ret_ty = val.r#type();
+                blk.append_operation(func::r#return(&[*val], loc));
+                vec![ret_ty]
+            }
+            None => {
+                blk.append_operation(func::r#return(&[], loc));
+                vec![]
+            }
+        };
+
+        // Create the func.func operation with the correct function type.
+        let sym_name = Identifier::new(context, "sym_name");
+        let func_type_id = Identifier::new(context, "function_type");
+        let func_type = melior::ir::r#type::FunctionType::new(context, &[], &ret_types);
+        let func_op = OperationBuilder::new("func.func", loc)
+            .add_attributes(&[
+                (sym_name, StringAttribute::new(context, func_name).into()),
+                (func_type_id, TypeAttribute::new(func_type.into()).into()),
+            ])
+            .add_regions([region])
+            .build()
+            .ok()?;
+        module.body().append_operation(func_op);
+    }
+
+    Some(module)
+}
+
 use crate::lower::layout::ty_byte_size_static;
 use crate::prelude::*;
 use ::span::{SpanId, SpanTable};
 use ast::ty::Ty;
 use ast::{
-    Bind, BindValue, DeclareValue, Expr, FileAst, Spanned, SymbolTable as CompileTimeSymbolTable,
-    TypeExpr, type_surface_mangle_name,
+    Bind, BindValue, DeclareValue, Expr, FileAst, SymbolTable as CompileTimeSymbolTable, TypeExpr,
+    Typed, TypedFileAst, type_surface_mangle_name,
 };
 use ast::{LocalTypes, TyInfer, TyInferEnv};
 use diagnostic::codegen::CodegenSymptom;
@@ -33,7 +121,7 @@ use std::{
     collections::{HashMap, HashSet},
 };
 
-/// ScopedSymbolTable is defined in `crate::ScopedSymbolTable` (the struct in lib.rs).
+// ScopedSymbolTable is defined in `crate::ScopedSymbolTable` (the struct in lib.rs).
 use i256::I256;
 
 #[derive(Debug, Clone)]
@@ -86,11 +174,14 @@ fn byte_offset_to_line_col(line_starts: &[usize], byte: usize) -> (usize, usize)
 
 pub struct CodegenContext<'a, 'c> {
     pub mlir: &'c Context,
+    /// Typed AST — carries tag_types, fn_return_types, variant_map, and ExprId-based traversal.
+    pub typed_ast: Option<&'a TypedFileAst>,
     pub type_info: &'a HashMap<Intern<String>, TypeInfo>,
     pub symbol_table: &'a CompileTimeSymbolTable,
-    pub tag_types: &'a HashMap<Intern<String>, Ty>,
-    pub fn_return_types: &'a HashMap<Intern<String>, Ty>,
-    pub variant_map: &'a ast::VariantMap,
+    /// Intern<String>-keyed tag types (converted from TagId-keyed TypedFileAst on construction).
+    pub tag_types: HashMap<Intern<String>, Ty>,
+    /// Intern<String>-keyed fn return types (converted from DefId-keyed TypedFileAst on construction).
+    pub fn_return_types: HashMap<Intern<String>, Ty>,
     pub string_literals: RefCell<Vec<String>>,
     pub string_symbols: RefCell<HashMap<String, String>>,
     pub string_counter: Cell<usize>,
@@ -112,22 +203,36 @@ pub struct CodegenContext<'a, 'c> {
 impl<'a, 'c> CodegenContext<'a, 'c> {
     pub fn new(
         mlir: &'c Context,
+        typed_ast: Option<&'a TypedFileAst>,
         type_info: &'a HashMap<Intern<String>, TypeInfo>,
         symbol_table: &'a CompileTimeSymbolTable,
-        tag_types: &'a HashMap<Intern<String>, Ty>,
-        fn_return_types: &'a HashMap<Intern<String>, Ty>,
-        variant_map: &'a ast::VariantMap,
         source: &'a str,
         filename: &str,
         span_table: &'a SpanTable,
     ) -> Self {
+        let (tag_types, fn_return_types) = match typed_ast {
+            Some(typed) => {
+                let tag_types = typed
+                    .tag_types
+                    .iter()
+                    .map(|(id, ty)| (id.0, ty.clone()))
+                    .collect();
+                let fn_return_types = typed
+                    .fn_return_types
+                    .iter()
+                    .map(|(id, ty)| (id.0, ty.clone()))
+                    .collect();
+                (tag_types, fn_return_types)
+            }
+            None => (HashMap::new(), HashMap::new()),
+        };
         Self {
             mlir,
-            type_info,
-            symbol_table,
+            typed_ast,
             tag_types,
             fn_return_types,
-            variant_map,
+            type_info,
+            symbol_table,
             string_literals: RefCell::new(Vec::new()),
             string_symbols: RefCell::new(HashMap::new()),
             string_counter: Cell::new(0),
@@ -144,30 +249,33 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
     }
 
     pub fn lookup_tag(&self, name: Intern<String>) -> Option<&Ty> {
-        self.tag_types.get(&name)
+        self.typed_ast
+            .and_then(|typed| typed.tag_types.get(&ast::typed::TagId(name)))
     }
 
     pub fn lookup_variant(&self, name: Intern<String>) -> Option<ast::VariantLookupResult<'_>> {
-        let candidates = self.variant_map.get(&name)?;
-        candidates
-            .first()
+        self.typed_ast
+            .and_then(|typed| typed.variant_map.get(&name))
+            .and_then(|candidates| candidates.first())
             .map(|(union, idx, fields)| (*union, *idx, fields.as_slice()))
     }
 
     pub fn fn_return_ty(&self, name: &Intern<String>) -> Option<&Ty> {
-        self.fn_return_types.get(name)
+        self.typed_ast
+            .and_then(|typed| typed.fn_return_types.get(&ast::typed::DefId(*name)))
     }
 
-    pub fn infer_env(&self, locals: &'a dyn LocalTypes) -> TyInferEnv<'a> {
+    pub fn infer_env(&'a self, locals: &'a dyn LocalTypes) -> TyInferEnv<'a> {
         TyInferEnv {
-            tag_types: self.tag_types,
-            fn_return_types: self.fn_return_types,
+            tag_types: &self.tag_types,
+            fn_return_types: &self.fn_return_types,
             locals,
+            tag_params: None,
         }
     }
 
     pub fn resolve_type_surface(&self, e: &TypeExpr) -> Option<Ty> {
-        ast::is_type_surface(e).then(|| ast::resolve_type_expr_from_map(e, self.tag_types))
+        ast::is_type_surface(e).then(|| ast::resolve_type_expr_from_map(e, &self.tag_types))
     }
 
     pub fn param_types<'b>(&self, bind: &'b ast::Bind) -> Vec<(&'b Intern<String>, Ty)> {
@@ -184,9 +292,10 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                         let ty = ast::resolve_parameter_kind_with_subst(
                             *name,
                             kind,
-                            self.tag_types,
-                            self.fn_return_types,
+                            &self.tag_types,
+                            &self.fn_return_types,
                             &subst,
+                            None,
                         );
                         (name, ty)
                     })
@@ -253,6 +362,149 @@ impl LocalTypes for CodegenContext<'_, '_> {
     }
 }
 
+/// This is the ExprId-based codegen path. It reads from `ctx.typed_ast` (the typed
+/// expression arena) instead of traversing `Box<Typed<Expr>>` pointers.
+pub fn lower_typed_expr<'c>(
+    ctx: &CodegenContext<'_, 'c>,
+    expr_id: ast::typed::ExprId,
+    block: &BlockRef<'c, 'c>,
+    symtab: &mut ScopedSymbolTable<'c>,
+) -> Option<Value<'c, 'c>> {
+    let typed_ast = ctx.typed_ast?;
+    let expr_ref = typed_ast.expr(expr_id)?;
+
+    match expr_ref.kind {
+        ast::typed::TypedExprKind::Lit(lit) => lit.lower(ctx, block, symtab),
+        ast::typed::TypedExprKind::FnCall { target, args } => {
+            // Lower arguments first.
+            let lowered_args: Vec<Value<'c, 'c>> = args
+                .as_ref()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|arg_id| lower_typed_expr(ctx, *arg_id, block, symtab))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let fn_name = target.0.as_str();
+            let loc = ctx.location();
+
+            // Look up the var in the symtab if no args (variable reference).
+            if (args.is_none() || args.as_ref().is_none_or(|a| a.is_empty()))
+                && let Some(val) = symtab.get(fn_name)
+            {
+                return Some(val);
+            }
+
+            // Determine return type from the typed AST.
+            let return_ty = typed_ast
+                .fn_return_types
+                .get(target)
+                .map(|t| ty_to_mlir(t, ctx.mlir))
+                .unwrap_or_else(|| ctx.mlir.i64());
+
+            Some(block.call(ctx.mlir, fn_name, &lowered_args, return_ty, loc))
+        }
+        ast::typed::TypedExprKind::Bind { name, body } => {
+            let val = lower_typed_expr(ctx, *body, block, symtab)?;
+            symtab.insert(name.as_str().to_string(), val);
+            // Track variable type in var_types for field access.
+            ctx.var_types
+                .borrow_mut()
+                .insert(*name, expr_ref.ty.clone());
+            Some(val)
+        }
+        ast::typed::TypedExprKind::Binary { op, lhs, rhs } => {
+            let lhs_val = lower_typed_expr(ctx, *lhs, block, symtab)?;
+            let rhs_val = lower_typed_expr(ctx, *rhs, block, symtab)?;
+            let loc = ctx.location();
+
+            use melior::ir::operation::OperationBuilder;
+
+            let bin_op_name = match op {
+                BinOp::Add => "arith.addi",
+                BinOp::Subtract => "arith.subi",
+                BinOp::Multiply => "arith.muli",
+                _ => return None,
+            };
+
+            let result_ty = lhs_val.r#type();
+            let op = OperationBuilder::new(bin_op_name, loc)
+                .add_operands(&[lhs_val, rhs_val])
+                .add_results(&[result_ty])
+                .build()
+                .ok()?;
+            Some(block.append_op(op))
+        }
+        ast::typed::TypedExprKind::TagCall {
+            variant_id,
+            discriminant,
+            args,
+        } => {
+            // Lower tag calls using the existing tag_call lowering logic.
+            let lowered_args: Vec<Value<'c, 'c>> = args
+                .as_ref()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|arg_id| lower_typed_expr(ctx, *arg_id, block, symtab))
+                        .collect()
+                })
+                .unwrap_or_default();
+            tag_call::lower_typed_tag_call(
+                ctx,
+                &variant_id.union.0,
+                &variant_id.name,
+                *discriminant,
+                &lowered_args,
+                block,
+                symtab,
+            )
+        }
+        ast::typed::TypedExprKind::SelfRef { target } => {
+            // Look up `self` in the symbol table.
+            symtab.get(target.0.as_str())
+        }
+        ast::typed::TypedExprKind::Range { start, end } => {
+            let _s = lower_typed_expr(ctx, *start, block, symtab)?;
+            let _e = lower_typed_expr(ctx, *end, block, symtab)?;
+            None // Range lowering not yet implemented
+        }
+        ast::typed::TypedExprKind::TupleLit(items) => {
+            let vals: Vec<Value<'c, 'c>> = items
+                .iter()
+                .filter_map(|id| lower_typed_expr(ctx, *id, block, symtab))
+                .collect();
+            vals.first().copied()
+        }
+        ast::typed::TypedExprKind::Cast { expr, .. } => lower_typed_expr(ctx, *expr, block, symtab),
+        ast::typed::TypedExprKind::TupleAlloc { init, .. }
+        | ast::typed::TypedExprKind::TakePtr(init)
+        | ast::typed::TypedExprKind::TakeRef(init)
+        | ast::typed::TypedExprKind::Negate(init)
+        | ast::typed::TypedExprKind::MutArg(init)
+        | ast::typed::TypedExprKind::OwnArg(init) => lower_typed_expr(ctx, *init, block, symtab),
+        ast::typed::TypedExprKind::TupleGet { base, .. }
+        | ast::typed::TypedExprKind::Deref(base) => lower_typed_expr(ctx, *base, block, symtab),
+        ast::typed::TypedExprKind::TupleSet { base, value, .. } => {
+            lower_typed_expr(ctx, *base, block, symtab)?;
+            lower_typed_expr(ctx, *value, block, symtab)
+        }
+        ast::typed::TypedExprKind::BufGet { buf, index }
+        | ast::typed::TypedExprKind::BufSet { buf, index, .. } => {
+            lower_typed_expr(ctx, *buf, block, symtab)?;
+            lower_typed_expr(ctx, *index, block, symtab)?;
+            None
+        }
+        // Complex types not yet lowered via typed path.
+        ast::typed::TypedExprKind::When(_)
+        | ast::typed::TypedExprKind::If(_)
+        | ast::typed::TypedExprKind::Loop(_)
+        | ast::typed::TypedExprKind::FormatString(_)
+        | ast::typed::TypedExprKind::List(_)
+        | ast::typed::TypedExprKind::Asm(_) => None,
+    }
+}
+
 pub trait Lower<'c> {
     fn lower(
         &self,
@@ -262,20 +514,14 @@ pub trait Lower<'c> {
     ) -> Option<Value<'c, 'c>>;
 }
 
-/// Build an MLIR module from the AST with a provided context.
 /// This is used for native compilation where we need control over the context.
 pub fn build_module_with_context<'c>(
     context: &'c Context,
     ast: &mut FileAst,
+    typed_ast: Option<&TypedFileAst>,
     source: &str,
     filename: &str,
 ) -> (Option<Module<'c>>, Vec<Diagnostic>) {
-    // Resolve types if not already done.
-    let analysis = ast::resolve_types(ast, std::slice::from_ref(ast));
-    ast::populate_ast_types(ast, &analysis);
-    let tag_types = &analysis.tag_types;
-    let fn_return_types = &analysis.fn_return_types;
-    let variant_map = &analysis.variant_map;
     // Register dialects
     melior::dialect::DialectHandle::llvm().register_dialect(context);
     context.get_or_load_dialect("arith");
@@ -286,19 +532,22 @@ pub fn build_module_with_context<'c>(
     // Build compile-time symbol table from AST
     let source_path = std::path::PathBuf::new();
     let symbol_table = CompileTimeSymbolTable::from_file(ast, source_path.to_path_buf());
-    let type_info = match extract_type_info(ast) {
-        Some(info) => info,
+    let type_info = extract_type_info(ast).unwrap_or_default();
+
+    // If no typed AST provided, transform the file first.
+    let owned_typed;
+    let typed_ref = match typed_ast {
+        Some(t) => t,
         None => {
-            return (None, Vec::new());
+            owned_typed = ast::typed::transform_file(ast.clone(), ast::typed::FileId(0));
+            &owned_typed
         }
     };
     let ctx = CodegenContext::new(
         context,
+        Some(typed_ref),
         &type_info,
         &symbol_table,
-        tag_types,
-        fn_return_types,
-        variant_map,
         source,
         filename,
         ast.span_table(),
@@ -376,7 +625,6 @@ pub fn build_module_with_context<'c>(
     (Some(module), symptoms)
 }
 
-/// Create a global string constant operation using LLVM dialect.
 /// Produces: `llvm.mlir.global internal constant @name("value\00") : !llvm.array<N x i8>`
 pub fn create_string_global<'c>(
     context: &'c Context,
@@ -430,7 +678,6 @@ pub fn create_string_global<'c>(
     Some(global)
 }
 
-/// Get the address of a global string using llvm.addressof operation.
 /// This returns a pointer to the global that can be used in function calls.
 pub fn addressof_string_global<'c>(
     context: &'c Context,
@@ -463,7 +710,7 @@ fn emit_tuple_lit_global<'c>(
     context: &'c Context,
     ctx: &CodegenContext<'_, 'c>,
     name: &str,
-    elems: &[Spanned<Expr>],
+    elems: &[Typed<Expr>],
 ) -> Option<Operation<'c>> {
     let loc = context.unknown_loc();
 
@@ -622,9 +869,7 @@ fn extract_type_info(ast: &FileAst) -> Option<HashMap<Intern<String>, TypeInfo>>
     Some(type_info)
 }
 
-// === Expression lowering ===
-
-impl<'c> Lower<'c> for Spanned<Expr> {
+impl<'c> Lower<'c> for Typed<Expr> {
     fn lower(
         &self,
         ctx: &CodegenContext<'_, 'c>,
@@ -861,7 +1106,6 @@ pub(crate) fn emit_discriminant_extend<'c>(
     }
 }
 
-/// Bind payload fields from a union variant into the symbol table.
 /// Shared between `if_` pattern conditions and `when` pattern arms.
 pub(crate) fn bind_pattern_payload_fields<'c>(
     ctx: &CodegenContext<'_, 'c>,
@@ -916,7 +1160,7 @@ fn bind_value_uses_self(value: &BindValue) -> bool {
     }
 }
 
-fn spanned_uses_self(sp: &Spanned<Expr>) -> bool {
+fn spanned_uses_self(sp: &Typed<Expr>) -> bool {
     expr_uses_self(&sp.value)
 }
 
@@ -991,7 +1235,6 @@ fn expr_uses_self(expr: &Expr) -> bool {
     }
 }
 
-/// Lower a function definition to MLIR func.func operation.
 pub fn lower_function<'c>(
     ctx: &CodegenContext<'_, 'c>,
     def_name: &Intern<String>,
@@ -1027,9 +1270,10 @@ pub fn lower_function<'c>(
         .collect();
 
     let env = TyInferEnv {
-        tag_types: ctx.tag_types,
-        fn_return_types: ctx.fn_return_types,
+        tag_types: &ctx.tag_types,
+        fn_return_types: &ctx.fn_return_types,
         locals: &HashMap::new(),
+        tag_params: None,
     };
     let return_ty = bind.infer_ty(&env);
     let ret_types: Vec<Type<'c>> = match &return_ty {
@@ -1113,7 +1357,7 @@ fn lower_take_ptr<'c>(
     ctx: &CodegenContext<'_, 'c>,
     block: &BlockRef<'c, 'c>,
     symtab: &mut ScopedSymbolTable<'c>,
-    inner: &Spanned<Expr>,
+    inner: &Typed<Expr>,
 ) -> Option<Value<'c, 'c>> {
     // For a bare variable reference, check if it already lives in a mutable slot.
     if let Expr::FnCall(call) = &inner.value
@@ -1146,9 +1390,8 @@ fn lower_take_ptr<'c>(
     Some(ptr)
 }
 
-/// Look up the element type of a base expression that should have `Ty::Array`.
 /// Falls back to `Ty::Int { width: 8, signed: false }` (byte) if the type cannot be determined.
-fn elem_ty_of_array_expr(base: &Spanned<Expr>, ctx: &CodegenContext) -> Ty {
+fn elem_ty_of_array_expr(base: &Typed<Expr>, ctx: &CodegenContext) -> Ty {
     let base: &Expr = base;
     if let Expr::FnCall(call) = base
         && call.path.segments.is_empty()
@@ -1173,7 +1416,7 @@ fn lower_tuple_alloc<'c>(
     ctx: &CodegenContext<'_, 'c>,
     block: &BlockRef<'c, 'c>,
     symtab: &mut ScopedSymbolTable<'c>,
-    init: &Spanned<Expr>,
+    init: &Typed<Expr>,
     size: usize,
 ) -> Option<Value<'c, 'c>> {
     let loc = ctx.location();
@@ -1206,7 +1449,7 @@ fn lower_tuple_get<'c>(
     ctx: &CodegenContext<'_, 'c>,
     block: &BlockRef<'c, 'c>,
     symtab: &mut ScopedSymbolTable<'c>,
-    base: &Spanned<Expr>,
+    base: &Typed<Expr>,
     index: usize,
 ) -> Option<Value<'c, 'c>> {
     let loc = ctx.location();
@@ -1248,9 +1491,9 @@ fn lower_tuple_set<'c>(
     ctx: &CodegenContext<'_, 'c>,
     block: &BlockRef<'c, 'c>,
     symtab: &mut ScopedSymbolTable<'c>,
-    base: &Spanned<Expr>,
+    base: &Typed<Expr>,
     index: usize,
-    value: &Spanned<Expr>,
+    value: &Typed<Expr>,
 ) -> Option<Value<'c, 'c>> {
     let loc = ctx.location();
     let ptr = base.lower(ctx, block, symtab)?;
@@ -1271,6 +1514,59 @@ fn lower_tuple_set<'c>(
     Some(block.const_i64(ctx.mlir, 0))
 }
 
+/// Emit destructor calls (`drop` methods) for `#[lin]` variables that are still alive
+/// at function exit. This runs after all body expressions but before the return value.
+fn emit_lin_destructors<'c>(
+    ctx: &CodegenContext<'_, 'c>,
+    block: &BlockRef<'c, 'c>,
+    symtab: &ScopedSymbolTable<'c>,
+) -> Option<()> {
+    // Lin types and flow analysis are no longer available via the old Analysis struct.
+    // This function is only reachable from the old (non-typed) codegen path which
+    // is being deprecated. Return early with no destructors for now.
+    let _ = (ctx, block, symtab);
+    Some(())
+
+    /*
+    let final_ctx = &ctx.analysis.flow.final_context;
+    let lin_types = &ctx.analysis.lin_types;
+    let mut visited = HashSet::new();
+
+    for (var_name, ty) in ctx.var_types.borrow().iter() {
+        if !is_lin_type(ty, lin_types, &mut visited) {
+            visited.clear();
+            continue;
+        }
+        visited.clear();
+
+        // Check if this var is still alive at function exit
+        if matches!(final_ctx.get_var_state(var_name), Some(VarState::Alive)) {
+            // Build the drop function name: TypeName.drop
+            // Resolve the type name from the ty
+            let type_name = match ty {
+                Ty::Record { name, .. } | Ty::Union { name, .. } => name.as_str().to_string(),
+                _ => continue,
+            };
+            let drop_name = format!("{type_name}.drop");
+
+            // Look up the variable's value in the symtab
+            let var_value = symtab.get(var_name.as_str())?;
+
+            // Emit a call to the drop function via func.call
+            let loc = ctx.location();
+            let callee = FlatSymbolRefAttribute::new(ctx.mlir, &drop_name);
+            let op = OperationBuilder::new("func.call", loc)
+                .add_attributes(&[(Identifier::new(ctx.mlir, "callee"), callee.into())])
+                .add_operands(&[var_value])
+                .build()
+                .ok()?;
+            block.append_operation(op);
+        }
+    }
+    Some(())
+    */
+}
+
 fn lower_bind_value<'c>(
     ctx: &CodegenContext<'_, 'c>,
     block: &BlockRef<'c, 'c>,
@@ -1279,6 +1575,7 @@ fn lower_bind_value<'c>(
 ) -> Option<Option<Value<'c, 'c>>> {
     match bind_value {
         BindValue::Expr(expr) => {
+            emit_lin_destructors(ctx, block, symtab)?;
             let val = expr.lower(ctx, block, &mut symtab.clone())?;
             Some(Some(val))
         }
@@ -1287,6 +1584,7 @@ fn lower_bind_value<'c>(
             for expr in exprs {
                 expr.lower(ctx, block, &mut local_symtab)?;
             }
+            emit_lin_destructors(ctx, block, &local_symtab)?;
             match &ret.value {
                 Some(expr) => {
                     let val = expr.lower(ctx, block, &mut local_symtab)?;
@@ -1299,7 +1597,6 @@ fn lower_bind_value<'c>(
     }
 }
 
-/// Emit the appropriate MLIR cast op between two numeric types.
 fn lower_cast<'c>(
     ctx: &CodegenContext<'_, 'c>,
     block: &BlockRef<'c, 'c>,

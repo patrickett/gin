@@ -1,5 +1,5 @@
 use crate::Expr;
-use crate::Spanned;
+use crate::Typed;
 use crate::span::SpanId;
 use internment::Intern;
 
@@ -10,9 +10,9 @@ pub struct AsmExpr {
     /// Typed constraint expressions — values of the `Constraint` union type.
     /// Each constraint describes how a register participates in the assembly block,
     /// e.g. `Output[X0]`, `Input[X16]`, `ClobberMemory`.
-    pub constraints: Vec<Spanned<Expr>>,
+    pub constraints: Vec<Typed<Expr>>,
     /// Input operand expressions
-    pub operands: Vec<Spanned<Expr>>,
+    pub operands: Vec<Typed<Expr>>,
     /// Source span
     pub span: SpanId,
 }

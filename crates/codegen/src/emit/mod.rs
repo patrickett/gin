@@ -19,5 +19,6 @@ impl Profile {
 }
 
 pub use native::{
-    build_module_text, compile_to_object, link_executable, native_from_mlir, native_from_module,
+    build_module_text, build_module_text_from_typed, compile_to_object,
+    compile_to_object_from_typed, link_executable, native_from_mlir, native_from_module,
 };

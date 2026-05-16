@@ -414,14 +414,15 @@ mod tests {
     #[test]
     fn dot_completion_union_variants() {
         use crate::handlers::completion::dot_completions;
+        use ast::typed::transform_file;
 
         let source = "Maybe(x) is Some(x) or None";
         let po = parse_from_str(source);
-        let analysis = ast::resolve_types(&po, std::slice::from_ref(&po));
+        let typed = transform_file(po.clone(), ast::typed::FileId(0));
 
-        let ty = analysis
+        let ty = typed
             .tag_types
-            .get(&Intern::<String>::from_ref("Maybe"))
+            .get(&ast::typed::TagId(Intern::<String>::from_ref("Maybe")))
             .cloned()
             .expect("Expected Maybe to resolve to a union type");
         let items = dot_completions(ty);

@@ -276,8 +276,12 @@ fn find_call_in_expr(
             find_call_in_expr(&index.value, index.span_id, span_table, byte_pos, best);
             find_call_in_expr(&value.value, value.span_id, span_table, byte_pos, best);
         }
-        Expr::TakePtr(e) | Expr::TakeRef(e) | Expr::Deref(e) | Expr::Negate(e)
-        | Expr::MutArg(e) | Expr::OwnArg(e) => {
+        Expr::TakePtr(e)
+        | Expr::TakeRef(e)
+        | Expr::Deref(e)
+        | Expr::Negate(e)
+        | Expr::MutArg(e)
+        | Expr::OwnArg(e) => {
             find_call_in_expr(&e.value, e.span_id, span_table, byte_pos, best);
         }
         Expr::TupleLit(elems) | Expr::List(elems) => {
@@ -344,7 +348,7 @@ pub fn format_params(params: &Parameters) -> String {
 mod tests {
     use super::*;
     use crate::span::SpanId;
-    use crate::{Literal, Spanned};
+    use crate::{Literal, Spanned, Typed};
     use indexmap::IndexMap;
     use internment::Intern;
 
@@ -415,14 +419,11 @@ mod tests {
         let expr = Expr::Lit(Literal::Number(42));
         let params = make_params(vec![(
             intern("x"),
-            ParameterKind::Default(Spanned {
-                value: expr,
-                span_id: SpanId::new(0),
-            }),
+            ParameterKind::Default(Box::new(Typed::infer(expr, SpanId::new(0)))),
         )]);
         assert_eq!(
             format_params(&params),
-            "(x: Spanned { value: Lit(Number(42)), span_id: SpanId(0) })"
+            "(x: Typed { value: Lit(Number(42)), ty: Infer, const_value: None, span_id: SpanId(0), flaws: [] })"
         );
     }
 }

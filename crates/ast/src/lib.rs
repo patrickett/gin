@@ -28,8 +28,6 @@ mod parameter;
 pub use parameter::*;
 
 mod analysis;
-pub use analysis::Analysis;
-pub use analysis::check::pipeline::analyze_file;
 
 /// Re-exported for external crates that reference `ast::flow::*`.
 pub mod flow {
@@ -92,6 +90,9 @@ pub use impl_block::*;
 
 pub mod signature;
 pub use signature::*;
+
+pub mod typed;
+pub use typed::*;
 
 pub mod prelude {
     pub use crate::declare::*;

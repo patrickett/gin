@@ -1,9 +1,13 @@
-//! Shared analysis functions — the core logic that powers both ginlsp (LSP)
-//! and ginmcp (MCP). These are stateless helpers that take parsed ASTs and
+//! Shared analysis functions that power ginlsp (LSP).
+//! These are stateless helpers that take parsed ASTs and
 //! source text and return typed results.
 
+use std::collections::HashMap;
+
 use ast::ty::Ty;
-use ast::FileAst;
+use ast::typed::{transform_file, FileId};
+use ast::{FileAst, TypedFileAst};
+use internment::Intern;
 use parser::ParseOutput;
 
 /// A 0‑based position in source text.
@@ -27,7 +31,6 @@ pub struct HoverResult {
     pub error: Option<String>,
 }
 
-/// Goto‑definition result.
 #[derive(Debug, Default)]
 pub struct GotoDefResult {
     pub start_line: Option<u32>,
@@ -83,10 +86,6 @@ pub struct TypeAtResult {
     pub ty: Option<serde_json::Value>,
 }
 
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
 fn byte_pos(source: &str, line: u32, character: u32) -> usize {
     ast::position_to_byte_offset(source, line, character).unwrap_or(0)
 }
@@ -95,10 +94,16 @@ fn byte_offset_to_position(offset: usize, source: &str) -> (u32, u32) {
     ast::byte_offset_to_position(offset, source)
 }
 
-/// Resolve types for a file.
-/// Returns an `Analysis` with types populated.
-fn resolve_ast(ast: &FileAst) -> ast::Analysis {
-    ast::resolve_types(ast, std::slice::from_ref(ast))
+fn to_typed_ast(ast: &FileAst) -> TypedFileAst {
+    transform_file(ast.clone(), FileId(0))
+}
+
+pub fn build_tag_types_map(typed: &TypedFileAst) -> HashMap<Intern<String>, Ty> {
+    typed
+        .tag_types
+        .iter()
+        .map(|(id, ty)| (id.0, ty.clone()))
+        .collect()
 }
 
 /// Check whether a resolved `Ty` is a built-in structural primitive (Int, Float, Bool, Unit).
@@ -106,11 +111,6 @@ fn is_builtin_ty(ty: &Ty) -> bool {
     matches!(ty, Ty::Int { .. } | Ty::Float { .. } | Ty::Bool | Ty::Unit)
 }
 
-// ---------------------------------------------------------------------------
-// Public query functions
-// ---------------------------------------------------------------------------
-
-/// Compute hover information at the given positions.
 pub fn hover(
     po: &ParseOutput,
     source: &str,
@@ -118,30 +118,29 @@ pub fn hover(
     path: Option<&str>,
     scratchpad: Option<&str>,
 ) -> Vec<HoverResult> {
-    let main_analysis = if path.is_none() {
-        Some(resolve_ast(&po.ast))
-    } else {
-        None
-    };
+    let typed = to_typed_ast(&po.ast);
     positions
         .iter()
         .map(|pos| {
-            let bp = byte_pos(source, pos.line, pos.character);
             let text = match path {
-                Some(p) => hover_at_with_imports(source, p, bp),
+                Some(p) => {
+                    hover_at_with_imports(source, p, byte_pos(source, pos.line, pos.character))
+                }
                 None => {
-                    let analysis = main_analysis.as_ref().unwrap();
-                    let result = po.ast.hover_at(analysis, source, bp);
+                    let result = typed.hover_at(source, pos.line, pos.character);
                     if result.is_some() {
                         result
                     } else {
                         scratchpad.filter(|s| !s.is_empty()).and_then(|sp_src| {
                             let sp_po = parser::parse_source_full(sp_src);
-                            let all = [sp_po.ast, po.ast.clone()];
-                            let sp_analysis = ast::resolve_types(&po.ast, &all);
-                            let word = ast::word_at_byte_offset(source, bp)?;
-                            let def_span = ast::hover::definition_span(&po.ast, &word)?;
-                            po.ast.hover_at(&sp_analysis, source, def_span.start)
+                            let sp_typed = to_typed_ast(&sp_po.ast);
+                            let def_span =
+                                sp_typed.definition_span(source, pos.line, pos.character);
+                            def_span.and_then(|(start_byte, _end_byte)| {
+                                let (l, c) =
+                                    ast::byte_offset_to_position(start_byte as usize, source);
+                                typed.hover_at(source, l, c)
+                            })
                         })
                     }
                 }
@@ -151,7 +150,7 @@ pub fn hover(
         .collect()
 }
 
-/// Compute goto-definition (single‑file, no import resolution).
+/// Single‑file, no import resolution.
 pub fn goto_definition(
     po: &ParseOutput,
     source: &str,
@@ -159,25 +158,17 @@ pub fn goto_definition(
     character: u32,
     scratchpad: Option<&str>,
 ) -> GotoDefResult {
-    let bp = byte_pos(source, line, character);
-    let word = po
-        .ast
-        .word_at_byte(bp, source)
-        .or_else(|| ast::word_at_byte_offset(source, bp))
-        .unwrap_or_default();
-    let rng = ast::hover::definition_span(&po.ast, &word)
+    let typed = to_typed_ast(&po.ast);
+    let rng = typed
+        .definition_span(source, line, character)
         .or_else(|| {
             scratchpad.filter(|s| !s.is_empty()).and_then(|sp_src| {
                 let sp_po = parser::parse_source_full(sp_src);
-                let all = [sp_po.ast, po.ast.clone()];
-                let _analysis = ast::resolve_types(&po.ast, &all);
-                ast::hover::definition_span(&po.ast, &word)
+                let sp_typed = to_typed_ast(&sp_po.ast);
+                sp_typed.definition_span(source, line, character)
             })
         })
-        .map(|r| Span {
-            start: r.start,
-            end: r.end,
-        });
+        .map(|(start, end)| Span { start, end });
     match rng {
         Some(r) => {
             let (a, b) = byte_offset_to_position(r.start, source);
@@ -193,7 +184,7 @@ pub fn goto_definition(
     }
 }
 
-/// Compute goto-definition with import resolution (filesystem‑aware).
+/// Filesystem‑aware import resolution.
 pub fn goto_definition_with_imports(
     source: &str,
     path: &str,
@@ -294,7 +285,7 @@ pub fn resolve_symbol_def_span(file_path: &str, byte_pos: usize) -> Option<Span>
     }
 }
 
-/// Compute hover text with import resolution (filesystem‑aware).
+/// Filesystem‑aware import resolution.
 pub fn hover_at_with_imports(source: &str, file_path: &str, byte_pos: usize) -> Option<String> {
     let po = parser::parse_source_full(source);
 
@@ -330,11 +321,11 @@ pub fn hover_at_with_imports(source: &str, file_path: &str, byte_pos: usize) -> 
         }
     }
 
-    let analysis = resolve_ast(&po.ast);
-    ast::hover::hover_at(source, &po.ast, &analysis, byte_pos)
+    let typed = to_typed_ast(&po.ast);
+    let (line, character) = ast::byte_offset_to_position(byte_pos, source);
+    typed.hover_at(source, line, character)
 }
 
-/// Find all references to the symbol at the given position.
 pub fn references(
     po: &ParseOutput,
     source: &str,
@@ -390,7 +381,6 @@ pub fn references(
     refs
 }
 
-/// Get auto-completion suggestions for Gin source code.
 pub fn completions(po: &ParseOutput, scratchpad: Option<&str>) -> Vec<CompletionItem> {
     let mut completions: Vec<CompletionItem> = ast::completions::completions_for_ast(&po.ast)
         .into_iter()
@@ -418,7 +408,6 @@ pub fn completions(po: &ParseOutput, scratchpad: Option<&str>) -> Vec<Completion
     completions
 }
 
-/// Collect parse‑ and type‑check diagnostics.
 pub fn diagnostics(po: &ParseOutput, source: &str, scratchpad: Option<&str>) -> Vec<DiagItem> {
     let st = po.ast.span_table();
     let mut diags: Vec<DiagItem> = Vec::new();
@@ -434,18 +423,16 @@ pub fn diagnostics(po: &ParseOutput, source: &str, scratchpad: Option<&str>) -> 
             source: "parse",
         });
     }
-    // Resolve the AST once — diagnostics are in the Analysis.
+    // Collect diagnostics from the typed AST transform (type flaws, etc.).
     {
-        let analysis = ast::resolve_types(&po.ast, std::slice::from_ref(&po.ast));
-        for d in &analysis.diagnostics {
-            let sp = st.get(d.span_id);
-            let (l, c) = byte_offset_to_position(sp.start, source);
+        let typed = to_typed_ast(&po.ast);
+        for (_expr_id, flaw) in typed.all_flaws() {
             diags.push(DiagItem {
-                line: l,
-                character: c,
-                message: d.message.clone(),
-                category: format!("{:?}", d.category),
-                code: format!("{:?}", d.code),
+                line: 0,
+                character: 0,
+                message: format!("{:?}", flaw),
+                category: "Flaw".to_string(),
+                code: format!("{:?}", flaw),
                 source: "typeck",
             });
         }
@@ -470,7 +457,149 @@ pub fn diagnostics(po: &ParseOutput, source: &str, scratchpad: Option<&str>) -> 
     diags
 }
 
-/// List all top-level symbols (defs, functions, and tags) sorted alphabetically.
+/// This is the typed-AST equivalent of `diagnostics()`, producing `DiagItem`s
+/// from `TypeFlaw`s on each expression node in the typed expression arena.
+pub fn typed_diagnostics(po: &ParseOutput, source: &str) -> Vec<DiagItem> {
+    let st = po.ast.span_table();
+    let mut diags: Vec<DiagItem> = Vec::new();
+
+    // Parse diagnostics (same as regular path).
+    for d in &po.symptoms {
+        let sp = st.get(d.span_id);
+        let (l, c) = byte_offset_to_position(sp.start, source);
+        diags.push(DiagItem {
+            line: l,
+            character: c,
+            message: d.message.clone(),
+            category: format!("{:?}", d.category),
+            code: format!("{:?}", d.code),
+            source: "parse",
+        });
+    }
+
+    // Transform to TypedFileAst and collect TypeFlaws via all_flaws().
+    let typed = ast::typed::transform_file(po.ast.clone(), ast::typed::FileId(0));
+    for (expr_id, flaw) in typed.all_flaws() {
+        let idx = expr_id.as_usize();
+        let span_id = typed.exprs.span[idx];
+        let sp = typed.span_table.get(span_id);
+        let (l, c) = byte_offset_to_position(sp.start, source);
+        let msg = format!("{:?}", flaw);
+        diags.push(DiagItem {
+            line: l,
+            character: c,
+            message: msg,
+            category: "Flaw".to_string(),
+            code: "TypeFlaw".to_string(),
+            source: "typeck.typed",
+        });
+    }
+
+    diags
+}
+
+pub fn typed_symbols(po: &ParseOutput, scratchpad: Option<&str>) -> Vec<SymbolItem> {
+    let typed = ast::typed::transform_file(po.ast.clone(), ast::typed::FileId(0));
+    let mut syms: Vec<SymbolItem> = Vec::new();
+
+    // Tag symbols.
+    for (tag_id, tag) in &typed.tags {
+        syms.push(SymbolItem {
+            name: tag_id.0.as_str().to_string(),
+            kind: "tag".to_string(),
+            detail: Some(format!("{:?}", tag.resolved_ty)),
+            signature: None,
+            private: typed.private_tags.contains(tag_id),
+        });
+    }
+
+    // Def symbols.
+    for (def_id, bind) in &typed.defs {
+        let sig = if !bind.params.is_empty() {
+            let params: Vec<String> = bind
+                .params
+                .iter()
+                .map(|(n, t)| format!("{}: {:?}", n.as_str(), t))
+                .collect();
+            Some(format!("({})", params.join(", ")))
+        } else {
+            None
+        };
+        syms.push(SymbolItem {
+            name: def_id.0.as_str().to_string(),
+            kind: if !bind.params.is_empty() {
+                "function"
+            } else {
+                "bind"
+            }
+            .to_string(),
+            detail: Some(format!("{:?}", bind.return_type)),
+            signature: sig,
+            private: typed.private_defs.contains(def_id),
+        });
+    }
+
+    if let Some(sp_source) = scratchpad.filter(|s| !s.is_empty()) {
+        let sp_po = parser::parse_source_full(sp_source);
+        let sp_syms = collect_symbols(&sp_po.ast);
+        syms.extend(sp_syms);
+    }
+
+    syms.sort_by(|a, b| a.name.cmp(&b.name));
+    syms
+}
+
+pub fn typed_references(po: &ParseOutput, source: &str, line: u32, character: u32) -> Vec<Range> {
+    let typed = ast::typed::transform_file(po.ast.clone(), ast::typed::FileId(0));
+    let mut refs: Vec<Range> = Vec::new();
+
+    // Find the target symbol at the given position.
+    let Some(expr_id) = typed.expr_at_source_pos(source, line, character) else {
+        return refs;
+    };
+    let Some(expr_ref) = typed.expr(expr_id) else {
+        return refs;
+    };
+
+    // Determine the target name.
+    let target_name: Option<String> = match expr_ref.kind {
+        ast::typed::TypedExprKind::Bind { name, .. } => Some(name.as_str().to_string()),
+        ast::typed::TypedExprKind::FnCall { target, .. } => Some(target.0.as_str().to_string()),
+        _ => None,
+    };
+    let Some(target_name) = target_name else {
+        return refs;
+    };
+
+    // Walk the expression arena and find all references.
+    for i in 0..typed.exprs.kind.len() {
+        let kind = &typed.exprs.kind[i];
+        let matches = match kind {
+            ast::typed::TypedExprKind::Bind { name, .. } => name.as_str() == target_name,
+            ast::typed::TypedExprKind::FnCall { target, .. } => target.0.as_str() == target_name,
+            _ => false,
+        };
+        if matches {
+            let span_id = typed.exprs.span[i];
+            let sp = typed.span_table.get(span_id);
+            let start = byte_offset_to_position(sp.start, source);
+            let end = byte_offset_to_position(sp.end, source);
+            refs.push(Range {
+                start: Pos {
+                    line: start.0,
+                    character: start.1,
+                },
+                end: Pos {
+                    line: end.0,
+                    character: end.1,
+                },
+            });
+        }
+    }
+
+    refs
+}
+
 pub fn symbols(po: &ParseOutput, scratchpad: Option<&str>) -> Vec<SymbolItem> {
     let mut syms = collect_symbols(&po.ast);
     if let Some(sp_source) = scratchpad.filter(|s| !s.is_empty()) {
@@ -513,12 +642,74 @@ fn collect_symbols(a: &FileAst) -> Vec<SymbolItem> {
     syms
 }
 
+pub fn typed_completions(po: &ParseOutput, _line: u32, _character: u32) -> Vec<CompletionItem> {
+    let typed = ast::typed::transform_file(po.ast.clone(), ast::typed::FileId(0));
+    let mut items: Vec<CompletionItem> = Vec::new();
+
+    // Add all tags.
+    for tag_id in typed.tags.keys() {
+        items.push(CompletionItem {
+            label: tag_id.0.as_str().to_string(),
+            kind: "tag".to_string(),
+            detail: Some("type".to_string()),
+            documentation: None,
+        });
+    }
+
+    // Add all defs.
+    for (def_id, bind) in &typed.defs {
+        let kind = if !bind.params.is_empty() {
+            "function"
+        } else {
+            "bind"
+        };
+        items.push(CompletionItem {
+            label: def_id.0.as_str().to_string(),
+            kind: kind.to_string(),
+            detail: Some(format!("{:?}", bind.return_type)),
+            documentation: None,
+        });
+    }
+
+    items
+}
+
+pub fn typed_signature_help(
+    po: &ParseOutput,
+    source: &str,
+    line: u32,
+    character: u32,
+) -> Option<SignatureInfo> {
+    let typed = ast::typed::transform_file(po.ast.clone(), ast::typed::FileId(0));
+    let bp = byte_pos(source, line, character);
+    let word = ast::word_at_byte_offset(source, bp)?;
+    let word_str = word.clone();
+    let word_interned = internment::Intern::new(word);
+
+    // Look up the word in typed defs.
+    let def_id = ast::typed::DefId(word_interned);
+    let bind = typed.defs.get(&def_id)?;
+
+    let params: Vec<String> = bind
+        .params
+        .iter()
+        .map(|(n, t)| format!("{}: {:?}", n.as_str(), t))
+        .collect();
+    let label = format!("{}({})", word_str, params.join(", "));
+
+    Some(SignatureInfo {
+        function: word_str,
+        label,
+        params: params.clone(),
+        documentation: bind.doc_comment.as_ref().map(|d| d.value.clone()),
+    })
+}
+
 /// Format Gin source code.
 pub fn format(source: &str) -> String {
     ginfmt::format(source)
 }
 
-/// Get signature help for a function call at the given position.
 pub fn signature_help(
     po: &ParseOutput,
     source: &str,
@@ -556,40 +747,41 @@ pub fn dot_type(po: &ParseOutput, source: &str, line: u32, character: u32) -> Op
     ast::hover::dot_type_at(source, &po.ast, bp).map(|ty| format!("{:?}", ty))
 }
 
-/// Get structured type information at the given positions.
 pub fn type_at(
     po: &ParseOutput,
     source: &str,
     positions: &[Pos],
     scratchpad: Option<&str>,
 ) -> Vec<TypeAtResult> {
-    // Resolve the main AST once for all positions.
-    let analysis = ast::resolve_types(&po.ast, std::slice::from_ref(&po.ast));
-    // Build scratchpad-resolved analysis for origin detection.
-    let sp_analysis: Option<ast::Analysis> = scratchpad.filter(|s| !s.is_empty()).map(|sp_src| {
-        let sp_po = parser::parse_source_full(sp_src);
-        let all = [sp_po.ast, po.ast.clone()];
-        ast::resolve_types(&po.ast, &all)
-    });
+    // Transform main AST via typed pipeline once for all positions.
+    let typed = to_typed_ast(&po.ast);
+    let tag_types = build_tag_types_map(&typed);
+    // Build scratchpad-resolved tag_types for origin detection.
+    let sp_tag_types: Option<HashMap<Intern<String>, Ty>> =
+        scratchpad.filter(|s| !s.is_empty()).map(|sp_src| {
+            let sp_po = parser::parse_source_full(sp_src);
+            let sp_typed = to_typed_ast(&sp_po.ast);
+            build_tag_types_map(&sp_typed)
+        });
     positions
         .iter()
         .map(|pos| {
             let bp = byte_pos(source, pos.line, pos.character);
             let word = ast::word_at_byte_offset(source, bp);
             let ty = word.as_ref().and_then(|w| {
-                let interned = internment::Intern::from_ref(w);
-                analysis.tag_types.get(&interned).cloned()
+                let interned = Intern::from_ref(w);
+                tag_types.get(&interned).cloned()
             });
             let origin = word.as_ref().map(|w| {
-                let interned = internment::Intern::from_ref(w.as_str());
+                let interned = Intern::from_ref(w.as_str());
                 if po.ast.tags().contains_key(&interned) || po.ast.defs().contains_key(&interned) {
                     "local"
-                } else if sp_analysis.as_ref().is_some_and(|sp| {
-                    sp.tag_types
-                        .contains_key(&internment::Intern::from_ref(w.as_str()))
-                }) {
+                } else if sp_tag_types
+                    .as_ref()
+                    .is_some_and(|sp| sp.contains_key(&Intern::from_ref(w.as_str())))
+                {
                     "scratchpad"
-                } else if let Some(resolved_ty) = analysis.tag_types.get(&interned) {
+                } else if let Some(resolved_ty) = tag_types.get(&interned) {
                     if is_builtin_ty(resolved_ty) {
                         "builtin"
                     } else {

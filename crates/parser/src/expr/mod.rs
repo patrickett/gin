@@ -22,7 +22,7 @@ use internment::Intern;
 use lexer::{Lexer, Token};
 
 use ast::span::{SpanId, SpanTable};
-use ast::{Expr, FileAst, Spanned};
+use ast::{Expr, FileAst, Spanned, Typed};
 
 use crate::cursor::{self, ParseError, TokenCursor};
 
@@ -30,7 +30,7 @@ use crate::unescape::unescape;
 use ast::ModPath;
 use ast::{AsmExpr, BinOp, Binary, FnCall, FormatPart, FormatString, Range, TagCall};
 
-pub type ExprFn = fn(&mut TokenCursor) -> Spanned<Expr>;
+pub type ExprFn = fn(&mut TokenCursor) -> Typed<Expr>;
 
 pub fn parse_tokens(tokens: &[(Token<'_>, SpanId)], span_table: &mut SpanTable) -> FileAst {
     let mut cursor = cursor::TokenCursor::new(tokens, span_table);
@@ -80,8 +80,6 @@ pub fn parse_source(source: &str) -> FileAst {
     ast
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
 fn last_consumed_span(cursor: &TokenCursor) -> SpanId {
     cursor.last_consumed_span()
 }
@@ -90,7 +88,7 @@ fn merge_spans(a: SpanId, b: SpanId, cursor: &mut TokenCursor) -> SpanId {
     cursor.merge_span(a, b)
 }
 
-pub(crate) fn parse_paren_args(cursor: &mut TokenCursor) -> Option<Vec<Spanned<Expr>>> {
+pub(crate) fn parse_paren_args(cursor: &mut TokenCursor) -> Option<Vec<Typed<Expr>>> {
     // Swift guardrail: if there's a raw newline before `(`, don't treat as call args.
     // This prevents `foo\n(1)` from being parsed as `foo(1)` — the `(1)` on the next
     // line is a parenthesized group, not a function call.
@@ -118,40 +116,31 @@ pub(crate) fn parse_paren_args(cursor: &mut TokenCursor) -> Option<Vec<Spanned<E
 }
 
 /// Parse an argument expression, recognizing `mut expr` and `own expr` prefixes.
-fn parse_arg_expr(cursor: &mut TokenCursor) -> Spanned<Expr> {
+fn parse_arg_expr(cursor: &mut TokenCursor) -> Typed<Expr> {
     if cursor.eat(&Token::Mut) {
         let inner = parse_expression(cursor);
-        Spanned {
-            value: Expr::MutArg(Box::new(inner.clone())),
-            span_id: inner.span_id,
-        }
+        let span_id = inner.span_id;
+        Typed::infer(Expr::MutArg(Box::new(inner)), span_id)
     } else if cursor.eat(&Token::Own) {
         let inner = parse_expression(cursor);
-        Spanned {
-            value: Expr::OwnArg(Box::new(inner.clone())),
-            span_id: inner.span_id,
-        }
+        let span_id = inner.span_id;
+        Typed::infer(Expr::OwnArg(Box::new(inner)), span_id)
     } else {
         parse_expression(cursor)
     }
 }
 
-// ─── Main Entry Point ─────────────────────────────────────────────────────────
-
-pub fn parse_expression(cursor: &mut TokenCursor) -> Spanned<Expr> {
+pub fn parse_expression(cursor: &mut TokenCursor) -> Typed<Expr> {
     parse_expr_min_prec(cursor, 0)
 }
 
-fn parse_expr_min_prec(cursor: &mut TokenCursor, min_prec: u8) -> Spanned<Expr> {
+fn parse_expr_min_prec(cursor: &mut TokenCursor, min_prec: u8) -> Typed<Expr> {
     let mut lhs = match parse_prefix(cursor) {
         Some(expr) => expr,
         None => {
             let span = cursor.current_span();
             cursor.error("expected expression", span);
-            return Spanned {
-                value: Expr::AnonymousTag(cursor.intern("Error"), span),
-                span_id: span,
-            };
+            return Typed::infer(Expr::AnonymousTag(cursor.intern("Error"), span), span);
         }
     };
 
@@ -204,10 +193,10 @@ fn parse_expr_min_prec(cursor: &mut TokenCursor, min_prec: u8) -> Spanned<Expr> 
                 let lhs_span = lhs.span_id;
                 let rhs = parse_expr_min_prec(cursor, 3);
                 let rhs_span = rhs.span_id;
-                lhs = Spanned {
-                    value: Expr::Range(Range::new(lhs, rhs, cursor.merge_span(lhs_span, rhs_span))),
-                    span_id: merge_spans(lhs_span, rhs_span, cursor),
-                };
+                lhs = Typed::infer(
+                    Expr::Range(Range::new(lhs, rhs, cursor.merge_span(lhs_span, rhs_span))),
+                    merge_spans(lhs_span, rhs_span, cursor),
+                );
                 cursor.advance_pop();
                 continue;
             }
@@ -222,15 +211,15 @@ fn parse_expr_min_prec(cursor: &mut TokenCursor, min_prec: u8) -> Spanned<Expr> 
             let lhs_span = lhs.span_id;
             let rhs = parse_expr_min_prec(cursor, prec + 1);
             let rhs_span = rhs.span_id;
-            lhs = Spanned {
-                value: Expr::Binary(Binary::new(
+            lhs = Typed::infer(
+                Expr::Binary(Binary::new(
                     lhs,
                     binop,
                     rhs,
                     cursor.merge_span(lhs_span, rhs_span),
                 )),
-                span_id: merge_spans(lhs_span, rhs_span, cursor),
-            };
+                merge_spans(lhs_span, rhs_span, cursor),
+            );
             cursor.advance_pop();
             continue;
         }
@@ -252,19 +241,17 @@ fn parse_expr_min_prec(cursor: &mut TokenCursor, min_prec: u8) -> Spanned<Expr> 
     lhs
 }
 
-// ─── Prefix ───────────────────────────────────────────────────────────────────
-
-fn parse_prefix(cursor: &mut TokenCursor) -> Option<Spanned<Expr>> {
+fn parse_prefix(cursor: &mut TokenCursor) -> Option<Typed<Expr>> {
     match cursor.peek()? {
         // Only `-` is a Pratt prefix (precedence 6); @, ^, * are atoms
         Token::Minus => {
             let (_, start_span) = cursor.advance()?;
             let inner = parse_expr_min_prec(cursor, 6);
             let inner_span = inner.span_id;
-            Some(Spanned {
-                value: Expr::Negate(Box::new(inner)),
-                span_id: merge_spans(start_span, inner_span, cursor),
-            })
+            Some(Typed::infer(
+                Expr::Negate(Box::new(inner)),
+                merge_spans(start_span, inner_span, cursor),
+            ))
         }
         _ => {
             if matches!(
@@ -279,9 +266,7 @@ fn parse_prefix(cursor: &mut TokenCursor) -> Option<Spanned<Expr>> {
     }
 }
 
-// ─── Atom Dispatch ────────────────────────────────────────────────────────────
-
-fn parse_atom(cursor: &mut TokenCursor) -> Spanned<Expr> {
+fn parse_atom(cursor: &mut TokenCursor) -> Typed<Expr> {
     match cursor.peek() {
         Some(Token::At) => parse_take_ptr(cursor),
         Some(Token::Caret) => parse_take_ref(cursor),
@@ -306,10 +291,10 @@ fn parse_atom(cursor: &mut TokenCursor) -> Spanned<Expr> {
                     let start_span = cursor.span_at(checkpoint);
                     cursor.consume_trailing_newline();
                     let end_span = last_consumed_span(cursor);
-                    return Spanned {
-                        value: Expr::Bind(Box::new(bind)),
-                        span_id: merge_spans(start_span, end_span, cursor),
-                    };
+                    return Typed::infer(
+                        Expr::Bind(Box::new(bind)),
+                        merge_spans(start_span, end_span, cursor),
+                    );
                 }
                 cursor.rewind(checkpoint);
             }
@@ -317,24 +302,15 @@ fn parse_atom(cursor: &mut TokenCursor) -> Spanned<Expr> {
         }
         Some(Token::Tag(_)) => parse_tag_atom(cursor),
         _ => {
-            if let Some(Spanned {
-                value: lit,
-                span_id: span,
-            }) = literal::parse_literal(cursor)
-            {
-                return Spanned {
-                    value: Expr::Lit(lit),
-                    span_id: span,
-                };
+            if let Some(lit) = literal::parse_literal(cursor) {
+                let span = lit.span_id;
+                return Typed::infer(Expr::Lit(lit.value), span);
             }
             let span = cursor.current_span();
             cursor.error("expected expression", span);
             // Advance past the unrecognised token so the caller makes progress
             cursor.advance();
-            Spanned {
-                value: Expr::AnonymousTag(cursor.intern("Error"), span),
-                span_id: span,
-            }
+            Typed::infer(Expr::AnonymousTag(cursor.intern("Error"), span), span)
         }
     }
 }
@@ -438,10 +414,8 @@ fn skip_balanced_delimiters(
     }
 }
 
-// ─── Id-based Atoms: BufSet, TupleSet, FnCall ─────────────────────────────────
-
-fn parse_id_atom(cursor: &mut TokenCursor) -> Spanned<Expr> {
-    // ── BufSet: name.(index): value or BufGet: name.(index) ──
+fn parse_id_atom(cursor: &mut TokenCursor) -> Typed<Expr> {
+    // BufSet: name.(index): value or BufGet: name.(index)
     if matches!(cursor.peek(), Some(Token::Id(_)))
         && cursor.peek_at(1) == Some(&Token::Dot)
         && cursor.peek_at(2) == Some(&Token::ParenOpen)
@@ -464,41 +438,41 @@ fn parse_id_atom(cursor: &mut TokenCursor) -> Spanned<Expr> {
             }
             let value = parse_expression(cursor);
             let end_span = last_consumed_span(cursor);
-            let base = Spanned {
-                value: Expr::FnCall(FnCall {
+            let base = Typed::infer(
+                Expr::FnCall(FnCall {
                     path: Spanned::new(ModPath::new(name, vec![]), id_span),
                     args: None,
                 }),
-                span_id: id_span,
-            };
-            return Spanned {
-                value: Expr::BufSet {
+                id_span,
+            );
+            return Typed::infer(
+                Expr::BufSet {
                     buf: Box::new(base),
                     index: Box::new(index),
                     value: Box::new(value),
                 },
-                span_id: merge_spans(id_span, end_span, cursor),
-            };
+                merge_spans(id_span, end_span, cursor),
+            );
         }
         // BufGet — return as expression
-        let base = Spanned {
-            value: Expr::FnCall(FnCall {
+        let base = Typed::infer(
+            Expr::FnCall(FnCall {
                 path: Spanned::new(ModPath::new(name, vec![]), id_span),
                 args: None,
             }),
-            span_id: id_span,
-        };
+            id_span,
+        );
         let end_span = last_consumed_span(cursor);
-        return Spanned {
-            value: Expr::BufGet {
+        return Typed::infer(
+            Expr::BufGet {
                 buf: Box::new(base),
                 index: Box::new(index),
             },
-            span_id: merge_spans(id_span, end_span, cursor),
-        };
+            merge_spans(id_span, end_span, cursor),
+        );
     }
 
-    // ── TupleSet: name.N: value or TupleGet: name.N ──
+    // TupleSet: name.N: value or TupleGet: name.N
     if matches!(cursor.peek(), Some(Token::Id(_)))
         && cursor.peek_at(1) == Some(&Token::Dot)
         && matches!(cursor.peek_at(2), Some(Token::Int(_)))
@@ -521,38 +495,38 @@ fn parse_id_atom(cursor: &mut TokenCursor) -> Spanned<Expr> {
             }
             let value = parse_expression(cursor);
             let end_span = last_consumed_span(cursor);
-            let base = Spanned {
-                value: Expr::FnCall(FnCall {
+            let base = Typed::infer(
+                Expr::FnCall(FnCall {
                     path: Spanned::new(ModPath::new(name, vec![]), id_span),
                     args: None,
                 }),
-                span_id: id_span,
-            };
-            return Spanned {
-                value: Expr::TupleSet {
+                id_span,
+            );
+            return Typed::infer(
+                Expr::TupleSet {
                     base: Box::new(base),
                     index: idx as usize,
                     value: Box::new(value),
                 },
-                span_id: merge_spans(id_span, end_span, cursor),
-            };
+                merge_spans(id_span, end_span, cursor),
+            );
         }
         // TupleGet — return as expression
-        let base = Spanned {
-            value: Expr::FnCall(FnCall {
+        let base = Typed::infer(
+            Expr::FnCall(FnCall {
                 path: Spanned::new(ModPath::new(name, vec![]), id_span),
                 args: None,
             }),
-            span_id: id_span,
-        };
+            id_span,
+        );
         let end_span = last_consumed_span(cursor);
-        return Spanned {
-            value: Expr::TupleGet {
+        return Typed::infer(
+            Expr::TupleGet {
                 base: Box::new(base),
                 index: idx as usize,
             },
-            span_id: merge_spans(id_span, end_span, cursor),
-        };
+            merge_spans(id_span, end_span, cursor),
+        );
     }
 
     // ── FnCall: name, name(args), name.path(args) ──
@@ -561,23 +535,20 @@ fn parse_id_atom(cursor: &mut TokenCursor) -> Spanned<Expr> {
         let args = parse_paren_args(cursor);
         cursor.consume_trailing_newline();
         let end_span = last_consumed_span(cursor);
-        return Spanned {
-            value: Expr::FnCall(FnCall { path, args }),
-            span_id: merge_spans(path_span, end_span, cursor),
-        };
+        return Typed::infer(
+            Expr::FnCall(FnCall { path, args }),
+            merge_spans(path_span, end_span, cursor),
+        );
     }
 
     let span = cursor.current_span();
     cursor.error("expected identifier", span);
-    Spanned {
-        value: Expr::AnonymousTag(cursor.intern("Error"), span),
-        span_id: span,
-    }
+    Typed::infer(Expr::AnonymousTag(cursor.intern("Error"), span), span)
 }
 
 // ─── Tag-based Atoms: TagCall, AnonymousTag, Tag-rooted FnCall ────────────────
 
-fn parse_tag_atom(cursor: &mut TokenCursor) -> Spanned<Expr> {
+fn parse_tag_atom(cursor: &mut TokenCursor) -> Typed<Expr> {
     // Single-pass lookahead avoids speculative parsing with rewind.
     // The common case (bare Tag or Tag(args)) skips all path parsing.
     if matches!(cursor.peek(), Some(Token::Tag(_))) && matches!(cursor.peek_at(1), Some(Token::Dot))
@@ -595,15 +566,15 @@ fn parse_tag_atom(cursor: &mut TokenCursor) -> Spanned<Expr> {
             };
             let end_span = last_consumed_span(cursor);
             let span = merge_spans(start_span, end_span, cursor);
-            return Spanned {
-                value: Expr::TagCall(TagCall {
+            return Typed::infer(
+                Expr::TagCall(TagCall {
                     name: variant_name,
                     qual_path: Some(path),
                     args,
                     span,
                 }),
-                span_id: span,
-            };
+                span,
+            );
         }
 
         // Tag-rooted method call: Tag.id[.id...][(args)]
@@ -614,10 +585,10 @@ fn parse_tag_atom(cursor: &mut TokenCursor) -> Spanned<Expr> {
             let args = parse_paren_args(cursor);
             cursor.consume_trailing_newline();
             let end_span = last_consumed_span(cursor);
-            return Spanned {
-                value: Expr::FnCall(FnCall { path, args }),
-                span_id: merge_spans(path_span, end_span, cursor),
-            };
+            return Typed::infer(
+                Expr::FnCall(FnCall { path, args }),
+                merge_spans(path_span, end_span, cursor),
+            );
         }
     }
 
@@ -629,34 +600,28 @@ fn parse_tag_atom(cursor: &mut TokenCursor) -> Spanned<Expr> {
             let args = parse_paren_args(cursor).unwrap_or_default();
             let end_span = last_consumed_span(cursor);
             let span = merge_spans(tag_span, end_span, cursor);
-            return Spanned {
-                value: Expr::TagCall(TagCall {
+            return Typed::infer(
+                Expr::TagCall(TagCall {
                     name: name_interned,
                     qual_path: None,
                     args,
                     span,
                 }),
-                span_id: span,
-            };
+                span,
+            );
         }
 
-        return Spanned {
-            value: Expr::AnonymousTag(name_interned, tag_span),
-            span_id: tag_span,
-        };
+        return Typed::infer(Expr::AnonymousTag(name_interned, tag_span), tag_span);
     }
 
     let span = cursor.current_span();
     cursor.error("expected tag", span);
-    Spanned {
-        value: Expr::AnonymousTag(cursor.intern("Error"), span),
-        span_id: span,
-    }
+    Typed::infer(Expr::AnonymousTag(cursor.intern("Error"), span), span)
 }
 
 // ─── Specific Atom Parsers (stub-mandated signatures) ─────────────────────────
 
-fn parse_list_lit(cursor: &mut TokenCursor) -> Spanned<Expr> {
+fn parse_list_lit(cursor: &mut TokenCursor) -> Typed<Expr> {
     let start_span = cursor.peek_span().unwrap_or_else(|| cursor.current_span());
     cursor.advance(); // consume [
 
@@ -666,10 +631,10 @@ fn parse_list_lit(cursor: &mut TokenCursor) -> Spanned<Expr> {
     if cursor.is_at(&Token::BracketClose) {
         cursor.advance();
         let end_span = last_consumed_span(cursor);
-        return Spanned {
-            value: Expr::List(Vec::new()),
-            span_id: merge_spans(start_span, end_span, cursor),
-        };
+        return Typed::infer(
+            Expr::List(Vec::new()),
+            merge_spans(start_span, end_span, cursor),
+        );
     }
 
     let mut elems = Vec::new();
@@ -684,13 +649,10 @@ fn parse_list_lit(cursor: &mut TokenCursor) -> Spanned<Expr> {
 
     cursor.expect(&Token::BracketClose);
     let end_span = last_consumed_span(cursor);
-    Spanned {
-        value: Expr::List(elems),
-        span_id: merge_spans(start_span, end_span, cursor),
-    }
+    Typed::infer(Expr::List(elems), merge_spans(start_span, end_span, cursor))
 }
 
-fn parse_tuple_lit_or_alloc_or_group(cursor: &mut TokenCursor) -> Spanned<Expr> {
+fn parse_tuple_lit_or_alloc_or_group(cursor: &mut TokenCursor) -> Typed<Expr> {
     let start_span = cursor.peek_span().unwrap_or_else(|| cursor.current_span());
     cursor.advance(); // consume (
 
@@ -700,10 +662,10 @@ fn parse_tuple_lit_or_alloc_or_group(cursor: &mut TokenCursor) -> Spanned<Expr> 
     if cursor.is_at(&Token::ParenClose) {
         cursor.advance();
         let end_span = last_consumed_span(cursor);
-        return Spanned {
-            value: Expr::TupleLit(Vec::new()),
-            span_id: merge_spans(start_span, end_span, cursor),
-        };
+        return Typed::infer(
+            Expr::TupleLit(Vec::new()),
+            merge_spans(start_span, end_span, cursor),
+        );
     }
 
     let first = parse_expression(cursor);
@@ -721,13 +683,13 @@ fn parse_tuple_lit_or_alloc_or_group(cursor: &mut TokenCursor) -> Spanned<Expr> 
         };
         cursor.expect(&Token::ParenClose);
         let end_span = last_consumed_span(cursor);
-        return Spanned {
-            value: Expr::TupleAlloc {
+        return Typed::infer(
+            Expr::TupleAlloc {
                 init: Box::new(first),
                 size,
             },
-            span_id: merge_spans(start_span, end_span, cursor),
-        };
+            merge_spans(start_span, end_span, cursor),
+        );
     }
 
     // Single element with no comma → grouped expression
@@ -749,49 +711,49 @@ fn parse_tuple_lit_or_alloc_or_group(cursor: &mut TokenCursor) -> Spanned<Expr> 
 
     cursor.expect(&Token::ParenClose);
     let end_span = last_consumed_span(cursor);
-    Spanned {
-        value: Expr::TupleLit(elems),
-        span_id: merge_spans(start_span, end_span, cursor),
-    }
+    Typed::infer(
+        Expr::TupleLit(elems),
+        merge_spans(start_span, end_span, cursor),
+    )
 }
 
-fn parse_take_ptr(cursor: &mut TokenCursor) -> Spanned<Expr> {
+fn parse_take_ptr(cursor: &mut TokenCursor) -> Typed<Expr> {
     let (_, start_span) = cursor
         .advance()
         .expect("peek confirmed '@' token before parse_take_ptr"); // @
     let inner = parse_expression(cursor);
     let end_span = inner.span_id;
-    Spanned {
-        value: Expr::TakePtr(Box::new(inner)),
-        span_id: merge_spans(start_span, end_span, cursor),
-    }
+    Typed::infer(
+        Expr::TakePtr(Box::new(inner)),
+        merge_spans(start_span, end_span, cursor),
+    )
 }
 
-fn parse_take_ref(cursor: &mut TokenCursor) -> Spanned<Expr> {
+fn parse_take_ref(cursor: &mut TokenCursor) -> Typed<Expr> {
     let (_, start_span) = cursor
         .advance()
         .expect("peek confirmed '^' token before parse_take_ref"); // ^
     let inner = parse_expression(cursor);
     let end_span = inner.span_id;
-    Spanned {
-        value: Expr::TakeRef(Box::new(inner)),
-        span_id: merge_spans(start_span, end_span, cursor),
-    }
+    Typed::infer(
+        Expr::TakeRef(Box::new(inner)),
+        merge_spans(start_span, end_span, cursor),
+    )
 }
 
-fn parse_deref(cursor: &mut TokenCursor) -> Spanned<Expr> {
+fn parse_deref(cursor: &mut TokenCursor) -> Typed<Expr> {
     let (_, start_span) = cursor
         .advance()
         .expect("peek confirmed '*' token before parse_deref"); // *
     let inner = parse_expression(cursor);
     let end_span = inner.span_id;
-    Spanned {
-        value: Expr::Deref(Box::new(inner)),
-        span_id: merge_spans(start_span, end_span, cursor),
-    }
+    Typed::infer(
+        Expr::Deref(Box::new(inner)),
+        merge_spans(start_span, end_span, cursor),
+    )
 }
 
-fn parse_self_ref(cursor: &mut TokenCursor) -> Spanned<Expr> {
+fn parse_self_ref(cursor: &mut TokenCursor) -> Typed<Expr> {
     let (_, span) = cursor
         .advance()
         .expect("peek confirmed 'self' token before parse_self_ref"); // self
@@ -802,17 +764,11 @@ fn parse_self_ref(cursor: &mut TokenCursor) -> Spanned<Expr> {
         && let Some((Token::Id(_field), field_span)) = cursor.advance()
     {
         let merged_span = merge_spans(start, field_span, cursor);
-        return Spanned {
-            value: Expr::SelfRef(merged_span),
-            span_id: merged_span,
-        };
+        return Typed::infer(Expr::SelfRef(merged_span), merged_span);
     }
 
     // Bare self
-    Spanned {
-        value: Expr::SelfRef(start),
-        span_id: start,
-    }
+    Typed::infer(Expr::SelfRef(start), start)
 }
 
 // ─── Infix / Postfix ─────────────────────────────────────────────────────────
@@ -842,10 +798,7 @@ fn try_infix_op(token: &Token) -> Option<(BinOp, u8)> {
 }
 
 #[allow(clippy::result_large_err)]
-fn apply_postfix(
-    cursor: &mut TokenCursor,
-    lhs: Spanned<Expr>,
-) -> Result<Spanned<Expr>, Spanned<Expr>> {
+fn apply_postfix(cursor: &mut TokenCursor, lhs: Typed<Expr>) -> Result<Typed<Expr>, Typed<Expr>> {
     // .N → TupleGet
     if cursor.is_at(&Token::Dot)
         && let Some(&Token::Int(n)) = cursor.peek_at(1)
@@ -854,13 +807,13 @@ fn apply_postfix(
         cursor.advance(); // Int
         let end_span = last_consumed_span(cursor);
         let lhs_span = lhs.span_id;
-        return Ok(Spanned {
-            value: Expr::TupleGet {
+        return Ok(Typed::infer(
+            Expr::TupleGet {
                 base: Box::new(lhs),
                 index: n as usize,
             },
-            span_id: merge_spans(lhs_span, end_span, cursor),
-        });
+            merge_spans(lhs_span, end_span, cursor),
+        ));
     }
 
     // .(expr) → BufGet
@@ -871,13 +824,13 @@ fn apply_postfix(
         cursor.expect(&Token::ParenClose);
         let end_span = last_consumed_span(cursor);
         let lhs_span = lhs.span_id;
-        return Ok(Spanned {
-            value: Expr::BufGet {
+        return Ok(Typed::infer(
+            Expr::BufGet {
                 buf: Box::new(lhs),
                 index: Box::new(index),
             },
-            span_id: merge_spans(lhs_span, end_span, cursor),
-        });
+            merge_spans(lhs_span, end_span, cursor),
+        ));
     }
 
     // as Type → Cast
@@ -888,13 +841,13 @@ fn apply_postfix(
                 let ty = cursor.intern(name);
                 let end_span = last_consumed_span(cursor);
                 let lhs_span = lhs.span_id;
-                return Ok(Spanned {
-                    value: Expr::Cast {
+                return Ok(Typed::infer(
+                    Expr::Cast {
                         expr: Box::new(lhs),
                         ty,
                     },
-                    span_id: merge_spans(lhs_span, end_span, cursor),
-                });
+                    merge_spans(lhs_span, end_span, cursor),
+                ));
             }
             _ => {
                 cursor.error("expected type name after 'as'", cursor.current_span());
@@ -907,32 +860,32 @@ fn apply_postfix(
 
 // ─── Control Flow Dispatch ────────────────────────────────────────────────────
 
-fn parse_loop_or_control(cursor: &mut TokenCursor) -> Option<Spanned<Expr>> {
+fn parse_loop_or_control(cursor: &mut TokenCursor) -> Option<Typed<Expr>> {
     let start_span = cursor.current_span();
 
     if let Some(if_expr) = control::parse_if_expr(cursor, parse_expression as ExprFn) {
         let end_span = last_consumed_span(cursor);
-        return Some(Spanned {
-            value: Expr::If(if_expr),
-            span_id: merge_spans(start_span, end_span, cursor),
-        });
+        return Some(Typed::infer(
+            Expr::If(if_expr),
+            merge_spans(start_span, end_span, cursor),
+        ));
     }
 
     if let Some(when_expr) = control::parse_when_expr(cursor, parse_expression as ExprFn) {
         cursor.consume_trailing_newline();
         let end_span = last_consumed_span(cursor);
-        return Some(Spanned {
-            value: Expr::When(when_expr),
-            span_id: merge_spans(start_span, end_span, cursor),
-        });
+        return Some(Typed::infer(
+            Expr::When(when_expr),
+            merge_spans(start_span, end_span, cursor),
+        ));
     }
 
     if let Some(loop_expr) = control::parse_loop_expr(cursor, parse_expression as ExprFn) {
         let end_span = last_consumed_span(cursor);
-        return Some(Spanned {
-            value: Expr::Loop(loop_expr),
-            span_id: merge_spans(start_span, end_span, cursor),
-        });
+        return Some(Typed::infer(
+            Expr::Loop(loop_expr),
+            merge_spans(start_span, end_span, cursor),
+        ));
     }
 
     None
@@ -940,7 +893,7 @@ fn parse_loop_or_control(cursor: &mut TokenCursor) -> Option<Spanned<Expr>> {
 
 // ─── Format String ────────────────────────────────────────────────────────────
 
-fn parse_format_string_expr(cursor: &mut TokenCursor) -> Spanned<Expr> {
+fn parse_format_string_expr(cursor: &mut TokenCursor) -> Typed<Expr> {
     let start_span = cursor.peek_span().unwrap_or_else(|| cursor.current_span());
     cursor.advance(); // consume opening "
 
@@ -958,6 +911,7 @@ fn parse_format_string_expr(cursor: &mut TokenCursor) -> Spanned<Expr> {
                 cursor.advance();
                 let expr = parse_expression(cursor);
                 let expr_span = expr.span_id;
+                // Clone expr (via .value access) — FormatPart stores Typed<Expr>
                 parts.push(FormatPart::Expr(Box::new(expr), expr_span));
                 cursor.expect(&Token::FormatInterpEnd);
                 cursor.advance_pop();
@@ -967,22 +921,22 @@ fn parse_format_string_expr(cursor: &mut TokenCursor) -> Spanned<Expr> {
                 cursor.advance_drop();
                 let end_span = last_consumed_span(cursor);
                 let fmt_span = merge_spans(start_span, end_span, cursor);
-                return Spanned {
-                    value: Expr::FormatString(FormatString {
+                return Typed::infer(
+                    Expr::FormatString(FormatString {
                         parts,
                         span: fmt_span,
                     }),
-                    span_id: fmt_span,
-                };
+                    fmt_span,
+                );
             }
             Some(Token::UnterminatedFormatString) | None => {
                 cursor.advance_drop();
                 let span = cursor.current_span();
                 cursor.error("unterminated format string", span);
-                return Spanned {
-                    value: Expr::FormatString(FormatString { parts, span }),
-                    span_id: merge_spans(start_span, span, cursor),
-                };
+                return Typed::infer(
+                    Expr::FormatString(FormatString { parts, span }),
+                    merge_spans(start_span, span, cursor),
+                );
             }
             _ => {
                 let span = cursor.current_span();
@@ -994,17 +948,17 @@ fn parse_format_string_expr(cursor: &mut TokenCursor) -> Spanned<Expr> {
     }
 }
 
-fn parse_asm_expr(cursor: &mut TokenCursor) -> Spanned<Expr> {
+fn parse_asm_expr(cursor: &mut TokenCursor) -> Typed<Expr> {
     let start_span = cursor.peek_span().unwrap_or_else(|| cursor.current_span());
     cursor.advance(); // eat Asm
 
     // expect (
     if !cursor.eat(&Token::ParenOpen) {
         cursor.error("expected '(' after 'asm'", cursor.current_span());
-        return Spanned {
-            value: Expr::AnonymousTag(cursor.intern("Error"), start_span),
-            span_id: start_span,
-        };
+        return Typed::infer(
+            Expr::AnonymousTag(cursor.intern("Error"), start_span),
+            start_span,
+        );
     }
 
     // first argument = template string
@@ -1012,10 +966,10 @@ fn parse_asm_expr(cursor: &mut TokenCursor) -> Spanned<Expr> {
         Some((Token::String(s), _span)) => Intern::<String>::from_ref(s),
         _ => {
             cursor.error("expected assembly template string", cursor.current_span());
-            return Spanned {
-                value: Expr::AnonymousTag(cursor.intern("Error"), start_span),
-                span_id: start_span,
-            };
+            return Typed::infer(
+                Expr::AnonymousTag(cursor.intern("Error"), start_span),
+                start_span,
+            );
         }
     };
 
@@ -1085,10 +1039,10 @@ fn parse_asm_expr(cursor: &mut TokenCursor) -> Spanned<Expr> {
     // expect )
     if !cursor.eat(&Token::ParenClose) {
         cursor.error("expected ')' after asm operands", cursor.current_span());
-        return Spanned {
-            value: Expr::AnonymousTag(cursor.intern("Error"), start_span),
-            span_id: start_span,
-        };
+        return Typed::infer(
+            Expr::AnonymousTag(cursor.intern("Error"), start_span),
+            start_span,
+        );
     }
 
     // Consume any trailing dedent tokens that were produced by the indent-aware lexer
@@ -1100,13 +1054,13 @@ fn parse_asm_expr(cursor: &mut TokenCursor) -> Spanned<Expr> {
 
     let end_span = last_consumed_span(cursor);
 
-    Spanned {
-        value: Expr::Asm(AsmExpr {
+    Typed::infer(
+        Expr::Asm(AsmExpr {
             template,
             constraints,
             operands,
             span: merge_spans(start_span, end_span, cursor),
         }),
-        span_id: merge_spans(start_span, end_span, cursor),
-    }
+        merge_spans(start_span, end_span, cursor),
+    )
 }

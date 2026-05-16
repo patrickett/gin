@@ -7,7 +7,7 @@ use std::ops::ControlFlow;
 use ControlFlow::Continue;
 
 use ast::{
-    Bind, Declare, DeclareValue, Expr, FileAst, ImplBlock, ParameterKind, Spanned, TypeExpr,
+    Bind, Declare, DeclareValue, Expr, FileAst, ImplBlock, ParameterKind, Spanned, TypeExpr, Typed,
     Variant, collapse_defs_for_platform, type_surface_mangle_name,
 };
 use indexmap::IndexMap;
@@ -167,7 +167,7 @@ enum TopLevelValue {
     Tag(Declare),
     Bind(Box<Bind>),
     ImplBlock(ImplBlock),
-    Expr(Expr, SpanId),
+    Expr(Typed<Expr>),
 }
 
 fn parse_top_level_element(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<TopLevelValue> {
@@ -228,38 +228,29 @@ fn parse_top_level_element(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Opt
                 cursor.rewind(checkpoint);
             }
             // else: bare identifier or expression — no bind speculation needed
-            let Spanned {
-                value: expr,
-                span_id: span,
-            } = expr_parser(cursor);
+            let expr = expr_parser(cursor);
             // Feature 3: Detect `{expr} {expr}` on the same line without an operator.
             if let Some(next_tok) = cursor.peek_at(0)
                 && crate::expr::control::can_start_expr(next_tok)
             {
                 cursor.error(
                     format!("expected operator between expressions, found {next_tok:?}"),
-                    cursor.peek_span().unwrap_or(span),
+                    cursor.peek_span().unwrap_or(expr.span_id),
                 );
             }
-            Some(TopLevelValue::Expr(expr, span))
+            Some(TopLevelValue::Expr(expr))
         }
         Token::Pound => {
             // #[...] always starts a bind, no speculation needed
             if let Some(bind) = crate::expr::bind::parse_bind(cursor, expr_parser) {
                 return Some(TopLevelValue::Bind(Box::new(bind)));
             }
-            let Spanned {
-                value: expr,
-                span_id: span,
-            } = expr_parser(cursor);
-            Some(TopLevelValue::Expr(expr, span))
+            let expr = expr_parser(cursor);
+            Some(TopLevelValue::Expr(expr))
         }
         _ => {
-            let Spanned {
-                value: expr,
-                span_id: span,
-            } = expr_parser(cursor);
-            Some(TopLevelValue::Expr(expr, span))
+            let expr = expr_parser(cursor);
+            Some(TopLevelValue::Expr(expr))
         }
     }
 }
@@ -307,11 +298,8 @@ fn dispatch_tag_element(
     }
 
     // fallback: expression (bare Tag, Tag(args), etc.)
-    let Spanned {
-        value: expr,
-        span_id: span,
-    } = expr_parser(cursor);
-    Some(TopLevelValue::Expr(expr, span))
+    let expr = expr_parser(cursor);
+    Some(TopLevelValue::Expr(expr))
 }
 
 /// If the token at `offset` is `(`, return the offset just past the matching `)`.
@@ -482,8 +470,8 @@ fn collect_top_level(
                 defs.entry(mangled).or_default().push(bind);
             }
         }
-        TopLevelValue::Expr(expr, span) => {
-            exprs.push((expr, span));
+        TopLevelValue::Expr(expr) => {
+            exprs.push((expr.value, expr.span_id));
         }
     }
 }

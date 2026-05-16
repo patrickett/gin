@@ -1,6 +1,6 @@
 use crate::prelude::*;
 
-use ast::Expr;
+use ast::{Expr, Typed};
 
 /// Derive an LLVM constraint string from a typed constraint expression.
 ///
@@ -15,7 +15,7 @@ use ast::Expr;
 /// The register name is extracted from the constraint's type parameter
 /// (e.g. `X0` in `Output[X0]`).
 fn derive_constraint_string(
-    constraints: &[ast::Spanned<Expr>],
+    constraints: &[Typed<Expr>],
     ctx: &CodegenContext<'_, '_>,
 ) -> (String, Vec<usize>) {
     let mut parts = Vec::new();

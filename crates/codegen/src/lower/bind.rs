@@ -1,6 +1,6 @@
 use crate::{lower_function, prelude::*, ty_to_mlir};
 use ast::ty::Ty;
-use ast::{TyInfer, flow::ConstValue};
+use ast::{TyInfer, Typed, flow::ConstValue};
 
 impl<'c> Lower<'c> for Bind {
     fn lower(
@@ -80,7 +80,7 @@ impl<'c> Lower<'c> for Bind {
 fn lower_const_union_literal<'c>(
     ctx: &CodegenContext<'_, 'c>,
     block: &BlockRef<'c, 'c>,
-    expr: &Spanned<Expr>,
+    expr: &Typed<Expr>,
     values: &[ConstValue],
 ) -> Option<Value<'c, 'c>> {
     let lit = match &expr.value {

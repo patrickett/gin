@@ -5,11 +5,10 @@ use crate::analysis::flow::{
     TypeConstraint, VarState,
 };
 use crate::analysis::resolve::is_type_surface;
-use crate::span::Spanned;
 use crate::ty::Ty;
 use crate::{
-    Bind, BindValue, Expr, FileAst, FnCall, IfCondition, IfExpr, Loop, TypeExpr, WhenArm, WhenExpr,
-    for_loop_pattern_names, pattern_type_binding_names, type_surface_mangle_name,
+    Bind, BindValue, Expr, FileAst, FnCall, IfCondition, IfExpr, Loop, TypeExpr, Typed, WhenArm,
+    WhenExpr, for_loop_pattern_names, pattern_type_binding_names, type_surface_mangle_name,
 };
 use crate::{TyInfer, TyInferEnv};
 use internment::Intern;
@@ -96,7 +95,7 @@ impl<'a> FlowAnalyzer<'a> {
 
     /// Analyze a spanned expression, recording its SpanId for position-aware context lookup
     /// before delegating to `analyze_expr`.
-    fn analyze_spanned_expr(&mut self, expr: &Spanned<Expr>) {
+    fn analyze_spanned_expr(&mut self, expr: &Typed<Expr>) {
         self.result.expr_spans.insert(expr.span_id, self.expr_index);
         self.analyze_expr(expr);
     }
@@ -116,7 +115,6 @@ impl<'a> FlowAnalyzer<'a> {
                 let mut all_named = true;
                 for arg in &call.args {
                     match &arg.value {
-                        // Named argument: `field: expr` — parsed as Expr::Bind
                         Expr::Bind(bind) if !bind.is_const => {
                             if let crate::BindValue::Expr(sp) = bind.value() {
                                 if let Some(val) = self.eval_const(&sp.value) {
@@ -128,7 +126,6 @@ impl<'a> FlowAnalyzer<'a> {
                                 all_named = false;
                             }
                         }
-                        // Positional argument
                         _ => {
                             all_named = false;
                             args.push(self.eval_const(&arg.value)?);
@@ -136,7 +133,6 @@ impl<'a> FlowAnalyzer<'a> {
                     }
                 }
                 if all_named && !named_fields.is_empty() {
-                    // TagCall with all named args → record constructor
                     Some(ConstValue::Record {
                         fields: named_fields,
                     })
@@ -157,7 +153,6 @@ impl<'a> FlowAnalyzer<'a> {
                 }
             }
             Expr::Bind(bind) if bind.is_const || bind.params().is_none() => {
-                // const binding (`:=`) — evaluate its value expression
                 if let crate::BindValue::Expr(sp) = bind.value() {
                     self.eval_const(&sp.value)
                 } else {
@@ -176,7 +171,7 @@ impl<'a> FlowAnalyzer<'a> {
                 let rhs = self.eval_const(&bin.rhs.value)?;
                 lhs.eval_binop(&bin.op, &rhs)
             }
-            // Lowercase variable reference — look up its known constant value.
+            // Look up variable's known constant value
             Expr::FnCall(call) if call.args.is_none() && call.path.segments.is_empty() => self
                 .current_context()
                 .get_constant(&call.path.root)
@@ -279,20 +274,16 @@ impl<'a> FlowAnalyzer<'a> {
     }
 
     fn enter_bind(&mut self, bind: &Bind) {
-        // Add parameters to scope
         if let Some(params) = bind.params().as_ref() {
             for (name, _) in params.iter() {
                 self.in_scope.insert(*name);
-                // Parameters are alive with Own capability
                 self.current_context_mut()
                     .set_var_state(*name, VarState::Alive);
                 self.current_context_mut()
                     .set_capability(*name, Capability::Own);
-                // Assign a region to each parameter (its own name as region)
                 self.current_context_mut().set_region_owner(*name, *name);
             }
         }
-        // Add self if this is a method
         if bind.is_method() {
             let self_name = Intern::<String>::from_ref("self");
             self.in_scope.insert(self_name);
@@ -306,7 +297,6 @@ impl<'a> FlowAnalyzer<'a> {
     fn analyze_bind(&mut self, bind: &Bind) {
         self.enter_bind(bind);
 
-        // Mark the binding itself as Alive with Own capability
         self.current_context_mut()
             .set_var_state(bind.name(), VarState::Alive);
         self.current_context_mut()
@@ -322,7 +312,6 @@ impl<'a> FlowAnalyzer<'a> {
                 }
             }
             BindValue::Expr(expr) => {
-                // Track constant value for top-level const binds.
                 if bind.is_const
                     && let Some(const_val) = self.eval_const(&expr.value)
                 {
@@ -336,33 +325,26 @@ impl<'a> FlowAnalyzer<'a> {
     }
 
     fn analyze_expr(&mut self, expr: &Expr) {
-        // Save context *before* incrementing so the context index matches the
-        // span index recorded in `analyze_spanned_expr`.
+        // Save context before incrementing so the index matches the span index
         self.save_context_for_expr();
         self.expr_index += 1;
 
         match expr {
-            // Pattern matching in if expressions.
             Expr::If(if_expr) => {
                 self.analyze_if_expr(if_expr);
             }
 
-            // Pattern matching in when expressions.
             Expr::When(when_expr) => {
                 self.analyze_when_expr(when_expr);
             }
 
-            // Variable binding (resets narrowing on reassignment).
             Expr::Bind(bind) => {
-                // Add binding name to scope
                 self.in_scope.insert(bind.name());
 
-                // Track const vars for ownership semantics
                 if bind.is_const {
                     self.const_vars.insert(bind.name());
                 }
 
-                // Mutable reassignment resets narrowing and ownership
                 if !bind.is_const {
                     self.current_context_mut().reset(&bind.name());
                     self.current_context_mut()
@@ -372,18 +354,17 @@ impl<'a> FlowAnalyzer<'a> {
                     self.reassigned.insert(bind.name());
                 }
 
-                // Track the type of the bound variable for bounds checking
                 if let BindValue::Expr(expr) = bind.value() {
                     let env = TyInferEnv {
                         tag_types: self.tag_types,
                         fn_return_types: self.fn_return_types,
                         locals: &self.locals,
+                        tag_params: None,
                     };
                     let ty = expr.infer_ty(&env);
                     self.locals.insert(bind.name(), ty);
                 }
 
-                // Track constant value for constant propagation
                 if let BindValue::Expr(expr) = bind.value()
                     && let Some(const_val) = self.eval_const(&expr.value)
                 {
@@ -394,12 +375,11 @@ impl<'a> FlowAnalyzer<'a> {
                 self.analyze_bind(bind);
             }
 
-            // Loops - conservative approach, don't persist narrowing across iterations.
+            // Don't persist narrowing across loop iterations
             Expr::Loop(loop_expr) => {
                 self.analyze_loop(loop_expr);
             }
 
-            // Function call - analyze arguments.
             Expr::FnCall(call) => {
                 // Check if this is a variable reference (no args, no path segments)
                 if call.args.is_none() && call.path.segments.is_empty() {
@@ -426,13 +406,11 @@ impl<'a> FlowAnalyzer<'a> {
                 self.analyze_fn_call(call);
             }
 
-            // Binary operations.
             Expr::Binary(bin) => {
                 self.analyze_spanned_expr(&bin.lhs);
                 self.analyze_spanned_expr(&bin.rhs);
             }
 
-            // Tuple and list operations.
             Expr::TupleLit(exprs) | Expr::List(exprs) => {
                 for expr in exprs {
                     self.analyze_spanned_expr(expr);
@@ -449,7 +427,6 @@ impl<'a> FlowAnalyzer<'a> {
                 self.analyze_spanned_expr(value);
             }
 
-            // Buffer operations.
             Expr::BufGet { buf, index } => {
                 self.analyze_spanned_expr(buf);
                 self.analyze_spanned_expr(index);
@@ -462,7 +439,6 @@ impl<'a> FlowAnalyzer<'a> {
                 self.check_bounds(buf, index, crate::span::SpanId::INVALID);
             }
 
-            // Cast and reference operations.
             Expr::Cast { expr, .. } => {
                 self.analyze_spanned_expr(expr);
             }
@@ -541,12 +517,10 @@ impl<'a> FlowAnalyzer<'a> {
                 }
             }
 
-            // Tag operations.
             Expr::TagCall(_) => {}
             Expr::AnonymousTag(..) => {}
             Expr::SelfRef(_) => {}
 
-            // Literals and other expressions.
             Expr::Lit(_) => {}
             Expr::FormatString(_) => {}
             Expr::Range(_) => {}
@@ -591,20 +565,17 @@ impl<'a> FlowAnalyzer<'a> {
                     return;
                 }
 
-                // Extract variable name from subject if it's a simple variable reference
                 let var_name = self.extract_var_name(subject);
 
                 if let Some(var) = var_name {
                     let variant_name =
                         Intern::<String>::from_ref(type_surface_mangle_name(&pattern.value));
 
-                    // Look up which union this variant belongs to
                     if let Some(entry) = self.variant_map.get(&variant_name)
                         && let Some((union_name, _, _)) = entry.first()
                     {
                         let constraint = TypeConstraint::IsVariant(*union_name, variant_name);
 
-                        // Check if this narrowing is impossible
                         if self.current_context().is_impossible(&var, &constraint) {
                             self.result.add_impossible_check(ImpossibleCheck {
                                 expr_index: self.expr_index,
@@ -615,12 +586,10 @@ impl<'a> FlowAnalyzer<'a> {
                             });
                         }
 
-                        // Analyze body with narrowed context
                         self.push_context();
                         self.current_context_mut().narrow(var, constraint.clone());
 
                         let pat_bindings = self.push_pattern_bindings(&pattern.value);
-                        // Extract pattern variables from known constant value
                         self.extract_pattern_constants(var, &pattern.value);
 
                         // Every gin if block always ends with a `return` (syntax requirement),
@@ -636,7 +605,6 @@ impl<'a> FlowAnalyzer<'a> {
 
                         let narrowed_context = self.context_stack.pop().unwrap();
 
-                        // If the branch has an early return, merge the narrowing back to parent
                         if has_early_return {
                             self.merge_narrowing_from_branch(&narrowed_context);
                         }
@@ -665,13 +633,11 @@ impl<'a> FlowAnalyzer<'a> {
     }
 
     fn analyze_when_expr(&mut self, when_expr: &WhenExpr) {
-        // If there's a subject, analyze it first
         if let Some(subject) = &when_expr.subject {
             self.analyze_spanned_expr(subject.as_ref());
 
             let var_name = self.extract_var_name(subject);
 
-            // For pattern matching when, analyze each arm
             for arm in &when_expr.arms {
                 match arm {
                     WhenArm::Is { pattern, body, .. } => {
@@ -689,7 +655,6 @@ impl<'a> FlowAnalyzer<'a> {
                         {
                             let constraint = TypeConstraint::IsVariant(*union_name, variant_name);
 
-                            // Check for impossibility if we have a simple variable subject
                             if let Some(var) = var_name
                                 && self.current_context().is_impossible(&var, &constraint)
                             {
@@ -702,7 +667,6 @@ impl<'a> FlowAnalyzer<'a> {
                                 });
                             }
 
-                            // Analyze arm body with narrowed context
                             self.push_context();
                             if let Some(var) = var_name {
                                 self.current_context_mut().narrow(var, constraint);
@@ -715,7 +679,6 @@ impl<'a> FlowAnalyzer<'a> {
                             self.pop_tag_pattern_bindings(&pat_bindings);
                             self.pop_context();
                         } else {
-                            // Unknown variant, analyze without narrowing
                             self.push_context();
                             let pat_bindings = self.push_pattern_bindings(&pattern.value);
                             if let Some(var) = var_name {
@@ -742,7 +705,6 @@ impl<'a> FlowAnalyzer<'a> {
                 }
             }
         } else {
-            // Boolean when - no narrowing
             for arm in &when_expr.arms {
                 match arm {
                     WhenArm::Cond {
@@ -754,9 +716,7 @@ impl<'a> FlowAnalyzer<'a> {
                     WhenArm::Else(body, _) => {
                         self.analyze_spanned_expr(body);
                     }
-                    WhenArm::Is { .. } => {
-                        // Is arm in boolean when - error case, but we still analyze
-                    }
+                    WhenArm::Is { .. } => {}
                 }
             }
         }
@@ -767,24 +727,12 @@ impl<'a> FlowAnalyzer<'a> {
             Loop::While(while_loop) => {
                 self.analyze_spanned_expr(&while_loop.cond);
 
-                // Extract comparison constraints from the condition.
-                // e.g. `while i < len` gives us `i < len` inside the loop body.
+                // Extract comparison constraints from the condition
                 let cond_comparisons = self.extract_comparisons(&while_loop.cond.value);
 
-                // Save entry context for post-loop restoration
                 let entry_context = self.current_context().clone();
 
-                // TODO: Constant propagation through reassignment in loops.
-                // `i: i + 1` where `i = 0` should track `i = 1` after the first iteration,
-                // but currently reset_loop_variables drops the constant before the body is
-                // evaluated. A fixpoint approach would iterate until constraints stabilize,
-                // widening numeric bounds to avoid infinite ascent (e.g. `i` → 0..∞).
-                // For now, comparison constraints like `i < len` are still valid inside the
-                // body because the condition is re-checked each iteration.
-
-                // Loop body: narrow based on condition being true.
-                // The condition is re-checked each iteration, so the narrowing
-                // is valid even though the body may modify variables.
+                // Narrow based on condition (re-checked each iteration)
                 self.push_context();
                 for (var, constraint) in &cond_comparisons {
                     self.current_context_mut().narrow(*var, constraint.clone());
@@ -794,26 +742,19 @@ impl<'a> FlowAnalyzer<'a> {
                 }
                 self.pop_context();
 
-                // After loop, reset narrowing for variables modified in loop
                 self.reset_loop_variables(&while_loop.exprs, entry_context);
 
-                // After the loop exits, the condition is false.
-                // Apply negated comparisons (e.g. `i >= len` after `while i < len`).
-                // This is correct because the loop exits precisely when the condition
-                // fails — the condition is evaluated at the top of each iteration with
-                // the current values of all variables.
+                // After the loop exits, the negated condition holds (e.g. `i >= len` after `while i < len`)
                 for (var, constraint) in &cond_comparisons {
                     let negated = constraint.negate();
                     self.current_context_mut().narrow(*var, negated);
                 }
             }
             Loop::ForIn(for_loop) => {
-                // Analyze iterator
                 self.analyze_spanned_expr(&for_loop.iter);
 
                 let entry_context = self.current_context().clone();
 
-                // Add loop variable(s) to scope (from pattern)
                 if let Some(names) = for_loop_pattern_names(&for_loop.pat.value) {
                     for n in &names {
                         self.in_scope.insert(*n);
@@ -826,14 +767,12 @@ impl<'a> FlowAnalyzer<'a> {
                 }
                 self.pop_context();
 
-                // Remove loop variable(s) from scope
                 if let Some(names) = for_loop_pattern_names(&for_loop.pat.value) {
                     for n in &names {
                         self.in_scope.remove(n);
                     }
                 }
 
-                // Reset narrowing for variables modified in loop
                 self.reset_loop_variables(&for_loop.exprs, entry_context);
             }
         }
@@ -856,6 +795,7 @@ impl<'a> FlowAnalyzer<'a> {
             tag_types: self.tag_types,
             fn_return_types: self.fn_return_types,
             locals: &self.locals,
+            tag_params: None,
         };
 
         let index_val = match index.infer_ty(&env) {
@@ -896,12 +836,12 @@ impl<'a> FlowAnalyzer<'a> {
         }
     }
 
-    fn has_return_in_exprs(&self, exprs: &[Spanned<Expr>]) -> bool {
+    fn has_return_in_exprs(&self, exprs: &[Typed<Expr>]) -> bool {
         exprs.iter().any(|e| self.has_return(e))
     }
 
-    fn has_return(&self, expr: &Expr) -> bool {
-        match expr {
+    fn has_return(&self, expr: &Typed<Expr>) -> bool {
+        match &**expr {
             Expr::Loop(loop_expr) => match loop_expr {
                 Loop::While(w) => self.has_return_in_exprs(&w.exprs),
                 Loop::ForIn(f) => self.has_return_in_exprs(&f.exprs),
@@ -936,7 +876,7 @@ impl<'a> FlowAnalyzer<'a> {
         }
     }
 
-    fn reset_loop_variables(&mut self, exprs: &[Spanned<Expr>], entry_context: FlowContext) {
+    fn reset_loop_variables(&mut self, exprs: &[Typed<Expr>], entry_context: FlowContext) {
         // Reset narrowing for variables that are assigned in the loop
         for expr in exprs {
             if let Expr::Bind(bind) = &**expr {

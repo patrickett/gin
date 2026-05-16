@@ -1,9 +1,6 @@
-use crate::VariantMap;
-use crate::analysis::Analysis;
 use crate::path::ModPath;
 use crate::prelude::*;
 use crate::span::{SpanId, SpanTable, Spanned};
-use crate::ty::Ty;
 use indexmap::IndexMap;
 use std::{
     collections::{HashMap, HashSet},
@@ -45,7 +42,6 @@ fn pick_bind_for_platform(binds: Vec<Bind>) -> Option<Bind> {
     }
 }
 
-/// Symbol kind - distinguishes between different types of symbols.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SymbolKind {
     /// A tag/type definition (e.g., `Person ::= ...`)
@@ -65,15 +61,12 @@ pub struct Symbol {
     /// The symbol name (e.g., "http.web.handle" or "foo")
     pub name: Intern<String>,
 
-    /// Which file defined this symbol
     pub source_file: PathBuf,
 
-    /// What kind of symbol this is
     pub kind: SymbolKind,
 }
 
 impl Symbol {
-    /// Create a new symbol.
     pub fn new(name: Intern<String>, source_file: PathBuf, kind: SymbolKind) -> Self {
         Self {
             name,
@@ -82,7 +75,6 @@ impl Symbol {
         }
     }
 
-    /// Create a tag symbol.
     pub fn tag(name: Intern<String>, source_file: PathBuf) -> Self {
         Self {
             name,
@@ -91,7 +83,6 @@ impl Symbol {
         }
     }
 
-    /// Create a function symbol.
     pub fn function(name: Intern<String>, source_file: PathBuf) -> Self {
         Self {
             name,
@@ -100,7 +91,6 @@ impl Symbol {
         }
     }
 
-    /// Create a bind symbol.
     pub fn bind(name: Intern<String>, source_file: PathBuf) -> Self {
         Self {
             name,
@@ -109,17 +99,14 @@ impl Symbol {
         }
     }
 
-    /// Check if this is a function.
     pub fn is_function(&self) -> bool {
         matches!(self.kind, SymbolKind::Function(_))
     }
 
-    /// Check if this is a bind (value).
     pub fn is_bind(&self) -> bool {
         matches!(self.kind, SymbolKind::Bind(_))
     }
 
-    /// Check if this is a tag.
     pub fn is_tag(&self) -> bool {
         matches!(self.kind, SymbolKind::Tag(_))
     }
@@ -135,34 +122,28 @@ impl Symbol {
 /// Runtime MLIR values are tracked separately during codegen.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SymbolTable {
-    /// Map of symbol name to symbol information
     pub symbols: HashMap<Intern<String>, Symbol>,
 }
 
 impl SymbolTable {
-    /// Create a new empty symbol table.
     pub fn new() -> Self {
         Self {
             symbols: HashMap::new(),
         }
     }
 
-    /// Insert a symbol into the table.
     pub fn insert(&mut self, symbol: Symbol) {
         self.symbols.insert(symbol.name, symbol);
     }
 
-    /// Look up a symbol by name.
     pub fn get(&self, name: &Intern<String>) -> Option<&Symbol> {
         self.symbols.get(name)
     }
 
-    /// Check if a symbol exists.
     pub fn contains(&self, name: &Intern<String>) -> bool {
         self.symbols.contains_key(name)
     }
 
-    /// Get all function names.
     pub fn function_names(&self) -> Vec<Intern<String>> {
         self.symbols
             .values()
@@ -171,7 +152,6 @@ impl SymbolTable {
             .collect()
     }
 
-    /// Get all bind names.
     pub fn bind_names(&self) -> Vec<Intern<String>> {
         self.symbols
             .values()
@@ -180,7 +160,6 @@ impl SymbolTable {
             .collect()
     }
 
-    /// Get all tag names.
     pub fn tag_names(&self) -> Vec<Intern<String>> {
         self.symbols
             .values()
@@ -189,7 +168,6 @@ impl SymbolTable {
             .collect()
     }
 
-    /// Merge another symbol table into this one.
     /// Returns conflicting symbols (names that exist in both).
     pub fn merge(&mut self, other: SymbolTable) -> Vec<Symbol> {
         let mut conflicts = Vec::new();
@@ -205,7 +183,6 @@ impl SymbolTable {
         conflicts
     }
 
-    /// Create a symbol table from a single file's AST.
     pub fn from_file(file: &FileAst, source_path: PathBuf) -> Self {
         Self::from_file_filtered(file, source_path, false)
     }
@@ -281,7 +258,6 @@ impl FileAst {
         &self.defs
     }
 
-    /// Access the span table for resolving SpanId → byte ranges.
     pub fn span_table(&self) -> &SpanTable {
         &self.span_table
     }
@@ -410,7 +386,6 @@ impl FileAst {
 }
 
 impl FileAst {
-    /// Compute a content-based hash for change detection within a compilation session.
     pub fn compute_content_hash(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -418,11 +393,8 @@ impl FileAst {
         hasher.finish()
     }
 
-    /// Find the innermost expression at the given byte position.
-    ///
-    /// Returns a reference to the expression and its span ID. Searches top-level
-    /// expressions and all bind bodies. Returns the most deeply nested expression
-    /// containing `byte_pos`.
+    /// Returns the most deeply nested expression containing `byte_pos`.
+    /// Searches top-level expressions and all bind bodies.
     pub fn expr_at_byte(&self, byte_pos: usize) -> Option<(&Expr, SpanId)> {
         // Search top-level expressions
         for (expr, span_id) in &self.exprs {
@@ -499,42 +471,6 @@ impl FileAst {
         }
     }
 
-    /// Compute hover markdown at a byte position.
-    pub fn hover_at(
-        &self,
-        analysis: &crate::analysis::Analysis,
-        source: &str,
-        byte_pos: usize,
-    ) -> Option<String> {
-        crate::hover::hover_at_with_flow(
-            source,
-            self,
-            Some(analysis),
-            &analysis.flow,
-            byte_pos,
-            None,
-        )
-    }
-
-    /// Like [`hover_at`](Self::hover_at) but includes a `source_name` prefix.
-    pub fn hover_at_with_source(
-        &self,
-        analysis: &crate::analysis::Analysis,
-        source: &str,
-        byte_pos: usize,
-        source_name: Option<&str>,
-    ) -> Option<String> {
-        crate::hover::hover_at_with_flow(
-            source,
-            self,
-            Some(analysis),
-            &analysis.flow,
-            byte_pos,
-            source_name,
-        )
-    }
-
-    /// Find the definition span of a symbol by name.
     pub fn definition_span(&self, name: &str) -> Option<std::ops::Range<usize>> {
         crate::hover::definition_span(self, name)
     }
@@ -771,205 +707,5 @@ fn find_expr_in_bind_value<'a>(
             None
         }
         BindValue::Extern => None,
-    }
-}
-
-/// Resolve tag types, return types, variant map, flow analysis, and
-/// diagnostics for a [`FileAst`], producing an [`Analysis`].
-///
-/// Uses declarations from `all_asts` for cross-file type resolution
-/// (aliases, generics, etc.).
-pub fn resolve_types(ast: &FileAst, all_asts: &[FileAst]) -> Analysis {
-    use crate::resolve_name_from_files;
-    use crate::{TyInfer, TyInferEnv};
-
-    // 1. Resolve tag types — collect from ALL compilation units so that
-    //    cross-file type references (e.g. `Int` from `int.gin` used in
-    //    `io.gin`) are visible during type-checking of the current file.
-    let mut tag_types: HashMap<Intern<String>, Ty> = HashMap::new();
-    let mut explicit_tag_names: HashSet<Intern<String>> = HashSet::new();
-    for file_ast in all_asts {
-        for name in file_ast.tags.keys() {
-            if explicit_tag_names.insert(*name) {
-                let ty = resolve_name_from_files(*name, all_asts, 0);
-                tag_types.insert(*name, ty);
-            }
-        }
-    }
-    tag_types
-        .entry(Intern::<String>::from_ref("Str"))
-        .or_insert_with(crate::ty::str_record_ty);
-
-    // 2. Build variant map from tag_types
-    let mut variant_map: VariantMap = HashMap::new();
-    for (union_name, ty) in &tag_types {
-        if let Ty::Union { variants, .. } = ty {
-            for (i, (variant_name, fields)) in variants.iter().enumerate() {
-                let field_tys: Vec<(Intern<String>, Ty)> =
-                    fields.iter().map(|(n, t)| (*n, *(*t).clone())).collect();
-                variant_map
-                    .entry(*variant_name)
-                    .or_default()
-                    .push((*union_name, i, field_tys));
-            }
-        } else if let Ty::ConstUnion { values, .. } = ty {
-            for (i, cv) in values.iter().enumerate() {
-                let vname = cv.display_name();
-                variant_map
-                    .entry(vname)
-                    .or_default()
-                    .push((*union_name, i, Vec::new()));
-            }
-        }
-    }
-
-    // 3. Infer return types (two passes for cross-function references)
-    let mut fn_return_types: HashMap<Intern<String>, Ty> = HashMap::new();
-    {
-        let empty_env = TyInferEnv {
-            tag_types: &tag_types,
-            fn_return_types: &HashMap::new(),
-            locals: &HashMap::new(),
-        };
-        for a in all_asts {
-            for (name, bind) in &a.defs {
-                if !bind.attributes().matches_current_platform() {
-                    continue;
-                }
-                let ret = bind.infer_ty(&empty_env);
-                fn_return_types.insert(*name, ret);
-            }
-        }
-    }
-    {
-        let mut second_pass: Vec<(Intern<String>, Ty)> = Vec::new();
-        let full_env = TyInferEnv {
-            tag_types: &tag_types,
-            fn_return_types: &fn_return_types,
-            locals: &HashMap::new(),
-        };
-        for a in all_asts {
-            for (name, bind) in &a.defs {
-                if !bind.attributes().matches_current_platform() {
-                    continue;
-                }
-                let ret = bind.infer_ty(&full_env);
-                second_pass.push((*name, ret));
-            }
-        }
-        // drop(full_env);
-        for (name, ret) in second_pass {
-            fn_return_types.insert(name, ret);
-        }
-    }
-
-    // 5. Build flow analysis
-    let flow = if !ast.defs.is_empty() {
-        let mut analyzer = crate::FlowAnalyzer::new(&tag_types, &fn_return_types, &variant_map);
-        analyzer.analyze_file(ast);
-        analyzer.into_result()
-    } else {
-        crate::FlowAnalysis::new()
-    };
-
-    // 6. Run type-check diagnostics
-    let mut diagnostics = Vec::new();
-    crate::analysis::check::check_unknowns(
-        ast,
-        &tag_types,
-        &explicit_tag_names,
-        &fn_return_types,
-        &variant_map,
-        &mut diagnostics,
-    );
-    for check in &flow.bounds_checks {
-        use diagnostic::DiagnosticLike;
-        use diagnostic::type_::TypeSymptom;
-        diagnostics.push(
-            TypeSymptom::IndexOutOfBounds {
-                index: check.index,
-                size: check.size,
-            }
-            .into_diagnostic(check.span_id()),
-        );
-    }
-
-    Analysis {
-        tag_types,
-        fn_return_types,
-        variant_map,
-        flow,
-        diagnostics,
-        explicit_tag_names,
-    }
-}
-
-/// Write resolved type information from an [`Analysis`] back into [`FileAst`]
-/// AST nodes.
-///
-/// Populates `tag.resolved_type`, `bind.return_type`, `bind.param_slots[*].ty`,
-/// and `bind.receiver_typevars` so consumers can read types directly from the
-/// AST instead of reaching into side-tables.
-///
-/// Call this after [`resolve_types`] on any AST you intend to mutate:
-///
-/// ```ignore
-/// let analysis = resolve_types(&ast, &[ast.clone()]);
-/// populate_ast_types(&mut ast, &analysis);
-/// ```
-pub fn populate_ast_types(ast: &mut FileAst, analysis: &Analysis) {
-    // Populate tag resolved_type
-    for (name, ty) in &analysis.tag_types {
-        if let Some(decl) = ast.tags.get_mut(name) {
-            decl.resolved_type = Some(ty.clone());
-        }
-    }
-
-    // Populate bind return_type and param/resolver info
-    for (name, bind) in &mut ast.defs {
-        // Return type
-        if let Some(ret_ty) = analysis.fn_return_types.get(name) {
-            bind.return_type = crate::TyState::Resolved(ret_ty.clone());
-        }
-
-        // Receiver typevars
-        {
-            let typevars = bind
-                .receiver_type_surface()
-                .map(|sp| crate::typevars_from_receiver(&sp.value))
-                .unwrap_or_default();
-            bind.receiver_typevars = typevars
-                .iter()
-                .map(|(k, v)| (*k, crate::TyState::Resolved(v.clone())))
-                .collect();
-
-            // Parameter types
-            if let Some(params) = bind.params() {
-                let convention = |k: &Intern<String>| {
-                    bind.param_conventions
-                        .get(k)
-                        .copied()
-                        .unwrap_or(crate::ParamConvention::Ref)
-                };
-                bind.param_slots = params
-                    .iter()
-                    .map(|(k, kind)| {
-                        let ty = crate::resolve_parameter_kind_with_subst(
-                            *k,
-                            kind,
-                            &analysis.tag_types,
-                            &analysis.fn_return_types,
-                            &typevars,
-                        );
-                        let slot = crate::ParamSlot {
-                            ty: crate::TyState::Resolved(ty.clone()),
-                            default: None,
-                            convention: convention(k),
-                        };
-                        (*k, slot)
-                    })
-                    .collect();
-            }
-        }
     }
 }

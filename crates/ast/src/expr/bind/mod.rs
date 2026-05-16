@@ -6,6 +6,7 @@ use internment::Intern;
 use crate::TypeExpr;
 use crate::doc_comment::DocComment;
 use crate::expr::Expr;
+use crate::expr::Typed;
 use crate::parameter::ParamConvention;
 use crate::parameter::ParamSlot;
 use crate::parameter::Parameters;
@@ -57,7 +58,7 @@ pub struct Bind {
     /// Replaces `return_type_name` + `return_tag` + the `fn_return_types` side-table.
     pub return_type: TyState,
     /// Explicit type annotation with value args, e.g. `Maybe(3)` in `val Maybe(3): Some(3)`.
-    pub type_annotation: Option<(Intern<String>, Vec<Spanned<Expr>>)>,
+    pub type_annotation: Option<(Intern<String>, Vec<Typed<Expr>>)>,
     /// Qualified path for type annotation, e.g. `Maybe.Some` in `val Maybe.Some(3): ...`
     pub type_annotation_qual: Option<Spanned<ModPath>>,
     /// `true` for `:=` (immutable/const) binds; `false` for `:` (mutable, alloca-backed) binds.

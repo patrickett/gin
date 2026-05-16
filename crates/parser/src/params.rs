@@ -51,7 +51,7 @@ pub fn parse_param_after_name(
 
     if cursor.eat(&Token::Colon) {
         let expr = expr_parser(cursor);
-        return Some((name, ParameterKind::Default(expr)));
+        return Some((name, ParameterKind::Default(Box::new(expr))));
     }
 
     Some((name, ParameterKind::Generic))

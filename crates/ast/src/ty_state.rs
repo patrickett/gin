@@ -15,7 +15,7 @@ use crate::ty::Ty;
 /// Parse time: `Infer` (no annotation) or `Explicit(TypeExpr)` (user wrote a type).
 /// After resolution: `Resolved(Ty)`.
 /// After flow analysis: `Narrowed { current, original }` for control-flow-refined types.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TyState {
     /// No annotation — type will be inferred from usage.
     Infer,
@@ -26,4 +26,40 @@ pub enum TyState {
     /// Control-flow narrowed type (e.g., after `if x is Some(v)`, `x` becomes
     /// `Narrowed { current: Maybe.Some, original: Maybe }` inside the then-branch).
     Narrowed { current: Ty, original: Box<Ty> },
+}
+
+impl TyState {
+    /// Returns the concrete type if resolved, stripping any narrowing.
+    ///
+    /// For [`TyState::Resolved(ty)`] returns `Some(ty)`.
+    /// For [`TyState::Narrowed { original, .. }`] returns `Some(original)`.
+    /// For [`TyState::Infer`] or [`TyState::Explicit`] returns `None`.
+    pub fn resolved_ty(&self) -> Option<&Ty> {
+        match self {
+            TyState::Resolved(ty) => Some(ty),
+            TyState::Narrowed { original, .. } => Some(original),
+            TyState::Infer | TyState::Explicit(_) => None,
+        }
+    }
+
+    /// Returns the current (possibly narrowed) type if resolved.
+    ///
+    /// For [`TyState::Resolved(ty)`] returns `Some(ty)`.
+    /// For [`TyState::Narrowed { current, .. }`] returns `Some(current)`.
+    /// For [`TyState::Infer`] or [`TyState::Explicit`] returns `None`.
+    pub fn current_ty(&self) -> Option<&Ty> {
+        match self {
+            TyState::Resolved(ty) => Some(ty),
+            TyState::Narrowed { current, .. } => Some(current),
+            TyState::Infer | TyState::Explicit(_) => None,
+        }
+    }
+
+    pub fn is_resolved(&self) -> bool {
+        matches!(self, TyState::Resolved(_))
+    }
+
+    pub fn is_narrowed(&self) -> bool {
+        matches!(self, TyState::Narrowed { .. })
+    }
 }

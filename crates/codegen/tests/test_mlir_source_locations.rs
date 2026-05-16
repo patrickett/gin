@@ -18,7 +18,7 @@ fn codegen_to_mlir_text(source: &str, filename: &str) -> (String, Vec<Diagnostic
     context.get_or_load_dialect("scf");
     context.get_or_load_dialect("llvm");
 
-    let (module, symptoms) = build_module_with_context(&context, &mut ast, source, filename);
+    let (module, symptoms) = build_module_with_context(&context, &mut ast, None, source, filename);
     let mlir_text = module
         .expect("codegen should succeed")
         .as_operation()

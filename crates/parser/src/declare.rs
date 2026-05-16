@@ -3,8 +3,8 @@ use crate::expr::ExprFn;
 use crate::expr::literal::parse_literal;
 use ast::span::SpanId;
 use ast::{
-    Declare, DeclareValue, DocComment, ParameterKind, Parameters, Spanned, TypeExpr, Variant,
-    type_surface_mangle_name,
+    Declare, DeclareValue, DocComment, ParameterKind, Parameters, Spanned, TypeExpr, Typed,
+    Variant, type_surface_mangle_name,
 };
 
 use crate::tag::{parse_pattern_type_expr, parse_type_expr};
@@ -426,6 +426,7 @@ fn parse_params_for_declare(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Op
     cursor.advance();
 
     let mut params = Parameters::new();
+    let mut seen_default = false;
 
     if cursor.is_at(&close_token) {
         cursor.advance();
@@ -433,6 +434,7 @@ fn parse_params_for_declare(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Op
     }
 
     if let Some((key, kind)) = parse_one_declare_param(cursor, expr_parser) {
+        seen_default = matches!(kind, ParameterKind::Default(_));
         params.insert(key, kind);
     }
 
@@ -441,6 +443,18 @@ fn parse_params_for_declare(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Op
             break;
         }
         if let Some((key, kind)) = parse_one_declare_param(cursor, expr_parser) {
+            if seen_default && !matches!(kind, ParameterKind::Default(_)) {
+                cursor.error(
+                    format!(
+                        "positional parameter `{}` appears after a default parameter",
+                        key.as_str()
+                    ),
+                    cursor.current_span(),
+                );
+            }
+            if matches!(kind, ParameterKind::Default(_)) {
+                seen_default = true;
+            }
             params.insert(key, kind);
         }
     }
@@ -466,7 +480,7 @@ fn parse_one_declare_param(
         ));
     }
 
-    // Named: id [Tag | id | : expr]
+    // Named: id [Tag | id | : TypeExpr]
     let name = match cursor.peek() {
         Some(Token::Id(n)) => {
             let id = cursor.intern(n);
@@ -476,7 +490,17 @@ fn parse_one_declare_param(
         _ => return None,
     };
 
+    // In declaration (type-level) position, `:` introduces a type default,
+    // not a value default. This is how `Box(x, a: LibcAllocator)` works.
+    if cursor.eat(&Token::Colon) {
+        let sp = parse_type_expr(cursor, expr_parser)?;
+        return Some((
+            name,
+            ParameterKind::Default(Box::new(Typed::infer(sp.value.into(), sp.span_id))),
+        ));
+    }
+
     // Shared helper supports `id Tag`, `id id` (type variable, e.g.
-    // `Range[x] has (start x, end x)`), `id: expr`, and bare `id` (generic).
+    // `Range[x] has (start x, end x)`), and bare `id` (generic).
     crate::params::parse_param_after_name(cursor, expr_parser, name)
 }

@@ -6,12 +6,13 @@
 
 use crate::analysis::const_value::ConstValue;
 use crate::ty::{Ty, str_record_ty};
-use crate::{DeclareValue, FnCall, Literal, ParameterKind, TypeExpr, type_surface_mangle_name};
+use crate::{
+    DeclareValue, FnCall, Literal, ParameterKind, Parameters, TypeExpr, type_surface_mangle_name,
+};
 use i256::I256;
 use internment::Intern;
 use std::collections::HashMap;
 
-/// Check whether a [`TypeExpr`] is a type surface.
 pub fn is_type_surface(e: &TypeExpr) -> bool {
     matches!(
         e,
@@ -38,10 +39,9 @@ pub fn typevars_from_receiver(recv: &TypeExpr) -> HashMap<Intern<String>, Ty> {
     out
 }
 
-/// Resolve a type-surface [`TypeExpr`] to a [`Ty`] using a pre-built `tag_types` map.
 pub fn resolve_type_expr_from_map(e: &TypeExpr, tag_types: &HashMap<Intern<String>, Ty>) -> Ty {
     let empty: HashMap<Intern<String>, Ty> = HashMap::new();
-    resolve_type_expr_with_subst(e, tag_types, &empty)
+    resolve_type_expr_with_subst(e, tag_types, &empty, None)
 }
 
 /// Resolve a type-surface [`TypeExpr`] to a [`Ty`], substituting any type-variable
@@ -53,10 +53,15 @@ pub fn resolve_type_expr_from_map(e: &TypeExpr, tag_types: &HashMap<Intern<Strin
 /// (`x -> Ty::Opaque(x)`) so the same opaque tag flows through params, body, and
 /// return type. At call sites, `subst` can bind `x` to a concrete type (e.g.
 /// `Ty::Int`) to instantiate the signature.
+///
+/// `tag_params` maps tag names to their declaration parameters. Used to fill
+/// default type arguments (e.g. `a: LibcAllocator` in `Box(x, a: LibcAllocator)`)
+/// when fewer args are provided at the use site.
 pub fn resolve_type_expr_with_subst(
     e: &TypeExpr,
     tag_types: &HashMap<Intern<String>, Ty>,
     subst: &HashMap<Intern<String>, Ty>,
+    tag_params: Option<&HashMap<Intern<String>, Parameters>>,
 ) -> Ty {
     match e {
         TypeExpr::Nominal(name, _) => {
@@ -67,7 +72,7 @@ pub fn resolve_type_expr_with_subst(
         }
         TypeExpr::Generic { name, params, .. } => {
             let base = tag_types.get(name).cloned().unwrap_or(Ty::Opaque(*name));
-            let local_subst = build_subst_for_generic(params, tag_types, subst);
+            let local_subst = build_subst_for_generic(params, tag_types, subst, tag_params, name);
             if local_subst.is_empty() {
                 base
             } else {
@@ -82,8 +87,8 @@ pub fn resolve_type_expr_with_subst(
     }
 }
 
-/// Walk a `Ty` and replace every `Ty::Opaque(name)` with `subst[name]` when
-/// present. Recurses through Records, Unions, Tuples, Arrays, Ptr, and Ref.
+/// Substitute type variables, replacing only [`Ty::Opaque`] leaves that match an
+/// entry in `subst`.
 pub fn substitute_in_ty(ty: &Ty, subst: &HashMap<Intern<String>, Ty>) -> Ty {
     match ty {
         Ty::Opaque(name) => subst.get(name).cloned().unwrap_or(Ty::Opaque(*name)),
@@ -122,7 +127,7 @@ pub fn substitute_in_ty(ty: &Ty, subst: &HashMap<Intern<String>, Ty>) -> Ty {
     }
 }
 
-/// Build the symbol name for a callee: `foo` or `io.print` (matches codegen).
+/// Flattens a qualified path into a single symbol name for codegen (e.g. `io.print`).
 pub fn mangled_fn_call_name(call: &FnCall) -> Intern<String> {
     if call.path.segments.is_empty() {
         call.path.root
@@ -136,8 +141,6 @@ pub fn mangled_fn_call_name(call: &FnCall) -> Intern<String> {
     }
 }
 
-/// Resolve a declared tag name to its full `Ty` by looking through the raw
-/// `DeclareValue` declarations across one or more `FileAst`s.
 pub fn resolve_name_from_files(
     name: Intern<String>,
     files: &[crate::FileAst],
@@ -152,33 +155,78 @@ pub fn resolve_name_from_files(
     resolve_name(name, &raw, recursion_depth)
 }
 
-// ── Internal helpers ───────────────────────────────────────────────────────
-
 fn build_subst_for_generic(
-    params: &[(Intern<String>, ParameterKind)],
+    use_site_params: &[(Intern<String>, ParameterKind)],
     tag_types: &HashMap<Intern<String>, Ty>,
     outer_subst: &HashMap<Intern<String>, Ty>,
+    tag_params: Option<&HashMap<Intern<String>, Parameters>>,
+    tag_name: &Intern<String>,
 ) -> HashMap<Intern<String>, Ty> {
     let mut out = HashMap::new();
-    for (name, kind) in params {
-        let resolved = match kind {
-            ParameterKind::Tagged(sp)
-                if sp
-                    .value
-                    .as_type_expr()
-                    .is_some_and(|te| is_type_surface(&te)) =>
-            {
-                resolve_type_expr_with_subst(
-                    &sp.value.as_type_expr().unwrap(),
-                    tag_types,
-                    outer_subst,
-                )
+
+    // Process use-site args by positional correspondence with declaration params.
+    if let Some(decl_params) = tag_params.and_then(|tp| tp.get(tag_name)) {
+        let decl_entries: Vec<_> = decl_params.iter().collect();
+
+        for (i, (name, kind)) in use_site_params.iter().enumerate() {
+            let resolved = match kind {
+                ParameterKind::Tagged(sp)
+                    if sp
+                        .value
+                        .as_type_expr()
+                        .is_some_and(|te| is_type_surface(&te)) =>
+                {
+                    resolve_type_expr_with_subst(
+                        &sp.value.as_type_expr().unwrap(),
+                        tag_types,
+                        outer_subst,
+                        tag_params,
+                    )
+                }
+                ParameterKind::Generic => Ty::Opaque(*name),
+                _ => continue,
+            };
+            // Map the resolved type to the declaration param at this position.
+            if let Some((decl_name, _)) = decl_entries.get(i) {
+                out.insert(**decl_name, resolved);
             }
-            ParameterKind::Generic => Ty::Opaque(*name),
-            _ => continue,
-        };
-        out.insert(*name, resolved);
+        }
+
+        // Fill defaults for any remaining declaration params that weren't provided.
+        for (decl_name, decl_kind) in decl_entries.iter().skip(use_site_params.len()) {
+            if let ParameterKind::Default(expr) = decl_kind
+                && let Some(te) = expr.value.as_type_expr()
+                && is_type_surface(&te)
+            {
+                let default_ty =
+                    resolve_type_expr_with_subst(&te, tag_types, outer_subst, tag_params);
+                out.insert(**decl_name, default_ty);
+            }
+        }
+    } else {
+        // No declaration params available — fall back to old behavior.
+        for (name, kind) in use_site_params {
+            let resolved = match kind {
+                ParameterKind::Tagged(sp)
+                    if sp
+                        .value
+                        .as_type_expr()
+                        .is_some_and(|te| is_type_surface(&te)) =>
+                {
+                    resolve_type_expr_with_subst(
+                        &sp.value.as_type_expr().unwrap(),
+                        tag_types,
+                        outer_subst,
+                        tag_params,
+                    )
+                }
+                ParameterKind::Generic => Ty::Opaque(*name),
+                _ => continue,
+            };
+            out.insert(*name, resolved);
+        }
     }
+
     out
 }
 

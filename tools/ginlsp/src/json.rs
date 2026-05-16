@@ -1,5 +1,5 @@
 //! JSON serialization helpers for Gin types and ASTs.
-//! Used by ginmcp to format responses, and available to ginlsp when needed.
+//! Used to format JSON responses for the LSP.
 
 use ast::flow::ConstValue;
 use ast::ty::Ty;

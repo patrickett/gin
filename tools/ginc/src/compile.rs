@@ -1,18 +1,17 @@
 //! Compilation orchestration.
 
 use crate::cli::Args;
-use ast::FileAst;
+use ast::{
+    FileId, TypedFileAst,
+    typed::{TransformCtx, transform_file_with_ctx},
+};
 use codegen::emit;
 use diagnostic::{Category, Diagnostic};
 use flask::FlaskConfig;
-use internment::Intern;
 use lexer::debug_tokens;
 use parser::parse_source_full;
 use resolve::ParsedFile;
 use std::path::{Path, PathBuf};
-struct TypecheckResult {
-    symptoms: Vec<Vec<Diagnostic>>,
-}
 
 /// Analogous to the `ginc` command
 pub struct GinCompiler;
@@ -74,38 +73,23 @@ impl GinCompiler {
             return;
         }
 
-        // eprintln!(
-        //     "DEBUG resolved files: {:?}",
-        //     files
-        //         .iter()
-        //         .map(|f| f.path.display().to_string())
-        //         .collect::<Vec<_>>()
-        // );
-        let checked = typecheck(&files);
-
-        if print_typecheck_diagnostics(&files, &checked) {
-            return;
-        }
-
-        let mut merged_ast = match resolve::merge_asts_checked(&files) {
-            Ok(m) => m,
-            Err(symptoms) => {
-                print_standalone_import_diagnostics(&files, &symptoms);
-                return;
+        // Transform files into TypedFileAsts with cross-file resolution.
+        // No merge step — each file stays independent. Codegen consumes
+        // the first file's typed AST (entry file for binaries, or primary for libraries).
+        let typed_asts: Vec<TypedFileAst> = {
+            let mut results: Vec<TypedFileAst> = Vec::with_capacity(files.len());
+            for (i, f) in files.iter().enumerate() {
+                let ctx = TransformCtx::from_typed_asts(&results);
+                let typed = transform_file_with_ctx(f.output.ast.clone(), FileId(i as u32), &ctx);
+                results.push(typed);
             }
+            results
         };
 
-        if matches!(args.emit, crate::cli::Emit::Exe)
-            && !is_library
-            && !validate_main_binary(&merged_ast, &path)
-        {
-            return;
-        }
-
         match args.emit {
-            crate::cli::Emit::Mlir => emit_mlir(&files, &mut merged_ast),
+            crate::cli::Emit::Mlir => emit_mlir_typed(&files, &typed_asts),
             crate::cli::Emit::Obj | crate::cli::Emit::Exe => {
-                emit_native(&files, &mut merged_ast, args, &path, is_library)
+                emit_native_typed(&files, &typed_asts, args, &path, is_library)
             }
             crate::cli::Emit::Tokens => unreachable!(),
         }
@@ -124,22 +108,6 @@ fn parse(sources: &[(PathBuf, String)]) -> Vec<ParsedFile> {
             }
         })
         .collect()
-}
-
-fn typecheck(files: &[ParsedFile]) -> TypecheckResult {
-    let asts: Vec<_> = files.iter().map(|f| f.output.ast.clone()).collect();
-
-    // resolve_types embeds diagnostics in each FileAst.
-    // We clone each file, resolve it against the snapshot, then collect diagnostics.
-    let symptoms: Vec<Vec<diagnostic::Diagnostic>> = asts
-        .iter()
-        .map(|ast| {
-            let analysis = ast::resolve_types(ast, &asts);
-            analysis.diagnostics
-        })
-        .collect();
-
-    TypecheckResult { symptoms }
 }
 
 // Delegates to resolve::collect_gin_files (single source of truth).
@@ -200,59 +168,6 @@ fn print_diagnostics(files: &[ParsedFile]) -> bool {
     has_flaws
 }
 
-/// Print type-check diagnostics returned by the typecheck stage.
-fn print_typecheck_diagnostics(files: &[ParsedFile], result: &TypecheckResult) -> bool {
-    let mut has_flaws = false;
-    for (i, symptoms) in result.symptoms.iter().enumerate() {
-        let file = &files[i];
-        let filename = path_for_diagnostic_report(&file.path);
-        let span_table = file.output.ast.span_table();
-        for diag in symptoms {
-            diag.print(span_table, &file.source, &filename);
-            if matches!(diag.category, Category::Flaw) {
-                has_flaws = true;
-            }
-        }
-    }
-    has_flaws
-}
-
-fn validate_main_binary(merged: &FileAst, input: &Path) -> bool {
-    let is_main_entry = input.file_name().is_some_and(|n| n == "main.gin");
-    if !is_main_entry {
-        return true;
-    }
-    let main_name = Intern::<String>::from_ref("main");
-    if merged.defs.contains_key(&main_name) {
-        return true;
-    }
-    eprintln!(
-        "error: binary entry main.gin must define a top-level `main` binding (see {})",
-        input.display()
-    );
-    false
-}
-
-fn print_standalone_import_diagnostics(files: &[ParsedFile], symptoms: &[Diagnostic]) {
-    let Some(primary) = files.first() else {
-        for s in symptoms {
-            eprintln!(
-                "{}: [{}] {}",
-                s.category.as_str(),
-                s.error_code(),
-                s.message
-            );
-        }
-        return;
-    };
-    let label = path_for_diagnostic_report(&primary.path);
-    let span_table = primary.output.ast.span_table();
-    let source = primary.source.as_str();
-    for d in symptoms {
-        d.print(span_table, source, &label);
-    }
-}
-
 /// Print codegen / link diagnostics with the same ariadne layout as parse and type errors.
 ///
 /// Uses the first parsed `.gin` file as source context (span table + text). This matches
@@ -280,13 +195,16 @@ fn print_codegen_diagnostics(files: &[ParsedFile], symptoms: &[Diagnostic]) {
     }
 }
 
-/// Print MLIR text to stdout.
-fn emit_mlir(files: &[ParsedFile], merged_ast: &mut FileAst) {
+/// Print MLIR text to stdout using the typed AST (no merge step).
+fn emit_mlir_typed(files: &[ParsedFile], typed_asts: &[TypedFileAst]) {
+    let Some(typed) = typed_asts.first() else {
+        return;
+    };
     let (source, label) = match files.first() {
         Some(f) => (f.source.as_str(), path_for_diagnostic_report(&f.path)),
         None => ("", "<stdin>".to_string()),
     };
-    let (result, symptoms) = emit::build_module_text(merged_ast, source, &label);
+    let (result, symptoms) = emit::build_module_text_from_typed(typed, source, &label);
     match result {
         Some(mlir_text) => {
             print_codegen_diagnostics(files, &symptoms);
@@ -298,14 +216,17 @@ fn emit_mlir(files: &[ParsedFile], merged_ast: &mut FileAst) {
     }
 }
 
-/// Compile to object file / executable.
-fn emit_native(
+/// Compile to object file / executable using the typed AST (no merge step).
+fn emit_native_typed(
     files: &[ParsedFile],
-    merged_ast: &mut FileAst,
+    typed_asts: &[TypedFileAst],
     args: &Args,
     path: &Path,
     is_library: bool,
 ) {
+    let (Some(typed), Some(file)) = (typed_asts.first(), files.first()) else {
+        return;
+    };
     let obj_path = if is_library {
         // Folder packages reuse `args.output` only for `-o exe`/`link` destinations.
         // When emitting Exe we always stage `.o` under `<pkg>/target/` so `-o foo`
@@ -334,14 +255,13 @@ fn emit_native(
         let _ = std::fs::create_dir_all(parent);
     }
 
-    let (source, label) = match files.first() {
-        Some(f) => (f.source.as_str(), path_for_diagnostic_report(&f.path)),
-        None => ("", path.to_string_lossy().into_owned()),
-    };
+    let source = file.source.as_str();
+    let label = path_for_diagnostic_report(&file.path);
     let profile = args.profile.into();
-    let (ok, symptoms) = emit::compile_to_object(merged_ast, &obj_path, profile, source, &label);
+    let (ok, symptoms) =
+        emit::compile_to_object_from_typed(typed, &obj_path, profile, source, &label);
     if !ok {
-        print_codegen_diagnostics(files, &symptoms);
+        eprintln!("Codegen failed: {:?}", symptoms);
         return;
     }
 
@@ -353,11 +273,12 @@ fn emit_native(
         let (linked, link_symptoms) =
             emit::link_executable(&obj_path, &exe_path, args.target.as_deref());
         if !linked {
-            print_codegen_diagnostics(files, &link_symptoms);
+            for s in &link_symptoms {
+                eprintln!("Link error: {}", s.message);
+            }
         }
         let _ = std::fs::remove_file(&obj_path);
     } else {
-        print_codegen_diagnostics(files, &symptoms);
         println!("Compiled to {}", obj_path.display());
     }
 }
