@@ -49,7 +49,7 @@ pub(crate) fn fmt_type_expr_surface(e: &TypeExpr, f: &mut fmt::Formatter<'_>) ->
             Ok(())
         }
         TypeExpr::Generic { name, params, .. } => {
-            write!(f, "{}[", name.as_str())?;
+            write!(f, "{}(", name.as_str())?;
             let mut first = true;
             for (k, v) in params.iter() {
                 if !first {
@@ -79,7 +79,7 @@ pub(crate) fn fmt_type_expr_surface(e: &TypeExpr, f: &mut fmt::Formatter<'_>) ->
                     }
                 }
             }
-            write!(f, "]")
+            write!(f, ")")
         }
         TypeExpr::Literal(..) => write!(f, "<type>"),
     }

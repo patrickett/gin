@@ -415,7 +415,7 @@ mod tests {
     fn dot_completion_union_variants() {
         use crate::handlers::completion::dot_completions;
 
-        let source = "Maybe[x] is Some(x) or None";
+        let source = "Maybe(x) is Some(x) or None";
         let po = parse_from_str(source);
         let analysis = ast::resolve_types(&po, std::slice::from_ref(&po));
 

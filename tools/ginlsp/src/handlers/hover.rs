@@ -199,14 +199,14 @@ impl Backend {
                                 ---\n\n\
                                 The left-hand name **is** shorthand for the right-hand shape.\n\n\
                                 ```gin\n\
-                                Pointer[x] is @x                     --- Pointer[x] = \u{27E8}pointer to x\u{27E9}\n\
-                                String is (bytes List[Byte])          --- String = \u{27E8}list of bytes\u{27E9}\n\
+                                Pointer(x) is @x                     --- Pointer(x) = \u{27E8}pointer to x\u{27E9}
+                                String is (bytes List(Byte))          --- String = \u{27E8}list of bytes\u{27E9}
                                 ```\n\n\
                                 #### Also used for\n\n\
                                 **Unions** — the type is one of several variants:\n\n\
                                 ```gin\n\
                                 Bool is True or False\n\
-                                Maybe[x] is Some(x) or None\n\
+                                Maybe(x) is Some(x) or None
                                 ```\n\n\
                                 **Ranges** — the type is an integer within bounds:\n\n\
                                 ```gin\n\
@@ -245,9 +245,9 @@ impl Backend {
                                 ```\n\n\
                                 #### More examples\n\n\
                                 ```gin\n\
-                                Register has (value Str)                        --- \u{27}has a value\u{27} interface\n\
-                                List[x] has (pointer Pointer[x], length Length)  --- collection interface\n\
-                                Range[x] has (start x, end x)                    --- bounded-range interface\n\
+                                Register has (value Str)                        --- \u{27}has a value\u{27} interface
+                                List(x) has (pointer Pointer(x), length Length)  --- collection interface
+                                Range(x) has (start x, end x)                    --- bounded-range interface\n\
                                 ```\n\n\
                                 > **Contrast with** `is`, which defines a type alias \
                                 (the name is shorthand for a shape).",
@@ -639,7 +639,7 @@ true  := Bool.True
     /// and size/align metadata.
     #[test]
     fn hover_maybe_tag() {
-        let source = "Maybe[x] is    --- Used to represent values that may or may not be present.\n    Some(x) or --- Has some value `x`\n    None       --- Has no value\n";
+        let source = "Maybe(x) is    --- Used to represent values that may or may not be present.\n    Some(x) or --- Has some value `x`\n    None       --- Has no value\n";
         let po = parser::parse_source_full(source);
 
         // Hover at "Maybe"
@@ -650,7 +650,7 @@ true  := Bool.True
 
         // Should contain the declaration
         assert!(
-            hover.contains("Maybe[x] is Some(x) or None"),
+            hover.contains("Maybe(x) is Some(x) or None"),
             "hover on Maybe should show the tag declaration, got: {hover}"
         );
 
@@ -672,7 +672,7 @@ true  := Bool.True
     /// shows the parent tag name, the variant shape, and the variant's doc comment.
     #[test]
     fn hover_some_variant() {
-        let source = "Maybe[x] is    --- Used to represent values that may or may not be present.\n    Some(x) or --- Has some value `x`\n    None       --- Has no value\n";
+        let source = "Maybe(x) is    --- Used to represent values that may or may not be present.\n    Some(x) or --- Has some value `x`\n    None       --- Has no value\n";
         let po = parser::parse_source_full(source);
 
         // Hover at "Some"
@@ -706,7 +706,7 @@ true  := Bool.True
     /// shows the parent tag name, the variant shape, and the variant's doc comment.
     #[test]
     fn hover_none_variant() {
-        let source = "Maybe[x] is    --- Used to represent values that may or may not be present.\n    Some(x) or --- Has some value `x`\n    None       --- Has no value\n";
+        let source = "Maybe(x) is    --- Used to represent values that may or may not be present.\n    Some(x) or --- Has some value `x`\n    None       --- Has no value\n";
         let po = parser::parse_source_full(source);
 
         // Hover at "None"
@@ -741,7 +741,7 @@ true  := Bool.True
     /// correct doc comments attached.
     #[test]
     fn maybe_variants_have_doc_comments() {
-        let source = "Maybe[x] is    --- Used to represent values that may or may not be present.\n    Some(x) or --- Has some value `x`\n    None       --- Has no value\n";
+        let source = "Maybe(x) is    --- Used to represent values that may or may not be present.\n    Some(x) or --- Has some value `x`\n    None       --- Has no value\n";
         let po = parser::parse_source_full(source);
 
         let declare = po
@@ -782,7 +782,7 @@ true  := Bool.True
     /// Verify that hovering on variants in a multi-variant tag works correctly.
     ///
     /// The parser requires `or` immediately after the first variant shape,
-    /// before any doc comment (same pattern as `Maybe[x] is Some(x) or`).
+    /// before any doc comment (same pattern as `Maybe(x) is Some(x) or`).
     #[test]
     fn hover_multi_variant_tag() {
         let source =

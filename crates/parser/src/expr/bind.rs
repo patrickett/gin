@@ -11,7 +11,7 @@ use super::ExprFn;
 use super::control::parse_return;
 use crate::cursor::TokenCursor;
 use crate::path::{parse_id, parse_tag_variant_path};
-use crate::tag::{parse_tag_type_params, parse_type_expr};
+use crate::tag::parse_type_expr;
 
 type ReturnTypePart = (
     Option<Intern<String>>,
@@ -200,27 +200,8 @@ fn parse_return_type_part(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Retu
         _ => return (None, None, None, None),
     };
 
-    if cursor.is_at(&Token::BracketOpen) {
-        let params = parse_tag_type_params(cursor, expr_parser);
-        if !params.is_empty() {
-            let end_span = cursor.last_consumed_span();
-            let span = cursor.merge_span(name_span, end_span);
-            return (
-                None,
-                Some(Box::new(Spanned {
-                    value: TypeExpr::Generic {
-                        name,
-                        params: params.into_iter().collect(),
-                        span,
-                    },
-                    span_id: span,
-                })),
-                None,
-                None,
-            );
-        }
-    }
-
+    // `Tag(args)` in return position — try type params first, fall through
+    // to value annotation if args are value expressions.
     if cursor.is_at(&Token::ParenOpen) {
         let args = parse_type_annotation_args(cursor, expr_parser);
         if !args.is_empty() {

@@ -419,11 +419,10 @@ fn parse_signed_int(cursor: &mut TokenCursor) -> Option<I256> {
 }
 
 fn parse_params_for_declare(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Parameters> {
-    let (_open_token, close_token) = match cursor.peek() {
-        Some(Token::ParenOpen) => (Token::ParenOpen, Token::ParenClose),
-        Some(Token::BracketOpen) => (Token::BracketOpen, Token::BracketClose),
-        _ => return None,
-    };
+    if !cursor.is_at(&Token::ParenOpen) {
+        return None;
+    }
+    let close_token = Token::ParenClose;
     cursor.advance();
 
     let mut params = Parameters::new();

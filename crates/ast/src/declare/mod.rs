@@ -75,7 +75,7 @@ impl std::fmt::Display for Declare {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.name.as_str())?;
         if let Some(params) = &self.params {
-            write!(f, "[")?;
+            write!(f, "(")?;
             let mut first = true;
             for (k, v) in params {
                 if !first {
@@ -84,7 +84,7 @@ impl std::fmt::Display for Declare {
                 first = false;
                 write!(f, "{}{v}", k.as_str())?;
             }
-            write!(f, "]")?;
+            write!(f, ")")?;
         }
         let keyword = match &self.value {
             DeclareValue::Record(_) => " has",

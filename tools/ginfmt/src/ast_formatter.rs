@@ -183,7 +183,7 @@ impl<'a> AstFormatter<'a> {
     }
 
     fn format_params(&mut self, params: &Parameters) {
-        self.buffer.push('[');
+        self.buffer.push('(');
         let st = self.span_table;
         let src = self.source;
         for (i, (name, kind)) in params.iter().enumerate() {
@@ -206,7 +206,7 @@ impl<'a> AstFormatter<'a> {
                 }
             }
         }
-        self.buffer.push(']');
+        self.buffer.push(')');
     }
 
     fn format_union_variants(&mut self, variants: &[Variant]) {
