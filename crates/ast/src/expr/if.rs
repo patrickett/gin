@@ -1,8 +1,8 @@
 use crate::TypeExpr;
 use crate::expr::Typed;
 use crate::expr::r#return::Return;
-use crate::span::SpanId;
 use crate::span::Spanned;
+use crate::span::SubSpan;
 
 use crate::expr::Expr;
 
@@ -21,5 +21,5 @@ pub struct IfExpr {
     pub condition: IfCondition,
     pub body: Vec<Typed<Expr>>,
     pub ret: Return,
-    pub span: SpanId,
+    pub body_span: SubSpan,
 }

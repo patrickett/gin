@@ -129,6 +129,35 @@ impl Span {
     }
 }
 
+/// A span that represents a narrower range within some enclosing span.
+///
+/// Used inside expression variant structs that always live inside `Typed<T>`.
+/// The full expression span is on the `Typed<T>` wrapper; `SubSpan` values
+/// are more specific ranges within it (e.g. the body of an `if` excluding
+/// the keyword, or just the `loop` keyword inside a while-loop).
+///
+/// This is a newtype rather than a bare `SpanId` to make the relationship
+/// explicit at the type level: a `SubSpan` is *always* a subset of the
+/// wrapping `Typed<T>`'s span.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SubSpan(pub(crate) SpanId);
+
+impl SubSpan {
+    /// Create a new SubSpan from a SpanId.
+    #[inline]
+    #[must_use]
+    pub const fn new(id: SpanId) -> Self {
+        Self(id)
+    }
+
+    /// Convert back to the raw SpanId.
+    #[inline]
+    #[must_use]
+    pub const fn into_inner(self) -> SpanId {
+        self.0
+    }
+}
+
 /// A table that stores all spans and maps SpanIds to Span data.
 ///
 /// This enables interned span storage - each unique span is stored once and

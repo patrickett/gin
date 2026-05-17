@@ -65,6 +65,11 @@ fn fmt_variant_shape_surface(e: &TypeExpr, f: &mut std::fmt::Formatter<'_>) -> s
             Ok(())
         }
         TypeExpr::Literal(lit, _) => write!(f, "{lit}"),
+        TypeExpr::Pointer(inner) => {
+            write!(f, "@")?;
+            fmt_variant_shape_surface(&inner.value, f)
+        }
+        TypeExpr::Unit => write!(f, "()"),
     }
 }
 

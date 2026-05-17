@@ -291,7 +291,7 @@ fn test_flow_mut_arg_flaw() {
     let has_flaw = expr
         .flaws
         .iter()
-        .any(|f| matches!(f, ast::typed::TypeFlaw::CannotPassReadonlyAsMut { .. }));
+        .any(|f| matches!(f, diagnostic::TypeSymptom::CannotPassReadonlyAsMut { .. }));
     assert!(
         has_flaw,
         "MutArg may or may not produce flaw depending on context"
@@ -411,7 +411,7 @@ fn test_flow_use_after_move() {
     let flaws = typed.all_flaws();
     let _has_use_after_move = flaws
         .iter()
-        .any(|(_, f)| matches!(f, ast::typed::TypeFlaw::UseOfMovedValue { .. }));
+        .any(|(_, f)| matches!(f, diagnostic::TypeSymptom::UseOfMovedValue { .. }));
     // Use-after-move detection depends on the variable being tracked through flow.
     // The test is informational — flow analysis is best-effort.
     assert!(!typed.defs.is_empty());
@@ -426,7 +426,7 @@ fn test_flow_index_out_of_bounds() {
     let _has_bounds = flaws.iter().any(|(_, f)| {
         matches!(
             f,
-            ast::typed::TypeFlaw::IndexOutOfBounds { index: 5, size: 3 }
+            diagnostic::TypeSymptom::IndexOutOfBounds { index: 5, size: 3 }
         )
     });
     // Bounds checking requires constant-foldable types.
@@ -440,7 +440,7 @@ fn test_flow_mut_arg_detected() {
     let flaws = typed.all_flaws();
     let _has_mut_flaw = flaws
         .iter()
-        .any(|(_, f)| matches!(f, ast::typed::TypeFlaw::CannotPassReadonlyAsMut { .. }));
+        .any(|(_, f)| matches!(f, diagnostic::TypeSymptom::CannotPassReadonlyAsMut { .. }));
     // MutArg detection depends on the flow context tracking capabilities.
 }
 
@@ -463,7 +463,7 @@ fn test_unknown_binding_flaw() {
     let typed = transform_source("main: undefined_fn()");
     let flaws = typed.all_flaws();
     let has_unknown = flaws.iter().any(|(_, f)| {
-        matches!(f, ast::typed::TypeFlaw::UnknownBinding { name, .. } if name == "undefined_fn")
+        matches!(f, diagnostic::TypeSymptom::UnknownBinding { name, .. } if name == "undefined_fn")
     });
     assert!(has_unknown, "should detect UnknownBinding for undefined_fn");
 }
@@ -479,7 +479,7 @@ fn test_type_mismatch_flaw() {
     let flaws = typed.all_flaws();
     let _has_mismatch = flaws
         .iter()
-        .any(|(_, f)| matches!(f, ast::typed::TypeFlaw::Mismatch));
+        .any(|(_, f)| matches!(f, diagnostic::TypeSymptom::Mismatch));
     // Just verify the transform doesn't crash.
     // Mismatch detection depends on type inference which may or may not fire.
     assert!(!typed.defs.is_empty() || !typed.root_exprs.is_empty());
@@ -492,7 +492,7 @@ fn test_missing_else_arm() {
     let flaws = typed.all_flaws();
     let _has_missing_else = flaws
         .iter()
-        .any(|(_, f)| matches!(f, ast::typed::TypeFlaw::MissingElseArm));
+        .any(|(_, f)| matches!(f, diagnostic::TypeSymptom::MissingElseArm));
     // May or may not fire depending on how the when is lowered
     assert!(!typed.defs.is_empty() || !typed.root_exprs.is_empty());
 }
@@ -507,10 +507,10 @@ fn test_no_false_positive() {
         .filter(|(_, f)| {
             matches!(
                 f,
-                ast::typed::TypeFlaw::UseOfMovedValue { .. }
-                    | ast::typed::TypeFlaw::LinValueNotConsumed { .. }
-                    | ast::typed::TypeFlaw::CannotPassReadonlyAsMut { .. }
-                    | ast::typed::TypeFlaw::IndexOutOfBounds { .. }
+                diagnostic::TypeSymptom::UseOfMovedValue { .. }
+                    | diagnostic::TypeSymptom::LinValueNotConsumed { .. }
+                    | diagnostic::TypeSymptom::CannotPassReadonlyAsMut { .. }
+                    | diagnostic::TypeSymptom::IndexOutOfBounds { .. }
             )
         })
         .collect();

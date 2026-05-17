@@ -3,7 +3,6 @@ use crate::path::ModPath;
 use crate::span::SpanId;
 use crate::ty::Ty;
 use crate::ty_state::TyState;
-use crate::typed::ParseFlaw;
 use internment::Intern;
 
 use std::ops::{Deref, DerefMut};
@@ -37,7 +36,7 @@ pub struct Typed<T> {
     /// Source location for diagnostics and LSP.
     pub span_id: SpanId,
     /// Parse-time flaws (lex, parse, import errors) attached to this node.
-    pub flaws: Vec<ParseFlaw>,
+    pub flaws: Vec<diagnostic::DiagnosticCode>,
 }
 
 impl<T> Typed<T> {
@@ -242,13 +241,13 @@ pub enum Expr {
     Bind(Box<Bind>),
     When(WhenExpr),
     If(IfExpr),
-    SelfRef(SpanId),
+    SelfRef,
     /// A capitalized variant constructor with arguments, e.g. `Some(5)`.
     TagCall(TagCall),
     /// A bare capitalized tag in expression position, e.g. `None`, `True`.
-    AnonymousTag(Intern<String>, SpanId),
+    AnonymousTag(Intern<String>),
     /// Type position: bare `Tag` (e.g. `Str` in `(x Str)`).
-    TypeNominal(Intern<String>, SpanId),
+    TypeNominal(Intern<String>),
     /// Type position: qualified path `Tag.Tag…`.
     TypeQualified(Spanned<ModPath>),
     /// Type position: `Tag(...)` with generic / named parameters.
@@ -257,7 +256,6 @@ pub enum Expr {
     TypeGeneric {
         name: Intern<String>,
         params: Vec<(Intern<String>, ParameterKind)>,
-        span: SpanId,
     },
     /// Stack-allocate an array: `(init_expr; N)` — emits `llvm.alloca N×sizeof(elem)`.
     TupleAlloc {
@@ -314,26 +312,32 @@ pub enum Expr {
 impl From<crate::TypeExpr> for Expr {
     fn from(te: crate::TypeExpr) -> Self {
         match te {
-            crate::TypeExpr::Nominal(name, span) => Expr::TypeNominal(name, span),
+            crate::TypeExpr::Nominal(name, _span) => Expr::TypeNominal(name),
             crate::TypeExpr::Qualified(path) => Expr::TypeQualified(path),
-            crate::TypeExpr::Generic { name, params, span } => {
-                Expr::TypeGeneric { name, params, span }
-            }
+            crate::TypeExpr::Generic { name, params, .. } => Expr::TypeGeneric { name, params },
             crate::TypeExpr::Literal(..) => Expr::Lit(crate::Literal::Number(0)),
+            crate::TypeExpr::Pointer(_) | crate::TypeExpr::Unit => {
+                Expr::Lit(crate::Literal::Number(0))
+            }
         }
     }
 }
 
 impl Expr {
     /// If this expression is a type-position variant, return the equivalent [`TypeExpr`].
+    ///
+    /// The returned [`TypeExpr`] carries [`SpanId::INVALID`] for leaf variants since the
+    /// span is available from the enclosing [`Spanned`](crate::Spanned) or
+    /// [`Typed`] wrapper. Prefer calling this on the wrapper and using its [`SpanId`]
+    /// when a real span is needed.
     pub fn as_type_expr(&self) -> Option<crate::TypeExpr> {
         match self {
-            Expr::TypeNominal(name, span) => Some(crate::TypeExpr::Nominal(*name, *span)),
+            Expr::TypeNominal(name) => Some(crate::TypeExpr::Nominal(*name, SpanId::INVALID)),
             Expr::TypeQualified(path) => Some(crate::TypeExpr::Qualified(path.clone())),
-            Expr::TypeGeneric { name, params, span } => Some(crate::TypeExpr::Generic {
+            Expr::TypeGeneric { name, params } => Some(crate::TypeExpr::Generic {
                 name: *name,
                 params: params.clone(),
-                span: *span,
+                span: SpanId::INVALID,
             }),
             _ => None,
         }

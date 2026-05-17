@@ -519,7 +519,7 @@ impl<'a> FlowAnalyzer<'a> {
 
             Expr::TagCall(_) => {}
             Expr::AnonymousTag(..) => {}
-            Expr::SelfRef(_) => {}
+            Expr::SelfRef => {}
 
             Expr::Lit(_) => {}
             Expr::FormatString(_) => {}
@@ -821,7 +821,7 @@ impl<'a> FlowAnalyzer<'a> {
 
     fn extract_var_name(&self, expr: &Expr) -> Option<Intern<String>> {
         match expr {
-            Expr::AnonymousTag(name, _) if self.in_scope.contains(name) => Some(*name),
+            Expr::AnonymousTag(name) if self.in_scope.contains(name) => Some(*name),
             // Lowercase variable references are parsed as FnCall with no args and no path segments.
             Expr::FnCall(call) if call.args.is_none() && call.path.segments.is_empty() => {
                 let name = call.path.root;
@@ -831,7 +831,7 @@ impl<'a> FlowAnalyzer<'a> {
                     None
                 }
             }
-            Expr::SelfRef(_) => Some(Intern::<String>::from_ref("self")),
+            Expr::SelfRef => Some(Intern::<String>::from_ref("self")),
             _ => None,
         }
     }

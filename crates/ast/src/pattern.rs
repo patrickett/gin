@@ -63,6 +63,8 @@ pub fn type_surface_mangle_name(e: &TypeExpr) -> &str {
             Literal::Float(_) => "__literal_float",
             Literal::Number(_) => "__literal_number",
         },
+        TypeExpr::Pointer(inner) => type_surface_mangle_name(&inner.value),
+        TypeExpr::Unit => "()",
     }
 }
 
@@ -79,7 +81,11 @@ pub fn literal_value_from_expr(e: &Expr) -> Option<crate::Literal> {
 pub fn pattern_type_binding_names(expr: &TypeExpr) -> Vec<Intern<String>> {
     match expr {
         TypeExpr::Generic { params, .. } => params.iter().map(|(k, _)| *k).collect(),
-        TypeExpr::Nominal(..) | TypeExpr::Qualified(_) | TypeExpr::Literal(..) => Vec::new(),
+        TypeExpr::Nominal(..)
+        | TypeExpr::Qualified(_)
+        | TypeExpr::Literal(..)
+        | TypeExpr::Pointer(_)
+        | TypeExpr::Unit => Vec::new(),
     }
 }
 

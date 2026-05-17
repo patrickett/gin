@@ -23,4 +23,8 @@ pub enum TypeExpr {
     },
     /// Literal value in type position (e.g. union variant like `X0 is 'x0'`).
     Literal(Literal, SpanId),
+    /// Pointer to another type (e.g. `@x` — raw pointer to `x`).
+    Pointer(Box<Spanned<TypeExpr>>),
+    /// The unit type `()`.
+    Unit,
 }

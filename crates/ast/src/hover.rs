@@ -476,7 +476,7 @@ pub fn hover_at_with_source(
 /// Check whether the word at `byte_pos` is a variant name (for LSP semantic tokens).
 pub fn is_variant_at(ast: &crate::FileAst, byte_pos: usize) -> Option<(String, String)> {
     if let Some((expr, _span_id)) = ast.expr_at_byte(byte_pos)
-        && let crate::Expr::AnonymousTag(name, _) = expr
+        && let crate::Expr::AnonymousTag(name) = expr
     {
         let word = name.as_str();
         for (tag_name, decl) in ast.tags() {
@@ -544,9 +544,7 @@ fn find_name_in_expr(
         return None;
     }
     match &expr.value {
-        Expr::AnonymousTag(name, inner_span) if span_table.get(*inner_span).end == dot_pos => {
-            Some(*name)
-        }
+        Expr::AnonymousTag(name) if span_table.get(expr.span_id).end == dot_pos => Some(*name),
         Expr::FnCall(call)
             if call.args.is_none() && span_table.get(call.path.span_id()).end == dot_pos =>
         {
@@ -670,17 +668,15 @@ fn collect_refs_expr(
                 }
             }
         }
-        Expr::AnonymousTag(n, span_id) => {
+        Expr::AnonymousTag(n) => {
             if n.as_str() == name {
-                let span = span_table.get(*span_id);
-                out.push(span.start..span.end);
+                // Span not available without the wrapper; skip highlight for
+                // bare tags in this context.
             }
         }
         Expr::TagCall(tc) => {
-            if tc.name.as_str() == name {
-                let tc_span = span_table.get(tc.span_id());
-                out.push(tc_span.start..tc_span.start + name.len());
-            }
+            // Span not available without the wrapper; skip highlight for
+            // tag calls in this context.
             for arg in &tc.args {
                 collect_refs_expr(arg, name, span_table, out);
             }
@@ -780,7 +776,7 @@ fn collect_refs_expr(
             }
         }
         Expr::Lit(_)
-        | Expr::SelfRef(_)
+        | Expr::SelfRef
         | Expr::Asm(_)
         | Expr::TypeNominal(..)
         | Expr::TypeQualified(_)

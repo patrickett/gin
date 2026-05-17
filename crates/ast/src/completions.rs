@@ -290,7 +290,7 @@ fn find_call_in_expr(
             }
         }
         Expr::Lit(_)
-        | Expr::SelfRef(_)
+        | Expr::SelfRef
         | Expr::AnonymousTag(..)
         | Expr::Asm(_)
         | Expr::TypeNominal(..)
@@ -365,7 +365,7 @@ mod tests {
     }
 
     fn tagged_param(name: &str, type_name: &str) -> (Intern<String>, ParameterKind) {
-        let expr = Expr::TypeNominal(intern(type_name), SpanId::new(0));
+        let expr = Expr::TypeNominal(intern(type_name));
         (
             intern(name),
             ParameterKind::Tagged(Box::new(Spanned {

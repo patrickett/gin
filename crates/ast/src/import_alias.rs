@@ -44,9 +44,11 @@ struct ImportAliasFolder {
 impl Folder for ImportAliasFolder {
     fn fold_expr(&mut self, expr: &mut Expr) -> ControlFlow<()> {
         match expr {
-            Expr::AnonymousTag(name, span) => {
+            Expr::AnonymousTag(name) => {
                 if let Some(_target) = self.alias_map.get(name) {
-                    self.alias_spans.push(*span);
+                    // Span removed from AnonymousTag; alias tracking for bare tags
+                    // is handled through the type-expr pass instead.
+                    // self.alias_spans.push(*span);
                     // Encode the target as the path of a TagCall or similar
                     // expression position. Type expressions are handled in a
                     // separate pass.

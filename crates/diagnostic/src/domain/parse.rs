@@ -1,6 +1,6 @@
 use crate::{Category, DiagnosticLike};
 
-#[derive(Debug, Clone, PartialEq, Eq, strum::AsRefStr)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, strum::AsRefStr)]
 #[non_exhaustive]
 pub enum ParseSymptom {
     #[strum(serialize = "parse-unexpected-token")]

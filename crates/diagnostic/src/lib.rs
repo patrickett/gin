@@ -1,5 +1,11 @@
 #![deny(unsafe_code)]
-#![warn(clippy::correctness, clippy::suspicious, clippy::style, clippy::complexity, clippy::perf)]
+#![warn(
+    clippy::correctness,
+    clippy::suspicious,
+    clippy::style,
+    clippy::complexity,
+    clippy::perf
+)]
 //! Unified diagnostics for the ginc compiler.
 //!
 //! This module provides a single `Diagnostic` type that encompasses all
@@ -17,13 +23,13 @@ pub use domain::*;
 pub use span::{Span, SpanId, SpanTable, Spanned};
 
 /// A secondary span label attached to a diagnostic.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RelatedSpan {
     pub span_id: SpanId,
     pub label: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Diagnostic {
     pub code: DiagnosticCode,
     pub message: String,

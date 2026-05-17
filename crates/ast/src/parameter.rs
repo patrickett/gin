@@ -79,6 +79,11 @@ pub(crate) fn fmt_type_expr_surface(e: &TypeExpr, f: &mut fmt::Formatter<'_>) ->
             write!(f, ")")
         }
         TypeExpr::Literal(..) => write!(f, "<type>"),
+        TypeExpr::Pointer(inner) => {
+            write!(f, "@")?;
+            fmt_type_expr_surface(&inner.value, f)
+        }
+        TypeExpr::Unit => write!(f, "()"),
     }
 }
 

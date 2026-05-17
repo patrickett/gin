@@ -43,7 +43,7 @@ pub fn parse_param_after_name(
         let ty_name = cursor.intern(t);
         cursor.advance();
         let sp = Spanned {
-            value: Expr::TypeNominal(ty_name, span),
+            value: Expr::TypeNominal(ty_name),
             span_id: span,
         };
         return Some((name, ParameterKind::Tagged(Box::new(sp))));

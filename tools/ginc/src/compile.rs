@@ -86,6 +86,14 @@ impl GinCompiler {
             results
         };
 
+        // Print type-check flaws from the typed AST (uses the diagnostic crate for proper
+        // messages, help text, and ariadne rendering).
+        //
+        // Type flaws are printed but do NOT gate compilation — type checking is
+        // best-effort diagnostics; codegen may still succeed for code the checker
+        // doesn't fully understand yet (e.g. template unions).
+        print_type_diagnostics(&files, &typed_asts);
+
         match args.emit {
             crate::cli::Emit::Mlir => emit_mlir_typed(&files, &typed_asts),
             crate::cli::Emit::Obj | crate::cli::Emit::Exe => {
@@ -166,6 +174,25 @@ fn print_diagnostics(files: &[ParsedFile]) -> bool {
         }
     }
     has_flaws
+}
+
+/// Print type-check flaws from the typed AST for every file.
+///
+/// Flaws are already [`diagnostic::TypeSymptom`] values — they are converted to
+/// [`Diagnostic`] via the [`DiagnosticLike`](diagnostic::DiagnosticLike) trait and
+/// rendered with the same ariadne-based printer used for parse diagnostics.
+fn print_type_diagnostics(files: &[ParsedFile], typed_asts: &[TypedFileAst]) {
+    use diagnostic::DiagnosticLike;
+
+    for (file, typed) in files.iter().zip(typed_asts) {
+        let filename = path_for_diagnostic_report(&file.path);
+        let span_table = file.output.ast.span_table();
+        for (expr_id, flaw) in typed.all_flaws() {
+            let span_id = typed.exprs.span[expr_id.as_usize()];
+            let diag = flaw.clone().into_diagnostic(span_id);
+            diag.print(span_table, &file.source, &filename);
+        }
+    }
 }
 
 /// Print codegen / link diagnostics with the same ariadne layout as parse and type errors.

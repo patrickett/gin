@@ -43,7 +43,7 @@ fn rewrites_function_call_alias() {
 fn rewrites_anonymous_tag_alias() {
     let mut ast = FileAst::default();
     ast.exprs.push((
-        Expr::AnonymousTag(Intern::from_ref("Range"), SpanId::INVALID),
+        Expr::AnonymousTag(Intern::from_ref("Range")),
         SpanId::INVALID,
     ));
     add_symbol_alias(&mut ast, "Range", "core", "Range");
@@ -53,7 +53,7 @@ fn rewrites_anonymous_tag_alias() {
     // AnonymousTag is handled by a separate pass, so it remains unchanged.
     let expr = &ast.exprs[0].0;
     assert!(
-        matches!(expr, Expr::AnonymousTag(n, _) if n.as_str() == "Range"),
+        matches!(expr, Expr::AnonymousTag(n) if n.as_str() == "Range"),
         "expected AnonymousTag(Range), got {:?}",
         expr,
     );

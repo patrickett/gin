@@ -1,6 +1,6 @@
 use crate::expr::Expr;
 use crate::expr::Typed;
-use crate::span::SpanId;
+use crate::span::SubSpan;
 
 /// While loop: loop while a condition holds.
 ///
@@ -14,5 +14,5 @@ use crate::span::SpanId;
 pub struct WhileLoop {
     pub cond: Box<Typed<Expr>>,
     pub exprs: Vec<Typed<Expr>>,
-    pub span: SpanId,
+    pub keyword_span: SubSpan,
 }

@@ -137,8 +137,7 @@ pub fn hover(
                             let def_span =
                                 sp_typed.definition_span(source, pos.line, pos.character);
                             def_span.and_then(|(start_byte, _end_byte)| {
-                                let (l, c) =
-                                    ast::byte_offset_to_position(start_byte as usize, source);
+                                let (l, c) = ast::byte_offset_to_position(start_byte, source);
                                 typed.hover_at(source, l, c)
                             })
                         })
@@ -423,20 +422,7 @@ pub fn diagnostics(po: &ParseOutput, source: &str, scratchpad: Option<&str>) -> 
             source: "parse",
         });
     }
-    // Collect diagnostics from the typed AST transform (type flaws, etc.).
-    {
-        let typed = to_typed_ast(&po.ast);
-        for (_expr_id, flaw) in typed.all_flaws() {
-            diags.push(DiagItem {
-                line: 0,
-                character: 0,
-                message: format!("{:?}", flaw),
-                category: "Flaw".to_string(),
-                code: format!("{:?}", flaw),
-                source: "typeck",
-            });
-        }
-    }
+
     // Also include scratchpad parse symptoms.
     if let Some(sp_source) = scratchpad.filter(|s| !s.is_empty()) {
         let sp_po = parser::parse_source_full(sp_source);
@@ -458,7 +444,7 @@ pub fn diagnostics(po: &ParseOutput, source: &str, scratchpad: Option<&str>) -> 
 }
 
 /// This is the typed-AST equivalent of `diagnostics()`, producing `DiagItem`s
-/// from `TypeFlaw`s on each expression node in the typed expression arena.
+/// from `TypeSymptom`s on each expression node in the typed expression arena.
 pub fn typed_diagnostics(po: &ParseOutput, source: &str) -> Vec<DiagItem> {
     let st = po.ast.span_table();
     let mut diags: Vec<DiagItem> = Vec::new();
@@ -477,20 +463,24 @@ pub fn typed_diagnostics(po: &ParseOutput, source: &str) -> Vec<DiagItem> {
         });
     }
 
-    // Transform to TypedFileAst and collect TypeFlaws via all_flaws().
+    use diagnostic::DiagnosticLike;
+
+    // Transform to TypedFileAst and collect type flaws via all_flaws().
     let typed = ast::typed::transform_file(po.ast.clone(), ast::typed::FileId(0));
     for (expr_id, flaw) in typed.all_flaws() {
         let idx = expr_id.as_usize();
         let span_id = typed.exprs.span[idx];
         let sp = typed.span_table.get(span_id);
         let (l, c) = byte_offset_to_position(sp.start, source);
-        let msg = format!("{:?}", flaw);
+        let d = flaw.clone().into_diagnostic(span_id);
+        let category = d.category.as_str().to_string();
+        let code = d.error_code().to_string();
         diags.push(DiagItem {
             line: l,
             character: c,
-            message: msg,
-            category: "Flaw".to_string(),
-            code: "TypeFlaw".to_string(),
+            message: d.message,
+            category,
+            code,
             source: "typeck.typed",
         });
     }

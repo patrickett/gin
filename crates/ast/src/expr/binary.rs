@@ -1,22 +1,19 @@
 use crate::expr::Expr;
 use crate::expr::Typed;
-use crate::span::SpanId;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Binary {
     pub lhs: Box<Typed<Expr>>,
     pub op: BinOp,
     pub rhs: Box<Typed<Expr>>,
-    pub span: SpanId,
 }
 
 impl Binary {
-    pub fn new(lhs: Typed<Expr>, op: BinOp, rhs: Typed<Expr>, span: SpanId) -> Self {
+    pub fn new(lhs: Typed<Expr>, op: BinOp, rhs: Typed<Expr>) -> Self {
         Self {
             lhs: Box::new(lhs),
             op,
             rhs: Box::new(rhs),
-            span,
         }
     }
 }

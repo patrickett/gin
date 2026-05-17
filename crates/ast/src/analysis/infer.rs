@@ -281,7 +281,7 @@ impl TyInfer for Expr {
             Expr::TagCall(tc) => tc.infer_ty(env),
             Expr::When(w) => w.infer_ty(env),
 
-            Expr::AnonymousTag(name, _) => Ty::Opaque(*name),
+            Expr::AnonymousTag(name) => Ty::Opaque(*name),
             Expr::FormatString(_) => str_record_ty(),
             Expr::Loop(_) => Ty::Unit,
             Expr::If(_) => Ty::Unit,
@@ -290,7 +290,7 @@ impl TyInfer for Expr {
             Expr::TupleSet { .. } | Expr::BufSet { .. } => Ty::Unit,
             Expr::Cast { ty, .. } => Ty::Opaque(*ty),
 
-            Expr::SelfRef(_) => env
+            Expr::SelfRef => env
                 .locals
                 .get_type(&Intern::<String>::from_ref("self"))
                 .unwrap_or_else(|| Ty::Opaque(Intern::<String>::from_ref("Self"))),

@@ -11,5 +11,4 @@ pub enum FormatPart {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FormatString {
     pub parts: Vec<FormatPart>,
-    pub span: SpanId,
 }

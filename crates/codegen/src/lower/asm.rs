@@ -39,7 +39,7 @@ fn derive_constraint_string(
                     }
                 };
                 let reg = tc.args.first().and_then(|arg| match &arg.value {
-                    Expr::AnonymousTag(name, _) => Some(name.as_str().to_lowercase()),
+                    Expr::AnonymousTag(name) => Some(name.as_str().to_lowercase()),
                     _ => None,
                 });
                 if matches!(tc.name.as_str(), "Output" | "LateOut" | "InOut") {
@@ -47,7 +47,7 @@ fn derive_constraint_string(
                 }
                 (prefix, reg)
             }
-            Expr::AnonymousTag(name, _) if name.as_str() == "ClobberMemory" => {
+            Expr::AnonymousTag(name) if name.as_str() == "ClobberMemory" => {
                 ("~", Some("memory".to_string()))
             }
             _ => {

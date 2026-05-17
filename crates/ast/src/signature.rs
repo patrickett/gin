@@ -182,6 +182,12 @@ fn hash_type_expr(hasher: &mut Sha256, e: &TypeExpr) {
         TypeExpr::Literal(..) => {
             let _ = write!(hasher, "LIT");
         }
+        TypeExpr::Pointer(_) => {
+            let _ = write!(hasher, "PTR");
+        }
+        TypeExpr::Unit => {
+            let _ = write!(hasher, "UNIT");
+        }
     }
 }
 
@@ -410,6 +416,7 @@ fn extract_type_expr_sig(e: &TypeExpr) -> TagSig {
             TagSig::Qualified(parts)
         }
         TypeExpr::Literal(..) => TagSig::Nominal(String::new()),
+        TypeExpr::Pointer(_) | TypeExpr::Unit => TagSig::Nominal(String::new()),
     }
 }
 

@@ -2,14 +2,12 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub(crate) use crate::analysis::FlowContext;
 use crate::prelude::*;
-use crate::span::{SpanId, SpanTable};
+use crate::span::{SpanId, SpanTable, SubSpan};
 use crate::ty::Ty;
 
-mod flaw;
 mod id;
 mod transform;
 
-pub use flaw::*;
 pub use id::*;
 pub use transform::*;
 
@@ -29,7 +27,7 @@ pub struct TypedExpr {
     /// Compile-time constant value, if this expression can be folded.
     pub const_value: Option<crate::analysis::ConstValue>,
     /// Type/flow/flaw diagnostics attached to this expression.
-    pub flaws: Vec<TypeFlaw>,
+    pub flaws: Vec<diagnostic::TypeSymptom>,
     /// Flow-sensitive context at this program point, if computed.
     pub flow: Option<FlowContext>,
 }
@@ -51,7 +49,9 @@ pub struct TypedWhenExpr {
     /// Subject expression for pattern matching (`None` for condition-based when).
     pub subject: Option<ExprId>,
     pub arms: Vec<TypedWhenArm>,
-    pub span: SpanId,
+    /// Covers from after the `when` keyword to end.
+    /// The full expression span is on the `TypedExpr` arena entry.
+    pub body_span: SubSpan,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -59,14 +59,16 @@ pub enum TypedWhenArm {
     Cond {
         condition: ExprId,
         body: ExprId,
-        span: SpanId,
+        /// Span of this arm (condition and body).
+        arm_span: SubSpan,
     },
     Is {
         pattern: Box<crate::span::Spanned<TypeExpr>>,
         body: ExprId,
-        span: SpanId,
+        /// Span of this is-arm (pattern and body).
+        arm_span: SubSpan,
     },
-    Else(ExprId, SpanId),
+    Else(ExprId, SubSpan),
 }
 
 /// Typed if-expression — like `IfExpr` but with `ExprId` children.
@@ -75,7 +77,9 @@ pub struct TypedIfExpr {
     pub condition: TypedIfCondition,
     pub then_body: ExprId,
     pub else_body: Option<ExprId>,
-    pub span: SpanId,
+    /// Covers from condition start to end (excludes the `if` keyword).
+    /// The full expression span (including `if`) is on the `TypedExpr` arena entry.
+    pub body_span: SubSpan,
 }
 
 /// Condition for a typed if-expression.
@@ -93,7 +97,9 @@ pub enum TypedIfCondition {
 pub struct TypedLoop {
     pub kind: TypedLoopKind,
     pub body: ExprId,
-    pub span: SpanId,
+    /// Span of the `loop` keyword only.
+    /// The full expression span is on the `TypedExpr` arena entry.
+    pub keyword_span: SubSpan,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -190,6 +196,8 @@ pub struct TypedTag {
     pub doc_comment: Option<DocComment>,
     /// Tag parameters (type variables, defaults), if any.
     pub params: Option<Parameters>,
+    /// Formatted declaration text (e.g. "Bool is True or False"), for use in hover.
+    pub declaration_text: String,
 }
 
 /// A fully-resolved bind (function or value definition).
@@ -415,10 +423,15 @@ impl TypedFileAst {
         let tag_id = TagId(word_interned);
 
         if let Some(tag) = self.tags.get(&tag_id) {
-            let ty_str = format_ty_for_hover(&tag.resolved_ty);
-            let mut result = format!("`{}`: {}", tag_id.0.as_str(), ty_str);
+            let mut result = format!("```gin\n{}\n```", tag.declaration_text);
             if let Some(ref doc) = tag.doc_comment {
-                result = format!("{} --- {}", result, doc.value);
+                result = format!("{}\n---\n{}", result, doc.value);
+            }
+            // Show size/align when the type has a concrete layout.
+            let size = crate::ty::ty_byte_size_static(&tag.resolved_ty);
+            let align = crate::ty::ty_alignment(&tag.resolved_ty);
+            if size > 0 || align > 0 {
+                result.push_str(&format!("\n\n---\n\nsize = {size}, align = {align}"));
             }
             return Some(result);
         }
@@ -512,7 +525,7 @@ impl TypedFileAst {
     }
 
     /// Collect all type flaws from the expression arena.
-    pub fn all_flaws(&self) -> Vec<(ExprId, &TypeFlaw)> {
+    pub fn all_flaws(&self) -> Vec<(ExprId, &diagnostic::TypeSymptom)> {
         let mut flaws = Vec::new();
         for i in 0..self.exprs.kind.len() {
             let expr_id = ExprId(i as u32);
@@ -548,7 +561,13 @@ pub(crate) fn format_ty_for_hover(ty: &Ty) -> String {
         }
         Ty::Bool => "Bool".to_string(),
         Ty::Unit => "()".to_string(),
-        Ty::Record { name, .. } => format!("Record({})", name.as_str()),
+        Ty::Record { fields, .. } => {
+            let parts: Vec<String> = fields
+                .iter()
+                .map(|(fname, fty)| format!("{}: {}", fname.as_str(), format_ty_for_hover(fty)))
+                .collect();
+            parts.join(", ")
+        }
         Ty::Union { name, .. } => format!("Union({})", name.as_str()),
         Ty::Opaque(name) => name.as_str().to_string(),
         Ty::Array { elem, size } => format!("[{}; {}]", format_ty_for_hover(elem), size),

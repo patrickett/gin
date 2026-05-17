@@ -903,13 +903,13 @@ impl<'c> Lower<'c> for Expr {
                 );
                 None
             }
-            Expr::SelfRef(span) => symtab.get("self").or_else(|| {
-                ctx.current_span.set(*span);
+            Expr::SelfRef => symtab.get("self").or_else(|| {
+                ctx.current_span.set(SpanId::INVALID);
                 ctx.emit_symptom(TypeSymptom::SelfOutsideMethod);
                 None
             }),
             Expr::TagCall(tc) => tc.lower(ctx, block, symtab),
-            Expr::AnonymousTag(tag_name, _) => {
+            Expr::AnonymousTag(tag_name) => {
                 // Bare capitalized tag — treat as a unit variant constructor.
                 // Note: unknown tag diagnostics are emitted by typeck; codegen just fails gracefully.
                 let (union_name, discriminant, _) = ctx.lookup_variant(*tag_name)?;
@@ -1166,7 +1166,7 @@ fn spanned_uses_self(sp: &Typed<Expr>) -> bool {
 
 fn expr_uses_self(expr: &Expr) -> bool {
     match expr {
-        Expr::SelfRef(_) => true,
+        Expr::SelfRef => true,
         Expr::Binary(b) => spanned_uses_self(&b.lhs) || spanned_uses_self(&b.rhs),
         Expr::FnCall(c) => {
             // `self.x` and `self.method(args)` start with `self` as the path root.

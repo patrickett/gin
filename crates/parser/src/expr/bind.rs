@@ -262,9 +262,9 @@ fn try_args_as_type_params(args: &[Typed<Expr>]) -> Option<Vec<(Intern<String>, 
             }
             // Bare capitalized tag, e.g. `Int` in `Range(Int)` → concrete
             // instantiation. Tagged so the typechecker resolves and validates it.
-            Expr::AnonymousTag(n, _) => {
+            Expr::AnonymousTag(n) => {
                 let sp = Spanned {
-                    value: Expr::TypeNominal(*n, *span),
+                    value: Expr::TypeNominal(*n),
                     span_id: *span,
                 };
                 out.push((*n, ParameterKind::Tagged(Box::new(sp))));

@@ -4,7 +4,6 @@ use crate::expr::Expr;
 use crate::expr::Typed;
 use crate::path::ModPath;
 use crate::span::Spanned;
-use crate::span::{HasSpanId, SpanId};
 
 /// A capitalized variant constructor call, e.g. `Some(5)` or `Maybe.Some(3)`.
 ///
@@ -17,11 +16,4 @@ pub struct TagCall {
     /// Optional qualified path (e.g., ModPath { root: "Maybe", segments: ["Some"] })
     pub qual_path: Option<Spanned<ModPath>>,
     pub args: Vec<Typed<Expr>>,
-    pub span: SpanId,
-}
-
-impl HasSpanId for TagCall {
-    fn span_id(&self) -> SpanId {
-        self.span
-    }
 }

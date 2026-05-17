@@ -32,6 +32,7 @@ pub fn stage_declare(parse_ast: &ParseAst, file_id: FileId, ctx: &TransformCtx) 
             attributes: declare.attributes.clone(),
             doc_comment: declare.doc_comment.clone(),
             params: declare.params.clone(),
+            declaration_text: declare.to_string(),
         };
 
         typed.tags.insert(tag_id, typed_tag);
@@ -271,6 +272,10 @@ fn resolve_variant_shape(
             let name = Intern::new("__const__".to_string());
             (name, vec![])
         }
+        TypeExpr::Pointer(_) | TypeExpr::Unit => {
+            let name = Intern::new("__unknown__".to_string());
+            (name, vec![])
+        }
     }
 }
 
@@ -292,7 +297,7 @@ fn resolve_type_from_typed_expr(expr: &Expr, tag_types: &HashMap<Intern<String>,
             },
             Literal::String(_) => Ty::Opaque(Intern::new("Str".to_string())),
         },
-        Expr::TypeNominal(name, _) => tag_types.get(name).cloned().unwrap_or(Ty::Opaque(*name)),
+        Expr::TypeNominal(name) => tag_types.get(name).cloned().unwrap_or(Ty::Opaque(*name)),
         Expr::TypeQualified(path) => {
             let last = path.segments.last().copied().unwrap_or(path.root);
             tag_types.get(&last).cloned().unwrap_or(Ty::Opaque(last))
@@ -332,16 +337,25 @@ fn resolve_return_type(bind: &Bind, tag_types: &HashMap<Intern<String>, Ty>) -> 
 
 fn resolve_param_types(
     bind: &Bind,
-    _tag_types: &HashMap<Intern<String>, Ty>,
+    tag_types: &HashMap<Intern<String>, Ty>,
 ) -> Vec<(Intern<String>, Ty)> {
-    bind.param_slots
+    let Some(params) = &bind.params else {
+        return Vec::new();
+    };
+    params
         .iter()
-        .map(|(name, slot)| {
-            let ty = slot
-                .ty
-                .resolved_ty()
-                .cloned()
-                .unwrap_or(Ty::Opaque(Intern::new("infer".to_string())));
+        .map(|(name, kind)| {
+            let ty = match kind {
+                ParameterKind::Tagged(sp) => {
+                    if let Some(te) = sp.value.as_type_expr() {
+                        resolve_type_expr_from_map(&te, tag_types)
+                    } else {
+                        Ty::Opaque(*name)
+                    }
+                }
+                ParameterKind::Generic => Ty::Opaque(*name),
+                ParameterKind::Default(v) => resolve_type_from_typed_expr(&v.value, tag_types),
+            };
             (*name, ty)
         })
         .collect()

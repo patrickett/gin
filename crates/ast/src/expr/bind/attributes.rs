@@ -270,7 +270,7 @@ pub(crate) fn extract_complexity(args: &[Typed<Expr>]) -> Option<Complexity> {
     let variant = args.first()?;
     match &variant.value {
         // Bare tag (no parens) — e.g. `Constant`
-        Expr::AnonymousTag(n, _) => match n.as_str() {
+        Expr::AnonymousTag(n) => match n.as_str() {
             "Constant" => Some(Complexity::Constant),
             _ => None,
         },
@@ -313,7 +313,7 @@ pub(crate) fn extract_complexity(args: &[Typed<Expr>]) -> Option<Complexity> {
 fn extract_complexity_expr_from_expr(expr: &Expr) -> Option<ComplexityExpr> {
     match expr {
         Expr::FnCall(call) if call.args.is_none() => Some(ComplexityExpr::Var(call.path.root)),
-        Expr::AnonymousTag(n, _) => Some(ComplexityExpr::Var(*n)),
+        Expr::AnonymousTag(n) => Some(ComplexityExpr::Var(*n)),
         Expr::Binary(bin) => {
             let left = complexity_var_from_expr(&bin.lhs.value)?;
             let right = complexity_var_from_expr(&bin.rhs.value)?;
@@ -331,7 +331,7 @@ fn extract_complexity_expr_from_expr(expr: &Expr) -> Option<ComplexityExpr> {
 fn complexity_var_from_expr(expr: &Expr) -> Option<Intern<String>> {
     match expr {
         Expr::FnCall(call) if call.args.is_none() => Some(call.path.root),
-        Expr::AnonymousTag(n, _) => Some(*n),
+        Expr::AnonymousTag(n) => Some(*n),
         _ => None,
     }
 }

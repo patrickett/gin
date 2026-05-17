@@ -1,8 +1,8 @@
 use lexer::Token;
 
 use ast::{
-    Expr, FnCall, ForInLoop, IfCondition, IfExpr, Loop, ModPath, Return, Spanned, TypeExpr, Typed,
-    WhenArm, WhenExpr, WhileLoop,
+    Expr, FnCall, ForInLoop, IfCondition, IfExpr, Loop, ModPath, Return, Spanned, SubSpan,
+    TypeExpr, Typed, WhenArm, WhenExpr, WhileLoop,
 };
 
 use super::ExprFn;
@@ -178,7 +178,7 @@ pub fn parse_if_expr(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<If
         condition,
         body,
         ret,
-        span: cursor.merge_span(cond_span, end_span),
+        body_span: SubSpan::new(cursor.merge_span(cond_span, end_span)),
     })
 }
 
@@ -213,7 +213,7 @@ pub fn parse_when_expr(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<
             let mut arms = vec![WhenArm::Cond {
                 condition: Box::new(initial_expr),
                 body: Box::new(first_result),
-                span: cursor.merge_span(when_start_span, cursor.current_span()),
+                arm_span: SubSpan::new(cursor.merge_span(when_start_span, cursor.current_span())),
             }];
 
             // Look for the else arm (newlines auto-skipped by peek)
@@ -224,7 +224,10 @@ pub fn parse_when_expr(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<
             } else if cursor.is_at(&Token::Else) {
                 cursor.advance();
                 let body = expr_parser(cursor);
-                arms.push(WhenArm::Else(Box::new(body), cursor.last_consumed_span()));
+                arms.push(WhenArm::Else(
+                    Box::new(body),
+                    SubSpan::new(cursor.last_consumed_span()),
+                ));
             }
 
             // If we consumed a continuation Indent, eat the matching Dedent
@@ -237,7 +240,7 @@ pub fn parse_when_expr(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<
             Some(WhenExpr {
                 subject: None,
                 arms,
-                span: cursor.merge_span(when_start_span, end_span),
+                body_span: SubSpan::new(cursor.merge_span(when_start_span, end_span)),
             })
         }
         Some(Token::Is) => {
@@ -251,7 +254,7 @@ pub fn parse_when_expr(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<
             Some(WhenExpr {
                 subject: Some(Box::new(initial_expr)),
                 arms,
-                span: cursor.merge_span(when_start_span, end_span),
+                body_span: SubSpan::new(cursor.merge_span(when_start_span, end_span)),
             })
         }
         Some(Token::Indent) => {
@@ -267,7 +270,7 @@ pub fn parse_when_expr(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<
             Some(WhenExpr {
                 subject: Some(Box::new(initial_expr)),
                 arms,
-                span: cursor.merge_span(when_start_span, end_span),
+                body_span: SubSpan::new(cursor.merge_span(when_start_span, end_span)),
             })
         }
         _ => None,
@@ -283,7 +286,10 @@ fn parse_when_boolean_arms(cursor: &mut TokenCursor, expr_parser: ExprFn, arms: 
         if cursor.is_at(&Token::Else) {
             cursor.advance();
             let body = expr_parser(cursor);
-            arms.push(WhenArm::Else(Box::new(body), cursor.last_consumed_span()));
+            arms.push(WhenArm::Else(
+                Box::new(body),
+                SubSpan::new(cursor.last_consumed_span()),
+            ));
             break;
         }
 
@@ -297,7 +303,7 @@ fn parse_when_boolean_arms(cursor: &mut TokenCursor, expr_parser: ExprFn, arms: 
         arms.push(WhenArm::Cond {
             condition: Box::new(cond),
             body: Box::new(body),
-            span,
+            arm_span: SubSpan::new(span),
         });
     }
 }
@@ -312,7 +318,10 @@ fn parse_when_is_arms(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<V
         if cursor.is_at(&Token::Else) {
             cursor.advance();
             let body = expr_parser(cursor);
-            arms.push(WhenArm::Else(Box::new(body), cursor.last_consumed_span()));
+            arms.push(WhenArm::Else(
+                Box::new(body),
+                SubSpan::new(cursor.last_consumed_span()),
+            ));
             break;
         }
 
@@ -357,7 +366,7 @@ fn parse_when_is_arms(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<V
         arms.push(WhenArm::Is {
             pattern: Box::new(pattern),
             body: Box::new(body),
-            span: arm_span,
+            arm_span: SubSpan::new(arm_span),
         });
 
         if indented {
@@ -395,7 +404,7 @@ pub fn parse_loop_expr(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<
             pat: Box::new(pat),
             iter: Box::new(iter),
             exprs,
-            span: cursor.current_span(),
+            keyword_span: SubSpan::new(cursor.current_span()),
         }))
     } else if cursor.is_at(&Token::While) {
         cursor.advance();
@@ -416,7 +425,7 @@ pub fn parse_loop_expr(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<
         Some(Loop::While(WhileLoop {
             cond: Box::new(cond),
             exprs,
-            span: cursor.current_span(),
+            keyword_span: SubSpan::new(cursor.current_span()),
         }))
     } else {
         None

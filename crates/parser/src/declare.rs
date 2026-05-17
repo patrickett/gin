@@ -167,6 +167,18 @@ fn parse_is_rhs(
         cursor.rewind(checkpoint);
     }
 
+    // Unit type: `()`
+    if cursor.is_at(&Token::ParenOpen) && cursor.peek_at(1) == Some(&Token::ParenClose) {
+        cursor.advance(); // eat (
+        cursor.advance(); // eat )
+        let span = cursor.last_consumed_span();
+        let unit_expr = Spanned {
+            value: TypeExpr::Unit,
+            span_id: span,
+        };
+        return (DeclareValue::Alias(Box::new(unit_expr)), None);
+    }
+
     // Union or Alias: starts with optional doc then a type pattern or literal
     let checkpoint = cursor.checkpoint();
     let first_doc = parse_doc_comment(cursor);

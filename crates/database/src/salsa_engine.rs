@@ -100,6 +100,49 @@ impl QueryEngine for SalsaQueryEngine {
 
     fn hover(&self, path: &Path, byte_pos: u32) -> Option<String> {
         let file = self.files.get(path)?;
+        let file_path = file.path(&self.db);
+
+        // Build a cross-file TransformCtx from all registered files in the same
+        // package, so that imported types (e.g. `List`, `Byte`) resolve correctly.
+        if let Some(pkg_root) = file_path.parent().and_then(find_package_root) {
+            let mut pkg_files: Vec<File> = self
+                .files
+                .values()
+                .filter(|f| f.path(&self.db).starts_with(&pkg_root))
+                .copied()
+                .collect();
+            pkg_files.sort_by_key(|f| f.path(&self.db).to_string_lossy().into_owned());
+
+            let mut typed_asts: Vec<ast::typed::TypedFileAst> = Vec::new();
+            let mut target_idx: Option<usize> = None;
+
+            for pf in &pkg_files {
+                let output = file_parse_output(&self.db, *pf);
+                let parse_ast = ast::typed::ParseAst::from_file_ast(output.ast.clone());
+                let file_id = ast::typed::FileId(typed_asts.len() as u32);
+                let ctx = ast::typed::TransformCtx::from_typed_asts(&typed_asts);
+                let typed = ast::typed::transform(parse_ast, file_id, &ctx);
+
+                if pf.path(&self.db) == file_path {
+                    target_idx = Some(typed_asts.len());
+                }
+                typed_asts.push(typed);
+            }
+
+            if let Some(idx) = target_idx {
+                let typed = &typed_asts[idx];
+                let source = file.contents(&self.db);
+                let (line, character) = ast::byte_offset_to_position(byte_pos as usize, source);
+                let hover_text = typed.hover_at(source, line, character)?;
+                let source_name = file_path.parent().and_then(package_source_name);
+                return match source_name {
+                    Some(name) => Some(format!("`{name}`\n\n{hover_text}")),
+                    None => Some(hover_text),
+                };
+            }
+        }
+
+        // Fallback: Salsa-tracked hover_markdown (no cross-file context).
         hover_markdown(&self.db, *file, byte_pos)
     }
 
@@ -117,4 +160,24 @@ impl QueryEngine for SalsaQueryEngine {
             files: self.files.clone(),
         })
     }
+}
+
+/// Walk up from `dir` looking for a `flask.jsonc` package configuration.
+fn find_package_root(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let (_config, root_dir) = flask::FlaskConfig::find_package_config(dir)?;
+    Some(root_dir)
+}
+
+/// Compute the package-qualified source name (e.g. "core" or "core.arch") for
+/// a file in a package. Returns `None` when no package config is found.
+fn package_source_name(dir: &std::path::Path) -> Option<String> {
+    let (config, root_dir) = flask::FlaskConfig::find_package_config(dir)?;
+    if let Ok(rel) = dir.strip_prefix(&root_dir)
+        && let Some(rel_str) = rel.to_str()
+        && !rel_str.is_empty()
+    {
+        let subpath = rel_str.replace('/', ".");
+        return Some(format!("{}.{subpath}", config.name));
+    }
+    Some(config.name)
 }

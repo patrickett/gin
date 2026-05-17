@@ -140,7 +140,7 @@ fn parse_expr_min_prec(cursor: &mut TokenCursor, min_prec: u8) -> Typed<Expr> {
         None => {
             let span = cursor.current_span();
             cursor.error("expected expression", span);
-            return Typed::infer(Expr::AnonymousTag(cursor.intern("Error"), span), span);
+            return Typed::infer(Expr::AnonymousTag(cursor.intern("Error")), span);
         }
     };
 
@@ -194,7 +194,7 @@ fn parse_expr_min_prec(cursor: &mut TokenCursor, min_prec: u8) -> Typed<Expr> {
                 let rhs = parse_expr_min_prec(cursor, 3);
                 let rhs_span = rhs.span_id;
                 lhs = Typed::infer(
-                    Expr::Range(Range::new(lhs, rhs, cursor.merge_span(lhs_span, rhs_span))),
+                    Expr::Range(Range::new(lhs, rhs)),
                     merge_spans(lhs_span, rhs_span, cursor),
                 );
                 cursor.advance_pop();
@@ -212,12 +212,7 @@ fn parse_expr_min_prec(cursor: &mut TokenCursor, min_prec: u8) -> Typed<Expr> {
             let rhs = parse_expr_min_prec(cursor, prec + 1);
             let rhs_span = rhs.span_id;
             lhs = Typed::infer(
-                Expr::Binary(Binary::new(
-                    lhs,
-                    binop,
-                    rhs,
-                    cursor.merge_span(lhs_span, rhs_span),
-                )),
+                Expr::Binary(Binary::new(lhs, binop, rhs)),
                 merge_spans(lhs_span, rhs_span, cursor),
             );
             cursor.advance_pop();
@@ -310,7 +305,7 @@ fn parse_atom(cursor: &mut TokenCursor) -> Typed<Expr> {
             cursor.error("expected expression", span);
             // Advance past the unrecognised token so the caller makes progress
             cursor.advance();
-            Typed::infer(Expr::AnonymousTag(cursor.intern("Error"), span), span)
+            Typed::infer(Expr::AnonymousTag(cursor.intern("Error")), span)
         }
     }
 }
@@ -543,7 +538,7 @@ fn parse_id_atom(cursor: &mut TokenCursor) -> Typed<Expr> {
 
     let span = cursor.current_span();
     cursor.error("expected identifier", span);
-    Typed::infer(Expr::AnonymousTag(cursor.intern("Error"), span), span)
+    Typed::infer(Expr::AnonymousTag(cursor.intern("Error")), span)
 }
 
 // ─── Tag-based Atoms: TagCall, AnonymousTag, Tag-rooted FnCall ────────────────
@@ -571,7 +566,6 @@ fn parse_tag_atom(cursor: &mut TokenCursor) -> Typed<Expr> {
                     name: variant_name,
                     qual_path: Some(path),
                     args,
-                    span,
                 }),
                 span,
             );
@@ -605,18 +599,17 @@ fn parse_tag_atom(cursor: &mut TokenCursor) -> Typed<Expr> {
                     name: name_interned,
                     qual_path: None,
                     args,
-                    span,
                 }),
                 span,
             );
         }
 
-        return Typed::infer(Expr::AnonymousTag(name_interned, tag_span), tag_span);
+        return Typed::infer(Expr::AnonymousTag(name_interned), tag_span);
     }
 
     let span = cursor.current_span();
     cursor.error("expected tag", span);
-    Typed::infer(Expr::AnonymousTag(cursor.intern("Error"), span), span)
+    Typed::infer(Expr::AnonymousTag(cursor.intern("Error")), span)
 }
 
 // ─── Specific Atom Parsers (stub-mandated signatures) ─────────────────────────
@@ -764,11 +757,11 @@ fn parse_self_ref(cursor: &mut TokenCursor) -> Typed<Expr> {
         && let Some((Token::Id(_field), field_span)) = cursor.advance()
     {
         let merged_span = merge_spans(start, field_span, cursor);
-        return Typed::infer(Expr::SelfRef(merged_span), merged_span);
+        return Typed::infer(Expr::SelfRef, merged_span);
     }
 
     // Bare self
-    Typed::infer(Expr::SelfRef(start), start)
+    Typed::infer(Expr::SelfRef, start)
 }
 
 // ─── Infix / Postfix ─────────────────────────────────────────────────────────
@@ -921,20 +914,14 @@ fn parse_format_string_expr(cursor: &mut TokenCursor) -> Typed<Expr> {
                 cursor.advance_drop();
                 let end_span = last_consumed_span(cursor);
                 let fmt_span = merge_spans(start_span, end_span, cursor);
-                return Typed::infer(
-                    Expr::FormatString(FormatString {
-                        parts,
-                        span: fmt_span,
-                    }),
-                    fmt_span,
-                );
+                return Typed::infer(Expr::FormatString(FormatString { parts }), fmt_span);
             }
             Some(Token::UnterminatedFormatString) | None => {
                 cursor.advance_drop();
                 let span = cursor.current_span();
                 cursor.error("unterminated format string", span);
                 return Typed::infer(
-                    Expr::FormatString(FormatString { parts, span }),
+                    Expr::FormatString(FormatString { parts }),
                     merge_spans(start_span, span, cursor),
                 );
             }
@@ -955,10 +942,7 @@ fn parse_asm_expr(cursor: &mut TokenCursor) -> Typed<Expr> {
     // expect (
     if !cursor.eat(&Token::ParenOpen) {
         cursor.error("expected '(' after 'asm'", cursor.current_span());
-        return Typed::infer(
-            Expr::AnonymousTag(cursor.intern("Error"), start_span),
-            start_span,
-        );
+        return Typed::infer(Expr::AnonymousTag(cursor.intern("Error")), start_span);
     }
 
     // first argument = template string
@@ -966,10 +950,7 @@ fn parse_asm_expr(cursor: &mut TokenCursor) -> Typed<Expr> {
         Some((Token::String(s), _span)) => Intern::<String>::from_ref(s),
         _ => {
             cursor.error("expected assembly template string", cursor.current_span());
-            return Typed::infer(
-                Expr::AnonymousTag(cursor.intern("Error"), start_span),
-                start_span,
-            );
+            return Typed::infer(Expr::AnonymousTag(cursor.intern("Error")), start_span);
         }
     };
 
@@ -1039,10 +1020,7 @@ fn parse_asm_expr(cursor: &mut TokenCursor) -> Typed<Expr> {
     // expect )
     if !cursor.eat(&Token::ParenClose) {
         cursor.error("expected ')' after asm operands", cursor.current_span());
-        return Typed::infer(
-            Expr::AnonymousTag(cursor.intern("Error"), start_span),
-            start_span,
-        );
+        return Typed::infer(Expr::AnonymousTag(cursor.intern("Error")), start_span);
     }
 
     // Consume any trailing dedent tokens that were produced by the indent-aware lexer
@@ -1059,7 +1037,6 @@ fn parse_asm_expr(cursor: &mut TokenCursor) -> Typed<Expr> {
             template,
             constraints,
             operands,
-            span: merge_spans(start_span, end_span, cursor),
         }),
         merge_spans(start_span, end_span, cursor),
     )

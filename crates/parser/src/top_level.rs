@@ -518,11 +518,22 @@ fn skip_metadata_offset(cursor: &TokenCursor) -> usize {
             }
             Some(Token::Pound) => {
                 offset += 1;
+                // Track bracket nesting to handle `#[attr([inner])]` correctly.
+                // Depth starts at 0; the `BracketOpen` immediately after `#`
+                // increments to 1, and we break when it returns to 0.
+                let mut depth = 0u32;
                 loop {
                     match cursor.peek_at(offset) {
-                        Some(Token::BracketClose) => {
+                        Some(Token::BracketOpen) => {
+                            depth += 1;
                             offset += 1;
-                            break;
+                        }
+                        Some(Token::BracketClose) => {
+                            depth -= 1;
+                            offset += 1;
+                            if depth == 0 {
+                                break;
+                            }
                         }
                         None => return offset,
                         _ => {
@@ -577,6 +588,7 @@ fn collect_type_surface_tags(expr: &TypeExpr, tags: &mut Vec<(Intern<String>, Sp
         }
         TypeExpr::Qualified(_) => {}
         TypeExpr::Literal(..) => {}
+        TypeExpr::Pointer(_) | TypeExpr::Unit => {}
         TypeExpr::Generic { params, .. } => {
             for (_, pk) in params {
                 match pk {
@@ -606,8 +618,10 @@ struct AnonymousTagCollector {
 impl Visitor for AnonymousTagCollector {
     fn visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
         match expr {
-            Expr::AnonymousTag(name, span) => {
-                self.collected.push((*name, *span));
+            Expr::AnonymousTag(_name) => {
+                // Span removed from AnonymousTag; tag collection from type
+                // surfaces is now handled through the TypeExpr visitor.
+                // self.collected.push((*name, *span));
                 Continue(())
             }
             _ => walk_expr(self, expr),

@@ -488,6 +488,8 @@ fn variant_name(expr: &TypeExpr) -> String {
             .unwrap_or_else(|| path.root.as_str().to_string()),
         TypeExpr::Generic { name, .. } => name.as_str().to_string(),
         TypeExpr::Literal(..) => String::new(),
+        TypeExpr::Pointer(inner) => variant_name(&inner.value),
+        TypeExpr::Unit => String::new(),
     }
 }
 
@@ -505,11 +507,17 @@ fn type_text(expr: &TypeExpr) -> String {
         }
         TypeExpr::Generic { name, .. } => name.as_str().to_string(),
         TypeExpr::Literal(..) => String::new(),
+        TypeExpr::Pointer(inner) => {
+            let mut s = String::from("@");
+            s.push_str(&type_text(&inner.value));
+            s
+        }
+        TypeExpr::Unit => String::from("()"),
     }
 }
 
 /// Fallback expression formatting when span is zero-length.
-fn expr_fallback(expr: &Expr, st: &SpanTable, source: &str) -> String {
+fn expr_fallback(expr: &Expr, _st: &SpanTable, _source: &str) -> String {
     match expr {
         Expr::Lit(lit) => match lit {
             Literal::Number(n) => n.to_string(),
@@ -517,15 +525,8 @@ fn expr_fallback(expr: &Expr, st: &SpanTable, source: &str) -> String {
             Literal::Float(f) => f.to_string(),
             Literal::String(s) => format!("'{}'", s),
         },
-        Expr::AnonymousTag(name, span) => {
-            let s = st.get(*span);
-            if !s.is_empty() {
-                s.extract(source).to_string()
-            } else {
-                name.as_str().to_string()
-            }
-        }
-        Expr::SelfRef(_) => "self".to_string(),
+        Expr::AnonymousTag(name) => name.as_str().to_string(),
+        Expr::SelfRef => "self".to_string(),
         _ => String::new(),
     }
 }

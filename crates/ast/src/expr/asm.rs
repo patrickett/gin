@@ -1,6 +1,5 @@
 use crate::Expr;
 use crate::Typed;
-use crate::span::SpanId;
 use internment::Intern;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -13,6 +12,4 @@ pub struct AsmExpr {
     pub constraints: Vec<Typed<Expr>>,
     /// Input operand expressions
     pub operands: Vec<Typed<Expr>>,
-    /// Source span
-    pub span: SpanId,
 }

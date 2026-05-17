@@ -1,7 +1,7 @@
 use ariadne::Color;
 
 /// Error severity levels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Category {
     /// This is a compiler error and prevents compilation.
     Flaw,

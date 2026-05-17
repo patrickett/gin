@@ -104,6 +104,19 @@ impl Ty {
         matches!(self, Ty::Ptr { .. } | Ty::Ref { .. })
     }
 
+    /// Returns `true` for types that can be used as a `when` condition:
+    /// `Ty::Bool` (from comparisons) or a `Ty::Union` with exactly two
+    /// unit variants (e.g. `Bool is True or False`).
+    pub fn is_bool_like(&self) -> bool {
+        match self {
+            Ty::Bool => true,
+            Ty::Union { variants, .. } => {
+                variants.len() == 2 && variants.iter().all(|(_, fields)| fields.is_empty())
+            }
+            _ => false,
+        }
+    }
+
     pub fn is_union(&self) -> bool {
         matches!(self, Ty::Union { .. })
     }

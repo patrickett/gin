@@ -1,6 +1,6 @@
 use crate::{CodegenSymptom, IoSymptom, LexSymptom, ParseSymptom, TypeSymptom, UseSymptom};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum DiagnosticCode {
     Import(UseSymptom),

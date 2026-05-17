@@ -663,10 +663,10 @@ true  := Bool.True
             "hover on Maybe should show the doc comment"
         );
 
-        // Should show the type
+        // Should show the declaration text
         assert!(
-            hover.contains("Union") || hover.contains("Record"),
-            "hover on Maybe should show the type, got: {hover}"
+            hover.contains("Maybe(x) is Some(x) or None"),
+            "hover on Maybe should show the declaration, got: {hover}"
         );
     }
 

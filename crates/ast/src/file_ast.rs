@@ -428,8 +428,8 @@ impl FileAst {
     pub fn word_at_byte(&self, byte_pos: usize, source: &str) -> Option<String> {
         let (expr, _span_id) = self.expr_at_byte(byte_pos)?;
         match expr {
-            Expr::AnonymousTag(name, _) => Some(name.as_str().to_string()),
-            Expr::SelfRef(_) => Some("self".to_string()),
+            Expr::AnonymousTag(name) => Some(name.as_str().to_string()),
+            Expr::SelfRef => Some("self".to_string()),
             Expr::TagCall(tc) => Some(tc.name.as_str().to_string()),
             Expr::FnCall(call) => {
                 // For method calls like `obj.method`, extract the precise word
@@ -485,7 +485,7 @@ fn find_expr_at_byte<'a>(
 ) -> Option<(&'a Expr, SpanId)> {
     match expr {
         // Leaf nodes — return self
-        Expr::Lit(_) | Expr::SelfRef(_) | Expr::AnonymousTag(..) => Some((expr, span_id)),
+        Expr::Lit(_) | Expr::SelfRef | Expr::AnonymousTag(..) => Some((expr, span_id)),
 
         // Nested: check children, then return self as innermost
         Expr::Bind(bind) => {

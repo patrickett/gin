@@ -1,8 +1,8 @@
 //! Flow analysis tests for the ownership system.
 
 use ast::Expr;
-use ast::typed::{FileId, TypeFlaw, transform_file};
-use diagnostic::TypeSymptom;
+use ast::typed::{FileId, transform_file};
+use diagnostic::{DiagnosticLike, TypeSymptom};
 use internment::Intern;
 
 /// Parse source, transform via typed AST pipeline, and collect diagnostics.
@@ -11,31 +11,8 @@ fn collect_ownership_diagnostics(source: &str) -> Vec<diagnostic::Diagnostic> {
     let typed = transform_file(ast.clone(), FileId(0));
     let mut diags = Vec::new();
     for (_expr_id, flaw) in typed.all_flaws() {
-        let symptom = match flaw {
-            TypeFlaw::UseOfMovedValue { name } => {
-                TypeSymptom::UseOfMovedValue { name: name.clone() }
-            }
-            TypeFlaw::LinValueNotConsumed { name } => {
-                TypeSymptom::LinValueNotConsumed { name: name.clone() }
-            }
-            TypeFlaw::CannotPassReadonlyAsMut { name } => {
-                TypeSymptom::CannotPassReadonlyAsMut { name: name.clone() }
-            }
-            TypeFlaw::IndexOutOfBounds { index, size } => TypeSymptom::IndexOutOfBounds {
-                index: *index,
-                size: *size,
-            },
-            _ => continue,
-        };
-        diags.push(diagnostic::Diagnostic {
-            code: diagnostic::DiagnosticCode::Type(symptom),
-            message: format!("{:?}", flaw),
-            help_on_span: None,
-            help: None,
-            span_id: span::SpanId::INVALID,
-            category: diagnostic::Category::Flaw,
-            related: Vec::new(),
-        });
+        // flaws are already TypeSymptom values — convert via DiagnosticLike trait
+        diags.push(flaw.clone().into_diagnostic(span::SpanId::INVALID));
     }
     diags
 }

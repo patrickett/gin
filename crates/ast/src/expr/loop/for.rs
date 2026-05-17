@@ -1,6 +1,6 @@
 use crate::expr::Expr;
 use crate::expr::Typed;
-use crate::span::SpanId;
+use crate::span::SubSpan;
 
 /// For-in loop: iterate over a range or collection
 ///
@@ -26,5 +26,5 @@ pub struct ForInLoop {
     // TODO: check and make sure it accepts expression that can be iterated
     pub iter: Box<Typed<Expr>>,
     pub exprs: Vec<Typed<Expr>>,
-    pub span: SpanId,
+    pub keyword_span: SubSpan,
 }

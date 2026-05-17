@@ -84,6 +84,15 @@ pub fn resolve_type_expr_with_subst(
             .cloned()
             .unwrap_or(Ty::Opaque(path.root)),
         TypeExpr::Literal(..) => Ty::Opaque(Intern::new(String::new())),
+        TypeExpr::Pointer(inner) => Ty::Ptr {
+            inner: Box::new(resolve_type_expr_with_subst(
+                &inner.value,
+                tag_types,
+                subst,
+                tag_params,
+            )),
+        },
+        TypeExpr::Unit => Ty::Unit,
     }
 }
 
@@ -258,6 +267,8 @@ fn resolve_type_expr_ref(
         }
         TypeExpr::Qualified(path) => resolve_name(path.root, raw, recursion_depth),
         TypeExpr::Literal(..) => Ty::Opaque(Intern::new(String::new())),
+        TypeExpr::Pointer(inner) => resolve_type_expr_ref(&inner.value, raw, recursion_depth),
+        TypeExpr::Unit => Ty::Unit,
     }
 }
 

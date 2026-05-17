@@ -5,7 +5,7 @@
 
 use crate::package::PackageFiles;
 use crate::{Db, File};
-use diagnostic::{Category, Diagnostic, DiagnosticCode, TypeSymptom};
+use diagnostic::Diagnostic;
 use std::sync::Arc;
 
 /// This is a pure function of the file contents + cursor position, so Salsa
@@ -61,7 +61,7 @@ pub fn file_parse_output(db: &dyn Db, file: File) -> Arc<parser::ParseOutput> {
 /// Uses the new [`TypedFileAst`](ast::typed::TypedFileAst) API. Each file is
 /// transformed with access to previously-transformed files via
 /// [`TransformCtx::from_typed_asts`](ast::typed::TransformCtx::from_typed_asts).
-/// TypeFlaws are collected and converted to `Diagnostic` for the existing API.
+/// Type symptoms are collected and converted to `Diagnostic` for the existing API.
 #[salsa::tracked]
 pub fn package_typecheck_symptoms<'db>(
     db: &'db dyn Db,
@@ -82,17 +82,10 @@ pub fn package_typecheck_symptoms<'db>(
 
         // Collect flaws and convert to Diagnostic.
         let mut file_diags: Vec<Diagnostic> = Vec::new();
-        for (_expr_id, flaw) in typed.all_flaws() {
-            let msg = format!("{:?}", flaw);
-            file_diags.push(Diagnostic {
-                span_id: span::SpanId::INVALID,
-                message: msg,
-                category: Category::Flaw,
-                code: DiagnosticCode::Type(TypeSymptom::Mismatch),
-                help_on_span: None,
-                help: None,
-                related: Vec::new(),
-            });
+        for (expr_id, flaw) in typed.all_flaws() {
+            use diagnostic::DiagnosticLike;
+            let span_id = typed.exprs.span[expr_id.as_usize()];
+            file_diags.push(flaw.clone().into_diagnostic(span_id));
         }
 
         results.push(file_diags);

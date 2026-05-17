@@ -92,7 +92,8 @@ pub fn transform(parse_ast: ParseAst, file_id: FileId, ctx: &TransformCtx) -> Ty
 
 /// A `ParseAst` is a parse-time representation (like today's `FileAst` with per-node flaws).
 /// This is a simplified version — it mirrors today's `FileAst` structure.
-/// Full ParseFlaw integration on per-node will be added in follow-up.
+/// Parse-time flaw integration on per-node (via `diagnostic::DiagnosticCode`) will be
+/// added in follow-up.
 #[derive(Debug, Clone)]
 pub struct ParseAst {
     pub module_doc: Option<DocComment>,

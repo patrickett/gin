@@ -251,7 +251,7 @@ fn collect_unused_values(ast: &FileAst) -> Vec<(String, SpanId)> {
                 };
                 (name, call.path.span_id())
             }
-            Expr::AnonymousTag(tag, span) => (tag.as_str().to_string(), *span),
+            Expr::AnonymousTag(tag) => (tag.as_str().to_string(), *expr_span),
             _ => ("expression".to_string(), *expr_span),
         };
 

@@ -8,8 +8,9 @@ use crate::analysis::{Capability, FlowContext, VarState};
 use crate::expr::Literal;
 use crate::ty::Ty;
 use crate::typed::{
-    ExprId, TypeFlaw, TypedExprKind, TypedFileAst, TypedIfCondition, TypedLoopKind, TypedWhenArm,
+    ExprId, TypedExprKind, TypedFileAst, TypedIfCondition, TypedLoopKind, TypedWhenArm,
 };
+use diagnostic::TypeSymptom;
 use internment::Intern;
 
 /// Walks the expression arena, computes flow contexts at each program point,
@@ -78,7 +79,7 @@ fn walk_expr_flow(typed: &mut TypedFileAst, expr_id: ExprId, flow: &mut FlowCont
         add_flaw(
             typed,
             expr_id,
-            TypeFlaw::UseOfMovedValue {
+            TypeSymptom::UseOfMovedValue {
                 name: name.as_str().to_string(),
             },
         );
@@ -227,7 +228,7 @@ fn walk_expr_flow(typed: &mut TypedFileAst, expr_id: ExprId, flow: &mut FlowCont
                     add_flaw(
                         typed,
                         expr_id,
-                        TypeFlaw::CannotPassReadonlyAsMut {
+                        TypeSymptom::CannotPassReadonlyAsMut {
                             name: name.as_str().to_string(),
                         },
                     );
@@ -274,7 +275,7 @@ fn check_lin_values(
             // We need to find the expression that corresponds to this variable's point of creation
             // to attach the flaw. For simplicity, attach to the last expression.
             if let Some(last_expr) = typed.exprs.kind.len().checked_sub(1) {
-                typed.exprs.flaws[last_expr].push(TypeFlaw::LinValueNotConsumed {
+                typed.exprs.flaws[last_expr].push(TypeSymptom::LinValueNotConsumed {
                     name: var_name.as_str().to_string(),
                 });
             }
@@ -320,7 +321,7 @@ fn check_bounds(
         add_flaw(
             typed,
             expr_id,
-            TypeFlaw::IndexOutOfBounds {
+            TypeSymptom::IndexOutOfBounds {
                 index: const_index,
                 size,
             },
@@ -328,7 +329,7 @@ fn check_bounds(
     }
 }
 
-fn add_flaw(typed: &mut TypedFileAst, expr_id: ExprId, flaw: TypeFlaw) {
+fn add_flaw(typed: &mut TypedFileAst, expr_id: ExprId, flaw: TypeSymptom) {
     let idx = expr_id.as_usize();
     if idx < typed.exprs.flaws.len() {
         typed.exprs.flaws[idx].push(flaw);

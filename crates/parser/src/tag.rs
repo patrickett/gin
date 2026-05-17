@@ -40,6 +40,30 @@ fn parse_type_expr_with(
 ) -> Option<Spanned<TypeExpr>> {
     let start_span = cursor.current_span();
 
+    // Pointer type: `@TypeExpr`
+    if cursor.eat(&Token::At) {
+        let inner = parse_type_expr_with(cursor, expr_parser)?;
+        let end_span = inner.span_id;
+        let span = cursor.merge_span(start_span, end_span);
+        return Some(Spanned {
+            value: TypeExpr::Pointer(Box::new(inner)),
+            span_id: span,
+        });
+    }
+
+    // Unit type: `()`
+    if cursor.is_at(&Token::ParenOpen) && cursor.peek_at(1) == Some(&Token::ParenClose) {
+        let open_span = cursor.peek_span()?;
+        cursor.advance(); // eat (
+        cursor.advance(); // eat )
+        let close_span = cursor.last_consumed_span();
+        let span = cursor.merge_span(open_span, close_span);
+        return Some(Spanned {
+            value: TypeExpr::Unit,
+            span_id: span,
+        });
+    }
+
     if cursor.peek_at(1) == Some(&Token::Dot) {
         let qual_checkpoint = cursor.checkpoint();
         if let Some(path) = parse_tag_variant_path(cursor) {
@@ -79,6 +103,14 @@ fn parse_type_expr_with(
 
     let (name, name_span) = match cursor.peek()? {
         &Token::Tag(n) => {
+            let name = cursor.intern(n);
+            let span = cursor.peek_span()?;
+            cursor.advance();
+            (name, span)
+        }
+        &Token::Id(n) => {
+            // Lowercase identifiers in type position are type variables
+            // (e.g., `x` in `@x` or `x` in `Range[x]`).
             let name = cursor.intern(n);
             let span = cursor.peek_span()?;
             cursor.advance();
@@ -211,53 +243,43 @@ fn parse_one_tag_param(
 
 #[allow(dead_code)]
 pub fn parse_tag_call(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<TagCall> {
-    let start_span = cursor.current_span();
-
     if cursor.peek_at(1) == Some(&Token::Dot) {
         let qual_checkpoint = cursor.checkpoint();
         if let Some(path) = parse_tag_variant_path(cursor) {
             let variant_name = *path.segments.last().unwrap_or(&path.root);
             if cursor.is_at(&Token::ParenOpen) {
                 let args = parse_call_args(cursor, expr_parser);
-                let end_span = cursor.last_consumed_span();
-                let span = cursor.merge_span(start_span, end_span);
                 return Some(TagCall {
                     name: variant_name,
                     qual_path: Some(path),
                     args,
-                    span,
                 });
             }
-            let span = path.span_id;
             return Some(TagCall {
                 name: variant_name,
                 qual_path: Some(path),
                 args: Vec::new(),
-                span,
             });
         }
         cursor.rewind(qual_checkpoint);
     }
 
-    let (name, name_span) = match cursor.peek()? {
+    let (name, _name_span) = match cursor.peek()? {
         &Token::Tag(n) => {
             let name = cursor.intern(n);
-            let span = cursor.peek_span()?;
+            let _span = cursor.peek_span()?;
             cursor.advance();
-            (name, span)
+            (name, _span)
         }
         _ => return None,
     };
 
     if cursor.is_at(&Token::ParenOpen) {
         let args = parse_call_args(cursor, expr_parser);
-        let end_span = cursor.last_consumed_span();
-        let span = cursor.merge_span(name_span, end_span);
         return Some(TagCall {
             name,
             qual_path: None,
             args,
-            span,
         });
     }
 
@@ -265,7 +287,6 @@ pub fn parse_tag_call(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<T
         name,
         qual_path: None,
         args: Vec::new(),
-        span: name_span,
     })
 }
 
