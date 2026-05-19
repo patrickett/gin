@@ -237,17 +237,6 @@ impl<'src, 't> TokenCursor<'src, 't> {
             .unwrap_or(SpanId::INVALID)
     }
 
-    #[allow(dead_code)]
-    fn source_len(&self) -> usize {
-        self.tokens
-            .last()
-            .map(|(_, id)| {
-                let span = self.span_table.get(*id);
-                span.end
-            })
-            .unwrap_or(0)
-    }
-
     /// Peek at the next token past any intervening newlines AND indents,
     /// without consuming them. Used for Indent-as-continuation in expressions.
     #[inline]

@@ -10,13 +10,12 @@ use crate::type_surface_mangle_name;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ParamConvention {
-    /// Bare `s String` — passed as `&T` (readonly reference).
+    /// Bare `name Type` — compiler infers from body whether the param is
+    /// threaded (appears in return) or consumed (never returned).
     #[default]
-    Ref,
-    /// `mut s String` — passed as `&mut T` (mutable reference).
-    Mut,
-    /// `own s String` — passed as `T` (value, ownership transfer).
-    Own,
+    Inferred,
+    /// `~name Type` — function consumes the parameter; it is not returned.
+    Consume,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +80,14 @@ pub(crate) fn fmt_type_expr_surface(e: &TypeExpr, f: &mut fmt::Formatter<'_>) ->
         TypeExpr::Literal(..) => write!(f, "<type>"),
         TypeExpr::Pointer(inner) => {
             write!(f, "@")?;
+            fmt_type_expr_surface(&inner.value, f)
+        }
+        TypeExpr::Ref { inner, mutable } => {
+            if *mutable {
+                write!(f, "mut ")?;
+            } else {
+                write!(f, "ref ")?;
+            }
             fmt_type_expr_surface(&inner.value, f)
         }
         TypeExpr::Unit => write!(f, "()"),

@@ -140,16 +140,14 @@ impl TyInfer for FnCall {
         if let Some(mut ty) = env.locals.get_type(&name) {
             for seg in &self.path.segments {
                 ty = match &ty {
-                    Ty::Ptr { inner } | Ty::Ref { inner } if inner.is_record() => {
-                        match inner.as_ref() {
-                            Ty::Record { fields, .. } => fields
-                                .iter()
-                                .find(|(fname, _)| fname.as_str() == seg.as_str())
-                                .map(|(_, fty)| (**fty).clone())
-                                .unwrap_or(ty),
-                            _ => return ty,
-                        }
-                    }
+                    Ty::Ptr { inner } if inner.is_record() => match inner.as_ref() {
+                        Ty::Record { fields, .. } => fields
+                            .iter()
+                            .find(|(fname, _)| fname.as_str() == seg.as_str())
+                            .map(|(_, fty)| (**fty).clone())
+                            .unwrap_or(ty),
+                        _ => return ty,
+                    },
                     Ty::Record { fields, .. } => fields
                         .iter()
                         .find(|(fname, _)| fname.as_str() == seg.as_str())
@@ -318,30 +316,33 @@ impl TyInfer for Expr {
                 inner: Box::new(inner.infer_ty(env)),
             },
 
-            Expr::TakeRef(inner) => Ty::Ref {
+            Expr::Ref { inner, mutable } => Ty::Ref {
                 inner: Box::new(inner.infer_ty(env)),
+                mutable: *mutable,
             },
 
+            Expr::ConsumeArg(inner) => inner.infer_ty(env),
+
+            Expr::Eat(inner) => inner.infer_ty(env),
+
             Expr::Deref(inner) => match inner.infer_ty(env) {
-                Ty::Ptr { inner } | Ty::Ref { inner } => *inner,
+                Ty::Ptr { inner } => *inner,
                 _ => Ty::i64(),
             },
 
-            Expr::MutArg(inner) | Expr::OwnArg(inner) | Expr::Negate(inner) => {
-                match inner.infer_ty(env) {
-                    Ty::Int {
-                        value: Some(n),
-                        width,
-                        signed,
-                    } => Ty::Int {
-                        width,
-                        signed,
-                        value: Some(-n),
-                    },
-                    Ty::Float { value: Some(f) } => Ty::Float { value: Some(-f) },
-                    other => other,
-                }
-            }
+            Expr::Negate(inner) => match inner.infer_ty(env) {
+                Ty::Int {
+                    value: Some(n),
+                    width,
+                    signed,
+                } => Ty::Int {
+                    width,
+                    signed,
+                    value: Some(-n),
+                },
+                Ty::Float { value: Some(f) } => Ty::Float { value: Some(-f) },
+                other => other,
+            },
 
             Expr::TupleLit(elems) => Ty::Tuple(elems.iter().map(|e| e.infer_ty(env)).collect()),
             Expr::List(_) => Ty::Opaque(Intern::<String>::from_ref("List")),

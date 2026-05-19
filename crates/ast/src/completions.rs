@@ -277,11 +277,11 @@ fn find_call_in_expr(
             find_call_in_expr(&value.value, value.span_id, span_table, byte_pos, best);
         }
         Expr::TakePtr(e)
-        | Expr::TakeRef(e)
+        | Expr::Ref { inner: e, .. }
+        | Expr::ConsumeArg(e)
+        | Expr::Eat(e)
         | Expr::Deref(e)
-        | Expr::Negate(e)
-        | Expr::MutArg(e)
-        | Expr::OwnArg(e) => {
+        | Expr::Negate(e) => {
             find_call_in_expr(&e.value, e.span_id, span_table, byte_pos, best);
         }
         Expr::TupleLit(elems) | Expr::List(elems) => {

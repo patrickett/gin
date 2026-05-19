@@ -2,7 +2,7 @@ use lexer::{Lexer, Token};
 
 #[test]
 fn test_keywords() {
-    let src = "use if else for as is in of or and has when then loop continue break return private mut own";
+    let src = "use if else for as is in of or and has when then loop continue break return private ref mut deref eat";
 
     let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
@@ -25,8 +25,10 @@ fn test_keywords() {
     assert!(matches!(tokens[15], Token::Break));
     assert!(matches!(tokens[16], Token::Return));
     assert!(matches!(tokens[17], Token::Private));
-    assert!(matches!(tokens[18], Token::Mut));
-    assert!(matches!(tokens[19], Token::Own));
+    assert!(matches!(tokens[18], Token::Ref));
+    assert!(matches!(tokens[19], Token::Mut));
+    assert!(matches!(tokens[20], Token::Deref));
+    assert!(matches!(tokens[21], Token::Eat));
 }
 
 #[test]
@@ -40,39 +42,6 @@ fn test_identifiers() {
     assert!(matches!(tokens[1], Token::Id(_)));
     assert!(matches!(tokens[2], Token::Id(_)));
     assert!(matches!(tokens[3], Token::Id(_)));
-}
-
-#[test]
-fn test_mut_own_are_not_identifiers() {
-    // mut and own should be separate keywords, not Id tokens
-    let src = "mut own";
-    let mut lexer = Lexer::new(src);
-    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
-
-    assert!(matches!(tokens[0], Token::Mut));
-    assert!(matches!(tokens[1], Token::Own));
-
-    // Verify they are NOT Id tokens
-    assert!(!matches!(tokens[0], Token::Id(_)));
-    assert!(!matches!(tokens[1], Token::Id(_)));
-}
-
-#[test]
-fn test_mut_own_in_context() {
-    // mut/own should work alongside other keywords and identifiers
-    let src = "func(mut s String, own t Int)";
-    let mut lexer = Lexer::new(src);
-    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
-
-    // Expected: Id("func"), ParenOpen, Mut, Id("s"), Id("String"), Comma, Own, Id("t"), Id("Int"), ParenClose
-    assert!(matches!(tokens[0], Token::Id(_))); // func
-    assert!(matches!(tokens[1], Token::ParenOpen)); // (
-    assert!(matches!(tokens[2], Token::Mut)); // mut
-    assert!(matches!(tokens[3], Token::Id(_))); // s
-    assert!(matches!(tokens[5], Token::Comma)); // ,
-    assert!(matches!(tokens[6], Token::Own)); // own
-    assert!(matches!(tokens[7], Token::Id(_))); // t
-    assert!(matches!(tokens[9], Token::ParenClose)); // )
 }
 
 #[test]

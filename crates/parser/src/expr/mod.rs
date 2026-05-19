@@ -115,16 +115,12 @@ pub(crate) fn parse_paren_args(cursor: &mut TokenCursor) -> Option<Vec<Typed<Exp
     Some(args)
 }
 
-/// Parse an argument expression, recognizing `mut expr` and `own expr` prefixes.
+/// Parse an argument expression, recognizing `~expr` (consume) prefix.
 fn parse_arg_expr(cursor: &mut TokenCursor) -> Typed<Expr> {
-    if cursor.eat(&Token::Mut) {
+    if cursor.eat(&Token::Tilde) {
         let inner = parse_expression(cursor);
         let span_id = inner.span_id;
-        Typed::infer(Expr::MutArg(Box::new(inner)), span_id)
-    } else if cursor.eat(&Token::Own) {
-        let inner = parse_expression(cursor);
-        let span_id = inner.span_id;
-        Typed::infer(Expr::OwnArg(Box::new(inner)), span_id)
+        Typed::infer(Expr::ConsumeArg(Box::new(inner)), span_id)
     } else {
         parse_expression(cursor)
     }
@@ -264,9 +260,12 @@ fn parse_prefix(cursor: &mut TokenCursor) -> Option<Typed<Expr>> {
 fn parse_atom(cursor: &mut TokenCursor) -> Typed<Expr> {
     match cursor.peek() {
         Some(Token::At) => parse_take_ptr(cursor),
-        Some(Token::Caret) => parse_take_ref(cursor),
         Some(Token::Star) => parse_deref(cursor),
         Some(Token::SelfInstance) => parse_self_ref(cursor),
+        Some(Token::Ref) => parse_ref_take(cursor),
+        Some(Token::Mut) => parse_mut_take(cursor),
+        Some(Token::Deref) => parse_deref_expr(cursor),
+        Some(Token::Eat) => parse_eat_expr(cursor),
         Some(Token::BracketOpen) => parse_list_lit(cursor),
         Some(Token::ParenOpen) => parse_tuple_lit_or_alloc_or_group(cursor),
         Some(Token::FormatStringDelim) => parse_format_string_expr(cursor),
@@ -722,18 +721,6 @@ fn parse_take_ptr(cursor: &mut TokenCursor) -> Typed<Expr> {
     )
 }
 
-fn parse_take_ref(cursor: &mut TokenCursor) -> Typed<Expr> {
-    let (_, start_span) = cursor
-        .advance()
-        .expect("peek confirmed '^' token before parse_take_ref"); // ^
-    let inner = parse_expression(cursor);
-    let end_span = inner.span_id;
-    Typed::infer(
-        Expr::TakeRef(Box::new(inner)),
-        merge_spans(start_span, end_span, cursor),
-    )
-}
-
 fn parse_deref(cursor: &mut TokenCursor) -> Typed<Expr> {
     let (_, start_span) = cursor
         .advance()
@@ -742,6 +729,60 @@ fn parse_deref(cursor: &mut TokenCursor) -> Typed<Expr> {
     let end_span = inner.span_id;
     Typed::infer(
         Expr::Deref(Box::new(inner)),
+        merge_spans(start_span, end_span, cursor),
+    )
+}
+
+fn parse_ref_take(cursor: &mut TokenCursor) -> Typed<Expr> {
+    let (_, start_span) = cursor
+        .advance()
+        .expect("peek confirmed 'ref' token before parse_ref_take");
+    let inner = parse_expression(cursor);
+    let end_span = inner.span_id;
+    Typed::infer(
+        Expr::Ref {
+            inner: Box::new(inner),
+            mutable: false,
+        },
+        merge_spans(start_span, end_span, cursor),
+    )
+}
+
+fn parse_mut_take(cursor: &mut TokenCursor) -> Typed<Expr> {
+    let (_, start_span) = cursor
+        .advance()
+        .expect("peek confirmed 'mut' token before parse_mut_take");
+    let inner = parse_expression(cursor);
+    let end_span = inner.span_id;
+    Typed::infer(
+        Expr::Ref {
+            inner: Box::new(inner),
+            mutable: true,
+        },
+        merge_spans(start_span, end_span, cursor),
+    )
+}
+
+fn parse_deref_expr(cursor: &mut TokenCursor) -> Typed<Expr> {
+    let (_, start_span) = cursor
+        .advance()
+        .expect("peek confirmed 'deref' token before parse_deref_expr");
+    let inner = parse_expression(cursor);
+    let end_span = inner.span_id;
+    Typed::infer(
+        Expr::Deref(Box::new(inner)),
+        merge_spans(start_span, end_span, cursor),
+    )
+}
+
+fn parse_eat_expr(cursor: &mut TokenCursor) -> Typed<Expr> {
+    let (_, start_span) = cursor
+        .advance()
+        .expect("peek confirmed 'eat' token before parse_eat_expr");
+    let inner = parse_expression(cursor);
+    let end_span = inner.span_id;
+    Typed::infer(
+        Expr::Eat(Box::new(inner)),
         merge_spans(start_span, end_span, cursor),
     )
 }

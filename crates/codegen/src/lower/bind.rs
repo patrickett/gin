@@ -33,12 +33,7 @@ impl<'c> Lower<'c> for Bind {
                     expr.lower(ctx, block, symtab)
                 }?;
 
-                if self.is_const {
-                    // Const bind (`:=`): direct SSA value in symtab — no alloca.
-                    symtab.insert(name.as_str().to_string(), init_val);
-                    ctx.var_types.borrow_mut().insert(name, ty);
-                    Some(init_val)
-                } else {
+                {
                     let loc = ctx.location();
                     let name_str = name.as_str().to_string();
                     if ctx.mutable_slots.borrow().contains(&name_str) {

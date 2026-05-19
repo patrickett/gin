@@ -642,11 +642,11 @@ fn find_expr_at_byte<'a>(
         }
         Expr::TupleAlloc { init, .. }
         | Expr::TakePtr(init)
-        | Expr::TakeRef(init)
+        | Expr::Ref { inner: init, .. }
+        | Expr::ConsumeArg(init)
         | Expr::Deref(init)
         | Expr::Negate(init)
-        | Expr::MutArg(init)
-        | Expr::OwnArg(init) => {
+        | Expr::Eat(init) => {
             if st.contains(init.span_id(), byte_pos) {
                 return find_expr_at_byte(st, &init.value, init.span_id(), byte_pos);
             }

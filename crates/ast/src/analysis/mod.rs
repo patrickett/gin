@@ -7,24 +7,28 @@ use internment::Intern;
 use crate::ty::Ty;
 
 mod const_value;
+
+/// Body inference — determines whether each linear parameter is threaded
+/// (appears in all return paths) or consumed (never returned).
+pub mod infer_convention;
 pub use const_value::{Bound, ConstValue, TypeConstraint};
 
 mod flow;
 pub use flow::{
-    Capability, FlowAnalysis, FlowContext, ImpossibleCheck, IndexOutOfBounds, VarState,
+    FlowAnalysis, FlowAnalyzer, FlowContext, ImpossibleCheck, IndexOutOfBounds, VarState,
 };
 
-mod flow_analyzer;
-pub use flow_analyzer::FlowAnalyzer;
-
 mod copy;
-pub use copy::{is_copyable, is_lin_type};
+pub use copy::is_copyable;
 
 mod resolve;
 pub use resolve::{
     is_type_surface, mangled_fn_call_name, resolve_name_from_files, resolve_type_expr_from_map,
     resolve_type_expr_with_subst, substitute_in_ty, typevars_from_receiver,
 };
+
+mod desugar_threads;
+pub use desugar_threads::stage_desugar_threads;
 
 mod infer;
 pub use infer::{

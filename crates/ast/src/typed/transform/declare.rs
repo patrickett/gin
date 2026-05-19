@@ -7,8 +7,11 @@
 use internment::Intern;
 use std::collections::HashMap;
 
+use diagnostic::TypeSymptom;
+
 use super::{ParseAst, TransformCtx};
 use crate::analysis::{ConstValue, resolve_type_expr_from_map};
+use crate::marker::MarkerBinding;
 use crate::prelude::*;
 use crate::ty::Ty;
 use crate::typed::{DefId, FileId, TagId, TypedBind, TypedFileAst, TypedTag};
@@ -20,6 +23,7 @@ use crate::{DeclareValue, TypeExpr};
 pub fn stage_declare(parse_ast: &ParseAst, file_id: FileId, ctx: &TransformCtx) -> TypedFileAst {
     let mut typed = TypedFileAst::new(file_id, parse_ast.span_table.clone());
     typed.resolved_imports = HashMap::new(); // will be populated by import resolution
+    typed.marker_registry = ctx.marker_registry.clone();
 
     // 1. Walk tag declarations and resolve them.
     for (name, declare) in &parse_ast.tags {
@@ -30,10 +34,24 @@ pub fn stage_declare(parse_ast: &ParseAst, file_id: FileId, ctx: &TransformCtx) 
         let typed_tag = TypedTag {
             resolved_ty: resolved_ty.clone(),
             attributes: declare.attributes.clone(),
+            marker_bindings: declare.marker_bindings.clone(),
             doc_comment: declare.doc_comment.clone(),
             params: declare.params.clone(),
             declaration_text: declare.to_string(),
         };
+
+        // Check marker bindings against the registry — warn about unrecognized markers.
+        for binding in &declare.marker_bindings {
+            if !typed.marker_registry.is_recognized(&binding.marker_name) {
+                typed.warnings.push(TypeSymptom::UnknownBinding {
+                    name: format!(
+                        "`{}` is not a recognized marker; recognized markers are `Copy`",
+                        binding.marker_name.as_str()
+                    ),
+                    did_you_mean: None,
+                });
+            }
+        }
 
         typed.tags.insert(tag_id, typed_tag);
         typed.tag_types.insert(tag_id, resolved_ty.clone());
@@ -97,7 +115,6 @@ pub fn stage_declare(parse_ast: &ParseAst, file_id: FileId, ctx: &TransformCtx) 
                 .map(|rt| resolve_type_expr_from_map(&rt.value, &tag_types_raw)),
             attributes: bind.attributes.clone(),
             doc_comment: bind.doc_comment.clone(),
-            is_const: bind.is_const,
         };
 
         typed.defs.insert(def_id, typed_bind);
@@ -123,6 +140,10 @@ pub fn stage_declare(parse_ast: &ParseAst, file_id: FileId, ctx: &TransformCtx) 
         .tag_types
         .entry(str_generic_id)
         .or_insert_with(crate::ty::str_record_ty);
+
+    // Propagate marker bindings from marker-propagating aliases (e.g. `Linear(T)`)
+    // through field type expressions in record/union declarations.
+    propagate_marker_aliases(&mut typed, parse_ast);
 
     typed
 }
@@ -272,7 +293,7 @@ fn resolve_variant_shape(
             let name = Intern::new("__const__".to_string());
             (name, vec![])
         }
-        TypeExpr::Pointer(_) | TypeExpr::Unit => {
+        TypeExpr::Pointer(_) | TypeExpr::Ref { .. } | TypeExpr::Unit => {
             let name = Intern::new("__unknown__".to_string());
             (name, vec![])
         }
@@ -386,5 +407,128 @@ fn base_ty_for_const_value(cv: &ConstValue) -> Ty {
         ConstValue::Tag { .. } => Ty::Opaque(Intern::new("tag".to_string())),
         ConstValue::Record { .. } => Ty::Opaque(Intern::new("Record".to_string())),
         ConstValue::List(_) => Ty::Opaque(Intern::new("List".to_string())),
+    }
+}
+
+/// After all tags are resolved, propagate marker bindings from marker-propagating
+/// aliases (like `Linear(x) is x and is not Copy`) through field type expressions.
+///
+/// When a record field uses `Linear(Connection)`, the `not Copy` binding from
+/// `Linear`'s declaration propagates to the containing tag. This implements
+/// field-level linearity: `Database has (conn Linear(Connection))` marks
+/// `Database` as not Copy via the `AnyField` inference rule.
+fn propagate_marker_aliases(typed: &mut TypedFileAst, parse_ast: &ParseAst) {
+    // Find marker-propagating aliases: tags whose marker bindings reference
+    // known markers (e.g. Linear registers `and is not Copy`).
+    // Check both the current file's tags and the cross-file marker registry.
+    let mut marker_aliases: HashMap<Intern<String>, Vec<MarkerBinding>> = HashMap::new();
+
+    // From current file's typed tags
+    for (tag_id, tag) in &typed.tags {
+        if !tag.marker_bindings.is_empty() {
+            marker_aliases.insert(tag_id.0, tag.marker_bindings.clone());
+        }
+    }
+
+    // From cross-file marker registry: any type with a positive binding for a
+    // known marker is a candidate. Build this from the registry's binding sets.
+    for marker_name in typed.marker_registry.recognized_markers() {
+        if let Some(def) = typed.marker_registry.definition(&marker_name) {
+            for type_name in &def.positive_bindings {
+                if !marker_aliases.contains_key(type_name) {
+                    marker_aliases.insert(
+                        *type_name,
+                        vec![MarkerBinding {
+                            marker_name,
+                            positive: true,
+                            args: Vec::new(),
+                        }],
+                    );
+                }
+            }
+        }
+    }
+
+    if marker_aliases.is_empty() {
+        return;
+    }
+
+    // Walk all declarations and check their value expressions for references
+    // to marker-propagating aliases.
+    for (name, declare) in &parse_ast.tags {
+        let tag_id = TagId(*name);
+        let extra = collect_alias_markers_from_value(&declare.value, &marker_aliases);
+        if !extra.is_empty()
+            && let Some(tag) = typed.tags.get_mut(&tag_id)
+        {
+            tag.marker_bindings.extend(extra);
+        }
+    }
+}
+
+/// Walk a `DeclareValue` and collect marker bindings from any field type
+/// expressions that reference marker-propagating aliases.
+fn collect_alias_markers_from_value(
+    value: &DeclareValue,
+    aliases: &HashMap<Intern<String>, Vec<MarkerBinding>>,
+) -> Vec<MarkerBinding> {
+    match value {
+        DeclareValue::Record(params) => {
+            let mut bindings = Vec::new();
+            for (_name, kind) in params {
+                if let ParameterKind::Tagged(sp) = kind
+                    && let Some(te) = sp.value.as_type_expr()
+                    && let Some(mb) = collect_alias_markers_from_type_expr(&te, aliases)
+                {
+                    bindings.extend(mb);
+                }
+            }
+            bindings
+        }
+        DeclareValue::Union { variants } => {
+            let mut bindings = Vec::new();
+            for variant in variants {
+                let shape = variant.shape();
+                if let Some(mb) = collect_alias_markers_from_type_expr(&shape.value, aliases) {
+                    bindings.extend(mb);
+                }
+            }
+            bindings
+        }
+        DeclareValue::Alias(sp) => {
+            collect_alias_markers_from_type_expr(&sp.value, aliases).unwrap_or_default()
+        }
+        _ => vec![],
+    }
+}
+
+/// Check a `TypeExpr` for references to marker-propagating aliases.
+///
+/// For `Generic { name: "Linear", ... }`, checks if `Linear` is a marker
+/// alias and returns its marker bindings.
+fn collect_alias_markers_from_type_expr(
+    te: &TypeExpr,
+    aliases: &HashMap<Intern<String>, Vec<MarkerBinding>>,
+) -> Option<Vec<MarkerBinding>> {
+    match te {
+        TypeExpr::Generic { name, params, .. } => {
+            // Check if the generic itself is a marker alias: Linear(Connection)
+            if let Some(bindings) = aliases.get(name) {
+                return Some(bindings.clone());
+            }
+            // Check inner type parameters for marker aliases
+            for (_, kind) in params {
+                if let ParameterKind::Tagged(sp) = kind
+                    && let Some(inner_te) = sp.value.as_type_expr()
+                    && let Some(inner_bindings) =
+                        collect_alias_markers_from_type_expr(&inner_te, aliases)
+                {
+                    return Some(inner_bindings);
+                }
+            }
+            None
+        }
+        TypeExpr::Nominal(name, _) => aliases.get(name).cloned(),
+        _ => None,
     }
 }

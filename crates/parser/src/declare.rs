@@ -3,8 +3,8 @@ use crate::expr::ExprFn;
 use crate::expr::literal::parse_literal;
 use ast::span::SpanId;
 use ast::{
-    Declare, DeclareValue, DocComment, ParameterKind, Parameters, Spanned, TypeExpr, Typed,
-    Variant, type_surface_mangle_name,
+    Declare, DeclareValue, DocComment, MarkerBinding, ParameterKind, Parameters, Spanned, TypeExpr,
+    Typed, Variant, type_surface_mangle_name,
 };
 
 use crate::tag::{parse_pattern_type_expr, parse_type_expr};
@@ -40,7 +40,8 @@ pub fn parse_declare(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<De
         let doc = doc_after_value.or(doc_after_is).or(doc_before);
         let mut decl = Declare::new(name, name_span, value)
             .with_params(params)
-            .with_doc(doc);
+            .with_doc(doc)
+            .with_marker_bindings(parse_marker_clauses(cursor));
         if let Some(a) = attrs {
             decl = decl.with_attributes(a);
         }
@@ -54,7 +55,8 @@ pub fn parse_declare(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<De
 
         let mut decl = Declare::new(name, name_span, value)
             .with_params(params)
-            .with_doc(doc_before);
+            .with_doc(doc_before)
+            .with_marker_bindings(parse_marker_clauses(cursor));
         if let Some(a) = attrs {
             decl = decl.with_attributes(a);
         }
@@ -404,6 +406,60 @@ fn attach_doc_to_previous(variants: &mut [Variant], doc: Option<DocComment>) {
             }
         };
     }
+}
+
+/// Parse `and is [not] MarkerName` clauses after a declaration body.
+/// Marker clauses are at the same or deeper indentation as the declaration.
+fn parse_marker_clauses(cursor: &mut TokenCursor) -> Vec<MarkerBinding> {
+    let mut bindings = Vec::new();
+
+    loop {
+        // Skip any leading indents (marker clauses are often indented)
+        cursor.skip_indents();
+
+        let checkpoint = cursor.checkpoint();
+
+        // Try to consume `and` followed by `is`
+        if !cursor.eat(&Token::And) {
+            break;
+        }
+        if !cursor.eat(&Token::Is) {
+            cursor.rewind(checkpoint);
+            break;
+        }
+
+        // Check for optional `not`
+        let positive = if matches!(cursor.peek(), Some(Token::Id(n)) if *n == "not") {
+            cursor.advance();
+            false
+        } else {
+            true
+        };
+
+        // Parse the marker name (capitalized identifier = Tag)
+        let marker_name = match cursor.peek() {
+            Some(Token::Tag(n)) => {
+                let name = cursor.intern(n);
+                cursor.advance();
+                name
+            }
+            _ => {
+                cursor.error(
+                    "expected marker name (e.g. `Copy`) after `and is`",
+                    cursor.current_span(),
+                );
+                break;
+            }
+        };
+
+        bindings.push(MarkerBinding {
+            marker_name,
+            positive,
+            args: Vec::new(),
+        });
+    }
+
+    bindings
 }
 
 fn parse_int_range(cursor: &mut TokenCursor) -> Option<(I256, I256)> {

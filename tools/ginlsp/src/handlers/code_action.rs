@@ -42,10 +42,43 @@ impl Backend {
             if let Some(action) = remove_bundle_member_code_action(uri, diag, &source) {
                 out.push(CodeActionOrCommand::CodeAction(action));
             }
+            if let Some(action) = sort_imports_code_action(uri, diag) {
+                out.push(CodeActionOrCommand::CodeAction(action));
+            }
         }
 
         Ok(Some(out))
     }
+}
+
+fn sort_imports_code_action(uri: &Url, diag: &Diagnostic) -> Option<CodeAction> {
+    let v = diag.data.as_ref()?;
+    let obj = v.as_object()?;
+    if obj.get("gincQuickFix").and_then(|x| x.as_str()) != Some("sort-imports") {
+        return None;
+    }
+    let sorted_text = obj.get("sortedText").and_then(|x| x.as_str())?;
+
+    let mut changes = HashMap::new();
+    changes.insert(
+        uri.clone(),
+        vec![TextEdit {
+            range: diag.range,
+            new_text: sorted_text.to_string(),
+        }],
+    );
+
+    Some(CodeAction {
+        title: "Sort imports alphabetically".to_string(),
+        kind: Some(CodeActionKind::QUICKFIX),
+        diagnostics: Some(vec![diag.clone()]),
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }),
+        is_preferred: Some(true),
+        ..Default::default()
+    })
 }
 
 fn remove_bundle_member_code_action(

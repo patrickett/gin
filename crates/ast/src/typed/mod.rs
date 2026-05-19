@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub(crate) use crate::analysis::FlowContext;
+use crate::marker::MarkerRegistry;
 use crate::prelude::*;
 use crate::span::{SpanId, SpanTable, SubSpan};
 use crate::ty::Ty;
@@ -75,8 +76,8 @@ pub enum TypedWhenArm {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedIfExpr {
     pub condition: TypedIfCondition,
-    pub then_body: ExprId,
-    pub else_body: Option<ExprId>,
+    pub stmts: Vec<ExprId>,
+    pub ret: Option<ExprId>,
     /// Covers from condition start to end (excludes the `if` keyword).
     /// The full expression span (including `if`) is on the `TypedExpr` arena entry.
     pub body_span: SubSpan,
@@ -96,7 +97,7 @@ pub enum TypedIfCondition {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedLoop {
     pub kind: TypedLoopKind,
-    pub body: ExprId,
+    pub stmts: Vec<ExprId>,
     /// Span of the `loop` keyword only.
     /// The full expression span is on the `TypedExpr` arena entry.
     pub keyword_span: SubSpan,
@@ -132,6 +133,7 @@ pub enum TypedExprKind {
     },
     Bind {
         name: Intern<String>,
+        stmts: Vec<ExprId>,
         body: ExprId,
     },
     When(TypedWhenExpr),
@@ -176,12 +178,16 @@ pub enum TypedExprKind {
         value: ExprId,
     },
     TakePtr(ExprId),
-    TakeRef(ExprId),
+    /// A safe reference: `ref expr` or `mut expr`.
+    Ref(ExprId),
     Deref(ExprId),
 
     Negate(ExprId),
-    MutArg(ExprId),
-    OwnArg(ExprId),
+
+    /// Argument passed with `~` at call site: explicit consume.
+    ConsumeArg(ExprId),
+    /// Explicit consume: `eat expr`.
+    Eat(ExprId),
 
     Asm(AsmExpr),
 }
@@ -191,8 +197,10 @@ pub enum TypedExprKind {
 pub struct TypedTag {
     /// The resolved type of this tag (e.g., `Ty::Union`, `Ty::Record`, `Ty::ConstUnion`, etc.).
     pub resolved_ty: Ty,
-    /// Tag attributes (e.g., `#[lin]`, `#[os(linux)]`).
+    /// Tag attributes (e.g., `#[os(linux)]`).
     pub attributes: DeclareAttributes,
+    /// Marker bindings from `and is` / `and is not` clauses.
+    pub marker_bindings: Vec<crate::marker::MarkerBinding>,
     pub doc_comment: Option<DocComment>,
     /// Tag parameters (type variables, defaults), if any.
     pub params: Option<Parameters>,
@@ -216,8 +224,6 @@ pub struct TypedBind {
     /// Bind attributes (e.g., `#[inline]`, visibility).
     pub attributes: BindAttributes,
     pub doc_comment: Option<DocComment>,
-    /// `true` for `:=` (const), `false` for `:` (mutable).
-    pub is_const: bool,
 }
 
 /// The body of a [`TypedBind`].
@@ -290,6 +296,10 @@ pub struct TypedFileAst {
     pub fn_return_types: HashMap<DefId, Ty>,
     /// Variant name → [(union_name, discriminant, fields)].
     pub variant_map: crate::analysis::VariantMap,
+    /// The marker registry — marker definitions and bindings for this package.
+    pub marker_registry: MarkerRegistry,
+    /// Declaration-level warnings (e.g., unrecognized custom markers).
+    pub warnings: Vec<diagnostic::TypeSymptom>,
 }
 
 impl std::fmt::Debug for TypedFileAst {
@@ -344,6 +354,8 @@ impl TypedFileAst {
             tag_types: HashMap::new(),
             fn_return_types: HashMap::new(),
             variant_map: HashMap::new(),
+            marker_registry: MarkerRegistry::new(),
+            warnings: Vec::new(),
         }
     }
 
@@ -395,23 +407,32 @@ impl TypedFileAst {
             && let Some(expr_ref) = self.expr(expr_id)
         {
             let ty_str = format_ty_for_hover(expr_ref.ty);
+            let is_copy = crate::analysis::is_copyable(expr_ref.ty, &self.marker_registry);
+            let copy_badge = if is_copy {
+                "[`Copy`](gin:copy)".to_string()
+            } else {
+                "[`not Copy`](gin:copy)".to_string()
+            };
             let mut result = ty_str.clone();
             match expr_ref.kind {
                 TypedExprKind::Bind { name, .. } => {
-                    result = format!("`{}`: `{}`", name.as_str(), ty_str);
+                    result = format!("`{}`: `{}` {}", name.as_str(), ty_str, copy_badge);
                 }
                 TypedExprKind::FnCall { target, .. } => {
                     let fn_name = target.0.as_str();
-                    result = format!("`{}`: `{}`", fn_name, ty_str);
+                    result = format!("`{}`: `{}` {}", fn_name, ty_str, copy_badge);
                 }
                 TypedExprKind::TagCall { variant_id, .. } => {
                     result = format!(
-                        "`{}` (variant of `{}`)",
+                        "`{}` (variant of `{}`) {}",
                         variant_id.name.as_str(),
-                        variant_id.union.0.as_str()
+                        variant_id.union.0.as_str(),
+                        copy_badge
                     );
                 }
-                _ => {}
+                _ => {
+                    result = format!("{} {}", ty_str, copy_badge);
+                }
             }
             return Some(result);
         }
@@ -427,9 +448,31 @@ impl TypedFileAst {
             if let Some(ref doc) = tag.doc_comment {
                 result = format!("{}\n---\n{}", result, doc.value);
             }
-            // Show size/align when the type has a concrete layout.
+            // Show markers section — formatted as clickable links
+            if !tag.marker_bindings.is_empty() {
+                result.push_str("\n\n---\nMarkers");
+                for binding in &tag.marker_bindings {
+                    let prefix = if binding.positive { "" } else { "not " };
+                    let marker = binding.marker_name.as_str();
+                    // Link to the marker via gin_core module path convention
+                    // The database layer replaces `gin:marker/Name` with a file:// URI.
+                    result.push_str(&format!(
+                        "\n  - [`{}{}`](gin:marker/{})",
+                        prefix, marker, marker
+                    ));
+                }
+            }
+            // Show copyability badge.
             let size = crate::ty::ty_byte_size_static(&tag.resolved_ty);
             let align = crate::ty::ty_alignment(&tag.resolved_ty);
+            let is_copy = crate::analysis::is_copyable(&tag.resolved_ty, &self.marker_registry);
+            if is_copy {
+                result.push_str("\n\n---\n\n[`Copy`](gin:copy)");
+            } else {
+                result.push_str("\n\n---\n\n[`not Copy`](gin:copy)");
+            }
+
+            // Show size/align when the type has a concrete layout.
             if size > 0 || align > 0 {
                 result.push_str(&format!("\n\n---\n\nsize = {size}, align = {align}"));
             }
@@ -535,6 +578,11 @@ impl TypedFileAst {
         }
         flaws
     }
+
+    /// Collect declaration-level warnings (e.g., unrecognized markers).
+    pub fn all_warnings(&self) -> &[diagnostic::TypeSymptom] {
+        &self.warnings
+    }
 }
 
 /// Format a `Ty` for hover display.
@@ -572,7 +620,10 @@ pub(crate) fn format_ty_for_hover(ty: &Ty) -> String {
         Ty::Opaque(name) => name.as_str().to_string(),
         Ty::Array { elem, size } => format!("[{}; {}]", format_ty_for_hover(elem), size),
         Ty::Ptr { inner } => format!("*{}", format_ty_for_hover(inner)),
-        Ty::Ref { inner } => format!("^{}", format_ty_for_hover(inner)),
+        Ty::Ref { inner, mutable } => {
+            let prefix = if *mutable { "mut " } else { "ref " };
+            format!("{}{}", prefix, format_ty_for_hover(inner))
+        }
         Ty::Tuple(tys) => {
             let parts: Vec<String> = tys.iter().map(format_ty_for_hover).collect();
             format!("({})", parts.join(", "))

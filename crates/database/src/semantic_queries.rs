@@ -8,6 +8,58 @@ use crate::{Db, File};
 use diagnostic::Diagnostic;
 use std::sync::Arc;
 
+/// Replace `gin:marker/Name` links with `file://` URIs to the actual marker definition files.
+fn resolve_marker_links(hover_text: &str, core_root: &std::path::Path) -> String {
+    let mut result = hover_text.to_string();
+    // Pattern: `gin:marker/Name` where Name is a capitalised marker type
+    while let Some(start) = result.find("gin:marker/") {
+        let after_prefix = &result[start + 11..];
+        let end = after_prefix
+            .find(|c: char| !c.is_alphanumeric())
+            .unwrap_or(after_prefix.len());
+        let marker_name = &after_prefix[..end];
+        let file_path = core_root
+            .join("marker")
+            .join(format!("{}.gin", marker_name.to_lowercase()));
+        // Build a file:// URI manually (macOS/Linux paths)
+        let path_str = file_path.to_string_lossy();
+        // Ensure the path starts with /
+        let uri = if path_str.starts_with('/') {
+            format!("file://{}", path_str)
+        } else {
+            format!("file:///{}", path_str)
+        };
+        result.replace_range(start..start + 11 + end, &uri);
+    }
+    result
+}
+
+/// Find the gin_core package root directory by searching for a `flask.jsonc`
+/// whose package name is "core". This is where marker definitions live.
+fn find_core_package_root() -> Option<std::path::PathBuf> {
+    // Search upward from the current working directory or use a known path
+    let candidates = [
+        std::env::current_dir().ok(),
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf())),
+    ];
+    for start in candidates.into_iter().flatten() {
+        let mut dir = start.clone();
+        loop {
+            if let Some((config, root_dir)) = flask::FlaskConfig::find_package_config(&dir)
+                && config.name == "core"
+            {
+                return Some(root_dir);
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+    }
+    None
+}
+
 /// This is a pure function of the file contents + cursor position, so Salsa
 /// caching is a natural fit. Parsing matches [`crate::file_parse_output`]
 /// (full lexer + parse diagnostics path).
@@ -44,6 +96,14 @@ pub fn hover_markdown(db: &dyn Db, file: File, byte_pos: u32) -> Option<String> 
     let typed = ast::typed::transform_file(output.ast.clone(), ast::typed::FileId(0));
 
     let hover_text = typed.hover_at(source, line, character)?;
+
+    // Resolve gin:marker/Name links to file:// URIs pointing to the marker's
+    // gin_core definition (e.g. `gin:marker/Copy` → `file:///path/to/.../marker/copy.gin`).
+    let hover_text = if let Some(core_root) = find_core_package_root() {
+        resolve_marker_links(&hover_text, &core_root)
+    } else {
+        hover_text
+    };
 
     // Prefix with module path if available (mirrors old hover_at_with_source behavior).
     match source_name {

@@ -54,17 +54,29 @@ pub enum TypeSymptom {
     /// Use of a moved value.
     #[strum(serialize = "type-use-of-moved-value")]
     UseOfMovedValue { name: String },
-    /// A `#[lin]` value was not consumed before scope exit.
+    /// A non-Copy value was not consumed before scope exit.
+    /// Types with `and is not Copy` follow linear rules — they must be
+    /// explicitly consumed via `~` or transferred to another owner.
     #[strum(serialize = "type-lin-value-not-consumed")]
-    LinValueNotConsumed { name: String },
-    /// Cannot pass a readonly variable as `mut`.
-    #[strum(serialize = "type-cannot-pass-readonly-as-mut")]
-    CannotPassReadonlyAsMut { name: String },
+    LinValueNotConsumed {
+        name: String,
+        /// Inferred consumption paths — methods on this type that consume via `own self`.
+        consumption_paths: Vec<String>,
+    },
     /// A positional parameter appears after a parameter with a default value.
     /// Once a default is present, all subsequent parameters must also have defaults
     /// (or be named — see NOTE about named type arguments).
     #[strum(serialize = "type-positional-after-default")]
     PositionalAfterDefault { name: String },
+    /// A `~` (consumed) parameter was used as the return expression, which is
+    /// not allowed — consumed values must be destroyed within the function, not
+    /// returned to the caller.
+    #[strum(serialize = "type-return-consumed-param")]
+    ReturnConsumedParam { name: String },
+    /// `~` used at call site on an argument whose corresponding parameter
+    /// is not declared with `~`.
+    #[strum(serialize = "type-consume-arg-on-bare-param")]
+    ConsumeArgOnBareParam { name: String },
 }
 
 impl DiagnosticLike for TypeSymptom {
@@ -104,14 +116,25 @@ impl DiagnosticLike for TypeSymptom {
             Self::UseOfMovedValue { name } => {
                 format!("use of moved value `{name}`")
             }
-            Self::LinValueNotConsumed { name } => {
-                format!("`#[lin]` value `{name}` was not consumed before scope exit")
+            Self::LinValueNotConsumed {
+                name,
+                consumption_paths,
+            } => {
+                let mut msg = format!("`{name}` must be consumed before scope exit");
+                if !consumption_paths.is_empty() {
+                    msg.push_str(&format!(", e.g. with: {}", consumption_paths.join(", ")));
+                }
+                msg
             }
-            Self::CannotPassReadonlyAsMut { name } => {
-                format!("cannot pass `{name}` as `mut` because it is read-only")
-            }
+
             Self::PositionalAfterDefault { name } => {
                 format!("positional parameter `{name}` appears after a default parameter")
+            }
+            Self::ReturnConsumedParam { name } => {
+                format!("cannot return consumed parameter `{name}`")
+            }
+            Self::ConsumeArgOnBareParam { name } => {
+                format!("cannot use `~` on parameter `{name}`: parameter is not consumed")
             }
         }
     }
@@ -162,15 +185,20 @@ impl DiagnosticLike for TypeSymptom {
             Self::UseOfMovedValue { .. } => {
                 Some("value was moved into another owner and cannot be used".into())
             }
-            Self::LinValueNotConsumed { .. } => Some(
-                "consider passing the value to a consuming function (e.g. `commit(own txn)`)"
-                    .into(),
+            Self::LinValueNotConsumed { consumption_paths, .. } if !consumption_paths.is_empty() => {
+                Some(format!("consume it with one of: {}", consumption_paths.join(", ")))
+            }
+            Self::LinValueNotConsumed { name, .. } => Some(
+                format!("value '{name}' was not consumed via `~{name}`")
             ),
-            Self::CannotPassReadonlyAsMut { .. } => {
-                Some("declare the parameter with `mut` or bind with `:` instead of `:=".into())
-            },
             Self::PositionalAfterDefault { .. } => Some(
                 "all parameters after a default must also have defaults (or use named arguments — see NOTE)".into(),
+            ),
+            Self::ReturnConsumedParam { .. } => Some(
+                "a `~` parameter is consumed (destroyed) within the function and cannot be returned".into(),
+            ),
+            Self::ConsumeArgOnBareParam { .. } => Some(
+                "remove the `~` or declare the parameter with `~` in the function signature".into(),
             ),
         }
     }
@@ -180,6 +208,8 @@ impl DiagnosticLike for TypeSymptom {
             Self::UnusedBinding { .. } => Category::Help,
             Self::LinValueNotConsumed { .. } => Category::Flaw,
             Self::PositionalAfterDefault { .. } => Category::Flaw,
+            Self::ReturnConsumedParam { .. } => Category::Flaw,
+            Self::ConsumeArgOnBareParam { .. } => Category::Flaw,
             _ => Category::Flaw,
         }
     }

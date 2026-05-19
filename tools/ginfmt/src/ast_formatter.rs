@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 
 use ast::{
-    BindValue, Declare, DeclareValue, DocComment, Expr, FileAst, ImportSource, Literal,
-    ParameterKind, Parameters, SpanTable, Spanned, TypeExpr, Typed, Variant,
+    BindValue, BundleExportImport, Declare, DeclareValue, DocComment, Expr, FileAst, ImportSource,
+    Literal, ModuleImport, ParameterKind, Parameters, SpanTable, Spanned, TypeExpr, Typed, Variant,
 };
 use internment::Intern;
 
@@ -273,8 +273,18 @@ impl<'a> AstFormatter<'a> {
     }
 
     fn format_import(&mut self, import: &ast::Import) {
-        for mi in &import.0 {
-            self.buffer.push_str("use ");
+        if import.0.is_empty() {
+            return;
+        }
+
+        let mut sorted: Vec<&ModuleImport> = import.0.iter().collect();
+        sorted.sort_by_key(|mi| import_display_key(mi));
+
+        self.buffer.push_str("use ");
+        for (i, mi) in sorted.iter().enumerate() {
+            if i > 0 {
+                self.buffer.push_str(", ");
+            }
             match &mi.source {
                 ImportSource::Package(path) => {
                     self.buffer.push_str(path.root.as_str());
@@ -291,7 +301,9 @@ impl<'a> AstFormatter<'a> {
                 ImportSource::LocalBundle(b) => {
                     self.buffer.push_str(b.root.as_str());
                     self.buffer.push_str(".(");
-                    for (j, member) in b.members.iter().enumerate() {
+                    let mut members: Vec<&BundleExportImport> = b.members.iter().collect();
+                    members.sort_by_key(|m| m.export.as_str().to_lowercase());
+                    for (j, member) in members.iter().enumerate() {
                         if j > 0 {
                             self.buffer.push_str(", ");
                         }
@@ -334,11 +346,7 @@ impl<'a> AstFormatter<'a> {
             self.buffer.push(' ');
             self.buffer.push_str(&text);
         }
-        if bind.is_const {
-            self.buffer.push_str(" := ");
-        } else {
-            self.buffer.push_str(": ");
-        }
+        self.buffer.push_str(": ");
         let prefix_end = self.buffer.len();
 
         match bind.value() {
@@ -458,6 +466,30 @@ impl<'a> AstFormatter<'a> {
     }
 }
 
+/// Return a case-insensitive sort key for a module import.
+fn import_display_key(mi: &ModuleImport) -> String {
+    match &mi.source {
+        ImportSource::Package(path) => {
+            let mut s = path.root.as_str().to_lowercase();
+            for seg in &path.segments {
+                s.push('.');
+                s.push_str(seg.as_str().to_lowercase().as_str());
+            }
+            s
+        }
+        ImportSource::Local(p, _) => p.to_string_lossy().to_lowercase(),
+        ImportSource::LocalBundle(b) => b.root.as_str().to_lowercase(),
+        ImportSource::CurrentModule { member } => {
+            let mut s = member.export.as_str().to_lowercase();
+            if let Some(alias) = &member.alias {
+                s.push_str(" as ");
+                s.push_str(alias.as_str().to_lowercase().as_str());
+            }
+            s
+        }
+    }
+}
+
 /// Get the source text for a spanned expression using the span table.
 fn span_text(expr: &Typed<Expr>, st: &SpanTable, source: &str) -> String {
     let span = st.get(expr.span_id);
@@ -489,6 +521,7 @@ fn variant_name(expr: &TypeExpr) -> String {
         TypeExpr::Generic { name, .. } => name.as_str().to_string(),
         TypeExpr::Literal(..) => String::new(),
         TypeExpr::Pointer(inner) => variant_name(&inner.value),
+        TypeExpr::Ref { inner, .. } => variant_name(&inner.value),
         TypeExpr::Unit => String::new(),
     }
 }
@@ -509,6 +542,12 @@ fn type_text(expr: &TypeExpr) -> String {
         TypeExpr::Literal(..) => String::new(),
         TypeExpr::Pointer(inner) => {
             let mut s = String::from("@");
+            s.push_str(&type_text(&inner.value));
+            s
+        }
+        TypeExpr::Ref { inner, mutable } => {
+            let prefix = if *mutable { "mut " } else { "ref " };
+            let mut s = String::from(prefix);
             s.push_str(&type_text(&inner.value));
             s
         }
@@ -628,5 +667,55 @@ mod tests {
         let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
         let r = f.format_file(&out.ast);
         assert_eq!(r, "");
+    }
+
+    #[test]
+    fn test_import_sort_current_module() {
+        let source = "use ToString, Copy\n";
+        let out = parse_source_full(source);
+        let cfg = Config::default();
+        let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
+        let r = f.format_file(&out.ast);
+        assert_eq!(r, "use Copy, ToString\n");
+    }
+
+    #[test]
+    fn test_import_sort_package() {
+        let source = "use http.web, crypto.hash\n";
+        let out = parse_source_full(source);
+        let cfg = Config::default();
+        let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
+        let r = f.format_file(&out.ast);
+        assert_eq!(r, "use crypto.hash, http.web\n");
+    }
+
+    #[test]
+    fn test_import_sort_single() {
+        let source = "use http\n";
+        let out = parse_source_full(source);
+        let cfg = Config::default();
+        let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
+        let r = f.format_file(&out.ast);
+        assert_eq!(r, "use http\n");
+    }
+
+    #[test]
+    fn test_bundle_member_sort() {
+        let source = "use core.(Int, Byte, Area)\n";
+        let out = parse_source_full(source);
+        let cfg = Config::default();
+        let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
+        let r = f.format_file(&out.ast);
+        assert_eq!(r, "use core.(Area, Byte, Int)\n");
+    }
+
+    #[test]
+    fn test_import_sort_idempotent() {
+        let source = "use Copy, ToString\n";
+        let out = parse_source_full(source);
+        let cfg = Config::default();
+        let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
+        let r = f.format_file(&out.ast);
+        assert_eq!(r, "use Copy, ToString\n");
     }
 }

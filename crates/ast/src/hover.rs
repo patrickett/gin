@@ -281,7 +281,7 @@ fn format_bind_hover(
         result.push_str(&format_params_pre(params).to_string());
     }
     let is_function = bind.params().is_some();
-    if !is_function && bind.is_const {
+    if !is_function {
         let var = Intern::<String>::from_ref(display_name);
         if let Some(const_val) = flow.final_context.get_constant(&var) {
             let is_single_variant = bind.return_tag.as_ref().is_some_and(|sp| match &sp.value {
@@ -763,11 +763,11 @@ fn collect_refs_expr(
             collect_refs_expr(value, name, span_table, out);
         }
         Expr::TakePtr(inner)
-        | Expr::TakeRef(inner)
+        | Expr::Ref { inner, .. }
+        | Expr::ConsumeArg(inner)
+        | Expr::Eat(inner)
         | Expr::Deref(inner)
-        | Expr::Negate(inner)
-        | Expr::MutArg(inner)
-        | Expr::OwnArg(inner) => {
+        | Expr::Negate(inner) => {
             collect_refs_expr(inner, name, span_table, out);
         }
         Expr::TupleLit(elems) | Expr::List(elems) => {

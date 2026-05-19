@@ -1,100 +1,41 @@
-//! Structural copyability analysis.
+//! Copyability analysis — size-based heuristic with explicit opt-out.
 //!
-//! Determines whether a type can be implicitly copied (e.g. when used as a bare
-//! or `own` argument). Copyable types follow value semantics; non-copyable types
-//! follow move semantics.
+//! Copyability is determined in this order:
+//!   1. Explicit marker bindings (`and is Copy` / `and is not Copy`) take priority.
+//!   2. Otherwise, a type is Copy if its static byte size ≤ 16 bytes.
+//!
+//! This means small value types are Copy by default, but users can explicitly
+//! opt into linear semantics with `and is not Copy` (e.g., `File has (fd Int)
+//! and is not Copy`).
 
-use std::collections::HashSet;
-
+use crate::marker::{MarkerRegistry, ty_name};
+use crate::ty::{Ty, ty_byte_size_static};
 use internment::Intern;
 
-use crate::ty::Ty;
+/// Maximum byte size for a type to be implicitly copyable.
+const MAX_COPY_BYTES: usize = 16;
 
-/// Determine whether a type is structurally copyable.
+/// Determine whether a type is implicitly copyable.
 ///
-/// A type is copyable if:
-/// - It is a primitive (int, float, bool, unit)
-/// - It is a const union (small integer discriminant)
-/// - It is a record/union where all fields are copyable AND the type is not `#[lin]`
-/// - It is a tuple where all elements are copyable
-///
-/// A type is NOT copyable if:
-/// - It is a pointer or reference (aliasing concerns)
-/// - It is an array (heap-allocated)
-/// - It is an opaque/generic type (conservative: assume non-copyable)
-/// - It is annotated with `#[not_copy]`
-/// - It is annotated with `#[lin]`
-pub fn is_copyable(
-    ty: &Ty,
-    lin_types: &HashSet<Intern<String>>,
-    not_copy_types: &HashSet<Intern<String>>,
-) -> bool {
-    match ty {
-        Ty::Int { .. } | Ty::Float { .. } | Ty::Bool | Ty::Unit => true,
-        Ty::Ptr { .. } | Ty::Ref { .. } | Ty::Array { .. } => false,
-        Ty::Opaque(_) => false,        // conservative for generics
-        Ty::ConstUnion { .. } => true, // small integer discriminant
-
-        Ty::Record { name, fields } => {
-            if lin_types.contains(name) || not_copy_types.contains(name) {
-                return false;
-            }
-            fields
-                .iter()
-                .all(|(_, f)| is_copyable(f, lin_types, not_copy_types))
+/// Priority order:
+/// 1. If the `Copy` marker is registered, check explicit `and is Copy` /
+///    `and is not Copy` bindings on the type.
+/// 2. Otherwise, fall back to the size rule: ≤ 16 bytes → Copy, > 16 → linear.
+pub fn is_copyable(ty: &Ty, registry: &MarkerRegistry) -> bool {
+    // Check for explicit marker bindings if Copy is a known marker.
+    if let Some(type_name) = ty_name(ty)
+        && registry.is_recognized(&Intern::from_ref("Copy"))
+    {
+        // Explicit `and is not Copy` always overrides.
+        if registry.has_negative_binding(type_name, &Intern::from_ref("Copy")) {
+            return false;
         }
-        Ty::Union { name, variants } => {
-            if lin_types.contains(name) || not_copy_types.contains(name) {
-                return false;
-            }
-            variants.iter().all(|(_, fields)| {
-                fields
-                    .iter()
-                    .all(|(_, f)| is_copyable(f, lin_types, not_copy_types))
-            })
+        // Explicit `and is Copy` always overrides.
+        if registry.has_positive_binding(type_name, &Intern::from_ref("Copy")) {
+            return true;
         }
-        Ty::Tuple(fields) => fields
-            .iter()
-            .all(|f| is_copyable(f, lin_types, not_copy_types)),
     }
-}
 
-/// Determine whether a type is `#[lin]` (linear).
-///
-/// A type is linear if it is explicitly annotated with `#[lin]`, or if any
-/// of its fields is linear (infectious propagation).
-pub fn is_lin_type(
-    ty: &Ty,
-    lin_types: &HashSet<Intern<String>>,
-    visited: &mut HashSet<Intern<String>>,
-) -> bool {
-    match ty {
-        Ty::Record { name, fields } => {
-            if lin_types.contains(name) {
-                return true;
-            }
-            if !visited.insert(*name) {
-                return false; // already checked, avoid cycles
-            }
-            fields
-                .iter()
-                .any(|(_, f)| is_lin_type(f, lin_types, visited))
-        }
-        Ty::Union { name, variants } => {
-            if lin_types.contains(name) {
-                return true;
-            }
-            if !visited.insert(*name) {
-                return false; // already checked, avoid cycles
-            }
-            variants.iter().any(|(_, fields)| {
-                fields
-                    .iter()
-                    .any(|(_, f)| is_lin_type(f, lin_types, visited))
-            })
-        }
-        Ty::Tuple(fields) => fields.iter().any(|f| is_lin_type(f, lin_types, visited)),
-        // Primitives, pointers, opaque are never lin
-        _ => false,
-    }
+    // Fall back to size-based rule.
+    ty_byte_size_static(ty) <= MAX_COPY_BYTES
 }

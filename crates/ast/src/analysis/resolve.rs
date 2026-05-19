@@ -68,6 +68,13 @@ pub fn resolve_type_expr_with_subst(
             if let Some(t) = subst.get(name) {
                 return t.clone();
             }
+            // Unresolved lowercase names are type variables (e.g. `x` in `Linear(x) is x`).
+            // Return Opaque so generic substitution can replace them.
+            if let Some(c) = name.as_str().chars().next()
+                && c.is_ascii_lowercase()
+            {
+                return Ty::Opaque(*name);
+            }
             tag_types.get(name).cloned().unwrap_or(Ty::i64())
         }
         TypeExpr::Generic { name, params, .. } => {
@@ -92,6 +99,16 @@ pub fn resolve_type_expr_with_subst(
                 tag_params,
             )),
         },
+        TypeExpr::Ref { inner, mutable } => Ty::Ref {
+            inner: Box::new(resolve_type_expr_with_subst(
+                &inner.value,
+                tag_types,
+                subst,
+                tag_params,
+            )),
+            mutable: *mutable,
+        },
+
         TypeExpr::Unit => Ty::Unit,
     }
 }
@@ -127,9 +144,6 @@ pub fn substitute_in_ty(ty: &Ty, subst: &HashMap<Intern<String>, Ty>) -> Ty {
             size: *size,
         },
         Ty::Ptr { inner } => Ty::Ptr {
-            inner: Box::new(substitute_in_ty(inner, subst)),
-        },
-        Ty::Ref { inner } => Ty::Ref {
             inner: Box::new(substitute_in_ty(inner, subst)),
         },
         _ => ty.clone(),
@@ -268,6 +282,10 @@ fn resolve_type_expr_ref(
         TypeExpr::Qualified(path) => resolve_name(path.root, raw, recursion_depth),
         TypeExpr::Literal(..) => Ty::Opaque(Intern::new(String::new())),
         TypeExpr::Pointer(inner) => resolve_type_expr_ref(&inner.value, raw, recursion_depth),
+        TypeExpr::Ref { inner, mutable } => Ty::Ref {
+            inner: Box::new(resolve_type_expr_ref(&inner.value, raw, recursion_depth)),
+            mutable: *mutable,
+        },
         TypeExpr::Unit => Ty::Unit,
     }
 }

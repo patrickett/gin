@@ -61,8 +61,9 @@ pub fn ty_to_json(ty: &Ty) -> Value {
         Ty::Ptr { inner } => serde_json::json!({
             "kind": "Ptr", "inner": ty_to_json(inner),
         }),
-        Ty::Ref { inner } => serde_json::json!({
-            "kind": "Ref", "inner": ty_to_json(inner),
+        Ty::Ref { inner, mutable } => serde_json::json!({
+            "kind": if *mutable { "Mut" } else { "Ref" },
+            "inner": ty_to_json(inner),
         }),
         Ty::ConstUnion { name, base, values } => {
             let vals: Vec<Value> = values
@@ -361,11 +362,11 @@ fn expr_kind_name(expr: &Expr) -> &'static str {
         Expr::BufGet { .. } => "BufGet",
         Expr::BufSet { .. } => "BufSet",
         Expr::TakePtr(_) => "TakePtr",
-        Expr::TakeRef(_) => "TakeRef",
+        Expr::Ref { .. } => "Ref",
+        Expr::ConsumeArg(_) => "ConsumeArg",
+        Expr::Eat(_) => "Eat",
         Expr::Deref(_) => "Deref",
         Expr::Negate(_) => "Negate",
-        Expr::MutArg(_) => "MutArg",
-        Expr::OwnArg(_) => "OwnArg",
         Expr::Asm(_) => "Asm",
         Expr::List(_) => "List",
         Expr::TupleLit(_) => "TupleLit",

@@ -7,10 +7,20 @@
 use internment::Intern;
 use std::collections::{HashMap, HashSet};
 
+use crate::analysis::{is_type_surface, resolve_type_expr_with_subst};
+
+/// Map from local variable name to its resolved type, built incrementally
+/// during expression lowering. This lets `resolve_expr_type` look up the
+/// type of a variable that was bound earlier in the same function body.
+type LocalVarTypes = HashMap<Intern<String>, crate::ty::Ty>;
+
 use super::{ParseAst, TransformCtx};
 use crate::prelude::*;
 use crate::ty::Ty;
-use crate::typed::{BindBody, DefId, ExprId, TagId, TypedExprKind, TypedFileAst, VariantId};
+use crate::typed::{
+    BindBody, DefId, ExprId, TagId, TypedExprKind, TypedFileAst, TypedIfCondition, TypedIfExpr,
+    TypedLoop, TypedLoopKind, VariantId,
+};
 use diagnostic::TypeSymptom;
 
 /// Computes the Levenshtein distance between two strings.
@@ -124,6 +134,10 @@ pub fn stage_resolve(typed: &mut TypedFileAst, parse_ast: &ParseAst, _ctx: &Tran
         let empty_locals = HashSet::new();
         let locals: &HashSet<Intern<String>> = param_sets.get(def_id).unwrap_or(&empty_locals);
 
+        // Start each function body with an empty local-var map so that
+        // variables from one function don't leak into another.
+        let mut local_var_types: LocalVarTypes = HashMap::new();
+
         let body = match &bind.value {
             BindValue::Expr(typed_expr) => {
                 let id = lower_typed_expr(
@@ -133,6 +147,7 @@ pub fn stage_resolve(typed: &mut TypedFileAst, parse_ast: &ParseAst, _ctx: &Tran
                     &variant_map,
                     receiver_type,
                     locals,
+                    &mut local_var_types,
                 );
                 BindBody::Expr(id)
             }
@@ -146,6 +161,7 @@ pub fn stage_resolve(typed: &mut TypedFileAst, parse_ast: &ParseAst, _ctx: &Tran
                         &variant_map,
                         receiver_type,
                         locals,
+                        &mut local_var_types,
                     ));
                 }
                 let ret_id = ret.value.as_ref().map(|ret_expr| {
@@ -156,6 +172,7 @@ pub fn stage_resolve(typed: &mut TypedFileAst, parse_ast: &ParseAst, _ctx: &Tran
                         &variant_map,
                         receiver_type,
                         locals,
+                        &mut local_var_types,
                     )
                 });
                 BindBody::Body {
@@ -173,6 +190,7 @@ pub fn stage_resolve(typed: &mut TypedFileAst, parse_ast: &ParseAst, _ctx: &Tran
 
     // Lower top-level expressions.
     let empty_locals = HashSet::new();
+    let mut local_var_types: LocalVarTypes = HashMap::new();
     for (expr, span_id) in &parse_ast.exprs {
         let wrapped = Typed::infer(expr.clone(), *span_id);
         let expr_id = lower_typed_expr(
@@ -182,6 +200,7 @@ pub fn stage_resolve(typed: &mut TypedFileAst, parse_ast: &ParseAst, _ctx: &Tran
             &variant_map,
             None,
             &empty_locals,
+            &mut local_var_types,
         );
         typed.root_exprs.push(expr_id);
     }
@@ -201,15 +220,32 @@ fn lower_typed_expr(
     variant_map: &crate::analysis::VariantMap,
     receiver_type: Option<&Ty>,
     locals: &HashSet<Intern<String>>,
+    local_var_types: &mut LocalVarTypes,
 ) -> ExprId {
-    let resolved_ty = resolve_expr_type(expr, tag_types, variant_map, receiver_type);
+    let resolved_ty =
+        resolve_expr_type(expr, tag_types, variant_map, receiver_type, local_var_types);
     let const_val = expr.const_value.clone();
 
-    let kind = lower_expr_kind(typed, expr, tag_types, variant_map, receiver_type, locals);
+    let kind = lower_expr_kind(
+        typed,
+        expr,
+        tag_types,
+        variant_map,
+        receiver_type,
+        locals,
+        local_var_types,
+    );
     let expr_id = ExprId(typed.exprs.kind.len() as u32);
 
     let mut flaws: Vec<diagnostic::TypeSymptom> = Vec::new();
-    check_type_flaws(&kind, &resolved_ty, typed, locals, &mut flaws);
+    check_type_flaws(
+        &kind,
+        &resolved_ty,
+        typed,
+        locals,
+        local_var_types,
+        &mut flaws,
+    );
 
     typed.exprs.kind.push(kind);
     typed.exprs.ty.push(resolved_ty);
@@ -232,13 +268,15 @@ fn check_type_flaws(
     _ty: &Ty,
     typed: &TypedFileAst,
     locals: &HashSet<Intern<String>>,
+    local_var_types: &LocalVarTypes,
     flaws: &mut Vec<diagnostic::TypeSymptom>,
 ) {
     match kind {
         TypedExprKind::FnCall { target, .. } => {
             let is_known = typed.defs.contains_key(target)
                 || typed.fn_return_types.contains_key(target)
-                || locals.contains(&target.0);
+                || locals.contains(&target.0)
+                || local_var_types.contains_key(&target.0);
             if !is_known {
                 let name = target.0.as_str();
                 let did_you_mean = closest_name(
@@ -249,7 +287,8 @@ fn check_type_flaws(
                         .map(|d| d.0.as_str())
                         .chain(typed.fn_return_types.keys().map(|d| d.0.as_str()))
                         .chain(typed.tags.keys().map(|t| t.0.as_str()))
-                        .chain(locals.iter().map(|l| l.as_str())),
+                        .chain(locals.iter().map(|l| l.as_str()))
+                        .chain(local_var_types.keys().map(|t| t.as_str()))
                 );
                 flaws.push(TypeSymptom::UnknownBinding {
                     name: name.to_string(),
@@ -309,6 +348,7 @@ fn lower_expr_kind(
     variant_map: &crate::analysis::VariantMap,
     receiver_type: Option<&Ty>,
     locals: &HashSet<Intern<String>>,
+    local_var_types: &mut LocalVarTypes,
 ) -> TypedExprKind {
     match &expr.value {
         Expr::Lit(lit) => TypedExprKind::Lit(lit.clone()),
@@ -321,6 +361,7 @@ fn lower_expr_kind(
                 variant_map,
                 receiver_type,
                 locals,
+                local_var_types,
             );
             let rhs = lower_typed_expr(
                 typed,
@@ -329,6 +370,7 @@ fn lower_expr_kind(
                 variant_map,
                 receiver_type,
                 locals,
+                local_var_types,
             );
             TypedExprKind::Binary {
                 op: binary.op.clone(),
@@ -342,7 +384,15 @@ fn lower_expr_kind(
             let args = fn_call.args.as_ref().map(|args| {
                 args.iter()
                     .map(|a| {
-                        lower_typed_expr(typed, a, tag_types, variant_map, receiver_type, locals)
+                        lower_typed_expr(
+                            typed,
+                            a,
+                            tag_types,
+                            variant_map,
+                            receiver_type,
+                            locals,
+                            local_var_types,
+                        )
                     })
                     .collect()
             });
@@ -367,6 +417,7 @@ fn lower_expr_kind(
                                 variant_map,
                                 receiver_type,
                                 locals,
+                                local_var_types,
                             )
                         })
                         .collect(),
@@ -400,9 +451,8 @@ fn lower_expr_kind(
         }
 
         Expr::Bind(local_bind) => {
-            // Local bind (e.g., `val x: 42` inside a function body).
-            // Extract the body expression from the bind value.
-            match &local_bind.value {
+            // Local bind (e.g., `x: 42` inside a function body).
+            let (stmts, body) = match &local_bind.value {
                 BindValue::Expr(typed_expr) => {
                     let body = lower_typed_expr(
                         typed,
@@ -411,53 +461,100 @@ fn lower_expr_kind(
                         variant_map,
                         receiver_type,
                         locals,
+                        local_var_types,
                     );
-                    TypedExprKind::Bind {
-                        name: local_bind.name,
-                        body,
-                    }
+                    (Vec::new(), body)
                 }
                 BindValue::Body { exprs, ret } => {
-                    // For multi-expr bodies, lower the last expression as the value.
-                    if let Some(last) = exprs.last() {
-                        let body = lower_typed_expr(
-                            typed,
-                            last,
-                            tag_types,
-                            variant_map,
-                            receiver_type,
-                            locals,
-                        );
-                        TypedExprKind::Bind {
-                            name: local_bind.name,
-                            body,
-                        }
-                    } else if let Some(ret_expr) = &ret.value {
-                        let body = lower_typed_expr(
-                            typed,
-                            ret_expr,
-                            tag_types,
-                            variant_map,
-                            receiver_type,
-                            locals,
-                        );
-                        TypedExprKind::Bind {
-                            name: local_bind.name,
-                            body,
-                        }
-                    } else {
-                        TypedExprKind::Lit(Literal::Number(0))
-                    }
+                    let stmts: Vec<ExprId> = exprs
+                        .iter()
+                        .map(|e| {
+                            lower_typed_expr(
+                                typed,
+                                e,
+                                tag_types,
+                                variant_map,
+                                receiver_type,
+                                locals,
+                                local_var_types,
+                            )
+                        })
+                        .collect();
+                    let body = ret
+                        .value
+                        .as_ref()
+                        .map(|ret_expr| {
+                            lower_typed_expr(
+                                typed,
+                                ret_expr,
+                                tag_types,
+                                variant_map,
+                                receiver_type,
+                                locals,
+                                local_var_types,
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            // No explicit return value — unit fallback.
+                            let id = ExprId(typed.exprs.kind.len() as u32);
+                            typed
+                                .exprs
+                                .kind
+                                .push(TypedExprKind::Lit(Literal::Number(0)));
+                            typed.exprs.ty.push(crate::ty::Ty::Unit);
+                            typed.exprs.span.push(SpanId::INVALID);
+                            typed.exprs.const_value.push(None);
+                            typed.exprs.flaws.push(Vec::new());
+                            typed.exprs.flow.push(None);
+                            id
+                        });
+                    (stmts, body)
                 }
-                BindValue::Extern => TypedExprKind::Lit(Literal::Number(0)),
+                BindValue::Extern => {
+                    let id = ExprId(typed.exprs.kind.len() as u32);
+                    typed
+                        .exprs
+                        .kind
+                        .push(TypedExprKind::Lit(Literal::Number(0)));
+                    typed.exprs.ty.push(crate::ty::Ty::Unit);
+                    typed.exprs.span.push(SpanId::INVALID);
+                    typed.exprs.const_value.push(None);
+                    typed.exprs.flaws.push(Vec::new());
+                    typed.exprs.flow.push(None);
+                    (Vec::new(), id)
+                }
+            };
+            // Record the variable's type so subsequent expressions can resolve it.
+            // When a return_tag annotation is present, use that type instead
+            // of the body-inferred type (e.g. `level LogLevel: 'debug'` should
+            // bind `level` as `LogLevel` (ConstUnion), not `Str`).
+            let var_ty = if let Some(sp) = &local_bind.return_tag
+                && is_type_surface(&sp.value)
+            {
+                resolve_type_expr_with_subst(&sp.value, tag_types, &HashMap::new(), None)
+            } else {
+                typed.exprs.ty[body.as_usize()].clone()
+            };
+            local_var_types.insert(local_bind.name, var_ty);
+            TypedExprKind::Bind {
+                name: local_bind.name,
+                stmts,
+                body,
             }
         }
 
         Expr::When(when_expr) => {
-            let subject = when_expr
-                .subject
-                .as_ref()
-                .map(|s| lower_typed_expr(typed, s, tag_types, variant_map, receiver_type, locals));
+            let subject = when_expr.subject.as_ref().map(|s| {
+                lower_typed_expr(
+                    typed,
+                    s,
+                    tag_types,
+                    variant_map,
+                    receiver_type,
+                    locals,
+                    local_var_types,
+                )
+            });
             let arms: Vec<crate::typed::TypedWhenArm> = when_expr
                 .arms
                 .iter()
@@ -474,6 +571,7 @@ fn lower_expr_kind(
                             variant_map,
                             receiver_type,
                             locals,
+                            local_var_types,
                         );
                         let body_id = lower_typed_expr(
                             typed,
@@ -482,6 +580,7 @@ fn lower_expr_kind(
                             variant_map,
                             receiver_type,
                             locals,
+                            local_var_types,
                         );
                         crate::typed::TypedWhenArm::Cond {
                             condition: cond_id,
@@ -501,6 +600,7 @@ fn lower_expr_kind(
                             variant_map,
                             receiver_type,
                             locals,
+                            local_var_types,
                         );
                         crate::typed::TypedWhenArm::Is {
                             pattern: pattern.clone(),
@@ -516,6 +616,7 @@ fn lower_expr_kind(
                             variant_map,
                             receiver_type,
                             locals,
+                            local_var_types,
                         );
                         crate::typed::TypedWhenArm::Else(body_id, *arm_span)
                     }
@@ -528,69 +629,59 @@ fn lower_expr_kind(
             })
         }
         Expr::If(if_expr) => {
-            let (condition, then_body, else_body) = match &if_expr.condition {
-                IfCondition::Bool(cond) => {
-                    let cond_id = lower_typed_expr(
-                        typed,
-                        cond,
-                        tag_types,
-                        variant_map,
-                        receiver_type,
-                        locals,
-                    );
-                    let body_id = if let Some(last) = if_expr.body.last() {
-                        lower_typed_expr(typed, last, tag_types, variant_map, receiver_type, locals)
-                    } else if let Some(ret_val) = &if_expr.ret.value {
-                        lower_typed_expr(
-                            typed,
-                            ret_val,
-                            tag_types,
-                            variant_map,
-                            receiver_type,
-                            locals,
-                        )
-                    } else {
-                        lower_typed_expr(typed, expr, tag_types, variant_map, receiver_type, locals)
-                    };
-                    (crate::typed::TypedIfCondition::Bool(cond_id), body_id, None)
-                }
-                IfCondition::Pattern { subject, pattern } => {
-                    let subj_id = lower_typed_expr(
+            let condition = match &if_expr.condition {
+                IfCondition::Bool(cond) => TypedIfCondition::Bool(lower_typed_expr(
+                    typed,
+                    cond,
+                    tag_types,
+                    variant_map,
+                    receiver_type,
+                    locals,
+                    local_var_types,
+                )),
+                IfCondition::Pattern { subject, pattern } => TypedIfCondition::Pattern {
+                    subject: lower_typed_expr(
                         typed,
                         subject,
                         tag_types,
                         variant_map,
                         receiver_type,
                         locals,
-                    );
-                    let body_id = if let Some(last) = if_expr.body.last() {
-                        lower_typed_expr(typed, last, tag_types, variant_map, receiver_type, locals)
-                    } else if let Some(ret_val) = &if_expr.ret.value {
-                        lower_typed_expr(
-                            typed,
-                            ret_val,
-                            tag_types,
-                            variant_map,
-                            receiver_type,
-                            locals,
-                        )
-                    } else {
-                        lower_typed_expr(typed, expr, tag_types, variant_map, receiver_type, locals)
-                    };
-                    (
-                        crate::typed::TypedIfCondition::Pattern {
-                            subject: subj_id,
-                            pattern: pattern.clone(),
-                        },
-                        body_id,
-                        None,
-                    )
-                }
+                        local_var_types,
+                    ),
+                    pattern: pattern.clone(),
+                },
             };
-            TypedExprKind::If(crate::typed::TypedIfExpr {
+            let stmts: Vec<ExprId> = if_expr
+                .body
+                .iter()
+                .map(|e| {
+                    lower_typed_expr(
+                        typed,
+                        e,
+                        tag_types,
+                        variant_map,
+                        receiver_type,
+                        locals,
+                        local_var_types,
+                    )
+                })
+                .collect();
+            let ret = if_expr.ret.value.as_ref().map(|ret_val| {
+                lower_typed_expr(
+                    typed,
+                    ret_val,
+                    tag_types,
+                    variant_map,
+                    receiver_type,
+                    locals,
+                    local_var_types,
+                )
+            });
+            TypedExprKind::If(TypedIfExpr {
                 condition,
-                then_body,
-                else_body,
+                stmts,
+                ret,
                 body_span: if_expr.body_span,
             })
         }
@@ -604,37 +695,26 @@ fn lower_expr_kind(
                         variant_map,
                         receiver_type,
                         locals,
+                        local_var_types,
                     );
-                    // While body is a block — lower the last expression as the body.
-                    let body_id = while_loop
+                    let stmts: Vec<ExprId> = while_loop
                         .exprs
-                        .last()
-                        .map(|last| {
+                        .iter()
+                        .map(|e| {
                             lower_typed_expr(
                                 typed,
-                                last,
+                                e,
                                 tag_types,
                                 variant_map,
                                 receiver_type,
                                 locals,
+                                local_var_types,
                             )
                         })
-                        .unwrap_or_else(|| {
-                            let id = typed.exprs.kind.len() as u32;
-                            typed
-                                .exprs
-                                .kind
-                                .push(TypedExprKind::Lit(Literal::Number(0)));
-                            typed.exprs.ty.push(crate::ty::Ty::Unit);
-                            typed.exprs.span.push(SpanId::INVALID);
-                            typed.exprs.const_value.push(None);
-                            typed.exprs.flaws.push(Vec::new());
-                            typed.exprs.flow.push(None);
-                            ExprId(id)
-                        });
-                    TypedExprKind::Loop(crate::typed::TypedLoop {
-                        kind: crate::typed::TypedLoopKind::While { condition: cond_id },
-                        body: body_id,
+                        .collect();
+                    TypedExprKind::Loop(TypedLoop {
+                        kind: TypedLoopKind::While { condition: cond_id },
+                        stmts,
                         keyword_span: while_loop.keyword_span,
                     })
                 }
@@ -646,44 +726,34 @@ fn lower_expr_kind(
                         variant_map,
                         receiver_type,
                         locals,
+                        local_var_types,
                     );
-                    let body_id = for_in
+                    let stmts: Vec<ExprId> = for_in
                         .exprs
-                        .last()
-                        .map(|last| {
+                        .iter()
+                        .map(|e| {
                             lower_typed_expr(
                                 typed,
-                                last,
+                                e,
                                 tag_types,
                                 variant_map,
                                 receiver_type,
                                 locals,
+                                local_var_types,
                             )
                         })
-                        .unwrap_or_else(|| {
-                            let id = typed.exprs.kind.len() as u32;
-                            typed
-                                .exprs
-                                .kind
-                                .push(TypedExprKind::Lit(Literal::Number(0)));
-                            typed.exprs.ty.push(crate::ty::Ty::Unit);
-                            typed.exprs.span.push(SpanId::INVALID);
-                            typed.exprs.const_value.push(None);
-                            typed.exprs.flaws.push(Vec::new());
-                            typed.exprs.flow.push(None);
-                            ExprId(id)
-                        });
+                        .collect();
                     // Extract variable name from the for-in pattern.
                     let var_name = match &for_in.pat.value {
                         Expr::Bind(b) => b.name.as_str().to_string(),
                         _ => Intern::new("it".to_string()).as_str().to_string(),
                     };
-                    TypedExprKind::Loop(crate::typed::TypedLoop {
-                        kind: crate::typed::TypedLoopKind::ForIn {
+                    TypedExprKind::Loop(TypedLoop {
+                        kind: TypedLoopKind::ForIn {
                             variable: Intern::new(var_name),
                             iterable: iter_id,
                         },
-                        body: body_id,
+                        stmts,
                         keyword_span: for_in.keyword_span,
                     })
                 }
@@ -704,6 +774,7 @@ fn lower_expr_kind(
                 variant_map,
                 receiver_type,
                 locals,
+                local_var_types,
             );
             let end = lower_typed_expr(
                 typed,
@@ -712,13 +783,21 @@ fn lower_expr_kind(
                 variant_map,
                 receiver_type,
                 locals,
+                local_var_types,
             );
             TypedExprKind::Range { start, end }
         }
 
         Expr::TupleAlloc { init, size } => {
-            let init_id =
-                lower_typed_expr(typed, init, tag_types, variant_map, receiver_type, locals);
+            let init_id = lower_typed_expr(
+                typed,
+                init,
+                tag_types,
+                variant_map,
+                receiver_type,
+                locals,
+                local_var_types,
+            );
             TypedExprKind::TupleAlloc {
                 init: init_id,
                 size: *size,
@@ -726,8 +805,15 @@ fn lower_expr_kind(
         }
 
         Expr::TupleGet { base, index } => {
-            let base_id =
-                lower_typed_expr(typed, base, tag_types, variant_map, receiver_type, locals);
+            let base_id = lower_typed_expr(
+                typed,
+                base,
+                tag_types,
+                variant_map,
+                receiver_type,
+                locals,
+                local_var_types,
+            );
             TypedExprKind::TupleGet {
                 base: base_id,
                 index: *index,
@@ -735,10 +821,24 @@ fn lower_expr_kind(
         }
 
         Expr::TupleSet { base, index, value } => {
-            let base_id =
-                lower_typed_expr(typed, base, tag_types, variant_map, receiver_type, locals);
-            let value_id =
-                lower_typed_expr(typed, value, tag_types, variant_map, receiver_type, locals);
+            let base_id = lower_typed_expr(
+                typed,
+                base,
+                tag_types,
+                variant_map,
+                receiver_type,
+                locals,
+                local_var_types,
+            );
+            let value_id = lower_typed_expr(
+                typed,
+                value,
+                tag_types,
+                variant_map,
+                receiver_type,
+                locals,
+                local_var_types,
+            );
             TypedExprKind::TupleSet {
                 base: base_id,
                 index: *index,
@@ -757,6 +857,7 @@ fn lower_expr_kind(
                 variant_map,
                 receiver_type,
                 locals,
+                local_var_types,
             );
             let cast_ty = tag_types.get(ty).cloned().unwrap_or(Ty::Opaque(*ty));
             TypedExprKind::Cast {
@@ -766,10 +867,24 @@ fn lower_expr_kind(
         }
 
         Expr::BufGet { buf, index } => {
-            let buf_id =
-                lower_typed_expr(typed, buf, tag_types, variant_map, receiver_type, locals);
-            let index_id =
-                lower_typed_expr(typed, index, tag_types, variant_map, receiver_type, locals);
+            let buf_id = lower_typed_expr(
+                typed,
+                buf,
+                tag_types,
+                variant_map,
+                receiver_type,
+                locals,
+                local_var_types,
+            );
+            let index_id = lower_typed_expr(
+                typed,
+                index,
+                tag_types,
+                variant_map,
+                receiver_type,
+                locals,
+                local_var_types,
+            );
             TypedExprKind::BufGet {
                 buf: buf_id,
                 index: index_id,
@@ -777,12 +892,33 @@ fn lower_expr_kind(
         }
 
         Expr::BufSet { buf, index, value } => {
-            let buf_id =
-                lower_typed_expr(typed, buf, tag_types, variant_map, receiver_type, locals);
-            let index_id =
-                lower_typed_expr(typed, index, tag_types, variant_map, receiver_type, locals);
-            let value_id =
-                lower_typed_expr(typed, value, tag_types, variant_map, receiver_type, locals);
+            let buf_id = lower_typed_expr(
+                typed,
+                buf,
+                tag_types,
+                variant_map,
+                receiver_type,
+                locals,
+                local_var_types,
+            );
+            let index_id = lower_typed_expr(
+                typed,
+                index,
+                tag_types,
+                variant_map,
+                receiver_type,
+                locals,
+                local_var_types,
+            );
+            let value_id = lower_typed_expr(
+                typed,
+                value,
+                tag_types,
+                variant_map,
+                receiver_type,
+                locals,
+                local_var_types,
+            );
             TypedExprKind::BufSet {
                 buf: buf_id,
                 index: index_id,
@@ -790,6 +926,18 @@ fn lower_expr_kind(
             }
         }
 
+        Expr::Ref { inner, mutable } => {
+            let _ = mutable;
+            TypedExprKind::Ref(lower_typed_expr(
+                typed,
+                inner,
+                tag_types,
+                variant_map,
+                receiver_type,
+                locals,
+                local_var_types,
+            ))
+        }
         Expr::TakePtr(inner) => TypedExprKind::TakePtr(lower_typed_expr(
             typed,
             inner,
@@ -797,14 +945,25 @@ fn lower_expr_kind(
             variant_map,
             receiver_type,
             locals,
+            local_var_types,
         )),
-        Expr::TakeRef(inner) => TypedExprKind::TakeRef(lower_typed_expr(
+        Expr::Eat(inner) => TypedExprKind::Eat(lower_typed_expr(
             typed,
             inner,
             tag_types,
             variant_map,
             receiver_type,
             locals,
+            local_var_types,
+        )),
+        Expr::ConsumeArg(inner) => TypedExprKind::ConsumeArg(lower_typed_expr(
+            typed,
+            inner,
+            tag_types,
+            variant_map,
+            receiver_type,
+            locals,
+            local_var_types,
         )),
         Expr::Deref(inner) => TypedExprKind::Deref(lower_typed_expr(
             typed,
@@ -813,6 +972,7 @@ fn lower_expr_kind(
             variant_map,
             receiver_type,
             locals,
+            local_var_types,
         )),
         Expr::Negate(inner) => TypedExprKind::Negate(lower_typed_expr(
             typed,
@@ -821,29 +981,22 @@ fn lower_expr_kind(
             variant_map,
             receiver_type,
             locals,
-        )),
-        Expr::MutArg(inner) => TypedExprKind::MutArg(lower_typed_expr(
-            typed,
-            inner,
-            tag_types,
-            variant_map,
-            receiver_type,
-            locals,
-        )),
-        Expr::OwnArg(inner) => TypedExprKind::OwnArg(lower_typed_expr(
-            typed,
-            inner,
-            tag_types,
-            variant_map,
-            receiver_type,
-            locals,
+            local_var_types,
         )),
 
         Expr::TupleLit(items) => {
             let lowered: Vec<ExprId> = items
                 .iter()
                 .map(|item| {
-                    lower_typed_expr(typed, item, tag_types, variant_map, receiver_type, locals)
+                    lower_typed_expr(
+                        typed,
+                        item,
+                        tag_types,
+                        variant_map,
+                        receiver_type,
+                        locals,
+                        local_var_types,
+                    )
                 })
                 .collect();
             TypedExprKind::TupleLit(lowered)
@@ -853,7 +1006,15 @@ fn lower_expr_kind(
             let lowered: Vec<ExprId> = items
                 .iter()
                 .map(|item| {
-                    lower_typed_expr(typed, item, tag_types, variant_map, receiver_type, locals)
+                    lower_typed_expr(
+                        typed,
+                        item,
+                        tag_types,
+                        variant_map,
+                        receiver_type,
+                        locals,
+                        local_var_types,
+                    )
                 })
                 .collect();
             TypedExprKind::List(lowered)
@@ -873,6 +1034,7 @@ fn resolve_expr_type(
     tag_types: &HashMap<Intern<String>, Ty>,
     variant_map: &crate::analysis::VariantMap,
     receiver_type: Option<&Ty>,
+    local_var_types: &LocalVarTypes,
 ) -> Ty {
     if let Some(resolved) = expr.resolved_ty() {
         return resolved.clone();
@@ -880,45 +1042,80 @@ fn resolve_expr_type(
     match &expr.value {
         Expr::Lit(lit) => lit_to_ty(lit),
         Expr::Binary(bin) => {
-            let lhs_ty = resolve_expr_type(&bin.lhs, tag_types, variant_map, receiver_type);
+            let lhs_ty = resolve_expr_type(
+                &bin.lhs,
+                tag_types,
+                variant_map,
+                receiver_type,
+                local_var_types,
+            );
             if bin.op.is_comparison() {
                 Ty::Bool
             } else {
                 lhs_ty
             }
         }
-        Expr::FnCall(_) => Ty::Opaque(Intern::new("infer".to_string())),
+        Expr::FnCall(fn_call) => {
+            // Check if the target is a local variable whose type is known.
+            let name = &fn_call.path.value.root;
+            if let Some(ty) = local_var_types.get(name) {
+                return ty.clone();
+            }
+            Ty::Opaque(Intern::new("infer".to_string()))
+        }
         Expr::TagCall(tag_call) => resolve_tag_call_type(&tag_call.name, tag_types, variant_map),
         Expr::AnonymousTag(name) => tag_types.get(name).cloned().unwrap_or(Ty::Opaque(*name)),
-        Expr::Bind(local_bind) => match &local_bind.value {
-            BindValue::Expr(e) => resolve_expr_type(e, tag_types, variant_map, receiver_type),
-            BindValue::Body { exprs, ret } => exprs
-                .last()
-                .map(|e| resolve_expr_type(e, tag_types, variant_map, receiver_type))
-                .or_else(|| {
-                    ret.value
-                        .as_ref()
-                        .map(|e| resolve_expr_type(e, tag_types, variant_map, receiver_type))
-                })
-                .unwrap_or(Ty::Unit),
-            BindValue::Extern => Ty::Unit,
-        },
+        Expr::Bind(local_bind) => {
+            // If the bind has an explicit type annotation (return_tag), use that
+            // instead of inferring from the body expression. This ensures
+            // annotated binds like `level LogLevel: 'debug'` get the correct
+            // ConstUnion type rather than inferring `Str` from the literal body.
+            if let Some(sp) = &local_bind.return_tag
+                && is_type_surface(&sp.value)
+            {
+                return resolve_type_expr_with_subst(&sp.value, tag_types, &HashMap::new(), None);
+            }
+
+            match &local_bind.value {
+                BindValue::Expr(e) => {
+                    resolve_expr_type(e, tag_types, variant_map, receiver_type, local_var_types)
+                }
+                BindValue::Body { exprs, ret } => exprs
+                    .last()
+                    .map(|e| {
+                        resolve_expr_type(e, tag_types, variant_map, receiver_type, local_var_types)
+                    })
+                    .or_else(|| {
+                        ret.value.as_ref().map(|e| {
+                            resolve_expr_type(
+                                e,
+                                tag_types,
+                                variant_map,
+                                receiver_type,
+                                local_var_types,
+                            )
+                        })
+                    })
+                    .unwrap_or(Ty::Unit),
+                BindValue::Extern => Ty::Unit,
+            }
+        }
         Expr::When(when_expr) => when_expr
             .arms
             .first()
             .map(|arm| match arm {
                 WhenArm::Cond { body, .. } | WhenArm::Is { body, .. } => {
-                    resolve_expr_type(body, tag_types, variant_map, receiver_type)
+                    resolve_expr_type(body, tag_types, variant_map, receiver_type, local_var_types)
                 }
                 WhenArm::Else(body, _) => {
-                    resolve_expr_type(body, tag_types, variant_map, receiver_type)
+                    resolve_expr_type(body, tag_types, variant_map, receiver_type, local_var_types)
                 }
             })
             .unwrap_or(Ty::Opaque(Intern::new("infer".to_string()))),
         Expr::If(if_expr) => if_expr
             .body
             .first()
-            .map(|e| resolve_expr_type(e, tag_types, variant_map, receiver_type))
+            .map(|e| resolve_expr_type(e, tag_types, variant_map, receiver_type, local_var_types))
             .unwrap_or(Ty::Unit),
         Expr::Loop(_) => Ty::Unit,
         Expr::SelfRef => receiver_type
@@ -934,7 +1131,8 @@ fn resolve_expr_type(
             size: 0,
         },
         Expr::TupleAlloc { init, .. } => {
-            let elem_ty = resolve_expr_type(init, tag_types, variant_map, receiver_type);
+            let elem_ty =
+                resolve_expr_type(init, tag_types, variant_map, receiver_type, local_var_types);
             Ty::Array {
                 elem: Box::new(elem_ty),
                 size: 0,
@@ -945,56 +1143,94 @@ fn resolve_expr_type(
             tag_types,
             variant_map,
             receiver_type,
+            local_var_types,
         )),
-        Expr::TupleSet { value, .. } => {
-            resolve_expr_type(value, tag_types, variant_map, receiver_type)
-        }
+        Expr::TupleSet { value, .. } => resolve_expr_type(
+            value,
+            tag_types,
+            variant_map,
+            receiver_type,
+            local_var_types,
+        ),
         Expr::Cast { ty, .. } => tag_types.get(ty).cloned().unwrap_or(Ty::Opaque(*ty)),
         Expr::BufGet { buf, .. } => extract_element_type(&resolve_expr_type(
             buf,
             tag_types,
             variant_map,
             receiver_type,
+            local_var_types,
         )),
-        Expr::BufSet { value, .. } => {
-            resolve_expr_type(value, tag_types, variant_map, receiver_type)
-        }
+        Expr::BufSet { value, .. } => resolve_expr_type(
+            value,
+            tag_types,
+            variant_map,
+            receiver_type,
+            local_var_types,
+        ),
         Expr::TakePtr(inner) => Ty::Ptr {
             inner: Box::new(resolve_expr_type(
                 inner,
                 tag_types,
                 variant_map,
                 receiver_type,
+                local_var_types,
             )),
         },
-        Expr::TakeRef(inner) => Ty::Ref {
+        Expr::Ref { inner, mutable } => Ty::Ref {
             inner: Box::new(resolve_expr_type(
                 inner,
                 tag_types,
                 variant_map,
                 receiver_type,
+                local_var_types,
             )),
+            mutable: *mutable,
         },
+        Expr::Eat(inner) => resolve_expr_type(
+            inner,
+            tag_types,
+            variant_map,
+            receiver_type,
+            local_var_types,
+        ),
+        Expr::ConsumeArg(inner) => resolve_expr_type(
+            inner,
+            tag_types,
+            variant_map,
+            receiver_type,
+            local_var_types,
+        ),
         Expr::Deref(inner) => {
-            let inner_ty = resolve_expr_type(inner, tag_types, variant_map, receiver_type);
+            let inner_ty = resolve_expr_type(
+                inner,
+                tag_types,
+                variant_map,
+                receiver_type,
+                local_var_types,
+            );
             match &inner_ty {
-                Ty::Ptr { inner } | Ty::Ref { inner } => *inner.clone(),
+                Ty::Ptr { inner } => *inner.clone(),
                 _ => Ty::Opaque(Intern::new("infer".to_string())),
             }
         }
-        Expr::Negate(inner) => resolve_expr_type(inner, tag_types, variant_map, receiver_type),
-        Expr::MutArg(inner) | Expr::OwnArg(inner) => {
-            resolve_expr_type(inner, tag_types, variant_map, receiver_type)
-        }
+        Expr::Negate(inner) => resolve_expr_type(
+            inner,
+            tag_types,
+            variant_map,
+            receiver_type,
+            local_var_types,
+        ),
         Expr::TupleLit(items) => Ty::Tuple(
             items
                 .iter()
-                .map(|item| resolve_expr_type(item, tag_types, variant_map, receiver_type))
+                .map(|item| {
+                    resolve_expr_type(item, tag_types, variant_map, receiver_type, local_var_types)
+                })
                 .collect(),
         ),
         Expr::List(items) => items
             .first()
-            .map(|e| resolve_expr_type(e, tag_types, variant_map, receiver_type))
+            .map(|e| resolve_expr_type(e, tag_types, variant_map, receiver_type, local_var_types))
             .unwrap_or(Ty::Opaque(Intern::new("List".to_string()))),
         Expr::Asm(_) => Ty::Unit,
         Expr::TypeNominal(name) | Expr::TypeGeneric { name, .. } => {
@@ -1067,13 +1303,13 @@ fn resolve_tag_call_variant(
             name,
         };
     }
-    if let Some(candidates) = variant_map.get(&name) {
-        if let Some((union_name, _, _)) = candidates.first() {
-            return VariantId {
-                union: TagId(*union_name),
-                name,
-            };
-        }
+    if let Some(candidates) = variant_map.get(&name)
+        && let Some((union_name, _, _)) = candidates.first()
+    {
+        return VariantId {
+            union: TagId(*union_name),
+            name,
+        };
     }
     VariantId {
         union: TagId(name),

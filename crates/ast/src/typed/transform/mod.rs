@@ -5,6 +5,9 @@
 //! 2. **Resolve** — Lower parse expressions to typed expressions, attach type flaws.
 //! 3. **Flow** — Compute flow contexts, attach flow flaws (ownership, bounds).
 
+use crate::analysis::infer_convention::infer_param_conventions;
+use crate::analysis::stage_desugar_threads;
+use crate::marker::{MarkerDef, MarkerInference, MarkerRegistry};
 use crate::prelude::*;
 use crate::span::SpanTable;
 use crate::typed::{DefId, FileId, TagId, TypedFileAst};
@@ -29,6 +32,8 @@ pub struct TransformCtx {
     pub cross_file_fn_return_types: HashMap<DefId, crate::ty::Ty>,
     /// Variant map entries from other files.
     pub cross_file_variant_map: HashMap<Intern<String>, Vec<crate::analysis::VariantMapEntry>>,
+    /// The marker registry — marker definitions and bindings from all files.
+    pub marker_registry: MarkerRegistry,
 }
 
 impl TransformCtx {
@@ -37,6 +42,7 @@ impl TransformCtx {
             cross_file_tag_types: HashMap::new(),
             cross_file_fn_return_types: HashMap::new(),
             cross_file_variant_map: HashMap::new(),
+            marker_registry: MarkerRegistry::new(),
         }
     }
 }
@@ -50,6 +56,7 @@ impl Default for TransformCtx {
 impl TransformCtx {
     /// This collects tag types, function return types, and variant maps from all files
     /// so that a new file being transformed can resolve references to symbols in these files.
+    /// Also builds the marker registry from marker definitions in gin_core.
     pub fn from_typed_asts(asts: &[TypedFileAst]) -> Self {
         let mut ctx = Self::new();
         for ast in asts {
@@ -71,7 +78,59 @@ impl TransformCtx {
                     .extend(entries.iter().cloned());
             }
         }
+        // Build marker registry after all tags are collected
+        ctx.build_marker_registry(asts);
         ctx
+    }
+
+    /// Scan all typed ASTs for marker definitions (`Tag is Marker(AllFields)` etc.)
+    /// and explicit marker bindings (`and is Copy`, `and is not Copy`).
+    fn build_marker_registry(&mut self, asts: &[TypedFileAst]) {
+        // First pass: detect marker definitions from declaration text patterns.
+        // A marker definition looks like "Name is Marker(Variant)" where
+        // Variant is AllFields or AnyField.
+        for ast in asts {
+            for (tag_id, tag) in &ast.tags {
+                let text = &tag.declaration_text;
+                // Detect `is Marker(AllFields)` or `is Marker(AnyField)`
+                let inference = if text.contains("is Marker(AllFields)") {
+                    Some(MarkerInference::AllFields)
+                } else if text.contains("is Marker(AnyField)") {
+                    Some(MarkerInference::AnyField)
+                } else {
+                    None
+                };
+
+                if let Some(inference) = inference {
+                    let name = tag_id.0;
+                    let implies_not_copy = tag
+                        .marker_bindings
+                        .iter()
+                        .any(|b| !b.positive && b.marker_name.as_str() == "Copy");
+
+                    self.marker_registry.register_definition(MarkerDef {
+                        name,
+                        inference,
+                        implies_not_copy,
+                        positive_bindings: HashSet::new(),
+                        negative_bindings: HashSet::new(),
+                    });
+                }
+            }
+        }
+
+        // Second pass: register explicit marker bindings from all declarations.
+        for ast in asts {
+            for (tag_id, tag) in &ast.tags {
+                for binding in &tag.marker_bindings {
+                    self.marker_registry.register_binding(
+                        binding.marker_name,
+                        tag_id.0,
+                        binding.positive,
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -84,8 +143,24 @@ pub fn transform(parse_ast: ParseAst, file_id: FileId, ctx: &TransformCtx) -> Ty
     // Stage 2: Resolve — lower expressions to the typed arena, attach type flaws.
     stage_resolve(&mut typed, &parse_ast, ctx);
 
+    // Stage 2.4: Body inference — determine which params are threaded vs consumed.
+    // This runs on the parse AST before desugaring.
+    use crate::typed::DefId;
+    use std::collections::HashMap;
+    let mut conventions: HashMap<DefId, crate::analysis::infer_convention::ConventionInference> =
+        HashMap::new();
+    for (name, bind) in &parse_ast.defs {
+        let conv = infer_param_conventions(bind);
+        conventions.insert(DefId(*name), conv);
+    }
+
+    // Stage 2.5: Desugar threads — expand return types for threaded params.
+    // This must run between resolve and flow so the return types are updated
+    // before flow analysis computes contexts.
+    let _thread_flaws = stage_desugar_threads(&mut typed, &conventions);
+
     // Stage 3: Flow — compute flow contexts, attach flow flaws.
-    stage_flow(&mut typed);
+    stage_flow(&mut typed, &conventions);
 
     typed
 }

@@ -1,9 +1,7 @@
 use internment::Intern;
 use lexer::Token;
 
-use ast::{
-    Expr, ParameterKind, Parameters, Spanned, TagCall, TypeExpr, Typed, type_surface_mangle_name,
-};
+use ast::{ParameterKind, Parameters, Spanned, TypeExpr, type_surface_mangle_name};
 
 use crate::cursor::TokenCursor;
 use crate::expr::ExprFn;
@@ -47,6 +45,32 @@ fn parse_type_expr_with(
         let span = cursor.merge_span(start_span, end_span);
         return Some(Spanned {
             value: TypeExpr::Pointer(Box::new(inner)),
+            span_id: span,
+        });
+    }
+
+    // Reference type: `ref T` or `mut T`
+    if cursor.eat(&Token::Ref) {
+        let inner = parse_type_expr_with(cursor, expr_parser)?;
+        let end_span = inner.span_id;
+        let span = cursor.merge_span(start_span, end_span);
+        return Some(Spanned {
+            value: TypeExpr::Ref {
+                inner: Box::new(inner),
+                mutable: false,
+            },
+            span_id: span,
+        });
+    }
+    if cursor.eat(&Token::Mut) {
+        let inner = parse_type_expr_with(cursor, expr_parser)?;
+        let end_span = inner.span_id;
+        let span = cursor.merge_span(start_span, end_span);
+        return Some(Spanned {
+            value: TypeExpr::Ref {
+                inner: Box::new(inner),
+                mutable: true,
+            },
             span_id: span,
         });
     }
@@ -101,14 +125,14 @@ fn parse_type_expr_with(
         cursor.rewind(qual_checkpoint);
     }
 
-    let (name, name_span) = match cursor.peek()? {
-        &Token::Tag(n) => {
+    let (name, name_span) = match *cursor.peek()? {
+        Token::Tag(n) => {
             let name = cursor.intern(n);
             let span = cursor.peek_span()?;
             cursor.advance();
             (name, span)
         }
-        &Token::Id(n) => {
+        Token::Id(n) => {
             // Lowercase identifiers in type position are type variables
             // (e.g., `x` in `@x` or `x` in `Range[x]`).
             let name = cursor.intern(n);
@@ -239,75 +263,4 @@ fn parse_one_tag_param(
     }
 
     Some((name, ParameterKind::Generic))
-}
-
-#[allow(dead_code)]
-pub fn parse_tag_call(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<TagCall> {
-    if cursor.peek_at(1) == Some(&Token::Dot) {
-        let qual_checkpoint = cursor.checkpoint();
-        if let Some(path) = parse_tag_variant_path(cursor) {
-            let variant_name = *path.segments.last().unwrap_or(&path.root);
-            if cursor.is_at(&Token::ParenOpen) {
-                let args = parse_call_args(cursor, expr_parser);
-                return Some(TagCall {
-                    name: variant_name,
-                    qual_path: Some(path),
-                    args,
-                });
-            }
-            return Some(TagCall {
-                name: variant_name,
-                qual_path: Some(path),
-                args: Vec::new(),
-            });
-        }
-        cursor.rewind(qual_checkpoint);
-    }
-
-    let (name, _name_span) = match cursor.peek()? {
-        &Token::Tag(n) => {
-            let name = cursor.intern(n);
-            let _span = cursor.peek_span()?;
-            cursor.advance();
-            (name, _span)
-        }
-        _ => return None,
-    };
-
-    if cursor.is_at(&Token::ParenOpen) {
-        let args = parse_call_args(cursor, expr_parser);
-        return Some(TagCall {
-            name,
-            qual_path: None,
-            args,
-        });
-    }
-
-    Some(TagCall {
-        name,
-        qual_path: None,
-        args: Vec::new(),
-    })
-}
-
-#[allow(dead_code)]
-fn parse_call_args(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Vec<Typed<Expr>> {
-    if cursor.expect(&Token::ParenOpen).is_none() {
-        return Vec::new();
-    }
-
-    let mut args = Vec::new();
-
-    if !cursor.is_at(&Token::ParenClose) {
-        args.push(expr_parser(cursor));
-        while cursor.eat(&Token::Comma) {
-            if cursor.is_at(&Token::ParenClose) {
-                break;
-            }
-            args.push(expr_parser(cursor));
-        }
-    }
-
-    cursor.expect(&Token::ParenClose);
-    args
 }

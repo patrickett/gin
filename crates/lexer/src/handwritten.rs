@@ -1,4 +1,4 @@
-use crate::{LexContext, MAX_INDENT_DEPTH, Token};
+use crate::token::{LexContext, MAX_INDENT_DEPTH, Token};
 use diagnostic::LexSymptom;
 use memchr::{memchr, memchr2, memchr3};
 use span::{Span, SpanId, SpanTable};
@@ -214,8 +214,10 @@ impl<'src> Lexer<'src> {
             "return" => Token::Return,
             "break" => Token::Break,
             "loop" => Token::Loop,
+            "ref" => Token::Ref,
             "mut" => Token::Mut,
-            "own" => Token::Own,
+            "deref" => Token::Deref,
+            "eat" => Token::Eat,
             "then" => Token::Then,
             "when" => Token::When,
             "else" => Token::Else,

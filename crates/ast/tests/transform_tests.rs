@@ -282,20 +282,12 @@ fn test_variant_map_populated() {
 
 #[test]
 fn test_flow_mut_arg_flaw() {
-    // Passing a readonly variable as `mut` should produce CannotPassReadonlyAsMut.
-    let typed = transform_source("foo(x Int) Int: x\nmain: foo(mut 5)");
-    // The literal `5` can't be passed as `mut`.
+    // Flow context is set on function call expressions.
+    // (MutArg and CannotPassReadonlyAsMut were removed from the AST.)
+    let typed = transform_source("foo(x Int) Int: x\nmain: foo(5)");
     let main_body = body_expr_id(&typed, "main").expect("main has body");
     let expr = typed.exprs.get(main_body.as_usize()).expect("main body");
-    // The FnCall or its MutArg child may have the flaw
-    let has_flaw = expr
-        .flaws
-        .iter()
-        .any(|f| matches!(f, diagnostic::TypeSymptom::CannotPassReadonlyAsMut { .. }));
-    assert!(
-        has_flaw,
-        "MutArg may or may not produce flaw depending on context"
-    );
+    assert!(expr.flow.is_some(), "flow context should be set");
 }
 
 #[test]
@@ -435,13 +427,11 @@ fn test_flow_index_out_of_bounds() {
 
 #[test]
 fn test_flow_mut_arg_detected() {
-    // Passing a literal as `mut` should produce CannotPassReadonlyAsMut.
-    let typed = transform_source("foo(x Int) Int: x\nmain: foo(mut 5)");
-    let flaws = typed.all_flaws();
-    let _has_mut_flaw = flaws
-        .iter()
-        .any(|(_, f)| matches!(f, diagnostic::TypeSymptom::CannotPassReadonlyAsMut { .. }));
-    // MutArg detection depends on the flow context tracking capabilities.
+    // Flow analysis tracks variables through function calls.
+    // (MutArg and CannotPassReadonlyAsMut were removed from the AST.)
+    let typed = transform_source("foo(x Int) Int: x\nmain: val val: 42; foo(val); return 0");
+    let _flaws = typed.all_flaws();
+    assert!(!typed.defs.is_empty());
 }
 
 #[test]
@@ -509,7 +499,6 @@ fn test_no_false_positive() {
                 f,
                 diagnostic::TypeSymptom::UseOfMovedValue { .. }
                     | diagnostic::TypeSymptom::LinValueNotConsumed { .. }
-                    | diagnostic::TypeSymptom::CannotPassReadonlyAsMut { .. }
                     | diagnostic::TypeSymptom::IndexOutOfBounds { .. }
             )
         })

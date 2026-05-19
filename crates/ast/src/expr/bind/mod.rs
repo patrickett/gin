@@ -61,12 +61,10 @@ pub struct Bind {
     pub type_annotation: Option<(Intern<String>, Vec<Typed<Expr>>)>,
     /// Qualified path for type annotation, e.g. `Maybe.Some` in `val Maybe.Some(3): ...`
     pub type_annotation_qual: Option<Spanned<ModPath>>,
-    /// `true` for `:=` (immutable/const) binds; `false` for `:` (mutable, alloca-backed) binds.
-    pub is_const: bool,
 }
 
 impl Bind {
-    pub fn new(name: Intern<String>, name_span: SpanId, value: BindValue, is_const: bool) -> Self {
+    pub fn new(name: Intern<String>, name_span: SpanId, value: BindValue) -> Self {
         Bind {
             doc_comment: None,
             name,
@@ -83,7 +81,6 @@ impl Bind {
             return_type: TyState::Infer,
             type_annotation: None,
             type_annotation_qual: None,
-            is_const,
         }
     }
 
@@ -203,7 +200,6 @@ impl std::hash::Hash for Bind {
                 }
             }
         }
-        self.is_const.hash(state);
         self.receiver_type.hash(state);
         self.return_tag.hash(state);
         self.return_type_name.hash(state);

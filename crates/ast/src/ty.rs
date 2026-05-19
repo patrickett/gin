@@ -39,9 +39,12 @@ pub enum Ty {
     Ptr {
         inner: Box<Ty>,
     },
-    /// Reference (borrow-checked pointer in future). Same layout as `Ptr` for now.
+    /// Safe reference — does not consume source. Copy semantics.
+    /// `ref T` is immutable, `mut T` is mutable.
+    /// Invalidation is tracked in flow analysis.
     Ref {
         inner: Box<Ty>,
+        mutable: bool,
     },
     /// Positional tuple VALUE — used for tuple literals `(e1, e2, …)`. Maps to an LLVM struct.
     Tuple(Vec<Ty>),
@@ -100,8 +103,16 @@ impl Ty {
         matches!(self, Ty::Float { .. })
     }
 
-    pub fn is_ptr_or_ref(&self) -> bool {
-        matches!(self, Ty::Ptr { .. } | Ty::Ref { .. })
+    pub fn is_ptr(&self) -> bool {
+        matches!(self, Ty::Ptr { .. })
+    }
+
+    pub fn is_ref(&self) -> bool {
+        matches!(self, Ty::Ref { .. })
+    }
+
+    pub fn is_mutable_ref(&self) -> bool {
+        matches!(self, Ty::Ref { mutable: true, .. })
     }
 
     /// Returns `true` for types that can be used as a `when` condition:
@@ -147,14 +158,6 @@ impl Ty {
         }
     }
 }
-
-/// Type alias for union variant fields: (field_name, field_type)
-#[allow(dead_code)]
-pub(crate) type UnionFields = Vec<(Intern<String>, Box<Ty>)>;
-
-/// Type alias for union variants: (variant_name, fields)
-#[allow(dead_code)]
-pub(crate) type UnionVariants = Vec<(Intern<String>, UnionFields)>;
 
 /// Type alias for union variant fields: (variant_name, [(field_name, field_type)])
 type UnionVariant<'a> = (Intern<String>, Vec<(Intern<String>, Box<Ty>)>);
@@ -277,8 +280,12 @@ impl std::hash::Hash for Ty {
                 elem.hash(state);
                 size.hash(state);
             }
+            Ty::Ref { inner, mutable } => {
+                inner.hash(state);
+                mutable.hash(state);
+            }
             Ty::Ptr { inner } => inner.hash(state),
-            Ty::Ref { inner } => inner.hash(state),
+
             Ty::Tuple(fields) => fields.hash(state),
             Ty::ConstUnion { name, base, values } => {
                 name.hash(state);

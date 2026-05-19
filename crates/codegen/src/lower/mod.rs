@@ -405,7 +405,10 @@ pub fn lower_typed_expr<'c>(
 
             Some(block.call(ctx.mlir, fn_name, &lowered_args, return_ty, loc))
         }
-        ast::typed::TypedExprKind::Bind { name, body } => {
+        ast::typed::TypedExprKind::Bind { name, stmts, body } => {
+            for stmt_id in stmts {
+                lower_typed_expr(ctx, *stmt_id, block, symtab)?;
+            }
             let val = lower_typed_expr(ctx, *body, block, symtab)?;
             symtab.insert(name.as_str().to_string(), val);
             // Track variable type in var_types for field access.
@@ -479,10 +482,10 @@ pub fn lower_typed_expr<'c>(
         ast::typed::TypedExprKind::Cast { expr, .. } => lower_typed_expr(ctx, *expr, block, symtab),
         ast::typed::TypedExprKind::TupleAlloc { init, .. }
         | ast::typed::TypedExprKind::TakePtr(init)
-        | ast::typed::TypedExprKind::TakeRef(init)
+        | ast::typed::TypedExprKind::Ref(init)
+        | ast::typed::TypedExprKind::ConsumeArg(init)
         | ast::typed::TypedExprKind::Negate(init)
-        | ast::typed::TypedExprKind::MutArg(init)
-        | ast::typed::TypedExprKind::OwnArg(init) => lower_typed_expr(ctx, *init, block, symtab),
+        | ast::typed::TypedExprKind::Eat(init) => lower_typed_expr(ctx, *init, block, symtab),
         ast::typed::TypedExprKind::TupleGet { base, .. }
         | ast::typed::TypedExprKind::Deref(base) => lower_typed_expr(ctx, *base, block, symtab),
         ast::typed::TypedExprKind::TupleSet { base, value, .. } => {
@@ -555,47 +558,11 @@ pub fn build_module_with_context<'c>(
 
     let module = Module::new(context.unknown_loc());
 
-    // Emit global arrays for top-level `:=` TupleLit and TupleAlloc binds.
-    let mut global_ops = Vec::new();
-    for (def_name, bind) in &ast.defs {
-        if !bind.is_const {
-            continue;
-        }
-        if let BindValue::Expr(boxed) = bind.value() {
-            let inner: &Expr = boxed;
-            match inner {
-                Expr::TupleLit(elems) => {
-                    let global_op = emit_tuple_lit_global(context, &ctx, def_name.as_str(), elems);
-                    if let Some(op) = global_op {
-                        global_ops.push(op);
-                    }
-                }
-                Expr::TupleAlloc { init, size } => {
-                    let global_op =
-                        emit_tuple_alloc_global(context, &ctx, def_name.as_str(), init, *size);
-                    if let Some(op) = global_op {
-                        global_ops.push(op);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
     let mut func_ops = Vec::new();
     for (def_name, bind) in &ast.defs {
         // TODO: flaw diagnostic when a referenced symbol has no matching platform declaration
         if !bind.attributes().matches_current_platform() {
             continue;
-        }
-        // Skip global TupleLit/TupleAlloc constants — already emitted as globals above.
-        if bind.is_const
-            && let BindValue::Expr(boxed) = bind.value()
-        {
-            let inner: &Expr = boxed;
-            if matches!(inner, Expr::TupleLit(_) | Expr::TupleAlloc { .. }) {
-                continue;
-            }
         }
         let func_op = lower_function(&ctx, def_name, bind);
         if let Some(op) = func_op {
@@ -605,10 +572,6 @@ pub fn build_module_with_context<'c>(
 
     // Create string globals (must appear before function ops in the module)
     let string_symbols = ctx.string_symbols.borrow().clone();
-
-    for global_op in global_ops {
-        module.body().append_operation(global_op);
-    }
 
     for (value, symbol) in &string_symbols {
         let global_op = create_string_global(context, symbol, value);
@@ -702,153 +665,6 @@ pub fn addressof_string_global<'c>(
             .expect("result 0 should exist on append_operation")
             .into(),
     )
-}
-
-/// Emit `llvm.mlir.global` for a top-level `:=` bind whose value is a `TupleLit`.
-/// Returns the global op AND registers the element type in `ctx.global_const_elems`.
-fn emit_tuple_lit_global<'c>(
-    context: &'c Context,
-    ctx: &CodegenContext<'_, 'c>,
-    name: &str,
-    elems: &[Typed<Expr>],
-) -> Option<Operation<'c>> {
-    let loc = context.unknown_loc();
-
-    let region = Region::new();
-    let init_block = Block::new(&[]);
-    region.append_block(init_block);
-    let blk = region.first_block().unwrap();
-
-    let mut symtab: ScopedSymbolTable<'c> = ScopedSymbolTable::new();
-    let elem_vals: Vec<Value<'c, 'c>> = elems
-        .iter()
-        .map(|e| e.lower(ctx, &blk, &mut symtab))
-        .collect::<Option<Vec<_>>>()?;
-
-    let elem_mlir_ty = elem_vals
-        .first()
-        .map(|v| v.r#type())
-        .unwrap_or_else(|| context.i64());
-    let n = elem_vals.len() as u32;
-    let array_mlir_ty = r#type::array(elem_mlir_ty, n);
-
-    let locals: HashMap<Intern<String>, Ty> = HashMap::new();
-    if let Some(first_elem) = elems.first() {
-        let elem_ty = first_elem.infer_ty(&ctx.infer_env(&locals));
-        ctx.global_const_elems
-            .borrow_mut()
-            .insert(name.to_string(), elem_ty);
-    }
-
-    let undef = blk.append_op(ctx.mlir.llvm_undef(array_mlir_ty));
-    let mut current = undef;
-    for (i, val) in elem_vals.iter().enumerate() {
-        let pos = DenseI64ArrayAttribute::new(context, &[i as i64]);
-        let insert_op = OperationBuilder::new("llvm.insertvalue", loc)
-            .add_attributes(&[(Identifier::new(context, "position"), pos.into())])
-            .add_operands(&[current, *val])
-            .enable_result_type_inference()
-            .build()
-            .ok()?;
-        current = blk.append_op(insert_op);
-    }
-
-    let ret_op = OperationBuilder::new("llvm.return", loc)
-        .add_operands(&[current])
-        .build()
-        .ok()?;
-    blk.append_operation(ret_op);
-
-    let linkage_attr = melior::dialect::llvm::attributes::linkage(
-        context,
-        melior::dialect::llvm::attributes::Linkage::Internal,
-    );
-
-    let global = OperationBuilder::new("llvm.mlir.global", loc)
-        .add_attributes(&[
-            (Identifier::new(context, "sym_name"), context.str_attr(name)),
-            (
-                Identifier::new(context, "global_type"),
-                TypeAttribute::new(array_mlir_ty).into(),
-            ),
-            (Identifier::new(context, "linkage"), linkage_attr),
-            (
-                Identifier::new(context, "constant"),
-                Attribute::unit(context),
-            ),
-            (
-                Identifier::new(context, "addr_space"),
-                IntegerAttribute::new(IntegerType::new(context, 32).into(), 0).into(),
-            ),
-        ])
-        .add_regions([region])
-        .build()
-        .ok()?;
-
-    Some(global)
-}
-
-/// Emit `llvm.mlir.global` for a top-level `:=` bind whose value is a `TupleAlloc`.
-/// Emits a mutable zero-initialized global array and registers the element type in
-/// `ctx.global_const_elems`.
-fn emit_tuple_alloc_global<'c>(
-    context: &'c Context,
-    ctx: &CodegenContext<'_, 'c>,
-    name: &str,
-    init: &Expr,
-    size: usize,
-) -> Option<Operation<'c>> {
-    let loc = context.unknown_loc();
-
-    let locals: HashMap<Intern<String>, Ty> = HashMap::new();
-    let elem_ty = init.infer_ty(&ctx.infer_env(&locals));
-    let elem_mlir_ty = ty_to_mlir(&elem_ty, context);
-    let array_mlir_ty = r#type::array(elem_mlir_ty, size as u32);
-
-    ctx.global_const_elems
-        .borrow_mut()
-        .insert(name.to_string(), elem_ty);
-
-    let region = Region::new();
-    let init_block = Block::new(&[]);
-    region.append_block(init_block);
-    let blk = region.first_block().unwrap();
-
-    let zero_op = OperationBuilder::new("llvm.mlir.zero", loc)
-        .add_results(&[array_mlir_ty])
-        .build()
-        .ok()?;
-    let zero_val = blk.append_op(zero_op);
-
-    let ret_op = OperationBuilder::new("llvm.return", loc)
-        .add_operands(&[zero_val])
-        .build()
-        .ok()?;
-    blk.append_operation(ret_op);
-
-    let linkage_attr = melior::dialect::llvm::attributes::linkage(
-        context,
-        melior::dialect::llvm::attributes::Linkage::Internal,
-    );
-
-    let global = OperationBuilder::new("llvm.mlir.global", loc)
-        .add_attributes(&[
-            (Identifier::new(context, "sym_name"), context.str_attr(name)),
-            (
-                Identifier::new(context, "global_type"),
-                TypeAttribute::new(array_mlir_ty).into(),
-            ),
-            (Identifier::new(context, "linkage"), linkage_attr),
-            (
-                Identifier::new(context, "addr_space"),
-                IntegerAttribute::new(IntegerType::new(context, 32).into(), 0).into(),
-            ),
-        ])
-        .add_regions([region])
-        .build()
-        .ok()?;
-
-    Some(global)
 }
 
 fn extract_type_info(ast: &FileAst) -> Option<HashMap<Intern<String>, TypeInfo>> {
@@ -999,16 +815,23 @@ impl<'c> Lower<'c> for Expr {
                 // GEP + load at the discriminant offset. See `create_string_global`.
                 lower_cast(ctx, block, val, &src_ty, &dst_ty)
             }
-            Expr::TakePtr(inner) | Expr::TakeRef(inner) => {
-                lower_take_ptr(ctx, block, symtab, inner)
+            Expr::Ref { inner, mutable } => {
+                let _ = mutable;
+                // A ref to a stack value: just pass through the value.
+                // For mutable slots, load from the alloca first, then the ref is the value.
+                // The invalidation is handled entirely in flow analysis.
+                inner.lower(ctx, block, symtab)
             }
+            Expr::TakePtr(inner) => lower_take_ptr(ctx, block, symtab, inner),
+            Expr::ConsumeArg(inner) => inner.lower(ctx, block, symtab),
+            Expr::Eat(inner) => inner.lower(ctx, block, symtab),
             Expr::Deref(inner) => {
                 let ptr = inner.lower(ctx, block, symtab)?;
                 let pointee_ty = match inner
                     .value
                     .infer_ty(&ctx.infer_env(&*ctx.var_types.borrow()))
                 {
-                    Ty::Ptr { inner } | Ty::Ref { inner } => *inner,
+                    Ty::Ptr { inner } => *inner,
                     _ => Ty::Int {
                         width: 64,
                         signed: true,
@@ -1019,7 +842,7 @@ impl<'c> Lower<'c> for Expr {
                 let loc = ctx.location();
                 Some(block.load_typed(ctx, ptr, mlir_ty, loc)?)
             }
-            Expr::MutArg(inner) | Expr::OwnArg(inner) => inner.lower(ctx, block, symtab),
+
             Expr::Negate(inner) => {
                 let val = inner.lower(ctx, block, symtab)?;
                 let loc = ctx.location();
@@ -1188,11 +1011,10 @@ fn expr_uses_self(expr: &Expr) -> bool {
             spanned_uses_self(buf) || spanned_uses_self(index) || spanned_uses_self(value)
         }
         Expr::TakePtr(e)
-        | Expr::TakeRef(e)
+        | Expr::Ref { inner: e, .. }
         | Expr::Deref(e)
         | Expr::Negate(e)
-        | Expr::MutArg(e)
-        | Expr::OwnArg(e) => spanned_uses_self(e),
+        | Expr::Eat(e) => spanned_uses_self(e),
         Expr::Cast { expr: e, .. } => spanned_uses_self(e),
         Expr::Bind(b) => bind_value_uses_self(b.value()),
         Expr::When(w) => {
@@ -1367,10 +1189,7 @@ fn lower_take_ptr<'c>(
         let name = call.path.root;
         if ctx.mutable_slots.borrow().contains(name.as_str()) {
             let var_ty = ctx.var_types.borrow().get(&name).cloned();
-            if matches!(
-                var_ty,
-                Some(Ty::Array { .. }) | Some(Ty::Ptr { .. }) | Some(Ty::Ref { .. })
-            ) {
+            if matches!(var_ty, Some(Ty::Array { .. }) | Some(Ty::Ptr { .. })) {
                 // For pointer-valued slots (arrays, ptr vars), the user wants the data
                 // pointer itself — evaluate normally to load it from the slot.
                 return inner.lower(ctx, block, symtab);
@@ -1514,59 +1333,6 @@ fn lower_tuple_set<'c>(
     Some(block.const_i64(ctx.mlir, 0))
 }
 
-/// Emit destructor calls (`drop` methods) for `#[lin]` variables that are still alive
-/// at function exit. This runs after all body expressions but before the return value.
-fn emit_lin_destructors<'c>(
-    ctx: &CodegenContext<'_, 'c>,
-    block: &BlockRef<'c, 'c>,
-    symtab: &ScopedSymbolTable<'c>,
-) -> Option<()> {
-    // Lin types and flow analysis are no longer available via the old Analysis struct.
-    // This function is only reachable from the old (non-typed) codegen path which
-    // is being deprecated. Return early with no destructors for now.
-    let _ = (ctx, block, symtab);
-    Some(())
-
-    /*
-    let final_ctx = &ctx.analysis.flow.final_context;
-    let lin_types = &ctx.analysis.lin_types;
-    let mut visited = HashSet::new();
-
-    for (var_name, ty) in ctx.var_types.borrow().iter() {
-        if !is_lin_type(ty, lin_types, &mut visited) {
-            visited.clear();
-            continue;
-        }
-        visited.clear();
-
-        // Check if this var is still alive at function exit
-        if matches!(final_ctx.get_var_state(var_name), Some(VarState::Alive)) {
-            // Build the drop function name: TypeName.drop
-            // Resolve the type name from the ty
-            let type_name = match ty {
-                Ty::Record { name, .. } | Ty::Union { name, .. } => name.as_str().to_string(),
-                _ => continue,
-            };
-            let drop_name = format!("{type_name}.drop");
-
-            // Look up the variable's value in the symtab
-            let var_value = symtab.get(var_name.as_str())?;
-
-            // Emit a call to the drop function via func.call
-            let loc = ctx.location();
-            let callee = FlatSymbolRefAttribute::new(ctx.mlir, &drop_name);
-            let op = OperationBuilder::new("func.call", loc)
-                .add_attributes(&[(Identifier::new(ctx.mlir, "callee"), callee.into())])
-                .add_operands(&[var_value])
-                .build()
-                .ok()?;
-            block.append_operation(op);
-        }
-    }
-    Some(())
-    */
-}
-
 fn lower_bind_value<'c>(
     ctx: &CodegenContext<'_, 'c>,
     block: &BlockRef<'c, 'c>,
@@ -1575,7 +1341,6 @@ fn lower_bind_value<'c>(
 ) -> Option<Option<Value<'c, 'c>>> {
     match bind_value {
         BindValue::Expr(expr) => {
-            emit_lin_destructors(ctx, block, symtab)?;
             let val = expr.lower(ctx, block, &mut symtab.clone())?;
             Some(Some(val))
         }
@@ -1584,7 +1349,6 @@ fn lower_bind_value<'c>(
             for expr in exprs {
                 expr.lower(ctx, block, &mut local_symtab)?;
             }
-            emit_lin_destructors(ctx, block, &local_symtab)?;
             match &ret.value {
                 Some(expr) => {
                     let val = expr.lower(ctx, block, &mut local_symtab)?;
@@ -1611,7 +1375,7 @@ fn lower_cast<'c>(
     let dst_mlir = ty_to_mlir(dst_ty, ctx.mlir);
 
     // Pointer-to-integer: `ptr as Int` — emits llvm.ptrtoint.
-    if (src_ty.is_ptr_or_ref() || matches!(src_ty, Ty::Array { .. })) && dst_ty.is_int() {
+    if (src_ty.is_ptr() || matches!(src_ty, Ty::Array { .. })) && dst_ty.is_int() {
         let op = OperationBuilder::new("llvm.ptrtoint", loc)
             .add_operands(&[val])
             .add_results(&[dst_mlir])

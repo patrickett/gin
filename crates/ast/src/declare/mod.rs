@@ -3,6 +3,7 @@ use internment::Intern;
 use std::hash::{Hash, Hasher};
 
 use crate::doc_comment::DocComment;
+use crate::marker::MarkerBinding;
 use crate::parameter::Parameters;
 use crate::ty::Ty;
 
@@ -20,6 +21,7 @@ pub struct Declare {
     pub resolved_type: Option<Ty>,
     pub attributes: DeclareAttributes,
     pub value: DeclareValue,
+    pub marker_bindings: Vec<MarkerBinding>,
 }
 
 impl Declare {
@@ -32,6 +34,7 @@ impl Declare {
             resolved_type: None,
             attributes: DeclareAttributes::default(),
             value,
+            marker_bindings: Vec::new(),
         }
     }
 
@@ -67,6 +70,11 @@ impl Declare {
 
     pub fn with_attributes(mut self, attrs: DeclareAttributes) -> Self {
         self.attributes = attrs;
+        self
+    }
+
+    pub fn with_marker_bindings(mut self, bindings: Vec<MarkerBinding>) -> Self {
+        self.marker_bindings = bindings;
         self
     }
 }
@@ -110,5 +118,6 @@ impl Hash for Declare {
             }
         }
         self.value.hash(state);
+        self.marker_bindings.hash(state);
     }
 }

@@ -25,6 +25,11 @@ pub enum TypeExpr {
     Literal(Literal, SpanId),
     /// Pointer to another type (e.g. `@x` — raw pointer to `x`).
     Pointer(Box<Spanned<TypeExpr>>),
+    /// Reference type: `ref T` or `mut T`.
+    Ref {
+        inner: Box<Spanned<TypeExpr>>,
+        mutable: bool,
+    },
     /// The unit type `()`.
     Unit,
 }

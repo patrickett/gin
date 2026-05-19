@@ -64,6 +64,7 @@ pub fn type_surface_mangle_name(e: &TypeExpr) -> &str {
             Literal::Number(_) => "__literal_number",
         },
         TypeExpr::Pointer(inner) => type_surface_mangle_name(&inner.value),
+        TypeExpr::Ref { inner, .. } => type_surface_mangle_name(&inner.value),
         TypeExpr::Unit => "()",
     }
 }
@@ -85,6 +86,7 @@ pub fn pattern_type_binding_names(expr: &TypeExpr) -> Vec<Intern<String>> {
         | TypeExpr::Qualified(_)
         | TypeExpr::Literal(..)
         | TypeExpr::Pointer(_)
+        | TypeExpr::Ref { .. }
         | TypeExpr::Unit => Vec::new(),
     }
 }

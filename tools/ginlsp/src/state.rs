@@ -1,6 +1,6 @@
 use crossbeam_channel::unbounded;
-use database::SalsaQueryEngine;
 use database::QueryEngine;
+use database::SalsaQueryEngine;
 use std::path::{Path, PathBuf};
 
 pub struct DocumentState {

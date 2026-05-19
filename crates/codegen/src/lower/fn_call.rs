@@ -15,9 +15,7 @@ impl<'c> Lower<'c> for FnCall {
             if let Some(ty) = ctx.var_types.borrow().get(&root).cloned() {
                 // Unwrap one level of Ptr/Ref for auto-deref field access.
                 let record_ty = match &ty {
-                    Ty::Ptr { inner } | Ty::Ref { inner } if inner.is_record() => {
-                        inner.as_ref().clone()
-                    }
+                    Ty::Ptr { inner } if inner.is_record() => inner.as_ref().clone(),
                     other => other.clone(),
                 };
 
@@ -255,7 +253,7 @@ fn lower_field_access<'c>(
 
     // Auto-deref: unwrap one level of Ptr/Ref to reach the record type.
     let (mut ty, mut val) = match ty {
-        Ty::Ptr { inner } | Ty::Ref { inner } => {
+        Ty::Ptr { inner } => {
             let record_ty = *inner;
             let struct_mlir_ty = ty_to_mlir(&record_ty, ctx.mlir);
             let loc = ctx.location();

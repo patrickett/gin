@@ -35,7 +35,7 @@ Range(x) has (start x, end x)
 Range(x).new(start x, end x) Range(x): (start, end)
 
 main:
-    r := Range.new(12, 1200)
+    r : Range.new(12, 1200)
     return r.start
 return
 ";
@@ -60,7 +60,7 @@ fn range_new_single_file_uses_repo_range_gin_text() {
     let src = format!(
         "{}\n\n{}",
         include_str!("../../../modules/gin_core/range.gin"),
-        "main:\n    r := Range.new(12, 1200)\n    return r.start\nreturn\n",
+        "main:\n    r : Range.new(12, 1200)\n    return r.start\nreturn\n",
     );
     compile_and_run_with_options(
         &src,
@@ -115,7 +115,7 @@ fn range_new_pkg_folder_emits_mlir_with_repo_range_gin() {
     write_pkg_file(&dir.join("range.gin"), repo_range_gin);
     write_pkg_file(
         &dir.join("main.gin"),
-        "use Range\n\nmain:\n    r := Range.new(12, 1200)\n    return r.start\nreturn\n",
+        "use Range\n\nmain:\n    r : Range.new(12, 1200)\n    return r.start\nreturn\n",
     );
 
     // MLIR emits via println! inside the compiler; run ginc as a subprocess so we
@@ -156,7 +156,7 @@ fn range_new_pkg_folder_compiles_exe_with_output_flag() {
     write_pkg_file(&dir.join("range.gin"), repo_range_gin);
     write_pkg_file(
         &dir.join("main.gin"),
-        "use Range\n\nmain:\n    r := Range.new(12, 1200)\n    return r.start\nreturn\n",
+        "use Range\n\nmain:\n    r : Range.new(12, 1200)\n    return r.start\nreturn\n",
     );
     let exe_path = dir.join("runner_main");
     let mut args = Args {

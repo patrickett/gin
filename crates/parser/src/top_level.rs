@@ -589,6 +589,7 @@ fn collect_type_surface_tags(expr: &TypeExpr, tags: &mut Vec<(Intern<String>, Sp
         TypeExpr::Qualified(_) => {}
         TypeExpr::Literal(..) => {}
         TypeExpr::Pointer(_) | TypeExpr::Unit => {}
+        TypeExpr::Ref { inner, .. } => collect_type_surface_tags(&inner.value, tags),
         TypeExpr::Generic { params, .. } => {
             for (_, pk) in params {
                 match pk {

@@ -46,35 +46,25 @@ pub fn parse_bind(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Bind>
         parse_return_type_part(cursor, expr_parser);
 
     // Handle `extern` binds: `name(params) extern` without `:` or `:=`
-    let (value, postfix_doc, is_const) = if cursor.eat(&Token::Extern) {
-        (BindValue::Extern, None, false)
+    let (value, postfix_doc) = if cursor.eat(&Token::Extern) {
+        (BindValue::Extern, None)
     } else {
-        let is_const = if cursor.eat(&Token::ColonEq) {
-            true
-        } else if cursor.eat(&Token::Colon) {
-            false
-        } else {
-            cursor.error("expected ':=', ':', or 'extern'", cursor.current_span());
+        if cursor.eat(&Token::ColonEq) {
+            cursor.error(
+                "expected ':', not ':='. Use ':' for all bindings",
+                cursor.current_span(),
+            );
+        } else if !cursor.eat(&Token::Colon) {
+            cursor.error("expected ':' or 'extern'", cursor.current_span());
             return None;
-        };
-
-        // For `:=` (const) binds, Indent means expression continuation,
-        // not block body. For `:` (function) binds, Indent starts a block.
-        if is_const && cursor.is_at(&Token::Indent) {
-            // Const bind with Indent: skip Indent, parse as continuation expr.
-            cursor.skip_indents();
-            let expr = expr_parser(cursor);
-            cursor.eat(&Token::Dedent);
-            (BindValue::Expr(Box::new(expr)), None, true)
-        } else {
-            let (value, postfix_doc) = parse_bind_value(cursor, expr_parser);
-            (value, postfix_doc, is_const)
         }
+        let (value, postfix_doc) = parse_bind_value(cursor, expr_parser);
+        (value, postfix_doc)
     };
 
     let doc = postfix_doc.or(doc_before);
 
-    let mut bind = Bind::new(name, name_span, value, is_const)
+    let mut bind = Bind::new(name, name_span, value)
         .with_params(params)
         .with_return_type_name(return_type_name)
         .with_doc(doc);
@@ -362,7 +352,7 @@ fn parse_params(
     if let Some((key, kind, conv)) = parse_one_param(cursor, expr_parser) {
         seen_default = matches!(kind, ParameterKind::Default(_));
         params.insert(key, kind);
-        if conv != ParamConvention::Ref {
+        if conv != ParamConvention::Inferred {
             conventions.insert(key, conv);
         }
     }
@@ -385,7 +375,7 @@ fn parse_params(
                 seen_default = true;
             }
             params.insert(key, kind);
-            if conv != ParamConvention::Ref {
+            if conv != ParamConvention::Inferred {
                 conventions.insert(key, conv);
             }
         }
@@ -409,19 +399,15 @@ fn parse_one_param(
                 value: sp.value.into(),
                 span_id: sp.span_id,
             })),
-            ParamConvention::Ref,
+            ParamConvention::Inferred,
         ));
     }
 
-    // Convention keyword before the parameter name:
-    // `mut name Type` → Mutable
-    // `own name Type` → Own
-    let convention = if cursor.eat(&Token::Mut) {
-        ParamConvention::Mut
-    } else if cursor.eat(&Token::Own) {
-        ParamConvention::Own
+    // Convention: `~name Type` → Consume (terminus), bare `name Type` → Inferred (default)
+    let convention = if cursor.eat(&Token::Tilde) {
+        ParamConvention::Consume
     } else {
-        ParamConvention::Ref
+        ParamConvention::Inferred
     };
 
     // Named: id [Tag | id | : expr]

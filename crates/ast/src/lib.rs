@@ -32,17 +32,16 @@ mod analysis;
 /// Re-exported for external crates that reference `ast::flow::*`.
 pub mod flow {
     pub use crate::analysis::{
-        Capability, ConstValue, FlowAnalysis, FlowContext, ImpossibleCheck, IndexOutOfBounds,
-        TypeConstraint, VarState,
+        ConstValue, FlowAnalysis, FlowContext, ImpossibleCheck, IndexOutOfBounds, TypeConstraint,
+        VarState,
     };
 }
 pub use analysis::{
-    Bound, Capability, ConstValue, FlowAnalysis, FlowAnalyzer, FlowContext, ImpossibleCheck,
-    IndexOutOfBounds, LayeredLocals, LocalTypes, TyInfer, TyInferEnv, TypeConstraint, VarState,
-    VariantLookupResult, VariantMap, VariantMapEntry, is_copyable, is_lin_type, is_type_surface,
-    mangled_fn_call_name, resolve_name_from_files, resolve_parameter_kind_with_subst,
-    resolve_type_expr_from_map, resolve_type_expr_with_subst, substitute_in_ty,
-    typevars_from_receiver,
+    Bound, ConstValue, FlowAnalysis, FlowAnalyzer, FlowContext, ImpossibleCheck, IndexOutOfBounds,
+    LayeredLocals, LocalTypes, TyInfer, TyInferEnv, TypeConstraint, VarState, VariantLookupResult,
+    VariantMap, VariantMapEntry, is_copyable, is_type_surface, mangled_fn_call_name,
+    resolve_name_from_files, resolve_parameter_kind_with_subst, resolve_type_expr_from_map,
+    resolve_type_expr_with_subst, substitute_in_ty, typevars_from_receiver,
 };
 
 pub mod completions;
@@ -54,6 +53,11 @@ pub use completions::{
 pub mod hover;
 
 pub mod ty;
+
+pub mod marker;
+pub use marker::{
+    MarkerBinding, MarkerDef, MarkerInference, MarkerRegistry, structurally_has_marker, ty_name,
+};
 
 pub mod folder;
 pub mod visit;

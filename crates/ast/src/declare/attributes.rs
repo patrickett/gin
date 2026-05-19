@@ -10,10 +10,6 @@ pub struct DeclareAttributes {
     /// `None` means no `#[...]` block was present at all.
     /// `Some(vec![])` means an empty `#[]` was present.
     pub raw_attributes: Option<Vec<AttributeItem>>,
-    /// Whether this type requires linear usage (`#[lin]`).
-    pub is_lin: bool,
-    /// Whether this type is explicitly non-copyable (`#[not_copy]`).
-    pub is_not_copy: bool,
 }
 
 impl DeclareAttributes {
@@ -53,12 +49,10 @@ impl DeclareAttributes {
                     }
                     _ => {}
                 }
-            } else if let AttributeItem::Flag { name, .. } = item {
-                match name.as_str() {
-                    "lin" => self.is_lin = true,
-                    "not_copy" => self.is_not_copy = true,
-                    _ => {}
-                }
+            } else if let AttributeItem::Flag { name: _, .. } = item {
+                // match name.as_str() {
+                //     _ => {}
+                // }
             }
         }
     }

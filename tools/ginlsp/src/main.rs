@@ -12,6 +12,8 @@ mod state;
 
 use dashmap::DashMap;
 
+use ast::HasSpanId;
+use ast::ImportSource;
 use diagnostics::symptoms_to_diagnostics;
 use futures::FutureExt;
 use resolve::{resolve_flask_path_dependencies, ParsedFile};
@@ -29,6 +31,164 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 
 const DIAGNOSTIC_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Produce LSP diagnostics and code-action data for `use` statements whose
+/// comma-separated items are not in alphabetical order.
+fn find_unsorted_imports(source: &str, file_ast: &ast::FileAst) -> Vec<Diagnostic> {
+    fn import_sort_key(mi: &ast::ModuleImport) -> String {
+        match &mi.source {
+            ImportSource::Package(path) => {
+                let mut s = path.root.as_str().to_lowercase();
+                for seg in &path.segments {
+                    s.push('.');
+                    s.push_str(seg.as_str().to_lowercase().as_str());
+                }
+                s
+            }
+            ImportSource::Local(p, _) => p.to_string_lossy().to_lowercase(),
+            ImportSource::LocalBundle(b) => b.root.as_str().to_lowercase(),
+            ImportSource::CurrentModule { member } => member.export.as_str().to_lowercase(),
+        }
+    }
+
+    fn is_unsorted(items: &[&ast::ModuleImport]) -> bool {
+        items
+            .windows(2)
+            .any(|w| import_sort_key(w[0]) > import_sort_key(w[1]))
+    }
+
+    /// Compute the byte span of a full `use …` line from the first and last
+    /// `ModuleImport` source spans.
+    fn use_line_span(
+        first_span_id: ast::span::SpanId,
+        last_span_id: ast::span::SpanId,
+        source: &str,
+        span_table: &ast::SpanTable,
+    ) -> Option<(usize, usize)> {
+        let first = span_table.get(first_span_id);
+        let last = span_table.get(last_span_id);
+        // Walk backward from first bytes to find "use "
+        let line_start = source[..first.start]
+            .rfind('\n')
+            .map(|p| p + 1)
+            .unwrap_or(0);
+        // Walk forward from last bytes to end of line
+        let line_end = source[last.end..]
+            .find('\n')
+            .map(|p| last.end + p)
+            .unwrap_or(source.len());
+        Some((line_start, line_end))
+    }
+
+    let span_table = file_ast.span_table();
+    let mut result = Vec::new();
+
+    for import in &file_ast.uses {
+        if import.0.len() < 2 {
+            continue;
+        }
+        let items: Vec<&ast::ModuleImport> = import.0.iter().collect();
+        if !is_unsorted(&items) {
+            continue;
+        }
+
+        let first_id = match items.first() {
+            Some(mi) => mi.source.span_id(),
+            None => continue,
+        };
+        let last_id = match items.last() {
+            Some(mi) => mi.source.span_id(),
+            None => continue,
+        };
+
+        let (line_start_byte, line_end_byte) =
+            match use_line_span(first_id, last_id, source, span_table) {
+                Some(spans) => spans,
+                None => continue,
+            };
+
+        // Build the sorted version
+        let mut sorted: Vec<&ast::ModuleImport> = items.clone();
+        sorted.sort_by_key(|mi| import_sort_key(mi));
+
+        let mut sorted_text = String::from("use ");
+        for (i, mi) in sorted.iter().enumerate() {
+            if i > 0 {
+                sorted_text.push_str(", ");
+            }
+            match &mi.source {
+                ImportSource::Package(path) => {
+                    sorted_text.push_str(path.root.as_str());
+                    for seg in &path.segments {
+                        sorted_text.push('.');
+                        sorted_text.push_str(seg.as_str());
+                    }
+                }
+                ImportSource::Local(p, _) => {
+                    sorted_text.push('\'');
+                    sorted_text.push_str(&p.to_string_lossy());
+                    sorted_text.push('\'');
+                }
+                ImportSource::LocalBundle(b) => {
+                    sorted_text.push_str(b.root.as_str());
+                    sorted_text.push_str(".(");
+                    let mut members: Vec<&ast::BundleExportImport> = b.members.iter().collect();
+                    members.sort_by_key(|m| m.export.as_str().to_lowercase());
+                    for (j, member) in members.iter().enumerate() {
+                        if j > 0 {
+                            sorted_text.push_str(", ");
+                        }
+                        sorted_text.push_str(member.export.as_str());
+                        if let Some(alias) = &member.alias {
+                            sorted_text.push_str(" as ");
+                            sorted_text.push_str(alias.as_str());
+                        }
+                    }
+                    sorted_text.push(')');
+                }
+                ImportSource::CurrentModule { member } => {
+                    sorted_text.push_str(member.export.as_str());
+                    if let Some(alias) = &member.alias {
+                        sorted_text.push_str(" as ");
+                        sorted_text.push_str(alias.as_str());
+                    }
+                }
+            }
+        }
+
+        use ast::byte_offset_to_position;
+        let (sl, sc) = byte_offset_to_position(line_start_byte, source);
+        let (el, ec) = byte_offset_to_position(line_end_byte, source);
+
+        let range = Range {
+            start: Position {
+                line: sl,
+                character: sc,
+            },
+            end: Position {
+                line: el,
+                character: ec,
+            },
+        };
+
+        result.push(Diagnostic {
+            range,
+            severity: Some(DiagnosticSeverity::HINT),
+            code: Some(NumberOrString::String("ginfmt.sort-imports".to_string())),
+            code_description: None,
+            source: Some("ginfmt".to_string()),
+            message: "Imports are not in alphabetical order".to_string(),
+            related_information: None,
+            tags: None,
+            data: Some(serde_json::json!({
+                "gincQuickFix": "sort-imports",
+                "sortedText": sorted_text,
+            })),
+        });
+    }
+
+    result
+}
 
 fn package_root_containing(from_dir: &Path) -> Option<std::path::PathBuf> {
     let mut search = from_dir.to_path_buf();
@@ -310,12 +470,20 @@ impl Backend {
                 .source_and_parse(pkg_path)
                 .map(|(s, po)| (s, po.ast.span_table().clone()));
 
-            let diagnostics = match source_and_span {
-                Some((source, span_table)) => {
-                    symptoms_to_diagnostics(&source, &span_table, &symptoms, &pkg_uri)
+            let parse_output = snapshot.engine.source_and_parse(pkg_path);
+
+            let mut diagnostics = match source_and_span {
+                Some((ref source, ref span_table)) => {
+                    symptoms_to_diagnostics(source, span_table, &symptoms, &pkg_uri)
                 }
                 None => Vec::new(),
             };
+
+            // Check for unsorted imports and emit hints
+            if let Some((ref source, ref _po)) = parse_output {
+                let unsorted = find_unsorted_imports(source, &_po.ast);
+                diagnostics.extend(unsorted);
+            }
 
             results.push((pkg_uri, diagnostics));
         }

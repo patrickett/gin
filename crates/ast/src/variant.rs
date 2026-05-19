@@ -69,6 +69,15 @@ fn fmt_variant_shape_surface(e: &TypeExpr, f: &mut std::fmt::Formatter<'_>) -> s
             write!(f, "@")?;
             fmt_variant_shape_surface(&inner.value, f)
         }
+        TypeExpr::Ref { inner, mutable } => {
+            if *mutable {
+                write!(f, "mut ")?;
+            } else {
+                write!(f, "ref ")?;
+            }
+            fmt_variant_shape_surface(&inner.value, f)
+        }
+
         TypeExpr::Unit => write!(f, "()"),
     }
 }

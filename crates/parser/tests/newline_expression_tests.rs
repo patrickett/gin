@@ -34,13 +34,6 @@ fn count_exprs(out: &parser::ParseOutput) -> usize {
     out.ast.top_level_exprs().len()
 }
 
-#[allow(dead_code)]
-fn print_diags(out: &parser::ParseOutput) {
-    for d in &out.symptoms {
-        println!("  {:?}: {}", d.code, d.message);
-    }
-}
-
 // ── SAME-INDENT CONTINUATION (No Indent token emitted) ─────────────────
 //
 // These work because no Indent/Dedent tokens are inserted — the next line
@@ -49,15 +42,14 @@ fn print_diags(out: &parser::ParseOutput) {
 #[test]
 fn same_indent_minus_at_start_of_line() {
     // With Indent-as-continuation, same-indent minus parses as binary.
-    let src = "y := 2 * 4\n- 3\n";
+    let src = "y : 2 * 4\n- 3\n";
     let out = parse_source_full(src);
     assert!(has_def(&out, "y"), "should be a single bind");
-    print_diags(&out);
 }
 
 #[test]
 fn same_indent_multiple_lines() {
-    let src = "x := 1\n+ 2\n+ 3\n";
+    let src = "x : 1\n+ 2\n+ 3\n";
     let out = parse_source_full(src);
     assert!(
         has_def(&out, "x"),
@@ -68,7 +60,7 @@ fn same_indent_multiple_lines() {
 
 #[test]
 fn same_indent_minus_touching_number() {
-    let src = "y := 4\n-3\n";
+    let src = "y : 4\n-3\n";
     let out = parse_source_full(src);
     assert!(has_def(&out, "y"), "y should be a single bind");
     assert_eq!(count_unused(&out), 0, "no unused value");
@@ -94,7 +86,7 @@ fn same_indent_function_call_across_lines() {
 
 #[test]
 fn greater_indent_trailing_operator() {
-    let src = "x := 3 +\n  2\n";
+    let src = "x : 3 +\n  2\n";
     let out = parse_source_full(src);
     assert!(
         has_def(&out, "x"),
@@ -113,7 +105,7 @@ fn greater_indent_trailing_operator() {
 
 #[test]
 fn greater_indent_leading_operator() {
-    let src = "x := 1\n    + 2\n    + 3\n";
+    let src = "x : 1\n    + 2\n    + 3\n";
     let out = parse_source_full(src);
     assert!(has_def(&out, "x"), "x should be bound (value is just 1)");
     let errors = count_errors(&out);
@@ -153,7 +145,7 @@ fn bare_return_followed_by_expression() {
 fn grouped_expression_across_lines() {
     // The Indent token inside parens causes an error.
     // Workaround: same-indent or operator-at-end.
-    let src = "x := (1\n  + 2)\n";
+    let src = "x : (1\n  + 2)\n";
     let out = parse_source_full(src);
     assert!(has_def(&out, "x"), "grouped expression should be a bind");
 }
@@ -161,7 +153,7 @@ fn grouped_expression_across_lines() {
 #[test]
 fn grouped_same_indent_inside_parens() {
     // Same-indent inside parens — no Indent token, works fine
-    let src = "x := (1\n+ 2)\n";
+    let src = "x : (1\n+ 2)\n";
     let out = parse_source_full(src);
     assert!(has_def(&out, "x"));
     assert_eq!(count_errors(&out), 0);
@@ -196,7 +188,7 @@ fn tagged_union_across_lines() {
 
 #[test]
 fn if_body_expression_continuation() {
-    let src = "result := if True\n    1\n    + 2\nreturn\n";
+    let src = "result : if True\n    1\n    + 2\nreturn\n";
     let out = parse_source_full(src);
     let errors = count_errors(&out);
     assert_eq!(
@@ -207,7 +199,7 @@ fn if_body_expression_continuation() {
 
 #[test]
 fn when_then_across_lines() {
-    let src = "x := when 5 > 0\n          then 1\n          else 2\n";
+    let src = "x : when 5 > 0\n          then 1\n          else 2\n";
     let out = parse_source_full(src);
     let errors = count_errors(&out);
     assert_eq!(
@@ -253,7 +245,7 @@ fn unused_top_level_binary_warns() {
 
 #[test]
 fn sequential_top_level_binds_no_warning() {
-    let src = "x := 1\ny := 2\n";
+    let src = "x : 1\ny : 2\n";
     let out = parse_source_full(src);
     assert!(has_def(&out, "x"));
     assert!(has_def(&out, "y"));
@@ -293,7 +285,7 @@ fn two_expressions_on_one_line_no_crash() {
 
 #[test]
 fn minus_sign_touching_number_same_indent() {
-    let src = "y := 4\n-3\n";
+    let src = "y : 4\n-3\n";
     let out = parse_source_full(src);
     assert!(
         has_def(&out, "y"),
@@ -306,7 +298,7 @@ fn minus_sign_touching_number_same_indent() {
 
 #[test]
 fn article_python_gotcha() {
-    let src = "y := 2 * 4\n- 3\n";
+    let src = "y : 2 * 4\n- 3\n";
     let out = parse_source_full(src);
     assert!(has_def(&out, "y"), "y should be a single bind");
     assert_eq!(count_unused(&out), 0, "no unused");
@@ -314,14 +306,14 @@ fn article_python_gotcha() {
 
 #[test]
 fn article_go_gotcha() {
-    let src = "y := 2 * 4\n- 3\n";
+    let src = "y : 2 * 4\n- 3\n";
     let out = parse_source_full(src);
     assert!(has_def(&out, "y"), "y should be a single bind");
 }
 
 #[test]
 fn article_swift_gotcha() {
-    let src = "y := 4\n-3\n";
+    let src = "y : 4\n-3\n";
     let out = parse_source_full(src);
     assert!(has_def(&out, "y"), "one bind, y = 4 - 3");
     assert_eq!(count_unused(&out), 0);
@@ -361,7 +353,7 @@ fn fn_call_across_lines() {
 
 #[test]
 fn bind_then_another_bind_with_newline() {
-    let src = "x := 1\ny := 2\n";
+    let src = "x : 1\ny : 2\n";
     let out = parse_source_full(src);
     assert!(has_def(&out, "x"), "first bind");
     assert!(has_def(&out, "y"), "second bind");
@@ -370,7 +362,7 @@ fn bind_then_another_bind_with_newline() {
 
 #[test]
 fn bind_then_bare_expression() {
-    let src = "x := 1\n42\n";
+    let src = "x : 1\n42\n";
     let out = parse_source_full(src);
     assert!(has_def(&out, "x"), "first bind");
     assert!(count_exprs(&out) >= 1, "42 should be a bare expression");

@@ -291,18 +291,24 @@ pub enum Expr {
     },
     /// Take a raw pointer to a value: `@expr` — emits alloca + spill if needed, returns `!llvm.ptr`.
     TakePtr(Box<Typed<Expr>>),
-    /// Take a reference to a value: `^expr` — same layout as TakePtr for now.
-    TakeRef(Box<Typed<Expr>>),
-    /// Dereference a pointer or reference: `*expr` — emits `llvm.load` of the pointed-to value.
+    /// Take a safe reference: `ref expr` or `mut expr`.
+    /// Does NOT consume `expr`. The original value stays Alive.
+    /// Invalidated when the source is consumed.
+    Ref {
+        inner: Box<Typed<Expr>>,
+        mutable: bool,
+    },
+    /// Dereference a pointer or reference: `deref expr`.
     Deref(Box<Typed<Expr>>),
     /// Unary negation: `-expr`.
     Negate(Box<Typed<Expr>>),
-    /// Mutably-borrowed call argument: `mut expr`.
-    MutArg(Box<Typed<Expr>>),
-    /// Owned call argument: `own expr`.
-    OwnArg(Box<Typed<Expr>>),
+
     /// Inline assembly: `asm("template", "constraints", args...)"
     Asm(AsmExpr),
+    /// Argument passed with `~` at call site: `~expr` — explicit consume.
+    ConsumeArg(Box<Typed<Expr>>),
+    /// Explicit consume: `eat expr`. Used standalone, not at call site.
+    Eat(Box<Typed<Expr>>),
     /// Tuple literal: `(e1, e2, …)` — at least two elements.
     TupleLit(Vec<Typed<Expr>>),
     /// List literal: `[e1, e2, …]` — homogeneous compile-time list.
@@ -316,7 +322,7 @@ impl From<crate::TypeExpr> for Expr {
             crate::TypeExpr::Qualified(path) => Expr::TypeQualified(path),
             crate::TypeExpr::Generic { name, params, .. } => Expr::TypeGeneric { name, params },
             crate::TypeExpr::Literal(..) => Expr::Lit(crate::Literal::Number(0)),
-            crate::TypeExpr::Pointer(_) | crate::TypeExpr::Unit => {
+            crate::TypeExpr::Pointer(_) | crate::TypeExpr::Ref { .. } | crate::TypeExpr::Unit => {
                 Expr::Lit(crate::Literal::Number(0))
             }
         }

@@ -70,7 +70,8 @@ pub fn ty_to_mlir<'c>(ty: &Ty, ctx: &'c Context) -> Type<'c> {
             }
         }
         Ty::Unit | Ty::Opaque(_) => ctx.i64(),
-        Ty::Array { .. } | Ty::Ptr { .. } | Ty::Ref { .. } => ctx.llvm_ptr(),
+        Ty::Array { .. } | Ty::Ptr { .. } => ctx.llvm_ptr(),
+        Ty::Ref { inner, .. } => ty_to_mlir(inner, ctx),
         Ty::Tuple(fields) => {
             let field_types: Vec<Type<'c>> = fields.iter().map(|f| ty_to_mlir(f, ctx)).collect();
             r#type::r#struct(ctx, &field_types, false)

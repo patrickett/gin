@@ -1018,7 +1018,7 @@ mod tests {
 
     #[test]
     fn resolve_attaches_symptoms_to_correct_file() {
-        let pf = make_pf("/main.gin", "x := 42\n");
+        let pf = make_pf("/main.gin", "x: 42\n");
         let mut symptoms = vec![];
         let diag = UseSymptom::DuplicateTopLevel {
             symbol: "x".to_string(),
