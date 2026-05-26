@@ -1,0 +1,12 @@
+Cargo.lock
+package-lock.json
+node_modules
+build
+*.log
+/examples/*/
+/target/
+*.wasm
+tree-sitter-gin.wasm
+src/parser.c
+src/grammar.json
+src/node-types.json

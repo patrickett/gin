@@ -1,0 +1,23 @@
+{
+  "name": "gin",
+  "version": "0.1.0",
+  "description": "Gin grammar for tree-sitter",
+  "license": "MIT",
+  "repository": "https://github.com/patrickett/gin",
+  "authors": ["Patrick Trickett <patrickett@protonmail.com>"],
+  "main": "grammar.js",
+  "generate": {
+    "path": "src"
+  },
+  "grammars": [
+    {
+      "name": "gin",
+      "path": ".",
+      "scope": "source.gin"
+    }
+  ],
+  "metadata": {
+    "name": "gin",
+    "version": "0.1.0"
+  }
+}

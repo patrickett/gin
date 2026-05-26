@@ -1,7 +1,7 @@
 {
   "name": "gin",
   "displayName": "Gin",
-  "description": "Language support for the Gin programming language (syntax highlighting and ginlsp).",
+  "description": "Language support for the Gin programming language (tree-sitter highlighting and ginlsp).",
   "version": "0.1.0",
   "publisher": "patrickett",
   "license": "MIT",
@@ -17,9 +17,7 @@
   ],
   "main": "./out/extension.js",
   "activationEvents": [
-    
     "workspaceContains:**/*.gin"
-    
   ],
   "contributes": {
     "commands": [
@@ -41,13 +39,6 @@
         "configuration": "./language-configuration.json"
       }
     ],
-    "grammars": [
-      {
-        "language": "gin",
-        "scopeName": "source.gin",
-        "path": "./syntaxes/gin.tmLanguage.json"
-      }
-    ],
     "configuration": {
       "title": "Gin",
       "properties": {
@@ -57,20 +48,28 @@
           "description": "Path to the ginlsp executable. When empty, the extension runs ginlsp from your PATH."
         }
       }
+    },
+    "configurationDefaults": {
+      "[gin]": {
+        "editor.semanticHighlighting.enabled": true
+      }
     }
   },
   "scripts": {
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "vscode:prepublish": "npm run compile",
+    "postinstall": "node -e \"const fs=require('fs');const p=require('path');const d=p.join(__dirname,'wasm');fs.mkdirSync(d,{recursive:true});fs.copyFileSync(p.join(__dirname,'node_modules','web-tree-sitter','tree-sitter.wasm'),p.join(d,'tree-sitter.wasm'));\"",
+    "vscode:prepublish": "bash ../../scripts/generate-tree-sitter.sh && npm run compile",
     "package": "vsce package",
     "publish:open-vsx": "ovsx publish",
     "publish:marketplace": "vsce publish"
   },
   "dependencies": {
-    "vscode-languageclient": "^9.0.1"
+    "vscode-languageclient": "^9.0.1",
+    "web-tree-sitter": "^0.25.6"
   },
   "devDependencies": {
+    "@types/node": "^22.10.0",
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^3.3.2",
     "ovsx": "^0.10.6",

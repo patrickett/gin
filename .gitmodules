@@ -1,3 +1,0 @@
-[submodule "editors/tree-sitter-gin"]
-	path = editors/tree-sitter-gin
-	url = https://github.com/patrickett/tree-sitter-gin

@@ -5,6 +5,7 @@ import {
   ServerOptions,
   TransportKind,
 } from "vscode-languageclient/node";
+import { registerGinTreeSitter } from "./treeSitterHighlight";
 
 let client: LanguageClient | undefined;
 let lspOutput: vscode.OutputChannel | undefined;
@@ -34,6 +35,8 @@ function createClient(outputChannel: vscode.OutputChannel): LanguageClient {
 export function activate(context: vscode.ExtensionContext): void {
   lspOutput = vscode.window.createOutputChannel("Gin Language Server");
   context.subscriptions.push(lspOutput);
+
+  void registerGinTreeSitter(context);
 
   client = createClient(lspOutput);
   context.subscriptions.push(client);

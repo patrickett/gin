@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "editors/tree-sitter-gin",
     "tools/begin",
     "crates/flask",
     "crates/ast",
