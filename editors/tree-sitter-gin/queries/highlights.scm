@@ -58,8 +58,6 @@
 
 ; Attributes
 (attributes) @attribute
-(platform_attribute) @attribute
-
 ; Keywords
 "use" @keyword
 "as" @keyword

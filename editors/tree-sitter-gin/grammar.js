@@ -227,16 +227,11 @@ module.exports = grammar({
 
     // ── Attributes ───────────────────────────────────────
     //
-    // #[os({ linux, macos })]
     // #[test, inline]
 
     attributes: ($) => seq("#", "[", sep1(",", $._attribute_item), "]"),
 
-    _attribute_item: ($) =>
-      choice($.platform_attribute, "debug", "test", "inline"),
-
-    platform_attribute: ($) =>
-      seq(choice("os", "arch"), "(", "{", sep1(",", $.identifier), "}", ")"),
+    _attribute_item: ($) => choice("debug", "test", "inline"),
 
     // ── Statements ───────────────────────────────────────
 
