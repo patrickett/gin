@@ -75,6 +75,7 @@ module.exports = grammar({
     _top_level_item: ($) =>
       choice(
         $.declare_statement,
+        $.blanket_impl,
         $.impl_block,
         $.method_definition,
         $.bind_statement,
@@ -137,6 +138,24 @@ module.exports = grammar({
 
     qualified_tag: ($) =>
       prec.left(seq($.type_identifier, repeat1(seq(".", $.type_identifier)))),
+
+    // ── Blanket impl ─────────────────────────────────────
+    //
+    // x has Sized(size: compute_size(x))
+    // x has Copy(can_copy: is_copy(x))
+
+    blanket_impl: ($) =>
+      seq(
+        field("type_var", $.identifier),
+        "has",
+        field("trait", $.type_identifier),
+        "(",
+        optional(sep1(",", $.trait_field)),
+        ")",
+      ),
+
+    trait_field: ($) =>
+      seq(field("name", $.identifier), ":", field("value", $._expression)),
 
     // ── Impl block ───────────────────────────────────────
     //

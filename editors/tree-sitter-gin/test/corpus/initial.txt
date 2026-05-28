@@ -45,3 +45,41 @@ x: 42
     name: (identifier)
     value: (literal
       (number))))
+
+================================================================================
+blanket impl
+================================================================================
+
+x has Sized(size: compute_size(x))
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (blanket_impl
+    type_var: (identifier)
+    trait: (type_identifier)
+    (trait_field
+      name: (identifier)
+      value: (call_expression
+        function: (identifier)
+        arguments: (argument_list
+          (identifier))))))
+
+================================================================================
+blanket impl with multiple fields
+================================================================================
+
+x has Copy(can_copy: is_copy(x))
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (blanket_impl
+    type_var: (identifier)
+    trait: (type_identifier)
+    (trait_field
+      name: (identifier)
+      value: (call_expression
+        function: (identifier)
+        arguments: (argument_list
+          (identifier))))))
