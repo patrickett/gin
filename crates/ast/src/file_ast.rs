@@ -1,3 +1,4 @@
+use crate::blanket_impl::BlanketImpl;
 use crate::path::ModPath;
 use crate::prelude::*;
 use crate::span::{SpanId, SpanTable, Spanned};
@@ -11,36 +12,8 @@ use std::{
 pub type TagMap = HashMap<Intern<String>, Declare>;
 /// Method name → single bind (impl blocks, etc.).
 pub type MethodMap = HashMap<Intern<String>, Bind>;
-/// Top-level def name → one bind after platform filtering (see [`collapse_defs_for_platform`]).
+/// Top-level def name → one bind.
 pub type DefMap = IndexMap<Intern<String>, Bind>;
-
-/// Collapse parser scratch (`Vec` per name from raw top-level collection) to a single bind per name
-/// for the current host `#[os]` / `#[arch]`. Names with no matching overload are dropped.
-pub fn collapse_defs_for_platform(multi: IndexMap<Intern<String>, Vec<Bind>>) -> DefMap {
-    let mut defs = DefMap::new();
-    for (name, binds) in multi {
-        if let Some(bind) = pick_bind_for_platform(binds) {
-            defs.insert(name, bind);
-        }
-    }
-    defs
-}
-
-fn pick_bind_for_platform(binds: Vec<Bind>) -> Option<Bind> {
-    if binds.is_empty() {
-        return None;
-    }
-    let mut matching: Vec<Bind> = binds
-        .into_iter()
-        .filter(|b| b.attributes().matches_current_platform())
-        .collect();
-    if matching.is_empty() {
-        None
-    } else {
-        // If several overloads match (misconfiguration), keep the first.
-        Some(matching.remove(0))
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SymbolKind {
@@ -239,9 +212,18 @@ pub struct FileAst {
     pub symbol_alias_spans: Vec<SpanId>,
     /// Span table mapping SpanId → Span (byte ranges).
     pub span_table: SpanTable,
+    /// Quantified trait impls: `x has Trait(...)`.
+    pub blanket_impls: Vec<BlanketImpl>,
+    /// Parse-time warnings (e.g. `name Ty` then `name := expr`).
+    pub parse_warnings: Vec<diagnostic::Diagnostic>,
 }
 
 impl FileAst {
+    /// Minimal AST for compile-time evaluation helpers (no source file).
+    pub fn empty_for_tests() -> Self {
+        Self::default()
+    }
+
     pub fn module_doc(&self) -> Option<&DocComment> {
         self.module_doc.as_ref()
     }
@@ -344,8 +326,6 @@ impl FileAst {
     /// Merge defs and tags from `other` into `self`.
     ///
     /// Existing entries in `self` take precedence (entry file can shadow dependency symbols).
-    /// Dependency defs that don't match the current build platform are skipped, allowing the same
-    /// name (e.g. `SYS_WRITE`) to be defined in separate platform-specific files.
     /// The dependency's top-level exprs and private symbols are not imported.
     pub fn merge_from(&mut self, other: FileAst) {
         for (name, declare) in other.tags {
@@ -355,10 +335,10 @@ impl FileAst {
             if self.defs.contains_key(&name) {
                 continue;
             }
-            if bind.attributes().matches_current_platform() {
-                self.defs.insert(name, bind);
-            }
+            self.defs.insert(name, bind);
         }
+        self.blanket_impls.extend(other.blanket_impls);
+        self.parse_warnings.extend(other.parse_warnings);
     }
 
     /// Like [`merge_from`], but returns an error if `other` introduces a tag or def that already exists.
@@ -377,9 +357,7 @@ impl FileAst {
             self.tags.insert(name, declare);
         }
         for (name, bind) in other.defs {
-            if bind.attributes().matches_current_platform() {
-                self.defs.insert(name, bind);
-            }
+            self.defs.insert(name, bind);
         }
         Ok(())
     }
@@ -625,7 +603,7 @@ fn find_expr_at_byte<'a>(
             Some((expr, span_id))
         }
         Expr::Asm(a) => {
-            for op in &a.operands {
+            for op in &a.operand_values {
                 if st.contains(op.span_id(), byte_pos) {
                     return find_expr_at_byte(st, &op.value, op.span_id(), byte_pos);
                 }
@@ -653,6 +631,7 @@ fn find_expr_at_byte<'a>(
             Some((expr, span_id))
         }
         Expr::TupleGet { base, .. }
+        | Expr::RecordGet { base, .. }
         | Expr::Cast { expr: base, .. }
         | Expr::BufGet { buf: base, .. } => {
             if st.contains(base.span_id(), byte_pos) {
@@ -673,9 +652,11 @@ fn find_expr_at_byte<'a>(
             }
             Some((expr, span_id))
         }
-        Expr::TypeNominal(..) | Expr::TypeQualified(_) | Expr::TypeGeneric { .. } => {
-            Some((expr, span_id))
-        }
+        Expr::TypeNominal(..)
+        | Expr::TypeInRange(..)
+        | Expr::TypeQualified(_)
+        | Expr::TypeGeneric { .. }
+        | Expr::TypeRef { .. } => Some((expr, span_id)),
     }
 }
 
@@ -706,6 +687,6 @@ fn find_expr_in_bind_value<'a>(
             }
             None
         }
-        BindValue::Extern => None,
+        BindValue::Extern | BindValue::Unassigned => None,
     }
 }

@@ -107,14 +107,11 @@ impl ModuleTree {
     }
 }
 
-/// Directory names to skip during module discovery.
-const SKIP_DIRS: &[&str] = &["target", ".git", "node_modules"];
-
 /// Walk a directory and build a `ModuleTree`.
 ///
 /// - `.gin` files in the directory become the module's direct files.
 /// - Subdirectories become sub-modules (recursively discovered).
-/// - Directories named `target`, `.git`, or `node_modules` are skipped.
+/// - Paths excluded by `.gitignore` are skipped.
 /// - Non-`.gin` files are ignored.
 ///
 /// Returns `None` if the directory doesn't exist or can't be read.
@@ -142,8 +139,7 @@ pub fn discover_module(dir: &Path) -> Option<ModuleTree> {
                 None => continue,
             };
 
-            // Skip known non-module directories
-            if SKIP_DIRS.contains(&dir_name.as_str()) {
+            if crate::gin_walk::is_gitignored(&path) {
                 continue;
             }
 
@@ -265,15 +261,27 @@ mod tests {
     }
 
     #[test]
-    fn test_discover_skips_target() {
+    fn test_discover_skips_gitignored_target() {
         let tmp = TempDir::new("skip_target");
+        tmp.add_file(".gitignore", "target/\n");
         tmp.add_file("main.gin", "main:\nreturn\n");
         let target = tmp.add_dir("target");
-        target.add_file("output.o", "binary");
+        target.add_file("build.gin", "x := 1\n");
 
         let tree = discover_module(&tmp.path).unwrap();
         assert_eq!(tree.files.len(), 1);
         assert!(!tree.children.contains_key("target"));
+    }
+
+    #[test]
+    fn test_discover_includes_target_without_gitignore() {
+        let tmp = TempDir::new("include_target");
+        tmp.add_file("main.gin", "main:\nreturn\n");
+        let target = tmp.add_dir("target");
+        target.add_file("triple.gin", "x := 1\n");
+
+        let tree = discover_module(&tmp.path).unwrap();
+        assert!(tree.children.contains_key("target"));
     }
 
     #[test]

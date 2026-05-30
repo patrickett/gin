@@ -18,7 +18,26 @@ impl Profile {
     }
 }
 
+impl std::fmt::Display for Profile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Profile {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "debug" => Ok(Self::Debug),
+            "release" => Ok(Self::Release),
+            _ => Err(format!(
+                "unknown build profile '{s}', expected 'debug' or 'release'"
+            )),
+        }
+    }
+}
+
 pub use native::{
-    build_module_text, build_module_text_from_typed, compile_to_object,
-    compile_to_object_from_typed, link_executable, native_from_mlir, native_from_module,
+    build_module_text_from_typed, compile_to_object_from_typed, link_executable, native_from_mlir,
+    native_from_module,
 };

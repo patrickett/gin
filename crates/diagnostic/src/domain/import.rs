@@ -60,6 +60,28 @@ pub enum UseSymptom {
         /// The module/dependency that was queried.
         module: String,
     },
+    /// A `.gin` file that is not inside any recognised package (no
+    /// `flask.jsonc` found in its parent directory chain).
+    #[strum(serialize = "use-file-outside-package")]
+    FileOutsidePackage {
+        /// The path to the orphaned file.
+        path: String,
+    },
+    #[strum(serialize = "use-import-target-must-be-folder")]
+    ImportTargetMustBeFolder { path: String },
+    #[strum(serialize = "use-escapes-package-root")]
+    EscapesPackageRoot { path: String },
+    #[strum(serialize = "use-dep-local-name-collision")]
+    DepLocalNameCollision {
+        name: String,
+        dependency: String,
+        local_path: String,
+    },
+    #[strum(serialize = "use-unused-import")]
+    UnusedImport { name: String },
+    /// Single-symbol bundle import such as `use core.(Int)` — prefer `use core.Int`.
+    #[strum(serialize = "use-prefer-member-import")]
+    PreferMemberImport { path_prefix: String, symbol: String },
 }
 
 impl DiagnosticLike for UseSymptom {
@@ -135,41 +157,76 @@ impl DiagnosticLike for UseSymptom {
             Self::NotExported { symbol, module } => {
                 format!("`{}` is not exported from `{}`", symbol, module)
             }
+            Self::FileOutsidePackage { path } => {
+                format!(
+                    "`{}` is not part of any package (no flask.jsonc found)",
+                    path
+                )
+            }
+            Self::ImportTargetMustBeFolder { path } => {
+                format!("import target must be a folder module, not `{}`", path)
+            }
+            Self::EscapesPackageRoot { path } => {
+                format!("import path `{}` escapes the package root", path)
+            }
+            Self::DepLocalNameCollision {
+                name,
+                dependency,
+                local_path,
+            } => format!(
+                "name `{name}` conflicts with dependency `{dependency}` and local folder `{local_path}`; alias one side"
+            ),
+            Self::UnusedImport { name } => format!("unused import `{name}`"),
+            Self::PreferMemberImport {
+                path_prefix,
+                symbol,
+            } => format!("prefer `use {path_prefix}.{symbol}` over a single-item `.(…)` bundle"),
         }
     }
 
     fn help(&self) -> Option<String> {
-        Some(match self {
-            Self::Conflict { .. } => "choose a single qualifier/alias for this module".into(),
-            Self::TargetNotFound { .. } => "ensure the import path points to an existing `.gin` file or folder module".into(),
-            Self::LocalMustEndInGin { .. } => "use `use './file.gin'` for local file imports".into(),
-            Self::LocalNotFound { .. } => "check the path relative to this file, and ensure it ends in `.gin`".into(),
-            Self::FolderMissingConfig { .. } => "add a flask.jsonc to the folder module, or import a .gin file instead".into(),
-            Self::MissingExport { .. } => "add a nested folder `segment/flask.jsonc` under the parent package".into(),
-            Self::ExportTargetNotFound { .. } => "ensure the nested package path exists with a `flask.jsonc`".into(),
-            Self::AmbiguousLocalRoot { .. } => "rename one of them, or use an explicit local file import (`use './path.gin'`)".into(),
-            Self::FileHasSegments { .. } => "remove the trailing segment, or use a nested folder package".into(),
-            Self::UnknownDependency { .. } => "add it to `dependencies` in flask.jsonc, or use a local file import".into(),
-            Self::DependencyMissingConfig { .. } => "add a flask.jsonc to the dependency root directory".into(),
-            Self::MissingConfig { .. } => "add a `flask.jsonc` in this folder module directory".into(),
-            Self::ChainedExportNotFolder { .. } => "make the export's `path` point to a folder containing flask.jsonc, or stop the chain here".into(),
-            Self::Cycle { chain } => format!("cycle: {chain}"),
-            Self::LocalFolderRequiresAs { .. } => {
-                "add `as Alias` so the folder module has a single namespace prefix".into()
+        match self {
+            Self::FileOutsidePackage { .. } => Some("add a `flask.jsonc` to this directory or one of its parents to make it a Gin package".into()),
+            Self::ImportTargetMustBeFolder { .. } => {
+                Some("import a directory (folder module), not a single `.gin` file".into())
             }
-            Self::NestedPackageNotFound { .. } => {
-                "create `segment/flask.jsonc` under the parent package, or fix the import path".into()
+            Self::EscapesPackageRoot { .. } => {
+                Some("use a path that stays within the package containing flask.jsonc".into())
             }
-            Self::PackageHasNoGinFiles { .. } => {
-                "add at least one `.gin` file next to flask.jsonc".into()
-            }
-            Self::DuplicateTopLevel { .. } => {
-                "rename or move one of the definitions so each public top-level name is unique in the package"
-                    .into()
-            }
-            Self::NotExported { symbol, module } => format!(
-                "`{symbol}` is not exported from `{module}`"
-            ),
-        })
+            Self::DepLocalNameCollision { name, .. } => Some(format!(
+                "use `use {name} as {name}_dep` for the dependency, or `use '{name}' as {name}` for the local folder"
+            )),
+            Self::UnusedImport { .. } => Some("remove the import or reference the name in this file".into()),
+            Self::PreferMemberImport { path_prefix, symbol } => Some(format!(
+                "use `use {path_prefix}.{symbol}` for a single import; reserve `.(…)` for multiple symbols"
+            )),
+            Self::Conflict { .. } => Some("choose a single qualifier/alias for this module".into()),
+            Self::TargetNotFound { .. } => Some("ensure the import path points to an existing `.gin` file or folder module".into()),
+            Self::LocalMustEndInGin { .. } => Some("use `use './file.gin'` for local file imports".into()),
+            Self::LocalNotFound { .. } => Some("check the path relative to this file, and ensure it ends in `.gin`".into()),
+            Self::FolderMissingConfig { .. } => Some("add a flask.jsonc to the folder module, or import a .gin file instead".into()),
+            Self::MissingExport { .. } => Some("add a nested folder `segment/flask.jsonc` under the parent package".into()),
+            Self::ExportTargetNotFound { .. } => Some("ensure the nested package path exists with a `flask.jsonc`".into()),
+            Self::AmbiguousLocalRoot { .. } => Some("rename one of them, or use an explicit local file import (`use './path.gin'`)".into()),
+            Self::FileHasSegments { .. } => Some("remove the trailing segment, or use a nested folder package".into()),
+            Self::UnknownDependency { .. } => Some("add it to `dependencies` in flask.jsonc, or use a local file import".into()),
+            Self::DependencyMissingConfig { .. } => Some("add a flask.jsonc to the dependency root directory".into()),
+            Self::MissingConfig { .. } => Some("add a `flask.jsonc` in this folder module directory".into()),
+            Self::ChainedExportNotFolder { .. } => Some("make the export's `path` point to a folder containing flask.jsonc, or stop the chain here".into()),
+            Self::Cycle { chain } => Some(format!("cycle: {chain}")),
+            Self::LocalFolderRequiresAs { .. } => Some("add `as Alias` so the folder module has a single namespace prefix".into()),
+            Self::NestedPackageNotFound { .. } => Some("create `segment/flask.jsonc` under the parent package, or fix the import path".into()),
+            Self::PackageHasNoGinFiles { .. } => Some("add at least one `.gin` file next to flask.jsonc".into()),
+            Self::DuplicateTopLevel { .. } => Some("rename or move one of the definitions so each public top-level name is unique in the package".into()),
+            Self::NotExported { symbol, module } => Some(format!("`{symbol}` is not exported from `{module}`")),
+        }
+    }
+
+    fn category(&self) -> crate::Category {
+        match self {
+            Self::FileOutsidePackage { .. } => crate::Category::Info,
+            Self::UnusedImport { .. } => crate::Category::Help,
+            _ => crate::Category::Flaw,
+        }
     }
 }

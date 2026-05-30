@@ -1,4 +1,7 @@
-use crate::{CodegenSymptom, IoSymptom, LexSymptom, ParseSymptom, TypeSymptom, UseSymptom};
+use crate::{
+    CodegenSymptom, CompileTimeSymptom, IoSymptom, LexSymptom, ParseSymptom, TypeSymptom,
+    UseSymptom,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -9,37 +12,29 @@ pub enum DiagnosticCode {
     Type(TypeSymptom),
     Io(IoSymptom),
     Codegen(CodegenSymptom),
+    CompileTime(CompileTimeSymptom),
 }
 
-impl From<UseSymptom> for DiagnosticCode {
-    fn from(v: UseSymptom) -> Self {
-        DiagnosticCode::Import(v)
-    }
+macro_rules! impl_from_symptom {
+    ($($symptom:ident => $variant:ident),* $(,)?) => {
+        $(
+            impl From<$symptom> for DiagnosticCode {
+                fn from(v: $symptom) -> Self {
+                    DiagnosticCode::$variant(v)
+                }
+            }
+        )*
+    };
 }
-impl From<LexSymptom> for DiagnosticCode {
-    fn from(v: LexSymptom) -> Self {
-        DiagnosticCode::Lex(v)
-    }
-}
-impl From<ParseSymptom> for DiagnosticCode {
-    fn from(v: ParseSymptom) -> Self {
-        DiagnosticCode::Parse(v)
-    }
-}
-impl From<TypeSymptom> for DiagnosticCode {
-    fn from(v: TypeSymptom) -> Self {
-        DiagnosticCode::Type(v)
-    }
-}
-impl From<IoSymptom> for DiagnosticCode {
-    fn from(v: IoSymptom) -> Self {
-        DiagnosticCode::Io(v)
-    }
-}
-impl From<CodegenSymptom> for DiagnosticCode {
-    fn from(v: CodegenSymptom) -> Self {
-        DiagnosticCode::Codegen(v)
-    }
+
+impl_from_symptom! {
+    UseSymptom => Import,
+    LexSymptom => Lex,
+    ParseSymptom => Parse,
+    TypeSymptom => Type,
+    IoSymptom => Io,
+    CompileTimeSymptom => CompileTime,
+    CodegenSymptom => Codegen,
 }
 
 impl DiagnosticCode {
@@ -53,20 +48,15 @@ impl DiagnosticCode {
             DiagnosticCode::Type(s) => s.as_ref(),
             DiagnosticCode::Io(s) => s.as_ref(),
             DiagnosticCode::Codegen(s) => s.as_ref(),
+            DiagnosticCode::CompileTime(s) => s.as_ref(),
         }
     }
 
     /// Delegate custom rendering to the domain type.
     /// Returns `true` if the domain handled printing itself.
-    pub fn render_custom(
-        &self,
-        diag: &crate::Diagnostic,
-        span_table: &crate::SpanTable,
-        source: &str,
-        filename: &str,
-    ) -> bool {
+    pub fn render_custom(&self, diag: &crate::Diagnostic, source: &str, filename: &str) -> bool {
         match self {
-            DiagnosticCode::Lex(lex) => lex.render_custom(diag, span_table, source, filename),
+            DiagnosticCode::Lex(lex) => lex.render_custom(diag, source, filename),
             _ => false,
         }
     }

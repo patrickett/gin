@@ -5,16 +5,18 @@ edition = "2024"
 
 [dependencies]
 ast = { workspace = true }
+typed_ast = { workspace = true }
+typecheck = { workspace = true }
 parser = { workspace = true }
 diagnostic = { workspace = true }
 span = { workspace = true }
 i256 = { workspace = true }
-melior = "0.26.3"
-mlir-sys = "210.0.1"
+melior = "0.27"
+mlir-sys = "220.0.2"
 internment = "0.8"
+flask = { workspace = true }
 
 [dev-dependencies]
-database = { workspace = true }
 criterion = { workspace = true }
 parser = { workspace = true }
 

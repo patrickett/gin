@@ -1,4 +1,5 @@
 use crate::TypeExpr;
+use crate::WhenExpr;
 use crate::parameter::fmt_type_expr_surface;
 use crate::prelude::*;
 use crate::span::Spanned;
@@ -10,6 +11,8 @@ pub enum DeclareValue {
     Alias(Box<Spanned<TypeExpr>>),
     Record(Parameters),
     Union { variants: Vec<Variant> },
+    /// Type-level conditional: `PointerSize is when target.arch is … then …`.
+    When(Box<WhenExpr>),
     Set(/* TODO */),
     Range(I256, I256),
     // DiceThrow is in 1...6 (element of range)
@@ -20,6 +23,7 @@ impl std::fmt::Display for DeclareValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Alias(sp) => fmt_type_expr_surface(&sp.value, f),
+            Self::When(_) => write!(f, "when …"),
             Self::Record(params) => {
                 write!(f, "(")?;
                 let mut first = true;
@@ -33,6 +37,16 @@ impl std::fmt::Display for DeclareValue {
                 write!(f, ")")
             }
             Self::Union { variants } => {
+                let all_literal = variants
+                    .iter()
+                    .all(|v| matches!(v.shape().value, TypeExpr::Literal(..)));
+                if all_literal && !variants.is_empty() {
+                    write!(f, "{}", variants[0])?;
+                    for v in &variants[1..] {
+                        write!(f, "\n             or {v}")?;
+                    }
+                    return Ok(());
+                }
                 let mut first = true;
                 for v in variants {
                     if !first {
@@ -61,6 +75,7 @@ impl Hash for DeclareValue {
                     v.hash(state);
                 }
             }
+            Self::When(w) => w.hash(state),
             Self::Union { variants } => {
                 for variant in variants {
                     variant.hash(state);

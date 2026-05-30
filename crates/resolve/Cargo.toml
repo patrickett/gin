@@ -5,7 +5,12 @@ edition = "2024"
 
 [dependencies]
 ast = { workspace = true }
+typed_ast = { workspace = true }
 diagnostic = { workspace = true }
 parser = { workspace = true }
 flask = { workspace = true }
+typecheck = { workspace = true }
 internment = "0.8"
+
+[dev-dependencies]
+test-fixtures = { workspace = true }

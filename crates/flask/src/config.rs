@@ -59,6 +59,7 @@ impl std::fmt::Display for Author {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct FlaskConfig {
     pub name: String,
     pub description: Option<String>,
@@ -74,7 +75,9 @@ pub struct FlaskConfig {
     bugs: Option<BugInfo>,
     #[serde(default)]
     funding: Option<Vec<String>>,
-    targets: Option<Vec<String>>,
+    /// `"library"` or full target triple (`arch-vendor-os`).
+    #[serde(default)]
+    pub target: Option<String>,
     #[serde(default)]
     dependencies: HashMap<String, Dependency>,
 }
@@ -91,7 +94,7 @@ impl FlaskConfig {
             license: None,
             bugs: None,
             funding: None,
-            targets: None,
+            target: None,
             dependencies: HashMap::new(),
         }
     }
@@ -140,6 +143,10 @@ impl FlaskConfig {
 
     pub fn funding(&self) -> Option<&[String]> {
         self.funding.as_deref()
+    }
+
+    pub fn target(&self) -> Option<&str> {
+        self.target.as_deref()
     }
 
     pub fn dependency_names(&self) -> Vec<&str> {

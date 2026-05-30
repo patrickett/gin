@@ -35,8 +35,6 @@ pub struct Typed<T> {
     pub const_value: Option<crate::ConstValue>,
     /// Source location for diagnostics and LSP.
     pub span_id: SpanId,
-    /// Parse-time flaws (lex, parse, import errors) attached to this node.
-    pub flaws: Vec<diagnostic::DiagnosticCode>,
 }
 
 impl<T> Typed<T> {
@@ -47,7 +45,6 @@ impl<T> Typed<T> {
             ty,
             const_value: None,
             span_id,
-            flaws: Vec::new(),
         }
     }
 
@@ -58,7 +55,6 @@ impl<T> Typed<T> {
             ty,
             const_value: Some(cv),
             span_id,
-            flaws: Vec::new(),
         }
     }
 
@@ -70,7 +66,6 @@ impl<T> Typed<T> {
             ty: TyState::Infer,
             const_value: None,
             span_id,
-            flaws: Vec::new(),
         }
     }
 
@@ -81,7 +76,6 @@ impl<T> Typed<T> {
             ty: TyState::Resolved(ty),
             const_value: None,
             span_id,
-            flaws: Vec::new(),
         }
     }
 
@@ -96,7 +90,6 @@ impl<T> Typed<T> {
             },
             const_value: None,
             span_id,
-            flaws: Vec::new(),
         }
     }
 
@@ -123,14 +116,13 @@ impl<T> Typed<T> {
         self.ty.current_ty()
     }
 
-    /// Map the inner node from `T` to `U`, preserving type info, span, and flaws.
+    /// Map the inner node from `T` to `U`, preserving type info and span.
     pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Typed<U> {
         Typed {
             value: f(self.value),
             ty: self.ty,
             const_value: self.const_value,
             span_id: self.span_id,
-            flaws: self.flaws,
         }
     }
 
@@ -142,8 +134,6 @@ impl<T> Typed<T> {
         }
     }
 }
-
-// --- Conversions between Typed<T> and Spanned<T> ---
 
 impl<T> Deref for Typed<T> {
     type Target = T;
@@ -171,28 +161,9 @@ impl<T> From<Spanned<T>> for Typed<T> {
     }
 }
 
-// --- Compatibility bridges: Typed<T> acts like Spanned<T> where needed ---
-
 impl<T> crate::span::HasSpanId for Typed<T> {
     fn span_id(&self) -> SpanId {
         self.span_id
-    }
-}
-
-impl crate::TyInfer for Typed<Expr> {
-    fn infer_ty(&self, env: &crate::TyInferEnv) -> crate::ty::Ty {
-        // If already resolved, use the cached type.
-        if let Some(ty) = self.current_ty() {
-            return ty.clone();
-        }
-        // Otherwise fall back to inferring from the inner expression.
-        self.value.infer_ty(env)
-    }
-}
-
-impl crate::TyInfer for Box<Typed<Expr>> {
-    fn infer_ty(&self, env: &crate::TyInferEnv) -> crate::ty::Ty {
-        (**self).infer_ty(env)
     }
 }
 
@@ -248,6 +219,8 @@ pub enum Expr {
     AnonymousTag(Intern<String>),
     /// Type position: bare `Tag` (e.g. `Str` in `(x Str)`).
     TypeNominal(Intern<String>),
+    /// Type position: `in 0...10` or `in WeekRange`.
+    TypeInRange(crate::InRangeBounds),
     /// Type position: qualified path `Tag.Tag…`.
     TypeQualified(Spanned<ModPath>),
     /// Type position: `Tag(...)` with generic / named parameters.
@@ -256,6 +229,11 @@ pub enum Expr {
     TypeGeneric {
         name: Intern<String>,
         params: Vec<(Intern<String>, ParameterKind)>,
+    },
+    /// Type position: `ref T` or `mut T`.
+    TypeRef {
+        inner: Box<Expr>,
+        mutable: bool,
     },
     /// Stack-allocate an array: `(init_expr; N)` — emits `llvm.alloca N×sizeof(elem)`.
     TupleAlloc {
@@ -305,10 +283,15 @@ pub enum Expr {
 
     /// Inline assembly: `asm("template", "constraints", args...)"
     Asm(AsmExpr),
-    /// Argument passed with `~` at call site: `~expr` — explicit consume.
+    /// Argument passed with `eat` at call site: `eat expr` — explicit consume.
     ConsumeArg(Box<Typed<Expr>>),
     /// Explicit consume: `eat expr`. Used standalone, not at call site.
     Eat(Box<Typed<Expr>>),
+    /// Record field read: `base.field` (compile-time when `base` is a const record).
+    RecordGet {
+        base: Box<Typed<Expr>>,
+        field: internment::Intern<String>,
+    },
     /// Tuple literal: `(e1, e2, …)` — at least two elements.
     TupleLit(Vec<Typed<Expr>>),
     /// List literal: `[e1, e2, …]` — homogeneous compile-time list.
@@ -321,10 +304,19 @@ impl From<crate::TypeExpr> for Expr {
             crate::TypeExpr::Nominal(name, _span) => Expr::TypeNominal(name),
             crate::TypeExpr::Qualified(path) => Expr::TypeQualified(path),
             crate::TypeExpr::Generic { name, params, .. } => Expr::TypeGeneric { name, params },
+            crate::TypeExpr::Ref { inner, mutable } => Expr::TypeRef {
+                inner: Box::new(Expr::TypeNominal(Intern::<String>::from_ref(
+                    crate::type_surface_mangle_name(&inner.value),
+                ))),
+                mutable,
+            },
             crate::TypeExpr::Literal(..) => Expr::Lit(crate::Literal::Number(0)),
-            crate::TypeExpr::Pointer(_) | crate::TypeExpr::Ref { .. } | crate::TypeExpr::Unit => {
-                Expr::Lit(crate::Literal::Number(0))
-            }
+            crate::TypeExpr::InRange { bounds, .. } => Expr::TypeInRange(bounds),
+            crate::TypeExpr::Pointer(_)
+            | crate::TypeExpr::Unit
+            | crate::TypeExpr::ListEmpty
+            | crate::TypeExpr::ListCons { .. }
+            | crate::TypeExpr::Tuple(_) => Expr::Lit(crate::Literal::Number(0)),
         }
     }
 }
@@ -343,6 +335,24 @@ impl Expr {
             Expr::TypeGeneric { name, params } => Some(crate::TypeExpr::Generic {
                 name: *name,
                 params: params.clone(),
+                param_spans: Vec::new(),
+                span: SpanId::INVALID,
+            }),
+            Expr::TypeRef { inner, mutable } => {
+                if let Expr::TypeNominal(name) = inner.as_ref() {
+                    Some(crate::TypeExpr::Ref {
+                        inner: Box::new(crate::span::Spanned {
+                            value: crate::TypeExpr::Nominal(*name, SpanId::INVALID),
+                            span_id: SpanId::INVALID,
+                        }),
+                        mutable: *mutable,
+                    })
+                } else {
+                    None
+                }
+            }
+            Expr::TypeInRange(bounds) => Some(crate::TypeExpr::InRange {
+                bounds: bounds.clone(),
                 span: SpanId::INVALID,
             }),
             _ => None,

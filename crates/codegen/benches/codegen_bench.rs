@@ -1,5 +1,7 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use parser::parse_source_full;
+use typecheck::transform::transform_file;
+use typed_ast::FileId;
 
 fn codegen_source() -> String {
     let mut s = String::with_capacity(4096);
@@ -20,7 +22,8 @@ fn codegen_source() -> String {
 
 fn bench_codegen(c: &mut Criterion) {
     let source = codegen_source();
-    let mut output = parse_source_full(&source);
+    let parsed = parse_source_full(&source);
+    let typed = transform_file(parsed.ast, FileId(0));
 
     let mut group = c.benchmark_group("codegen");
     group.throughput(criterion::Throughput::Bytes(source.len() as u64));
@@ -29,13 +32,8 @@ fn bench_codegen(c: &mut Criterion) {
     group.bench_function("build_module/codegen_source", |b| {
         b.iter(|| {
             let context = melior::Context::new();
-            let result = codegen::build_module_with_context(
-                &context,
-                &mut output.ast,
-                None,
-                &source,
-                "bench.gin",
-            );
+            let result =
+                codegen::build_module_from_typed_ast(&context, &typed, &source, "bench.gin", None);
             std::hint::black_box(&result);
         });
     });
@@ -52,16 +50,12 @@ mod tests {
     #[test]
     fn test_codegen_source_compiles() {
         let source = codegen_source();
-        let output = parse_source_full(&source);
-        assert!(!output.ast.defs().is_empty());
+        let parsed = parse_source_full(&source);
+        let typed = transform_file(parsed.ast, FileId(0));
+        assert!(!typed.defs.is_empty());
         let context = melior::Context::new();
-        let result = codegen::build_module_with_context(
-            &context,
-            &mut output.ast,
-            None,
-            &source,
-            "test.gin",
-        );
-        assert!(result.0.is_some(), "codegen should succeed");
+        let (module, _) =
+            codegen::build_module_from_typed_ast(&context, &typed, &source, "test.gin", None);
+        assert!(module.is_some(), "codegen should succeed");
     }
 }

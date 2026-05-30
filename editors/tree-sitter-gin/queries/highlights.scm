@@ -67,7 +67,7 @@
 "or" @keyword.operator
 "and" @keyword.operator
 "not" @keyword.operator
-((identifier) @keyword (#eq? @keyword "add"))
+
 "return" @keyword.return
 "if" @keyword.conditional
 "when" @keyword.conditional

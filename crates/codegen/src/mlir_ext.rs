@@ -321,7 +321,10 @@ pub trait BlockExt<'c> {
 impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
     fn append_op(&self, op: Operation<'c>) -> Value<'c, 'c> {
         let op_ref = self.append_operation(op);
-        op_ref.result(0).expect("append_operation result 0 should exist").into()
+        op_ref
+            .result(0)
+            .expect("append_operation result 0 should exist")
+            .into()
     }
 
     fn const_i64(&self, ctx: &'c Context, value: i64) -> Value<'c, 'c> {

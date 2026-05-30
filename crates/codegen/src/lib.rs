@@ -1,5 +1,11 @@
 #![deny(unsafe_code)]
-#![warn(clippy::correctness, clippy::suspicious, clippy::style, clippy::complexity, clippy::perf)]
+#![warn(
+    clippy::correctness,
+    clippy::suspicious,
+    clippy::style,
+    clippy::complexity,
+    clippy::perf
+)]
 //! MLIR code generation infrastructure.
 
 pub mod emit;
@@ -96,7 +102,6 @@ pub mod prelude {
         CodegenContext,
         ContextExt,
         FPredicates,
-        Lower,
         OperationBuilderExt,
         Predicates,
         ScopedSymbolTable,

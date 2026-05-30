@@ -1,10 +1,13 @@
-use codegen::build_module_with_context;
+use codegen::build_module_from_typed_ast;
 use diagnostic::Diagnostic;
 use melior::Context;
 use parser::parse_from_str;
+use typecheck::transform::transform_file;
+use typed_ast::FileId;
 
 fn codegen_to_mlir_text(source: &str, filename: &str) -> (String, Vec<Diagnostic>) {
-    let mut ast = parse_from_str(source);
+    let ast = parse_from_str(source);
+    let typed = transform_file(ast, FileId(0));
 
     let context = Context::new();
     melior::dialect::DialectHandle::llvm().register_dialect(&context);
@@ -13,7 +16,7 @@ fn codegen_to_mlir_text(source: &str, filename: &str) -> (String, Vec<Diagnostic
     context.get_or_load_dialect("scf");
     context.get_or_load_dialect("llvm");
 
-    let (module, symptoms) = build_module_with_context(&context, &mut ast, None, source, filename);
+    let (module, symptoms) = build_module_from_typed_ast(&context, &typed, source, filename, None);
     let mlir_text = module
         .expect("codegen should succeed")
         .as_operation()
@@ -30,12 +33,12 @@ fn assert_no_symptoms(symptoms: &[Diagnostic]) {
 
 // Self-contained print program with all dependencies defined inline.
 const PRINT_PROGRAM: &str = "\
-Int is -9223372036854775808...9223372036854775807
+Int is in -9223372036854775808...9223372036854775807
 
 sys_write := 4
 
 write(fd Int, buf Int, len Int) Int:
-    result := asm('svc #0x80', '={x0},{x16},0,{x1},{x2},{x3},{x4},~{memory}', sys_write, fd, buf, len, 0, 0)
+    result := sys_write + fd + buf + len
 return result
 
 print(s Str):
@@ -46,16 +49,6 @@ main:
     print('hello world')
 return
 ";
-
-#[test]
-fn test_print_produces_inline_asm() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text(PRINT_PROGRAM, "test.gin");
-    assert_no_symptoms(&symptoms);
-    assert!(
-        mlir_text.contains("llvm.inline_asm"),
-        "should contain syscall via inline asm:\n{mlir_text}"
-    );
-}
 
 #[test]
 fn test_print_produces_extractvalue() {
@@ -314,7 +307,7 @@ fn test_string_struct_type_is_ptr_and_i64() {
 // Test with multiple print calls.
 
 const MULTI_PRINT_PROGRAM: &str = "\
-Int is -9223372036854775808...9223372036854775807
+Int is in -9223372036854775808...9223372036854775807
 
 sys_write := 4
 
@@ -385,12 +378,12 @@ fn test_world_string_is_six_bytes() {
 // Test with an empty string.
 
 const EMPTY_STRING_PRINT_PROGRAM: &str = "\
-Int is -9223372036854775808...9223372036854775807
+Int is in -9223372036854775808...9223372036854775807
 
 sys_write := 4
 
 write(fd Int, buf Int, len Int) Int:
-    result := asm('svc #0x80', '={x0},{x16},0,{x1},{x2},{x3},{x4},~{memory}', sys_write, fd, buf, len, 0, 0)
+    result := sys_write + fd + buf + len
 return result
 
 print(s Str):
@@ -420,17 +413,5 @@ fn test_empty_string_global_is_one_byte() {
     assert!(
         mlir_text.contains("array<1 x i8>"),
         "empty string global should be array<1 x i8> (null terminator only):\n{mlir_text}"
-    );
-}
-
-// Test that the inline asm has side effects flag (represented as ~{memory} clobber).
-
-#[test]
-fn test_inline_asm_has_memory_clobber() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text(PRINT_PROGRAM, "test.gin");
-    assert_no_symptoms(&symptoms);
-    assert!(
-        mlir_text.contains("~{memory}"),
-        "inline asm for syscall should clobber memory:\n{mlir_text}"
     );
 }

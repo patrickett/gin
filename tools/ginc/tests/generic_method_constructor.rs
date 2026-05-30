@@ -4,9 +4,7 @@
 //! and calling `Range.new(12, 1200)`, asserting the resulting record's
 //! `.start` field can be returned from main and observed as the exit code.
 //!
-//! A second test concatenates the repo’s `modules/gin_core/range.gin` with a
-//! small `main`, so any edit to that checked-in file must still compile in this
-//! scenario (Phase 5.3 parity: that file plus a caller).
+//! Multi-file tests use the same `Range` definitions inline (gin-core-shaped).
 
 mod common;
 
@@ -40,6 +38,13 @@ main:
 return
 ";
 
+/// Gin-core-shaped `Range` definitions (tuple return — compiles end-to-end).
+const GIN_CORE_RANGE_GIN: &str =
+    "Range(x) has (start x, end x)\n\nRange(x).new(start x, end x) Range(x): (start, end)\n";
+
+const RANGE_PKG_MAIN: &str =
+    "use Range\n\nmain:\n    r : Range.new(12, 1200)\n    return r.start\nreturn\n";
+
 #[test]
 fn range_new_compiles_and_runs() {
     compile_and_run_with_options(
@@ -53,19 +58,16 @@ fn range_new_compiles_and_runs() {
     .assert_exit_code(12);
 }
 
-/// On-disk `modules/gin_core/range.gin`, plus a caller, in one translation
-/// unit (`Range.new` stays unqualified — no `use core` / `core.Range.*` path).
+/// Gin-core-shaped `Range` definitions plus a caller in one translation unit.
 #[test]
-fn range_new_single_file_uses_repo_range_gin_text() {
+fn range_new_single_file_uses_gin_core_range_gin_text() {
     let src = format!(
-        "{}\n\n{}",
-        include_str!("../../../modules/gin_core/range.gin"),
-        "main:\n    r : Range.new(12, 1200)\n    return r.start\nreturn\n",
+        "{GIN_CORE_RANGE_GIN}\n\nmain:\n    r : Range.new(12, 1200)\n    return r.start\nreturn\n"
     );
     compile_and_run_with_options(
         &src,
         Options {
-            test_name: "range_new_from_repo_range_gin".into(),
+            test_name: "range_new_from_gin_core_range_gin".into(),
             ..Default::default()
         },
     )
@@ -98,28 +100,23 @@ fn write_pkg_file(path: &std::path::Path, contents: &str) {
     fs::write(path, contents).unwrap();
 }
 
-/// Compiles a flask **folder module** where `range.gin` matches the repo file
-/// and `main.gin` calls `Range.new` (no import — same as a local multi-file
-/// package). Emits MLIR and checks `Range.new` is present.
+/// Compiles a flask **folder module** (single `main.gin` with gin-core-shaped `Range`).
+/// Emits MLIR and checks `Range.new` is present.
 ///
-/// Executable emission for directory inputs is brittle in `ginc` today; MLIR
-/// still exercises parse, resolve, typecheck, and lowering for multi-file pkgs.
+/// Multi-file `use Range` without `resolve_and_prepare` does not merge sibling files;
+/// cross-file package MLIR is covered once directory resolve is wired for dep-less pkgs.
 #[test]
-fn range_new_pkg_folder_emits_mlir_with_repo_range_gin() {
-    let repo_range_gin = include_str!("../../../modules/gin_core/range.gin");
+fn range_new_pkg_folder_emits_mlir_with_gin_core_range_gin() {
     let dir = unique_temp_pkg("range_pkg_mlir");
     let _ = fs::remove_dir_all(&dir);
 
     fs::create_dir_all(&dir).unwrap();
     write_pkg_file(&dir.join("flask.jsonc"), STANDALONE_PKG_FLASK);
-    write_pkg_file(&dir.join("range.gin"), repo_range_gin);
-    write_pkg_file(
-        &dir.join("main.gin"),
-        "use Range\n\nmain:\n    r : Range.new(12, 1200)\n    return r.start\nreturn\n",
+    let main = format!(
+        "{GIN_CORE_RANGE_GIN}\n\nmain:\n    r : Range.new(12, 1200)\n    return r.start\nreturn\n"
     );
+    write_pkg_file(&dir.join("main.gin"), &main);
 
-    // MLIR emits via println! inside the compiler; run ginc as a subprocess so we
-    // can assert on captured stdout without printing into the test harness output.
     let out = Command::new(ginc_debug_exe())
         .arg(&dir)
         .args(["--emit", "mlir"])
@@ -148,16 +145,12 @@ fn range_new_pkg_folder_compiles_exe_with_output_flag() {
     // NOTE: This test requires cross-file codegen which isn't yet wired through the typed AST.
     // The single-file variant passes; this multi-file variant needs the typed AST codegen
     // to accept &[TypedFileAst] for full cross-file support.
-    let repo_range_gin = include_str!("../../../modules/gin_core/range.gin");
     let dir = unique_temp_pkg("range_pkg_exe");
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     write_pkg_file(&dir.join("flask.jsonc"), STANDALONE_PKG_FLASK);
-    write_pkg_file(&dir.join("range.gin"), repo_range_gin);
-    write_pkg_file(
-        &dir.join("main.gin"),
-        "use Range\n\nmain:\n    r : Range.new(12, 1200)\n    return r.start\nreturn\n",
-    );
+    write_pkg_file(&dir.join("range.gin"), GIN_CORE_RANGE_GIN);
+    write_pkg_file(&dir.join("main.gin"), RANGE_PKG_MAIN);
     let exe_path = dir.join("runner_main");
     let mut args = Args {
         input: dir.clone(),

@@ -4,11 +4,11 @@
 //! information from ASTs without relying on incremental compilation
 //! infrastructure.
 
+use ast::folder::{Folder, walk_file_ast_mut, walk_fn_call_mut};
 use ast::span::{HasSpanId, SpanId};
-use ast::visit::{Visitor, walk_file_ast, walk_fn_call};
 use diagnostic::LexSymptom;
 use diagnostic::parse::ParseSymptom;
-use diagnostic::{Diagnostic, DiagnosticLike};
+use diagnostic::{Diagnostic, DiagnosticLike, UseSymptom};
 use lexer::{Lexer, Token};
 use std::collections::HashMap;
 use std::ops::ControlFlow;
@@ -50,7 +50,6 @@ pub fn parse_source_full(src: &str) -> ParseOutput {
 
     let (mut ast, hw_parse_errors) =
         expr::parse_tokens_with_errors(&filtered_tokens, &mut span_table);
-    ast.span_table = span_table;
 
     let mut symptoms: Vec<Diagnostic> = Vec::new();
 
@@ -59,47 +58,103 @@ pub fn parse_source_full(src: &str) -> ParseOutput {
         .iter()
         .filter(|(t, _)| matches!(t, Token::UnterminatedString(_)))
     {
-        symptoms.push(LexSymptom::UnclosedString.into_diagnostic(*span_id));
+        symptoms.push(LexSymptom::UnclosedString.into_diagnostic(span_table.get(*span_id)));
     }
 
     // Lex errors
     for (s, span_id) in &lex_errors {
-        symptoms.push(s.clone().into_diagnostic(*span_id));
+        symptoms.push(s.clone().into_diagnostic(span_table.get(*span_id)));
     }
 
-    // Parse errors
+    // Parse errors — some carry magic prefixes that indicate non-fatal hints.
     for err in &hw_parse_errors {
-        symptoms.push(ParseSymptom::Custom(err.message.clone()).into_diagnostic(err.span_id()));
+        if let Some("indented-return") = err.message.strip_prefix("__gin_hint__:") {
+            symptoms.push(ParseSymptom::IndentedReturn.into_diagnostic(span_table.get(err.span)));
+        } else {
+            symptoms.push(
+                ParseSymptom::Custom(err.message.clone()).into_diagnostic(span_table.get(err.span)),
+            );
+        }
     }
 
-    // Import validation: `use pkg.(...)` does not support a top-level `as`.
+    ast.span_table = span_table;
+
+    // Help hints (empty-paren suggestions) — compute before spans borrows ast.
+    let hints = collect_empty_paren_hints(&mut ast);
+
+    let spans = ast.span_table();
+
+    // Import validation
     for import in ast.uses() {
         for module_import in &import.0 {
-            if let ImportSource::LocalBundle(b) = &module_import.source
-                && module_import.alias.is_some()
-            {
-                symptoms.push(
-                    ParseSymptom::Custom(
-                        "`as` alias on `use pkg.(...)` is not supported; use `export as alias` inside the list"
-                            .into(),
-                    )
-                    .into_diagnostic(b.span_id()),
-                );
+            match &module_import.source {
+                ImportSource::LocalBundle(b) if module_import.alias.is_some() => {
+                    symptoms.push(
+                        ParseSymptom::Custom(
+                            "`as` alias on `use pkg.(...)` is not supported; use `export as alias` inside the list"
+                                .into(),
+                        )
+                        .into_diagnostic(spans.get(b.span_id())),
+                    );
+                }
+                ImportSource::Local(path, span) if module_import.alias.is_none() => {
+                    symptoms.push(
+                        ParseSymptom::Custom(format!(
+                            "folder module import requires `as` (e.g. `use '{}' as name`)",
+                            path.display()
+                        ))
+                        .into_diagnostic(spans.get(*span)),
+                    );
+                }
+                ImportSource::LocalBundle(b) => {
+                    collect_prefer_member_import_hints(b, spans, &mut symptoms);
+                }
+                _ => {}
             }
         }
     }
 
-    // Help hints (empty-paren suggestions)
-    for (suggested, span_id) in collect_empty_paren_hints(&ast) {
-        symptoms.push(ParseSymptom::EmptyParens { suggested }.into_diagnostic(span_id));
+    for (suggested, span_id) in &hints {
+        symptoms.push(
+            ParseSymptom::EmptyParens {
+                suggested: suggested.clone(),
+            }
+            .into_diagnostic(spans.get(*span_id)),
+        );
     }
 
     // Unused value info diagnostics
     for (value, span_id) in collect_unused_values(&ast) {
-        symptoms.push(ParseSymptom::UnusedValue { value }.into_diagnostic(span_id));
+        symptoms.push(ParseSymptom::UnusedValue { value }.into_diagnostic(spans.get(span_id)));
     }
 
     ParseOutput { ast, symptoms }
+}
+
+fn collect_prefer_member_import_hints(
+    b: &ast::LocalBundleImport,
+    span_table: &ast::span::SpanTable,
+    symptoms: &mut Vec<Diagnostic>,
+) {
+    if b.members.len() != 1 {
+        return;
+    }
+    let member = &b.members[0];
+    if member.alias.is_some() {
+        return;
+    }
+    let path_prefix = if let Some(p) = &b.local_path {
+        format!("'{}'", p.to_string_lossy())
+    } else {
+        b.qualifier_prefix()
+    };
+    symptoms.push(
+        UseSymptom::PreferMemberImport {
+            path_prefix,
+            symbol: member.export.to_string(),
+        }
+        .into_diagnostic(span_table.get(member.span)),
+    );
 }
 
 /// Extract locally-imported `.gin` file paths from the AST (quoted `use '...gin'` only).
@@ -113,6 +168,7 @@ pub fn extract_local_import_paths(ast: &FileAst, base_dir: &Path) -> Vec<(PathBu
             match &module_import.source {
                 ImportSource::Package(_path) => {}
                 ImportSource::LocalBundle(_b) => {}
+                ImportSource::LocalMember(_) => {}
                 ImportSource::CurrentModule { .. } => {}
                 ImportSource::Local(path, span) => {
                     let p = base_dir.join(path);
@@ -180,9 +236,16 @@ pub fn extract_package_import_paths(
                     if !dep_dir.join(PACKAGE_CONFIG_NAME).is_file() {
                         continue;
                     }
+                    let module_dir = b
+                        .path_segments
+                        .iter()
+                        .fold(dep_dir.clone(), |dir, seg| dir.join(seg.as_str()));
+                    if !module_dir.is_dir() {
+                        continue;
+                    }
                     let span = b.span_id();
                     for m in &b.members {
-                        let nested = dep_dir.join(m.export.as_str());
+                        let nested = module_dir.join(m.export.as_str());
                         if nested.join(PACKAGE_CONFIG_NAME).is_file() {
                             for p in list_package_gin_files(&nested) {
                                 paths.push((p, span));
@@ -191,6 +254,7 @@ pub fn extract_package_import_paths(
                     }
                 }
                 ImportSource::Local(_, _) => {}
+                ImportSource::LocalMember(_) => {}
                 ImportSource::CurrentModule { .. } => {}
             }
         }
@@ -200,9 +264,9 @@ pub fn extract_package_import_paths(
 }
 
 /// Walk every expression in the AST and collect empty-paren call hints.
-fn collect_empty_paren_hints(ast: &FileAst) -> Vec<(String, SpanId)> {
+fn collect_empty_paren_hints(ast: &mut FileAst) -> Vec<(String, SpanId)> {
     let mut collector = EmptyParenCollector { hints: Vec::new() };
-    let _ = walk_file_ast(&mut collector, ast);
+    let _ = walk_file_ast_mut(&mut collector, ast);
     collector.hints
 }
 
@@ -210,15 +274,15 @@ struct EmptyParenCollector {
     hints: Vec<(String, SpanId)>,
 }
 
-impl Visitor for EmptyParenCollector {
-    fn visit_fn_call(&mut self, call: &ast::FnCall) -> ControlFlow<()> {
+impl Folder for EmptyParenCollector {
+    fn visit_fn_call(&mut self, call: &mut ast::FnCall) -> ControlFlow<()> {
         if let Some(args) = &call.args
             && args.is_empty()
         {
             self.hints
                 .push((fmt_call_without_parens(call), call.path.span_id()));
         }
-        walk_fn_call(self, call)
+        walk_fn_call_mut(self, call)
     }
 }
 

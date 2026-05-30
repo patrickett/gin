@@ -12,11 +12,13 @@ diagnostic = { workspace = true }
 indexmap = { workspace = true }
 internment = "0.8"
 i256 = { workspace = true }
-sha2 = "0.10"
-serde = { workspace = true }
+sha2 = { workspace = true }
+ignore = { workspace = true }
 
 [dev-dependencies]
+typecheck = { workspace = true }
 criterion = "0.5"
+test-fixtures = { workspace = true }
 
 [[bench]]
 name = "parser_bench"

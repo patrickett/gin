@@ -6,13 +6,13 @@
 //! `Range[x] has (start x, end x)`). This module centralises the
 //! "after-name" classification so both parsers stay in sync.
 
-use ast::{Expr, ParameterKind, Spanned};
+use ast::ParameterKind;
 use internment::Intern;
 use lexer::Token;
 
 use crate::cursor::TokenCursor;
 use crate::expr::ExprFn;
-use crate::tag::parse_type_expr;
+use crate::type_annotation::parse_type_annotation;
 
 /// Classify the tokens that may follow an already-consumed parameter `name`.
 ///
@@ -27,26 +27,11 @@ pub fn parse_param_after_name(
     expr_parser: ExprFn,
     name: Intern<String>,
 ) -> Option<(Intern<String>, ParameterKind)> {
-    if matches!(cursor.peek(), Some(Token::Tag(_))) {
-        let sp = parse_type_expr(cursor, expr_parser)?;
+    if let Some(sp) = parse_type_annotation(cursor, expr_parser) {
         return Some((
             name,
-            ParameterKind::Tagged(Box::new(Spanned {
-                value: sp.value.into(),
-                span_id: sp.span_id,
-            })),
+            ParameterKind::Tagged(Box::new(sp)),
         ));
-    }
-
-    if let Some(Token::Id(t)) = cursor.peek() {
-        let span = cursor.peek_span()?;
-        let ty_name = cursor.intern(t);
-        cursor.advance();
-        let sp = Spanned {
-            value: Expr::TypeNominal(ty_name),
-            span_id: span,
-        };
-        return Some((name, ParameterKind::Tagged(Box::new(sp))));
     }
 
     if cursor.eat(&Token::Colon) {

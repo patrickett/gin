@@ -51,9 +51,6 @@ pub enum BeginCommand {
     /// Runs a security audit on the dependencies of the current project
     Audit,
 
-    /// Run the benchmarks declared in the current project
-    Bench,
-
     /// Compile the specified module (Default: cwd)
     #[command(alias = "b")]
     Build {
@@ -61,16 +58,9 @@ pub enum BeginCommand {
         watch: Option<bool>,
     },
 
-    /// Analyze the current module and report errors, but don't build object files
-    #[command(alias = "c")]
-    Check {},
-
     /// Generate documentation for current package and its dependencies
     #[command(subcommand, alias = "d")]
     Doc(DocCommand),
-
-    /// Format all the tracked files in the current package with 'ginfmt'
-    Format,
 
     /// Initialise a new Gin project in the current directory
     Init,
@@ -84,9 +74,6 @@ pub enum BeginCommand {
         path: Option<PathBuf>,
         watch: Option<bool>,
     },
-
-    /// Run the tests declared in the current project
-    Test,
 
     #[command(subcommand, alias = "v")]
     Version(VersionCommand),
@@ -130,7 +117,9 @@ impl BeginCommand {
                 begin_run(config, input.to_owned(), watch.unwrap_or(false))
             }
             BeginCommand::Version(cmd) => version(cmd),
-            _ => eprintln!("warning: command not yet implemented"),
+            BeginCommand::Init | BeginCommand::New(_) => {
+                unreachable!("Init/New are dispatched in `run` before reaching here")
+            }
         }
     }
 }

@@ -17,7 +17,7 @@ main:
 fn medium_source() -> &'static str {
     r#"
 --- The 8-bit signed integer type.
-SignedTinyInt is -128...127
+SignedTinyInt is in -128...127
 
 --- The 16-bit signed integer type.
 SignedSmallInt is -32768...32767
@@ -29,7 +29,7 @@ SignedInt is -2147483648...2147483647
 SignedBigInt is -9223372036854775808...9223372036854775807
 
 --- The 8-bit unsigned integer type.
-TinyInt is 0...255
+TinyInt is in 0...255
 
 --- The 16-bit unsigned integer type.
 SmallInt is 0...65535

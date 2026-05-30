@@ -1,17 +1,17 @@
 //! Compilation orchestration.
 
 use crate::cli::Args;
-use ast::{
-    FileId, TypedFileAst,
-    typed::{TransformCtx, transform_file_with_ctx},
-};
+use ast::FileAst;
 use codegen::emit;
 use diagnostic::{Category, Diagnostic};
-use flask::FlaskConfig;
-use lexer::debug_tokens;
+use flask::{CompileTarget, FlaskConfig};
 use parser::parse_source_full;
 use resolve::ParsedFile;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use typecheck::compile_time_trait::CompileTimeTraitRegistry;
+use typecheck::transform::{TransformCtx, transform_package};
+use typed_ast::{FileId, TypedFileAst};
 
 /// Analogous to the `ginc` command
 pub struct GinCompiler;
@@ -40,51 +40,96 @@ impl GinCompiler {
 
         let files = parse(&sources);
 
-        // Early exit for token dump
-        if matches!(args.emit, crate::cli::Emit::Tokens) {
-            for file in &files {
-                print!("{}", debug_tokens(&file.source));
-            }
-            return;
-        }
-
         if print_diagnostics(&files) {
             return;
         }
 
-        let files = if !is_library {
-            let entry_dir = files[0]
+        let entry_dir = if is_library {
+            path.clone()
+        } else {
+            files[0]
                 .path
                 .parent()
                 .map(|p| p.to_path_buf())
-                .unwrap_or_default();
-            if args.dependencies.is_empty()
-                && let Some(config) = FlaskConfig::from_directory(&entry_dir)
-            {
-                args.dependencies = resolve::resolve_flask_path_dependencies(&config, &entry_dir);
-            }
-
-            resolve::resolve_imports(files, &args.dependencies)
-        } else {
-            files
+                .unwrap_or_default()
         };
+        let flask_config = FlaskConfig::from_directory(&entry_dir);
+        if args.dependencies.is_empty() {
+            args.dependencies = resolve::flask_path_dependencies_for_file(&files[0].path);
+        }
+
+        let cli_triple = args.target.as_deref();
+        let compile_target = flask_config
+            .as_ref()
+            .and_then(|c| CompileTarget::resolve(c, cli_triple).ok())
+            .unwrap_or(CompileTarget::Library);
+
+        let is_lib_package = flask_config
+            .as_ref()
+            .is_none_or(|c| c.target().is_none() || c.target() == Some("library"));
+        if !is_lib_package
+            && cli_triple.is_none()
+            && let Some(ref config) = flask_config
+            && let Err(e) = config.require_entry_triple()
+        {
+            eprintln!("error: {e}");
+            return;
+        }
+
+        let mut files = if args.dependencies.is_empty() && !is_library {
+            files
+        } else {
+            analysis::resolve_and_prepare(files, &args.dependencies, &compile_target)
+        };
+
+        if args.dependencies.is_empty() && !is_library {
+            for file in &mut files {
+                file.output.symptoms.extend(typecheck::prepare_file_ast(
+                    &mut file.output.ast,
+                    &compile_target,
+                ));
+            }
+        }
 
         if print_diagnostics(&files) {
             return;
         }
 
-        // Transform files into TypedFileAsts with cross-file resolution.
-        // No merge step — each file stays independent. Codegen consumes
-        // the first file's typed AST (entry file for binaries, or primary for libraries).
-        let typed_asts: Vec<TypedFileAst> = {
-            let mut results: Vec<TypedFileAst> = Vec::with_capacity(files.len());
-            for (i, f) in files.iter().enumerate() {
-                let ctx = TransformCtx::from_typed_asts(&results);
-                let typed = transform_file_with_ctx(f.output.ast.clone(), FileId(i as u32), &ctx);
-                results.push(typed);
+        // Two-pass transform: declare all files, then lower/flow with full-package ctx
+        // so defs are visible regardless of file order.
+        let typed_asts: Vec<TypedFileAst>;
+        let trait_registry: Option<CompileTimeTraitRegistry>;
+        {
+            let mut compile_time_eval_ast = FileAst::default();
+            let mut package_blanket_impls = Vec::new();
+            for f in &files {
+                compile_time_eval_ast.merge_from(f.output.ast.clone());
+                package_blanket_impls.extend(f.output.ast.blanket_impls.clone());
             }
-            results
-        };
+
+            let compile_time_eval_ast_arc = Arc::new(compile_time_eval_ast);
+            trait_registry = Some(CompileTimeTraitRegistry::from_parse_ast(
+                &compile_time_eval_ast_arc,
+                &package_blanket_impls,
+                compile_time_eval_ast_arc.clone(),
+            ));
+            let package_ctx = TransformCtx::with_package_compile_time_arc(
+                package_blanket_impls,
+                compile_time_eval_ast_arc,
+            );
+
+            let file_asts: Vec<(ast::FileAst, FileId)> = files
+                .iter()
+                .enumerate()
+                .map(|(i, f)| (f.output.ast.clone(), FileId(i as u32)))
+                .collect();
+
+            typed_asts = transform_package(
+                &file_asts,
+                &package_ctx,
+                typecheck::transform::PackageTransformOptions::FULL,
+            );
+        }
 
         // Print type-check flaws from the typed AST (uses the diagnostic crate for proper
         // messages, help text, and ariadne rendering).
@@ -95,11 +140,15 @@ impl GinCompiler {
         print_type_diagnostics(&files, &typed_asts);
 
         match args.emit {
-            crate::cli::Emit::Mlir => emit_mlir_typed(&files, &typed_asts),
-            crate::cli::Emit::Obj | crate::cli::Emit::Exe => {
-                emit_native_typed(&files, &typed_asts, args, &path, is_library)
-            }
-            crate::cli::Emit::Tokens => unreachable!(),
+            crate::cli::Emit::Mlir => emit_mlir_typed(&files, &typed_asts, trait_registry.as_ref()),
+            crate::cli::Emit::Obj | crate::cli::Emit::Exe => emit_native_typed(
+                &files,
+                &typed_asts,
+                args,
+                &path,
+                is_library,
+                trait_registry.as_ref(),
+            ),
         }
     }
 }
@@ -165,9 +214,8 @@ fn print_diagnostics(files: &[ParsedFile]) -> bool {
     let mut has_flaws = false;
     for file in files {
         let filename = path_for_diagnostic_report(&file.path);
-        let span_table = file.output.ast.span_table();
         for diag in &file.output.symptoms {
-            diag.print(span_table, &file.source, &filename);
+            diag.print(&file.source, &filename);
             if matches!(diag.category, Category::Flaw) {
                 has_flaws = true;
             }
@@ -186,11 +234,10 @@ fn print_type_diagnostics(files: &[ParsedFile], typed_asts: &[TypedFileAst]) {
 
     for (file, typed) in files.iter().zip(typed_asts) {
         let filename = path_for_diagnostic_report(&file.path);
-        let span_table = file.output.ast.span_table();
-        for (expr_id, flaw) in typed.all_flaws() {
-            let span_id = typed.exprs.span[expr_id.as_usize()];
-            let diag = flaw.clone().into_diagnostic(span_id);
-            diag.print(span_table, &file.source, &filename);
+        let span_table = &typed.span_table;
+        for (span_id, flaw) in typed.all_flaws() {
+            let diag = flaw.clone().into_diagnostic(span_table.get(span_id));
+            diag.print(&file.source, &filename);
         }
     }
 }
@@ -215,15 +262,18 @@ fn print_codegen_diagnostics(files: &[ParsedFile], symptoms: &[Diagnostic]) {
         return;
     };
     let label = path_for_diagnostic_report(&primary.path);
-    let span_table = primary.output.ast.span_table();
     let source = primary.source.as_str();
     for d in symptoms {
-        d.print(span_table, source, &label);
+        d.print(source, &label);
     }
 }
 
 /// Print MLIR text to stdout using the typed AST (no merge step).
-fn emit_mlir_typed(files: &[ParsedFile], typed_asts: &[TypedFileAst]) {
+fn emit_mlir_typed(
+    files: &[ParsedFile],
+    typed_asts: &[TypedFileAst],
+    trait_registry: Option<&CompileTimeTraitRegistry>,
+) {
     let Some(typed) = typed_asts.first() else {
         return;
     };
@@ -231,7 +281,8 @@ fn emit_mlir_typed(files: &[ParsedFile], typed_asts: &[TypedFileAst]) {
         Some(f) => (f.source.as_str(), path_for_diagnostic_report(&f.path)),
         None => ("", "<stdin>".to_string()),
     };
-    let (result, symptoms) = emit::build_module_text_from_typed(typed, source, &label);
+    let (result, symptoms) =
+        emit::build_module_text_from_typed(typed, source, &label, trait_registry);
     match result {
         Some(mlir_text) => {
             print_codegen_diagnostics(files, &symptoms);
@@ -250,6 +301,7 @@ fn emit_native_typed(
     args: &Args,
     path: &Path,
     is_library: bool,
+    trait_registry: Option<&CompileTimeTraitRegistry>,
 ) {
     let (Some(typed), Some(file)) = (typed_asts.first(), files.first()) else {
         return;
@@ -284,9 +336,15 @@ fn emit_native_typed(
 
     let source = file.source.as_str();
     let label = path_for_diagnostic_report(&file.path);
-    let profile = args.profile.into();
-    let (ok, symptoms) =
-        emit::compile_to_object_from_typed(typed, &obj_path, profile, source, &label);
+    let profile = args.profile;
+    let (ok, symptoms) = emit::compile_to_object_from_typed(
+        typed,
+        &obj_path,
+        profile,
+        source,
+        &label,
+        trait_registry,
+    );
     if !ok {
         eprintln!("Codegen failed: {:?}", symptoms);
         return;

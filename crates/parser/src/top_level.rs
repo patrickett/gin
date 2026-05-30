@@ -1,14 +1,10 @@
 use ast::span::{SpanId, SpanTable};
-use ast::visit::{Visitor, walk_bind_value, walk_expr};
 use lexer::Token;
 use std::collections::HashSet;
-use std::ops::ControlFlow;
-
-use ControlFlow::Continue;
 
 use ast::{
     Bind, Declare, DeclareValue, Expr, FileAst, ImplBlock, ParameterKind, Spanned, TypeExpr, Typed,
-    Variant, collapse_defs_for_platform, type_surface_mangle_name,
+    Variant, type_surface_mangle_name,
 };
 use indexmap::IndexMap;
 use internment::Intern;
@@ -60,9 +56,16 @@ pub fn parse_file(cursor: &mut TokenCursor, expr_parser: ExprFn) -> FileAst {
     let mut private_defs = HashSet::new();
     let mut private_tags = HashSet::new();
     let mut exprs = Vec::new();
+    let mut blanket_impls = Vec::new();
 
     for el in public_elements {
-        collect_top_level(el, &mut tags_scratch, &mut defs_scratch, &mut exprs);
+        collect_top_level(
+            el,
+            &mut tags_scratch,
+            &mut defs_scratch,
+            &mut exprs,
+            &mut blanket_impls,
+        );
     }
 
     for el in private_elements {
@@ -83,13 +86,34 @@ pub fn parse_file(cursor: &mut TokenCursor, expr_parser: ExprFn) -> FileAst {
                     private_defs.insert(mangled);
                 }
             }
-            TopLevelValue::Expr(..) => {}
+            TopLevelValue::BlanketImpl(..) | TopLevelValue::Expr(..) => {}
         }
-        collect_top_level(el, &mut tags_scratch, &mut defs_scratch, &mut exprs);
+        collect_top_level(
+            el,
+            &mut tags_scratch,
+            &mut defs_scratch,
+            &mut exprs,
+            &mut blanket_impls,
+        );
     }
 
-    let mut tags = collapse_tags_for_platform(tags_scratch);
-    let defs = collapse_defs_for_platform(defs_scratch);
+    let mut tags = ast::TagMap::new();
+    for (name, declares) in tags_scratch {
+        if let Some(decl) = declares.into_iter().next() {
+            tags.insert(name, decl);
+        }
+    }
+    let mut defs = ast::DefMap::new();
+    let mut parse_warnings = Vec::new();
+    for (name, binds) in defs_scratch {
+        parse_warnings.extend(ast::warnings::const_bind_after_declare_warnings(
+            &binds,
+            cursor.span_table(),
+        ));
+        if let Some(bind) = binds.into_iter().last() {
+            defs.insert(name, bind);
+        }
+    }
     generate_return_type_unions(&defs, &mut tags, &private_defs);
 
     FileAst {
@@ -103,6 +127,8 @@ pub fn parse_file(cursor: &mut TokenCursor, expr_parser: ExprFn) -> FileAst {
         symbol_aliases: Vec::new(),
         symbol_alias_spans: Vec::new(),
         span_table: SpanTable::new(),
+        blanket_impls,
+        parse_warnings,
     }
 }
 
@@ -163,10 +189,23 @@ fn parse_imports(cursor: &mut TokenCursor) -> Vec<ast::Import> {
     imports
 }
 
+fn can_start_top_level_after_dedent(cursor: &TokenCursor) -> bool {
+    let start = skip_metadata_offset(cursor);
+    match cursor.peek_at(start) {
+        Some(Token::Tag(_)) => true,
+        Some(Token::Id(_)) => matches!(
+            cursor.peek_at(start + 1),
+            Some(Token::Colon) | Some(Token::ColonEq) | Some(Token::ParenOpen) | Some(Token::Has)
+        ),
+        _ => false,
+    }
+}
+
 enum TopLevelValue {
     Tag(Declare),
     Bind(Box<Bind>),
     ImplBlock(ImplBlock),
+    BlanketImpl(ast::BlanketImpl),
     Expr(Typed<Expr>),
 }
 
@@ -185,11 +224,16 @@ fn parse_top_level_element(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Opt
         return None;
     }
 
+    if cursor.is_at(&Token::Dedent) {
+        cursor.advance();
+        if can_start_top_level_after_dedent(cursor) {
+            return parse_top_level_element(cursor, expr_parser);
+        }
+        return None;
+    }
+
     match cursor.peek() {
-        Some(Token::Private)
-        | Some(Token::Dedent)
-        | Some(Token::ParenClose)
-        | Some(Token::Indent) => {
+        Some(Token::Private) | Some(Token::ParenClose) | Some(Token::Indent) => {
             return None;
         }
         _ => {}
@@ -201,6 +245,12 @@ fn parse_top_level_element(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Opt
     match effective {
         Token::Tag(_) => dispatch_tag_element(cursor, expr_parser, start_offset),
         Token::Id(_) => {
+            if crate::declare::is_blanket_impl_start(cursor) {
+                if let Some(blanket) = crate::declare::parse_blanket_impl(cursor, expr_parser) {
+                    return Some(TopLevelValue::BlanketImpl(blanket));
+                }
+                return None;
+            }
             // Deterministic dispatch: if next token after id is : or :=, it's definitely a bind.
             // No checkpoint/rewind needed for the common case (x: expr, x := expr).
             // For id(...) and id Tag, use speculative parsing only for the truly ambiguous cases.
@@ -219,19 +269,37 @@ fn parse_top_level_element(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Opt
                     return Some(TopLevelValue::Bind(Box::new(bind)));
                 }
                 cursor.rewind(checkpoint);
-            } else if matches!(cursor.peek_at(start_offset + 1), Some(Token::Tag(_))) {
-                // id Tag := expr or id Tag : expr — typed bind with inline type annotation
+            } else if matches!(cursor.peek_at(start_offset + 1), Some(Token::BracketOpen)) {
+                // id[...](...) or id[...] Tag: — group annotations + optional params
                 let checkpoint = cursor.checkpoint();
                 if let Some(bind) = crate::expr::bind::parse_bind(cursor, expr_parser) {
                     return Some(TopLevelValue::Bind(Box::new(bind)));
                 }
                 cursor.rewind(checkpoint);
+            } else if matches!(cursor.peek_at(start_offset + 1), Some(Token::Tag(_))) {
+                // `arch Architecture` — declare without value (same as unassigned bind).
+                let is_type_only_declare = !matches!(
+                    cursor.peek_at(start_offset + 2),
+                    Some(Token::Colon) | Some(Token::ColonEq)
+                );
+                if is_type_only_declare {
+                    if let Some(bind) = crate::expr::bind::parse_bind(cursor, expr_parser) {
+                        return Some(TopLevelValue::Bind(Box::new(bind)));
+                    }
+                } else {
+                    // `id Tag: value` — typed bind with inline type annotation
+                    let checkpoint = cursor.checkpoint();
+                    if let Some(bind) = crate::expr::bind::parse_bind(cursor, expr_parser) {
+                        return Some(TopLevelValue::Bind(Box::new(bind)));
+                    }
+                    cursor.rewind(checkpoint);
+                }
             }
             // else: bare identifier or expression — no bind speculation needed
             let expr = expr_parser(cursor);
             // Feature 3: Detect `{expr} {expr}` on the same line without an operator.
             if let Some(next_tok) = cursor.peek_at(0)
-                && crate::expr::control::can_start_expr(next_tok)
+                && crate::expr::body::can_start_expr(next_tok)
             {
                 cursor.error(
                     format!("expected operator between expressions, found {next_tok:?}"),
@@ -262,6 +330,20 @@ fn dispatch_tag_element(
 ) -> Option<TopLevelValue> {
     let after_tag = tag_offset + 1;
 
+    // Helper: given an offset that may be at a method separator (. or ::),
+    // return the offset just past it if found.
+    let sep_past = |cursor: &TokenCursor, offset: usize| -> Option<usize> {
+        if cursor.peek_at(offset) == Some(&Token::Dot) {
+            Some(offset + 1)
+        } else if matches!(cursor.peek_at(offset), Some(Token::Colon))
+            && cursor.peek_at(offset + 1) == Some(&Token::Colon)
+        {
+            Some(offset + 2)
+        } else {
+            None
+        }
+    };
+
     // Tag.Tag → impl_block (deterministic: no checkpoint/rewind needed)
     if matches!(cursor.peek_at(after_tag), Some(Token::Dot))
         && matches!(cursor.peek_at(after_tag + 1), Some(Token::Tag(_)))
@@ -270,24 +352,33 @@ fn dispatch_tag_element(
             .map(TopLevelValue::ImplBlock);
     }
 
-    // Tag.Id → method_bind (deterministic: no checkpoint/rewind needed)
-    if matches!(cursor.peek_at(after_tag), Some(Token::Dot))
-        && matches!(cursor.peek_at(after_tag + 1), Some(Token::Id(_)))
+    // Tag.Id or Tag::Id → method_bind (deterministic: no checkpoint/rewind needed)
+    if let Some(past_sep) = sep_past(cursor, after_tag)
+        && matches!(
+            cursor.peek_at(past_sep),
+            Some(Token::Id(_)) | Some(Token::Tag(_))
+        )
     {
         return parse_method_bind(cursor, expr_parser);
     }
 
-    // Tag(...).Id or Tag[...].Id → generic-receiver method_bind (skip a balanced () or [] after the tag)
+    // Tag(...).Id / Tag(...)::Id or Tag[...].Id / Tag[...]::Id → generic-receiver method_bind
     if let Some(after_parens) = skip_balanced_parens_offset(cursor, after_tag)
-        && matches!(cursor.peek_at(after_parens), Some(Token::Dot))
-        && matches!(cursor.peek_at(after_parens + 1), Some(Token::Id(_)))
+        && let Some(past_sep) = sep_past(cursor, after_parens)
+        && matches!(
+            cursor.peek_at(past_sep),
+            Some(Token::Id(_)) | Some(Token::Tag(_))
+        )
     {
         return parse_method_bind(cursor, expr_parser);
     }
 
     if let Some(after_brackets) = skip_balanced_brackets_offset(cursor, after_tag)
-        && matches!(cursor.peek_at(after_brackets), Some(Token::Dot))
-        && matches!(cursor.peek_at(after_brackets + 1), Some(Token::Id(_)))
+        && let Some(past_sep) = sep_past(cursor, after_brackets)
+        && matches!(
+            cursor.peek_at(past_sep),
+            Some(Token::Id(_)) | Some(Token::Tag(_))
+        )
     {
         return parse_method_bind(cursor, expr_parser);
     }
@@ -394,7 +485,10 @@ fn parse_method_bind(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<To
     // Receiver may be a bare Tag, a generic Tag(args), or a qualified Mod.Tag.
     let recv = crate::tag::parse_type_expr(cursor, expr_parser)?;
 
-    if !cursor.eat(&Token::Dot) {
+    // Accept `.` (Type.method) or `::` (Type::method) as the separator.
+    let has_sep =
+        cursor.eat(&Token::Dot) || (cursor.eat(&Token::Colon) && cursor.eat(&Token::Colon));
+    if !has_sep {
         return None;
     }
 
@@ -406,39 +500,15 @@ fn parse_method_bind(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<To
     Some(TopLevelValue::Bind(Box::new(bind)))
 }
 
-fn collapse_tags_for_platform(multi: IndexMap<Intern<String>, Vec<Declare>>) -> ast::TagMap {
-    let mut tags = ast::TagMap::new();
-    for (name, declares) in multi {
-        if let Some(decl) = pick_tag_for_platform(declares) {
-            tags.insert(name, decl);
-        }
-    }
-    tags
-}
-
-fn pick_tag_for_platform(declares: Vec<Declare>) -> Option<Declare> {
-    if declares.is_empty() {
-        return None;
-    }
-    let mut matching: Vec<Declare> = declares
-        .into_iter()
-        .filter(|d| d.attributes().matches_current_platform())
-        .collect();
-    if matching.is_empty() {
-        None
-    } else {
-        // If several overloads match (misconfiguration), keep the first.
-        Some(matching.remove(0))
-    }
-}
-
 fn collect_top_level(
     el: TopLevelValue,
     tags: &mut IndexMap<Intern<String>, Vec<Declare>>,
     defs: &mut IndexMap<Intern<String>, Vec<Bind>>,
     exprs: &mut Vec<(Expr, SpanId)>,
+    blanket_impls: &mut Vec<ast::BlanketImpl>,
 ) {
     match el {
+        TopLevelValue::BlanketImpl(b) => blanket_impls.push(b),
         TopLevelValue::Tag(decl) => {
             let name = decl.name();
             tags.entry(name).or_default().push(decl);
@@ -481,8 +551,7 @@ fn generate_return_type_unions(
     tags: &mut ast::TagMap,
     _private_defs: &HashSet<Intern<String>>,
 ) {
-    // Skip tags that were already filtered out by platform (they won't be in the map,
-    // but this function only adds new tags, so it's already correct).
+    // Only adds new tags from bind return types; existing tag map is unchanged.
     let mut tag_buffer = Vec::new(); // reused across iterations
     for bind in defs.values() {
         tag_buffer.clear();
@@ -566,19 +635,12 @@ fn is_declare_from_offset(cursor: &TokenCursor, tag_offset: usize) -> bool {
 }
 
 fn extract_anonymous_tags_from_bind(bind: &Bind, tags: &mut Vec<(Intern<String>, SpanId)>) {
-    let mut collector = AnonymousTagCollector {
-        collected: Vec::new(),
-    };
-
     if let Some(sp) = bind.receiver_type_surface() {
-        collect_type_surface_tags(&sp.value, &mut collector.collected);
+        collect_type_surface_tags(&sp.value, tags);
     }
     if let Some(sp) = &bind.return_tag {
-        collect_type_surface_tags(&sp.value, &mut collector.collected);
+        collect_type_surface_tags(&sp.value, tags);
     }
-
-    let _ = walk_bind_value(&mut collector, bind.value());
-    tags.extend(collector.collected);
 }
 
 fn collect_type_surface_tags(expr: &TypeExpr, tags: &mut Vec<(Intern<String>, SpanId)>) {
@@ -588,44 +650,36 @@ fn collect_type_surface_tags(expr: &TypeExpr, tags: &mut Vec<(Intern<String>, Sp
         }
         TypeExpr::Qualified(_) => {}
         TypeExpr::Literal(..) => {}
-        TypeExpr::Pointer(_) | TypeExpr::Unit => {}
+        TypeExpr::Pointer(_) | TypeExpr::Unit | TypeExpr::ListEmpty => {}
+        TypeExpr::ListCons { head, tail } => {
+            collect_type_surface_tags(&head.value, tags);
+            collect_type_surface_tags(&tail.value, tags);
+        }
+        TypeExpr::Tuple(elems) => {
+            for e in elems {
+                collect_type_surface_tags(&e.value, tags);
+            }
+        }
+        TypeExpr::InRange { bounds, span } => {
+            if let ast::InRangeBounds::Tag(name) = bounds {
+                tags.push((*name, *span));
+            }
+        }
         TypeExpr::Ref { inner, .. } => collect_type_surface_tags(&inner.value, tags),
         TypeExpr::Generic { params, .. } => {
             for (_, pk) in params {
                 match pk {
-                    ParameterKind::Default(e) => {
-                        let mut inner = AnonymousTagCollector {
-                            collected: Vec::new(),
-                        };
-                        let _ = walk_expr(&mut inner, e);
-                        tags.extend(inner.collected);
+                    ParameterKind::Default(_e) => {
+                        // Anonymous tags in default expressions are handled
+                        // by collect_type_surface_tags elsewhere.
                     }
                     ParameterKind::Tagged(sp) => {
-                        if let Some(te) = sp.value.as_type_expr() {
-                            collect_type_surface_tags(&te, tags);
-                        }
+                        let te = &sp.value;
+                        collect_type_surface_tags(te, tags);
                     }
                     ParameterKind::Generic => {}
                 }
             }
-        }
-    }
-}
-
-struct AnonymousTagCollector {
-    collected: Vec<(Intern<String>, SpanId)>,
-}
-
-impl Visitor for AnonymousTagCollector {
-    fn visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
-        match expr {
-            Expr::AnonymousTag(_name) => {
-                // Span removed from AnonymousTag; tag collection from type
-                // surfaces is now handled through the TypeExpr visitor.
-                // self.collected.push((*name, *span));
-                Continue(())
-            }
-            _ => walk_expr(self, expr),
         }
     }
 }

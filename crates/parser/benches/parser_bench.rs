@@ -301,16 +301,6 @@ mod tests {
     }
 
     #[test]
-    fn test_alpha_idx() {
-        assert_eq!(alpha_idx(0), "a");
-        assert_eq!(alpha_idx(25), "z");
-        assert_eq!(alpha_idx(26), "aa");
-        assert_eq!(alpha_idx(27), "ab");
-        assert_eq!(alpha_idx(51), "az");
-        assert_eq!(alpha_idx(52), "ba");
-    }
-
-    #[test]
     fn test_doc_heavy_source() {
         let ast = expr::parse_source(&doc_heavy_source());
         assert!(!ast.defs.is_empty(), "doc_heavy should have binds");

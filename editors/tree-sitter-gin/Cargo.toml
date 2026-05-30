@@ -5,7 +5,7 @@ version = "0.0.1"
 keywords = ["incremental", "parsing", "gin"]
 categories = ["parsing", "text-editors"]
 repository = "https://github.com/patrickett/gin"
-edition = "2018"
+edition = "2024"
 license = "MIT"
 
 build = "bindings/rust/build.rs"

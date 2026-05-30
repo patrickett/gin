@@ -3,11 +3,13 @@ use internment::Intern;
 use lexer::Token;
 
 use ast::{
-    AttributeItem, Bind, BindAttributes, BindValue, DocComment, Expr, ModPath, ParamConvention,
-    ParameterKind, Parameters, Return, Spanned, TypeExpr, Typed, type_surface_mangle_name,
+    AttributeItem, Bind, BindAttributes, BindValue, DocComment, Expr, GroupParam, ModPath,
+    ParamConvention, ParameterKind, Parameters, Return, Spanned, TraitBound, TypeExpr, Typed,
+    type_surface_mangle_name,
 };
 
 use super::ExprFn;
+use super::body::parse_body_exprs;
 use super::control::parse_return;
 use crate::cursor::TokenCursor;
 use crate::path::{parse_id, parse_tag_variant_path};
@@ -18,6 +20,19 @@ type ReturnTypePart = (
     Option<Box<Spanned<TypeExpr>>>,
     Option<(Intern<String>, Vec<Typed<Expr>>)>,
     Option<Spanned<ModPath>>,
+);
+
+type ParsedParams = (
+    Option<Parameters>,
+    IndexMap<Intern<String>, ParamConvention>,
+    IndexMap<Intern<String>, Intern<String>>,
+);
+
+type ParsedOneParam = (
+    Intern<String>,
+    ParameterKind,
+    ParamConvention,
+    Option<Intern<String>>,
 );
 
 pub fn parse_bind(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Bind> {
@@ -40,26 +55,48 @@ pub fn parse_bind(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Bind>
         _ => return None,
     };
 
-    let (params, conventions) = parse_params(cursor, expr_parser);
+    let group_params = parse_group_params(cursor);
+    let (params, conventions, param_groups) = parse_params(cursor, expr_parser);
 
     let (return_type_name, return_tag, type_annotation, type_annotation_qual) =
         parse_return_type_part(cursor, expr_parser);
 
+    let trait_bounds = parse_trait_bounds(cursor, expr_parser);
+
     // Handle `extern` binds: `name(params) extern` without `:` or `:=`
     let (value, postfix_doc) = if cursor.eat(&Token::Extern) {
         (BindValue::Extern, None)
+    } else if return_tag.is_some() && !cursor.is_at(&Token::Colon) && !cursor.is_at(&Token::ColonEq)
+    {
+        // `name Type` on its own line — declared, assigned later via `name: value`.
+        (BindValue::Unassigned, None)
     } else {
-        if cursor.eat(&Token::ColonEq) {
-            cursor.error(
-                "expected ':', not ':='. Use ':' for all bindings",
-                cursor.current_span(),
-            );
-        } else if !cursor.eat(&Token::Colon) {
-            cursor.error("expected ':' or 'extern'", cursor.current_span());
+        let is_constant = if cursor.eat(&Token::ColonEq) {
+            true
+        } else if cursor.eat(&Token::Colon) {
+            false
+        } else {
+            cursor.error("expected ':', ':=' or 'extern'", cursor.current_span());
             return None;
-        }
+        };
         let (value, postfix_doc) = parse_bind_value(cursor, expr_parser);
-        (value, postfix_doc)
+        let doc = postfix_doc.or(doc_before);
+        let mut bind = Bind::new(name, name_span, value)
+            .with_params(params)
+            .with_return_type_name(return_type_name)
+            .with_doc(doc);
+        bind.is_constant = is_constant;
+        if let Some(attrs) = attrs {
+            bind = bind.with_attributes(attrs);
+        }
+        bind.param_conventions = conventions;
+        bind.group_params = group_params;
+        bind.param_groups = param_groups;
+        bind.return_tag = return_tag;
+        bind.type_annotation = type_annotation;
+        bind.type_annotation_qual = type_annotation_qual;
+        bind.trait_bounds = trait_bounds;
+        return Some(bind);
     };
 
     let doc = postfix_doc.or(doc_before);
@@ -73,11 +110,67 @@ pub fn parse_bind(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Bind>
         bind = bind.with_attributes(attrs);
     }
     bind.param_conventions = conventions;
+    bind.group_params = group_params;
+    bind.param_groups = param_groups;
     bind.return_tag = return_tag;
     bind.type_annotation = type_annotation;
     bind.type_annotation_qual = type_annotation_qual;
+    bind.trait_bounds = trait_bounds;
 
     Some(bind)
+}
+
+/// `where T has Trait(field Pattern)` clauses after the signature, before `:`.
+pub(crate) fn parse_trait_bounds(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Vec<TraitBound> {
+    let mut bounds = Vec::new();
+    while matches!(cursor.peek(), Some(Token::Id(n)) if *n == "where") {
+        let span = cursor.peek_span().unwrap_or(cursor.current_span());
+        cursor.advance();
+        let type_var = match cursor.peek() {
+            Some(Token::Id(n)) | Some(Token::Tag(n)) => {
+                let v = cursor.intern(n);
+                cursor.advance();
+                v
+            }
+            _ => break,
+        };
+        if !cursor.eat(&Token::Has) {
+            break;
+        }
+        let (trait_name, trait_name_span) = match cursor.peek() {
+            Some(Token::Tag(n)) => {
+                let name = cursor.intern(n);
+                let s = cursor.peek_span().unwrap_or(cursor.current_span());
+                cursor.advance();
+                (name, s)
+            }
+            _ => break,
+        };
+        if cursor.expect(&Token::ParenOpen).is_none() {
+            break;
+        }
+        let (field_name, pattern) = match cursor.peek() {
+            Some(Token::Id(n)) => {
+                let field = cursor.intern(n);
+                cursor.advance();
+                let Some(pat) = crate::tag::parse_pattern_type_expr(cursor, expr_parser) else {
+                    break;
+                };
+                (field, pat)
+            }
+            _ => break,
+        };
+        cursor.expect(&Token::ParenClose);
+        bounds.push(TraitBound {
+            type_var,
+            trait_name,
+            trait_name_span,
+            field_name,
+            pattern: Box::new(pattern),
+            span,
+        });
+    }
+    bounds
 }
 
 pub fn parse_bind_attributes(cursor: &mut TokenCursor) -> Option<BindAttributes> {
@@ -145,6 +238,32 @@ fn parse_return_type_part(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Retu
         return (Some(name), None, None, None);
     }
 
+    // `ref T` / `mut T` return type (e.g. `r ref Entity:` in a body bind)
+    if matches!(cursor.peek(), Some(Token::Ref) | Some(Token::Mut)) {
+        let mutable = cursor.eat(&Token::Mut);
+        if !mutable {
+            cursor.eat(&Token::Ref);
+        }
+        if let Some(sp) = parse_type_expr(cursor, expr_parser) {
+            return (
+                None,
+                Some(Box::new(Spanned {
+                    value: TypeExpr::Ref {
+                        inner: Box::new(Spanned {
+                            value: sp.value,
+                            span_id: sp.span_id,
+                        }),
+                        mutable,
+                    },
+                    span_id: sp.span_id,
+                })),
+                None,
+                None,
+            );
+        }
+        return (None, None, None, None);
+    }
+
     // Tag-based type annotations
     if !matches!(cursor.peek(), Some(Token::Tag(_))) {
         return (None, None, None, None);
@@ -207,6 +326,7 @@ fn parse_return_type_part(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Retu
                         value: TypeExpr::Generic {
                             name,
                             params: type_params,
+                            param_spans: Vec::new(),
                             span: name_span,
                         },
                         span_id: name_span,
@@ -254,7 +374,7 @@ fn try_args_as_type_params(args: &[Typed<Expr>]) -> Option<Vec<(Intern<String>, 
             // instantiation. Tagged so the typechecker resolves and validates it.
             Expr::AnonymousTag(n) => {
                 let sp = Spanned {
-                    value: Expr::TypeNominal(*n),
+                    value: TypeExpr::Nominal(*n, *span),
                     span_id: *span,
                 };
                 out.push((*n, ParameterKind::Tagged(Box::new(sp))));
@@ -328,40 +448,86 @@ fn parse_bind_value(
     (BindValue::Expr(Box::new(expr)), doc)
 }
 
-fn parse_params(
-    cursor: &mut TokenCursor,
-    expr_parser: ExprFn,
-) -> (
-    Option<Parameters>,
-    IndexMap<Intern<String>, ParamConvention>,
-) {
+fn parse_group_params(cursor: &mut TokenCursor) -> Vec<GroupParam> {
+    if !cursor.is_at(&Token::BracketOpen) {
+        return Vec::new();
+    }
+    cursor.advance();
+
+    let mut groups = Vec::new();
+    if !cursor.is_at(&Token::BracketClose) {
+        loop {
+            let mutable = cursor.eat(&Token::Mut);
+            let Some(name) = parse_id(cursor) else {
+                break;
+            };
+            let ty_name = match cursor.peek() {
+                Some(Token::Tag(t)) => {
+                    let ty = cursor.intern(t);
+                    cursor.advance();
+                    ty
+                }
+                Some(Token::Id(t)) => {
+                    let ty = cursor.intern(t);
+                    cursor.advance();
+                    ty
+                }
+                _ => break,
+            };
+            groups.push(GroupParam {
+                name,
+                ty_name,
+                mutable,
+            });
+            if !cursor.eat(&Token::Comma) {
+                break;
+            }
+        }
+    }
+
+    cursor.expect(&Token::BracketClose);
+    groups
+}
+
+fn parse_params(cursor: &mut TokenCursor, expr_parser: ExprFn) -> ParsedParams {
     if !cursor.is_at(&Token::ParenOpen) {
-        return (None, IndexMap::new());
+        return (None, IndexMap::new(), IndexMap::new());
     }
 
     let mut params = Parameters::new();
     let mut conventions = IndexMap::new();
+    let mut param_groups = IndexMap::new();
     let mut seen_default = false;
     cursor.advance();
 
     if cursor.is_at(&Token::ParenClose) {
         cursor.advance();
-        return (Some(params), conventions);
+        return (Some(params), conventions, param_groups);
     }
 
-    if let Some((key, kind, conv)) = parse_one_param(cursor, expr_parser) {
-        seen_default = matches!(kind, ParameterKind::Default(_));
+    let mut ingest = |key: Intern<String>,
+                      kind: ParameterKind,
+                      conv: ParamConvention,
+                      group: Option<Intern<String>>| {
         params.insert(key, kind);
         if conv != ParamConvention::Inferred {
             conventions.insert(key, conv);
         }
+        if let Some(gn) = group {
+            param_groups.insert(key, gn);
+        }
+    };
+
+    if let Some((key, kind, conv, group)) = parse_one_param(cursor, expr_parser) {
+        seen_default = matches!(kind, ParameterKind::Default(_));
+        ingest(key, kind, conv, group);
     }
 
     while cursor.eat(&Token::Comma) {
         if cursor.is_at(&Token::ParenClose) {
             break;
         }
-        if let Some((key, kind, conv)) = parse_one_param(cursor, expr_parser) {
+        if let Some((key, kind, conv, group)) = parse_one_param(cursor, expr_parser) {
             if seen_default && !matches!(kind, ParameterKind::Default(_)) {
                 cursor.error(
                     format!(
@@ -374,21 +540,27 @@ fn parse_params(
             if matches!(kind, ParameterKind::Default(_)) {
                 seen_default = true;
             }
-            params.insert(key, kind);
-            if conv != ParamConvention::Inferred {
-                conventions.insert(key, conv);
-            }
+            ingest(key, kind, conv, group);
         }
     }
 
     cursor.expect(&Token::ParenClose);
-    (Some(params), conventions)
+    (Some(params), conventions, param_groups)
 }
 
-fn parse_one_param(
-    cursor: &mut TokenCursor,
-    expr_parser: ExprFn,
-) -> Option<(Intern<String>, ParameterKind, ParamConvention)> {
+fn parse_param_convention_prefix(cursor: &mut TokenCursor) -> ParamConvention {
+    if cursor.eat(&Token::Tilde) || cursor.eat(&Token::Eat) {
+        ParamConvention::Eat
+    } else if cursor.eat(&Token::Ref) {
+        ParamConvention::Ref(false)
+    } else if cursor.eat(&Token::Mut) {
+        ParamConvention::Ref(true)
+    } else {
+        ParamConvention::Inferred
+    }
+}
+
+fn parse_one_param(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<ParsedOneParam> {
     // Positional: bare Tag → (tag_name, ParameterKind::Tagged(tag))
     if matches!(cursor.peek(), Some(Token::Tag(_))) {
         let sp = parse_type_expr(cursor, expr_parser)?;
@@ -396,18 +568,23 @@ fn parse_one_param(
         return Some((
             key,
             ParameterKind::Tagged(Box::new(Spanned {
-                value: sp.value.into(),
+                value: sp.value,
                 span_id: sp.span_id,
             })),
             ParamConvention::Inferred,
+            None,
         ));
     }
 
-    // Convention: `~name Type` → Consume (terminus), bare `name Type` → Inferred (default)
-    let convention = if cursor.eat(&Token::Tilde) {
-        ParamConvention::Consume
+    let convention = parse_param_convention_prefix(cursor);
+
+    let group_name = if cursor.is_at(&Token::BracketOpen) {
+        cursor.advance();
+        let gn = parse_id(cursor)?;
+        cursor.expect(&Token::BracketClose)?;
+        Some(gn)
     } else {
-        ParamConvention::Inferred
+        None
     };
 
     // Named: id [Tag | id | : expr]
@@ -417,11 +594,15 @@ fn parse_one_param(
             cursor.advance();
             id
         }
+        Some(Token::SelfInstance) => {
+            cursor.advance();
+            Intern::from_ref("self")
+        }
         _ => return None,
     };
 
     let (name, kind) = crate::params::parse_param_after_name(cursor, expr_parser, name)?;
-    Some((name, kind, convention))
+    Some((name, kind, convention, group_name))
 }
 
 pub(crate) fn parse_doc_comment(cursor: &mut TokenCursor) -> Option<DocComment> {
@@ -460,68 +641,4 @@ pub(crate) fn parse_doc_comment(cursor: &mut TokenCursor) -> Option<DocComment> 
         value: lines.join("\n"),
     };
     if doc.is_empty() { None } else { Some(doc) }
-}
-
-fn parse_body_exprs(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Vec<Typed<Expr>> {
-    let mut exprs = Vec::new();
-    loop {
-        super::body_trivia::skip_expr_body_trivia(cursor);
-        match cursor.peek() {
-            Some(t) if can_start_expr(t) => {
-                // Fast path: in body context, Id followed by : or := is always a bind.
-                // This bypasses the speculative looks_like_bind + checkpoint/rewind in parse_atom,
-                // eliminating ~100 speculative parse_bind calls for large_mixed (40 functions × ~2-3 body binds).
-                if matches!(t, Token::Id(_)) {
-                    cursor.skip_newlines();
-                    if matches!(cursor.peek_at(1), Some(Token::Colon) | Some(Token::ColonEq)) {
-                        let start_pos = cursor.pos();
-                        if let Some(bind) = parse_bind(cursor, expr_parser) {
-                            let start_span = cursor.span_at(start_pos);
-                            cursor.consume_trailing_newline();
-                            let end_span = cursor.last_consumed_span();
-                            exprs.push(Typed::infer(
-                                Expr::Bind(Box::new(bind)),
-                                cursor.merge_span(start_span, end_span),
-                            ));
-                            continue;
-                        }
-                        // parse_bind failed on Id: — extremely rare, rewind and fall through
-                        cursor.rewind(start_pos);
-                    }
-                }
-
-                let pos_before = cursor.pos();
-                let expr = expr_parser(cursor);
-                exprs.push(expr);
-                if cursor.pos() == pos_before {
-                    cursor.error("expression parser made no progress", cursor.current_span());
-                    cursor.advance();
-                }
-            }
-            _ => break,
-        }
-    }
-    exprs
-}
-
-fn can_start_expr(token: &Token) -> bool {
-    matches!(
-        token,
-        Token::Id(_)
-            | Token::Tag(_)
-            | Token::Int(_)
-            | Token::Float(_)
-            | Token::String(_)
-            | Token::SelfInstance
-            | Token::Minus
-            | Token::At
-            | Token::Caret
-            | Token::Star
-            | Token::ParenOpen
-            | Token::If
-            | Token::When
-            | Token::For
-            | Token::While
-            | Token::FormatStringDelim
-    )
 }

@@ -1,12 +1,10 @@
 use indexmap::IndexMap;
 use internment::Intern;
-use std::fmt;
 
 use crate::TypeExpr;
 use crate::expr::{Expr, Typed};
 use crate::span::Spanned;
 use crate::ty_state::TyState;
-use crate::type_surface_mangle_name;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ParamConvention {
@@ -14,8 +12,20 @@ pub enum ParamConvention {
     /// threaded (appears in return) or consumed (never returned).
     #[default]
     Inferred,
-    /// `~name Type` — function consumes the parameter; it is not returned.
-    Consume,
+    /// `ref name Type` — immutable reference parameter.
+    /// The parameter is borrowed, not consumed.
+    Ref(bool),
+    /// `eat name Type` — explicit consume parameter.
+    Eat,
+}
+
+/// A group parameter on a function: `[mut r T]` or `[r T]`.
+/// Declares that multiple params may alias because they belong to the same group.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GroupParam {
+    pub name: Intern<String>,
+    pub ty_name: Intern<String>,
+    pub mutable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,79 +39,9 @@ pub struct ParamSlot {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ParameterKind {
     Generic,
-    /// Type annotation for this parameter, as expression-shaped type syntax.
-    Tagged(Box<Spanned<Expr>>),
+    /// Type annotation for this parameter (`name Type` with no value).
+    Tagged(Box<Spanned<TypeExpr>>),
     Default(Box<Typed<Expr>>),
-}
-
-pub(crate) fn fmt_type_expr_surface(e: &TypeExpr, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    match e {
-        TypeExpr::Nominal(name, _) => write!(f, "{}", name.as_str()),
-        TypeExpr::Qualified(path) => {
-            write!(f, "{}", path.root.as_str())?;
-            for seg in &path.segments {
-                write!(f, ".{}", seg.as_str())?;
-            }
-            Ok(())
-        }
-        TypeExpr::Generic { name, params, .. } => {
-            write!(f, "{}(", name.as_str())?;
-            let mut first = true;
-            for (k, v) in params.iter() {
-                if !first {
-                    write!(f, ", ")?;
-                }
-                first = false;
-                match v {
-                    ParameterKind::Tagged(sp) => {
-                        if let Some(te) = sp.value.as_type_expr() {
-                            // Positional type arg (key equals mangled type name):
-                            // just show the type. Named param (key differs): show key + type.
-                            if type_surface_mangle_name(&te) == k.as_str() {
-                                fmt_type_expr_surface(&te, f)?;
-                            } else {
-                                write!(f, "{} ", k.as_str())?;
-                                fmt_type_expr_surface(&te, f)?;
-                            }
-                        } else {
-                            write!(f, "{} <type>", k.as_str())?;
-                        }
-                    }
-                    ParameterKind::Default(expr) => {
-                        write!(f, "{}: {expr:?}", k.as_str())?;
-                    }
-                    ParameterKind::Generic => {
-                        write!(f, "{}", k.as_str())?;
-                    }
-                }
-            }
-            write!(f, ")")
-        }
-        TypeExpr::Literal(..) => write!(f, "<type>"),
-        TypeExpr::Pointer(inner) => {
-            write!(f, "@")?;
-            fmt_type_expr_surface(&inner.value, f)
-        }
-        TypeExpr::Ref { inner, mutable } => {
-            if *mutable {
-                write!(f, "mut ")?;
-            } else {
-                write!(f, "ref ")?;
-            }
-            fmt_type_expr_surface(&inner.value, f)
-        }
-        TypeExpr::Unit => write!(f, "()"),
-    }
-}
-
-pub fn format_type_surface(e: &TypeExpr) -> String {
-    struct Fmt<'a>(&'a TypeExpr);
-    impl fmt::Display for Fmt<'_> {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            fmt_type_expr_surface(self.0, f)
-        }
-    }
-    Fmt(e).to_string()
 }
 
 impl std::fmt::Display for ParameterKind {
@@ -109,12 +49,7 @@ impl std::fmt::Display for ParameterKind {
         match self {
             ParameterKind::Generic => Ok(()),
             ParameterKind::Tagged(sp) => {
-                write!(f, " ")?;
-                if let Some(te) = sp.value.as_type_expr() {
-                    fmt_type_expr_surface(&te, f)
-                } else {
-                    write!(f, "<type>")
-                }
+                write!(f, " {:?}", sp.value)
             }
             ParameterKind::Default(expr) => write!(f, ": {:?}", expr),
         }

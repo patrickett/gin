@@ -6,31 +6,18 @@ edition = "2024"
 [dependencies]
 ast = { workspace = true }
 diagnostic = { workspace = true }
-lexer = { workspace = true }
+typed_ast = { workspace = true }
+typecheck = { workspace = true }
 codegen = { workspace = true }
 resolve = { workspace = true }
-ariadne = "0.5.1"
-clap = { workspace = true }
-indexmap = { workspace = true }
-
-merkle_hash = "3.8.0"
-once_cell = "1.21.3"
+analysis = { workspace = true }
 parser = { workspace = true }
 flask = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-sha2 = "0.10.9"
-thiserror = { workspace = true }
-colored = "3.0.0"
-log = { workspace = true }
-eyre = "0.6.12"
-internment = "0.8"
-dirs = { workspace = true }
-rayon = { workspace = true }
-semver.workspace = true
+clap = { workspace = true }
 
 [dev-dependencies]
 criterion = "0.5"
+test-fixtures = { workspace = true }
 
 # [[bench]]
 # name = "lexer_bench"

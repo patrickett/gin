@@ -4,8 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-ginc = {workspace = true}
-
 parser = { workspace = true }
 ast = { workspace = true }
 span = { workspace = true }
@@ -14,3 +12,4 @@ internment = "0.8"
 
 lexer = { workspace = true }
 diagnostic = { workspace = true }
+ast-format = { workspace = true }

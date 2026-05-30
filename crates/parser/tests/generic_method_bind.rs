@@ -52,8 +52,8 @@ fn parses_generic_method_bind_with_typevar_params_and_return() {
     assert_eq!(k1.as_str(), "end");
     for (k, v) in [(*k0, v0), (*k1, v1)] {
         match v {
-            ParameterKind::Tagged(sp) => match sp.value.as_type_expr() {
-                Some(TypeExpr::Nominal(n, _)) => {
+            ParameterKind::Tagged(sp) => match &sp.value {
+                TypeExpr::Nominal(n, _) => {
                     assert_eq!(n.as_str(), "x", "{} param type-var should be x", k.as_str());
                 }
                 other => panic!("{} param should be TypeNominal(x), got {:?}", k, other),
@@ -169,4 +169,40 @@ core.Range.new(12, 1200)
     assert_eq!(call.path.root.as_str(), "core");
     let segments: Vec<&str> = call.path.segments.iter().map(|seg| seg.as_str()).collect();
     assert_eq!(segments, ["Range", "new"]);
+}
+
+#[test]
+fn method_with_typed_self_has_receiver_and_tagged_self_param() {
+    let src = "\
+Point has (x Int, y Int)\n\
+\n\
+Point.distance(self Point, other Point) Int:\
+    return 0\n\
+return\n";
+    let out = parser::parse_source_full(src);
+    if !out.symptoms.is_empty() {
+        eprintln!(
+            "symptoms: {:?}",
+            out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+    let ast = out.ast;
+    let def_names: Vec<_> = ast.defs().keys().map(|k| k.as_str().to_string()).collect();
+    let bind = ast
+        .defs()
+        .values()
+        .find(|b| b.name().as_str() == "distance")
+        .unwrap_or_else(|| panic!("distance method def among {def_names:?}"));
+    assert!(bind.is_method(), "expected receiver_type");
+    let has_typed_self = bind.params.as_ref().is_some_and(|p| {
+        matches!(
+            p.get(&internment::Intern::from_ref("self")),
+            Some(ast::ParameterKind::Tagged(_))
+        )
+    });
+    assert!(has_typed_self, "self should be tagged");
+    assert!(matches!(
+        bind.value(),
+        ast::BindValue::Body { .. } | ast::BindValue::Expr(_)
+    ));
 }

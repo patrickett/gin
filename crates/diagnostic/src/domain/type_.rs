@@ -5,10 +5,11 @@ use crate::{Category, DiagnosticLike};
 pub enum TypeSymptom {
     #[strum(serialize = "type-mismatch")]
     Mismatch,
-    #[strum(serialize = "type-unknown-binding")]
-    UnknownBinding {
+    /// Name is not in scope (undefined bind, undeclared tag/trait, missing import).
+    #[strum(serialize = "type-unknown-symbol")]
+    UnknownSymbol {
         name: String,
-        /// Closest in-scope name (imports, functions, tags) within edit distance ≤ 2.
+        /// Closest in-scope name within edit distance ≤ 2, when applicable.
         did_you_mean: Option<String>,
     },
     /// Imported package prefix (or similar) used where a value / callable expression is required.
@@ -17,8 +18,6 @@ pub enum TypeSymptom {
         /// Name as written in source (shown in the message as `'name'`).
         name: String,
     },
-    #[strum(serialize = "type-unknown-tag")]
-    UnknownTag { name: String },
     #[strum(serialize = "type-inference-failed")]
     InferenceFailed,
     #[strum(serialize = "type-constraint-violation")]
@@ -48,6 +47,9 @@ pub enum TypeSymptom {
     /// A `when` expression is missing its required `else` clause.
     #[strum(serialize = "type-missing-else-arm")]
     MissingElseArm,
+    /// A `when` expression has an `else` clause but all cases are already covered.
+    #[strum(serialize = "type-unreachable-else-arm")]
+    UnreachableElseArm,
     /// A `when` condition does not resolve to `Bool`.
     #[strum(serialize = "type-condition-not-bool")]
     ConditionNotBool { got: String },
@@ -55,8 +57,8 @@ pub enum TypeSymptom {
     #[strum(serialize = "type-use-of-moved-value")]
     UseOfMovedValue { name: String },
     /// A non-Copy value was not consumed before scope exit.
-    /// Types with `and is not Copy` follow linear rules — they must be
-    /// explicitly consumed via `~` or transferred to another owner.
+    /// Non-Copy types follow linear rules — they must be explicitly consumed via
+    /// `eat` or transferred to another owner.
     #[strum(serialize = "type-lin-value-not-consumed")]
     LinValueNotConsumed {
         name: String,
@@ -68,24 +70,69 @@ pub enum TypeSymptom {
     /// (or be named — see NOTE about named type arguments).
     #[strum(serialize = "type-positional-after-default")]
     PositionalAfterDefault { name: String },
-    /// A `~` (consumed) parameter was used as the return expression, which is
+    /// A variable was declared with a type but used before being assigned a value.
+    #[strum(serialize = "type-use-before-assign")]
+    UseBeforeAssign { name: String },
+    /// A variable was declared with a type but never assigned a value.
+    #[strum(serialize = "type-unassigned-binding")]
+    UnassignedBinding { name: String },
+    /// A `eat` (consumed) parameter was used as the return expression, which is
     /// not allowed — consumed values must be destroyed within the function, not
     /// returned to the caller.
     #[strum(serialize = "type-return-consumed-param")]
     ReturnConsumedParam { name: String },
-    /// `~` used at call site on an argument whose corresponding parameter
-    /// is not declared with `~`.
+    /// `eat` used at call site on an argument whose corresponding parameter
+    /// is not declared with `eat`.
     #[strum(serialize = "type-consume-arg-on-bare-param")]
     ConsumeArgOnBareParam { name: String },
+    /// `self` parameter has an explicit type annotation that is already known
+    /// from the method's receiver type — the annotation is redundant.
+    #[strum(serialize = "type-self-param-typed")]
+    SelfParamTyped,
+    /// A compile-time-known value is outside an `in N...M` / bounded-int parameter type.
+    #[strum(serialize = "type-out-of-range")]
+    OutOfRange {
+        value: i128,
+        min: i128,
+        max: i128,
+    },
+    /// `in TinyInt` where `TinyInt` is a bounded-int tag — use `n TinyInt` instead.
+    #[strum(serialize = "type-in-range-on-bounded-tag")]
+    InRangeOnBoundedIntTag { tag: String },
+    /// User attempted to provide a reserved compiler trait (e.g. `Reflectable`).
+    #[strum(serialize = "type-reserved-trait-impl")]
+    ReservedTraitImpl { trait_name: String },
+    /// A `where` trait bound was not satisfied at this site.
+    #[strum(serialize = "type-trait-bound-failed")]
+    TraitBoundFailed {
+        trait_name: String,
+        field: String,
+        expected: String,
+        got: String,
+    },
+    /// Trait used in `and has Trait(...)` but not imported into this file.
+    #[strum(serialize = "type-trait-not-in-scope")]
+    TraitNotInScope {
+        trait_name: String,
+        suggested_import: String,
+    },
+    /// Reassign or shadow a name introduced with `:=`.
+    #[strum(serialize = "type-reassign-constant")]
+    ReassignConstant { name: String },
+    /// `name Ty` declare followed by `name := expr` in the same scope.
+    #[strum(serialize = "type-const-bind-after-declare")]
+    ConstBindAfterDeclare { name: String },
+    /// Comptime-classified function called from runtime with non-foldable arguments.
+    #[strum(serialize = "type-cannot-call-comptime-with-runtime-args")]
+    CannotCallComptimeWithRuntimeArgs { fn_name: String, detail: String },
 }
 
 impl DiagnosticLike for TypeSymptom {
     fn message(&self) -> String {
         match self {
             Self::Mismatch => "type mismatch".into(),
-            Self::UnknownBinding { name, .. } => format!("use of undefined binding `{name}`"),
+            Self::UnknownSymbol { name, .. } => format!("use of undefined symbol `{name}`"),
             Self::NotExpr { name } => format!("'{name}' is not an expression"),
-            Self::UnknownTag { name } => format!("use of undeclared tag `{name}`"),
             Self::InferenceFailed => "failed to infer type".into(),
             Self::ConstraintViolation {
                 param,
@@ -110,6 +157,9 @@ impl DiagnosticLike for TypeSymptom {
                 format!("empty return in function declared to return `{expected_type}`")
             }
             Self::MissingElseArm => "`when` expression requires an `else` clause".into(),
+            Self::UnreachableElseArm => {
+                "`else` clause is unreachable — all cases are already covered".into()
+            }
             Self::ConditionNotBool { got } => {
                 format!("`when` condition must be `Bool`, got `{got}`")
             }
@@ -127,6 +177,12 @@ impl DiagnosticLike for TypeSymptom {
                 msg
             }
 
+            Self::UseBeforeAssign { name } => {
+                format!("use of unassigned variable `{name}`")
+            }
+            Self::UnassignedBinding { name } => {
+                format!("variable `{name}` was declared but never assigned a value")
+            }
             Self::PositionalAfterDefault { name } => {
                 format!("positional parameter `{name}` appears after a default parameter")
             }
@@ -134,26 +190,62 @@ impl DiagnosticLike for TypeSymptom {
                 format!("cannot return consumed parameter `{name}`")
             }
             Self::ConsumeArgOnBareParam { name } => {
-                format!("cannot use `~` on parameter `{name}`: parameter is not consumed")
+                format!("cannot use `eat` on parameter `{name}`: parameter is not consumed")
             }
+            Self::SelfParamTyped => {
+                "redundant `self` parameter type — the type is already known from the method receiver".into()
+            }
+            Self::OutOfRange { value, min, max } => {
+                format!("value `{value}` is not in range `{min}...{max}` (inclusive)")
+            }
+            Self::InRangeOnBoundedIntTag { tag } => {
+                format!("use `{tag}` without `in` for bounded integer types")
+            }
+            Self::ReservedTraitImpl { trait_name } => {
+                format!("trait `{trait_name}` is provided by the compiler and cannot be implemented manually")
+            }
+            Self::TraitBoundFailed {
+                trait_name,
+                field,
+                expected,
+                got,
+            } => format!(
+                "`{trait_name}.{field}` bound not satisfied: expected `{expected}`, got `{got}`"
+            ),
+            Self::ReassignConstant { name } => {
+                format!("cannot reassign constant binding `{name}` (bound with `:=`)")
+            }
+            Self::ConstBindAfterDeclare { name } => format!(
+                "constant bind `{name} := …` after `{name} Type` declaration"
+            ),
+            Self::CannotCallComptimeWithRuntimeArgs { fn_name, detail } => format!(
+                "cannot call compile-time function `{fn_name}` here: {detail}"
+            ),
+            Self::TraitNotInScope {
+                trait_name,
+                suggested_import,
+            } => format!(
+                "trait `{trait_name}` is not in scope; import it (e.g. `{suggested_import}`)"
+            ),
         }
     }
 
     fn help_on_span(&self) -> Option<String> {
         match self {
-            Self::UnknownBinding { .. } => Some("import or define bind before using it".into()),
+            Self::UnknownSymbol { .. } => {
+                Some("import or define the symbol before using it".into())
+            }
             _ => None,
         }
     }
 
     fn help(&self) -> Option<String> {
         match self {
-            Self::UnknownBinding { did_you_mean, .. } => did_you_mean
+            Self::UnknownSymbol { did_you_mean, .. } => did_you_mean
                 .as_ref()
                 .map(|m| format!("did you mean `{m}`?")),
             Self::NotExpr { .. } => None,
             Self::Mismatch => Some("types do not match".into()),
-            Self::UnknownTag { .. } => Some("declare the tag before using it".into()),
             Self::InferenceFailed => Some("could not infer the type".into()),
             Self::ConstraintViolation {
                 param, expected, ..
@@ -178,6 +270,9 @@ impl DiagnosticLike for TypeSymptom {
                 Some(format!("expected a variant of `{expected_type}`"))
             }
             Self::MissingElseArm => Some("add an `else` clause that covers all other cases".into()),
+            Self::UnreachableElseArm => {
+                Some("remove the `else` clause — it can never be reached".into())
+            }
             Self::ConditionNotBool { .. } => Some(
                 "the condition must be a `Bool` value (e.g. `x == y` or some `Bool` expression)"
                     .into(),
@@ -189,23 +284,58 @@ impl DiagnosticLike for TypeSymptom {
                 Some(format!("consume it with one of: {}", consumption_paths.join(", ")))
             }
             Self::LinValueNotConsumed { name, .. } => Some(
-                format!("value '{name}' was not consumed via `~{name}`")
+                format!("value '{name}' was not consumed via `eat {name}`")
+            ),
+            Self::UseBeforeAssign { .. } => Some(
+                "assign a value to the variable before reading it".into(),
+            ),
+            Self::UnassignedBinding { .. } => Some(
+                "assign a value to the variable with `name: value`".into(),
             ),
             Self::PositionalAfterDefault { .. } => Some(
                 "all parameters after a default must also have defaults (or use named arguments — see NOTE)".into(),
             ),
             Self::ReturnConsumedParam { .. } => Some(
-                "a `~` parameter is consumed (destroyed) within the function and cannot be returned".into(),
+                "a `eat` parameter is consumed (destroyed) within the function and cannot be returned".into(),
             ),
             Self::ConsumeArgOnBareParam { .. } => Some(
-                "remove the `~` or declare the parameter with `~` in the function signature".into(),
+                "remove the `eat` or declare the parameter with `eat` in the function signature".into(),
+            ),
+            Self::SelfParamTyped => Some(
+                "drop the explicit type — `self` already has the receiver type".into(),
+            ),
+            Self::OutOfRange { min, max, .. } => {
+                Some(format!("use a value between {min} and {max} inclusive"))
+            }
+            Self::InRangeOnBoundedIntTag { tag } => Some(format!(
+                "bounded integer types like `{tag}` use `name {tag}`, not `name in {tag}`"
+            )),
+            Self::ReservedTraitImpl { .. } => None,
+            Self::TraitBoundFailed { .. } => None,
+            Self::TraitNotInScope { suggested_import, .. } => {
+                Some(format!("add `{suggested_import}` at the top of the file"))
+            }
+            Self::ReassignConstant { .. } => {
+                Some("use `:` for a rebindable binding, or choose a different name".into())
+            }
+            Self::ConstBindAfterDeclare { .. } => Some(
+                "use `name: value` after declare, or a single `name := value` / `name Type: value`"
+                    .into(),
+            ),
+            Self::CannotCallComptimeWithRuntimeArgs { .. } => Some(
+                "pass compile-time-known arguments (literals, `:=` constants, or flow constants), or call from a compile-time context"
+                    .into(),
             ),
         }
     }
 
     fn category(&self) -> Category {
         match self {
+            Self::SelfParamTyped { .. } => Category::Help,
             Self::UnusedBinding { .. } => Category::Help,
+            Self::UnassignedBinding { .. } => Category::Help,
+            Self::UnreachableElseArm => Category::Help,
+            Self::ConstBindAfterDeclare { .. } => Category::Help,
             Self::LinValueNotConsumed { .. } => Category::Flaw,
             Self::PositionalAfterDefault { .. } => Category::Flaw,
             Self::ReturnConsumedParam { .. } => Category::Flaw,

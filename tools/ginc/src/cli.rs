@@ -1,33 +1,8 @@
 use clap::{Parser, ValueEnum};
-use codegen::emit::Profile as CodegenProfile;
+pub use codegen::emit::Profile;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::PathBuf;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
-pub enum Profile {
-    #[default]
-    Debug,
-    Release,
-}
-
-impl Profile {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Debug => "debug",
-            Self::Release => "release",
-        }
-    }
-}
-
-impl From<Profile> for CodegenProfile {
-    fn from(profile: Profile) -> CodegenProfile {
-        match profile {
-            Profile::Debug => CodegenProfile::Debug,
-            Profile::Release => CodegenProfile::Release,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 pub enum Emit {
@@ -38,8 +13,6 @@ pub enum Emit {
     Obj,
     /// Print MLIR text to stdout
     Mlir,
-    /// Print debug token listing to stdout
-    Tokens,
 }
 
 #[derive(Parser, Debug, Default)]

@@ -1,71 +1,84 @@
+use super::lower_typed_expr;
 use crate::{prelude::*, ty_to_mlir};
-use ast::TyInfer;
-use ast::ty::Ty;
 use ast::type_surface_mangle_name;
+use internment::Intern;
+use typed_ast::TypedWhenArm;
 
-impl<'c> Lower<'c> for WhenExpr {
-    fn lower(
-        &self,
-        ctx: &CodegenContext<'_, 'c>,
-        block: &BlockRef<'c, 'c>,
-        symtab: &mut ScopedSymbolTable<'c>,
-    ) -> Option<Value<'c, 'c>> {
-        // Infer the result type from the else arm, falling back to the first arm.
-        let result_ty = {
-            let body = self
-                .arms
-                .iter()
-                .find_map(|a| {
-                    if let WhenArm::Else(b, _) = a {
-                        Some(b.as_ref())
-                    } else {
-                        None
-                    }
-                })
-                .or_else(|| {
-                    self.arms.first().map(|a| match a {
-                        WhenArm::Cond { body, .. }
-                        | WhenArm::Is { body, .. }
-                        | WhenArm::Else(body, _) => body.as_ref(),
+/// Lower a typed-arena `when` expression (runtime path).
+pub(crate) fn lower_typed_when<'c>(
+    ctx: &CodegenContext<'_, 'c>,
+    when_expr: &typed_ast::TypedWhenExpr,
+    block: &BlockRef<'c, 'c>,
+    symtab: &mut ScopedSymbolTable<'c>,
+) -> Option<Value<'c, 'c>> {
+    let _loc = ctx.location();
+    let typed_ast = ctx.typed_ast?;
+
+    // Determine result type from else arm or first arm.
+    let result_mlir = {
+        let else_ret = when_expr.arms.iter().find_map(|a| {
+            if let TypedWhenArm::Else(body, _) = a {
+                typed_ast
+                    .expr(*body)
+                    .map(|e| ty_to_mlir(e.ty, ctx.mlir, ctx.typed_ast.unwrap(), ctx.trait_registry))
+            } else {
+                None
+            }
+        });
+        else_ret
+            .or_else(|| {
+                when_expr.arms.first().and_then(|a| {
+                    let body_id = match a {
+                        TypedWhenArm::Cond { body, .. }
+                        | TypedWhenArm::Is { body, .. }
+                        | TypedWhenArm::Else(body, _) => *body,
+                    };
+                    typed_ast.expr(body_id).map(|e| {
+                        ty_to_mlir(e.ty, ctx.mlir, ctx.typed_ast.unwrap(), ctx.trait_registry)
                     })
-                });
-            body.map(|b| {
-                let ty = b.infer_ty(&ctx.infer_env(&*ctx.var_types.borrow()));
-                ty_to_mlir(&ty, ctx.mlir)
+                })
             })
             .unwrap_or_else(|| ctx.mlir.i64())
-        };
+    };
 
-        if let Some(subject_expr) = &self.subject {
-            let subject = subject_expr.lower(ctx, block, symtab)?;
-
-            // Check if this is an optimized union (simple integer representation)
-            let subject_ty = subject_expr.infer_ty(&ctx.infer_env(&*ctx.var_types.borrow()));
-
-            let disc = match &subject_ty {
-                Ty::ConstUnion { values, .. } => {
-                    super::emit_discriminant_extend(ctx, block, subject, values.len())
-                }
-                Ty::Union { variants, .. }
-                    if variants.iter().all(|(_, fields)| fields.is_empty()) =>
-                {
-                    super::emit_discriminant_extend(ctx, block, subject, variants.len())
-                }
-                _ => block.append_op(ctx.mlir.llvm_extractvalue(subject, 0, ctx.mlir.i64())),
-            };
-
-            lower_pattern_when(ctx, block, symtab, subject, disc, &self.arms, result_ty)
-        } else {
-            lower_boolean_when(ctx, block, symtab, &self.arms, result_ty)
+    match when_expr.subject {
+        Some(subject_id) => {
+            let subject = lower_typed_expr(ctx, subject_id, block, symtab)?;
+            if let Some(expr_ref) = typed_ast.expr(subject_id) {
+                let disc = match &expr_ref.ty {
+                    ty if ty.union_literal_values().is_some() => {
+                        let n = ty.union_literal_values().unwrap().len();
+                        super::emit_discriminant_extend(ctx, block, subject, n)
+                    }
+                    typed_ast::ty::Ty::Union { variants, .. }
+                        if variants.iter().all(|(_, fields)| fields.is_empty()) =>
+                    {
+                        super::emit_discriminant_extend(ctx, block, subject, variants.len())
+                    }
+                    _ => block.append_op(ctx.mlir.llvm_extractvalue(subject, 0, ctx.mlir.i64())),
+                };
+                lower_typed_pattern_when(
+                    ctx,
+                    block,
+                    symtab,
+                    subject,
+                    disc,
+                    &when_expr.arms,
+                    result_mlir,
+                )
+            } else {
+                None
+            }
         }
+        None => lower_typed_boolean_when(ctx, block, symtab, &when_expr.arms, result_mlir),
     }
 }
 
-fn lower_boolean_when<'c>(
+fn lower_typed_boolean_when<'c>(
     ctx: &CodegenContext<'_, 'c>,
     outer_block: &BlockRef<'c, 'c>,
     symtab: &mut ScopedSymbolTable<'c>,
-    arms: &[WhenArm],
+    arms: &[TypedWhenArm],
     result_ty: Type<'c>,
 ) -> Option<Value<'c, 'c>> {
     let loc = ctx.location();
@@ -75,19 +88,16 @@ fn lower_boolean_when<'c>(
     };
 
     match head {
-        WhenArm::Else(body, _) => body.lower(ctx, outer_block, symtab),
-
-        WhenArm::Is { .. } => {
+        TypedWhenArm::Else(body, _) => lower_typed_expr(ctx, *body, outer_block, symtab),
+        TypedWhenArm::Is { .. } => {
             ctx.emit_internal("Is arm in boolean when — use 'when subject is ...' form");
             None
         }
-
-        WhenArm::Cond {
+        TypedWhenArm::Cond {
             condition, body, ..
         } => {
-            let cond_val = condition.lower(ctx, outer_block, symtab)?;
-
-            let value_producing = tail.iter().any(|a| matches!(a, WhenArm::Else(_, _)));
+            let cond_val = lower_typed_expr(ctx, *condition, outer_block, symtab)?;
+            let value_producing = tail.iter().any(|a| matches!(a, TypedWhenArm::Else(..)));
             let result_tys: Vec<Type<'c>> = if value_producing {
                 vec![result_ty]
             } else {
@@ -99,7 +109,7 @@ fn lower_boolean_when<'c>(
                 let blk = Block::new(&[]);
                 then_region.append_block(blk);
                 let blk_ref = then_region.first_block().unwrap();
-                let val = body.lower(ctx, &blk_ref, &mut symtab.clone())?;
+                let val = lower_typed_expr(ctx, *body, &blk_ref, &mut symtab.clone())?;
                 if value_producing {
                     blk_ref.append_operation(scf_dialect::r#yield(&[val], loc));
                 } else {
@@ -112,7 +122,8 @@ fn lower_boolean_when<'c>(
                 let blk = Block::new(&[]);
                 else_region.append_block(blk);
                 let blk_ref = else_region.first_block().unwrap();
-                let val = lower_boolean_when(ctx, &blk_ref, &mut symtab.clone(), tail, result_ty)?;
+                let val =
+                    lower_typed_boolean_when(ctx, &blk_ref, &mut symtab.clone(), tail, result_ty)?;
                 if value_producing {
                     blk_ref.append_operation(scf_dialect::r#yield(&[val], loc));
                 } else {
@@ -132,23 +143,15 @@ fn lower_boolean_when<'c>(
     }
 }
 
-/// Lower a pattern-matching `when` expression.
-///
-/// `subject` is the full union value (always `union_type()`).
-/// `disc` is the pre-extracted discriminant (`i64`) from `subject[0]`.
-///
-/// Pattern matching always yields an `i64` value; non-exhaustive matches
-/// fall through to `const_i64(0)` as a default.
-fn lower_pattern_when<'c>(
+fn lower_typed_pattern_when<'c>(
     ctx: &CodegenContext<'_, 'c>,
     outer_block: &BlockRef<'c, 'c>,
     symtab: &mut ScopedSymbolTable<'c>,
     subject: Value<'c, 'c>,
     disc: Value<'c, 'c>,
-    arms: &[WhenArm],
+    arms: &[TypedWhenArm],
     result_ty: Type<'c>,
 ) -> Option<Value<'c, 'c>> {
-    use internment::Intern;
     let loc = ctx.location();
 
     let Some((head, tail)) = arms.split_first() else {
@@ -156,19 +159,17 @@ fn lower_pattern_when<'c>(
     };
 
     match head {
-        WhenArm::Else(body, _) => body.lower(ctx, outer_block, symtab),
-
-        WhenArm::Cond { .. } => {
+        TypedWhenArm::Else(body, _) => lower_typed_expr(ctx, *body, outer_block, symtab),
+        TypedWhenArm::Cond { .. } => {
             ctx.emit_internal("Cannot mix condition arms in a pattern match (when subject is ...)");
             None
         }
-
-        WhenArm::Is { pattern, body, .. } => {
+        TypedWhenArm::Is { pattern, body, .. } => {
             let expected_disc: i64 = {
                 let variant_name =
                     Intern::<String>::from_ref(type_surface_mangle_name(&pattern.value));
-                let (_, disc, _) = ctx.lookup_variant(variant_name)?;
-                disc as i64
+                let (_, disc_val, _) = ctx.lookup_variant(variant_name)?;
+                disc_val as i64
             };
 
             let expected_val = outer_block.const_i64(ctx.mlir, expected_disc);
@@ -192,17 +193,16 @@ fn lower_pattern_when<'c>(
                     &mut inner_symtab,
                 );
 
-                let val = body.lower(ctx, &blk_ref, &mut inner_symtab)?;
+                let val = lower_typed_expr(ctx, *body, &blk_ref, &mut inner_symtab)?;
                 blk_ref.append_operation(scf_dialect::r#yield(&[val], loc));
             }
 
-            // Build else-region: recurse on remaining arms.
             let else_region = Region::new();
             {
                 let blk = Block::new(&[]);
                 else_region.append_block(blk);
                 let blk_ref = else_region.first_block().unwrap();
-                let val = lower_pattern_when(
+                let val = lower_typed_pattern_when(
                     ctx,
                     &blk_ref,
                     &mut symtab.clone(),

@@ -3,14 +3,13 @@ use std::collections::HashMap;
 use indexmap::IndexMap;
 use internment::Intern;
 
+use crate::TraitBound;
 use crate::TypeExpr;
 use crate::doc_comment::DocComment;
 use crate::expr::Expr;
 use crate::expr::Typed;
-use crate::parameter::ParamConvention;
-use crate::parameter::ParamSlot;
-use crate::parameter::Parameters;
 use crate::parameter::fmt_type_expr_surface;
+use crate::parameter::{GroupParam, ParamConvention, ParamSlot, Parameters};
 use crate::path::ModPath;
 use crate::span::SpanId;
 use crate::span::Spanned;
@@ -43,6 +42,10 @@ pub struct Bind {
     pub params: Option<Parameters>,
     pub param_slots: IndexMap<Intern<String>, ParamSlot>,
     pub param_conventions: IndexMap<Intern<String>, ParamConvention>,
+    /// Group annotations: `[mut r T]` or `[r T]`.
+    pub group_params: Vec<GroupParam>,
+    /// Maps param names to group names for params with `ref[r]` / `mut[r]` syntax.
+    pub param_groups: IndexMap<Intern<String>, Intern<String>>,
     pub attributes: BindAttributes,
     pub value: BindValue,
     /// Method receiver — structural [`TypeExpr`].
@@ -54,9 +57,17 @@ pub struct Bind {
     /// Explicit capitalized return type annotation, e.g. `Str` in `foo() Str: expr`.
     /// Structural [`TypeExpr`].
     pub return_tag: Option<Box<Spanned<TypeExpr>>>,
+    /// Bound with `:=` instead of `:`. Immutable after evaluation in this scope.
+    pub is_constant: bool,
+    /// Participates in prepare-time comptime fold/validate (comptime fn or foldable value).
+    /// Set by [`comptime_classify::apply_comptime_classification`], not by the parser.
+    pub is_compile_time: bool,
+
     /// Resolved/progressive return type. Populated during analysis.
     /// Replaces `return_type_name` + `return_tag` + the `fn_return_types` side-table.
     pub return_type: TyState,
+    /// `where T has Trait(field Pattern)` compile-time trait bounds.
+    pub trait_bounds: Vec<TraitBound>,
     /// Explicit type annotation with value args, e.g. `Maybe(3)` in `val Maybe(3): Some(3)`.
     pub type_annotation: Option<(Intern<String>, Vec<Typed<Expr>>)>,
     /// Qualified path for type annotation, e.g. `Maybe.Some` in `val Maybe.Some(3): ...`
@@ -72,15 +83,20 @@ impl Bind {
             params: None,
             param_slots: IndexMap::new(),
             param_conventions: IndexMap::new(),
+            group_params: Vec::new(),
+            param_groups: IndexMap::new(),
             attributes: BindAttributes::default(),
             value,
             receiver_type: None,
             receiver_typevars: HashMap::new(),
             return_type_name: None,
             return_tag: None,
+            is_constant: false,
+            is_compile_time: false,
             return_type: TyState::Infer,
             type_annotation: None,
             type_annotation_qual: None,
+            trait_bounds: Vec::new(),
         }
     }
 
@@ -207,6 +223,11 @@ impl std::hash::Hash for Bind {
         self.type_annotation_qual.hash(state);
         self.value.hash(state);
         for (k, v) in &self.param_conventions {
+            k.hash(state);
+            v.hash(state);
+        }
+        self.group_params.hash(state);
+        for (k, v) in &self.param_groups {
             k.hash(state);
             v.hash(state);
         }

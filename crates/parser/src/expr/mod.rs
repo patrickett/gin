@@ -1,4 +1,5 @@
 pub(crate) mod bind;
+pub(crate) mod body;
 pub(crate) mod body_trivia;
 pub(crate) mod control;
 pub(crate) mod r#import;
@@ -15,8 +16,7 @@ pub(crate) mod literal;
 //   when_expr.rs   ← pub fn parse() -> Option<WhenExpr>
 //   return_expr.rs ← pub fn parse() -> Option<Return>
 //
-// This also deduplicates `parse_body_exprs` and `can_start_expr` that currently
-// exist in both control.rs and bind.rs. See conversation history for full plan.
+
 
 use internment::Intern;
 use lexer::{Lexer, Token};
@@ -28,7 +28,7 @@ use crate::cursor::{self, ParseError, TokenCursor};
 
 use crate::unescape::unescape;
 use ast::ModPath;
-use ast::{AsmExpr, BinOp, Binary, FnCall, FormatPart, FormatString, Range, TagCall};
+use ast::{AsmExpr, Bind, BindValue, BinOp, Binary, FnCall, FormatPart, FormatString, Range, TagCall};
 
 pub type ExprFn = fn(&mut TokenCursor) -> Typed<Expr>;
 
@@ -115,9 +115,9 @@ pub(crate) fn parse_paren_args(cursor: &mut TokenCursor) -> Option<Vec<Typed<Exp
     Some(args)
 }
 
-/// Parse an argument expression, recognizing `~expr` (consume) prefix.
+/// Parse an argument expression, recognizing `eat expr` (consume) prefix.
 fn parse_arg_expr(cursor: &mut TokenCursor) -> Typed<Expr> {
-    if cursor.eat(&Token::Tilde) {
+    if cursor.eat(&Token::Eat) {
         let inner = parse_expression(cursor);
         let span_id = inner.span_id;
         Typed::infer(Expr::ConsumeArg(Box::new(inner)), span_id)
@@ -311,13 +311,43 @@ fn parse_atom(cursor: &mut TokenCursor) -> Typed<Expr> {
 
 /// Heuristic: does the current position look like the start of a bind?
 /// True when we see `id :`, `id :=`, `id(...) :`, `id Tag :`, or `id Tag[...] :` patterns.
-fn looks_like_bind(cursor: &TokenCursor) -> bool {
+pub(crate) fn looks_like_bind(cursor: &TokenCursor) -> bool {
     // id: or id:=  → definitely a bind
     if matches!(cursor.peek_at(1), Some(Token::Colon) | Some(Token::ColonEq)) {
         return true;
     }
 
-    // id Tag or id Tag[...] followed by `:`/`:=`  → typed bind (e.g. `val Maybe[Int]: Some(3)`)
+    // id ref or id mut followed by type and `:`/`:=`  → typed ref bind
+    // (e.g. `r ref Entity: ref e` or `r mut Entity: mut e`)
+    if matches!(cursor.peek_at(1), Some(Token::Ref) | Some(Token::Mut)) {
+        let mut offset = 2; // skip past id and ref/mut
+        // Skip over the type expression after ref/mut
+        if matches!(cursor.peek_at(offset), Some(Token::Tag(_))) {
+            offset += 1; // skip the Tag
+            // Skip optional type-argument parens on the Tag
+            if cursor.peek_at(offset) == Some(&Token::ParenOpen) {
+                offset = match skip_balanced_delimiters(
+                    cursor,
+                    offset,
+                    Token::ParenOpen,
+                    Token::ParenClose,
+                ) {
+                    Some(o) => o,
+                    None => return false,
+                };
+            }
+        } else {
+            return false;
+        }
+        return matches!(
+            cursor.peek_at(offset),
+            Some(Token::Colon) | Some(Token::ColonEq)
+        );
+    }
+
+    // id Tag or id Tag[...]
+    // → typed bind with value (if `:` follows) or declaration without value (if newline follows)
+    // e.g. `val Int: 5` or just `val Int`
     if matches!(cursor.peek_at(1), Some(Token::Tag(_))) {
         let mut offset = 2; // skip past id and Tag
         // Skip optional type-argument brackets on the Tag.
@@ -339,9 +369,14 @@ fn looks_like_bind(cursor: &TokenCursor) -> bool {
                     None => return false,
                 };
         }
+        // Accept `Id Tag:` (with value) or `Id Tag` followed by newline/dedent/eof (declaration)
         return matches!(
             cursor.peek_at(offset),
-            Some(Token::Colon) | Some(Token::ColonEq)
+            Some(Token::Colon)
+                | Some(Token::ColonEq)
+                | Some(Token::Newline)
+                | Some(Token::Dedent)
+                | None
         );
     }
 
@@ -524,15 +559,36 @@ fn parse_id_atom(cursor: &mut TokenCursor) -> Typed<Expr> {
     }
 
     // ── FnCall: name, name(args), name.path(args) ──
+    // Dotted paths without `(` are field access (`a.x`), not qualified symbols (`a.x`).
     if let Some(path) = crate::path::parse_path(cursor) {
         let path_span = path.span_id;
         let args = parse_paren_args(cursor);
         cursor.consume_trailing_newline();
         let end_span = last_consumed_span(cursor);
-        return Typed::infer(
-            Expr::FnCall(FnCall { path, args }),
-            merge_spans(path_span, end_span, cursor),
+        if args.is_some() || path.value.segments.is_empty() {
+            return Typed::infer(
+                Expr::FnCall(FnCall { path, args }),
+                merge_spans(path_span, end_span, cursor),
+            );
+        }
+        let mut expr = Typed::infer(
+            Expr::FnCall(FnCall {
+                path: Spanned::new(ModPath::new(path.value.root, vec![]), path_span),
+                args: None,
+            }),
+            path_span,
         );
+        for field in path.value.segments {
+            let field_span = expr.span_id;
+            expr = Typed::infer(
+                Expr::RecordGet {
+                    base: Box::new(expr),
+                    field,
+                },
+                merge_spans(field_span, end_span, cursor),
+            );
+        }
+        return expr;
     }
 
     let span = cursor.current_span();
@@ -644,11 +700,82 @@ fn parse_list_lit(cursor: &mut TokenCursor) -> Typed<Expr> {
     Typed::infer(Expr::List(elems), merge_spans(start_span, end_span, cursor))
 }
 
+/// `(` followed by `id:` — record literal for compile-time defaults and similar.
+fn is_record_literal_start(cursor: &TokenCursor) -> bool {
+    let mut offset = 0;
+    loop {
+        match cursor.peek_at(offset) {
+            Some(Token::Newline) | Some(Token::Indent) | Some(Token::Dedent) => {
+                offset += 1;
+            }
+            Some(Token::Id(_)) => {
+                return matches!(cursor.peek_at(offset + 1), Some(Token::Colon));
+            }
+            _ => return false,
+        }
+    }
+}
+
+fn parse_record_literal_after_open_paren(cursor: &mut TokenCursor, start_span: SpanId) -> Typed<Expr> {
+    let mut fields: Vec<Typed<Expr>> = Vec::new();
+    loop {
+        cursor.skip_newlines();
+        cursor.skip_indents();
+        if cursor.is_at(&Token::ParenClose) {
+            break;
+        }
+        let (field_name, field_span) = match cursor.peek() {
+            Some(Token::Id(n)) => {
+                let name = cursor.intern(n);
+                let span = cursor.peek_span().unwrap_or(start_span);
+                cursor.advance();
+                (name, span)
+            }
+            _ => {
+                cursor.error("expected record field name", cursor.current_span());
+                break;
+            }
+        };
+        if cursor.expect(&Token::Colon).is_none() {
+            break;
+        }
+        let value = parse_expression(cursor);
+        let bind = Bind::new(field_name, field_span, BindValue::Expr(Box::new(value)));
+        fields.push(Typed::infer(Expr::Bind(Box::new(bind)), field_span));
+
+        cursor.skip_newlines();
+        cursor.skip_indents();
+        if !cursor.eat(&Token::Comma) {
+            break;
+        }
+    }
+
+    cursor.skip_newlines();
+    cursor.skip_indents();
+    cursor.expect(&Token::ParenClose);
+    let end_span = last_consumed_span(cursor);
+    Typed::infer(
+        Expr::TagCall(TagCall {
+            name: Intern::from_ref("__record__"),
+            qual_path: None,
+            args: fields,
+        }),
+        merge_spans(start_span, end_span, cursor),
+    )
+}
+
 fn parse_tuple_lit_or_alloc_or_group(cursor: &mut TokenCursor) -> Typed<Expr> {
     let start_span = cursor.peek_span().unwrap_or_else(|| cursor.current_span());
     cursor.advance(); // consume (
 
     cursor.skip_newlines();
+    cursor.skip_indents();
+
+    if is_record_literal_start(cursor) {
+        cursor.skip_newlines();
+        cursor.skip_indents();
+        return parse_record_literal_after_open_paren(cursor, start_span);
+    }
 
     // Empty parens → unit or alloc placeholder
     if cursor.is_at(&Token::ParenClose) {
@@ -867,6 +994,55 @@ fn apply_postfix(cursor: &mut TokenCursor, lhs: Typed<Expr>) -> Result<Typed<Exp
         ));
     }
 
+    // .field → RecordGet (not followed by '(')
+    if cursor.is_at(&Token::Dot)
+        && matches!(cursor.peek_at(1), Some(Token::Id(_)))
+        && cursor.peek_at(2) != Some(&Token::ParenOpen)
+    {
+        cursor.advance(); // Dot
+        if let Some((Token::Id(name), field_span)) = cursor.advance() {
+            let field = cursor.intern(name);
+            let lhs_span = lhs.span_id;
+            return Ok(Typed::infer(
+                Expr::RecordGet {
+                    base: Box::new(lhs),
+                    field,
+                },
+                merge_spans(lhs_span, field_span, cursor),
+            ));
+        }
+        return Err(lhs);
+    }
+
+    // .method(args) → Method call chaining
+    if cursor.is_at(&Token::Dot) && matches!(cursor.peek_at(1), Some(Token::Id(_))) {
+        cursor.advance(); // Dot
+        let method_name = match cursor.advance() {
+            Some((Token::Id(name), _)) => cursor.intern(name),
+            _ => return Err(lhs),
+        };
+        let lhs_span = lhs.span_id;
+        let args = parse_paren_args(cursor);
+        let mut all_args = vec![lhs];
+        if let Some(mut call_args) = args {
+            all_args.append(&mut call_args);
+        }
+        let end_span = last_consumed_span(cursor);
+        return Ok(Typed::infer(
+            Expr::FnCall(FnCall {
+                path: Spanned::new(
+                    ModPath {
+                        root: method_name,
+                        segments: vec![],
+                    },
+                    lhs_span,
+                ),
+                args: Some(all_args),
+            }),
+            merge_spans(lhs_span, end_span, cursor),
+        ));
+    }
+
     // as Type → Cast
     if cursor.is_at(&Token::As) {
         cursor.advance(); // As
@@ -986,76 +1162,20 @@ fn parse_asm_expr(cursor: &mut TokenCursor) -> Typed<Expr> {
         return Typed::infer(Expr::AnonymousTag(cursor.intern("Error")), start_span);
     }
 
-    // first argument = template string
-    let template = match cursor.advance() {
-        Some((Token::String(s), _span)) => Intern::<String>::from_ref(s),
-        _ => {
-            cursor.error("expected assembly template string", cursor.current_span());
-            return Typed::infer(Expr::AnonymousTag(cursor.intern("Error")), start_span);
-        }
-    };
+    // Parse the spec expression (an AsmSpec value constructed with :=)
+    let spec_expr = parse_expression(cursor);
 
-    // parse optional comma-separated constraint list and operands
-    let mut constraints = Vec::new();
-    let mut operands = Vec::new();
-
-    if cursor.eat(&Token::Comma) {
-        // Skip indent/dedent tokens that appear after newlines (the
-        // indent-aware lexer produces these; significant_pos only skips
-        // Newline, not Indent/Dedent).
+    // Parse optional runtime operand values
+    let mut operand_values = Vec::new();
+    while cursor.eat(&Token::Comma) {
+        // Skip indent/dedent tokens that appear after newlines
         while matches!(cursor.peek(), Some(Token::Indent) | Some(Token::Dedent)) {
             cursor.advance();
         }
-
-        // Try to parse a constraint list literal `[...]` first
-        if cursor.is_at(&Token::BracketOpen) {
-            // Parse constraint list: `[Constraint.Output(...), ...]`
-            cursor.advance(); // eat [
-            if !cursor.is_at(&Token::BracketClose) {
-                loop {
-                    // Skip indent/dedent tokens between constraints (multi-line list)
-                    while matches!(cursor.peek(), Some(Token::Indent) | Some(Token::Dedent)) {
-                        cursor.advance();
-                    }
-                    constraints.push(parse_expression(cursor));
-                    if !cursor.eat(&Token::Comma) {
-                        break;
-                    }
-                }
-            }
-            // Skip trailing indent/dedent before the closing bracket
-            while matches!(cursor.peek(), Some(Token::Indent) | Some(Token::Dedent)) {
-                cursor.advance();
-            }
-            cursor.expect(&Token::BracketClose);
-
-            // Parse remaining operands after the constraint list
-            while cursor.eat(&Token::Comma) {
-                // Skip indent tokens after commas
-                while matches!(cursor.peek(), Some(Token::Indent) | Some(Token::Dedent)) {
-                    cursor.advance();
-                }
-                if cursor.is_at(&Token::ParenClose) {
-                    break;
-                }
-                operands.push(parse_expression(cursor));
-            }
-        } else {
-            // No constraint list — everything after comma is operands
-            // Skip indent tokens that may appear after newlines
-            while matches!(cursor.peek(), Some(Token::Indent) | Some(Token::Dedent)) {
-                cursor.advance();
-            }
-            if !cursor.is_at(&Token::ParenClose) {
-                operands.push(parse_expression(cursor));
-                while cursor.eat(&Token::Comma) {
-                    if cursor.is_at(&Token::ParenClose) {
-                        break;
-                    }
-                    operands.push(parse_expression(cursor));
-                }
-            }
+        if cursor.is_at(&Token::ParenClose) {
+            break;
         }
+        operand_values.push(parse_expression(cursor));
     }
 
     // expect )
@@ -1075,9 +1195,11 @@ fn parse_asm_expr(cursor: &mut TokenCursor) -> Typed<Expr> {
 
     Typed::infer(
         Expr::Asm(AsmExpr {
-            template,
-            constraints,
-            operands,
+            template: Intern::new(String::new()),
+            operands: Vec::new(),
+            clobbers: Vec::new(),
+            operand_values,
+            spec_expr: Some(Box::new(spec_expr)),
         }),
         merge_spans(start_span, end_span, cursor),
     )

@@ -1,9 +1,10 @@
+use crate::expr::{Expr, Typed};
 use crate::span::SpanId;
 use internment::Intern;
 use std::hash::{Hash, Hasher};
 
+use crate::TraitBound;
 use crate::doc_comment::DocComment;
-use crate::marker::MarkerBinding;
 use crate::parameter::Parameters;
 use crate::ty::Ty;
 
@@ -12,16 +13,43 @@ mod value;
 pub use attributes::*;
 pub use value::*;
 
+/// A trait implementation provided via `and has TraitName(field: expr, ...)`.
+///
+/// For example, in `Capacity has (count PointerSize) and has IsEmpty(is_empty: self.count > 0)`,
+/// this represents the `IsEmpty(is_empty: self.count > 0)` part.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvidedTrait {
+    pub trait_name: Intern<String>,
+    pub trait_name_span: SpanId,
+    /// Field definitions for the provided trait.
+    /// e.g. `is_empty: self.count > 0` → `(is_empty, <expr>)`.
+    pub fields: Vec<(Intern<String>, Typed<Expr>)>,
+}
+
+impl Hash for ProvidedTrait {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.trait_name.hash(state);
+        self.trait_name_span.hash(state);
+        for (k, v) in &self.fields {
+            k.hash(state);
+            v.hash(state);
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Declare {
     pub doc_comment: Option<DocComment>,
     pub name: Intern<String>,
     pub name_span: SpanId,
+    /// Full declaration site from the tag name through the `is`/`has` value.
+    pub span: SpanId,
     pub params: Option<Parameters>,
     pub resolved_type: Option<Ty>,
     pub attributes: DeclareAttributes,
     pub value: DeclareValue,
-    pub marker_bindings: Vec<MarkerBinding>,
+    pub provided_traits: Vec<ProvidedTrait>,
+    pub trait_bounds: Vec<TraitBound>,
 }
 
 impl Declare {
@@ -30,11 +58,13 @@ impl Declare {
             doc_comment: None,
             name,
             name_span,
+            span: name_span,
             params: None,
             resolved_type: None,
             attributes: DeclareAttributes::default(),
             value,
-            marker_bindings: Vec::new(),
+            provided_traits: Vec::new(),
+            trait_bounds: Vec::new(),
         }
     }
 
@@ -73,32 +103,9 @@ impl Declare {
         self
     }
 
-    pub fn with_marker_bindings(mut self, bindings: Vec<MarkerBinding>) -> Self {
-        self.marker_bindings = bindings;
+    pub fn with_provided_traits(mut self, traits: Vec<ProvidedTrait>) -> Self {
+        self.provided_traits = traits;
         self
-    }
-}
-
-impl std::fmt::Display for Declare {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.name.as_str())?;
-        if let Some(params) = &self.params {
-            write!(f, "(")?;
-            let mut first = true;
-            for (k, v) in params {
-                if !first {
-                    write!(f, ", ")?;
-                }
-                first = false;
-                write!(f, "{}{v}", k.as_str())?;
-            }
-            write!(f, ")")?;
-        }
-        let keyword = match &self.value {
-            DeclareValue::Record(_) => " has",
-            _ => " is",
-        };
-        write!(f, "{keyword} {}", self.value)
     }
 }
 
@@ -107,6 +114,7 @@ impl Hash for Declare {
         self.doc_comment.hash(state);
         self.name.hash(state);
         self.name_span.hash(state);
+        self.span.hash(state);
         match &self.params {
             None => 0u8.hash(state),
             Some(params) => {
@@ -118,6 +126,6 @@ impl Hash for Declare {
             }
         }
         self.value.hash(state);
-        self.marker_bindings.hash(state);
+        self.provided_traits.hash(state);
     }
 }

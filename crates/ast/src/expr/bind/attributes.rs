@@ -1,45 +1,5 @@
-use crate::expr::{Expr, Literal, Typed};
+use crate::expr::{Expr, Typed};
 use internment::Intern;
-
-/// Target operating systems for `#[os({ ... })]` cfg filters.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum OsTarget {
-    Linux,
-    MacOS,
-    Windows,
-    Unknown,
-}
-
-impl OsTarget {
-    pub(crate) fn is_current_host(&self) -> bool {
-        match self {
-            OsTarget::Linux => cfg!(target_os = "linux"),
-            OsTarget::MacOS => cfg!(target_os = "macos"),
-            OsTarget::Windows => cfg!(target_os = "windows"),
-            OsTarget::Unknown => false,
-        }
-    }
-}
-
-/// Target CPU architectures for `#[arch({ ... })]` cfg filters.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum ArchTarget {
-    X86_64,
-    Arm64,
-    Wasm32,
-    Unknown,
-}
-
-impl ArchTarget {
-    pub(crate) fn is_current_host(&self) -> bool {
-        match self {
-            ArchTarget::X86_64 => cfg!(target_arch = "x86_64"),
-            ArchTarget::Arm64 => cfg!(target_arch = "aarch64"),
-            ArchTarget::Wasm32 => cfg!(target_arch = "wasm32"),
-            ArchTarget::Unknown => false,
-        }
-    }
-}
 
 /// A simple expression over parameter names for complexity annotations.
 ///
@@ -145,7 +105,7 @@ impl Complexity {
 /// A single item inside `#[...]` — either a function call or a bare identifier flag.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum AttributeItem {
-    /// A call like `os(['linux'])`
+    /// A call like `complexity(Linear(n))`
     Call {
         name: Intern<String>,
         name_span: crate::span::SpanId,
@@ -164,10 +124,6 @@ pub struct BindAttributes {
     pub test: bool,
     /// Always inline (`#[inline]`).
     pub inline_always: bool,
-    /// OS filter: `#[os({ linux, macos })]`. `None` means no filter (included on all platforms).
-    pub os: Option<Vec<OsTarget>>,
-    /// Arch filter: `#[arch({ x86_64, arm64 })]`. `None` means no filter.
-    pub arch: Option<Vec<ArchTarget>>,
     /// Strip in release builds (`#[debug]`).
     pub debug_only: bool,
     /// Time complexity annotation (`#[complexity(...)]`). `None` means unannotated.
@@ -179,24 +135,9 @@ pub struct BindAttributes {
 }
 
 impl BindAttributes {
-    /// Returns `true` if this bind should be compiled for the current build host.
-    pub fn matches_current_platform(&self) -> bool {
-        if let Some(targets) = &self.os
-            && !targets.iter().any(|t| t.is_current_host())
-        {
-            return false;
-        }
-        if let Some(arches) = &self.arch
-            && !arches.iter().any(|a| a.is_current_host())
-        {
-            return false;
-        }
-        true
-    }
-
     /// Extract compiler-known intrinsic attributes from `raw_attributes` into typed fields.
     /// Leaves unknown attributes in `raw_attributes` for tooling to consume.
-    /// Should be called after parsing, before platform filtering.
+    /// Should be called after parsing.
     pub fn extract_intrinsic_attributes(&mut self) {
         let Some(items) = &self.raw_attributes else {
             return;
@@ -207,18 +148,11 @@ impl BindAttributes {
 
         for item in items {
             match item {
-                AttributeItem::Call { name, args, .. } => match name.as_str() {
-                    "os" => {
-                        self.os = extract_os_targets(args);
-                    }
-                    "arch" => {
-                        self.arch = extract_arch_targets(args);
-                    }
-                    "complexity" => {
+                AttributeItem::Call { name, args, .. } => {
+                    if name.as_str() == "complexity" {
                         self.complexity = extract_complexity(args);
                     }
-                    _ => {}
-                },
+                }
                 AttributeItem::Flag { name, .. } => match name.as_str() {
                     "debug" => self.debug_only = true,
                     "test" => self.test = true,
@@ -228,42 +162,6 @@ impl BindAttributes {
             }
         }
     }
-}
-
-pub(crate) fn extract_os_targets(args: &[Typed<Expr>]) -> Option<Vec<OsTarget>> {
-    let list = args.first()?;
-    let exprs = match &list.value {
-        Expr::List(elems) => elems,
-        _ => return None,
-    };
-    let mut targets = Vec::with_capacity(exprs.len());
-    for elem in exprs {
-        match &elem.value {
-            Expr::Lit(Literal::String(s)) if *s == "linux" => targets.push(OsTarget::Linux),
-            Expr::Lit(Literal::String(s)) if *s == "macOS" => targets.push(OsTarget::MacOS),
-            Expr::Lit(Literal::String(s)) if *s == "windows" => targets.push(OsTarget::Windows),
-            _ => targets.push(OsTarget::Unknown),
-        }
-    }
-    Some(targets)
-}
-
-pub(crate) fn extract_arch_targets(args: &[Typed<Expr>]) -> Option<Vec<ArchTarget>> {
-    let list = args.first()?;
-    let exprs = match &list.value {
-        Expr::List(elems) => elems,
-        _ => return None,
-    };
-    let mut targets = Vec::with_capacity(exprs.len());
-    for elem in exprs {
-        match &elem.value {
-            Expr::Lit(Literal::String(s)) if *s == "x86_64" => targets.push(ArchTarget::X86_64),
-            Expr::Lit(Literal::String(s)) if *s == "arm64" => targets.push(ArchTarget::Arm64),
-            Expr::Lit(Literal::String(s)) if *s == "wasm32" => targets.push(ArchTarget::Wasm32),
-            _ => targets.push(ArchTarget::Unknown),
-        }
-    }
-    Some(targets)
 }
 
 pub(crate) fn extract_complexity(args: &[Typed<Expr>]) -> Option<Complexity> {

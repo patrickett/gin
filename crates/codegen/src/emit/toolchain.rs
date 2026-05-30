@@ -2,7 +2,6 @@
 
 use diagnostic::codegen::CodegenSymptom;
 use diagnostic::{Diagnostic, DiagnosticLike};
-use span::SpanId;
 use std::path::Path;
 use std::process::Command;
 
@@ -27,7 +26,7 @@ pub(crate) fn find_tool(name: &str, symptoms: &mut Vec<Diagnostic>) -> Option<St
         CodegenSymptom::Internal {
             message: format!("'{name}' not found. Install LLVM or add it to PATH."),
         }
-        .into_diagnostic(SpanId::INVALID),
+        .into_diagnostic(diagnostic::Span::new(0, 0)),
     );
     None
 }
@@ -58,7 +57,7 @@ pub(crate) fn find_cc(symptoms: &mut Vec<Diagnostic>) -> Option<String> {
                 CodegenSymptom::Internal {
                     message: "No C compiler found. Install LLVM or set $CC.".into(),
                 }
-                .into_diagnostic(SpanId::INVALID),
+                .into_diagnostic(diagnostic::Span::new(0, 0)),
             );
             None
         }
@@ -82,7 +81,7 @@ pub(crate) fn mlir_to_llvm_ir(mlir_text: &str, symptoms: &mut Vec<Diagnostic>) -
                 CodegenSymptom::Internal {
                     message: format!("Failed to run mlir-translate: {e}"),
                 }
-                .into_diagnostic(SpanId::INVALID),
+                .into_diagnostic(diagnostic::Span::new(0, 0)),
             );
             return None;
         }
@@ -94,7 +93,7 @@ pub(crate) fn mlir_to_llvm_ir(mlir_text: &str, symptoms: &mut Vec<Diagnostic>) -
             CodegenSymptom::Internal {
                 message: format!("Failed to write to mlir-translate stdin: {e}"),
             }
-            .into_diagnostic(SpanId::INVALID),
+            .into_diagnostic(diagnostic::Span::new(0, 0)),
         );
         return None;
     }
@@ -106,7 +105,7 @@ pub(crate) fn mlir_to_llvm_ir(mlir_text: &str, symptoms: &mut Vec<Diagnostic>) -
                 CodegenSymptom::Internal {
                     message: format!("mlir-translate failed: {e}"),
                 }
-                .into_diagnostic(SpanId::INVALID),
+                .into_diagnostic(diagnostic::Span::new(0, 0)),
             );
             return None;
         }
@@ -121,7 +120,7 @@ pub(crate) fn mlir_to_llvm_ir(mlir_text: &str, symptoms: &mut Vec<Diagnostic>) -
                     output.status.code().unwrap_or(-1)
                 ),
             }
-            .into_diagnostic(SpanId::INVALID),
+            .into_diagnostic(diagnostic::Span::new(0, 0)),
         );
         return None;
     }
@@ -133,7 +132,7 @@ pub(crate) fn mlir_to_llvm_ir(mlir_text: &str, symptoms: &mut Vec<Diagnostic>) -
                 CodegenSymptom::Internal {
                     message: format!("mlir-translate output is not UTF-8: {e}"),
                 }
-                .into_diagnostic(SpanId::INVALID),
+                .into_diagnostic(diagnostic::Span::new(0, 0)),
             );
             None
         }
@@ -154,7 +153,7 @@ pub(crate) fn compile_llvm_ir_to_object(
             CodegenSymptom::Internal {
                 message: format!("Failed to write LLVM IR: {e}"),
             }
-            .into_diagnostic(SpanId::INVALID),
+            .into_diagnostic(diagnostic::Span::new(0, 0)),
         );
         return false;
     }
@@ -183,7 +182,7 @@ pub(crate) fn compile_llvm_ir_to_object(
                 CodegenSymptom::Internal {
                     message: format!("Failed to run '{cc}': {e}"),
                 }
-                .into_diagnostic(SpanId::INVALID),
+                .into_diagnostic(diagnostic::Span::new(0, 0)),
             );
             let _ = std::fs::remove_file(&ll_path);
             return false;
@@ -201,7 +200,7 @@ pub(crate) fn compile_llvm_ir_to_object(
                     result.status.code().unwrap_or(-1)
                 ),
             }
-            .into_diagnostic(SpanId::INVALID),
+            .into_diagnostic(diagnostic::Span::new(0, 0)),
         );
         return false;
     }

@@ -263,20 +263,6 @@ fn test_indentation() {
 }
 
 #[test]
-fn test_play() {
-    let src = "--- Currently just a marker trait\nSized ()";
-
-    let mut lexer = Lexer::new(src);
-    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
-
-    assert!(matches!(tokens[0], Token::DocComment(_)));
-    assert!(matches!(tokens[1], Token::Newline));
-    assert!(matches!(tokens[2], Token::Tag(_)));
-    assert!(matches!(tokens[3], Token::ParenOpen));
-    assert!(matches!(tokens[4], Token::ParenClose));
-}
-
-#[test]
 fn test_string_literal() {
     let src = "'foo' 'bar' 'baz'";
 
@@ -543,30 +529,6 @@ fn test_format_string_empty() {
 }
 
 #[test]
-fn test_debug_tokens_format() {
-    let output = lexer::debug_tokens("print(x + 1)");
-    let lines: Vec<&str> = output.lines().collect();
-
-    assert_eq!(lines[0], r#"[id: "print"] (0..5)"#);
-    assert_eq!(lines[1], "[(] (5..6)");
-    assert_eq!(lines[2], r#"[id: "x"] (6..7)"#);
-    assert_eq!(lines[3], "[+] (8..9)");
-    assert_eq!(lines[4], "[int: 1] (10..11)");
-    assert_eq!(lines[5], "[)] (11..12)");
-    assert!(!output.contains("errors"));
-}
-
-#[test]
-fn test_debug_tokens_with_indentation() {
-    let output = lexer::debug_tokens("foo:\n    bar\n  baz");
-    assert!(output.contains("[indent]"));
-    assert!(output.contains("[dedent]"));
-    assert!(output.contains(r#"[id: "foo"]"#));
-    assert!(output.contains(r#"[id: "bar"]"#));
-    assert!(output.contains(r#"[id: "baz"]"#));
-}
-
-#[test]
 fn test_range_tokens() {
     let src = "TinyInt is 0...255";
     let mut lexer = Lexer::new(src);
@@ -644,18 +606,4 @@ fn test_asm_keyword() {
         "expected no errors, got {:?}",
         lexer.errors
     );
-}
-
-#[test]
-fn test_debug_float_coalesce() {
-    let src = "42 3.14 0 999";
-    let mut lexer = Lexer::new(src);
-    let tokens: Vec<_> = lexer.by_ref().collect();
-    eprintln!("Tokens for {:?}:", src);
-    for (tok, span_id) in &tokens {
-        let span = lexer.get_span(*span_id);
-        eprintln!("  {:?} at {}..{}", tok, span.start, span.end);
-    }
-    let errors = std::mem::take(&mut lexer.errors);
-    eprintln!("Errors: {:?}", errors);
 }

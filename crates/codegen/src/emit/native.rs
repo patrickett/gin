@@ -7,12 +7,9 @@
 
 use super::Profile;
 use super::toolchain;
-use crate::build_module_with_context;
-use ast::FileAst;
 use diagnostic::codegen::CodegenSymptom;
 use diagnostic::{Diagnostic, DiagnosticLike};
 use melior::{Context, dialect::DialectRegistry, ir::Module, pass, utility};
-use span::SpanId;
 use std::path::Path;
 use std::process::Command;
 
@@ -54,7 +51,7 @@ fn optimize_mlir(
                 CodegenSymptom::Internal {
                     message: format!("Optimization pass failed: {e}"),
                 }
-                .into_diagnostic(SpanId::INVALID),
+                .into_diagnostic(diagnostic::Span::new(0, 0)),
             );
             false
         }
@@ -79,7 +76,7 @@ fn lower_to_llvm(context: &Context, module: &mut Module, symptoms: &mut Vec<Diag
                 CodegenSymptom::Internal {
                     message: format!("MLIR pass pipeline failed: {e}"),
                 }
-                .into_diagnostic(SpanId::INVALID),
+                .into_diagnostic(diagnostic::Span::new(0, 0)),
             );
             false
         }
@@ -152,7 +149,7 @@ pub fn native_from_mlir(
                 CodegenSymptom::Internal {
                     message: "Failed to re-parse MLIR for native compilation".into(),
                 }
-                .into_diagnostic(SpanId::INVALID),
+                .into_diagnostic(diagnostic::Span::new(0, 0)),
             );
             return (false, symptoms);
         }
@@ -203,7 +200,7 @@ pub fn native_from_module(
                 CodegenSymptom::Internal {
                     message: "Failed to re-parse MLIR after fixing llvm.call segments".into(),
                 }
-                .into_diagnostic(SpanId::INVALID),
+                .into_diagnostic(diagnostic::Span::new(0, 0)),
             );
             return (false, symptoms);
         }
@@ -224,62 +221,40 @@ pub fn native_from_module(
     (ok, symptoms)
 }
 
-/// Used for `--emit mlir` and other cases where only the textual IR is needed.
-pub fn build_module_text(
-    ast: &mut FileAst,
+pub fn build_module_text_from_typed(
+    typed: &typed_ast::TypedFileAst,
     source: &str,
     filename: &str,
+    trait_registry: Option<&typecheck::compile_time_trait::CompileTimeTraitRegistry>,
 ) -> (Option<String>, Vec<Diagnostic>) {
     let context = create_native_context();
-    let (source_module, symptoms) =
-        build_module_with_context(&context, ast, None, source, filename);
-    let text = source_module.map(|m| m.as_operation().to_string());
+    let (module, symptoms) = crate::lower::build_module_from_typed_ast(
+        &context,
+        typed,
+        source,
+        filename,
+        trait_registry,
+    );
+    let text = module.map(|m| m.as_operation().to_string());
     (text, symptoms)
 }
 
-pub fn build_module_text_from_typed(
-    typed: &ast::typed::TypedFileAst,
-    source: &str,
-    filename: &str,
-) -> (Option<String>, Vec<Diagnostic>) {
-    let context = create_native_context();
-    let module = crate::lower::build_module_from_typed_ast(&context, typed, source, filename);
-    let text = module.map(|m| m.as_operation().to_string());
-    (text, Vec::new())
-}
-
-pub fn compile_to_object(
-    ast: &mut FileAst,
-    obj_path: &Path,
-    profile: Profile,
-    source: &str,
-    filename: &str,
-) -> (bool, Vec<Diagnostic>) {
-    let context = create_native_context();
-    let (source_module, lower_symptoms) =
-        build_module_with_context(&context, ast, None, source, filename);
-    let mut symptoms = lower_symptoms;
-    let Some(source_module) = source_module else {
-        return (false, symptoms);
-    };
-    let (ok, more) = native_from_module(&context, &source_module, obj_path, profile);
-    symptoms.extend(more);
-    (ok, symptoms)
-}
-
 pub fn compile_to_object_from_typed(
-    typed: &ast::typed::TypedFileAst,
+    typed: &typed_ast::TypedFileAst,
     obj_path: &Path,
     profile: Profile,
     source: &str,
     filename: &str,
+    trait_registry: Option<&typecheck::compile_time_trait::CompileTimeTraitRegistry>,
 ) -> (bool, Vec<Diagnostic>) {
     let context = create_native_context();
-    // Re-parse the source to get a FileAst, then use the well-tested codegen path
-    // with the typed AST for type resolution.
-    let mut file_ast = parser::parse_from_str(source);
-    let (module, symptoms) =
-        build_module_with_context(&context, &mut file_ast, Some(typed), source, filename);
+    let (module, symptoms) = crate::lower::build_module_from_typed_ast(
+        &context,
+        typed,
+        source,
+        filename,
+        trait_registry,
+    );
     let Some(module) = module else {
         return (false, symptoms);
     };
@@ -313,7 +288,7 @@ pub fn link_executable(
                 CodegenSymptom::Internal {
                     message: format!("Failed to run linker '{cc}': {e}"),
                 }
-                .into_diagnostic(SpanId::INVALID),
+                .into_diagnostic(diagnostic::Span::new(0, 0)),
             );
             return (false, symptoms);
         }
@@ -328,7 +303,7 @@ pub fn link_executable(
                     result.status.code().unwrap_or(-1)
                 ),
             }
-            .into_diagnostic(SpanId::INVALID),
+            .into_diagnostic(diagnostic::Span::new(0, 0)),
         );
         return (false, symptoms);
     }

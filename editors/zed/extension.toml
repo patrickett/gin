@@ -8,7 +8,7 @@ repository = "https://github.com/patrickett/gin"
 
 [grammars.gin]
 repository = "https://github.com/patrickett/gin"
-rev = "8235ea3448064f9b00d6e1053588912d62460c73"
+rev = "d061ba5b3b33aef1b0bfbc6f5d3e1cd6e0983d36"
 path = "editors/tree-sitter-gin"
 
 [language_servers.ginlsp]

@@ -157,7 +157,7 @@ impl<'a> AstFormatter<'a> {
             DeclareValue::Set(..) => {
                 self.buffer.push_str(" is set");
             }
-            DeclareValue::Range(_, _) | DeclareValue::InRange(_, _) => {
+            DeclareValue::Range(_, _) | DeclareValue::InRange(_, _) | DeclareValue::When(_) => {
                 self.buffer.push_str(" is ");
                 let span = st.get(declare.name_span);
                 let end = src[span.start..]
@@ -193,11 +193,9 @@ impl<'a> AstFormatter<'a> {
             self.buffer.push_str(name.as_str());
             match kind {
                 ParameterKind::Generic => {}
-                ParameterKind::Tagged(expr) => {
+                ParameterKind::Tagged(sp) => {
                     self.buffer.push(' ');
-                    if let Some(te) = expr.value.as_type_expr() {
-                        self.buffer.push_str(&type_text(&te));
-                    }
+                    self.buffer.push_str(&type_text(&sp.value));
                 }
                 ParameterKind::Default(expr) => {
                     let text = span_text(expr, st, src);
@@ -231,10 +229,8 @@ impl<'a> AstFormatter<'a> {
                     self.buffer.push(' ');
                     match fkind {
                         ParameterKind::Generic => {}
-                        ParameterKind::Tagged(expr) => {
-                            if let Some(te) = expr.value.as_type_expr() {
-                                self.buffer.push_str(&type_text(&te));
-                            }
+                        ParameterKind::Tagged(sp) => {
+                            self.buffer.push_str(&type_text(&sp.value));
                         }
                         ParameterKind::Default(expr) => {
                             let text = span_text(expr, st, src);
@@ -257,11 +253,9 @@ impl<'a> AstFormatter<'a> {
             self.buffer.push_str(name.as_str());
             match kind {
                 ParameterKind::Generic => {}
-                ParameterKind::Tagged(expr) => {
+                ParameterKind::Tagged(sp) => {
                     self.buffer.push(' ');
-                    if let Some(te) = expr.value.as_type_expr() {
-                        self.buffer.push_str(&type_text(&te));
-                    }
+                    self.buffer.push_str(&type_text(&sp.value));
                 }
                 ParameterKind::Default(expr) => {
                     let text = span_text(expr, st, src);
@@ -300,6 +294,10 @@ impl<'a> AstFormatter<'a> {
                 }
                 ImportSource::LocalBundle(b) => {
                     self.buffer.push_str(b.root.as_str());
+                    for seg in &b.path_segments {
+                        self.buffer.push('.');
+                        self.buffer.push_str(seg.as_str());
+                    }
                     self.buffer.push_str(".(");
                     let mut members: Vec<&BundleExportImport> = b.members.iter().collect();
                     members.sort_by_key(|m| m.export.as_str().to_lowercase());
@@ -318,6 +316,19 @@ impl<'a> AstFormatter<'a> {
                 ImportSource::CurrentModule { member } => {
                     self.buffer.push_str(member.export.as_str());
                     if let Some(alias) = &member.alias {
+                        self.buffer.push_str(" as ");
+                        self.buffer.push_str(alias.as_str());
+                    }
+                }
+                ImportSource::LocalMember(m) => {
+                    if let Some(p) = &m.local_path {
+                        self.buffer.push('\'');
+                        self.buffer.push_str(&p.to_string_lossy());
+                        self.buffer.push('\'');
+                        self.buffer.push('.');
+                    }
+                    self.buffer.push_str(m.member.export.as_str());
+                    if let Some(alias) = &m.member.alias {
                         self.buffer.push_str(" as ");
                         self.buffer.push_str(alias.as_str());
                     }
@@ -346,7 +357,10 @@ impl<'a> AstFormatter<'a> {
             self.buffer.push(' ');
             self.buffer.push_str(&text);
         }
-        self.buffer.push_str(": ");
+        let has_colon = !matches!(bind.value(), BindValue::Unassigned);
+        if has_colon {
+            self.buffer.push_str(": ");
+        }
         let prefix_end = self.buffer.len();
 
         match bind.value() {
@@ -378,9 +392,16 @@ impl<'a> AstFormatter<'a> {
             BindValue::Extern => {
                 self.buffer.push_str("extern");
             }
+            BindValue::Unassigned => {
+                // No value for unassigned binds — type annotation already printed.
+            }
         }
 
-        let is_single_line = !self.buffer[prefix_end.saturating_sub(1)..].contains('\n');
+        let is_single_line = if has_colon {
+            !self.buffer[prefix_end.saturating_sub(1)..].contains('\n')
+        } else {
+            true
+        };
         let sl = self.buffer[..prefix_end].matches('\n').count();
         if self.config.align_binds && matches!(bind.value(), BindValue::Expr(_)) && is_single_line {
             let nid = self.next_id();
@@ -487,6 +508,16 @@ fn import_display_key(mi: &ModuleImport) -> String {
             }
             s
         }
+        ImportSource::LocalMember(m) => {
+            let mut s = m
+                .local_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            s.push('.');
+            s.push_str(m.member.export.as_str().to_lowercase().as_str());
+            s
+        }
     }
 }
 
@@ -523,6 +554,10 @@ fn variant_name(expr: &TypeExpr) -> String {
         TypeExpr::Pointer(inner) => variant_name(&inner.value),
         TypeExpr::Ref { inner, .. } => variant_name(&inner.value),
         TypeExpr::Unit => String::new(),
+        TypeExpr::InRange { .. }
+        | TypeExpr::ListEmpty
+        | TypeExpr::ListCons { .. }
+        | TypeExpr::Tuple(_) => ast_format::type_expr::format_type_surface(expr),
     }
 }
 
@@ -552,6 +587,10 @@ fn type_text(expr: &TypeExpr) -> String {
             s
         }
         TypeExpr::Unit => String::from("()"),
+        TypeExpr::InRange { .. }
+        | TypeExpr::ListEmpty
+        | TypeExpr::ListCons { .. }
+        | TypeExpr::Tuple(_) => ast_format::type_expr::format_type_surface(expr),
     }
 }
 

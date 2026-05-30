@@ -25,7 +25,7 @@ pub use span::{Span, SpanId, SpanTable, Spanned};
 /// A secondary span label attached to a diagnostic.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RelatedSpan {
-    pub span_id: SpanId,
+    pub span: Span,
     pub label: String,
 }
 
@@ -37,7 +37,8 @@ pub struct Diagnostic {
     /// latter is rendered as a separate `help: …` line (LSP and ariadne).
     pub help_on_span: Option<String>,
     pub help: Option<String>,
-    pub span_id: SpanId,
+    /// Byte range in the source file this diagnostic applies to.
+    pub span: Span,
     pub category: Category,
     pub related: Vec<RelatedSpan>,
 }
@@ -69,9 +70,9 @@ pub trait DiagnosticLike: Sized {
         Category::Flaw
     }
 
-    /// Convert into a full `Diagnostic` anchored at the given span.
+    /// Convert into a full `Diagnostic` anchored at the given source byte range.
     #[must_use]
-    fn into_diagnostic(self, span_id: SpanId) -> Diagnostic
+    fn into_diagnostic(self, span: Span) -> Diagnostic
     where
         Self: Into<DiagnosticCode>,
     {
@@ -86,9 +87,18 @@ pub trait DiagnosticLike: Sized {
             help,
             category,
             code,
-            span_id,
+            span,
             related: Vec::new(),
         }
+    }
+
+    /// Resolve a [`SpanId`] through a table and build the diagnostic.
+    #[must_use]
+    fn into_diagnostic_id(self, span_id: SpanId, span_table: &SpanTable) -> Diagnostic
+    where
+        Self: Into<DiagnosticCode>,
+    {
+        self.into_diagnostic(span_table.get(span_id))
     }
 }
 
@@ -99,13 +109,12 @@ impl Diagnostic {
     }
 
     /// Pretty-print this diagnostic using ariadne with source context.
-    pub fn print(&self, span_table: &SpanTable, source: &str, filename: &str) {
+    pub fn print(&self, source: &str, filename: &str) {
         use ariadne::{Label, Report, ReportKind, Source};
         use std::ops::Range;
 
-        let span = span_table.get(self.span_id);
-        let start = span.start;
-        let end = span.end;
+        let start = self.span.start;
+        let end = self.span.end;
 
         // Clamp span to source bounds
         let len = source.len();
@@ -120,7 +129,7 @@ impl Diagnostic {
         let mut builder = Report::build(kind, (filename, span.clone())).with_message(msg);
 
         // Let the domain type do custom rendering if needed.
-        if self.code.render_custom(self, span_table, source, filename) {
+        if self.code.render_custom(self, source, filename) {
             return;
         }
 
@@ -196,9 +205,8 @@ impl Diagnostic {
 
         // Render related spans as secondary labels.
         for related in &self.related {
-            let rspan = span_table.get(related.span_id);
-            let rstart = rspan.start.min(len);
-            let rend = rspan.end.max(rstart).min(len);
+            let rstart = related.span.start.min(len);
+            let rend = related.span.end.max(rstart).min(len);
             if rstart < rend {
                 let label =
                     Label::new((filename, rstart..rend)).with_message(related.label.as_str());

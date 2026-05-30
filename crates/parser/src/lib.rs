@@ -1,14 +1,22 @@
 #![deny(unsafe_code)]
-#![warn(clippy::correctness, clippy::suspicious, clippy::style, clippy::complexity, clippy::perf)]
+#![warn(
+    clippy::correctness,
+    clippy::suspicious,
+    clippy::style,
+    clippy::complexity,
+    clippy::perf
+)]
 //! Parser for the Gin language.
 //!
 //! This crate contains the recursive-descent parser and content hashing.
 //! All public functions are pure — no Salsa or database dependency is required.
 
 pub mod content_hash;
+pub mod gin_walk;
 mod cursor;
 pub mod declare;
 pub mod expr;
+mod int_range;
 mod impl_block;
 pub mod module;
 pub mod params;
@@ -16,6 +24,7 @@ pub mod path;
 pub mod query;
 pub mod tag;
 mod top_level;
+pub mod type_annotation;
 pub mod unescape;
 
 pub use cursor::ParseError;
@@ -30,4 +39,5 @@ pub use query::{
 };
 
 // Re-export module discovery
+pub use gin_walk::{collect_gin_files_under, is_gitignored};
 pub use module::{ModuleTree, discover_module, discover_module_at};

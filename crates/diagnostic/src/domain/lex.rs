@@ -1,4 +1,4 @@
-use crate::{Category, Diagnostic, DiagnosticLike, SpanTable};
+use crate::{Category, Diagnostic, DiagnosticLike};
 
 #[derive(Default, Debug, Clone, PartialEq, Eq, Hash, strum::AsRefStr)]
 #[non_exhaustive]
@@ -42,13 +42,7 @@ impl DiagnosticLike for LexSymptom {
 
 impl LexSymptom {
     /// Custom rendering for unclosed strings: inserts a suggestion quote into the source.
-    pub fn render_custom(
-        &self,
-        diag: &Diagnostic,
-        span_table: &SpanTable,
-        source: &str,
-        filename: &str,
-    ) -> bool {
+    pub fn render_custom(&self, diag: &Diagnostic, source: &str, filename: &str) -> bool {
         if !matches!(self, Self::UnclosedString) {
             return false;
         }
@@ -56,10 +50,9 @@ impl LexSymptom {
         use ariadne::{Label, Report, ReportKind, Source};
         use std::ops::Range;
 
-        let span = span_table.get(diag.span_id);
         let len = source.len();
-        let start = span.start.min(len);
-        let end = span.end.max(start).min(len);
+        let start = diag.span.start.min(len);
+        let end = diag.span.end.max(start).min(len);
 
         if start >= end {
             return false;

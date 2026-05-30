@@ -1,11 +1,7 @@
-use crate::{ArchTarget, AttributeItem, OsTarget, extract_arch_targets, extract_os_targets};
+use crate::AttributeItem;
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct DeclareAttributes {
-    /// OS filter: `#[os({ linux, macos })]`. `None` means no filter (included on all platforms).
-    pub os: Option<Vec<OsTarget>>,
-    /// Arch filter: `#[arch({ x86_64, arm64 })]`. `None` means no filter.
-    pub arch: Option<Vec<ArchTarget>>,
     /// Raw parsed attributes before semantic extraction.
     /// `None` means no `#[...]` block was present at all.
     /// `Some(vec![])` means an empty `#[]` was present.
@@ -13,23 +9,8 @@ pub struct DeclareAttributes {
 }
 
 impl DeclareAttributes {
-    /// Returns `true` if this declaration should be compiled for the current build host.
-    pub fn matches_current_platform(&self) -> bool {
-        if let Some(targets) = &self.os
-            && !targets.iter().any(|t| t.is_current_host())
-        {
-            return false;
-        }
-        if let Some(arches) = &self.arch
-            && !arches.iter().any(|a| a.is_current_host())
-        {
-            return false;
-        }
-        true
-    }
-
     /// Extract compiler-known intrinsic attributes from `raw_attributes` into typed fields.
-    /// Should be called after parsing, before platform filtering.
+    /// Should be called after parsing.
     pub fn extract_intrinsic_attributes(&mut self) {
         let Some(items) = &self.raw_attributes else {
             return;
@@ -39,20 +20,12 @@ impl DeclareAttributes {
         }
 
         for item in items {
-            if let AttributeItem::Call { name, args, .. } = item {
-                match name.as_str() {
-                    "os" => {
-                        self.os = extract_os_targets(args);
-                    }
-                    "arch" => {
-                        self.arch = extract_arch_targets(args);
-                    }
-                    _ => {}
-                }
+            if let AttributeItem::Call {
+                name: _, args: _, ..
+            } = item
+            {
+                // No intrinsic call attributes for declares currently.
             } else if let AttributeItem::Flag { name: _, .. } = item {
-                // match name.as_str() {
-                //     _ => {}
-                // }
             }
         }
     }

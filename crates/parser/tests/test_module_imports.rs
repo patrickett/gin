@@ -176,10 +176,11 @@ fn test_empty_directories_not_discovered_as_children() {
 }
 
 #[test]
-fn test_target_directory_skipped() {
+fn test_gitignored_target_directory_skipped() {
     let proj = TempProject::new("skip_target");
+    proj.add_file(".gitignore", "target/\n");
     proj.add_file("src/main.gin", "main\n");
-    proj.add_file("target/output.o", "binary");
+    proj.add_file("target/build.gin", "x := 1\n");
 
     let tree = discover_module(proj.path()).unwrap();
     assert!(!tree.children.contains_key("target"));
@@ -342,25 +343,17 @@ fn test_has_any_files() {
 }
 
 #[test]
-fn test_use_path_bundle_file_parses() {
-    let src = "use './file.gin'.(Item1, Item2)\nmain:\nreturn\n";
+fn test_use_path_member_import_parses() {
+    let src = "use './folder'.Item1\nmain:\nreturn\n";
     let ast = parse_from_str(src);
 
     assert_eq!(ast.uses().len(), 1);
-    let import = &ast.uses()[0];
-    assert_eq!(import.0.len(), 1);
-
-    match &import.0[0].source {
-        ImportSource::LocalBundle(b) => {
-            assert_eq!(b.local_path, Some(std::path::PathBuf::from("./file.gin")));
-            assert_eq!(b.root.as_str(), "");
-            assert_eq!(b.members.len(), 2);
-            assert_eq!(b.members[0].export.as_str(), "Item1");
-            assert!(b.members[0].alias.is_none());
-            assert_eq!(b.members[1].export.as_str(), "Item2");
-            assert!(b.members[1].alias.is_none());
+    match &ast.uses()[0].0[0].source {
+        ImportSource::LocalMember(m) => {
+            assert_eq!(m.local_path, Some(std::path::PathBuf::from("./folder")));
+            assert_eq!(m.member.export.as_str(), "Item1");
         }
-        _ => panic!("expected LocalBundle"),
+        _ => panic!("expected LocalMember"),
     }
 }
 
@@ -386,15 +379,13 @@ fn test_use_path_bundle_folder_parses() {
 
 #[test]
 fn test_use_path_bundle_with_alias_parses() {
-    let src = "use './file.gin'.(Item as Alias)\nmain:\nreturn\n";
+    let src = "use './folder'.(Item as Alias)\nmain:\nreturn\n";
     let ast = parse_from_str(src);
 
     assert_eq!(ast.uses().len(), 1);
-    let import = &ast.uses()[0];
-
-    match &import.0[0].source {
+    match &ast.uses()[0].0[0].source {
         ImportSource::LocalBundle(b) => {
-            assert_eq!(b.local_path, Some(std::path::PathBuf::from("./file.gin")));
+            assert_eq!(b.local_path, Some(std::path::PathBuf::from("./folder")));
             assert_eq!(b.members.len(), 1);
             assert_eq!(b.members[0].export.as_str(), "Item");
             assert_eq!(b.members[0].alias.unwrap().as_str(), "Alias");

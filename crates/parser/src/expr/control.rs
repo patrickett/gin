@@ -1,38 +1,15 @@
 use lexer::Token;
 
 use ast::{
-    Expr, FnCall, ForInLoop, IfCondition, IfExpr, Loop, ModPath, Return, Spanned, SubSpan,
+    Expr, FnCall, ForInLoop, IfCondition, IfExpr, Loop, ModPath, Return, SpanId, Spanned, SubSpan,
     TypeExpr, Typed, WhenArm, WhenExpr, WhileLoop,
 };
 
 use super::ExprFn;
+use super::body::parse_body_exprs;
 use crate::cursor::TokenCursor;
 use crate::expr::literal::parse_literal;
 use crate::tag::parse_pattern_type_expr;
-
-pub(crate) fn can_start_expr(token: &Token) -> bool {
-    // Note: `Token::Return` is intentionally excluded — `return` after `if` belongs to
-    // `parse_if_expr`'s trailing `parse_return`, not the indented `parse_body_exprs` block.
-    matches!(
-        token,
-        Token::Id(_)
-            | Token::Tag(_)
-            | Token::Int(_)
-            | Token::Float(_)
-            | Token::String(_)
-            | Token::SelfInstance
-            | Token::Minus
-            | Token::At
-            | Token::Caret
-            | Token::Star
-            | Token::ParenOpen
-            | Token::If
-            | Token::When
-            | Token::For
-            | Token::While
-            | Token::FormatStringDelim
-    )
-}
 
 /// Parse a `for` binder using the same token shape as before (ids and `(id, …)` only).
 /// Produces `Expr` so the AST matches the unified-syntax direction without routing
@@ -100,45 +77,6 @@ fn parse_for_pattern(cursor: &mut TokenCursor) -> Option<Typed<Expr>> {
     }
 }
 
-fn parse_body_exprs(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Vec<Typed<Expr>> {
-    let mut exprs = Vec::new();
-    loop {
-        super::body_trivia::skip_expr_body_trivia(cursor);
-        match cursor.peek() {
-            Some(t) if can_start_expr(t) => {
-                // Fast path: in body context, Id followed by : or := is always a bind.
-                // This bypasses the speculative looks_like_bind + checkpoint/rewind in parse_atom,
-                // eliminating speculative parse_bind calls for body binds.
-                if matches!(t, Token::Id(_)) {
-                    cursor.skip_newlines();
-                    if matches!(cursor.peek_at(1), Some(Token::Colon) | Some(Token::ColonEq)) {
-                        let start_pos = cursor.pos();
-                        if let Some(bind) = super::bind::parse_bind(cursor, expr_parser) {
-                            let start_span = cursor.span_at(start_pos);
-                            cursor.consume_trailing_newline();
-                            let end_span = cursor.last_consumed_span();
-                            exprs.push(Typed::infer(
-                                Expr::Bind(Box::new(bind)),
-                                cursor.merge_span(start_span, end_span),
-                            ));
-                            continue;
-                        }
-                        // parse_bind failed on Id: — extremely rare, rewind and fall through
-                        cursor.rewind(start_pos);
-                    }
-                }
-
-                cursor.advance_push();
-                let expr = expr_parser(cursor);
-                exprs.push(expr);
-                cursor.advance_pop();
-            }
-            _ => break,
-        }
-    }
-    exprs
-}
-
 pub fn parse_if_expr(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<IfExpr> {
     if !cursor.eat(&Token::If) {
         return None;
@@ -159,6 +97,12 @@ pub fn parse_if_expr(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<If
 
     let has_indent = cursor.eat(&Token::Indent);
     let body = parse_body_exprs(cursor, expr_parser);
+
+    // Detect improperly indented return inside the if body.
+    if has_indent && cursor.is_at(&Token::Return) {
+        let span = cursor.peek_span().unwrap_or(SpanId::INVALID);
+        cursor.error("__gin_hint__:indented-return", span);
+    }
 
     if has_indent {
         cursor.expect(&Token::Dedent);
@@ -183,6 +127,7 @@ pub fn parse_if_expr(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<If
 }
 
 pub fn parse_when_expr(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<WhenExpr> {
+    let start_cp = cursor.checkpoint();
     if !cursor.eat(&Token::When) {
         return None;
     }
@@ -222,11 +167,12 @@ pub fn parse_when_expr(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<
                 parse_when_boolean_arms(cursor, expr_parser, &mut arms);
                 cursor.eat(&Token::Dedent);
             } else if cursor.is_at(&Token::Else) {
+                let else_start = cursor.current_span();
                 cursor.advance();
                 let body = expr_parser(cursor);
                 arms.push(WhenArm::Else(
                     Box::new(body),
-                    SubSpan::new(cursor.last_consumed_span()),
+                    SubSpan::new(cursor.merge_span(else_start, cursor.last_consumed_span())),
                 ));
             }
 
@@ -249,7 +195,10 @@ pub fn parse_when_expr(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<
             if had_continuation_indent {
                 cursor.rewind(continuation_cp);
             }
-            let arms = parse_when_is_arms(cursor, expr_parser)?;
+            let Some(arms) = parse_when_is_arms(cursor, expr_parser) else {
+                cursor.rewind(start_cp);
+                return None;
+            };
             let end_span = cursor.last_consumed_span();
             Some(WhenExpr {
                 subject: Some(Box::new(initial_expr)),
@@ -264,7 +213,10 @@ pub fn parse_when_expr(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<
                 cursor.rewind(continuation_cp);
             }
             cursor.advance();
-            let arms = parse_when_is_arms(cursor, expr_parser)?;
+            let Some(arms) = parse_when_is_arms(cursor, expr_parser) else {
+                cursor.rewind(start_cp);
+                return None;
+            };
             cursor.eat(&Token::Dedent);
             let end_span = cursor.last_consumed_span();
             Some(WhenExpr {
@@ -273,7 +225,10 @@ pub fn parse_when_expr(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<
                 body_span: SubSpan::new(cursor.merge_span(when_start_span, end_span)),
             })
         }
-        _ => None,
+        _ => {
+            cursor.rewind(start_cp);
+            None
+        }
     }
 }
 
@@ -284,11 +239,12 @@ fn parse_when_boolean_arms(cursor: &mut TokenCursor, expr_parser: ExprFn, arms: 
         }
 
         if cursor.is_at(&Token::Else) {
+            let else_start = cursor.current_span();
             cursor.advance();
             let body = expr_parser(cursor);
             arms.push(WhenArm::Else(
                 Box::new(body),
-                SubSpan::new(cursor.last_consumed_span()),
+                SubSpan::new(cursor.merge_span(else_start, cursor.last_consumed_span())),
             ));
             break;
         }
@@ -308,50 +264,114 @@ fn parse_when_boolean_arms(cursor: &mut TokenCursor, expr_parser: ExprFn, arms: 
     }
 }
 
+fn can_start_when_is_pattern(token: Option<&Token<'_>>) -> bool {
+    matches!(
+        token,
+        Some(Token::String(_))
+            | Some(Token::Int(_))
+            | Some(Token::Float(_))
+            | Some(Token::Tag(_))
+            | Some(Token::BracketOpen)
+            | Some(Token::ParenOpen)
+    )
+}
+
+/// One `is` pattern (literal or type expression).
+fn parse_when_is_pattern(
+    cursor: &mut TokenCursor,
+    expr_parser: ExprFn,
+) -> Option<Spanned<TypeExpr>> {
+    if matches!(
+        cursor.peek(),
+        Some(Token::String(_)) | Some(Token::Int(_)) | Some(Token::Float(_))
+    ) && let Some(Spanned {
+        value: lit,
+        span_id: span,
+    }) = parse_literal(cursor)
+    {
+        return Some(Spanned {
+            value: TypeExpr::Literal(lit, span),
+            span_id: span,
+        });
+    }
+    parse_pattern_type_expr(cursor, expr_parser)
+}
+
+/// `is 'a' or 'b' or 'c'` — multiple literal patterns before `then` (one arm body).
+fn parse_when_is_patterns(
+    cursor: &mut TokenCursor,
+    expr_parser: ExprFn,
+) -> Option<Vec<Spanned<TypeExpr>>> {
+    let first = parse_when_is_pattern(cursor, expr_parser)?;
+    let mut patterns = vec![first];
+
+    loop {
+        while cursor.eat(&Token::Indent) || cursor.eat(&Token::Dedent) {}
+        if !cursor.eat(&Token::Or) {
+            break;
+        }
+        while cursor.eat(&Token::Indent) || cursor.eat(&Token::Dedent) {}
+        if !matches!(
+            cursor.peek(),
+            Some(Token::String(_)) | Some(Token::Int(_)) | Some(Token::Float(_))
+        ) {
+            cursor.error("expected literal pattern after 'or'", cursor.current_span());
+            break;
+        }
+        let Some(Spanned {
+            value: lit,
+            span_id: span,
+        }) = parse_literal(cursor)
+        else {
+            cursor.error("expected literal pattern after 'or'", cursor.current_span());
+            break;
+        };
+        patterns.push(Spanned {
+            value: TypeExpr::Literal(lit, span),
+            span_id: span,
+        });
+    }
+
+    Some(patterns)
+}
+
 fn parse_when_is_arms(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Vec<WhenArm>> {
     let mut arms = Vec::new();
     loop {
+        cursor.skip_newlines();
+        cursor.skip_indents();
+
         if cursor.is_at(&Token::Dedent) || cursor.is_eof() {
             break;
         }
 
         if cursor.is_at(&Token::Else) {
+            let else_start = cursor.current_span();
             cursor.advance();
             let body = expr_parser(cursor);
             arms.push(WhenArm::Else(
                 Box::new(body),
-                SubSpan::new(cursor.last_consumed_span()),
+                SubSpan::new(cursor.merge_span(else_start, cursor.last_consumed_span())),
             ));
             break;
         }
 
         if !cursor.eat(&Token::Is) {
             if arms.is_empty() {
-                return None;
+                if !can_start_when_is_pattern(cursor.peek()) {
+                    return None;
+                }
+            } else if !can_start_when_is_pattern(cursor.peek()) {
+                break;
             }
-            break;
+            // Continuation arm after `when subject is` (no repeated `is` per line).
         }
 
-        // Try literal pattern first (e.g. `is 'debug'`), then tag pattern (e.g. `is Some(x)`)
-        let pattern: Spanned<TypeExpr> = if matches!(
-            cursor.peek(),
-            Some(Token::String(_)) | Some(Token::Int(_)) | Some(Token::Float(_))
-        ) {
-            if let Some(Spanned {
-                value: lit,
-                span_id: span,
-            }) = parse_literal(cursor)
-            {
-                Spanned {
-                    value: TypeExpr::Literal(lit, span),
-                    span_id: span,
-                }
-            } else {
-                parse_pattern_type_expr(cursor, expr_parser)?
-            }
-        } else {
-            parse_pattern_type_expr(cursor, expr_parser)?
-        };
+        // After `is` (or a continuation arm), patterns may start on the next indented line.
+        cursor.skip_newlines();
+        cursor.skip_indents();
+
+        let patterns = parse_when_is_patterns(cursor, expr_parser)?;
 
         let indented = cursor.eat(&Token::Indent);
 
@@ -362,16 +382,23 @@ fn parse_when_is_arms(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<V
         }
 
         let body = expr_parser(cursor);
-        let arm_span = cursor.merge_span(pattern.span_id, body.span_id);
-        arms.push(WhenArm::Is {
-            pattern: Box::new(pattern),
-            body: Box::new(body),
-            arm_span: SubSpan::new(arm_span),
-        });
+        let first_span = patterns.first().map(|p| p.span_id).unwrap_or(body.span_id);
+        let arm_span = cursor.merge_span(first_span, body.span_id);
+        for pattern in patterns {
+            arms.push(WhenArm::Is {
+                pattern: Box::new(pattern),
+                body: Box::new(body.clone()),
+                arm_span: SubSpan::new(arm_span),
+            });
+        }
 
         if indented {
             cursor.eat(&Token::Dedent);
         }
+    }
+    // `when subject is` arms are often indented; leave no trailing `Dedent` for top-level.
+    while cursor.is_at(&Token::Dedent) {
+        cursor.advance();
     }
     Some(arms)
 }
@@ -458,4 +485,38 @@ pub fn parse_return(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Ret
         value: Some(Box::new(expr)),
         span_id: span,
     })
+}
+
+#[cfg(test)]
+mod when_parse_tests {
+    use super::parse_when_expr;
+    use crate::cursor::TokenCursor;
+    use crate::expr::parse_expression as expr_parser;
+    use lexer::{Lexer, Token};
+
+    fn parse_when_source(source: &str) -> Option<ast::WhenExpr> {
+        let mut lexer = Lexer::new(source);
+        let tokens: Vec<_> = lexer
+            .by_ref()
+            .filter(|(t, _)| !matches!(t, Token::Comment(_)))
+            .collect();
+        let mut span_table = lexer.take_span_table();
+        let mut cursor = TokenCursor::new(&tokens, &mut span_table);
+        parse_when_expr(&mut cursor, expr_parser as crate::expr::ExprFn)
+    }
+
+    #[test]
+    fn when_is_multiline_arms_parse() {
+        let source = "when target.arch is\n    'x86_64' then BigInt\n    else Int";
+        assert!(
+            parse_when_source(source).is_some(),
+            "multiline is-when should parse"
+        );
+    }
+
+    #[test]
+    fn when_is_single_line_parses() {
+        let source = "when target.arch is 'x86_64' then BigInt else Int";
+        assert!(parse_when_source(source).is_some());
+    }
 }

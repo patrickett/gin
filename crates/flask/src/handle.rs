@@ -120,18 +120,28 @@ impl FlaskConfigHandle {
 
     pub fn read(&self) -> FlaskConfigReadGuard<'_> {
         FlaskConfigReadGuard {
-            guard: self.inner.read().expect("FlaskConfig RwLock should not be poisoned"),
+            guard: self
+                .inner
+                .read()
+                .expect("FlaskConfig RwLock should not be poisoned"),
         }
     }
 
     pub fn write(&self) -> FlaskConfigWriteGuard<'_> {
         FlaskConfigWriteGuard {
-            guard: self.inner.write().expect("FlaskConfig RwLock should not be poisoned"),
+            guard: self
+                .inner
+                .write()
+                .expect("FlaskConfig RwLock should not be poisoned"),
         }
     }
 
     pub fn source_dir(&self) -> PathBuf {
-        self.inner.read().expect("FlaskConfig RwLock should not be poisoned").source_dir.clone()
+        self.inner
+            .read()
+            .expect("FlaskConfig RwLock should not be poisoned")
+            .source_dir
+            .clone()
     }
 
     pub fn save(&self) -> Result<(), ConfigError> {

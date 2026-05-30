@@ -1,6 +1,23 @@
 [workspace]
+default-members = [
+    "crates/flask",
+    "crates/ast",
+    "crates/span",
+    "crates/diagnostic",
+    "crates/lexer",
+    "crates/parser",
+    "crates/typecheck",
+    "crates/typed_ast",
+    "crates/resolve",
+    "crates/codegen",
+    "crates/analysis",
+    "tools/ginc",
+    "tools/ginfmt",
+    "tools/ginlsp",
+]
 members = [
     "editors/tree-sitter-gin",
+    "crates/test-fixtures",
     "tools/begin",
     "crates/flask",
     "crates/ast",
@@ -8,12 +25,16 @@ members = [
     "crates/diagnostic",
     "crates/lexer",
     "crates/codegen",
-    "crates/database",
+    "crates/analysis",
     "crates/parser",
     "crates/resolve",
     "tools/ginc",
     "tools/ginfmt",
     "tools/ginlsp",
+    "crates/typed_ast",
+    "crates/typecheck",
+    "crates/ast/signature",
+    "crates/ast/format",
 ]
 resolver = "3"
 
@@ -25,23 +46,27 @@ lsp-types = "0.94.1"
 flask = { path = "crates/flask" }
 ginc = { path = "tools/ginc" }
 ast = { path = "crates/ast" }
+ast-format = { path = "crates/ast/format" }
+dashmap = "6.1.0"
 span = { path = "crates/span" }
 diagnostic = { path = "crates/diagnostic" }
 lexer = { path = "crates/lexer" }
 codegen = { path = "crates/codegen" }
-database = { path = "crates/database" }
+analysis = { path = "crates/analysis" }
 parser = { path = "crates/parser" }
 ginfmt = { path = "tools/ginfmt" }
 resolve = { path = "crates/resolve" }
-dashmap = "6.1.0"
+test-fixtures = { path = "crates/test-fixtures" }
+typecheck = { path = "crates/typecheck" }
+typed_ast = { path = "crates/typed_ast" }
 indexmap = "2"
 log = "0.4"
 thiserror = "2.0.11"
-salsa = "0.25.2"
 crossbeam-channel = "0.5.15"
 dirs = "6"
 rayon = "1"
 sha2 = "0.10"
+ignore = "0.4"
 
 strum = { version = "0.27", features = ["derive"] }
 i256 = "0.2"
