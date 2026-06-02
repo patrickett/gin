@@ -14,6 +14,83 @@ use core as c
       (identifier))))
 
 ================================================================================
+declare record fields
+================================================================================
+
+Slice(x) has (pointer Pointer(x), length PointerSize)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declare_statement
+    name: (type_identifier)
+    (parameters
+      (parameter
+        name: (identifier)))
+    (record_fields
+      (record_field
+        name: (identifier)
+        type: (tag
+          (type_application
+            (type_identifier)
+            (type_variable))))
+      (record_field
+        name: (identifier)
+        type: (tag
+          (type_identifier))))))
+
+================================================================================
+declare interface signatures
+================================================================================
+
+Allocator has (
+    allocate(ref self, l Layout) Slice(Byte) or AllocError,
+    deallocate(ref self, p Pointer(Byte), l Layout),
+)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declare_statement
+    name: (type_identifier)
+    (record_fields
+      (record_signature
+        name: (identifier)
+        (parameters
+          (parameter
+            modifier: "ref"
+            name: (self_parameter))
+          (parameter
+            name: (identifier)
+            type: (tag
+              (type_identifier))))
+        return_type: (type_union
+          (tag
+            (type_application
+              (type_identifier)
+              (tag
+                (type_identifier))))
+          (tag
+            (type_identifier))))
+      (record_signature
+        name: (identifier)
+        (parameters
+          (parameter
+            modifier: "ref"
+            name: (self_parameter))
+          (parameter
+            name: (identifier)
+            type: (tag
+              (type_application
+                (type_identifier)
+                (tag
+                  (type_identifier)))))
+          (parameter
+            name: (identifier)
+            type: (tag
+              (type_identifier))))))))
+
+================================================================================
 declare union
 ================================================================================
 
@@ -45,6 +122,29 @@ x: 42
     name: (identifier)
     value: (literal
       (number))))
+
+
+
+================================================================================
+bind with camelCase name
+================================================================================
+
+regConstraint(reg Register) String: ''
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (bind_statement
+    name: (identifier)
+    (parameters
+      (parameter
+        name: (identifier)
+        type: (tag
+          (type_identifier))))
+    return_type: (tag
+      (type_identifier))
+    value: (literal
+      (string))))
 
 ================================================================================
 blanket impl
@@ -83,3 +183,108 @@ x has Copy(can_copy: is_copy(x))
         function: (identifier)
         arguments: (argument_list
           (identifier))))))
+
+================================================================================
+when arms with logical and body
+================================================================================
+
+all_named_copy(fields List(NamedTy)) Bool := when fields is
+    []                  then True
+    [f, ...rest]        then is_copy(f.ty) and all_named_copy(rest)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (bind_statement
+    name: (identifier)
+    (parameters
+      (parameter
+        name: (identifier)
+        type: (tag
+          (type_application
+            (type_identifier)
+            (tag
+              (type_identifier))))))
+    return_type: (tag
+      (type_identifier))
+    value: (when_expression
+      subject: (identifier)
+      (when_pattern_arm
+        pattern: (is_pattern
+          (list_pattern))
+        body: (type_identifier))
+      (when_pattern_arm
+        pattern: (is_pattern
+          (list_pattern
+            (is_pattern
+              (identifier))
+            (is_pattern
+              (identifier))))
+        body: (binary_expression
+          left: (call_expression
+            function: (identifier)
+            arguments: (argument_list
+              (member_expression
+                base: (identifier)
+                field: (identifier))))
+          operator: "and"
+          right: (call_expression
+            function: (identifier)
+            arguments: (argument_list
+              (identifier))))))))
+
+================================================================================
+when is arms without repeated is
+================================================================================
+
+is_copy(x Type) Bool := when x is
+    Primitive(_, _)     then True
+    Ref(_, False)       then True
+    Opaque(_)           then False
+    Array(elem, _)      then is_copy(elem)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (bind_statement
+    name: (identifier)
+    (parameters
+      (parameter
+        name: (identifier)
+        type: (tag
+          (type_identifier))))
+    return_type: (tag
+      (type_identifier))
+    value: (when_expression
+      subject: (identifier)
+      (when_pattern_arm
+        pattern: (tag
+          (type_application
+            (type_identifier)
+            (type_variable)
+            (type_variable)))
+        body: (type_identifier))
+      (when_pattern_arm
+        pattern: (tag
+          (type_application
+            (type_identifier)
+            (type_variable)
+            (tag
+              (type_identifier))))
+        body: (type_identifier))
+      (when_pattern_arm
+        pattern: (tag
+          (type_application
+            (type_identifier)
+            (type_variable)))
+        body: (type_identifier))
+      (when_pattern_arm
+        pattern: (tag
+          (type_application
+            (type_identifier)
+            (type_variable)
+            (type_variable)))
+        body: (call_expression
+          function: (identifier)
+          arguments: (argument_list
+            (identifier)))))))

@@ -13,9 +13,28 @@
 (parameter
   name: (identifier) @variable.parameter)
 
+(parameter
+  name: (self_parameter) @variable.builtin)
+
 ; Bind statements (function/variable definitions)
 (bind_statement
   name: (identifier) @function)
+
+; Error recovery for top-level bind headers after indentation-based `when` arms.
+; Without newline tokens, tree-sitter can recover helper headers as ERROR nodes;
+; keep their names highlighted consistently as functions.
+(ERROR
+  (is_pattern
+    (identifier) @function)
+  (is_pattern
+    (tuple_is_pattern))
+  (type_identifier))
+
+(record_signature
+  name: (identifier) @function.method)
+
+(record_field
+  name: (identifier) @property)
 
 ; Function calls
 (call_expression
@@ -64,6 +83,7 @@
 "private" @keyword
 "has" @keyword.type
 "is" @keyword.operator
+"ref" @keyword.modifier
 "or" @keyword.operator
 "and" @keyword.operator
 "not" @keyword.operator

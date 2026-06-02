@@ -11,6 +11,7 @@ default-members = [
     "crates/resolve",
     "crates/codegen",
     "crates/analysis",
+    "editors/tree-sitter-gin",
     "tools/ginc",
     "tools/ginfmt",
     "tools/ginlsp",
