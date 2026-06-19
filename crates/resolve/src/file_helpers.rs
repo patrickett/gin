@@ -1,168 +1,110 @@
+//! Gin package-directory operations — discovering `.gin` files, listing public
+//! symbols, finding definitions, and resolving path dependencies.
+//!
+//! These are exposed via the [`GinPackageExt`] extension trait so callers can
+//! use them as `package_dir.collect_gin_files()` instead of passing raw paths.
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use flask::{DependencyKind, FlaskConfig, PACKAGE_CONFIG_NAME};
-use internment::Intern;
-use parser::parse_source_full;
+use flask::{DependencyKind, FlaskConfig, FlaskPathExt, PACKAGE_CONFIG_NAME};
+use parser::gin_walk::GinPathExt;
 
-// ---------------------------------------------------------------------------
-// File-system helpers
-// ---------------------------------------------------------------------------
+/// Extension trait adding Gin-package queries to [`Path`].
+///
+/// The receiver is always a directory path — a Gin package root or folder module.
+pub trait GinPackageExt {
+    /// Collect `.gin` file paths under this directory, honoring `.gitignore`.
+    ///
+    /// If the directory is a folder module (contains `flask.jsonc`), all package
+    /// `.gin` files are collected recursively. Otherwise, the directory is scanned
+    /// recursively. A single file returns itself.
+    fn collect_gin_files(&self) -> Vec<PathBuf>;
 
-pub fn is_folder_module_dir(path: &Path) -> bool {
-    path.is_dir() && path.join(PACKAGE_CONFIG_NAME).is_file()
+    /// Recursively collect `.gin` file paths under this directory, honoring `.gitignore`.
+    fn collect_gin_files_recursive(&self) -> Vec<PathBuf>;
+
+    /// List all public (exported) symbol names in any `.gin` file under this directory.
+    fn list_public_symbols(&self) -> Vec<String>;
+
+    /// Check whether `symbol_name` is a public (exported) definition in any
+    /// `.gin` file under this directory.
+    ///
+    /// First searches parsed AST defs/tags. When that fails, falls back to a
+    /// source-text search that checks whether the symbol appears as a top-level
+    /// declaration (`Tag is …`, `Tag has …`, `name:` or `name :=`).
+    fn find_public_def(&self, symbol_name: &str) -> Option<PathBuf>;
+
+    /// Whether `symbol_name` is a public definition under this directory.
+    fn check_public_def(&self, symbol_name: &str) -> bool;
+
+    /// Resolve path dependencies from a flask config relative to this package root.
+    fn resolve_flask_dependencies(&self, config: &FlaskConfig) -> HashMap<String, PathBuf>;
+
+    /// Path dependencies for the package containing this path (walks up to `flask.jsonc`).
+    fn flask_path_dependencies(&self) -> HashMap<String, PathBuf>;
+
+    /// Collect `.gin` paths to scan for public symbols under this directory.
+    fn gin_paths_for_symbol_lookup(&self) -> Vec<PathBuf>;
 }
 
-/// Collect `.gin` file paths under `root`, skipping `target/` directories.
-///
-/// If `root` is a folder module (contains `flask.jsonc`), only immediate
-/// `*.gin` files from the package manifest are returned. Otherwise, the
-/// directory is scanned recursively.
-pub fn collect_gin_files(root: &Path) -> Vec<PathBuf> {
-    if root.is_dir() {
-        if root.join(PACKAGE_CONFIG_NAME).is_file() {
-            flask::list_package_gin_files(root)
+impl GinPackageExt for Path {
+    fn collect_gin_files(&self) -> Vec<PathBuf> {
+        let root = self;
+        if root.is_dir() {
+            if root.join(PACKAGE_CONFIG_NAME).is_file() {
+                root.collect_gin_files_under()
+            } else {
+                self.collect_gin_files_recursive()
+            }
         } else {
-            collect_gin_files_recursive(root)
+            vec![root.to_path_buf()]
         }
-    } else {
-        vec![root.to_path_buf()]
     }
-}
 
-/// Recursively collect `.gin` file paths under `dir`, skipping `target/`
-/// directories.
-pub fn collect_gin_files_recursive(dir: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return files;
-    };
+    fn collect_gin_files_recursive(&self) -> Vec<PathBuf> {
+        self.collect_gin_files_under()
+    }
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if path.file_name().is_some_and(|n| n == "target") {
-                continue;
+    fn list_public_symbols(&self) -> Vec<String> {
+        crate::public_symbols::list_public_symbols(self)
+    }
+
+    fn find_public_def(&self, symbol_name: &str) -> Option<PathBuf> {
+        crate::public_symbols::find_public_def(self, symbol_name, true)
+    }
+
+    fn check_public_def(&self, symbol_name: &str) -> bool {
+        self.find_public_def(symbol_name).is_some()
+    }
+
+    fn resolve_flask_dependencies(&self, config: &FlaskConfig) -> HashMap<String, PathBuf> {
+        let package_root = self;
+        let mut dependencies = HashMap::new();
+        for (name, dep) in config.dependencies() {
+            if let DependencyKind::Path { path: dep_path } = &dep.kind {
+                dependencies.insert(name.clone(), package_root.join(dep_path));
             }
-            files.extend(collect_gin_files_recursive(&path));
-        } else if path.extension().is_some_and(|ext| ext == "gin") {
-            files.push(path);
         }
+        dependencies
     }
 
-    files
-}
-
-/// List all public (exported) symbol names in any `.gin` file under
-/// `package_dir`, including both defs and tags.
-pub fn list_public_symbols(package_dir: &Path) -> Vec<String> {
-    let paths = flask::list_package_gin_files(package_dir);
-    let mut symbols = Vec::new();
-    for path in &paths {
-        let Ok(source) = std::fs::read_to_string(path) else {
-            continue;
+    fn flask_path_dependencies(&self) -> HashMap<String, PathBuf> {
+        let file_dir = match self.parent() {
+            Some(d) => d,
+            None => return HashMap::new(),
         };
-        let output = parse_source_full(&source);
-        for (key, _) in &output.ast.defs {
-            if !output.ast.private_defs.contains(key) {
-                symbols.push(key.as_str().to_string());
-            }
-        }
-        for key in output.ast.tags.keys() {
-            if !output.ast.private_tags.contains(key) {
-                symbols.push(key.as_str().to_string());
-            }
-        }
-    }
-    symbols.sort();
-    symbols.dedup();
-    symbols
-}
-
-/// Check whether `symbol_name` is a public (exported) definition in any
-/// `.gin` file under `package_dir`.
-///
-/// First searches the platform-filtered AST. When that fails (e.g. a
-/// `#[os({ linux })]` tag on a macOS host), falls back to a source-text
-/// search that checks whether the symbol appears as a top-level
-/// declaration (`Tag is …`, `Tag has …`, `name:` or `name :=`).
-pub fn find_public_def_in_package(package_dir: &Path, symbol_name: &str) -> Option<PathBuf> {
-    let paths = flask::list_package_gin_files(package_dir);
-    let target = Intern::<String>::from_ref(symbol_name);
-    for path in &paths {
-        let Ok(source) = std::fs::read_to_string(path) else {
-            continue;
+        let Some((config, package_root)) = FlaskConfig::find_package_config(file_dir) else {
+            return HashMap::new();
         };
-        let output = parse_source_full(&source);
-        if !output.ast.private_defs.contains(&target) && output.ast.defs.contains_key(&target) {
-            return Some(path.clone());
-        }
-        if !output.ast.private_tags.contains(&target) && output.ast.tags.contains_key(&target) {
-            return Some(path.clone());
-        }
-        // Fallback: platform-gated symbols (e.g. #[os({ linux })] on macOS)
-        // are dropped by collapse_tags_for_platform and won't appear in
-        // the AST. Scan the raw source for a top-level declaration.
-        if source_has_top_level_symbol(&source, symbol_name) {
-            return Some(path.clone());
+        package_root.resolve_flask_dependencies(&config)
+    }
+
+    fn gin_paths_for_symbol_lookup(&self) -> Vec<PathBuf> {
+        if self.join(PACKAGE_CONFIG_NAME).is_file() {
+            self.collect_gin_files_under()
+        } else {
+            self.list_package_gin_files()
         }
     }
-    None
-}
-
-/// Check whether `symbol` appears as a top-level declaration in `source`.
-///
-/// Looks for patterns like `Tag is …`, `Tag has …`, `name: …`, or
-/// `name := …` at the start of a logical line (possibly preceded by
-/// `#[…]` attributes and whitespace).
-fn source_has_top_level_symbol(source: &str, symbol: &str) -> bool {
-    let mut in_attrs = true;
-    for line in source.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("--") {
-            continue;
-        }
-        // Skip attribute lines that precede a declaration.
-        if in_attrs && (trimmed.starts_with("#[") || trimmed.starts_with("@[")) {
-            continue;
-        }
-        in_attrs = false;
-        // Check for tag declaration: `Tag is …`, `Tag has …`,
-        // `Tag(params) is …`, `Tag[params] is …`.
-        if let Some(rest) = trimmed.strip_prefix(symbol) {
-            let rest = rest.trim_start();
-            if rest.starts_with("is ") || rest.starts_with("has ") || rest == "is" || rest == "has"
-            {
-                return true;
-            }
-            if rest.starts_with('(') || rest.starts_with('[') {
-                return true;
-            }
-        }
-        // Check for bind declaration: `name: …` or `name := …`.
-        if let Some(rest) = trimmed.strip_prefix(symbol) {
-            let rest = rest.trim_start();
-            if rest.starts_with(':') || rest.starts_with(":=") {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-pub fn check_public_def_in_package(package_dir: &Path, symbol_name: &str) -> bool {
-    find_public_def_in_package(package_dir, symbol_name).is_some()
-}
-
-pub fn resolve_flask_path_dependencies(
-    config: &FlaskConfig,
-    config_dir: &Path,
-) -> HashMap<String, PathBuf> {
-    let mut dependencies = HashMap::new();
-    for (name, dep) in config.dependencies() {
-        if let DependencyKind::Path { path: dep_path } = &dep.kind {
-            dependencies.insert(name.clone(), config_dir.join(dep_path));
-        }
-    }
-    dependencies
 }
