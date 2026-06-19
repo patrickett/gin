@@ -25,10 +25,6 @@ pub struct TokenCursor<'src, 't> {
     /// Stack of saved positions for [`Self::advance_pop`] progress assertions.
     /// See the section "Loop progress assertions" below.
     advance_stack: Vec<usize>,
-    /// Optional cancellation hook invoked at every successful loop iteration
-    /// (i.e. inside [`Self::advance_pop`]). The hook may panic to abort the
-    /// parse — Salsa's `Cancelled` is the canonical use case. See "Cooperative
-    /// cancellation" below.
     cancel_check: Option<&'t (dyn Fn() + 't)>,
     pub errors: Vec<ParseError>,
 }
@@ -73,8 +69,6 @@ impl<'src, 't> TokenCursor<'src, 't> {
             check();
         }
     }
-
-    // ── Significant access (auto-skip newlines on peek) ──────────────────
 
     #[inline(always)]
     fn invalidate_cache(&self) {
@@ -164,14 +158,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
         }
     }
 
-    // ── Lookahead (raw offsets from current pos) ──────────────────────────
-
     #[inline(always)]
     pub fn peek_at(&self, offset: usize) -> Option<&Token<'src>> {
         self.tokens.get(self.pos + offset).map(|(t, _)| t)
     }
-
-    // ── Position / span helpers ───────────────────────────────────────────
 
     #[inline(always)]
     pub fn is_eof(&self) -> bool {
@@ -237,6 +227,162 @@ impl<'src, 't> TokenCursor<'src, 't> {
             .unwrap_or(SpanId::INVALID)
     }
 
+    /// Peek at the raw next token without skipping any intervening tokens.
+    /// This is the only way to detect newline tokens that `peek()` would skip.
+    #[inline(always)]
+    pub fn raw_peek(&self) -> Option<&Token<'src>> {
+        self.tokens.get(self.pos).map(|(t, _)| t)
+    }
+
+    /// Skip layout tokens — newlines, indents, and dedents — that can appear
+    /// between items in a delimited list (parens, brackets, etc.).
+    /// Returns `true` if at least one token was consumed.
+    pub fn skip_layout(&mut self) -> bool {
+        let start = self.pos;
+        let tokens = self.tokens;
+        while self.pos < tokens.len()
+            && matches!(
+                tokens[self.pos].0,
+                Token::Newline | Token::Indent | Token::Dedent
+            )
+        {
+            self.pos += 1;
+        }
+        let did_skip = self.pos > start;
+        if did_skip {
+            self.invalidate_cache();
+        }
+        did_skip
+    }
+
+    /// Returns true when expression parsing already consumed the newline that
+    /// should separate the last item from the next significant token.
+    pub fn previous_token_was_newline_separator(&mut self) -> bool {
+        let Some(last_pos) = self.last_consumed_pos else {
+            return false;
+        };
+
+        let next_pos = self.significant_pos();
+        if last_pos >= next_pos {
+            return false;
+        }
+
+        let has_newline =
+            (last_pos..next_pos).any(|pos| matches!(self.tokens[pos].0, Token::Newline));
+        if has_newline {
+            self.skip_layout();
+        }
+        has_newline
+    }
+
+    /// Eat a list separator: either a comma (followed by optional layout)
+    /// or layout containing at least one newline. Returns `true` if a separator
+    /// was consumed.
+    ///
+    /// This is the core of newline-as-separator in delimited lists:
+    /// `(a, b)` and `(a\nb)` are both valid, but `(a b)` is not.
+    ///
+    /// When a comma is consumed but a newline (before or after the comma) or a
+    /// closing delimiter already provides separation, the comma is flagged as
+    /// unnecessary via a `__gin_hint__:unnecessary-comma` parse error.
+    pub fn eat_list_separator(&mut self) -> bool {
+        // Check for newlines between the current raw position and where a
+        // comma would be found (after skipping layout). This detects commas
+        // that appear on a line following a newline-based separator.
+        let sig_pos = self.significant_pos();
+        let newline_before = self
+            .tokens
+            .get(sig_pos)
+            .is_some_and(|(t, _)| *t == Token::Comma)
+            && (self.pos..sig_pos).any(|i| matches!(self.tokens[i].0, Token::Newline));
+
+        // Try comma first
+        if self.eat(&Token::Comma) {
+            let saw_layout = self.skip_layout();
+
+            // A comma is unnecessary when:
+            // - it is followed by layout (newline after the comma), OR
+            // - a newline preceded the comma (comma after newline-based separator), OR
+            // - the next significant token is a closing delimiter (trailing comma)
+            if saw_layout
+                || newline_before
+                || self.is_at(&Token::ParenClose)
+                || self.is_at(&Token::BracketClose)
+            {
+                let span = self.last_consumed_span();
+                self.errors.push(ParseError {
+                    message: "__gin_hint__:unnecessary-comma".to_string(),
+                    span,
+                });
+            }
+
+            return true;
+        }
+
+        // Try newline-based layout (one or more newlines + optional Indent/Dedent)
+        let start = self.pos;
+        let mut has_newline = false;
+        let tokens = self.tokens;
+        while self.pos < tokens.len() {
+            match &tokens[self.pos].0 {
+                Token::Newline => {
+                    has_newline = true;
+                    self.pos += 1;
+                }
+                Token::Indent | Token::Dedent => {
+                    self.pos += 1;
+                }
+                _ => break,
+            }
+        }
+
+        if has_newline {
+            self.invalidate_cache();
+            true
+        } else {
+            self.pos = start;
+            false
+        }
+    }
+
+    /// Try to consume a statement-level separator: a comma (the inline separator)
+    /// or one or more newlines (the layout separator). Returns `true` if a
+    /// separator was consumed.
+    ///
+    /// Used by `parse_top_level_element` and `parse_body_exprs` to enforce
+    /// separators between declarations and statements.
+    pub fn try_consume_statement_separator(&mut self) -> bool {
+        // Try comma first — this is the explicit inline separator.
+        if self.eat(&Token::Comma) {
+            self.skip_newlines();
+            return true;
+        }
+
+        // Try newline(s) — this is the free layout separator.
+        let start = self.pos;
+        let tokens = self.tokens;
+        let mut consumed_newline = false;
+        while self.pos < tokens.len() {
+            match &tokens[self.pos].0 {
+                Token::Newline => {
+                    consumed_newline = true;
+                    self.pos += 1;
+                }
+                Token::Indent | Token::Dedent => {
+                    self.pos += 1;
+                }
+                _ => break,
+            }
+        }
+        if consumed_newline {
+            self.invalidate_cache();
+            true
+        } else {
+            self.pos = start;
+            false
+        }
+    }
+
     /// Peek at the next token past any intervening newlines AND indents,
     /// without consuming them. Used for Indent-as-continuation in expressions.
     #[inline]
@@ -271,13 +417,20 @@ impl<'src, 't> TokenCursor<'src, 't> {
         self.invalidate_cache();
     }
 
-    // ── Error handling ────────────────────────────────────────────────────
-
     pub fn error(&mut self, message: impl Into<String>, span: SpanId) {
         self.errors.push(ParseError {
             message: message.into(),
             span,
         });
+    }
+
+    pub fn unexpected_token(
+        &mut self,
+        message: impl Into<String>,
+        _suggestion: Option<String>,
+        span: SpanId,
+    ) {
+        self.error(message, span);
     }
 
     pub fn checkpoint(&self) -> usize {
@@ -289,8 +442,6 @@ impl<'src, 't> TokenCursor<'src, 't> {
         self.invalidate_cache();
     }
 
-    // ── Loop progress assertions ──────────────────────────────────────────
-    //
     // Materializes the implicit "this loop body always consumes a token"
     // contract that recursive-descent parsers depend on. Wrap each parser
     // production called inside a loop:
@@ -354,8 +505,6 @@ impl<'src, 't> TokenCursor<'src, 't> {
             .pop()
             .expect("advance_drop called without matching advance_push");
     }
-
-    // ── Interning ─────────────────────────────────────────────────────────
 
     #[inline(always)]
     pub fn intern(&mut self, s: &'src str) -> Intern<String> {

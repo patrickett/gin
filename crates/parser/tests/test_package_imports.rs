@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use parser::{extract_package_import_paths, parse_from_str};
+use parser::query::{FileAstQueryExt, SourceParseExt};
 use test_fixtures::TempPackage;
 
 #[test]
@@ -12,12 +12,12 @@ fn test_package_import_with_nested_segment() {
     pkg.write("io/print.gin", "print(s Str):\nreturn\n");
 
     let src = "use core.io\nmain:\nreturn\n";
-    let ast = parse_from_str(src);
+    let ast = src.parse_source_full().ast;
 
     let mut deps = HashMap::new();
     deps.insert("core".to_string(), pkg.path().to_path_buf());
 
-    let paths = extract_package_import_paths(&ast, &deps);
+    let paths = ast.extract_package_import_paths(&deps);
 
     assert_eq!(paths.len(), 1);
     assert!(paths[0].0.ends_with("print.gin"));
@@ -37,12 +37,12 @@ fn test_package_import_no_segments_collects_flat_gin_only() {
     pkg.write("nested/x.gin", "x\n");
 
     let src = "use core\nmain:\nreturn\n";
-    let ast = parse_from_str(src);
+    let ast = src.parse_source_full().ast;
 
     let mut deps = HashMap::new();
     deps.insert("core".to_string(), pkg.path().to_path_buf());
 
-    let paths = extract_package_import_paths(&ast, &deps);
+    let paths = ast.extract_package_import_paths(&deps);
 
     let file_names: Vec<_> = paths
         .iter()
@@ -58,10 +58,10 @@ fn test_package_import_no_segments_collects_flat_gin_only() {
 #[test]
 fn test_package_import_missing_dependency() {
     let src = "use nonexistent.io\nmain:\nreturn\n";
-    let ast = parse_from_str(src);
+    let ast = src.parse_source_full().ast;
 
     let deps: HashMap<String, PathBuf> = HashMap::new();
-    let paths = extract_package_import_paths(&ast, &deps);
+    let paths = ast.extract_package_import_paths(&deps);
 
     assert!(paths.is_empty());
 }
@@ -77,12 +77,12 @@ fn test_package_import_multiple_package_uses() {
     );
 
     let src = "use core\nuse core\nmain:\nreturn\n";
-    let ast = parse_from_str(src);
+    let ast = src.parse_source_full().ast;
 
     let mut deps = HashMap::new();
     deps.insert("core".to_string(), pkg.path().to_path_buf());
 
-    let paths = extract_package_import_paths(&ast, &deps);
+    let paths = ast.extract_package_import_paths(&deps);
 
     let file_names: Vec<_> = paths
         .iter()
@@ -99,12 +99,12 @@ fn test_package_import_skips_local_imports() {
     pkg.write("io.gin", "print(s Str):\nreturn\n");
 
     let src = "use core\nuse './local.gin' as local\nmain:\nreturn\n";
-    let ast = parse_from_str(src);
+    let ast = src.parse_source_full().ast;
 
     let mut deps = HashMap::new();
     deps.insert("core".to_string(), pkg.path().to_path_buf());
 
-    let paths = extract_package_import_paths(&ast, &deps);
+    let paths = ast.extract_package_import_paths(&deps);
 
     assert_eq!(paths.len(), 1);
     assert!(paths[0].0.file_name().unwrap() == "io.gin");
@@ -116,12 +116,12 @@ fn test_package_import_nonexistent_nested_package() {
     pkg.write_flask("core");
 
     let src = "use core.nonexistent\nmain:\nreturn\n";
-    let ast = parse_from_str(src);
+    let ast = src.parse_source_full().ast;
 
     let mut deps = HashMap::new();
     deps.insert("core".to_string(), pkg.path().to_path_buf());
 
-    let paths = extract_package_import_paths(&ast, &deps);
+    let paths = ast.extract_package_import_paths(&deps);
 
     assert!(paths.is_empty());
 }
@@ -136,12 +136,12 @@ fn test_package_import_bundle_lists_nested_folder_gin_files() {
     pkg.write("fs/write.gin", "write:\nreturn\n");
 
     let src = "use core.(io, fs)\nmain:\nreturn\n";
-    let ast = parse_from_str(src);
+    let ast = src.parse_source_full().ast;
 
     let mut deps = HashMap::new();
     deps.insert("core".to_string(), pkg.path().to_path_buf());
 
-    let paths = extract_package_import_paths(&ast, &deps);
+    let paths = ast.extract_package_import_paths(&deps);
     let mut names: Vec<_> = paths
         .iter()
         .map(|(p, _)| p.file_name().unwrap().to_string_lossy().to_string())
@@ -159,12 +159,12 @@ fn test_package_import_two_segments_nested() {
     pkg.write("io/extra/z.gin", "z\n");
 
     let src = "use core.io.extra\nmain:\nreturn\n";
-    let ast = parse_from_str(src);
+    let ast = src.parse_source_full().ast;
 
     let mut deps = HashMap::new();
     deps.insert("core".to_string(), pkg.path().to_path_buf());
 
-    let paths = extract_package_import_paths(&ast, &deps);
+    let paths = ast.extract_package_import_paths(&deps);
     assert_eq!(paths.len(), 1);
     assert!(paths[0].0.ends_with("z.gin"));
 }

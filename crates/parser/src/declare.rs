@@ -1,494 +1,959 @@
+use indexmap::IndexMap;
+
 use crate::cursor::TokenCursor;
 use crate::expr::ExprFn;
-use crate::expr::literal::parse_literal;
 use ast::span::SpanId;
 use ast::{
-    Declare, DeclareValue, DocComment, Expr, ParameterKind, Parameters, ProvidedTrait, Spanned,
-    TypeExpr, Typed, Variant, type_surface_mangle_name,
+    Declare, DeclareValue, DocComment, Expr, InterfaceMember, ParameterKind, Parameters,
+    ProvidedTrait, Spanned, TypeExpr, Typed, Variant,
 };
-
-use crate::tag::{parse_pattern_type_expr, parse_type_expr};
 use i256::I256;
 use internment::Intern;
 use lexer::Token;
 
+/// `(return_type, error_type)` after parsing a method return type.
+type ParseResultType = (
+    Option<Box<Spanned<TypeExpr>>>,
+    Option<Box<Spanned<TypeExpr>>>,
+);
+
 /// asd
-pub fn parse_declare(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Declare> {
-    let doc_before = parse_doc_comment(cursor);
-    let attrs = parse_declare_attributes(cursor);
-    cursor.eat(&Token::Indent);
+impl<'src, 't> TokenCursor<'src, 't> {
+    pub fn parse_declare(&mut self, expr_parser: ExprFn) -> Option<Declare> {
+        let doc_before = self.parse_doc_comment();
+        let attrs = self.parse_declare_attributes();
+        self.eat(&Token::Indent);
 
-    let (name, name_span) = match cursor.peek()? {
-        &Token::Tag(n) => {
-            let name = cursor.intern(n);
-            let span = cursor.peek_span()?;
-            cursor.advance();
-            (name, span)
-        }
-        _ => return None,
-    };
-
-    let params = parse_params_for_declare(cursor, expr_parser);
-    let trait_bounds = crate::expr::bind::parse_trait_bounds(cursor, expr_parser);
-
-    if cursor.eat(&Token::Is) {
-        let doc_after_is = parse_doc_comment(cursor);
-        cursor.eat(&Token::Indent);
-
-        let (value, doc_after_value) = parse_is_rhs(cursor, expr_parser);
-        let provided_traits = parse_provided_trait_clauses(cursor, expr_parser);
-        cursor.eat(&Token::Dedent);
-        reject_removed_marker_syntax(cursor);
-
-        let doc = doc_after_value.or(doc_after_is).or(doc_before);
-        let mut decl = Declare::new(name, name_span, value)
-            .with_params(params)
-            .with_doc(doc)
-            .with_provided_traits(provided_traits);
-        decl.span = cursor.merge_span(name_span, cursor.last_consumed_span());
-        decl.trait_bounds = trait_bounds;
-        if let Some(a) = attrs {
-            decl = decl.with_attributes(a);
-        }
-        Some(decl)
-    } else if cursor.eat(&Token::Has) {
-        parse_doc_comment(cursor);
-        cursor.eat(&Token::Indent);
-
-        let value = parse_has_rhs(cursor, expr_parser);
-        let provided_traits = parse_provided_trait_clauses(cursor, expr_parser);
-        cursor.eat(&Token::Dedent);
-        reject_removed_marker_syntax(cursor);
-
-        let mut decl = Declare::new(name, name_span, value)
-            .with_params(params)
-            .with_doc(doc_before)
-            .with_provided_traits(provided_traits);
-        decl.span = cursor.merge_span(name_span, cursor.last_consumed_span());
-        decl.trait_bounds = trait_bounds;
-        if let Some(a) = attrs {
-            decl = decl.with_attributes(a);
-        }
-        Some(decl)
-    } else {
-        cursor.error("expected 'is' or 'has'", cursor.current_span());
-        None
-    }
-}
-
-fn parse_declare_attributes(cursor: &mut TokenCursor) -> Option<ast::DeclareAttributes> {
-    if !cursor.is_at(&Token::Pound) {
-        return None;
-    }
-    cursor.advance();
-
-    cursor.expect(&Token::BracketOpen)?;
-
-    let mut items: Vec<ast::AttributeItem> = Vec::new();
-
-    if !cursor.is_at(&Token::BracketClose) {
-        loop {
-            if let Some(item) = crate::expr::bind::parse_one_attribute_item(cursor) {
-                items.push(item);
+        let (name, name_span) = match self.peek()? {
+            &Token::Tag(n) => {
+                let name = self.intern(n);
+                let span = self.peek_span()?;
+                self.advance();
+                (name, span)
             }
-            if cursor.eat(&Token::Comma) {
-                continue;
-            }
-            break;
-        }
-    }
-
-    cursor.expect(&Token::BracketClose);
-
-    let mut attrs = ast::DeclareAttributes {
-        raw_attributes: Some(items),
-    };
-    attrs.extract_intrinsic_attributes();
-    Some(attrs)
-}
-
-fn parse_doc_comment(cursor: &mut TokenCursor) -> Option<DocComment> {
-    let text = match cursor.peek()? {
-        &Token::DocComment(t) => t,
-        _ => return None,
-    };
-    cursor.advance();
-
-    let first = text
-        .strip_prefix("---")
-        .map(|s| s.trim_start())
-        .unwrap_or(text)
-        .to_owned();
-
-    let mut lines = vec![first];
-
-    while let Some(Token::DocComment(text)) = cursor.peek() {
-        let stripped = text
-            .strip_prefix("---")
-            .map(|s| s.trim_start())
-            .unwrap_or(text)
-            .to_owned();
-        cursor.advance();
-        lines.push(stripped);
-    }
-
-    let doc = DocComment {
-        value: lines.join("\n"),
-    };
-    if doc.is_empty() { None } else { Some(doc) }
-}
-
-fn parse_has_rhs(cursor: &mut TokenCursor, expr_parser: ExprFn) -> DeclareValue {
-    if cursor.is_at(&Token::ParenOpen)
-        && let Some(params) = parse_params_for_declare(cursor, expr_parser)
-    {
-        return DeclareValue::Record(params);
-    }
-
-    cursor.error(
-        "expected record parameters after 'has'; use 'is' for type aliases, unions, and ranges",
-        cursor.current_span(),
-    );
-    DeclareValue::Record(Parameters::new())
-}
-
-fn parse_is_rhs(
-    cursor: &mut TokenCursor,
-    expr_parser: ExprFn,
-) -> (DeclareValue, Option<DocComment>) {
-    if matches!(cursor.peek(), Some(Token::When))
-        && let Some(when) = crate::expr::control::parse_when_expr(cursor, expr_parser) {
-            return (DeclareValue::When(Box::new(when)), None);
-        }
-
-    // InRange: `in` N...M
-    if cursor.eat(&Token::In) {
-        if let Some((a, b)) = parse_int_range(cursor) {
-            return (DeclareValue::InRange(a, b), None);
-        }
-        cursor.error("expected integer range after 'in'", cursor.current_span());
-        return (
-            DeclareValue::InRange(I256::from_u128(0), I256::from_u128(0)),
-            None,
-        );
-    }
-
-    // Range: [-]Int...[-]Int
-    if matches!(cursor.peek(), Some(Token::Int(_)) | Some(Token::Minus)) {
-        let checkpoint = cursor.checkpoint();
-        if let Some((a, b)) = parse_int_range(cursor) {
-            return (DeclareValue::Range(a, b), None);
-        }
-        cursor.rewind(checkpoint);
-    }
-
-    // Unit type: `()`
-    if cursor.is_at(&Token::ParenOpen) && cursor.peek_at(1) == Some(&Token::ParenClose) {
-        cursor.advance(); // eat (
-        cursor.advance(); // eat )
-        let span = cursor.last_consumed_span();
-        let unit_expr = Spanned {
-            value: TypeExpr::Unit,
-            span_id: span,
+            _ => return None,
         };
-        return (DeclareValue::Alias(Box::new(unit_expr)), None);
+
+        let params = self.parse_params_for_declare(expr_parser);
+
+        if self.eat(&Token::Is) {
+            let doc_after_is = self.parse_doc_comment();
+            self.eat(&Token::Indent);
+
+            let (value, doc_after_value, mut provided_traits) = self.parse_is_rhs(expr_parser);
+            provided_traits.extend(self.parse_provided_trait_clauses(expr_parser));
+            self.eat(&Token::Dedent);
+            self.reject_removed_marker_syntax();
+
+            let doc = DocComment::combine(
+                DocComment::combine(doc_before, doc_after_is),
+                doc_after_value,
+            );
+            let mut decl = Declare::new(name, name_span, value)
+                .with_params(params)
+                .with_doc(doc)
+                .with_provided_traits(provided_traits);
+            decl.span = self.merge_span(name_span, self.last_consumed_span());
+            if let Some(a) = attrs {
+                decl = decl.with_attributes(a);
+            }
+            Some(decl)
+        } else if self.eat(&Token::Has) {
+            self.parse_doc_comment();
+            self.eat(&Token::Indent);
+
+            let (value, provided_traits) = if self.is_at(&Token::ParenOpen) {
+                let value = self.parse_has_rhs(expr_parser);
+                let provided_traits = self.parse_provided_trait_clauses(expr_parser);
+                (value, provided_traits)
+            } else if matches!(self.peek(), Some(Token::Tag(_))) {
+                (
+                    DeclareValue::Interface(Vec::new()),
+                    self.parse_trait_chain_after_has(expr_parser),
+                )
+            } else {
+                (self.parse_has_rhs(expr_parser), Vec::new())
+            };
+            self.eat(&Token::Dedent);
+            self.reject_removed_marker_syntax();
+
+            let mut decl = Declare::new(name, name_span, value)
+                .with_params(params)
+                .with_doc(doc_before)
+                .with_provided_traits(provided_traits);
+            decl.span = self.merge_span(name_span, self.last_consumed_span());
+            if let Some(a) = attrs {
+                decl = decl.with_attributes(a);
+            }
+            Some(decl)
+        } else {
+            self.error("expected 'is' or 'has'", self.current_span());
+            None
+        }
     }
 
-    // Union or Alias: starts with optional doc then a type pattern or literal
-    let checkpoint = cursor.checkpoint();
-    let first_doc = parse_doc_comment(cursor);
+    fn parse_declare_attributes(&mut self) -> Option<ast::DeclareAttributes> {
+        if !self.is_at(&Token::Pound) {
+            return None;
+        }
+        self.advance();
 
-    // Try literal variant first (e.g. 'debug'), then tag pattern (e.g. Some(x))
-    let first_shape: Option<Spanned<TypeExpr>> = 'union_check: {
-        // Check if we're at a literal that could be a union variant
-        if matches!(
-            cursor.peek(),
-            Some(Token::String(_)) | Some(Token::Int(_)) | Some(Token::Float(_))
-        ) {
-            let cp = cursor.checkpoint();
-            if let Some(Spanned {
-                value: lit,
-                span_id: span,
-            }) = parse_literal(cursor)
-            {
-                let cp_after_lit = cursor.checkpoint();
-                parse_doc_comment(cursor);
-                // Skip Indent/Dedent tokens that may precede a continuation `or`
-                while cursor.eat(&Token::Indent) || cursor.eat(&Token::Dedent) {}
-                if cursor.is_at(&Token::Or) {
-                    cursor.rewind(cp_after_lit);
-                    break 'union_check Some(Spanned {
-                        value: TypeExpr::Literal(lit, span),
-                        span_id: span,
-                    });
+        self.expect(&Token::BracketOpen)?;
+
+        let mut items: Vec<ast::AttributeItem> = Vec::new();
+
+        if !self.is_at(&Token::BracketClose) {
+            loop {
+                if let Some(item) = self.parse_one_attribute_item() {
+                    items.push(item);
                 }
-                cursor.rewind(cp_after_lit);
-            }
-            // Not a union — rewind and try tag pattern
-            cursor.rewind(cp);
-        }
-        // Standard checkpoint approach for tag patterns
-        let cp = cursor.checkpoint();
-        if let Some(shape) = parse_pattern_type_expr(cursor, expr_parser) {
-            let cp_after_shape = cursor.checkpoint();
-            parse_doc_comment(cursor);
-            // Skip Indent/Dedent tokens that may precede a continuation `or`
-            // on an indented line (e.g. `Type is Variant(x)
-            //                            or OtherVariant(y)`)
-            while cursor.eat(&Token::Indent) || cursor.eat(&Token::Dedent) {}
-            if cursor.is_at(&Token::Or) {
-                cursor.rewind(cp_after_shape);
-                break 'union_check Some(shape);
-            }
-            cursor.rewind(cp_after_shape);
-        }
-        cursor.rewind(cp);
-        None
-    };
-
-    if let Some(first_shape) = first_shape {
-        // Union: Tag (or Tag)+
-        let first_post_doc = parse_doc_comment(cursor);
-
-        let first_variant = make_variant(first_doc, first_shape, first_post_doc);
-        let mut variants = vec![first_variant];
-
-        loop {
-            while cursor.eat(&Token::Indent) || cursor.eat(&Token::Dedent) {}
-            if !cursor.eat(&Token::Or) {
+                if self.eat(&Token::Comma) {
+                    continue;
+                }
                 break;
             }
-            let doc_on_or_line = parse_doc_comment(cursor);
-            cursor.eat(&Token::Indent);
+        }
 
-            match parse_variant(cursor, expr_parser) {
-                Some(next_variant) => {
-                    attach_doc_to_previous(&mut variants, doc_on_or_line);
-                    variants.push(next_variant);
+        self.expect(&Token::BracketClose);
+
+        let mut attrs = ast::DeclareAttributes {
+            raw_attributes: Some(items),
+        };
+        attrs.extract_intrinsic_attributes();
+        Some(attrs)
+    }
+
+    fn parse_has_rhs(&mut self, expr_parser: ExprFn) -> DeclareValue {
+        if !self.is_at(&Token::ParenOpen) {
+            self.error(
+                "expected interface body after 'has' (e.g. `has (method1, method2, ...)`)",
+                self.current_span(),
+            );
+            return DeclareValue::Interface(Vec::new());
+        }
+
+        self.expect(&Token::ParenOpen);
+        self.skip_indents();
+
+        let mut members = Vec::new();
+
+        loop {
+            // Allow trailing comma before closing paren
+            if self.is_at(&Token::ParenClose) {
+                break;
+            }
+
+            // Doc comment attached to this member (skip newlines first)
+            self.skip_newlines();
+            let member_doc = self.parse_doc_comment();
+
+            // Member name (must be a lowercase id)
+            let member_name = match self.peek() {
+                Some(Token::Id(n)) => {
+                    let name = self.intern(n);
+                    let name_span = self
+                        .peek_span()
+                        .expect("peek confirmed Id token, peek_span should succeed");
+                    self.advance();
+                    (name, name_span)
                 }
-                None => {
-                    cursor.error("expected variant after 'or'", cursor.current_span());
+                Some(_) => {
+                    self.error(
+                        "expected method name in interface body",
+                        self.current_span(),
+                    );
                     break;
                 }
+                None => break,
+            };
+
+            let (params, conventions, _param_groups) = if self.is_at(&Token::ParenOpen) {
+                // Method with parameters: `name(params...)`
+                self.parse_params(expr_parser)
+            } else {
+                // No params — method with empty parameter list
+                (Some(Parameters::new()), IndexMap::new(), IndexMap::new())
+            };
+
+            // Parse optional return type and error type
+            let (return_ty, error_ty) = self.parse_method_return_type(expr_parser);
+
+            members.push(InterfaceMember {
+                name: member_name.0,
+                name_span: member_name.1,
+                params: params.unwrap_or_else(Parameters::new),
+                conventions,
+                return_ty,
+                error_ty,
+                doc_comment: member_doc,
+            });
+
+            // Separator: comma or newline
+            if self.is_at(&Token::ParenClose) {
+                break;
+            }
+            if !self.eat_list_separator() {
+                self.error(
+                    "expected ',' or newline between interface members",
+                    self.current_span(),
+                );
+                break;
             }
         }
 
-        // Only consume doc comment if immediately after last variant (same line)
-        let post_doc = if matches!(cursor.peek_at(0), Some(Token::DocComment(_))) {
-            parse_doc_comment(cursor)
-        } else {
-            None
-        };
-        return (DeclareValue::Union { variants }, post_doc);
+        self.expect(&Token::ParenClose);
+
+        if members.is_empty() {
+            // Empty interface: `Allocator has ()`
+        }
+
+        DeclareValue::Interface(members)
     }
 
-    // Not a union — rewind to before any doc comment and try as alias
-    cursor.rewind(checkpoint);
+    /// Parse the return type (and optional error type) after a method's parameter list.
+    ///
+    /// Handles:
+    /// - `) Slice(Byte)` → return_ty = Some(Slice(Byte)), error_ty = None
+    /// - `) Slice(Byte) or AllocError` → return_ty = Some(Slice(Byte)), error_ty = Some(AllocError)
+    /// - `)` → return_ty = None, error_ty = None (no return type)
+    /// - `) ref T` / `) mut T` → return_ty = Some(ref/mut T)
+    /// - `) ()` → return_ty = Some(unit)
+    ///
+    /// IMPORTANT: if the next token is a raw newline (return type on a different
+    /// line from params), we skip return type parsing entirely. This prevents
+    /// consuming the next member's name as a bare-Id return type when there's
+    /// no explicit separator, which enables newline-separated interface members.
+    fn parse_method_return_type(&mut self, expr_parser: ExprFn) -> ParseResultType {
+        // If the return type would be on a different line from the params,
+        // there's no return type — the real return type must be on the same
+        // line. This prevents consuming the next member name as a bare-Id
+        // return type when using newline-separated members.
+        if matches!(self.raw_peek(), Some(Token::Newline)) {
+            return (None, None);
+        }
 
-    // Single literal variant (e.g., `X0 is 'x0'`, `Status is 'ready'`)
-    if matches!(
-        cursor.peek(),
-        Some(Token::String(_)) | Some(Token::Int(_)) | Some(Token::Float(_))
-    ) && let Some(variant) = parse_variant(cursor, expr_parser)
-    {
-        // Only consume doc comment if immediately after the value (same line)
-        let doc = if matches!(cursor.peek_at(0), Some(Token::DocComment(_))) {
-            parse_doc_comment(cursor)
-        } else {
+        // Check if the next token could start a return type.
+        // `parse_type_expr` handles: `@T`, `ref T`, `mut T`, `()`, `Tag`, `Tag(...)`, `Qual.Path`.
+        // But in interface method position, `(` followed by something other than `)` could be
+        // a tuple type — skip unit check since parse_type_expr handles it.
+        let can_start = matches!(
+            self.peek(),
+            Some(Token::Tag(_)) | Some(Token::Ref) | Some(Token::Mut) | Some(Token::At)
+        ) || matches!(self.peek(), Some(Token::ParenOpen) if self.peek_at(1) == Some(&Token::ParenClose));
+
+        if !can_start {
+            // Bare lowercase id as return type (e.g. `start x` where x is a type variable)
+            if let Some(Token::Id(t)) = self.peek() {
+                let name = self.intern(t);
+                let span = self.peek_span().unwrap_or(SpanId::INVALID);
+                self.advance();
+                let sp = Spanned {
+                    value: TypeExpr::Nominal(name, span),
+                    span_id: span,
+                };
+                return self.check_or_error(expr_parser, Some(Box::new(sp)));
+            }
+            return (None, None);
+        }
+
+        if let Some(sp) = self.parse_type_expr(expr_parser) {
+            return self.check_or_error(expr_parser, Some(Box::new(sp)));
+        }
+
+        (None, None)
+    }
+
+    /// After parsing a return type, check for `or ErrorType`.
+    ///
+    /// Uses `peek_past_indent` (non-consuming) to determine if `or` follows
+    /// before consuming layout, so it won't steal a newline that should be
+    /// consumed as a list-item separator by a caller
+    /// (e.g. `parse_has_rhs` or a top-level sequence parser).
+    fn check_or_error(
+        &mut self,
+        expr_parser: ExprFn,
+        return_ty: Option<Box<Spanned<TypeExpr>>>,
+    ) -> ParseResultType {
+        // Non-consuming peek: is `or` the next significant token?
+        if self.peek_past_indent() == Some(&Token::Or) {
+            // `or` is present — consume layout then `or`.
+            self.skip_indents();
+            self.advance(); // consume `or`
+            self.skip_indents();
+            if let Some(sp) = self.parse_type_expr(expr_parser) {
+                return (return_ty, Some(Box::new(sp)));
+            }
+            self.error(
+                "expected error type after 'or' in interface method return type",
+                self.current_span(),
+            );
+        }
+        // No `or` — leave layout unconsumed so it can serve as a list separator.
+        (return_ty, None)
+    }
+
+    fn parse_is_rhs(
+        &mut self,
+        expr_parser: ExprFn,
+    ) -> (DeclareValue, Option<DocComment>, Vec<ProvidedTrait>) {
+        if matches!(self.peek(), Some(Token::When))
+            && let Some(when) = self.parse_when_expr(expr_parser)
+        {
+            return (DeclareValue::When(Box::new(when)), None, Vec::new());
+        }
+
+        // InRange: `in` N...M
+        if self.eat(&Token::In) {
+            if let Some((a, b)) = self.parse_int_range() {
+                return (DeclareValue::InRange(a, b), None, Vec::new());
+            }
+            self.error("expected integer range after 'in'", self.current_span());
+            return (
+                DeclareValue::InRange(I256::from_u128(0), I256::from_u128(0)),
+                None,
+                Vec::new(),
+            );
+        }
+
+        // Range: [-]Int...[-]Int
+        if matches!(self.peek(), Some(Token::Int(_)) | Some(Token::Minus)) {
+            let checkpoint = self.checkpoint();
+            if let Some((a, b)) = self.parse_int_range() {
+                return (DeclareValue::Range(a, b), None, Vec::new());
+            }
+            self.rewind(checkpoint);
+        }
+
+        // Unit type: `()`
+        if self.is_at(&Token::ParenOpen) && self.peek_at(1) == Some(&Token::ParenClose) {
+            self.advance(); // eat (
+            self.advance(); // eat )
+            let span = self.last_consumed_span();
+            let unit_expr = Spanned {
+                value: TypeExpr::Unit,
+                span_id: span,
+            };
+            return (DeclareValue::Alias(Box::new(unit_expr)), None, Vec::new());
+        }
+
+        // Union or Alias: starts with optional doc then a type pattern or literal
+        let checkpoint = self.checkpoint();
+        let first_doc = self.parse_doc_comment();
+
+        // Try literal variant first (e.g. 'debug'), then tag pattern (e.g. Some(x))
+        let first_shape: Option<Spanned<TypeExpr>> = 'union_check: {
+            // Check if we're at a literal that could be a union variant
+            if matches!(
+                self.peek(),
+                Some(Token::String(_)) | Some(Token::Int(_)) | Some(Token::Float(_))
+            ) {
+                let cp = self.checkpoint();
+                if let Some(Spanned {
+                    value: lit,
+                    span_id: span,
+                }) = self.parse_literal()
+                {
+                    let cp_after_lit = self.checkpoint();
+                    self.parse_doc_comment();
+                    // Skip Indent/Dedent tokens that may precede a continuation `or`
+                    while self.eat(&Token::Indent) || self.eat(&Token::Dedent) {}
+                    if self.is_at(&Token::Or) {
+                        self.rewind(cp_after_lit);
+                        break 'union_check Some(Spanned {
+                            value: TypeExpr::Literal(lit, span),
+                            span_id: span,
+                        });
+                    }
+                    self.rewind(cp_after_lit);
+                }
+                // Not a union — rewind and try tag pattern
+                self.rewind(cp);
+            }
+            // Standard checkpoint approach for tag patterns
+            let cp = self.checkpoint();
+            if let Some(shape) = self.parse_pattern_type_expr(expr_parser) {
+                let cp_after_shape = self.checkpoint();
+                self.parse_doc_comment();
+                // Skip Indent/Dedent tokens that may precede a continuation `or`
+                // on an indented line (e.g. `Type is Variant(x)
+                //                            or OtherVariant(y)`)
+                while self.eat(&Token::Indent) || self.eat(&Token::Dedent) {}
+                if self.is_at(&Token::Or) {
+                    self.rewind(cp_after_shape);
+                    break 'union_check Some(shape);
+                }
+                self.rewind(cp_after_shape);
+            }
+            self.rewind(cp);
             None
         };
-        return (
-            DeclareValue::Union {
-                variants: vec![variant],
-            },
-            doc,
+
+        if let Some(first_shape) = first_shape {
+            // Union: Tag (or Tag)+
+            let first_post_doc = self.parse_doc_comment();
+
+            let first_variant = Self::make_variant(first_doc, first_shape, first_post_doc);
+            let mut variants = vec![first_variant];
+
+            let mut had_dedent_in_exit = false;
+            loop {
+                let mut saw_dedent = false;
+                while self.eat(&Token::Indent) || {
+                    let d = self.eat(&Token::Dedent);
+                    if d {
+                        saw_dedent = true;
+                    }
+                    d
+                } {}
+                if !self.eat(&Token::Or) {
+                    had_dedent_in_exit = saw_dedent;
+                    break;
+                }
+                let doc_on_or_line = self.parse_doc_comment();
+                self.eat(&Token::Indent);
+
+                match self.parse_variant(expr_parser) {
+                    Some(next_variant) => {
+                        Self::attach_doc_to_previous(&mut variants, doc_on_or_line);
+                        variants.push(next_variant);
+                    }
+                    None => {
+                        self.error("expected variant after 'or'", self.current_span());
+                        break;
+                    }
+                }
+            }
+
+            // Only consume doc comment if immediately after last variant (same line).
+            // If a Dedent was consumed when exiting the loop, the doc is on a NEW line
+            // and belongs to the next top-level element, not this union.
+            let post_doc =
+                if !had_dedent_in_exit && matches!(self.peek_at(0), Some(Token::DocComment(_))) {
+                    self.parse_doc_comment()
+                } else {
+                    None
+                };
+            return (DeclareValue::Union { variants }, post_doc, Vec::new());
+        }
+
+        // Not a union — rewind to before any doc comment and try as alias
+        self.rewind(checkpoint);
+
+        // Single literal variant (e.g., `X0 is 'x0'`, `Status is 'ready'`)
+        if matches!(
+            self.peek(),
+            Some(Token::String(_)) | Some(Token::Int(_)) | Some(Token::Float(_))
+        ) && let Some(variant) = self.parse_variant(expr_parser)
+        {
+            // Only consume doc comment if immediately after the value (same line)
+            let doc = if matches!(self.peek_at(0), Some(Token::DocComment(_))) {
+                self.parse_doc_comment()
+            } else {
+                None
+            };
+            return (
+                DeclareValue::Union {
+                    variants: vec![variant],
+                },
+                doc,
+                Vec::new(),
+            );
+        }
+
+        // Interface composition: `InOut is Input and Output`.
+        let composition_checkpoint = self.checkpoint();
+        if let Some(sp) = self.parse_pattern_type_expr(expr_parser) {
+            self.skip_indents();
+            if self.eat(&Token::And) {
+                let mut provided_traits = vec![Self::provided_trait_from_type_expr(sp)];
+                loop {
+                    self.skip_indents();
+                    let Some(next) = self.parse_pattern_type_expr(expr_parser) else {
+                        self.error("expected interface name after 'and'", self.current_span());
+                        break;
+                    };
+                    provided_traits.push(Self::provided_trait_from_type_expr(next));
+                    self.skip_indents();
+                    if !self.eat(&Token::And) {
+                        break;
+                    }
+                }
+                let doc = if matches!(self.peek_at(0), Some(Token::DocComment(_))) {
+                    self.parse_doc_comment()
+                } else {
+                    None
+                };
+                return (DeclareValue::Interface(Vec::new()), doc, provided_traits);
+            }
+        }
+        self.rewind(composition_checkpoint);
+
+        // Try pattern type expression (allows parens for params): `Register(value: 'rax')`
+        if let Some(sp) = self.parse_pattern_type_expr(expr_parser) {
+            let doc = if matches!(self.peek_at(0), Some(Token::DocComment(_))) {
+                self.parse_doc_comment()
+            } else {
+                None
+            };
+            return (DeclareValue::Alias(Box::new(sp)), doc, Vec::new());
+        }
+
+        if let Some(sp) = self.parse_type_expr(expr_parser) {
+            let doc = if matches!(self.peek_at(0), Some(Token::DocComment(_))) {
+                self.parse_doc_comment()
+            } else {
+                None
+            };
+            return (DeclareValue::Alias(Box::new(sp)), doc, Vec::new());
+        }
+
+        self.error(
+            "expected type declaration body after 'is'",
+            self.current_span(),
         );
+        (
+            DeclareValue::Alias(Box::new(Spanned {
+                value: TypeExpr::Nominal(Intern::new(String::new()), self.current_span()),
+                span_id: self.current_span(),
+            })),
+            None,
+            Vec::new(),
+        )
     }
 
-    // Try pattern type expression (allows parens for params): `Register(value: 'rax')`
-    if let Some(sp) = parse_pattern_type_expr(cursor, expr_parser) {
-        let doc = if matches!(cursor.peek_at(0), Some(Token::DocComment(_))) {
-            parse_doc_comment(cursor)
-        } else {
-            None
+    fn provided_trait_from_type_expr(sp: Spanned<TypeExpr>) -> ProvidedTrait {
+        let (trait_name, trait_name_span) = match sp.value {
+            TypeExpr::Nominal(name, span) => (name, span),
+            TypeExpr::Generic { name, span, .. } => (name, span),
+            _ => (
+                Intern::new(sp.value.surface_mangle_name().to_string()),
+                sp.span_id,
+            ),
         };
-        return (DeclareValue::Alias(Box::new(sp)), doc);
+        ProvidedTrait {
+            trait_name,
+            trait_name_span,
+            fields: Vec::new(),
+        }
     }
 
-    if let Some(sp) = parse_type_expr(cursor, expr_parser) {
-        let doc = if matches!(cursor.peek_at(0), Some(Token::DocComment(_))) {
-            parse_doc_comment(cursor)
-        } else {
-            None
-        };
-        return (DeclareValue::Alias(Box::new(sp)), doc);
-    }
+    fn parse_variant(&mut self, expr_parser: ExprFn) -> Option<Variant> {
+        let doc_before = self.parse_doc_comment();
 
-    cursor.error(
-        "expected type declaration body after 'is'",
-        cursor.current_span(),
-    );
-    (
-        DeclareValue::Alias(Box::new(Spanned {
-            value: TypeExpr::Nominal(Intern::new(String::new()), cursor.current_span()),
-            span_id: cursor.current_span(),
-        })),
-        None,
-    )
-}
-
-fn parse_variant(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Variant> {
-    let doc_before = parse_doc_comment(cursor);
-
-    // Try literal variant first (string, int, or float)
-    if matches!(
-        cursor.peek(),
-        Some(Token::String(_)) | Some(Token::Int(_)) | Some(Token::Float(_))
-    ) && let Some(Spanned {
-        value: lit,
-        span_id: span,
-    }) = parse_literal(cursor)
-    {
-        let shape = Box::new(Spanned {
-            value: TypeExpr::Literal(lit, span),
+        // Try literal variant first (string, int, or float)
+        if matches!(
+            self.peek(),
+            Some(Token::String(_)) | Some(Token::Int(_)) | Some(Token::Float(_))
+        ) && let Some(Spanned {
+            value: lit,
             span_id: span,
-        });
-        // Only consume doc comment if immediately after the value (same line)
-        let doc_after = if matches!(cursor.peek_at(0), Some(Token::DocComment(_))) {
-            parse_doc_comment(cursor)
+        }) = self.parse_literal()
+        {
+            let shape = Box::new(Spanned {
+                value: TypeExpr::Literal(lit, span),
+                span_id: span,
+            });
+            // Only consume doc comment if immediately after the value (same line)
+            let doc_after = if matches!(self.peek_at(0), Some(Token::DocComment(_))) {
+                self.parse_doc_comment()
+            } else {
+                None
+            };
+            let doc = DocComment::combine(doc_before, doc_after);
+            return Some(match doc.filter(|d| !d.is_empty()) {
+                Some(d) => Variant::Local {
+                    doc_comment: Some(d),
+                    shape,
+                },
+                None => Variant::External(shape),
+            });
+        }
+
+        // Fall through to tag-based pattern
+        let shape = self.parse_pattern_type_expr(expr_parser)?;
+        let sp = Box::new(shape);
+
+        // Only consume doc comment if immediately after the variant (same line)
+        let doc_after = if matches!(self.peek_at(0), Some(Token::DocComment(_))) {
+            self.parse_doc_comment()
         } else {
             None
         };
-        let doc = doc_after.or(doc_before);
-        return Some(match doc.filter(|d| !d.is_empty()) {
+
+        let doc = DocComment::combine(doc_before, doc_after);
+        Some(match doc.filter(|d| !d.is_empty()) {
             Some(d) => Variant::Local {
                 doc_comment: Some(d),
-                shape,
+                shape: sp,
             },
-            None => Variant::External(shape),
-        });
+            None => Variant::External(sp),
+        })
     }
 
-    // Fall through to tag-based pattern
-    let shape = parse_pattern_type_expr(cursor, expr_parser)?;
-    let sp = Box::new(shape);
-
-    // Only consume doc comment if immediately after the variant (same line)
-    let doc_after = if matches!(cursor.peek_at(0), Some(Token::DocComment(_))) {
-        parse_doc_comment(cursor)
-    } else {
-        None
-    };
-
-    let doc = doc_after.or(doc_before);
-    Some(match doc.filter(|d| !d.is_empty()) {
-        Some(d) => Variant::Local {
-            doc_comment: Some(d),
-            shape: sp,
-        },
-        None => Variant::External(sp),
-    })
-}
-
-fn make_variant(
-    doc_before: Option<DocComment>,
-    shape: Spanned<TypeExpr>,
-    doc_after: Option<DocComment>,
-) -> Variant {
-    let doc = doc_after.or(doc_before);
-    let sp = Box::new(shape);
-    match doc.filter(|d| !d.is_empty()) {
-        Some(d) => Variant::Local {
-            doc_comment: Some(d),
-            shape: sp,
-        },
-        None => Variant::External(sp),
-    }
-}
-
-fn attach_doc_to_previous(variants: &mut [Variant], doc: Option<DocComment>) {
-    if let Some(doc) = doc.filter(|d| !d.is_empty())
-        && let Some(prev) = variants.last_mut()
-    {
-        let placeholder = Variant::External(Box::new(Spanned {
-            value: TypeExpr::Nominal(Intern::new(String::new()), SpanId::INVALID),
-            span_id: SpanId::INVALID,
-        }));
-        let prev_owned = std::mem::replace(prev, placeholder);
-        *prev = match prev_owned {
-            Variant::External(shape) => Variant::Local {
-                doc_comment: Some(doc),
-                shape,
-            },
-            Variant::Local {
-                mut doc_comment,
-                shape,
-            } => {
-                if doc_comment.is_none() {
-                    doc_comment = Some(doc);
-                }
-                Variant::Local { doc_comment, shape }
-            }
+    /// True when `cursor` points at a lowercase `Id` followed by `has` (blanket impl start).
+    pub fn is_blanket_impl_start(&self) -> bool {
+        let Some(Token::Id(name)) = self.peek() else {
+            return false;
         };
+        let Some(c) = name.chars().next() else {
+            return false;
+        };
+        if !c.is_ascii_lowercase() {
+            return false;
+        }
+        matches!(self.peek_at(1), Some(Token::Has))
     }
-}
 
-/// True when `cursor` points at a lowercase `Id` followed by `has` (blanket impl start).
-pub fn is_blanket_impl_start(cursor: &TokenCursor) -> bool {
-    let Some(Token::Id(name)) = cursor.peek() else {
-        return false;
-    };
-    let Some(c) = name.chars().next() else {
-        return false;
-    };
-    if !c.is_ascii_lowercase() {
-        return false;
+    pub fn is_dot_blanket_impl_start(&self) -> bool {
+        let Some(Token::Id(name)) = self.peek() else {
+            return false;
+        };
+        let Some(c) = name.chars().next() else {
+            return false;
+        };
+        c.is_ascii_lowercase()
+            && matches!(self.peek_at(1), Some(Token::Dot))
+            && matches!(self.peek_at(2), Some(Token::Tag(_)))
     }
-    matches!(cursor.peek_at(1), Some(Token::Has))
-}
 
-/// Parse `x has TraitName(field: expr, ...)` where `x` is a lowercase type variable.
-pub fn parse_blanket_impl(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<ast::BlanketImpl> {
-    let type_var = match cursor.peek() {
-        Some(Token::Id(n)) => {
-            let id = n.to_string();
-            let lowercase = id
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_lowercase());
-            cursor.advance();
-            let name = Intern::new(id);
-            if !lowercase {
-                cursor.error(
-                    "blanket impl requires a lowercase type variable; write `x has Trait(...)` instead",
-                    cursor.current_span(),
+    pub fn parse_dot_blanket_impl(&mut self, expr_parser: ExprFn) -> Option<ast::BlanketImpl> {
+        let type_var = match self.peek() {
+            Some(Token::Id(n)) => {
+                let name = Intern::new(n.to_string());
+                self.advance();
+                name
+            }
+            _ => return None,
+        };
+        if !self.eat(&Token::Dot) {
+            return None;
+        }
+        let parsed = self.parse_trait_fields(expr_parser)?;
+        Some(ast::BlanketImpl {
+            trait_name: parsed.trait_name,
+            type_var,
+            fields: parsed.fields,
+        })
+    }
+
+    pub fn parse_dot_provided_impl(
+        &mut self,
+        expr_parser: ExprFn,
+    ) -> Option<(Intern<String>, ProvidedTrait)> {
+        let type_name = match self.peek()? {
+            Token::Tag(name) => {
+                let name = self.intern(name);
+                self.advance();
+                name
+            }
+            _ => return None,
+        };
+        if !self.eat(&Token::Dot) {
+            return None;
+        }
+        let parsed = self.parse_trait_fields(expr_parser)?;
+        Some((
+            type_name,
+            ProvidedTrait {
+                trait_name: parsed.trait_name,
+                trait_name_span: parsed.trait_name_span,
+                fields: parsed.fields,
+            },
+        ))
+    }
+
+    /// Parse legacy `x has TraitName(field: expr, ...)` where `x` is a lowercase type variable.
+    pub fn parse_blanket_impl(&mut self, expr_parser: ExprFn) -> Option<ast::BlanketImpl> {
+        let type_var = match self.peek() {
+            Some(Token::Id(n)) => {
+                let id = n.to_string();
+                let lowercase = id.chars().next().is_some_and(|c| c.is_ascii_lowercase());
+                self.advance();
+                let name = Intern::new(id);
+                if !lowercase {
+                    self.error(
+                        "blanket impl requires a lowercase type variable; write `x.Trait(...)` instead",
+                        self.current_span(),
+                    );
+                    return None;
+                }
+                name
+            }
+            Some(Token::Tag(_)) => {
+                self.error(
+                    "blanket impl requires a lowercase type variable; write `x.Trait(...)` instead",
+                    self.current_span(),
                 );
                 return None;
             }
-            name
-        }
-        Some(Token::Tag(_)) => {
-            cursor.error(
-                "blanket impl requires a lowercase type variable; write `x has Trait(...)` instead",
-                cursor.current_span(),
+            _ => {
+                self.error(
+                    "expected type variable before `has` in blanket impl",
+                    self.current_span(),
+                );
+                return None;
+            }
+        };
+        if !self.eat(&Token::Has) {
+            self.error(
+                "expected `has` after type variable in legacy blanket impl",
+                self.current_span(),
             );
             return None;
         }
-        _ => {
-            cursor.error("expected type variable before `has` in blanket impl", cursor.current_span());
+        let parsed = self.parse_trait_fields(expr_parser)?;
+        Some(ast::BlanketImpl {
+            trait_name: parsed.trait_name,
+            type_var,
+            fields: parsed.fields,
+        })
+    }
+
+    fn parse_trait_fields(&mut self, expr_parser: ExprFn) -> Option<ParsedTraitFields> {
+        let (trait_name, trait_name_span) = match self.peek() {
+            Some(Token::Tag(n)) => {
+                let name = self.intern(n);
+                let span = self.peek_span().unwrap_or(self.current_span());
+                self.advance();
+                (name, span)
+            }
+            _ => {
+                self.error("expected trait name after `has`", self.current_span());
+                return None;
+            }
+        };
+
+        let mut fields = Vec::new();
+        if self.eat(&Token::ParenOpen) {
+            if !self.is_at(&Token::ParenClose) {
+                loop {
+                    let field_name = match self.peek() {
+                        Some(Token::Id(n)) => {
+                            let id = self.intern(n);
+                            self.advance();
+                            id
+                        }
+                        _ => {
+                            self.error(
+                                "expected field name in trait parameters",
+                                self.current_span(),
+                            );
+                            break;
+                        }
+                    };
+                    if self.expect(&Token::Colon).is_none() {
+                        break;
+                    }
+                    fields.push((field_name, expr_parser(self)));
+                    if !self.eat(&Token::Comma) {
+                        break;
+                    }
+                }
+            }
+            self.expect(&Token::ParenClose)?;
+        }
+        Some(ParsedTraitFields {
+            trait_name,
+            trait_name_span,
+            fields,
+        })
+    }
+
+    /// Parse provided-trait clauses after a declaration.
+    fn parse_provided_trait_clauses(&mut self, expr_parser: ExprFn) -> Vec<ProvidedTrait> {
+        self.skip_indents();
+        let checkpoint = self.checkpoint();
+        if !self.eat(&Token::And) {
+            return Vec::new();
+        }
+        self.skip_indents();
+        if !self.eat(&Token::Has) {
+            self.rewind(checkpoint);
+            return Vec::new();
+        }
+
+        self.parse_trait_chain_after_has(expr_parser)
+    }
+
+    fn parse_trait_chain_after_has(&mut self, expr_parser: ExprFn) -> Vec<ProvidedTrait> {
+        let mut traits = Vec::new();
+
+        loop {
+            let Some(parsed) = self.parse_trait_fields(expr_parser) else {
+                break;
+            };
+            traits.push(ProvidedTrait {
+                trait_name: parsed.trait_name,
+                trait_name_span: parsed.trait_name_span,
+                fields: parsed.fields,
+            });
+
+            self.skip_indents();
+            let checkpoint = self.checkpoint();
+            if !self.eat(&Token::And) {
+                break;
+            }
+            self.skip_indents();
+            self.eat(&Token::Has);
+            if !matches!(self.peek(), Some(Token::Tag(_))) {
+                self.rewind(checkpoint);
+                break;
+            }
+        }
+
+        traits
+    }
+
+    /// Reject legacy `and is [not] Copy` marker syntax after a declaration.
+    fn reject_removed_marker_syntax(&mut self) {
+        self.skip_indents();
+        let checkpoint = self.checkpoint();
+        if self.eat(&Token::And) && self.eat(&Token::Is) {
+            self.error(
+                "marker syntax removed; use `and has Copy(can_copy: False)` to opt out of copyability",
+                self.current_span(),
+            );
+        } else {
+            self.rewind(checkpoint);
+        }
+    }
+
+    fn parse_params_for_declare(&mut self, expr_parser: ExprFn) -> Option<Parameters> {
+        if !self.is_at(&Token::ParenOpen) {
             return None;
         }
-    };
-    if !cursor.eat(&Token::Has) {
-        cursor.error("expected `has` after type variable in blanket impl", cursor.current_span());
-        return None;
+        let close_token = Token::ParenClose;
+        self.advance();
+
+        self.skip_layout();
+
+        let mut params = Parameters::new();
+        let mut seen_default = false;
+
+        if self.is_at(&close_token) {
+            self.advance();
+            return Some(params);
+        }
+
+        loop {
+            if let Some((key, kind)) = self.parse_one_declare_param(expr_parser) {
+                if seen_default && !matches!(kind, ParameterKind::Default(_)) {
+                    self.error(
+                        format!(
+                            "positional parameter `{}` appears after a default parameter",
+                            key.as_str()
+                        ),
+                        self.current_span(),
+                    );
+                }
+                if matches!(kind, ParameterKind::Default(_)) {
+                    seen_default = true;
+                }
+                params.insert(key, kind);
+            }
+
+            if self.is_at(&close_token) {
+                break;
+            }
+
+            if self.eat_list_separator() {
+                continue;
+            }
+
+            self.error(
+                "expected ',' or newline between parameters",
+                self.current_span(),
+            );
+            break;
+        }
+
+        self.skip_layout();
+        self.expect(&close_token);
+        Some(params)
     }
-    let parsed = parse_trait_fields(cursor, expr_parser)?;
-    Some(ast::BlanketImpl {
-        trait_name: parsed.trait_name,
-        type_var,
-        fields: parsed.fields,
-    })
+
+    fn parse_one_declare_param(
+        &mut self,
+        expr_parser: ExprFn,
+    ) -> Option<(Intern<String>, ParameterKind)> {
+        // Positional: bare Tag
+        if matches!(self.peek(), Some(Token::Tag(_))) {
+            let sp = self.parse_type_expr(expr_parser)?;
+            let key = Intern::<String>::from_ref(sp.value.surface_mangle_name());
+            return Some((
+                key,
+                ParameterKind::Tagged(Box::new(Spanned {
+                    value: sp.value,
+                    span_id: sp.span_id,
+                })),
+            ));
+        }
+
+        // Named: id [Tag | id | : TypeExpr]
+        let name = match self.peek() {
+            Some(Token::Id(n)) => {
+                let id = self.intern(n);
+                self.advance();
+                id
+            }
+            _ => return None,
+        };
+
+        // In declaration (type-level) position, `:` introduces a type default,
+        // not a value default. This is how `Box(x, a: LibcAllocator)` works.
+        if self.eat(&Token::Colon) {
+            let sp = self.parse_type_expr(expr_parser)?;
+            return Some((
+                name,
+                ParameterKind::Default(Box::new(Typed::infer(sp.value.into(), sp.span_id))),
+            ));
+        }
+
+        // Shared helper supports `id Tag`, `id id` (type variable, e.g.
+        // `Range[x] has (start x, end x)`), and bare `id` (generic).
+        self.parse_param_after_name(expr_parser, name)
+    }
+
+    fn make_variant(
+        doc_before: Option<DocComment>,
+        shape: Spanned<TypeExpr>,
+        doc_after: Option<DocComment>,
+    ) -> Variant {
+        let doc = DocComment::combine(doc_before, doc_after);
+        let sp = Box::new(shape);
+        match doc.filter(|d| !d.is_empty()) {
+            Some(d) => Variant::Local {
+                doc_comment: Some(d),
+                shape: sp,
+            },
+            None => Variant::External(sp),
+        }
+    }
+
+    fn attach_doc_to_previous(variants: &mut [Variant], doc: Option<DocComment>) {
+        if let Some(doc) = doc.filter(|d| !d.is_empty())
+            && let Some(prev) = variants.last_mut()
+        {
+            let placeholder = Variant::External(Box::new(Spanned {
+                value: TypeExpr::Nominal(Intern::new(String::new()), SpanId::INVALID),
+                span_id: SpanId::INVALID,
+            }));
+            let prev_owned = std::mem::replace(prev, placeholder);
+            *prev = match prev_owned {
+                Variant::External(shape) => Variant::Local {
+                    doc_comment: Some(doc),
+                    shape,
+                },
+                Variant::Local {
+                    mut doc_comment,
+                    shape,
+                } => {
+                    doc_comment = DocComment::combine(doc_comment, Some(doc));
+                    Variant::Local { doc_comment, shape }
+                }
+            };
+        }
+    }
 }
 
 struct ParsedTraitFields {
@@ -497,211 +962,99 @@ struct ParsedTraitFields {
     fields: Vec<(Intern<String>, Typed<Expr>)>,
 }
 
-fn parse_trait_fields(
-    cursor: &mut TokenCursor,
-    expr_parser: ExprFn,
-) -> Option<ParsedTraitFields> {
-    let (trait_name, trait_name_span) = match cursor.peek() {
-        Some(Token::Tag(n)) => {
-            let name = cursor.intern(n);
-            let span = cursor.peek_span().unwrap_or(cursor.current_span());
-            cursor.advance();
-            (name, span)
-        }
-        _ => {
-            cursor.error("expected trait name after `has`", cursor.current_span());
-            return None;
-        }
-    };
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query::SourceParseExt;
+    use ast::ParamConvention;
 
-    cursor.expect(&Token::ParenOpen)?;
+    #[test]
+    fn parses_interface_method_signatures() {
+        let source = r#"
+Allocator has (
+    --- Attempt to allocate.
+    allocate(ref self, l Layout) Slice(Byte) or AllocError,
+    --- Free a block.
+    deallocate(ref self, p Pointer(Byte), l Layout),
+)
+"#;
+        let ast = source.parse_source_full().ast;
+        let allocator = ast
+            .tags
+            .get(&Intern::new("Allocator".to_string()))
+            .expect("Allocator tag should exist");
 
-    let mut fields = Vec::new();
-    if !cursor.is_at(&Token::ParenClose) {
-        loop {
-            let field_name = match cursor.peek() {
-                Some(Token::Id(n)) => {
-                    let id = cursor.intern(n);
-                    cursor.advance();
-                    id
-                }
-                _ => {
-                    cursor.error("expected field name in trait parameters", cursor.current_span());
-                    break;
-                }
-            };
-            if cursor.expect(&Token::Colon).is_none() {
-                break;
-            }
-            fields.push((field_name, expr_parser(cursor)));
-            if !cursor.eat(&Token::Comma) {
-                break;
-            }
-        }
-    }
-    cursor.expect(&Token::ParenClose)?;
-    Some(ParsedTraitFields {
-        trait_name,
-        trait_name_span,
-        fields,
-    })
-}
-
-/// Parse `and has TraitName(field: expr, ...)` clauses after a record body.
-fn parse_provided_trait_clauses(
-    cursor: &mut TokenCursor,
-    expr_parser: ExprFn,
-) -> Vec<ProvidedTrait> {
-    let mut traits = Vec::new();
-
-    loop {
-        cursor.skip_indents();
-
-        let checkpoint = cursor.checkpoint();
-
-        if !cursor.eat(&Token::And) {
-            break;
-        }
-        cursor.skip_indents();
-        if !cursor.eat(&Token::Has) {
-            cursor.rewind(checkpoint);
-            break;
-        }
-
-        let Some(parsed) = parse_trait_fields(cursor, expr_parser) else {
-            break;
+        let DeclareValue::Interface(members) = &allocator.value else {
+            panic!(
+                "Allocator should be parsed as Interface, got {:?}",
+                &allocator.value
+            );
         };
-        traits.push(ProvidedTrait {
-            trait_name: parsed.trait_name,
-            trait_name_span: parsed.trait_name_span,
-            fields: parsed.fields,
-        });
-    }
 
-    traits
-}
+        assert_eq!(members.len(), 2, "expected 2 interface members");
 
-/// Reject legacy `and is [not] Copy` marker syntax after a declaration.
-fn reject_removed_marker_syntax(cursor: &mut TokenCursor) {
-    cursor.skip_indents();
-    let checkpoint = cursor.checkpoint();
-    if cursor.eat(&Token::And) && cursor.eat(&Token::Is) {
-        cursor.error(
-            "marker syntax removed; use `and has Copy(can_copy: False)` to opt out of copyability",
-            cursor.current_span(),
+        // First member: allocate(ref self, l Layout) Slice(Byte) or AllocError
+        let allocate = &members[0];
+        assert_eq!(allocate.name.as_str(), "allocate");
+        assert!(
+            allocate.doc_comment.is_some(),
+            "allocate should have doc comment"
         );
-    } else {
-        cursor.rewind(checkpoint);
-    }
-}
 
-fn parse_int_range(cursor: &mut TokenCursor) -> Option<(I256, I256)> {
-    let start = parse_signed_int(cursor)?;
-    if !cursor.eat(&Token::Infer) {
-        return None;
-    }
-    let end = parse_signed_int(cursor)?;
-    Some((start, end))
-}
+        // Check params
+        assert_eq!(allocate.params.len(), 2);
+        assert!(
+            allocate
+                .conventions
+                .contains_key(&Intern::new("self".to_string()))
+        );
+        assert_eq!(
+            allocate.conventions.get(&Intern::new("self".to_string())),
+            Some(&ParamConvention::Ref(false)),
+        );
 
-fn parse_signed_int(cursor: &mut TokenCursor) -> Option<I256> {
-    let neg = cursor.eat(&Token::Minus);
-    match cursor.peek()? {
-        &Token::Int(n) => {
-            cursor.advance();
-            if neg {
-                Some(-I256::from_u128(n))
-            } else {
-                Some(I256::from_u128(n))
+        // Check return type: Slice(Byte)
+        assert!(
+            allocate.return_ty.is_some(),
+            "allocate should have return type"
+        );
+        let rt = &allocate.return_ty.as_ref().unwrap().value;
+        match rt {
+            TypeExpr::Generic { name, params, .. } => {
+                assert_eq!(name.as_str(), "Slice");
+                assert_eq!(params.len(), 1);
             }
+            other => panic!("allocate return type should be Generic, got {:?}", other),
         }
-        _ => None,
-    }
-}
 
-fn parse_params_for_declare(cursor: &mut TokenCursor, expr_parser: ExprFn) -> Option<Parameters> {
-    if !cursor.is_at(&Token::ParenOpen) {
-        return None;
-    }
-    let close_token = Token::ParenClose;
-    cursor.advance();
-
-    let mut params = Parameters::new();
-    let mut seen_default = false;
-
-    if cursor.is_at(&close_token) {
-        cursor.advance();
-        return Some(params);
-    }
-
-    if let Some((key, kind)) = parse_one_declare_param(cursor, expr_parser) {
-        seen_default = matches!(kind, ParameterKind::Default(_));
-        params.insert(key, kind);
-    }
-
-    while cursor.eat(&Token::Comma) {
-        if cursor.is_at(&close_token) {
-            break;
-        }
-        if let Some((key, kind)) = parse_one_declare_param(cursor, expr_parser) {
-            if seen_default && !matches!(kind, ParameterKind::Default(_)) {
-                cursor.error(
-                    format!(
-                        "positional parameter `{}` appears after a default parameter",
-                        key.as_str()
-                    ),
-                    cursor.current_span(),
-                );
+        // Check error type: AllocError
+        assert!(
+            allocate.error_ty.is_some(),
+            "allocate should have error type"
+        );
+        let et = &allocate.error_ty.as_ref().unwrap().value;
+        match et {
+            TypeExpr::Nominal(name, _) => {
+                assert_eq!(name.as_str(), "AllocError");
             }
-            if matches!(kind, ParameterKind::Default(_)) {
-                seen_default = true;
-            }
-            params.insert(key, kind);
+            other => panic!("allocate error type should be AllocError, got {:?}", other),
         }
+
+        // Second member: deallocate(ref self, p Pointer(Byte), l Layout) (no return)
+        let deallocate = &members[1];
+        assert_eq!(deallocate.name.as_str(), "deallocate");
+        assert!(
+            deallocate.doc_comment.is_some(),
+            "deallocate should have doc comment"
+        );
+        assert_eq!(deallocate.params.len(), 3);
+        assert!(
+            deallocate.return_ty.is_none(),
+            "deallocate should have no return type"
+        );
+        assert!(
+            deallocate.error_ty.is_none(),
+            "deallocate should have no error type"
+        );
     }
-
-    cursor.expect(&close_token);
-    Some(params)
-}
-
-fn parse_one_declare_param(
-    cursor: &mut TokenCursor,
-    expr_parser: ExprFn,
-) -> Option<(Intern<String>, ParameterKind)> {
-    // Positional: bare Tag
-    if matches!(cursor.peek(), Some(Token::Tag(_))) {
-        let sp = parse_type_expr(cursor, expr_parser)?;
-        let key = Intern::<String>::from_ref(type_surface_mangle_name(&sp.value));
-        return Some((
-            key,
-            ParameterKind::Tagged(Box::new(Spanned {
-                value: sp.value,
-                span_id: sp.span_id,
-            })),
-        ));
-    }
-
-    // Named: id [Tag | id | : TypeExpr]
-    let name = match cursor.peek() {
-        Some(Token::Id(n)) => {
-            let id = cursor.intern(n);
-            cursor.advance();
-            id
-        }
-        _ => return None,
-    };
-
-    // In declaration (type-level) position, `:` introduces a type default,
-    // not a value default. This is how `Box(x, a: LibcAllocator)` works.
-    if cursor.eat(&Token::Colon) {
-        let sp = parse_type_expr(cursor, expr_parser)?;
-        return Some((
-            name,
-            ParameterKind::Default(Box::new(Typed::infer(sp.value.into(), sp.span_id))),
-        ));
-    }
-
-    // Shared helper supports `id Tag`, `id id` (type variable, e.g.
-    // `Range[x] has (start x, end x)`), and bare `id` (generic).
-    crate::params::parse_param_after_name(cursor, expr_parser, name)
 }

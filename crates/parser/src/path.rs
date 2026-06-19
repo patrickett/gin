@@ -3,136 +3,119 @@ use ast::{ModPath, Spanned};
 use internment::Intern;
 use lexer::Token;
 
-pub fn parse_id(cursor: &mut TokenCursor) -> Option<Intern<String>> {
-    match cursor.peek()? {
-        Token::Id(name) => {
-            let id = cursor.intern(name);
-            cursor.advance();
-            Some(id)
+impl<'src, 't> TokenCursor<'src, 't> {
+    pub fn parse_id(&mut self) -> Option<Intern<String>> {
+        match self.peek()? {
+            Token::Id(name) => {
+                let id = self.intern(name);
+                self.advance();
+                Some(id)
+            }
+            _ => None,
         }
-        _ => None,
     }
-}
 
-pub fn parse_path(cursor: &mut TokenCursor) -> Option<Spanned<ModPath>> {
-    let start_span = cursor.peek_span()?;
+    /// Internal: parse a dotted path where the root token is accepted by
+    /// `accept_root` and subsequent path segments (after `.`) are accepted by
+    /// `accept_segment`.
+    fn parse_path_matching(
+        &mut self,
+        mut accept_root: impl FnMut(Token<'src>) -> Option<&'src str>,
+        mut accept_segment: impl FnMut(Token<'src>) -> Option<&'src str>,
+    ) -> Option<Spanned<ModPath>> {
+        let start_span = self.peek_span()?;
 
-    let root = match cursor.peek()? {
-        Token::Id(name) => {
-            let id = cursor.intern(name);
-            cursor.advance();
+        let t = *self.peek()?;
+        let root = {
+            let name = accept_root(t)?;
+            let id = self.intern(name);
+            self.advance();
             id
-        }
-        _ => return None,
-    };
+        };
+        let root_span = start_span;
 
-    let mut segments = Vec::new();
-    let mut end_span = start_span;
+        let mut segments = Vec::new();
+        let mut segment_spans = Vec::new();
+        let mut end_span = start_span;
 
-    while cursor.is_at(&Token::Dot)
-        && matches!(cursor.peek_at(1), Some(Token::Id(_)) | Some(Token::Tag(_)))
-    {
-        cursor.advance(); // consume Dot
-        if let Some((token, span)) = cursor.advance() {
-            match token {
-                Token::Id(name) | Token::Tag(name) => {
-                    segments.push(cursor.intern(name));
+        while self.is_at(&Token::Dot) {
+            if let Some(next) = self.peek_at(1)
+                && let Some(name) = accept_segment(*next)
+            {
+                self.advance(); // consume Dot
+                if let Some((_, span)) = self.advance() {
+                    segments.push(self.intern(name));
+                    segment_spans.push(span);
                     end_span = span;
                 }
-                _ => break,
+            } else {
+                break;
             }
         }
+
+        let span = if end_span != start_span {
+            self.merge_span(start_span, end_span)
+        } else {
+            start_span
+        };
+
+        Some(Spanned::new(
+            ModPath::new_with_spans(root, root_span, segments, segment_spans),
+            span,
+        ))
     }
 
-    let span = if end_span != start_span {
-        cursor.merge_span(start_span, end_span)
-    } else {
-        start_span
-    };
+    /// Parse a path starting with a lowercase identifier (`foo.bar.Baz`).
+    pub fn parse_path(&mut self) -> Option<Spanned<ModPath>> {
+        self.parse_path_matching(
+            |t| match t {
+                Token::Id(n) => Some(n),
+                _ => None,
+            },
+            |t| match t {
+                Token::Id(n) | Token::Tag(n) => Some(n),
+                _ => None,
+            },
+        )
+    }
 
-    Some(Spanned::new(ModPath { root, segments }, span))
-}
-
-pub fn parse_tag_path(cursor: &mut TokenCursor) -> Option<Spanned<ModPath>> {
-    let start_span = cursor.peek_span()?;
-
-    let root = match cursor.peek()? {
-        Token::Tag(name) => {
-            let id = cursor.intern(name);
-            cursor.advance();
-            id
+    /// Parse `Tag.id[.id...]` — a tag-rooted method or module path.
+    /// Returns `None` if there is no segment after the root tag.
+    pub fn parse_tag_path(&mut self) -> Option<Spanned<ModPath>> {
+        let result = self.parse_path_matching(
+            |t| match t {
+                Token::Tag(n) => Some(n),
+                _ => None,
+            },
+            |t| match t {
+                Token::Id(n) => Some(n),
+                _ => None,
+            },
+        )?;
+        // Require at least one segment (e.g. `Map.keys`, not bare `Map`).
+        if result.value.segments.is_empty() {
+            return None;
         }
-        _ => return None,
-    };
-
-    let mut segments = Vec::new();
-    let mut end_span = start_span;
-
-    if !cursor.is_at(&Token::Dot) || !matches!(cursor.peek_at(1), Some(Token::Id(_))) {
-        return None;
-    }
-    cursor.advance(); // consume Dot
-
-    if let Some((Token::Id(name), span)) = cursor.advance() {
-        segments.push(cursor.intern(name));
-        end_span = span;
+        Some(result)
     }
 
-    while cursor.is_at(&Token::Dot) && matches!(cursor.peek_at(1), Some(Token::Id(_))) {
-        cursor.advance(); // consume Dot
-        if let Some((Token::Id(name), span)) = cursor.advance() {
-            segments.push(cursor.intern(name));
-            end_span = span;
+    /// Parse `Tag.Tag[.Tag...]` — a qualified variant path.
+    /// Returns `None` if there is no segment after the root tag.
+    pub fn parse_tag_variant_path(&mut self) -> Option<Spanned<ModPath>> {
+        let result = self.parse_path_matching(
+            |t| match t {
+                Token::Tag(n) => Some(n),
+                _ => None,
+            },
+            |t| match t {
+                Token::Tag(n) => Some(n),
+                _ => None,
+            },
+        )?;
+        // Require at least one segment (e.g. `Http.Status`, not bare `Http`).
+        if result.value.segments.is_empty() {
+            return None;
         }
+        Some(result)
     }
-
-    let span = if end_span != start_span {
-        cursor.merge_span(start_span, end_span)
-    } else {
-        start_span
-    };
-
-    Some(Spanned::new(ModPath { root, segments }, span))
-}
-
-pub fn parse_tag_variant_path(cursor: &mut TokenCursor) -> Option<Spanned<ModPath>> {
-    let start_span = cursor.peek_span()?;
-
-    let root = match cursor.peek()? {
-        Token::Tag(name) => {
-            let id = cursor.intern(name);
-            cursor.advance();
-            id
-        }
-        _ => return None,
-    };
-
-    let mut segments = Vec::new();
-    let mut end_span = start_span;
-
-    if !cursor.is_at(&Token::Dot) || !matches!(cursor.peek_at(1), Some(Token::Tag(_))) {
-        return None;
-    }
-    cursor.advance(); // consume Dot
-
-    if let Some((Token::Tag(name), span)) = cursor.advance() {
-        segments.push(cursor.intern(name));
-        end_span = span;
-    }
-
-    while cursor.is_at(&Token::Dot) && matches!(cursor.peek_at(1), Some(Token::Tag(_))) {
-        cursor.advance(); // consume Dot
-        if let Some((Token::Tag(name), span)) = cursor.advance() {
-            segments.push(cursor.intern(name));
-            end_span = span;
-        }
-    }
-
-    let span = if end_span != start_span {
-        cursor.merge_span(start_span, end_span)
-    } else {
-        start_span
-    };
-
-    Some(Spanned::new(ModPath { root, segments }, span))
 }

@@ -3,7 +3,9 @@
 
 use ast::{Expr, ParameterKind, TypeExpr};
 use internment::Intern;
-use parser::parse_from_str as parse_str;
+
+use parser::cursor::TokenCursor;
+use parser::query::SourceParseExt;
 
 fn intern(s: &str) -> Intern<String> {
     Intern::new(s.to_owned())
@@ -13,18 +15,18 @@ fn intern(s: &str) -> Intern<String> {
 fn parses_generic_method_bind_with_typevar_params_and_return() {
     let src =
         "Range(x) has (start x, end x)\n\nRange(x).new(start x, end x) Range(x): (start, end)\n";
-    let ast = parse_str(src);
+    let ast = TokenCursor::parse_source(src);
 
     // Tag declaration is recorded as `Range`
     assert!(
-        ast.tags().contains_key(&intern("Range")),
+        ast.tags.contains_key(&intern("Range")),
         "expected Range tag in tags(): {:?}",
-        ast.tags().keys().collect::<Vec<_>>()
+        ast.tags.keys().collect::<Vec<_>>()
     );
 
     // Method def is mangled as `Range.new` (TypeGeneric collapses to base name)
     let bind = ast
-        .defs()
+        .defs
         .get(&intern("Range.new"))
         .expect("expected Range.new bind");
 
@@ -43,7 +45,7 @@ fn parses_generic_method_bind_with_typevar_params_and_return() {
     }
 
     // Params: start: x, end: x — both Tagged(TypeNominal("x"))
-    let params = bind.params().as_ref().expect("Range.new must have params");
+    let params = bind.params.as_ref().expect("Range.new must have params");
     assert_eq!(params.len(), 2);
     let starts: Vec<_> = params.iter().collect();
     let (k0, v0) = &starts[0];
@@ -82,10 +84,10 @@ fn parses_method_bind_with_nontypevar_params() {
     // Sanity: ensure the existing `Type.method` form still parses for a non-generic
     // receiver — i.e., we did not regress the bare-Tag receiver path.
     let src = "Bool is True or False\n\nBool.to_string Str := 'true'\n";
-    let ast = parse_str(src);
+    let ast = TokenCursor::parse_source(src);
 
     let bind = ast
-        .defs()
+        .defs
         .get(&intern("Bool.to_string"))
         .expect("Bool.to_string should be present");
 
@@ -104,16 +106,16 @@ fn parses_custom_range_no_type_param_for_contrast() {
     // parse cleanly without forcing the two params to share a type variable.
     let src =
         "CustomRange has (start, end)\n\nCustomRange.new(start, end) CustomRange: (start, end)\n";
-    let ast = parse_str(src);
+    let ast = TokenCursor::parse_source(src);
 
-    assert!(ast.tags().contains_key(&intern("CustomRange")));
+    assert!(ast.tags.contains_key(&intern("CustomRange")));
 
     let bind = ast
-        .defs()
+        .defs
         .get(&intern("CustomRange.new"))
         .expect("CustomRange.new should be present");
 
-    let params = bind.params().as_ref().expect("must have params");
+    let params = bind.params.as_ref().expect("must have params");
     assert_eq!(params.len(), 2);
     let collected: Vec<_> = params.iter().collect();
     // No shared type variable: each param is `Generic` (no annotation).
@@ -135,13 +137,13 @@ Range(x) has (start x, end x)
 --- create a new range
 Range(x).new(start x, end x) Range(x): (start, end)
 ";
-    let ast = parse_str(src);
+    let ast = TokenCursor::parse_source(src);
     let bind = ast
-        .defs()
+        .defs
         .get(&intern("Range.new"))
         .expect("Range.new bind should exist");
     assert_eq!(
-        bind.doc_comment().map(|doc| doc.value.as_str()),
+        bind.doc_comment.as_ref().map(|doc| doc.value.as_str()),
         Some("create a new range")
     );
 }
@@ -155,10 +157,10 @@ Range(x).new(start x, end x) Range(x): (start, end)
 
 core.Range.new(12, 1200)
 ";
-    let ast = parse_str(src);
+    let ast = TokenCursor::parse_source(src);
 
     let call = ast
-        .top_level_exprs()
+        .exprs
         .iter()
         .find_map(|(expr, _)| match expr {
             Expr::FnCall(call) if call.path.root.as_str() == "core" => Some(call),
@@ -179,7 +181,7 @@ Point has (x Int, y Int)\n\
 Point.distance(self Point, other Point) Int:\
     return 0\n\
 return\n";
-    let out = parser::parse_source_full(src);
+    let out = src.parse_source_full();
     if !out.symptoms.is_empty() {
         eprintln!(
             "symptoms: {:?}",
@@ -187,11 +189,11 @@ return\n";
         );
     }
     let ast = out.ast;
-    let def_names: Vec<_> = ast.defs().keys().map(|k| k.as_str().to_string()).collect();
+    let def_names: Vec<_> = ast.defs.keys().map(|k| k.as_str().to_string()).collect();
     let bind = ast
-        .defs()
+        .defs
         .values()
-        .find(|b| b.name().as_str() == "distance")
+        .find(|b| b.name.as_str() == "distance")
         .unwrap_or_else(|| panic!("distance method def among {def_names:?}"));
     assert!(bind.is_method(), "expected receiver_type");
     let has_typed_self = bind.params.as_ref().is_some_and(|p| {
@@ -202,7 +204,7 @@ return\n";
     });
     assert!(has_typed_self, "self should be tagged");
     assert!(matches!(
-        bind.value(),
+        bind.value,
         ast::BindValue::Body { .. } | ast::BindValue::Expr(_)
     ));
 }

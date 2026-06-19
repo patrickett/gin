@@ -1,37 +1,45 @@
-/// support `\n`, `\t`, `\r`, `\\`, `\'`, `\"`, `\0`, `\(`.
-pub fn unescape(raw: &str) -> String {
-    // Fast path: no backslashes → return as-is
-    if !raw.contains('\\') {
-        return raw.to_owned();
-    }
+/// Extension trait providing string escape utilities on `str`.
+pub trait UnescapeExt {
+    /// Unescape common escape sequences (`\n`, `\t`, `\r`, `\\`, `\'`, `\"`, `\0`, `\(`).
+    /// Unknown escapes pass through literally.
+    fn unescape(&self) -> String;
+}
 
-    let mut out = String::with_capacity(raw.len());
-    let mut chars = raw.chars();
-
-    while let Some(ch) = chars.next() {
-        if ch != '\\' {
-            out.push(ch);
-            continue;
+impl UnescapeExt for str {
+    fn unescape(&self) -> String {
+        // Fast path: no backslashes → return as-is
+        if !self.contains('\\') {
+            return self.to_owned();
         }
-        match chars.next() {
-            Some('n') => out.push('\n'),
-            Some('t') => out.push('\t'),
-            Some('r') => out.push('\r'),
-            Some('\\') => out.push('\\'),
-            Some('\'') => out.push('\''),
-            Some('"') => out.push('"'),
-            Some('0') => out.push('\0'),
-            Some('(') => out.push('('),
-            Some(other) => {
-                // Unknown escape just pass through literally
-                out.push('\\');
-                out.push(other);
+
+        let mut out = String::with_capacity(self.len());
+        let mut chars = self.chars();
+
+        while let Some(ch) = chars.next() {
+            if ch != '\\' {
+                out.push(ch);
+                continue;
             }
-            None => out.push('\\'),
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('r') => out.push('\r'),
+                Some('\\') => out.push('\\'),
+                Some('\'') => out.push('\''),
+                Some('"') => out.push('"'),
+                Some('0') => out.push('\0'),
+                Some('(') => out.push('('),
+                Some(other) => {
+                    // Unknown escape just pass through literally
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
         }
-    }
 
-    out
+        out
+    }
 }
 
 #[cfg(test)]
@@ -40,52 +48,52 @@ mod tests {
 
     #[test]
     fn test_no_escapes() {
-        assert_eq!(unescape("hello world"), "hello world");
+        assert_eq!("hello world".unescape(), "hello world");
     }
 
     #[test]
     fn test_newline() {
-        assert_eq!(unescape("hello\\nworld"), "hello\nworld");
+        assert_eq!("hello\\nworld".unescape(), "hello\nworld");
     }
 
     #[test]
     fn test_tab() {
-        assert_eq!(unescape("tab\\there"), "tab\there");
+        assert_eq!("tab\\there".unescape(), "tab\there");
     }
 
     #[test]
     fn test_backslash() {
-        assert_eq!(unescape("back\\\\slash"), "back\\slash");
+        assert_eq!("back\\\\slash".unescape(), "back\\slash");
     }
 
     #[test]
     fn test_null() {
-        assert_eq!(unescape("null\\0byte"), "null\0byte");
+        assert_eq!("null\\0byte".unescape(), "null\0byte");
     }
 
     #[test]
     fn test_quotes() {
-        assert_eq!(unescape("say\\'hi\\'"), "say'hi'");
-        assert_eq!(unescape("say\\\"hi\\\""), "say\"hi\"");
+        assert_eq!("say\\'hi\\'".unescape(), "say'hi'");
+        assert_eq!("say\\\"hi\\\"".unescape(), "say\"hi\"");
     }
 
     #[test]
     fn test_escaped_paren() {
-        assert_eq!(unescape("\\(not interp)"), "(not interp)");
+        assert_eq!("\\(not interp)".unescape(), "(not interp)");
     }
 
     #[test]
     fn test_unknown_escape_passthrough() {
-        assert_eq!(unescape("\\q"), "\\q");
+        assert_eq!("\\q".unescape(), "\\q");
     }
 
     #[test]
     fn test_trailing_backslash() {
-        assert_eq!(unescape("end\\"), "end\\");
+        assert_eq!("end\\".unescape(), "end\\");
     }
 
     #[test]
     fn test_multiple_escapes() {
-        assert_eq!(unescape("a\\nb\\tc\\\\d"), "a\nb\tc\\d");
+        assert_eq!("a\\nb\\tc\\\\d".unescape(), "a\nb\tc\\d");
     }
 }

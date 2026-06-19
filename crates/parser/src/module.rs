@@ -24,6 +24,7 @@
 //! `use 'utils/requests'` makes `make_request` and `send_request` available
 //! directly (no qualifier needed).
 
+use crate::gin_walk::GinPathExt;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -105,84 +106,85 @@ impl ModuleTree {
     pub fn child_names(&self) -> Vec<&str> {
         self.children.keys().map(|s| s.as_str()).collect()
     }
-}
 
-/// Walk a directory and build a `ModuleTree`.
-///
-/// - `.gin` files in the directory become the module's direct files.
-/// - Subdirectories become sub-modules (recursively discovered).
-/// - Paths excluded by `.gitignore` are skipped.
-/// - Non-`.gin` files are ignored.
-///
-/// Returns `None` if the directory doesn't exist or can't be read.
-pub fn discover_module(dir: &Path) -> Option<ModuleTree> {
-    if !dir.is_dir() {
-        return None;
-    }
-
-    let name = dir
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-
-    let entries = std::fs::read_dir(dir).ok()?;
-
-    let mut files = Vec::new();
-    let mut children = BTreeMap::new();
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-
-        if path.is_dir() {
-            let dir_name = match path.file_name() {
-                Some(n) => n.to_string_lossy().into_owned(),
-                None => continue,
-            };
-
-            if crate::gin_walk::is_gitignored(&path) {
-                continue;
-            }
-
-            // Only discover sub-directories that contain .gin files somewhere
-            // in their tree. An empty directory shouldn't show up as a module.
-            if let Some(child_tree) = discover_module(&path)
-                && child_tree.has_any_files()
-            {
-                children.insert(dir_name, child_tree);
-            }
-        } else if path.extension().is_some_and(|e| e == "gin") {
-            files.push(path);
+    /// Walk a directory and build a `ModuleTree`.
+    ///
+    /// - `.gin` files in the directory become the module's direct files.
+    /// - Subdirectories become sub-modules (recursively discovered).
+    /// - Paths excluded by `.gitignore` are skipped.
+    /// - Non-`.gin` files are ignored.
+    ///
+    /// Returns `None` if the directory doesn't exist or can't be read.
+    pub fn discover(dir: &Path) -> Option<Self> {
+        if !dir.is_dir() {
+            return None;
         }
+
+        let name = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        let entries = std::fs::read_dir(dir).ok()?;
+
+        let mut files = Vec::new();
+        let mut children = BTreeMap::new();
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+
+            if path.is_dir() {
+                let dir_name = match path.file_name() {
+                    Some(n) => n.to_string_lossy().into_owned(),
+                    None => continue,
+                };
+
+                if path.is_gitignored() {
+                    continue;
+                }
+
+                // Only discover sub-directories that contain .gin files somewhere
+                // in their tree. An empty directory shouldn't show up as a module.
+                if let Some(child_tree) = Self::discover(&path)
+                    && child_tree.has_any_files()
+                {
+                    children.insert(dir_name, child_tree);
+                }
+            } else if path.extension().is_some_and(|e| e == "gin") {
+                files.push(path);
+            }
+        }
+
+        files.sort();
+
+        Some(ModuleTree {
+            name,
+            files,
+            children,
+        })
     }
 
-    files.sort();
-
-    Some(ModuleTree {
-        name,
-        files,
-        children,
-    })
-}
-
-/// Discover a module at a specific qualified path within a root directory.
-///
-/// Given `root = "src"` and `segments = ["utils", "requests"]`, this discovers
-/// the module at `src/utils/requests/`. An empty `segments` slice discovers the
-/// root directory itself.
-///
-/// Returns `None` if the path doesn't exist or isn't a directory.
-pub fn discover_module_at(root: &Path, segments: &[&str]) -> Option<ModuleTree> {
-    let mut dir = root.to_path_buf();
-    for seg in segments {
-        dir.push(seg);
+    /// Discover a module at a specific qualified path within a root directory.
+    ///
+    /// Given `root = "src"` and `segments = ["utils", "requests"]`, this discovers
+    /// the module at `src/utils/requests/`. An empty `segments` slice discovers the
+    /// root directory itself.
+    ///
+    /// Returns `None` if the path doesn't exist or isn't a directory.
+    pub fn discover_at(root: &Path, segments: &[&str]) -> Option<Self> {
+        let mut dir = root.to_path_buf();
+        for seg in segments {
+            dir.push(seg);
+        }
+        Self::discover(&dir)
     }
-    discover_module(&dir)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::ModuleTree;
     use std::fs;
+    use std::path::PathBuf;
 
     struct TempDir {
         path: PathBuf,
@@ -217,7 +219,7 @@ mod tests {
     #[test]
     fn test_discover_empty_dir() {
         let tmp = TempDir::new("empty");
-        let tree = discover_module(&tmp.path).unwrap();
+        let tree = ModuleTree::discover(&tmp.path).unwrap();
         assert!(tree.files.is_empty());
         assert!(tree.children.is_empty());
         assert!(tree.is_empty());
@@ -228,7 +230,7 @@ mod tests {
         let tmp = TempDir::new("single_file");
         tmp.add_file("helper.gin", "foo := 1\n");
 
-        let tree = discover_module(&tmp.path).unwrap();
+        let tree = ModuleTree::discover(&tmp.path).unwrap();
         assert_eq!(tree.files.len(), 1);
         assert!(tree.files[0].ends_with("helper.gin"));
         assert!(!tree.is_empty());
@@ -240,7 +242,7 @@ mod tests {
         tmp.add_file("readme.md", "hello");
         tmp.add_file("data.json", "{}");
 
-        let tree = discover_module(&tmp.path).unwrap();
+        let tree = ModuleTree::discover(&tmp.path).unwrap();
         assert!(tree.files.is_empty());
     }
 
@@ -251,7 +253,7 @@ mod tests {
         let sub = tmp.add_dir("requests");
         sub.add_file("make.gin", "make := 1\n");
 
-        let tree = discover_module(&tmp.path).unwrap();
+        let tree = ModuleTree::discover(&tmp.path).unwrap();
         assert_eq!(tree.files.len(), 1);
         assert!(tree.children.contains_key("requests"));
 
@@ -268,7 +270,7 @@ mod tests {
         let target = tmp.add_dir("target");
         target.add_file("build.gin", "x := 1\n");
 
-        let tree = discover_module(&tmp.path).unwrap();
+        let tree = ModuleTree::discover(&tmp.path).unwrap();
         assert_eq!(tree.files.len(), 1);
         assert!(!tree.children.contains_key("target"));
     }
@@ -280,7 +282,7 @@ mod tests {
         let target = tmp.add_dir("target");
         target.add_file("triple.gin", "x := 1\n");
 
-        let tree = discover_module(&tmp.path).unwrap();
+        let tree = ModuleTree::discover(&tmp.path).unwrap();
         assert!(tree.children.contains_key("target"));
     }
 
@@ -293,7 +295,7 @@ mod tests {
         let internal = requests.add_dir("internal");
         internal.add_file("parse.gin", "parse := 1\n");
 
-        let tree = discover_module(&tmp.path).unwrap();
+        let tree = ModuleTree::discover(&tmp.path).unwrap();
         assert_eq!(tree.files.len(), 1);
 
         let req = &tree.children["requests"];
@@ -313,7 +315,7 @@ mod tests {
         let deep = sub.add_dir("deep");
         deep.add_file("c.gin", "c\n");
 
-        let tree = discover_module(&tmp.path).unwrap();
+        let tree = ModuleTree::discover(&tmp.path).unwrap();
         let all = tree.all_files_recursive();
         assert_eq!(all.len(), 3);
     }
@@ -325,7 +327,7 @@ mod tests {
         let internal = requests.add_dir("internal");
         internal.add_file("parse.gin", "parse\n");
 
-        let tree = discover_module(&tmp.path).unwrap();
+        let tree = ModuleTree::discover(&tmp.path).unwrap();
         let resolved = tree.resolve_child(&["requests", "internal"]).unwrap();
         assert_eq!(resolved.files.len(), 1);
 
@@ -338,7 +340,7 @@ mod tests {
         tmp.add_file("main.gin", "main\n");
         let _empty = tmp.add_dir("empty_dir");
 
-        let tree = discover_module(&tmp.path).unwrap();
+        let tree = ModuleTree::discover(&tmp.path).unwrap();
         assert!(!tree.children.contains_key("empty_dir"));
     }
 
@@ -350,11 +352,11 @@ mod tests {
         let req = utils.add_dir("requests");
         req.add_file("make.gin", "m\n");
 
-        let tree = discover_module_at(&tmp.path, &["utils"]).unwrap();
+        let tree = ModuleTree::discover_at(&tmp.path, &["utils"]).unwrap();
         assert_eq!(tree.files.len(), 1);
         assert!(tree.children.contains_key("requests"));
 
-        let req_tree = discover_module_at(&tmp.path, &["utils", "requests"]).unwrap();
+        let req_tree = ModuleTree::discover_at(&tmp.path, &["utils", "requests"]).unwrap();
         assert_eq!(req_tree.files.len(), 1);
         assert!(req_tree.files[0].ends_with("make.gin"));
     }

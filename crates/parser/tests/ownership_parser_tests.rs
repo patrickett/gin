@@ -3,14 +3,14 @@
 
 use ast::{Expr, ParamConvention, TypeExpr};
 use internment::Intern;
-use parser::parse_from_str;
+use parser::query::SourceParseExt;
 
 #[test]
 fn test_parse_bare_param_is_inferred_by_default() {
     let src = "print(s String): 0
 ";
-    let ast = parse_from_str(src);
-    let bind = ast.defs().get(&Intern::from_ref("print")).unwrap();
+    let ast = src.parse_source_full().ast;
+    let bind = ast.defs.get(&Intern::from_ref("print")).unwrap();
     // Bare params default to Inferred; the parser only stores non-default conventions,
     // so nothing should be in the map for this param.
     assert!(bind.param_conventions.get(&Intern::from_ref("s")).is_none());
@@ -22,8 +22,8 @@ fn test_parse_mixed_params() {
     return 0
 return
 ";
-    let ast = parse_from_str(src);
-    let bind = ast.defs().get(&Intern::from_ref("process")).unwrap();
+    let ast = src.parse_source_full().ast;
+    let bind = ast.defs.get(&Intern::from_ref("process")).unwrap();
     assert_eq!(
         bind.param_conventions.get(&Intern::from_ref("db")),
         Some(&ParamConvention::Eat)
@@ -47,8 +47,8 @@ fn test_parse_own_param_with_return_type() {
     return 0
 return
 ";
-    let ast = parse_from_str(src);
-    let bind = ast.defs().get(&Intern::from_ref("consume")).unwrap();
+    let ast = src.parse_source_full().ast;
+    let bind = ast.defs.get(&Intern::from_ref("consume")).unwrap();
     // Bare param defaults to Inferred; convention not stored in the map.
     assert!(bind.param_conventions.get(&Intern::from_ref("s")).is_none());
     // Return tag should be set (capitalized type annotation)
@@ -68,13 +68,13 @@ main:
     return 0
 return
 ";
-    let ast = parse_from_str(src);
+    let ast = src.parse_source_full().ast;
     assert!(
-        ast.defs().contains_key(&Intern::from_ref("main")),
+        ast.defs.contains_key(&Intern::from_ref("main")),
         "main should be a def"
     );
-    let main_def = ast.defs().get(&Intern::from_ref("main")).unwrap();
-    if let ast::BindValue::Body { exprs, .. } = main_def.value() {
+    let main_def = ast.defs.get(&Intern::from_ref("main")).unwrap();
+    if let ast::BindValue::Body { exprs, .. } = &main_def.value {
         let has_consume_arg = exprs.iter().any(|expr| {
             if let Expr::FnCall(call) = &expr.value
                 && let Some(args) = &call.args
@@ -93,8 +93,8 @@ fn test_parse_ref_param() {
     return e.hp
 return
 ";
-    let ast = parse_from_str(src);
-    let bind = ast.defs().get(&Intern::from_ref("read")).unwrap();
+    let ast = src.parse_source_full().ast;
+    let bind = ast.defs.get(&Intern::from_ref("read")).unwrap();
     assert_eq!(
         bind.param_conventions.get(&Intern::from_ref("e")),
         Some(&ParamConvention::Ref(false))
@@ -107,8 +107,8 @@ fn test_parse_mut_param() {
     e.hp: hp
 return
 ";
-    let ast = parse_from_str(src);
-    let bind = ast.defs().get(&Intern::from_ref("write")).unwrap();
+    let ast = src.parse_source_full().ast;
+    let bind = ast.defs.get(&Intern::from_ref("write")).unwrap();
     assert_eq!(
         bind.param_conventions.get(&Intern::from_ref("e")),
         Some(&ParamConvention::Ref(true))
@@ -127,8 +127,8 @@ fn test_parse_eat_param() {
     return e.hp
 return
 ";
-    let ast = parse_from_str(src);
-    let bind = ast.defs().get(&Intern::from_ref("consume")).unwrap();
+    let ast = src.parse_source_full().ast;
+    let bind = ast.defs.get(&Intern::from_ref("consume")).unwrap();
     assert_eq!(
         bind.param_conventions.get(&Intern::from_ref("e")),
         Some(&ParamConvention::Eat)
@@ -141,8 +141,8 @@ fn test_parse_mixed_ref_and_bare_params() {
     d.hp: d.hp - a.damage
 return
 ";
-    let ast = parse_from_str(src);
-    let bind = ast.defs().get(&Intern::from_ref("attack")).unwrap();
+    let ast = src.parse_source_full().ast;
+    let bind = ast.defs.get(&Intern::from_ref("attack")).unwrap();
     assert_eq!(
         bind.param_conventions.get(&Intern::from_ref("a")),
         Some(&ParamConvention::Ref(false))
@@ -163,15 +163,15 @@ main:
     return 0
 return
 ";
-    let ast = parse_from_str(src);
-    let main_def = ast.defs().get(&Intern::from_ref("main")).unwrap();
+    let ast = src.parse_source_full().ast;
+    let main_def = ast.defs.get(&Intern::from_ref("main")).unwrap();
     // Look inside the body for the Bind with name "r"
-    if let ast::BindValue::Body { exprs, .. } = main_def.value() {
+    if let ast::BindValue::Body { exprs, .. } = &main_def.value {
         let r_bind = exprs
             .iter()
             .find_map(|expr| {
                 if let Expr::Bind(bind) = &expr.value {
-                    if bind.name().as_str() == "r" {
+                    if bind.name.as_str() == "r" {
                         Some(bind)
                     } else {
                         None
@@ -214,14 +214,14 @@ main:
     return 0
 return
 ";
-    let ast = parse_from_str(src);
-    let main_def = ast.defs().get(&Intern::from_ref("main")).unwrap();
-    if let ast::BindValue::Body { exprs, .. } = main_def.value() {
+    let ast = src.parse_source_full().ast;
+    let main_def = ast.defs.get(&Intern::from_ref("main")).unwrap();
+    if let ast::BindValue::Body { exprs, .. } = &main_def.value {
         let r_bind = exprs
             .iter()
             .find_map(|expr| {
                 if let Expr::Bind(bind) = &expr.value {
-                    if bind.name().as_str() == "r" {
+                    if bind.name.as_str() == "r" {
                         Some(bind)
                     } else {
                         None
@@ -260,8 +260,8 @@ process[r Entity](ref[r] a Entity, ref[r] d Entity) Int:
     return a.hp + d.hp
 return
 ";
-    let ast = parse_from_str(src);
-    let bind = ast.defs().get(&Intern::from_ref("process")).unwrap();
+    let ast = src.parse_source_full().ast;
+    let bind = ast.defs.get(&Intern::from_ref("process")).unwrap();
     assert_eq!(bind.group_params.len(), 1);
     assert_eq!(bind.group_params[0].name.as_str(), "r");
     assert_eq!(bind.group_params[0].ty_name.as_str(), "Entity");
@@ -275,10 +275,11 @@ attack[mut r Entity](ref[r] a Entity, ref[r] d Entity):
     d.hp: d.hp - a.calculate_damage(d)
 return
 ";
-    let ast = parse_from_str(src);
-    let bind = ast.defs().get(&Intern::from_ref("attack")).unwrap();
+    let ast = src.parse_source_full().ast;
+    let bind = ast.defs.get(&Intern::from_ref("attack")).unwrap();
     assert_eq!(bind.group_params.len(), 1);
     assert_eq!(bind.group_params[0].name.as_str(), "r");
+    assert_eq!(bind.group_params[0].ty_name.as_str(), "Entity");
     assert!(bind.group_params[0].mutable);
 }
 
@@ -289,8 +290,8 @@ process[e Entity, mut rr Ring](ref[e] entity Entity, mut[rr] ring Ring):
     ring.power: ring.power + entity.energy
 return
 ";
-    let ast = parse_from_str(src);
-    let bind = ast.defs().get(&Intern::from_ref("process")).unwrap();
+    let ast = src.parse_source_full().ast;
+    let bind = ast.defs.get(&Intern::from_ref("process")).unwrap();
     assert_eq!(bind.group_params.len(), 2);
     assert_eq!(bind.group_params[0].name.as_str(), "e");
     assert!(!bind.group_params[0].mutable);
@@ -309,9 +310,9 @@ return
 
 #[test]
 fn test_parse_and_has_copy_override() {
-    let src = "Transaction has (id Int) and\n    has Copy(can_copy: False)\n";
-    let ast = parse_from_str(src);
-    let decl = ast.tags().get(&Intern::from_ref("Transaction")).unwrap();
+    let src = "Transaction has (id Int) and has Copy(can_copy: False)\n";
+    let ast = src.parse_source_full().ast;
+    let decl = ast.tags.get(&Intern::from_ref("Transaction")).unwrap();
     let pt = decl
         .provided_traits
         .iter()
@@ -324,9 +325,11 @@ fn test_parse_and_has_copy_override() {
 #[test]
 fn test_parse_and_is_not_copy_rejected() {
     let src = "Transaction has (id Int)\n     and is not Copy\n";
-    let out = parser::parse_source_full(src);
+    let out = src.parse_source_full();
     assert!(
-        out.symptoms.iter().any(|d| d.message.contains("marker syntax removed")),
+        out.symptoms
+            .iter()
+            .any(|d| d.message.contains("marker syntax removed")),
         "expected migration diagnostic, got: {:?}",
         out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
     );
@@ -340,8 +343,8 @@ process[e Entity, mut rr Ring](ref[e] entity Entity, mut[rr] ring Ring):
     ring.power: ring.power + entity.energy
 return
 ";
-    let ast = parse_from_str(src);
-    let bind = ast.defs().get(&Intern::from_ref("process")).unwrap();
+    let ast = src.parse_source_full().ast;
+    let bind = ast.defs.get(&Intern::from_ref("process")).unwrap();
 
     // entity is ref in immutable group e
     assert_eq!(

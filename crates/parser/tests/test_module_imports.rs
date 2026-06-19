@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use ast::ImportSource;
-use parser::{discover_module, discover_module_at, parse_from_str};
+use parser::query::SourceParseExt;
 
 struct TempProject {
     root: PathBuf,
@@ -46,7 +46,7 @@ fn test_module_tree_flat_directory() {
     proj.add_file("utils/helper.gin", "helper := 1\n");
     proj.add_file("utils/format.gin", "format := 2\n");
 
-    let tree = discover_module(&proj.path().join("utils")).unwrap();
+    let tree = parser::module::ModuleTree::discover(&proj.path().join("utils")).unwrap();
 
     assert_eq!(tree.files.len(), 2);
     assert!(tree.children.is_empty());
@@ -66,7 +66,7 @@ fn test_module_tree_with_submodule() {
     proj.add_file("utils/requests/make_request.gin", "make := 1\n");
     proj.add_file("utils/requests/send_request.gin", "send := 2\n");
 
-    let tree = discover_module(&proj.path().join("utils")).unwrap();
+    let tree = parser::module::ModuleTree::discover(&proj.path().join("utils")).unwrap();
 
     // Direct files: error.gin only
     assert_eq!(tree.files.len(), 1);
@@ -85,7 +85,7 @@ fn test_module_tree_nested_submodules() {
     proj.add_file("utils/requests/make.gin", "make := 1\n");
     proj.add_file("utils/requests/internal/parse_url.gin", "parse := 1\n");
 
-    let tree = discover_module(&proj.path().join("utils")).unwrap();
+    let tree = parser::module::ModuleTree::discover(&proj.path().join("utils")).unwrap();
 
     // Top level: just error.gin
     assert_eq!(tree.files.len(), 1);
@@ -108,7 +108,7 @@ fn test_all_files_recursive_collects_everything() {
     proj.add_file("utils/requests/internal/c.gin", "c\n");
     proj.add_file("utils/helpers/d.gin", "d\n");
 
-    let tree = discover_module(&proj.path().join("utils")).unwrap();
+    let tree = parser::module::ModuleTree::discover(&proj.path().join("utils")).unwrap();
     let all = tree.all_files_recursive();
 
     assert_eq!(all.len(), 4);
@@ -120,7 +120,7 @@ fn test_direct_files_excludes_submodules() {
     proj.add_file("utils/top.gin", "top\n");
     proj.add_file("utils/sub/child.gin", "child\n");
 
-    let tree = discover_module(&proj.path().join("utils")).unwrap();
+    let tree = parser::module::ModuleTree::discover(&proj.path().join("utils")).unwrap();
 
     assert_eq!(tree.direct_files().len(), 1);
     assert!(tree.direct_files()[0].ends_with("top.gin"));
@@ -132,7 +132,7 @@ fn test_resolve_child_walks_path() {
     proj.add_file("root.gin", "r\n");
     proj.add_file("a/b/c/deep.gin", "deep\n");
 
-    let tree = discover_module(proj.path()).unwrap();
+    let tree = parser::module::ModuleTree::discover(proj.path()).unwrap();
 
     // Root has child "a"
     let a = tree.resolve_child(&["a"]).unwrap();
@@ -157,7 +157,7 @@ fn test_child_names() {
     proj.add_file("alpha/a.gin", "a\n");
     proj.add_file("beta/b.gin", "b\n");
 
-    let tree = discover_module(proj.path()).unwrap();
+    let tree = parser::module::ModuleTree::discover(proj.path()).unwrap();
     let names = tree.child_names();
 
     assert_eq!(names, vec!["alpha", "beta"]);
@@ -169,7 +169,7 @@ fn test_empty_directories_not_discovered_as_children() {
     proj.add_file("main.gin", "main\n");
     proj.add_dir("empty_subdir");
 
-    let tree = discover_module(proj.path()).unwrap();
+    let tree = parser::module::ModuleTree::discover(proj.path()).unwrap();
 
     assert_eq!(tree.files.len(), 1);
     assert!(!tree.children.contains_key("empty_subdir"));
@@ -182,7 +182,7 @@ fn test_gitignored_target_directory_skipped() {
     proj.add_file("src/main.gin", "main\n");
     proj.add_file("target/build.gin", "x := 1\n");
 
-    let tree = discover_module(proj.path()).unwrap();
+    let tree = parser::module::ModuleTree::discover(proj.path()).unwrap();
     assert!(!tree.children.contains_key("target"));
 }
 
@@ -192,30 +192,33 @@ fn test_discover_module_at_qualified_path() {
     proj.add_file("src/utils/io.gin", "io\n");
     proj.add_file("src/utils/requests/make.gin", "make\n");
 
-    let src_tree = discover_module_at(proj.path(), &["src"]).unwrap();
+    let src_tree = parser::module::ModuleTree::discover_at(proj.path(), &["src"]).unwrap();
     assert!(src_tree.children.contains_key("utils"));
 
-    let utils = discover_module_at(proj.path(), &["src", "utils"]).unwrap();
+    let utils = parser::module::ModuleTree::discover_at(proj.path(), &["src", "utils"]).unwrap();
     assert_eq!(utils.files.len(), 1);
     assert!(utils.children.contains_key("requests"));
 
-    let requests = discover_module_at(proj.path(), &["src", "utils", "requests"]).unwrap();
+    let requests =
+        parser::module::ModuleTree::discover_at(proj.path(), &["src", "utils", "requests"])
+            .unwrap();
     assert_eq!(requests.files.len(), 1);
 }
 
 #[test]
 fn test_nonexistent_directory_returns_none() {
-    let result = discover_module(std::path::Path::new("/nonexistent/path/xyz"));
+    let result =
+        parser::module::ModuleTree::discover(std::path::Path::new("/nonexistent/path/xyz"));
     assert!(result.is_none());
 }
 
 #[test]
 fn test_use_local_import_parses_correctly() {
     let src = "use 'utils'\nmain:\nreturn\n";
-    let ast = parse_from_str(src);
+    let ast = src.parse_source_full().ast;
 
-    assert_eq!(ast.uses().len(), 1);
-    let import = &ast.uses()[0];
+    assert_eq!(ast.uses.len(), 1);
+    let import = &ast.uses[0];
     assert_eq!(import.0.len(), 1);
 
     match &import.0[0].source {
@@ -229,10 +232,10 @@ fn test_use_local_import_parses_correctly() {
 #[test]
 fn test_use_local_subpath_parses_correctly() {
     let src = "use 'utils/requests'\nmain:\nreturn\n";
-    let ast = parse_from_str(src);
+    let ast = src.parse_source_full().ast;
 
-    assert_eq!(ast.uses().len(), 1);
-    let import = &ast.uses()[0];
+    assert_eq!(ast.uses.len(), 1);
+    let import = &ast.uses[0];
 
     match &import.0[0].source {
         ast::ImportSource::Local(path, _) => {
@@ -245,26 +248,26 @@ fn test_use_local_subpath_parses_correctly() {
 #[test]
 fn test_use_local_with_alias() {
     let src = "use 'utils' as u\nmain:\nreturn\n";
-    let ast = parse_from_str(src);
+    let ast = src.parse_source_full().ast;
 
-    let import = &ast.uses()[0];
+    let import = &ast.uses[0];
     assert!(import.0[0].alias.is_some());
 }
 
 #[test]
 fn test_use_multiple_local_imports() {
     let src = "use 'utils', 'helpers'\nmain:\nreturn\n";
-    let ast = parse_from_str(src);
+    let ast = src.parse_source_full().ast;
 
-    assert_eq!(ast.uses().len(), 1);
-    assert_eq!(ast.uses()[0].0.len(), 2);
+    assert_eq!(ast.uses.len(), 1);
+    assert_eq!(ast.uses[0].0.len(), 2);
 }
 
 #[test]
 fn test_use_local_bundle_parses() {
     let src = "use utils.(math, http as h)\nmain:\nreturn\n";
-    let ast = parse_from_str(src);
-    let import = &ast.uses()[0];
+    let ast = src.parse_source_full().ast;
+    let import = &ast.uses[0];
     assert_eq!(import.0.len(), 1);
     match &import.0[0].source {
         ImportSource::LocalBundle(b) => {
@@ -286,7 +289,7 @@ fn test_module_tree_files_sorted_deterministically() {
     proj.add_file("mod/alpha.gin", "a\n");
     proj.add_file("mod/middle.gin", "m\n");
 
-    let tree = discover_module(&proj.path().join("mod")).unwrap();
+    let tree = parser::module::ModuleTree::discover(&proj.path().join("mod")).unwrap();
 
     assert_eq!(tree.files.len(), 3);
     let names: Vec<_> = tree
@@ -308,7 +311,7 @@ fn test_module_tree_children_sorted_deterministically() {
     proj.add_file("a_sub/b.gin", "b\n");
     proj.add_file("m_sub/c.gin", "c\n");
 
-    let tree = discover_module(proj.path()).unwrap();
+    let tree = parser::module::ModuleTree::discover(proj.path()).unwrap();
     let names: Vec<_> = tree.children.keys().collect();
 
     assert_eq!(names[0].as_str(), "a_sub");
@@ -323,7 +326,7 @@ fn test_files_at_returns_direct_files_for_submodule() {
     proj.add_file("sub/a.gin", "a\n");
     proj.add_file("sub/b.gin", "b\n");
 
-    let tree = discover_module(proj.path()).unwrap();
+    let tree = parser::module::ModuleTree::discover(proj.path()).unwrap();
 
     let sub_files = tree.files_at(&["sub"]).unwrap();
     assert_eq!(sub_files.len(), 2);
@@ -335,7 +338,7 @@ fn test_has_any_files() {
     proj.add_dir("empty");
     proj.add_file("has_some/x.gin", "x\n");
 
-    let tree = discover_module(proj.path()).unwrap();
+    let tree = parser::module::ModuleTree::discover(proj.path()).unwrap();
 
     // The empty dir should not appear as a child
     assert!(!tree.children.contains_key("empty"));
@@ -345,10 +348,10 @@ fn test_has_any_files() {
 #[test]
 fn test_use_path_member_import_parses() {
     let src = "use './folder'.Item1\nmain:\nreturn\n";
-    let ast = parse_from_str(src);
+    let ast = src.parse_source_full().ast;
 
-    assert_eq!(ast.uses().len(), 1);
-    match &ast.uses()[0].0[0].source {
+    assert_eq!(ast.uses.len(), 1);
+    match &ast.uses[0].0[0].source {
         ImportSource::LocalMember(m) => {
             assert_eq!(m.local_path, Some(std::path::PathBuf::from("./folder")));
             assert_eq!(m.member.export.as_str(), "Item1");
@@ -360,10 +363,10 @@ fn test_use_path_member_import_parses() {
 #[test]
 fn test_use_path_bundle_folder_parses() {
     let src = "use './folder'.(Item1)\nmain:\nreturn\n";
-    let ast = parse_from_str(src);
+    let ast = src.parse_source_full().ast;
 
-    assert_eq!(ast.uses().len(), 1);
-    let import = &ast.uses()[0];
+    assert_eq!(ast.uses.len(), 1);
+    let import = &ast.uses[0];
 
     match &import.0[0].source {
         ImportSource::LocalBundle(b) => {
@@ -380,10 +383,10 @@ fn test_use_path_bundle_folder_parses() {
 #[test]
 fn test_use_path_bundle_with_alias_parses() {
     let src = "use './folder'.(Item as Alias)\nmain:\nreturn\n";
-    let ast = parse_from_str(src);
+    let ast = src.parse_source_full().ast;
 
-    assert_eq!(ast.uses().len(), 1);
-    match &ast.uses()[0].0[0].source {
+    assert_eq!(ast.uses.len(), 1);
+    match &ast.uses[0].0[0].source {
         ImportSource::LocalBundle(b) => {
             assert_eq!(b.local_path, Some(std::path::PathBuf::from("./folder")));
             assert_eq!(b.members.len(), 1);
