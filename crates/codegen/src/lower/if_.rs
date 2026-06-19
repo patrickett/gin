@@ -24,9 +24,19 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 return None;
             }
         };
-        let disc = block.append_op(self.mlir.llvm_extractvalue(subject_val, 0, self.mlir.i64()));
-        let expected_val = block.const_i64(self.mlir, expected_disc as i64);
-        let cond_val = block.append_op(self.mlir.build_cmpi(Predicates::EQ, disc, expected_val));
+        let disc = block.append_op(self.mlir.llvm_extractvalue(
+            subject_val,
+            0,
+            self.mlir.i64(),
+            self.location(),
+        ));
+        let expected_val = block.const_i64(self.mlir, expected_disc as i64, self.location());
+        let cond_val = block.append_op(self.mlir.build_cmpi(
+            Predicates::EQ,
+            disc,
+            expected_val,
+            self.location(),
+        ));
 
         // 2. Determine return type from typed AST
         let ret_ty = match if_expr.ret {
@@ -59,7 +69,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
 
             let ret_val = match if_expr.ret {
                 Some(ret_id) => self.lower_typed_expr(ret_id, &blk_ref, &mut inner_symtab)?,
-                None => blk_ref.unit_value(self),
+                None => blk_ref.unit_value(self, loc),
             };
             blk_ref.append_operation(scf_dialect::r#yield(&[ret_val], loc));
         }
@@ -70,7 +80,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
             let blk = Block::new(&[]);
             else_region.append_block(blk);
             let blk_ref = else_region.first_block().unwrap();
-            blk_ref.append_operation(scf_dialect::r#yield(&[blk_ref.unit_value(self)], loc));
+            blk_ref.append_operation(scf_dialect::r#yield(&[blk_ref.unit_value(self, loc)], loc));
         }
 
         // 5. Emit scf.if

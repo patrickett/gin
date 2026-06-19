@@ -6,7 +6,6 @@ use crate::prelude::*;
 
 /// Extension trait for [`melior::Context`] to simplify common operations.
 pub trait ContextExt {
-    fn unknown_loc(&self) -> Location<'_>;
     fn i64(&self) -> Type<'_>;
     fn i128(&self) -> Type<'_>;
     fn i1(&self) -> Type<'_>;
@@ -25,10 +24,6 @@ pub trait ContextExt {
 }
 
 impl ContextExt for Context {
-    fn unknown_loc(&self) -> Location<'_> {
-        Location::unknown(self)
-    }
-
     fn i64(&self) -> Type<'_> {
         Type::from(IntegerType::new(self, 64))
     }
@@ -103,30 +98,44 @@ impl<'c> AttributeExt<'c> for &'c Context {
 
 /// Extension trait for building MLIR operations.
 pub trait OperationBuilderExt<'c> {
-    fn i64_const(&self, value: i64) -> Operation<'c>;
+    fn i64_const(&self, value: i64, loc: Location<'c>) -> Operation<'c>;
     /// Create an integer constant of arbitrary bit-width.
     /// Note: melior's `IntegerAttribute::new` currently takes `i64`, so values
     /// exceeding 64 bits are truncated. Full i128 constant support requires a
     /// future melior API update or manual LLVMAPInt construction.
-    fn int_const(&self, ty: Type<'c>, value: i128) -> Operation<'c>;
-    fn const_op(&self, attr: Attribute<'c>, ty: Type<'c>) -> Operation<'c>;
+    fn int_const(&self, ty: Type<'c>, value: i128, loc: Location<'c>) -> Operation<'c>;
+    fn const_op(&self, attr: Attribute<'c>, ty: Type<'c>, loc: Location<'c>) -> Operation<'c>;
     fn build_binop(
         &self,
         name: &'static str,
         lhs: Value<'c, 'c>,
         rhs: Value<'c, 'c>,
         result_ty: Type<'c>,
+        loc: Location<'c>,
     ) -> Operation<'c>;
-    fn build_cmpi(&self, predicate: u64, lhs: Value<'c, 'c>, rhs: Value<'c, 'c>) -> Operation<'c>;
-    fn build_cmpf(&self, predicate: u64, lhs: Value<'c, 'c>, rhs: Value<'c, 'c>) -> Operation<'c>;
+    fn build_cmpi(
+        &self,
+        predicate: u64,
+        lhs: Value<'c, 'c>,
+        rhs: Value<'c, 'c>,
+        loc: Location<'c>,
+    ) -> Operation<'c>;
+    fn build_cmpf(
+        &self,
+        predicate: u64,
+        lhs: Value<'c, 'c>,
+        rhs: Value<'c, 'c>,
+        loc: Location<'c>,
+    ) -> Operation<'c>;
     /// `llvm.mlir.undef` — produce an undefined value of the given type
-    fn llvm_undef(&self, ty: Type<'c>) -> Operation<'c>;
+    fn llvm_undef(&self, ty: Type<'c>, loc: Location<'c>) -> Operation<'c>;
     /// `llvm.insertvalue` — insert a value into an aggregate at `position`
     fn llvm_insertvalue(
         &self,
         container: Value<'c, 'c>,
         value: Value<'c, 'c>,
         position: i64,
+        loc: Location<'c>,
     ) -> Operation<'c>;
     /// `llvm.extractvalue` — extract a value from an aggregate at `position`
     fn llvm_extractvalue(
@@ -134,22 +143,23 @@ pub trait OperationBuilderExt<'c> {
         container: Value<'c, 'c>,
         position: i64,
         result_type: Type<'c>,
+        loc: Location<'c>,
     ) -> Operation<'c>;
 }
 
 impl<'c> OperationBuilderExt<'c> for &'c Context {
-    fn i64_const(&self, value: i64) -> Operation<'c> {
+    fn i64_const(&self, value: i64, loc: Location<'c>) -> Operation<'c> {
         let ty = self.i64();
         let attr = IntegerAttribute::new(ty, value);
         let value_id = Identifier::new(self, "value");
-        OperationBuilder::new("arith.constant", self.unknown_loc())
+        OperationBuilder::new("arith.constant", loc)
             .add_attributes(&[(value_id, attr.into())])
             .add_results(&[ty])
             .build()
             .expect("arith.constant build should succeed")
     }
 
-    fn int_const(&self, ty: Type<'c>, value: i128) -> Operation<'c> {
+    fn int_const(&self, ty: Type<'c>, value: i128, loc: Location<'c>) -> Operation<'c> {
         let attr: Attribute<'c> = if value >= i64::MIN as i128 && value <= i64::MAX as i128 {
             // Fast path: value fits in i64, use native IntegerAttribute
             IntegerAttribute::new(ty, value as i64).into()
@@ -166,16 +176,16 @@ impl<'c> OperationBuilderExt<'c> for &'c Context {
             })
         };
         let value_id = Identifier::new(self, "value");
-        OperationBuilder::new("arith.constant", self.unknown_loc())
+        OperationBuilder::new("arith.constant", loc)
             .add_attributes(&[(value_id, attr)])
             .add_results(&[ty])
             .build()
             .expect("arith.constant build should succeed")
     }
 
-    fn const_op(&self, attr: Attribute<'c>, ty: Type<'c>) -> Operation<'c> {
+    fn const_op(&self, attr: Attribute<'c>, ty: Type<'c>, loc: Location<'c>) -> Operation<'c> {
         let value_id = Identifier::new(self, "value");
-        OperationBuilder::new("arith.constant", self.unknown_loc())
+        OperationBuilder::new("arith.constant", loc)
             .add_attributes(&[(value_id, attr)])
             .add_results(&[ty])
             .build()
@@ -188,38 +198,51 @@ impl<'c> OperationBuilderExt<'c> for &'c Context {
         lhs: Value<'c, 'c>,
         rhs: Value<'c, 'c>,
         result_ty: Type<'c>,
+        loc: Location<'c>,
     ) -> Operation<'c> {
-        OperationBuilder::new(name, self.unknown_loc())
+        OperationBuilder::new(name, loc)
             .add_operands(&[lhs, rhs])
             .add_results(&[result_ty])
             .build()
             .expect("arith.constant build should succeed")
     }
 
-    fn build_cmpi(&self, predicate: u64, lhs: Value<'c, 'c>, rhs: Value<'c, 'c>) -> Operation<'c> {
+    fn build_cmpi(
+        &self,
+        predicate: u64,
+        lhs: Value<'c, 'c>,
+        rhs: Value<'c, 'c>,
+        loc: Location<'c>,
+    ) -> Operation<'c> {
         let pred_attr = self.i64_attr(predicate as i64);
         let pred_id = Identifier::new(self, "predicate");
-        OperationBuilder::new("arith.cmpi", self.unknown_loc())
+        OperationBuilder::new("arith.cmpi", loc)
             .add_attributes(&[(pred_id, pred_attr)])
             .add_operands(&[lhs, rhs])
             .add_results(&[self.i1()])
             .build()
-            .expect("arith.constant build should succeed")
+            .expect("arith.cmpi build should succeed")
     }
 
-    fn build_cmpf(&self, predicate: u64, lhs: Value<'c, 'c>, rhs: Value<'c, 'c>) -> Operation<'c> {
+    fn build_cmpf(
+        &self,
+        predicate: u64,
+        lhs: Value<'c, 'c>,
+        rhs: Value<'c, 'c>,
+        loc: Location<'c>,
+    ) -> Operation<'c> {
         let pred_attr = self.i64_attr(predicate as i64);
         let pred_id = Identifier::new(self, "predicate");
-        OperationBuilder::new("arith.cmpf", self.unknown_loc())
+        OperationBuilder::new("arith.cmpf", loc)
             .add_attributes(&[(pred_id, pred_attr)])
             .add_operands(&[lhs, rhs])
             .add_results(&[self.i1()])
             .build()
-            .expect("arith.constant build should succeed")
+            .expect("arith.cmpf build should succeed")
     }
 
-    fn llvm_undef(&self, ty: Type<'c>) -> Operation<'c> {
-        melior::dialect::llvm::undef(ty, self.unknown_loc())
+    fn llvm_undef(&self, ty: Type<'c>, loc: Location<'c>) -> Operation<'c> {
+        melior::dialect::llvm::undef(ty, loc)
     }
 
     fn llvm_insertvalue(
@@ -227,13 +250,14 @@ impl<'c> OperationBuilderExt<'c> for &'c Context {
         container: Value<'c, 'c>,
         value: Value<'c, 'c>,
         position: i64,
+        loc: Location<'c>,
     ) -> Operation<'c> {
         melior::dialect::llvm::insert_value(
             self,
             container,
             DenseI64ArrayAttribute::new(self, &[position]),
             value,
-            self.unknown_loc(),
+            loc,
         )
     }
 
@@ -242,13 +266,14 @@ impl<'c> OperationBuilderExt<'c> for &'c Context {
         container: Value<'c, 'c>,
         position: i64,
         result_type: Type<'c>,
+        loc: Location<'c>,
     ) -> Operation<'c> {
         melior::dialect::llvm::extract_value(
             self,
             container,
             DenseI64ArrayAttribute::new(self, &[position]),
             result_type,
-            self.unknown_loc(),
+            loc,
         )
     }
 }
@@ -256,14 +281,25 @@ impl<'c> OperationBuilderExt<'c> for &'c Context {
 /// Extension trait for [`melior::ir::Block`] to simplify appending operations.
 pub trait BlockExt<'c> {
     fn append_op(&self, op: Operation<'c>) -> Value<'c, 'c>;
-    fn const_i64(&self, ctx: &'c Context, value: i64) -> Value<'c, 'c>;
+    fn const_i64(&self, ctx: &'c Context, value: i64, loc: Location<'c>) -> Value<'c, 'c>;
     /// Create an integer constant of the given MLIR type.
-    fn const_int(&self, ctx: &'c Context, ty: Type<'c>, value: i128) -> Value<'c, 'c>;
+    fn const_int(
+        &self,
+        ctx: &'c Context,
+        ty: Type<'c>,
+        value: i128,
+        loc: Location<'c>,
+    ) -> Value<'c, 'c>;
     /// Create a string constant - returns a fat pointer (ptr, length)
     /// This requires access to CodegenContext to register the string globally
-    fn const_string_with_ctx(&self, ctx: &CodegenContext<'_, 'c>, value: &str) -> Value<'c, 'c>;
+    fn const_string_with_ctx(
+        &self,
+        ctx: &CodegenContext<'_, 'c>,
+        value: &str,
+        loc: Location<'c>,
+    ) -> Value<'c, 'c>;
     /// Return a unit/void value
-    fn unit_value(&self, ctx: &CodegenContext<'_, 'c>) -> Value<'c, 'c>;
+    fn unit_value(&self, ctx: &CodegenContext<'_, 'c>, loc: Location<'c>) -> Value<'c, 'c>;
     fn ret(&self, ctx: &'c Context, values: &[Value<'c, 'c>], loc: Location<'c>) -> Operation<'c>;
     fn call_void(
         &self,
@@ -327,38 +363,49 @@ impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
             .into()
     }
 
-    fn const_i64(&self, ctx: &'c Context, value: i64) -> Value<'c, 'c> {
-        self.append_op(ctx.i64_const(value))
+    fn const_i64(&self, ctx: &'c Context, value: i64, loc: Location<'c>) -> Value<'c, 'c> {
+        self.append_op(ctx.i64_const(value, loc))
     }
 
-    fn const_int(&self, ctx: &'c Context, ty: Type<'c>, value: i128) -> Value<'c, 'c> {
-        self.append_op(ctx.int_const(ty, value))
+    fn const_int(
+        &self,
+        ctx: &'c Context,
+        ty: Type<'c>,
+        value: i128,
+        loc: Location<'c>,
+    ) -> Value<'c, 'c> {
+        self.append_op(ctx.int_const(ty, value, loc))
     }
 
-    fn const_string_with_ctx(&self, ctx: &CodegenContext<'_, 'c>, value: &str) -> Value<'c, 'c> {
+    fn const_string_with_ctx(
+        &self,
+        ctx: &CodegenContext<'_, 'c>,
+        value: &str,
+        loc: Location<'c>,
+    ) -> Value<'c, 'c> {
         let c = ctx.mlir;
         let symbol_name = ctx.register_string(value);
 
         // llvm.mlir.addressof @symbol → !llvm.ptr
         let ptr = ctx
-            .addressof_string_global(self, &symbol_name)
+            .addressof_string_global(self, &symbol_name, loc)
             .expect("addressof should succeed");
 
         // llvm.mlir.undef : !llvm.struct<(ptr, i64)>
-        let undef = self.append_op(c.llvm_undef(c.string_type()));
+        let undef = self.append_op(c.llvm_undef(c.string_type(), loc));
 
         // llvm.insertvalue ptr, undef[0]
-        let with_ptr = self.append_op(c.llvm_insertvalue(undef, ptr, 0));
+        let with_ptr = self.append_op(c.llvm_insertvalue(undef, ptr, 0, loc));
 
         // arith.constant <byte len> : i64
-        let len = self.const_i64(c, value.len() as i64);
+        let len = self.const_i64(c, value.len() as i64, loc);
 
         // llvm.insertvalue len, struct[1]
-        self.append_op(c.llvm_insertvalue(with_ptr, len, 1))
+        self.append_op(c.llvm_insertvalue(with_ptr, len, 1, loc))
     }
 
-    fn unit_value(&self, ctx: &CodegenContext<'_, 'c>) -> Value<'c, 'c> {
-        self.const_i64(ctx.mlir, 0)
+    fn unit_value(&self, ctx: &CodegenContext<'_, 'c>, loc: Location<'c>) -> Value<'c, 'c> {
+        self.const_i64(ctx.mlir, 0, loc)
     }
 
     fn ret(&self, _ctx: &'c Context, values: &[Value<'c, 'c>], loc: Location<'c>) -> Operation<'c> {
@@ -458,7 +505,7 @@ impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
         elem_ty: Type<'c>,
         loc: Location<'c>,
     ) -> Value<'c, 'c> {
-        let count_one = self.const_i64(ctx, 1);
+        let count_one = self.const_i64(ctx, 1, loc);
         self.append_op(melior::dialect::llvm::alloca(
             ctx,
             count_one,

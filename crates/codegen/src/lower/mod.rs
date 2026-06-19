@@ -14,6 +14,7 @@ use crate::prelude::*;
 use ast::HashFloat;
 use ast::SymbolTable as CompileTimeSymbolTable;
 use diagnostic::Diagnostic;
+use melior::ir::Location;
 use typecheck::TypedFileAst;
 use typecheck::compile_time_trait::CompileTimeTraitRegistry;
 
@@ -46,7 +47,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
             &typed.span_table,
         );
 
-        let module = melior::ir::Module::new(context.unknown_loc());
+        let module = melior::ir::Module::new(Location::new(context, filename, 0, 0));
 
         for (def_id, bind) in &typed.defs {
             let mut symtab = crate::ScopedSymbolTable::new();
@@ -145,27 +146,47 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
             typecheck::TypedExprKind::Lit(lit) => match lit {
                 ast::Literal::Number(n) => {
                     // usize always fits in i64 on all supported platforms.
-                    Some(block.const_i64(self.mlir, *n as i64))
+                    Some(block.const_i64(self.mlir, *n as i64, self.location()))
                 }
                 ast::Literal::Int(n) => {
                     let n = *n;
                     if n > i64::MAX as u128 {
-                        Some(block.const_int(self.mlir, self.mlir.i128(), n as i128))
+                        Some(block.const_int(
+                            self.mlir,
+                            self.mlir.i128(),
+                            n as i128,
+                            self.location(),
+                        ))
                     } else {
-                        Some(block.const_i64(self.mlir, n as i64))
+                        Some(block.const_i64(self.mlir, n as i64, self.location()))
                     }
                 }
                 ast::Literal::Float(HashFloat(f)) => {
                     let f_attr = self.mlir.f64_attr(*f);
-                    Some(block.append_op(self.mlir.const_op(f_attr, self.mlir.f64())))
+                    Some(block.append_op(self.mlir.const_op(
+                        f_attr,
+                        self.mlir.f64(),
+                        self.location(),
+                    )))
                 }
                 ast::Literal::String(s) => {
                     let name = self.register_string(s);
-                    let ptr = self.addressof_string_global(block, &name)?;
-                    let len = block.const_i64(self.mlir, s.len() as i64);
-                    let undef = block.append_op(self.mlir.llvm_undef(self.mlir.string_type()));
-                    let with_ptr = block.append_op(self.mlir.llvm_insertvalue(undef, ptr, 0));
-                    Some(block.append_op(self.mlir.llvm_insertvalue(with_ptr, len, 1)))
+                    let ptr = self.addressof_string_global(block, &name, self.location())?;
+                    let len = block.const_i64(self.mlir, s.len() as i64, self.location());
+                    let undef = block.append_op(
+                        self.mlir
+                            .llvm_undef(self.mlir.string_type(), self.location()),
+                    );
+                    let with_ptr =
+                        block.append_op(self.mlir.llvm_insertvalue(undef, ptr, 0, self.location()));
+                    Some(
+                        block.append_op(self.mlir.llvm_insertvalue(
+                            with_ptr,
+                            len,
+                            1,
+                            self.location(),
+                        )),
+                    )
                 }
             },
             typecheck::TypedExprKind::FnCall { target, args } => {
@@ -309,19 +330,29 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     .unwrap_or_default();
                 // Emit a struct { disc, payload } for the tag variant.
                 let _loc = self.location();
-                let disc_val = block.const_i64(self.mlir, *discriminant as i64);
+                let disc_val = block.const_i64(self.mlir, *discriminant as i64, self.location());
                 let field_types: Vec<Type<'c>> = std::iter::once(self.mlir.i64())
                     .chain(lowered_args.iter().map(|v| v.r#type()))
                     .collect();
                 use melior::dialect::llvm::r#type;
                 let struct_ty = r#type::r#struct(self.mlir, &field_types, false);
-                let undef = block.append_op(self.mlir.llvm_undef(struct_ty));
-                let with_disc = block.append_op(self.mlir.llvm_insertvalue(undef, disc_val, 0));
+                let undef = block.append_op(self.mlir.llvm_undef(struct_ty, self.location()));
+                let with_disc = block.append_op(self.mlir.llvm_insertvalue(
+                    undef,
+                    disc_val,
+                    0,
+                    self.location(),
+                ));
                 let result = lowered_args
                     .into_iter()
                     .enumerate()
                     .fold(with_disc, |acc, (i, v)| {
-                        block.append_op(self.mlir.llvm_insertvalue(acc, v, (i + 1) as i64))
+                        block.append_op(self.mlir.llvm_insertvalue(
+                            acc,
+                            v,
+                            (i + 1) as i64,
+                            self.location(),
+                        ))
                     });
                 Some(result)
             }
@@ -347,7 +378,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
             typecheck::TypedExprKind::Negate(init) => {
                 let val = self.lower_typed_expr(*init, block, symtab)?;
                 let result_ty = val.r#type();
-                let zero = block.const_int(self.mlir, result_ty, 0);
+                let zero = block.const_int(self.mlir, result_ty, 0, self.location());
                 let loc = self.location();
                 let op = melior::ir::operation::OperationBuilder::new("arith.subi", loc)
                     .add_operands(&[zero, val])
@@ -366,13 +397,12 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 // Extract the field at the given index from the struct/tuple.
                 // Use the expression's own type as the result type.
                 let result_ty = self.ty_to_mlir(expr_ref.ty);
-                Some(
-                    block.append_op(self.mlir.llvm_extractvalue(
-                        base_val,
-                        *index as i64,
-                        result_ty,
-                    )),
-                )
+                Some(block.append_op(self.mlir.llvm_extractvalue(
+                    base_val,
+                    *index as i64,
+                    result_ty,
+                    self.location(),
+                )))
             }
             typecheck::TypedExprKind::Deref(base) => self.lower_typed_expr(*base, block, symtab),
             typecheck::TypedExprKind::TupleSet { base, value, .. } => {

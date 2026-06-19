@@ -41,7 +41,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     after_region,
                     loc,
                 ));
-                Some(block.const_i64(self.mlir, 0))
+                Some(block.const_i64(self.mlir, 0, loc))
             }
             typecheck::TypedLoopKind::ForIn { variable, iterable } => {
                 let index_ty = Type::index(self.mlir);
@@ -66,7 +66,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                         return None;
                     };
 
-                let step_i64 = block.const_i64(self.mlir, 1);
+                let step_i64 = block.const_i64(self.mlir, 1, loc);
                 let start_idx =
                     block.append_op(arith_dialect::index_cast(start_i64, index_ty, loc));
                 let end_idx = block.append_op(arith_dialect::index_cast(end_i64, index_ty, loc));
@@ -99,7 +99,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     loop_region,
                     loc,
                 ));
-                Some(block.const_i64(self.mlir, 0))
+                Some(block.const_i64(self.mlir, 0, loc))
             }
         }
     }

@@ -91,8 +91,12 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         // Integer literal.
         if let ast::Expr::Lit(lit) = &expr.value {
             match lit {
-                ast::Literal::Number(n) => return Some(block.const_i64(self.mlir, *n as i64)),
-                ast::Literal::Int(n) => return Some(block.const_i64(self.mlir, *n as i64)),
+                ast::Literal::Number(n) => {
+                    return Some(block.const_i64(self.mlir, *n as i64, self.location()));
+                }
+                ast::Literal::Int(n) => {
+                    return Some(block.const_i64(self.mlir, *n as i64, self.location()));
+                }
                 _ => {}
             }
         }

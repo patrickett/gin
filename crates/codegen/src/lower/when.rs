@@ -10,7 +10,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         block: &BlockRef<'c, 'c>,
         symtab: &mut ScopedSymbolTable<'c>,
     ) -> Option<Value<'c, 'c>> {
-        let _loc = self.location();
+        let loc = self.location();
         let typed_ast = self.typed_ast?;
 
         // Determine result type from else arm or first arm.
@@ -54,6 +54,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                             subject,
                             0,
                             self.mlir.i64(),
+                            loc,
                         )),
                     };
                     self.lower_typed_pattern_when(
@@ -82,7 +83,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         let loc = self.location();
 
         let Some((head, tail)) = arms.split_first() else {
-            return Some(outer_block.const_i64(self.mlir, 0));
+            return Some(outer_block.const_i64(self.mlir, 0, loc));
         };
 
         match head {
@@ -139,7 +140,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 if value_producing {
                     Some(result_op.result(0).unwrap().into())
                 } else {
-                    Some(outer_block.const_i64(self.mlir, 0))
+                    Some(outer_block.const_i64(self.mlir, 0, loc))
                 }
             }
         }
@@ -157,7 +158,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         let loc = self.location();
 
         let Some((head, tail)) = arms.split_first() else {
-            return Some(outer_block.const_i64(self.mlir, 0));
+            return Some(outer_block.const_i64(self.mlir, 0, loc));
         };
 
         match head {
@@ -176,9 +177,13 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     disc_val as i64
                 };
 
-                let expected_val = outer_block.const_i64(self.mlir, expected_disc);
-                let cond =
-                    outer_block.append_op(self.mlir.build_cmpi(Predicates::EQ, disc, expected_val));
+                let expected_val = outer_block.const_i64(self.mlir, expected_disc, loc);
+                let cond = outer_block.append_op(self.mlir.build_cmpi(
+                    Predicates::EQ,
+                    disc,
+                    expected_val,
+                    loc,
+                ));
 
                 let result_tys = vec![result_ty];
 

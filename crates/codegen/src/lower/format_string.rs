@@ -36,7 +36,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                         continue;
                     }
                     let name = self.register_string(s);
-                    let ptr = match self.addressof_string_global(block, &name) {
+                    let ptr = match self.addressof_string_global(block, &name, loc) {
                         Some(p) => p,
                         None => {
                             self.emit_internal(format!(
@@ -45,7 +45,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                             return None;
                         }
                     };
-                    let len = block.const_i64(self.mlir, s.len() as i64);
+                    let len = block.const_i64(self.mlir, s.len() as i64, loc);
                     parts.push((ptr, len));
                 }
                 ast::FormatPart::Expr(_e, _) => {
@@ -59,17 +59,17 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         }
 
         if parts.is_empty() {
-            let undef = block.append_op(self.mlir.llvm_undef(self.mlir.string_type()));
-            let zero = block.const_i64(self.mlir, 0);
-            return Some(block.append_op(self.mlir.llvm_insertvalue(undef, zero, 1)));
+            let undef = block.append_op(self.mlir.llvm_undef(self.mlir.string_type(), loc));
+            let zero = block.const_i64(self.mlir, 0, loc);
+            return Some(block.append_op(self.mlir.llvm_insertvalue(undef, zero, 1, loc)));
         }
 
         // 2. Sum all lengths.
-        let zero = block.const_i64(self.mlir, 0);
+        let zero = block.const_i64(self.mlir, 0, loc);
         let total_len = parts.iter().fold(zero, |acc, (_, len)| {
             block.append_op(
                 self.mlir
-                    .build_binop("arith.addi", acc, *len, self.mlir.i64()),
+                    .build_binop("arith.addi", acc, *len, self.mlir.i64(), loc),
             )
         });
 
@@ -85,7 +85,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         ));
 
         // 4. Copy each part into the buffer at increasing offsets.
-        let mut cur_offset = block.const_i64(self.mlir, 0);
+        let mut cur_offset = block.const_i64(self.mlir, 0, loc);
         for (src_ptr, len) in &parts {
             let dst_ptr = block.gep_i8(self, buf, cur_offset, loc)?;
             let memcpy_operation = Self::memcpy_op(self.mlir, dst_ptr, *src_ptr, *len, loc)?;
@@ -95,12 +95,13 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 cur_offset,
                 *len,
                 self.mlir.i64(),
+                loc,
             ));
         }
 
         // 5. Return {buf, total_len} as a string fat pointer.
-        let undef = block.append_op(self.mlir.llvm_undef(self.mlir.string_type()));
-        let with_ptr = block.append_op(self.mlir.llvm_insertvalue(undef, buf, 0));
-        Some(block.append_op(self.mlir.llvm_insertvalue(with_ptr, total_len, 1)))
+        let undef = block.append_op(self.mlir.llvm_undef(self.mlir.string_type(), loc));
+        let with_ptr = block.append_op(self.mlir.llvm_insertvalue(undef, buf, 0, loc));
+        Some(block.append_op(self.mlir.llvm_insertvalue(with_ptr, total_len, 1, loc)))
     }
 }

@@ -308,7 +308,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
     pub fn location(&self) -> Location<'c> {
         let id = self.current_span.get();
         if !id.is_valid() {
-            return self.mlir.unknown_loc();
+            return Location::new(self.mlir, &self.source_filename, 0, 0);
         }
         let span = self.span_table.get(id);
         let byte = (span.start()).min(self.source.len());
@@ -404,6 +404,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     subject_val,
                     (slot + 1) as i64,
                     field_mlir_ty,
+                    self.location(),
                 ));
                 symtab.insert(param_name.as_str().to_string(), extracted);
             }
