@@ -3,13 +3,10 @@
 .cargo/
 *.lock
 
-# Tree-sitter / editor build artifacts (generate via ./scripts/generate-tree-sitter.sh)
+# Tree-sitter / editor build artifacts
 *.wasm
 editors/tree-sitter-gin/node_modules/
 editors/tree-sitter-gin/build/
-editors/tree-sitter-gin/src/parser.c
-editors/tree-sitter-gin/src/grammar.json
-editors/tree-sitter-gin/src/node-types.json
 editors/zed/grammars/
 editors/zed/target/
 editors/vscode/node_modules/
