@@ -58,7 +58,6 @@ Allocator has (
         name: (identifier)
         (parameters
           (parameter
-            modifier: "ref"
             name: (self_parameter))
           (parameter
             name: (identifier)
@@ -76,7 +75,6 @@ Allocator has (
         name: (identifier)
         (parameters
           (parameter
-            modifier: "ref"
             name: (self_parameter))
           (parameter
             name: (identifier)
@@ -227,7 +225,6 @@ all_named_copy(fields List(NamedTy)) Bool := when fields is
               (member_expression
                 base: (identifier)
                 field: (identifier))))
-          operator: "and"
           right: (call_expression
             function: (identifier)
             arguments: (argument_list
@@ -258,33 +255,132 @@ is_copy(x Type) Bool := when x is
     value: (when_expression
       subject: (identifier)
       (when_pattern_arm
-        pattern: (tag
-          (type_application
-            (type_identifier)
-            (type_variable)
-            (type_variable)))
+        pattern: (is_pattern
+          (tag
+            (type_application
+              (type_identifier)
+              (type_variable)
+              (type_variable))))
         body: (type_identifier))
       (when_pattern_arm
-        pattern: (tag
-          (type_application
-            (type_identifier)
-            (type_variable)
-            (tag
-              (type_identifier))))
+        pattern: (is_pattern
+          (tag
+            (type_application
+              (type_identifier)
+              (type_variable)
+              (tag
+                (type_identifier)))))
         body: (type_identifier))
       (when_pattern_arm
-        pattern: (tag
-          (type_application
-            (type_identifier)
-            (type_variable)))
+        pattern: (is_pattern
+          (tag
+            (type_application
+              (type_identifier)
+              (type_variable))))
         body: (type_identifier))
       (when_pattern_arm
-        pattern: (tag
-          (type_application
-            (type_identifier)
-            (type_variable)
-            (type_variable)))
+        pattern: (is_pattern
+          (tag
+            (type_application
+              (type_identifier)
+              (type_variable)
+              (type_variable))))
         body: (call_expression
           function: (identifier)
           arguments: (argument_list
             (identifier)))))))
+
+================================================================================
+newline tests: call args
+================================================================================
+
+result : write(
+    fd
+    buf
+    len
+)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (bind_statement
+    name: (identifier)
+    value: (call_expression
+      function: (identifier)
+      arguments: (argument_list
+        (identifier)
+        (identifier)
+        (identifier)))))
+
+================================================================================
+newline tests: bundle exports
+================================================================================
+
+use 'mod'.(
+    Foo
+    Bar
+)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (use_statement
+    (module_import
+      (string)
+      (bundle_export
+        (type_identifier))
+      (bundle_export
+        (type_identifier)))))
+
+================================================================================
+newline tests: function params
+================================================================================
+
+add(
+    a Int
+    b Int
+) Int := a + b
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (bind_statement
+    name: (identifier)
+    (parameters
+      (parameter
+        name: (identifier)
+        type: (tag
+          (type_identifier)))
+      (parameter
+        name: (identifier)
+        type: (tag
+          (type_identifier))))
+    return_type: (tag
+      (type_identifier))
+    value: (binary_expression
+      left: (identifier)
+      right: (identifier))))
+
+================================================================================
+newline tests: record fields
+================================================================================
+
+Point has (
+    x Int
+    y Int
+)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declare_statement
+    name: (type_identifier)
+    (record_fields
+      (record_field
+        name: (identifier)
+        type: (tag
+          (type_identifier)))
+      (record_field
+        name: (identifier)
+        type: (tag
+          (type_identifier))))))

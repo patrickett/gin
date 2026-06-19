@@ -6,7 +6,8 @@
 //! ```
 //! let code = "";
 //! let mut parser = tree_sitter::Parser::new();
-//! parser.set_language(tree_sitter_gin::language()).expect("Error loading gin grammar");
+//! let language = tree_sitter_gin::language();
+//! parser.set_language(&language).expect("Error loading gin grammar");
 //! let tree = parser.parse(code, None).unwrap();
 //! ```
 //!
@@ -57,7 +58,7 @@ mod tests {
     fn parser() -> Parser {
         let mut parser = Parser::new();
         parser
-            .set_language(super::language())
+            .set_language(&super::language())
             .expect("Error loading gin language");
         parser
     }
@@ -65,6 +66,42 @@ mod tests {
     #[test]
     fn test_can_load_grammar() {
         let _ = parser();
+    }
+
+    #[test]
+    fn simple_decl_no_newline() {
+        let mut p = parser();
+        let result = p.parse("Bool is True", None);
+        let tree = result.unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "simple decl (no newline): {}",
+            tree.root_node().to_sexp()
+        );
+    }
+
+    #[test]
+    fn simple_decl_with_newline() {
+        let mut p = parser();
+        let result = p.parse("Bool is True\n", None);
+        let tree = result.unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "simple decl (with newline): {}",
+            tree.root_node().to_sexp()
+        );
+    }
+
+    #[test]
+    fn simple_union_decl_parses() {
+        let mut p = parser();
+        let result = p.parse("Bool is True or False\n", None);
+        let tree = result.unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "simple union: {}",
+            tree.root_node().to_sexp()
+        );
     }
 
     #[test]
@@ -111,24 +148,27 @@ mod tests {
             tree.root_node().to_sexp()
         );
 
-        let query = Query::new(super::language(), super::HIGHLIGHTS_QUERY)
+        let query = Query::new(&super::language(), super::HIGHLIGHTS_QUERY)
             .expect("highlights query should compile");
         let keyword_operator_index = query
             .capture_names()
             .iter()
-            .position(|name| name == "keyword.operator")
+            .position(|name| *name == "keyword.operator")
             .expect("highlights query should define @keyword.operator")
             as u32;
 
+        use tree_sitter::StreamingIterator;
         let mut cursor = QueryCursor::new();
-        let captures = cursor.captures(&query, tree.root_node(), REFLECT_TYPE_DECL.as_bytes());
-        let highlighted_ors = captures
-            .filter(|(query_match, capture_index)| {
-                let capture = query_match.captures[*capture_index];
-                capture.index == keyword_operator_index
-                    && capture.node.utf8_text(REFLECT_TYPE_DECL.as_bytes()) == Ok("or")
-            })
-            .count();
+        let mut captures = cursor.captures(&query, tree.root_node(), REFLECT_TYPE_DECL.as_bytes());
+        let mut highlighted_ors = 0;
+        while let Some((query_match, capture_index)) = captures.next() {
+            let capture = query_match.captures[*capture_index];
+            if capture.index == keyword_operator_index
+                && capture.node.utf8_text(REFLECT_TYPE_DECL.as_bytes()) == Ok("or")
+            {
+                highlighted_ors += 1;
+            }
+        }
 
         assert_eq!(
             highlighted_ors, 7,

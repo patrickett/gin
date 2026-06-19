@@ -9,7 +9,15 @@
 module.exports = grammar({
   name: "gin",
 
-  extras: ($) => [/\s/, $.line_comment, $.doc_comment, $.module_doc_comment],
+  extras: ($) => [
+    /[ \t\r]/,
+    $.line_comment,
+    $.doc_comment,
+    $.module_doc_comment,
+    $._newline,
+  ],
+
+  externals: ($) => [$._newline],
 
   word: ($) => $.identifier,
 
@@ -19,9 +27,21 @@ module.exports = grammar({
     [$.tag, $._expression],
     [$.tuple_set, $.buf_set, $._expression],
     [$.qualified_tag, $._expression],
-    // Method definitions can have a bare-Tag, generic-Tag, or qualified-Tag
-    // receiver; all overlap with the matching expression-position usage.
-    [$.qualified_tag, $.impl_block, $.method_definition, $._expression],
+    // identifier.identifier sequences conflict across multiple rule types.
+    [
+      $.qualified_tag,
+      $.impl_block,
+      $.method_definition,
+      $.provided_impl,
+      $._expression,
+    ],
+    [$.provided_impl, $._expression],
+    [$.provided_trait],
+    [$.provided_trait, $.impl_block],
+    [$.provided_trait, $.tag],
+    [$.provided_trait_chain],
+    [$.intersection_type],
+    [$.trait_field, $._bind_value],
     // [$.when_expression, $.when_is_arm],  -- removed: when_expression no longer references when_is_arm
     [$.path],
   ],
@@ -58,7 +78,7 @@ module.exports = grammar({
         choice($.path, $.string, $.type_identifier),
         optional(
           choice(
-            seq(".", "(", sep1(",", $.bundle_export), ")"),
+            seq(".", "(", nlist($, $.bundle_export), ")"),
             seq("as", $.identifier),
           ),
         ),
@@ -67,6 +87,7 @@ module.exports = grammar({
     _top_level_item: ($) =>
       choice(
         $.declare_statement,
+        $.provided_impl,
         $.blanket_impl,
         $.impl_block,
         $.method_definition,
@@ -92,23 +113,28 @@ module.exports = grammar({
             seq("is", $._declare_type_value),
           ),
           repeat(seq("and", "is", optional("not"), $._declare_type_value)),
+          optional($.provided_trait_clause),
         ),
       ),
 
-    _declare_record_value: ($) => choice($.tag, $.record_fields),
+    provided_trait_clause: ($) => seq("and", "has", $.provided_trait_chain),
 
-    record_fields: ($) =>
+    provided_trait_chain: ($) =>
       seq(
-        "(",
-        optional(
-          seq(
-            $._record_member,
-            repeat(seq(",", $._record_member)),
-            optional(","),
-          ),
-        ),
-        ")",
+        $.provided_trait,
+        repeat(seq("and", optional("has"), $.provided_trait)),
       ),
+
+    provided_trait: ($) =>
+      seq(
+        field("trait", $.type_identifier),
+        optional(seq("(", optional(list($, $.trait_field)), ")")),
+      ),
+
+    _declare_record_value: ($) =>
+      choice($.record_fields, $.provided_trait_chain, $.tag),
+
+    record_fields: ($) => seq("(", optional(nlist($, $._record_member)), ")"),
 
     _record_member: ($) => choice($.record_signature, $.record_field),
 
@@ -122,7 +148,7 @@ module.exports = grammar({
     record_field: ($) => seq(field("name", $.identifier), field("type", $.tag)),
 
     _declare_type_value: ($) =>
-      choice($.range_type, $.in_range_type, $.union_type, $.tag),
+      choice($.range_type, $.in_range_type, $.intersection_type, $.union_type),
 
     range_type: ($) =>
       seq(optional("-"), $.number, "...", optional("-"), $.number),
@@ -131,6 +157,8 @@ module.exports = grammar({
       seq("in", optional("-"), $.number, "...", optional("-"), $.number),
 
     union_type: ($) => seq($.variant, repeat1(seq("or", $.variant))),
+
+    intersection_type: ($) => seq($.tag, repeat(seq("and", $.tag))),
 
     variant: ($) =>
       choice(prec(3, seq($.type_identifier, $.parameters)), $.tag),
@@ -153,7 +181,7 @@ module.exports = grammar({
         seq(
           $.type_identifier,
           "(",
-          sep1(",", choice($.tag, alias($.identifier, $.type_variable))),
+          nlist($, choice($.tag, alias($.identifier, $.type_variable))),
           ")",
         ),
       ),
@@ -161,9 +189,7 @@ module.exports = grammar({
     type_parameters: ($) =>
       seq(
         "[",
-        optional(
-          sep1(",", choice($.tag, alias($.identifier, $.type_variable))),
-        ),
+        optional(nlist($, choice($.tag, alias($.identifier, $.type_variable)))),
         "]",
       ),
 
@@ -171,6 +197,16 @@ module.exports = grammar({
 
     qualified_tag: ($) =>
       prec.left(seq($.type_identifier, repeat1(seq(".", $.type_identifier)))),
+
+    // Type.Trait(field: value)
+    // x.Trait(field: value)
+
+    provided_impl: ($) =>
+      seq(
+        field("type", choice($.type_identifier, $.identifier)),
+        ".",
+        $.provided_trait,
+      ),
 
     // x has Sized(size: compute_size(x))
     // x has Copy(can_copy: is_copy(x))
@@ -181,7 +217,7 @@ module.exports = grammar({
         "has",
         field("trait", $.type_identifier),
         "(",
-        optional(sep1(",", $.trait_field)),
+        optional(list($, $.trait_field)),
         ")",
       ),
 
@@ -254,7 +290,7 @@ module.exports = grammar({
     // (x)
     // (p: 123)
 
-    parameters: ($) => seq("(", optional(sep1(",", $.parameter)), ")"),
+    parameters: ($) => seq("(", optional(nlist($, $.parameter)), ")"),
 
     parameter: ($) =>
       choice(
@@ -276,7 +312,7 @@ module.exports = grammar({
 
     // #[test, inline]
 
-    attributes: ($) => seq("#", "[", sep1(",", $._attribute_item), "]"),
+    attributes: ($) => seq("#", "[", list($, $._attribute_item), "]"),
 
     _attribute_item: ($) => choice("debug", "test", "inline"),
 
@@ -365,7 +401,7 @@ module.exports = grammar({
 
     pattern: ($) => choice($.identifier, $.tuple_pattern),
 
-    tuple_pattern: ($) => seq("(", sep1(",", $.identifier), ")"),
+    tuple_pattern: ($) => seq("(", nlist($, $.identifier), ")"),
 
     // Patterns after `is` in `if`/`when`. Lowercase identifiers are binders,
     // uppercase tags are variant/type patterns, and list patterns support
@@ -386,7 +422,7 @@ module.exports = grammar({
         "]",
       ),
 
-    tuple_is_pattern: ($) => seq("(", sep1(",", $.is_pattern), ")"),
+    tuple_is_pattern: ($) => seq("(", nlist($, $.is_pattern), ")"),
 
     _expression: ($) =>
       choice(
@@ -514,7 +550,7 @@ module.exports = grammar({
         ),
       ),
 
-    argument_list: ($) => seq("(", optional(sep1(",", $._expression)), ")"),
+    argument_list: ($) => seq("(", optional(nlist($, $._expression)), ")"),
 
     self_expression: ($) =>
       prec.right(
@@ -531,14 +567,7 @@ module.exports = grammar({
       ),
 
     tuple_literal: ($) =>
-      seq(
-        "(",
-        $._expression,
-        ",",
-        sep1(",", $._expression),
-        optional(","),
-        ")",
-      ),
+      seq("(", $._expression, ",", list($, $._expression), ")"),
 
     tuple_alloc: ($) =>
       seq("(", field("init", $._expression), ";", field("size", $.number), ")"),
@@ -564,10 +593,26 @@ module.exports = grammar({
     number: ($) => choice(/\d+/, /0[xX][0-9a-fA-F]+/),
     string: ($) => token(seq("'", /[^'\n\r]*/, "'")),
 
-    identifier: ($) => /[a-z][a-z0-9]*(_[a-z0-9]+)*|_[a-z0-9]*(_[a-z0-9]+)*/,
+    identifier: ($) =>
+      /[a-z][a-zA-Z0-9]*(_[a-zA-Z0-9]+)*|_[a-zA-Z0-9]*(_[a-zA-Z0-9]+)*/,
     type_identifier: ($) => /[A-Z][a-zA-Z0-9]*/,
   },
 });
+
+/// Comma separated list.
+function list($, rule) {
+  return seq(rule, repeat(seq(",", rule)));
+}
+
+/// Comma-or-newline separated list with optional trailing separator.
+/// Uses external scanner's NEWLINE token for newline separation.
+function nlist($, rule) {
+  return seq(
+    rule,
+    repeat(seq(choice(",", $._newline), rule)),
+    optional(choice(",", $._newline)),
+  );
+}
 
 function sep1(sep, rule) {
   return seq(rule, repeat(seq(sep, rule)));
