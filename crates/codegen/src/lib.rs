@@ -4,9 +4,11 @@ pub mod emit;
 mod lower;
 mod mlir_ext;
 
-pub use emit::*;
-pub use lower::*;
-pub use mlir_ext::*;
+pub use emit::{NativeCompiler, Profile};
+pub use lower::{CodegenContext, TypeInfo};
+pub use mlir_ext::{
+    ArithOps, AttributeExt, BlockExt, ContextExt, FPredicates, OperationBuilderExt, Predicates,
+};
 
 use melior::ir::Value;
 use std::collections::HashMap;

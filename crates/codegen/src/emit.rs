@@ -5,11 +5,46 @@
 // jump instead of a call.
 // maybe also greedy-shuffling to minimize argument-copying overhead in tail calls.
 
-use super::Profile;
 use diagnostic::Diagnostic;
 use melior::{Context, dialect::DialectRegistry, ir::Module, pass, utility};
 use std::path::Path;
 use std::process::Command;
+
+/// Build profile for optimization levels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Profile {
+    #[default]
+    Debug,
+    Release,
+}
+
+impl Profile {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Debug => "debug",
+            Self::Release => "release",
+        }
+    }
+}
+
+impl std::fmt::Display for Profile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Profile {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "debug" => Ok(Self::Debug),
+            "release" => Ok(Self::Release),
+            _ => Err(format!(
+                "unknown build profile '{s}', expected 'debug' or 'release'"
+            )),
+        }
+    }
+}
 
 /// A native compiler that owns an MLIR context and manages the compilation pipeline.
 #[derive(Default)]
@@ -280,5 +315,220 @@ impl NativeCompiler {
         }
 
         (true, symptoms)
+    }
+
+    /// Find an LLVM/MLIR tool on PATH or in common Homebrew locations.
+    pub(crate) fn find_tool(name: &str, symptoms: &mut Vec<Diagnostic>) -> Option<String> {
+        if let Ok(output) = Command::new(name).arg("--help").output()
+            && output.status.success()
+        {
+            return Some(name.to_string());
+        }
+
+        for prefix in &["/opt/homebrew/opt/llvm/bin", "/usr/local/opt/llvm/bin"] {
+            let path = format!("{prefix}/{name}");
+            if Path::new(&path).exists() {
+                return Some(path);
+            }
+        }
+
+        symptoms.push(
+            Diagnostic::new(
+                "codegen-internal",
+                format!("'{name}' not found. Install LLVM or add it to PATH."),
+            )
+            .with_help("an internal compiler error occurred")
+            .at_span(diagnostic::Span::new(0, 0)),
+        );
+        None
+    }
+
+    /// Find a C compiler: check `$CC`, then Homebrew LLVM clang, then fall back to `cc`.
+    pub(crate) fn find_cc(symptoms: &mut Vec<Diagnostic>) -> Option<String> {
+        if let Ok(cc) = std::env::var("CC")
+            && !cc.is_empty()
+        {
+            return Some(cc);
+        }
+
+        let brew_prefixes = ["/opt/homebrew/opt", "/usr/local/opt"];
+        let llvm_variants = ["llvm", "llvm@21", "llvm@20", "llvm@19", "llvm@18"];
+        for prefix in &brew_prefixes {
+            for variant in &llvm_variants {
+                let candidate = format!("{prefix}/{variant}/bin/clang");
+                if Path::new(&candidate).exists() {
+                    return Some(candidate);
+                }
+            }
+        }
+
+        match Command::new("cc").arg("--version").output() {
+            Ok(output) if output.status.success() => Some("cc".into()),
+            _ => {
+                symptoms.push(
+                    Diagnostic::new(
+                        "codegen-internal",
+                        "No C compiler found. Install LLVM or set $CC.",
+                    )
+                    .with_help("an internal compiler error occurred")
+                    .at_span(diagnostic::Span::new(0, 0)),
+                );
+                None
+            }
+        }
+    }
+
+    /// Translate LLVM-dialect MLIR text to LLVM IR using `mlir-translate`.
+    pub(crate) fn mlir_to_llvm_ir(
+        mlir_text: &str,
+        symptoms: &mut Vec<Diagnostic>,
+    ) -> Option<String> {
+        let mlir_translate = Self::find_tool("mlir-translate", symptoms)?;
+
+        let mut cmd = Command::new(&mlir_translate);
+        cmd.arg("--mlir-to-llvmir");
+        cmd.stdin(std::process::Stdio::piped());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                symptoms.push(
+                    Diagnostic::new(
+                        "codegen-internal",
+                        format!("Failed to run mlir-translate: {e}"),
+                    )
+                    .with_help("an internal compiler error occurred")
+                    .at_span(diagnostic::Span::new(0, 0)),
+                );
+                return None;
+            }
+        };
+
+        use std::io::Write;
+        if let Err(e) = child.stdin.take().unwrap().write_all(mlir_text.as_bytes()) {
+            symptoms.push(
+                Diagnostic::new(
+                    "codegen-internal",
+                    format!("Failed to write to mlir-translate stdin: {e}"),
+                )
+                .with_help("an internal compiler error occurred")
+                .at_span(diagnostic::Span::new(0, 0)),
+            );
+            return None;
+        }
+
+        let output = match child.wait_with_output() {
+            Ok(o) => o,
+            Err(e) => {
+                symptoms.push(
+                    Diagnostic::new("codegen-internal", format!("mlir-translate failed: {e}"))
+                        .with_help("an internal compiler error occurred")
+                        .at_span(diagnostic::Span::new(0, 0)),
+                );
+                return None;
+            }
+        };
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            symptoms.push(
+                Diagnostic::new(
+                    "codegen-internal",
+                    format!(
+                        "mlir-translate failed (exit {}):\n{stderr}",
+                        output.status.code().unwrap_or(-1)
+                    ),
+                )
+                .with_help("an internal compiler error occurred")
+                .at_span(diagnostic::Span::new(0, 0)),
+            );
+            return None;
+        }
+
+        match String::from_utf8(output.stdout) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                symptoms.push(
+                    Diagnostic::new(
+                        "codegen-internal",
+                        format!("mlir-translate output is not UTF-8: {e}"),
+                    )
+                    .with_help("an internal compiler error occurred")
+                    .at_span(diagnostic::Span::new(0, 0)),
+                );
+                None
+            }
+        }
+    }
+
+    /// Compile LLVM IR text to an object file using `cc -c`.
+    pub(crate) fn compile_llvm_ir_to_object(
+        llvm_ir: &str,
+        obj_path: &Path,
+        profile: Profile,
+        symptoms: &mut Vec<Diagnostic>,
+    ) -> bool {
+        let ll_path = obj_path.with_extension("ll");
+
+        if let Err(e) = std::fs::write(&ll_path, llvm_ir) {
+            symptoms.push(
+                Diagnostic::new("codegen-internal", format!("Failed to write LLVM IR: {e}"))
+                    .with_help("an internal compiler error occurred")
+                    .at_span(diagnostic::Span::new(0, 0)),
+            );
+            return false;
+        }
+
+        let Some(cc) = Self::find_cc(symptoms) else {
+            let _ = std::fs::remove_file(&ll_path);
+            return false;
+        };
+
+        let opt_flag = match profile {
+            Profile::Release => "-O2",
+            Profile::Debug => "-O0",
+        };
+
+        let result = match Command::new(&cc)
+            .arg("-c")
+            .arg(opt_flag)
+            .arg(&ll_path)
+            .arg("-o")
+            .arg(obj_path)
+            .output()
+        {
+            Ok(o) => o,
+            Err(e) => {
+                symptoms.push(
+                    Diagnostic::new("codegen-internal", format!("Failed to run '{cc}': {e}"))
+                        .with_help("an internal compiler error occurred")
+                        .at_span(diagnostic::Span::new(0, 0)),
+                );
+                let _ = std::fs::remove_file(&ll_path);
+                return false;
+            }
+        };
+
+        let _ = std::fs::remove_file(&ll_path);
+
+        if !result.status.success() {
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            symptoms.push(
+                Diagnostic::new(
+                    "codegen-internal",
+                    format!(
+                        "Compiling LLVM IR failed (exit {}):\n{stderr}",
+                        result.status.code().unwrap_or(-1)
+                    ),
+                )
+                .with_help("an internal compiler error occurred")
+                .at_span(diagnostic::Span::new(0, 0)),
+            );
+            return false;
+        }
+
+        true
     }
 }

@@ -1,6 +1,9 @@
-use crate::span::{HasSpanId, SpanId};
-use internment::Intern;
+use std::ops::Deref;
 use std::path::PathBuf;
+
+use internment::Intern;
+
+use crate::span::{HasSpanId, SpanId};
 
 use crate::path::ModPath;
 use crate::span::Spanned;
@@ -55,6 +58,14 @@ pub struct LocalBundleImport {
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Import(pub Vec<ModuleImport>);
+
+impl Deref for Import {
+    type Target = Vec<ModuleImport>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ImportSource {

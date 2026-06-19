@@ -26,9 +26,9 @@ mod lower_ty;
 mod lower_util;
 mod lower_when;
 
-pub use declare::*;
-pub use flow::*;
-pub use lower_exprs::*;
+pub use declare::stage_declare;
+pub use flow::{RefTracker, stage_flow};
+pub use lower_exprs::stage_lower;
 
 /// Cross-file type environment for the transformation pipeline.
 ///

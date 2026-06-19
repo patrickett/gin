@@ -11,8 +11,6 @@ pub trait GinPathExt {
     /// Recursively collect `.gin` files under `self`, honoring `.gitignore`.
     fn collect_gin_files_under(&self) -> Vec<PathBuf>;
 
-    // --- private helpers ---
-
     /// Build a `WalkBuilder` configured for gin file discovery.
     fn walk_builder(&self) -> WalkBuilder;
 

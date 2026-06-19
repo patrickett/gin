@@ -1,6 +1,16 @@
+use std::ops::Deref;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DocComment {
     pub value: String,
+}
+
+impl Deref for DocComment {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
 }
 
 impl DocComment {
