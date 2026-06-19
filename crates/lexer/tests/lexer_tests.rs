@@ -538,7 +538,7 @@ fn test_range_tokens() {
     eprintln!("Tokens:");
     for (tok, span_id) in &tokens {
         let span = lexer.get_span(*span_id);
-        eprintln!("  {:?} at {}..{}", tok, span.start, span.end);
+        eprintln!("  {:?} at {}..{}", tok, span.start(), span.end());
     }
     eprintln!("Errors: {:?}", errors);
 

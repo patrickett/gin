@@ -1,194 +1,206 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use lexer::Lexer;
 
-fn small_source() -> &'static str {
-    r#"
-Maybe[x] is Some(x) or None
+// Synthetic Gin sources kept small and inline so benchmarks don't depend on
+// external files. Each exercises the lexer with different constructs.
 
-main:
-    val Maybe(3): Some(3)
-    if val is Some(v)
-        val
-        four: v + 1
-    return four
-"#
-}
+/// Simple Tag `is` declare (~8 lines).
+const MAYBE_GIN: &str = "\
+Maybe(x) is
+    Some(x) or
+    None
+";
 
-fn medium_source() -> &'static str {
-    r#"
+/// Range declares with doc comments (~24 lines).
+const INT_GIN: &str = "\
 --- The 8-bit signed integer type.
 SignedTinyInt is in -128...127
-
 --- The 16-bit signed integer type.
-SignedSmallInt is -32768...32767
-
+SignedSmallInt is in -32768...32767
 --- The 32-bit signed integer type.
-SignedInt is -2147483648...2147483647
-
+SignedInt is in -2147483648...2147483647
 --- The 64-bit signed integer type.
-SignedBigInt is -9223372036854775808...9223372036854775807
-
+SignedBigInt is in -9223372036854775808...9223372036854775807
 --- The 8-bit unsigned integer type.
 TinyInt is in 0...255
-
 --- The 16-bit unsigned integer type.
-SmallInt is 0...65535
-
+SmallInt is in 0...65535
 --- The 32-bit unsigned integer type.
-Int is 0...4294967295
-
+Int is in 0...4294967295
 --- The 64-bit unsigned integer type.
-BigInt is 0...18446744073709551615
+BigInt is in 0...18446744073709551615
+--- Alias for the 8-bit unsigned integer type.
+Byte is TinyInt
+";
 
-is_even(n Int) Bool: n % 2 == 0
-is_odd(n Int) Bool: n % 2 /= 0
+/// Blanket impl + when-is (~32 lines).
+const COPY_GIN: &str = "\
+Type is Primitive(width BigInt, signed Bool)
+     or Record(name String, fields List(NamedTy))
+     or Union(name String, variants List(VariantShape))
+     or Ptr(inner Type)
+     or Opaque(name String)
 
-clamp(x, lo, hi Int) Int:
-    if x < lo return lo
-    if x > hi return hi
-return x
+NamedTy has (name String, ty Type)
+VariantShape has (name String, fields List(NamedTy))
+Bool is True or False
+BigInt is in 0...18446744073709551615
+List(x) has (pointer Pointer(x), length BigInt)
+String has (bytes List(BigInt))
 
+Copy has (can_copy Bool)
+x.Copy(can_copy: is_copy(x))
 
-abs(x Int) Int: when x < 0
-                then -x
-                else x
+is_copy(x Type) Bool := when x is
+    Primitive(_, _)     then True
+    Ptr(_)              then False
+    Opaque(_)           then False
+    Record(_, fields)   then all_named_copy(fields)
+    Union(_, variants)  then all_variants_copy(variants)
 
-max(a, b Int) Int: when a >= b
-                   then a
-                   else b
+all_named_copy(fields List(NamedTy)) Bool := when fields is
+    []                  then True
+    [f, ...rest]        then is_copy(f.ty) and all_named_copy(rest)
 
-min(a, b Int) Int: when a <= b
-                   then a
-                   else b
+all_variants_copy(variants List(VariantShape)) Bool := when variants is
+    []                  then True
+    [v, ...rest]        then all_named_copy(v.fields) and all_variants_copy(rest)
+";
 
-divide(a, b Int) Int: when b == 0
-                      then 0
-                      else a / b
+/// When-is recursion + add/mul helpers (~53 lines).
+const SIZED_GIN: &str = "\
+Type is Primitive(width BigInt, signed Bool)
+     or Record(name String, fields List(NamedTy))
+     or Union(name String, variants List(VariantShape))
+     or Ptr(inner Type)
+     or Opaque(name String)
 
-fibonacci(n Int) Int: when n <= 1
-                      then n
-                      else fibonacci(n - 1) + fibonacci(n - 2)
+NamedTy has (name String, ty Type)
+VariantShape has (name String, fields List(NamedTy))
+Bool is True or False
+BigInt is in 0...18446744073709551615
+List(x) has (pointer Pointer(x), length BigInt)
+String has (bytes List(BigInt))
 
-factorial(n Int) Int: when n <= 1
-                      then 1
-                      else n * factorial(n - 1)
+Size is Const(BigInt) or Dynamic
+Sized has (size Size)
+x.Sized(size: compute_size(x))
 
-sum_to(n Int) Int: when n <= 0
-                   then 0
-                   else n + sum_to(n - 1)
-"#
-}
+compute_size(x Type) Size := when x is
+    Primitive(w, _)     then Const(w / 8)
+    Ptr(_)              then Const(8)
+    Opaque(_)           then Dynamic
+    Record(_, fields)   then sum_named(fields)
+    Union(_, variants)  then union_size(variants)
 
-fn number_heavy_source() -> String {
-    let mut s = String::with_capacity(8192);
-    for i in 0..200 {
-        if i > 0 {
-            s.push('\n');
-        }
-        match i % 6 {
-            0 => {
-                s.push_str("x: ");
-                s.push_str(&format!("{}", i * 1000 + 42));
-            }
-            1 => {
-                s.push_str("y: ");
-                let v = i as f64 * std::f64::consts::PI + std::f64::consts::E;
-                s.push_str(&format!("{v:.5}"));
-            }
-            2 => {
-                s.push_str("z: 0x");
-                s.push_str(&format!("{:X}", i * 255));
-            }
-            3 => {
-                s.push_str("n: ");
-                s.push_str(&format!("1_{:03}_{:03}", i, i * 7));
-            }
-            4 => {
-                s.push_str("f: ");
-                s.push_str(&format!("{}.{:06}", i, i * 12345));
-            }
-            5 => {
-                s.push_str("h: 0x");
-                s.push_str(&format!("{:08X}", i as u32 * 0xdead_beef_u32));
-            }
-            _ => unreachable!(),
-        }
-    }
-    s
-}
+sum_named(fields List(NamedTy)) Size := when fields is
+    []                  then Const(0)
+    [f, ...rest]        then add(compute_size(f.ty), sum_named(rest))
 
-fn large_mixed_source() -> String {
+add(a Size, b Size) Size := when (a, b) is
+    (Const(x), Const(y)) then Const(x + y)
+                         else Dynamic
+
+union_size(variants List(VariantShape)) Size := add(union_disc(variants), union_max_payload(variants))
+
+union_disc(variants List(VariantShape)) Size := when variants is
+    []           then Const(0)
+    [_]          then Const(1)
+                 else Const(2)
+
+union_max_payload(variants List(VariantShape)) Size := when variants is
+    []              then Const(0)
+    [v, ...rest]    then max_size(sum_named(v.fields), union_max_payload(rest))
+
+max_size(a Size, b Size) Size := when (a, b) is
+    (Const(x), Const(y)) then Const(when x > y then x else y)
+                         else Dynamic
+";
+
+/// Asm spec + format strings + binds with bodies (~62 lines).
+const IO_GIN: &str = "\
+Int is in 0...4294967295
+Pointer(x) is @x
+
+write_spec := 'svc #0x80'
+
+write(fd Int, buf Pointer(Int), len Int) Int:
+    result := asm(write_spec, fd, buf, len)
+    return result
+
+print(s String):
+    write(1, s.pointer, s.len)
+    return
+
+println(s String):
+    newline := '\\n'
+    print(s)
+    print(newline)
+    return
+";
+
+/// A larger module with declares, methods, format strings (~100 lines).
+const ASM_GIN: &str = "\
+Register has (value Str)
+
+AsmSpec has (
+    template    Str,
+    constraints Str,
+)
+
+AsmBuilder has (
+    template  Str,
+    outputs   List(Str),
+    inputs    List(Str),
+    clobbers  List(Str),
+)
+
+AsmBuilder.new(template Str) AsmBuilder:
+    return AsmBuilder(template, [], [], [])
+
+AsmBuilder.input(self AsmBuilder, reg Register) AsmBuilder:
+    self.inputs.push(reg.value)
+    return self
+
+AsmBuilder.output(self AsmBuilder, reg Register) AsmBuilder:
+    self.outputs.push('=' .. reg.value)
+    return self
+
+AsmBuilder.inout(self AsmBuilder, reg Register) AsmBuilder:
+    self.outputs.push('=' .. reg.value)
+    self.inputs.push(self.outputs.len() - 1)
+    return self
+
+AsmBuilder.clobber(self AsmBuilder, reg Register) AsmBuilder:
+    self.clobbers.push('~' .. reg.value)
+    return self
+
+AsmBuilder.clobber_memory(self AsmBuilder) AsmBuilder:
+    self.clobbers.push('~{memory}')
+    return self
+
+AsmBuilder.build(self AsmBuilder) AsmSpec:
+    parts := []
+    if self.outputs.len() > 0:
+        parts.push(self.outputs.join(','))
+    if self.inputs.len() > 0:
+        parts.push(self.inputs.join(','))
+    if self.clobbers.len() > 0:
+        parts.push(self.clobbers.join(','))
+    return AsmSpec(self.template, parts.join(','))
+
+RegConstraint(reg Register) Str:
+    return '\\{' .. reg.value .. '\\}'
+";
+
+/// Combined bundle of import-free files for a larger lex workload (~193 lines, ~8KB).
+fn bundle_source() -> String {
     let mut s = String::with_capacity(16 * 1024);
-    // module header
-    s.push_str("--- Core utilities for the example package.\n");
-    s.push_str("--- Provides common data structures and helpers.\n\n");
-
-    // type definitions
-    for i in 0..20 {
-        s.push_str(&format!(
-            "--- Variant {i} of the result type.\nResult_{i}[x] is Some(x) or None\n\n"
-        ));
-    }
-
-    // function definitions with varied bodies
-    for i in 0..40 {
-        s.push_str(&format!(
-            "--- Compute value {i}.\ncompute_{i}(a, b Int) Int:\n"
-        ));
-        s.push_str("    intermediate: a + b\n");
-        if i % 3 == 0 {
-            s.push_str("    if intermediate > 100\n");
-            s.push_str("        return intermediate - 100\n");
-            s.push_str("    return intermediate * 2\n");
-        } else if i % 3 == 1 {
-            s.push_str("    for x in 0...intermediate\n");
-            s.push_str("        if x % 2 == 0\n");
-            s.push_str("            continue\n");
-            s.push_str("        intermediate: intermediate + x\n");
-            s.push_str("    return intermediate\n");
-        } else {
-            s.push_str("    val: a * b + a / b\n");
-            s.push_str("    result: 'computed'\n");
-            s.push_str("    return val\n");
-        }
-        s.push('\n');
-    }
-
-    // string/format string section
-    for i in 0..15 {
-        s.push_str(&format!("msg_{i}: \"value is (x) and name is 'test'\"\n"));
-    }
+    s.push_str(MAYBE_GIN);
     s.push('\n');
-
-    // hex and underscore numbers
-    for i in 0..30 {
-        s.push_str(&format!(
-            "const_{i}: {}\n",
-            match i % 4 {
-                0 => format!("0x{:08X}", i * 0xcafe),
-                1 => format!("1_000_{}", i * 100),
-                2 => format!("{}.{:06}", i, i * 999),
-                _ => format!("{}", i * 1_000_000),
-            }
-        ));
-    }
-
-    s
-}
-
-fn doc_heavy_source() -> String {
-    let mut s = String::with_capacity(16 * 1024);
-    for func in 0..10 {
-        for line in 0..20 {
-            s.push_str(&format!(
-                "--- Function {func} documentation line {line}: \
-                 this is a longer comment to exercise scan-to-newline across many bytes of text.\n"
-            ));
-        }
-        s.push_str(&format!("func_{func}(a, b Int) Int:\n"));
-        s.push_str("    val: a + b\n");
-        s.push_str("    return val\n\n");
-    }
+    s.push_str(INT_GIN);
+    s.push('\n');
+    s.push_str(ASM_GIN);
     s
 }
 
@@ -206,12 +218,16 @@ fn lex_all(source: &str) -> usize {
 fn bench_lexer(c: &mut Criterion) {
     let mut group = c.benchmark_group("lexer");
 
+    let bundle = bundle_source();
+
     let inputs: &[(&str, &str)] = &[
-        ("small", small_source()),
-        ("medium", medium_source()),
-        ("number_heavy", &number_heavy_source()),
-        ("large_mixed", &large_mixed_source()),
-        ("doc_heavy", &doc_heavy_source()),
+        ("maybe", MAYBE_GIN),
+        ("int", INT_GIN),
+        ("copy", COPY_GIN),
+        ("sized", SIZED_GIN),
+        ("io", IO_GIN),
+        ("asm", ASM_GIN),
+        ("bundle", &bundle),
     ];
 
     for (label, source) in inputs {

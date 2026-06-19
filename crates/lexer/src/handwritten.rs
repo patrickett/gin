@@ -1,5 +1,5 @@
 use crate::token::{LexContext, MAX_INDENT_DEPTH, Token};
-use diagnostic::LexSymptom;
+use diagnostic::Diagnostic;
 use memchr::{memchr, memchr2, memchr3};
 use span::{Span, SpanId, SpanTable};
 
@@ -23,7 +23,7 @@ impl<'src> FormatStringState<'src> {
 pub struct Lexer<'src> {
     source: &'src str,
     pos: usize,
-    pub errors: Vec<(LexSymptom, SpanId)>,
+    pub errors: Vec<Diagnostic>,
     indent: LexContext,
     last_indent_span: SpanId,
     fmt: Option<FormatStringState<'src>>,
@@ -42,6 +42,9 @@ enum CommentKind {
 impl<'src> Lexer<'src> {
     pub fn new(source: &'src str) -> Self {
         let line_end = memchr(b'\n', source.as_bytes()).unwrap_or(source.len());
+        // Rough estimate: one span per ~6 bytes of source (token spans + merges).
+        // This avoids repeated Vec reallocation during lexing.
+        let estimated_spans = (source.len() / 6).max(64);
         Self {
             source,
             pos: 0,
@@ -49,7 +52,7 @@ impl<'src> Lexer<'src> {
             indent: LexContext::default(),
             last_indent_span: SpanId::INVALID,
             fmt: None,
-            span_table: SpanTable::new(),
+            span_table: SpanTable::with_capacity(estimated_spans),
             line_end,
         }
     }
@@ -61,10 +64,7 @@ impl<'src> Lexer<'src> {
 
     #[inline]
     fn insert_span(&mut self, range: std::ops::Range<usize>) -> SpanId {
-        self.span_table.insert(Span {
-            start: range.start,
-            end: range.end,
-        })
+        self.span_table.insert(Span::from_range(range))
     }
 
     /// Get the span data for a given SpanId.
@@ -199,7 +199,7 @@ impl<'src> Lexer<'src> {
         let bytes = self.source.as_bytes();
         while self.pos < bytes.len() {
             match bytes[self.pos] {
-                b'a'..=b'z' | b'0'..=b'9' | b'_' => self.pos += 1,
+                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' => self.pos += 1,
                 _ => break,
             }
         }
@@ -297,7 +297,10 @@ impl<'src> Lexer<'src> {
         match Self::parse_int_bytes(bytes, radix) {
             Some(v) => (Token::Int(v), span),
             None => {
-                self.errors.push((LexSymptom::InvalidInteger, span));
+                self.errors.push(
+                    Diagnostic::new("lex-invalid-integer", "integer literal out of range")
+                        .at_span_id(span, &self.span_table),
+                );
                 (Token::Int(0), span)
             }
         }
@@ -342,7 +345,10 @@ impl<'src> Lexer<'src> {
             return match Self::parse_float_bytes(&self.source.as_bytes()[start..self.pos]) {
                 Some(v) => (Token::Float(v), span),
                 None => {
-                    self.errors.push((LexSymptom::InvalidFloat, span));
+                    self.errors.push(
+                        Diagnostic::new("lex-invalid-float", "float literal out of range")
+                            .at_span_id(span, &self.span_table),
+                    );
                     (Token::Float(0.0), span)
                 }
             };
@@ -386,7 +392,10 @@ impl<'src> Lexer<'src> {
         let text = self.slice_from(start);
         let range = self.current_span(start);
         let span = self.insert_span(range);
-        self.errors.push((LexSymptom::UnclosedString, span));
+        self.errors.push(
+            Diagnostic::new("lex-unclosed-string", "unclosed string literal")
+                .at_span_id(span, &self.span_table),
+        );
         (Token::UnterminatedString(&text[1..]), span)
     }
 
@@ -454,7 +463,10 @@ impl<'src> Lexer<'src> {
                     }
                     let span = self.insert_span(unterm_start..self.pos);
                     tokens.push((Token::UnterminatedFormatString, span));
-                    self.errors.push((LexSymptom::UnclosedString, open_span));
+                    self.errors.push(
+                        Diagnostic::new("lex-unclosed-string", "unclosed string literal")
+                            .at_span_id(open_span, &self.span_table),
+                    );
                     break;
                 }
             }
@@ -471,7 +483,10 @@ impl<'src> Lexer<'src> {
                 None => {
                     let eof_span = self.insert_span(self.pos..self.pos);
                     tokens.push((Token::UnterminatedFormatString, eof_span));
-                    self.errors.push((LexSymptom::UnclosedString, eof_span));
+                    self.errors.push(
+                        Diagnostic::new("lex-unclosed-string", "unclosed string literal")
+                            .at_span_id(eof_span, &self.span_table),
+                    );
                     return;
                 }
                 Some((Token::ParenClose, span)) => {
@@ -484,7 +499,10 @@ impl<'src> Lexer<'src> {
                 }
                 Some((Token::FormatStringDelim, span)) => {
                     tokens.push((Token::UnterminatedFormatString, span));
-                    self.errors.push((LexSymptom::UnclosedString, span));
+                    self.errors.push(
+                        Diagnostic::new("lex-unclosed-string", "unclosed string literal")
+                            .at_span_id(span, &self.span_table),
+                    );
                     return;
                 }
                 Some((Token::Newline | Token::Indent | Token::Dedent, _)) => {}
@@ -655,7 +673,10 @@ impl<'src> Lexer<'src> {
                 _ => {
                     let range = self.current_span(start);
                     let span = self.insert_span(range);
-                    self.errors.push((LexSymptom::UnexpectedCharacter, span));
+                    self.errors.push(
+                        Diagnostic::new("lex-unexpected-character", "unexpected character")
+                            .at_span_id(span, &self.span_table),
+                    );
                     while self.peek().is_some_and(|b| b & 0xC0 == 0x80) {
                         self.pos += 1;
                     }
@@ -694,7 +715,10 @@ impl<'src> Lexer<'src> {
         let item = self.lex_single_token()?;
         if self.indent.indent_overflow {
             self.indent.indent_overflow = false;
-            self.errors.push((LexSymptom::OverflowIndent, item.1));
+            self.errors.push(
+                Diagnostic::new("lex-overflow-indent", "indentation overflow")
+                    .at_span_id(item.1, &self.span_table),
+            );
         }
         Some(item)
     }
