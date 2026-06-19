@@ -129,14 +129,6 @@ impl FlaskConfig {
         self.license.as_deref()
     }
 
-    pub fn set_name(&mut self, name: String) {
-        self.name = name;
-    }
-
-    pub fn set_version(&mut self, version: String) {
-        self.version = version;
-    }
-
     pub fn bugs(&self) -> Option<&BugInfo> {
         self.bugs.as_ref()
     }
@@ -149,16 +141,28 @@ impl FlaskConfig {
         self.target.as_deref()
     }
 
+    /// Qualified module name (e.g. `core.arch`) for a directory inside the package.
+    ///
+    /// `dir` must be a child of `root_dir`. When `dir == root_dir`, the bare
+    /// package name is returned.
+    pub fn qualified_name_for(&self, dir: &std::path::Path, root_dir: &std::path::Path) -> String {
+        if let Ok(rel) = dir.strip_prefix(root_dir)
+            && let Some(rel_str) = rel.to_str()
+            && !rel_str.is_empty()
+        {
+            let subpath = rel_str.replace('/', ".");
+            format!("{}.{subpath}", self.name)
+        } else {
+            self.name.clone()
+        }
+    }
+
     pub fn dependency_names(&self) -> Vec<&str> {
         self.dependencies.keys().map(|s| s.as_str()).collect()
     }
 
     pub fn dependencies(&self) -> &HashMap<String, Dependency> {
         &self.dependencies
-    }
-
-    pub fn from_directory(dir: &std::path::Path) -> Option<FlaskConfig> {
-        Self::find_package_config(dir).map(|(cfg, _root)| cfg)
     }
 
     /// Find the package configuration and its root directory by walking up from `dir`.
@@ -178,82 +182,5 @@ impl FlaskConfig {
                 return None;
             }
         }
-    }
-
-    pub fn from_current_directory() -> Option<FlaskConfig> {
-        let mut path = match std::env::current_dir() {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("error: cannot get current directory: {e}");
-                return None;
-            }
-        };
-        path.push(PACKAGE_CONFIG_NAME);
-
-        #[cfg(debug_assertions)]
-        println!("info: config_path ({path:#?})");
-
-        match std::fs::read_to_string(&path) {
-            Ok(raw) => {
-                let config: FlaskConfig = match json5::from_str(&raw) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        eprintln!("error: failed to parse {PACKAGE_CONFIG_NAME}: {e}");
-                        return None;
-                    }
-                };
-                return Some(config);
-            }
-            Err(err) => match err.kind() {
-                std::io::ErrorKind::NotFound => {
-                    path.pop();
-                    let original_dir = path.clone();
-                    let mut found_path = None;
-
-                    while path.pop() {
-                        path.push(PACKAGE_CONFIG_NAME);
-                        match std::fs::exists(&path) {
-                            Ok(_) => {
-                                found_path = Some(path.clone());
-                                break;
-                            }
-                            Err(_) => {
-                                path.pop();
-                            }
-                        }
-                    }
-
-                    match found_path {
-                        Some(found) => match std::fs::read_to_string(found) {
-                            Ok(raw) => {
-                                let config: FlaskConfig = match json5::from_str(&raw) {
-                                    Ok(c) => c,
-                                    Err(e) => {
-                                        eprintln!(
-                                            "error: failed to parse {PACKAGE_CONFIG_NAME}: {e}"
-                                        );
-                                        return None;
-                                    }
-                                };
-                                return Some(config);
-                            }
-                            Err(_) => eprintln!(
-                                "error: could not find `{PACKAGE_CONFIG_NAME}` in `{}` or any parent directory",
-                                original_dir.display()
-                            ),
-                        },
-                        None => {
-                            eprintln!(
-                                "error: could not find `{PACKAGE_CONFIG_NAME}` in `{}` or any parent directory",
-                                original_dir.display()
-                            )
-                        }
-                    }
-                }
-                err => eprintln!("{err:#?}"),
-            },
-        };
-
-        None
     }
 }

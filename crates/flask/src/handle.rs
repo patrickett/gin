@@ -55,16 +55,6 @@ impl Deref for FlaskConfigReadGuard<'_> {
     }
 }
 
-impl FlaskConfigReadGuard<'_> {
-    pub fn name(&self) -> &str {
-        self.config.name()
-    }
-
-    pub fn dependency_names(&self) -> Vec<&str> {
-        self.config.dependency_names()
-    }
-}
-
 #[derive(Debug)]
 pub struct FlaskConfigWriteGuard<'a> {
     guard: std::sync::RwLockWriteGuard<'a, FlaskConfigHandleInner>,
@@ -87,35 +77,13 @@ impl DerefMut for FlaskConfigWriteGuard<'_> {
 impl FlaskConfigHandle {
     /// Load config from a directory, searching upward for flask.jsonc.
     pub fn load(from_dir: &Path) -> Result<Self, ConfigError> {
-        let mut search = from_dir.to_path_buf();
-        loop {
-            search.push(PACKAGE_CONFIG_NAME);
-            match std::fs::read_to_string(&search) {
-                Ok(raw) => {
-                    let config = json5::from_str::<FlaskConfig>(&raw).map_err(|_err| {
-                        ConfigError::Io(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "failed to parse config",
-                        ))
-                    })?;
-                    search.pop();
-                    return Ok(Self {
-                        inner: Arc::new(RwLock::new(FlaskConfigHandleInner {
-                            config,
-                            source_dir: search.clone(),
-                        })),
-                    });
-                }
-                Err(_) => {
-                    search.pop();
-                    if !search.pop() {
-                        return Err(ConfigError::NotFound {
-                            searched_from: from_dir.to_path_buf(),
-                        });
-                    }
-                }
-            }
-        }
+        let (config, source_dir) =
+            FlaskConfig::find_package_config(from_dir).ok_or_else(|| ConfigError::NotFound {
+                searched_from: from_dir.to_path_buf(),
+            })?;
+        Ok(Self {
+            inner: Arc::new(RwLock::new(FlaskConfigHandleInner { config, source_dir })),
+        })
     }
 
     pub fn read(&self) -> FlaskConfigReadGuard<'_> {
@@ -157,15 +125,5 @@ impl FlaskConfigHandle {
             File::create(source_dir.join(PACKAGE_CONFIG_NAME)).map_err(ConfigError::Io)?;
         file.write_all(json.as_bytes()).map_err(ConfigError::Io)?;
         Ok(())
-    }
-
-    pub fn set_name(&mut self, name: String) {
-        let mut inner = self.write();
-        inner.config.set_name(name);
-    }
-
-    pub fn set_version(&mut self, version: String) {
-        let mut inner = self.write();
-        inner.config.set_version(version);
     }
 }
