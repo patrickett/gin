@@ -1,12 +1,9 @@
+use analysis::CacheEngine;
+use analysis::QueryEngine;
 use crossbeam_channel::unbounded;
-use database::QueryEngine;
-use database::SalsaQueryEngine;
+use diagnostic::DiagnosticPathExt;
+use resolve::GinPackageExt;
 use std::path::{Path, PathBuf};
-
-pub struct DocumentState {
-    pub source: String,
-    pub file_path: PathBuf,
-}
 
 pub struct JsonDocumentState {
     pub source: String,
@@ -28,9 +25,6 @@ impl Clone for GinSnapshot {
 pub struct PackageInfo {
     /// All `.gin` file paths discovered in the package source directory.
     pub file_paths: Vec<PathBuf>,
-    /// The root directory of the package (where `flask.jsonc` lives).
-    #[allow(dead_code)]
-    pub root: PathBuf,
 }
 
 pub struct GinHost {
@@ -41,7 +35,7 @@ impl GinHost {
     pub fn new() -> Self {
         let (tx, _rx) = unbounded();
         Self {
-            engine: Box::new(SalsaQueryEngine::new(tx)),
+            engine: Box::new(CacheEngine::new(tx)),
         }
     }
 
@@ -51,8 +45,16 @@ impl GinHost {
         }
     }
 
+    /// Evict the cached package entry for the package containing `path`.
+    /// Called when a file tab is closed to free typed AST memory.
+    pub fn evict_package_for(&self, path: &Path) {
+        let path = path.normalize_diagnostic_path();
+        self.engine.invalidate_package_cache_for(&path);
+    }
+
     /// Upsert a file into the database.
     pub fn upsert_file(&mut self, path: PathBuf, contents: String) {
+        let path = path.normalize_diagnostic_path();
         if !self.engine.contains(&path) {
             let _ = self.engine.add_file(path.clone());
         }
@@ -65,13 +67,16 @@ impl GinHost {
     /// This mirrors the file-collection logic that `ginc` uses so that
     /// the LSP sees the same set of files as the CLI.
     pub fn load_package(&mut self, dir: &Path) -> PackageInfo {
-        let file_paths = resolve::collect_gin_files(dir);
+        let file_paths: Vec<PathBuf> = dir
+            .collect_gin_files()
+            .into_iter()
+            .map(|path| path.normalize_diagnostic_path())
+            .collect();
         for p in &file_paths {
-            let _ = self.engine.add_file(p.clone());
+            if !self.engine.contains(p) {
+                let _ = self.engine.add_file(p.clone());
+            }
         }
-        PackageInfo {
-            file_paths,
-            root: dir.to_path_buf(),
-        }
+        PackageInfo { file_paths }
     }
 }

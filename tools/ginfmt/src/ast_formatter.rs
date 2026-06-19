@@ -2,13 +2,41 @@
 //!
 //! Walks the Gin `FileAst` and builds formatted output using AST node properties
 //! instead of operating on raw tree-sitter nodes or source text slices.
+//!
+//! # Future: structural multiline layout
+//!
+//! The parser now accepts newline-separated lists in many contexts:
+//! function params, type params, interface members, call args, list literals,
+//! tuple lits, and patterns. The formatter currently always emits compact
+//! comma-separated inline lists and relies on `wrap_lines` post-processing
+//! for line-length conformance.
+//!
+//! TODO: Structural multiline formatting — when an inline list exceeds
+//! `max_line_width`, emit newline-separated layout instead:
+//! ```
+//! // instead of:
+//! fn(a Int, b Int, c Int, d Int) Int := a + b + c + d
+//! // emit:
+//! fn(
+//!     a Int
+//!     b Int
+//!     c Int
+//!     d Int
+//! ) Int := a + b + c + d
+//! ```
+//! This requires:
+//! - Pre-measuring list width before emitting
+//! - Choosing between inline (comma) vs block (newline) layout per list
+//! - Tracking indentation depth across multiline delimiter pairs
 
 use std::collections::HashMap;
 
 use ast::{
-    BindValue, BundleExportImport, Declare, DeclareValue, DocComment, Expr, FileAst, ImportSource,
-    Literal, ModuleImport, ParameterKind, Parameters, SpanTable, Spanned, TypeExpr, Typed, Variant,
+    BindValue, BundleExportImport, Declare, DeclareValue, DocComment, Expr, FileAst, HashFloat,
+    ImportSource, Literal, ModuleImport, ParameterKind, Parameters, SpanTable, Spanned, TypeExpr,
+    Typed, Variant,
 };
+use ast_format::type_expr::TypeExprFormatExt;
 use internment::Intern;
 
 use crate::align_ast::{AlignableNode, DelimiterKind, group_alignable_nodes};
@@ -76,11 +104,11 @@ impl<'a> AstFormatter<'a> {
         }
         // Sort tags by source position for deterministic output
         let mut tag_order: Vec<(usize, &Intern<String>, &Declare)> = ast
-            .tags()
+            .tags
             .iter()
             .map(|(n, d)| {
                 let span = self.span_table.get(d.name_span);
-                (span.start, n, d)
+                (span.start(), n, d)
             })
             .collect();
         tag_order.sort_by_key(|&(pos, _, _)| pos);
@@ -93,11 +121,11 @@ impl<'a> AstFormatter<'a> {
         }
         // Sort defs by name_span for deterministic output
         let mut def_order: Vec<(usize, &Intern<String>, &ast::Bind)> = ast
-            .defs()
+            .defs
             .iter()
             .map(|(n, b)| {
                 let span = self.span_table.get(b.name_span);
-                (span.start, n, b)
+                (span.start(), n, b)
             })
             .collect();
         def_order.sort_by_key(|&(pos, _, _)| pos);
@@ -129,24 +157,49 @@ impl<'a> AstFormatter<'a> {
     }
 
     fn format_declare(&mut self, name: &Intern<String>, declare: &Declare) {
-        if let Some(doc) = declare.doc_comment() {
+        if let Some(doc) = declare.doc_comment.as_ref() {
             self.emit_doc_comment(doc);
         }
         self.buffer.push_str(name.as_str());
-        if let Some(params) = declare.params() {
+        if let Some(params) = &declare.params {
             self.format_params(params);
         }
         let prefix_end = self.buffer.len();
         let st = self.span_table;
         let src = self.source;
-        match declare.value() {
+        match &declare.value {
             DeclareValue::Union { variants } => {
                 self.buffer.push_str(" is ");
                 self.format_union_variants(variants);
             }
-            DeclareValue::Record(fields) => {
-                self.buffer.push_str(" is (");
-                self.format_record_fields(fields);
+            DeclareValue::Interface(members) => {
+                self.buffer.push_str(" has (");
+                let mut first = true;
+                for m in members {
+                    if !first {
+                        self.buffer.push_str(", ");
+                    }
+                    first = false;
+                    if let Some(doc) = &m.doc_comment {
+                        self.emit_doc_comment(doc);
+                    }
+                    self.buffer.push_str(m.name.as_str());
+                    if !m.params.is_empty() {
+                        self.buffer.push('(');
+                        self.format_params(&m.params);
+                        self.buffer.push(')');
+                    }
+                    if let Some(rt) = &m.return_ty {
+                        self.buffer.push(' ');
+                        let span = st.get(rt.span_id());
+                        self.buffer.push_str(span.extract(src));
+                    }
+                    if let Some(et) = &m.error_ty {
+                        self.buffer.push_str(" or ");
+                        let span = st.get(et.span_id());
+                        self.buffer.push_str(span.extract(src));
+                    }
+                }
                 self.buffer.push(')');
             }
             DeclareValue::Alias(target) => {
@@ -160,11 +213,11 @@ impl<'a> AstFormatter<'a> {
             DeclareValue::Range(_, _) | DeclareValue::InRange(_, _) | DeclareValue::When(_) => {
                 self.buffer.push_str(" is ");
                 let span = st.get(declare.name_span);
-                let end = src[span.start..]
+                let end = src[span.start()..]
                     .find('\n')
-                    .map(|p| span.start + p)
+                    .map(|p| span.start() + p)
                     .unwrap_or(src.len());
-                self.buffer.push_str(&src[span.start..end]);
+                self.buffer.push_str(&src[span.start()..end]);
             }
         }
         let is_single_line = !self.buffer[prefix_end.saturating_sub(1)..].contains('\n');
@@ -239,29 +292,6 @@ impl<'a> AstFormatter<'a> {
                     }
                 }
                 self.buffer.push(')');
-            }
-        }
-    }
-
-    fn format_record_fields(&mut self, fields: &Parameters) {
-        let st = self.span_table;
-        let src = self.source;
-        for (i, (name, kind)) in fields.iter().enumerate() {
-            if i > 0 {
-                self.buffer.push_str(", ");
-            }
-            self.buffer.push_str(name.as_str());
-            match kind {
-                ParameterKind::Generic => {}
-                ParameterKind::Tagged(sp) => {
-                    self.buffer.push(' ');
-                    self.buffer.push_str(&type_text(&sp.value));
-                }
-                ParameterKind::Default(expr) => {
-                    let text = span_text(expr, st, src);
-                    self.buffer.push_str(": ");
-                    self.buffer.push_str(&text);
-                }
             }
         }
     }
@@ -343,11 +373,11 @@ impl<'a> AstFormatter<'a> {
 
     fn format_bind(&mut self, name: &Intern<String>, bind: &ast::Bind) {
         let _ = name;
-        if let Some(doc) = bind.doc_comment() {
+        if let Some(doc) = bind.doc_comment.as_ref() {
             self.emit_doc_comment(doc);
         }
-        self.buffer.push_str(bind.name().as_str());
-        if let Some(params) = bind.params() {
+        self.buffer.push_str(bind.name.as_str());
+        if let Some(params) = &bind.params {
             self.format_params(params);
         }
         let st = self.span_table;
@@ -357,13 +387,13 @@ impl<'a> AstFormatter<'a> {
             self.buffer.push(' ');
             self.buffer.push_str(&text);
         }
-        let has_colon = !matches!(bind.value(), BindValue::Unassigned);
+        let has_colon = !matches!(&bind.value, BindValue::Unassigned);
         if has_colon {
             self.buffer.push_str(": ");
         }
         let prefix_end = self.buffer.len();
 
-        match bind.value() {
+        match &bind.value {
             BindValue::Expr(expr) => {
                 let text = span_text(expr, st, src);
                 self.buffer.push_str(&text);
@@ -403,7 +433,7 @@ impl<'a> AstFormatter<'a> {
             true
         };
         let sl = self.buffer[..prefix_end].matches('\n').count();
-        if self.config.align_binds && matches!(bind.value(), BindValue::Expr(_)) && is_single_line {
+        if self.config.align_binds && matches!(&bind.value, BindValue::Expr(_)) && is_single_line {
             let nid = self.next_id();
             let il = self.indent_level;
             self.alignable_nodes.push(AlignableNode {
@@ -557,7 +587,7 @@ fn variant_name(expr: &TypeExpr) -> String {
         TypeExpr::InRange { .. }
         | TypeExpr::ListEmpty
         | TypeExpr::ListCons { .. }
-        | TypeExpr::Tuple(_) => ast_format::type_expr::format_type_surface(expr),
+        | TypeExpr::Tuple(_) => expr.format_surface(),
     }
 }
 
@@ -590,7 +620,7 @@ fn type_text(expr: &TypeExpr) -> String {
         TypeExpr::InRange { .. }
         | TypeExpr::ListEmpty
         | TypeExpr::ListCons { .. }
-        | TypeExpr::Tuple(_) => ast_format::type_expr::format_type_surface(expr),
+        | TypeExpr::Tuple(_) => expr.format_surface(),
     }
 }
 
@@ -600,7 +630,7 @@ fn expr_fallback(expr: &Expr, _st: &SpanTable, _source: &str) -> String {
         Expr::Lit(lit) => match lit {
             Literal::Number(n) => n.to_string(),
             Literal::Int(i) => i.to_string(),
-            Literal::Float(f) => f.to_string(),
+            Literal::Float(HashFloat(f)) => f.to_string(),
             Literal::String(s) => format!("'{}'", s),
         },
         Expr::AnonymousTag(name) => name.as_str().to_string(),
@@ -674,12 +704,12 @@ fn find_break_point(line: &str, max_width: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use parser::parse_source_full;
+    use parser::query::SourceParseExt;
 
     #[test]
     fn test_basic_declare() {
         let source = "Maybe is Some or None\nResult is Ok or Error\n";
-        let out = parse_source_full(source);
+        let out = source.parse_source_full();
         let cfg = Config::default();
         let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
         let r = f.format_file(&out.ast);
@@ -689,7 +719,7 @@ mod tests {
     #[test]
     fn test_simple_bind() {
         let source = "main:\n    print('hello')\nreturn\n";
-        let out = parse_source_full(source);
+        let out = source.parse_source_full();
         let cfg = Config::default();
         let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
         let r = f.format_file(&out.ast);
@@ -701,7 +731,7 @@ mod tests {
     #[test]
     fn test_empty() {
         let source = "";
-        let out = parse_source_full(source);
+        let out = source.parse_source_full();
         let cfg = Config::default();
         let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
         let r = f.format_file(&out.ast);
@@ -711,7 +741,7 @@ mod tests {
     #[test]
     fn test_import_sort_current_module() {
         let source = "use ToString, Copy\n";
-        let out = parse_source_full(source);
+        let out = source.parse_source_full();
         let cfg = Config::default();
         let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
         let r = f.format_file(&out.ast);
@@ -721,7 +751,7 @@ mod tests {
     #[test]
     fn test_import_sort_package() {
         let source = "use http.web, crypto.hash\n";
-        let out = parse_source_full(source);
+        let out = source.parse_source_full();
         let cfg = Config::default();
         let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
         let r = f.format_file(&out.ast);
@@ -731,7 +761,7 @@ mod tests {
     #[test]
     fn test_import_sort_single() {
         let source = "use http\n";
-        let out = parse_source_full(source);
+        let out = source.parse_source_full();
         let cfg = Config::default();
         let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
         let r = f.format_file(&out.ast);
@@ -741,7 +771,7 @@ mod tests {
     #[test]
     fn test_bundle_member_sort() {
         let source = "use core.(Int, Byte, Area)\n";
-        let out = parse_source_full(source);
+        let out = source.parse_source_full();
         let cfg = Config::default();
         let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
         let r = f.format_file(&out.ast);
@@ -751,7 +781,7 @@ mod tests {
     #[test]
     fn test_import_sort_idempotent() {
         let source = "use Copy, ToString\n";
-        let out = parse_source_full(source);
+        let out = source.parse_source_full();
         let cfg = Config::default();
         let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
         let r = f.format_file(&out.ast);

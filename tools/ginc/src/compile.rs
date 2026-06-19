@@ -1,17 +1,18 @@
 //! Compilation orchestration.
 
 use crate::cli::Args;
+use analysis::ResolveAndPrepareExt;
 use ast::FileAst;
-use codegen::emit;
-use diagnostic::{Category, Diagnostic};
+use codegen::CodegenContext;
+use diagnostic::{Category, Diagnostic, DiagnosticPathExt};
 use flask::{CompileTarget, FlaskConfig};
-use parser::parse_source_full;
-use resolve::ParsedFile;
+use parser::query::SourceParseExt;
+use resolve::{GinPackageExt, ParsedFile};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use typecheck::compile_time_trait::CompileTimeTraitRegistry;
 use typecheck::transform::{TransformCtx, transform_package};
-use typed_ast::{FileId, TypedFileAst};
+use typecheck::{FileId, TypedFileAst};
 
 /// Analogous to the `ginc` command
 pub struct GinCompiler;
@@ -29,7 +30,7 @@ impl GinCompiler {
     pub fn compile(args: &'_ mut Args) {
         let path = args.input.to_owned();
 
-        let file_paths = collect_gin_files(&path);
+        let file_paths = path.collect_gin_files();
         if file_paths.is_empty() {
             eprintln!("No .gin files found in {}", path.display());
             return;
@@ -53,9 +54,9 @@ impl GinCompiler {
                 .map(|p| p.to_path_buf())
                 .unwrap_or_default()
         };
-        let flask_config = FlaskConfig::from_directory(&entry_dir);
+        let flask_config = FlaskConfig::find_package_config(&entry_dir).map(|(cfg, _)| cfg);
         if args.dependencies.is_empty() {
-            args.dependencies = resolve::flask_path_dependencies_for_file(&files[0].path);
+            args.dependencies = files[0].path.flask_path_dependencies();
         }
 
         let cli_triple = args.target.as_deref();
@@ -79,7 +80,7 @@ impl GinCompiler {
         let mut files = if args.dependencies.is_empty() && !is_library {
             files
         } else {
-            analysis::resolve_and_prepare(files, &args.dependencies, &compile_target)
+            files.resolve_and_prepare(&args.dependencies, &compile_target)
         };
 
         if args.dependencies.is_empty() && !is_library {
@@ -157,7 +158,7 @@ fn parse(sources: &[(PathBuf, String)]) -> Vec<ParsedFile> {
     sources
         .iter()
         .map(|(path, source)| {
-            let output = parse_source_full(source);
+            let output = source.parse_source_full();
             ParsedFile {
                 path: path.clone(),
                 source: source.clone(),
@@ -165,34 +166,6 @@ fn parse(sources: &[(PathBuf, String)]) -> Vec<ParsedFile> {
             }
         })
         .collect()
-}
-
-// Delegates to resolve::collect_gin_files (single source of truth).
-fn collect_gin_files(root: &Path) -> Vec<PathBuf> {
-    resolve::collect_gin_files(root)
-}
-
-/// Read file contents from disk, skipping files that can't be read.
-/// Path shown in ariadne diagnostics: relative to the process current directory when possible.
-fn path_for_diagnostic_report(path: &Path) -> String {
-    let Ok(cwd) = std::env::current_dir() else {
-        return path.display().to_string();
-    };
-    let abs = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        cwd.join(path)
-    };
-    match (abs.canonicalize(), cwd.canonicalize()) {
-        (Ok(abs), Ok(base)) => abs
-            .strip_prefix(&base)
-            .map(|p| {
-                let s = p.display().to_string();
-                if s.is_empty() { ".".to_string() } else { s }
-            })
-            .unwrap_or_else(|_| abs.display().to_string()),
-        _ => path.display().to_string(),
-    }
 }
 
 fn read_sources(paths: &[PathBuf]) -> Vec<(PathBuf, String)> {
@@ -213,7 +186,7 @@ fn read_sources(paths: &[PathBuf]) -> Vec<(PathBuf, String)> {
 fn print_diagnostics(files: &[ParsedFile]) -> bool {
     let mut has_flaws = false;
     for file in files {
-        let filename = path_for_diagnostic_report(&file.path);
+        let filename = file.path.diagnostic_report_path_from_cwd();
         for diag in &file.output.symptoms {
             diag.print(&file.source, &filename);
             if matches!(diag.category, Category::Flaw) {
@@ -225,19 +198,11 @@ fn print_diagnostics(files: &[ParsedFile]) -> bool {
 }
 
 /// Print type-check flaws from the typed AST for every file.
-///
-/// Flaws are already [`diagnostic::TypeSymptom`] values — they are converted to
-/// [`Diagnostic`] via the [`DiagnosticLike`](diagnostic::DiagnosticLike) trait and
-/// rendered with the same ariadne-based printer used for parse diagnostics.
 fn print_type_diagnostics(files: &[ParsedFile], typed_asts: &[TypedFileAst]) {
-    use diagnostic::DiagnosticLike;
-
     for (file, typed) in files.iter().zip(typed_asts) {
-        let filename = path_for_diagnostic_report(&file.path);
-        let span_table = &typed.span_table;
-        for (span_id, flaw) in typed.all_flaws() {
-            let diag = flaw.clone().into_diagnostic(span_table.get(span_id));
-            diag.print(&file.source, &filename);
+        let filename = file.path.diagnostic_report_path_from_cwd();
+        for (_, flaw) in typed.all_flaws() {
+            flaw.clone().print(&file.source, &filename);
         }
     }
 }
@@ -261,7 +226,7 @@ fn print_codegen_diagnostics(files: &[ParsedFile], symptoms: &[Diagnostic]) {
         }
         return;
     };
-    let label = path_for_diagnostic_report(&primary.path);
+    let label = primary.path.diagnostic_report_path_from_cwd();
     let source = primary.source.as_str();
     for d in symptoms {
         d.print(source, &label);
@@ -278,11 +243,18 @@ fn emit_mlir_typed(
         return;
     };
     let (source, label) = match files.first() {
-        Some(f) => (f.source.as_str(), path_for_diagnostic_report(&f.path)),
+        Some(f) => (f.source.as_str(), f.path.diagnostic_report_path_from_cwd()),
         None => ("", "<stdin>".to_string()),
     };
-    let (result, symptoms) =
-        emit::build_module_text_from_typed(typed, source, &label, trait_registry);
+    let context = codegen::emit::NativeCompiler::create_context();
+    let (module, symptoms) = CodegenContext::build_module_from_typed_ast(
+        &context,
+        typed,
+        source,
+        &label,
+        trait_registry,
+    );
+    let result = module.map(|m| m.as_operation().to_string());
     match result {
         Some(mlir_text) => {
             print_codegen_diagnostics(files, &symptoms);
@@ -335,16 +307,25 @@ fn emit_native_typed(
     }
 
     let source = file.source.as_str();
-    let label = path_for_diagnostic_report(&file.path);
+    let label = file.path.diagnostic_report_path_from_cwd();
     let profile = args.profile;
-    let (ok, symptoms) = emit::compile_to_object_from_typed(
+
+    let compiler = codegen::emit::NativeCompiler::default();
+    let context = codegen::emit::NativeCompiler::create_context();
+    let (module, symptoms) = CodegenContext::build_module_from_typed_ast(
+        &context,
         typed,
-        &obj_path,
-        profile,
         source,
         &label,
         trait_registry,
     );
+    let Some(module) = module else {
+        eprintln!("Codegen failed: {:?}", symptoms);
+        return;
+    };
+    let (ok, more) = compiler.native_from_module(&module, &obj_path, profile);
+    let mut symptoms = symptoms;
+    symptoms.extend(more);
     if !ok {
         eprintln!("Codegen failed: {:?}", symptoms);
         return;
@@ -355,8 +336,11 @@ fn emit_native_typed(
             .output
             .clone()
             .unwrap_or_else(|| path.with_extension(""));
-        let (linked, link_symptoms) =
-            emit::link_executable(&obj_path, &exe_path, args.target.as_deref());
+        let (linked, link_symptoms) = codegen::emit::NativeCompiler::link_executable(
+            &obj_path,
+            &exe_path,
+            args.target.as_deref(),
+        );
         if !linked {
             for s in &link_symptoms {
                 eprintln!("Link error: {}", s.message);

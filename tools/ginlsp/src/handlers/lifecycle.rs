@@ -61,7 +61,6 @@ impl Backend {
         // reason this path exists) cannot be cancelled, and shutdown must
         // not hang on it.
         self.shutdown.store(true, Ordering::SeqCst);
-        self.documents.clear();
         self.json_documents.clear();
         self.package_configs.clear();
         Ok(())

@@ -1,8 +1,6 @@
-use crate::diagnostics::span_to_range;
 use crate::Backend;
+use crate::diagnostics::DiagnosticConverter;
 
-use ast::hover::find_references;
-use ast::position_to_byte_offset;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 
@@ -18,8 +16,8 @@ impl Backend {
         let uri = params.text_document_position.text_document.uri.clone();
         let position = params.text_document_position.position;
 
-        let (source, file_path) = match self.documents.get(&uri.to_string()) {
-            Some(state) => (state.source.clone(), state.file_path.clone()),
+        let file_path = match Backend::file_path_from_uri(&uri) {
+            Some(p) => p,
             None => return Ok(None),
         };
 
@@ -27,20 +25,23 @@ impl Backend {
         let locations = self
             .run_blocking_request("references", move |this| {
                 let snapshot = this.snapshot();
-                let ast = snapshot.engine.parse_output(&file_path)?.ast.clone();
-                let word = position_to_byte_offset(&source, position.line, position.character)
-                    .and_then(|byte_pos| {
-                        ast.word_at_byte(byte_pos, &source)
-                            .or_else(|| ast::word_at_byte_offset(&source, byte_pos))
-                    })?;
+                let doc = snapshot.engine.document_snapshot(&file_path)?;
+                let converter =
+                    DiagnosticConverter::new((*doc.source).clone(), (*doc.line_index).clone());
+                let byte_pos = doc.line_index.position_to_byte(
+                    &doc.source,
+                    position.line,
+                    position.character,
+                )? as u32;
+                let refs = snapshot.engine.references_at(&file_path, byte_pos)?;
                 Some(
-                    find_references(&ast, &word)
+                    refs.spans
                         .into_iter()
                         .map(|span| Location {
                             uri: uri_for_locs.clone(),
-                            range: span_to_range(span.start, span.end, &source),
+                            range: converter.span_to_range_indexed(span.start, span.end),
                         })
-                        .collect::<Vec<_>>(),
+                        .collect::<Vec<Location>>(),
                 )
             })
             .await;
