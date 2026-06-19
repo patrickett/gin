@@ -1,0 +1,26 @@
+[package]
+name = "analysis"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+diagnostic = { workspace = true }
+span = { workspace = true }
+ast = { workspace = true }
+typecheck = { workspace = true }
+parser = { workspace = true }
+flask = { workspace = true }
+resolve = { workspace = true }
+internment = "0.8"
+crossbeam-channel = { workspace = true }
+notify-debouncer-mini = "0.4.1"
+
+[dev-dependencies]
+internment = "0.8"
+parser = { workspace = true }
+ast = { workspace = true }
+span = { workspace = true }
+test-fixtures = { workspace = true }
