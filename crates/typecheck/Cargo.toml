@@ -1,0 +1,24 @@
+[package]
+name = "typecheck"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+ast = { workspace = true }
+ast-format = { workspace = true }
+soa_derive = "0.14"
+span = { workspace = true }
+diagnostic = { workspace = true }
+flask = { workspace = true }
+indexmap = { workspace = true }
+internment = "0.8"
+i256 = { workspace = true }
+semver = { workspace = true }
+
+[dev-dependencies]
+parser = { workspace = true }
+resolve = { workspace = true }
+test-fixtures = { workspace = true }
