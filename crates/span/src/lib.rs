@@ -1,11 +1,3 @@
-#![deny(unsafe_code)]
-#![warn(
-    clippy::correctness,
-    clippy::suspicious,
-    clippy::style,
-    clippy::complexity,
-    clippy::perf
-)]
 //! Span handling with ID-based optimization.
 //!
 //! This crate provides a memory-efficient span representation using [`SpanId`]
@@ -58,12 +50,17 @@ impl Default for SpanId {
 }
 
 /// The actual span data - byte range in source code.
+///
+/// Stored as `u32` offsets to halve memory footprint vs `usize` on 64-bit
+/// platforms. Source files exceeding 4 GiB are not supported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Span {
-    /// Byte offset of the start of the span.
-    pub start: usize,
-    /// Byte offset of the end of the span (exclusive).
-    pub end: usize,
+    /// Byte offset of the start of the span (internal: u32).
+    /// Use [`Span::start`] to get a `usize` for source slicing.
+    pub(crate) start: u32,
+    /// Byte offset of the end of the span (internal: u32).
+    /// Use [`Span::end`] to get a `usize` for source slicing.
+    pub(crate) end: u32,
 }
 
 impl Span {
@@ -71,7 +68,10 @@ impl Span {
     #[inline]
     #[must_use]
     pub const fn new(start: usize, end: usize) -> Self {
-        Self { start, end }
+        Self {
+            start: start as u32,
+            end: end as u32,
+        }
     }
 
     /// Create a span from a byte range.
@@ -79,8 +79,8 @@ impl Span {
     #[must_use]
     pub fn from_range(range: std::ops::Range<usize>) -> Self {
         Self {
-            start: range.start,
-            end: range.end,
+            start: range.start as u32,
+            end: range.end as u32,
         }
     }
 
@@ -88,7 +88,7 @@ impl Span {
     #[inline]
     #[must_use]
     pub fn len(&self) -> usize {
-        self.end.saturating_sub(self.start)
+        (self.end as usize).saturating_sub(self.start as usize)
     }
 
     /// Check if the span is empty.
@@ -112,14 +112,42 @@ impl Span {
     #[inline]
     #[must_use]
     pub fn contains(&self, byte_pos: usize) -> bool {
-        self.start <= byte_pos && byte_pos < self.end
+        (self.start as usize) <= byte_pos && byte_pos < (self.end as usize)
     }
 
     /// Convert this span to a Range for use with string slicing.
     #[inline]
     #[must_use]
     pub fn to_range(&self) -> std::ops::Range<usize> {
-        self.start..self.end
+        self.start as usize..self.end as usize
+    }
+
+    /// Return the start offset as `usize` (for source slicing and arithmetic with `usize` values).
+    #[inline]
+    #[must_use]
+    pub fn start(&self) -> usize {
+        self.start as usize
+    }
+
+    /// Return the end offset as `usize` (for source slicing and arithmetic with `usize` values).
+    #[inline]
+    #[must_use]
+    pub fn end(&self) -> usize {
+        self.end as usize
+    }
+
+    /// Return the start offset as `u32` (for comparison with other `u32` span offsets).
+    #[inline]
+    #[must_use]
+    pub fn start_u32(&self) -> u32 {
+        self.start
+    }
+
+    /// Return the end offset as `u32` (for comparison with other `u32` span offsets).
+    #[inline]
+    #[must_use]
+    pub fn end_u32(&self) -> u32 {
+        self.end
     }
 
     /// Extract the substring from source text that this span covers.
@@ -173,6 +201,16 @@ impl SpanTable {
     #[inline]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create a new span table with the given pre-allocated capacity.
+    /// Use when you have a reasonable estimate of the number of spans
+    /// to avoid repeated reallocation during lexing and parsing.
+    #[inline]
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            spans: Vec::with_capacity(capacity),
+        }
     }
 
     /// Insert a new span and return its SpanId.

@@ -3,17 +3,20 @@ name = "parser"
 version = "0.1.0"
 edition = "2024"
 
+[lints]
+workspace = true
+
 [dependencies]
 ast = { workspace = true }
 flask = { workspace = true }
 span = { workspace = true }
 lexer = { workspace = true }
 diagnostic = { workspace = true }
+ignore = { workspace = true }
 indexmap = { workspace = true }
 internment = "0.8"
 i256 = { workspace = true }
 sha2 = { workspace = true }
-ignore = { workspace = true }
 
 [dev-dependencies]
 typecheck = { workspace = true }

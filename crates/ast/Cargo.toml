@@ -3,6 +3,9 @@ name = "ast"
 version = "0.1.0"
 edition = "2024"
 
+[lints]
+workspace = true
+
 [dependencies]
 
 span = { workspace = true }
@@ -11,12 +14,16 @@ indexmap = { workspace = true }
 internment = "0.8"
 i256 = { workspace = true }
 diagnostic = { workspace = true }
-flask = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
+flask = { workspace = true }
 parser = { workspace = true }
 resolve = { workspace = true }
 test-fixtures = { workspace = true }
-typed_ast = { workspace = true }
 typecheck = { workspace = true }
 indoc = "2.0"
+
+[[bench]]
+name = "source_positions"
+harness = false

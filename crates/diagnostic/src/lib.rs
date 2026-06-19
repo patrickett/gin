@@ -1,11 +1,3 @@
-#![deny(unsafe_code)]
-#![warn(
-    clippy::correctness,
-    clippy::suspicious,
-    clippy::style,
-    clippy::complexity,
-    clippy::perf
-)]
 //! Unified diagnostics for the ginc compiler.
 //!
 //! This module provides a single `Diagnostic` type that encompasses all
@@ -13,20 +5,129 @@
 //! - Source spans (using 0..0 for diagnostics without a location)
 //! - Severity levels (Flaw, Hint, Info)
 //! - Error codes (`{stage}-{name}` format, e.g. `lex-unexpected-character`)
+//!
+//! Diagnostics are constructed via the builder pattern, e.g.:
+//! ```ignore
+//! Diagnostic::new("type-unknown-symbol", "unknown symbol `Foo`")
+//!     .with_arg("name", "Foo")
+//!     .with_help("add an import for `Foo`")
+//!     .at_span_id(span_id, &span_table)
+//! ```
 
-mod category;
-mod code;
-mod domain;
-pub use category::Category;
-pub use code::*;
-pub use domain::*;
 pub use span::{Span, SpanId, SpanTable, Spanned};
+mod category;
+pub use category::Category;
+use std::path::{Component, Path, PathBuf};
+
+/// Extension trait providing diagnostic path utilities on [`Path`].
+pub trait DiagnosticPathExt {
+    /// Return a stable, absolute form of a path for diagnostic identity.
+    ///
+    /// Existing paths are canonicalized. Non-existing paths are made absolute against
+    /// the process current directory and normalized lexically, so CLI and LSP callers
+    /// can use the same keys even before a file has been written to disk.
+    #[must_use]
+    fn normalize_diagnostic_path(&self) -> PathBuf;
+
+    /// Return the display label used by terminal diagnostics.
+    ///
+    /// The label is relative to `base` when possible, otherwise it falls back to the
+    /// normalized absolute path. This is intentionally shared by tools so path labels
+    /// do not drift between diagnostic producers.
+    #[must_use]
+    fn diagnostic_report_path(&self, base: &Path) -> String;
+
+    /// Return the display label used by terminal diagnostics, relative to the
+    /// process current directory when possible.
+    #[must_use]
+    fn diagnostic_report_path_from_cwd(&self) -> String;
+
+    /// Lexically normalize a path by resolving `.` and `..` components without
+    /// touching the filesystem.
+    #[must_use]
+    fn lexical_normalize(&self) -> PathBuf;
+}
+
+impl DiagnosticPathExt for Path {
+    fn normalize_diagnostic_path(&self) -> PathBuf {
+        if let Ok(canonical) = self.canonicalize() {
+            return canonical;
+        }
+
+        let absolute = if self.is_absolute() {
+            self.to_path_buf()
+        } else if let Ok(cwd) = std::env::current_dir() {
+            cwd.join(self)
+        } else {
+            self.to_path_buf()
+        };
+
+        absolute.lexical_normalize()
+    }
+
+    fn diagnostic_report_path(&self, base: &Path) -> String {
+        let path = self.normalize_diagnostic_path();
+        let base = base.normalize_diagnostic_path();
+        path.strip_prefix(&base)
+            .map(|p| {
+                let s = p.display().to_string();
+                if s.is_empty() { ".".to_string() } else { s }
+            })
+            .unwrap_or_else(|_| path.display().to_string())
+    }
+
+    fn diagnostic_report_path_from_cwd(&self) -> String {
+        std::env::current_dir()
+            .map(|cwd| self.diagnostic_report_path(&cwd))
+            .unwrap_or_else(|_| self.normalize_diagnostic_path().display().to_string())
+    }
+
+    fn lexical_normalize(&self) -> PathBuf {
+        let mut out = PathBuf::new();
+        for component in self.components() {
+            match component {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    out.pop();
+                }
+                Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                    out.push(component.as_os_str());
+                }
+            }
+        }
+        out
+    }
+}
 
 /// A secondary span label attached to a diagnostic.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RelatedSpan {
     pub span: Span,
     pub label: String,
+}
+
+/// Stable kebab-case error-code slug (e.g. `"type-unknown-symbol"`, `"lex-unclosed-string"`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DiagnosticCode(pub String);
+
+impl DiagnosticCode {
+    /// Return the stable kebab-case slug string.
+    #[must_use]
+    pub fn slug(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for DiagnosticCode {
+    fn from(s: String) -> Self {
+        DiagnosticCode(s)
+    }
+}
+
+impl From<&str> for DiagnosticCode {
+    fn from(s: &str) -> Self {
+        DiagnosticCode(s.to_string())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -40,72 +141,77 @@ pub struct Diagnostic {
     /// Byte range in the source file this diagnostic applies to.
     pub span: Span,
     pub category: Category,
+    /// Structured key-value args for IDE quickfix data extraction (e.g. symbol name).
+    /// Only populated when a quickfix is applicable.
+    pub args: Vec<(String, String)>,
     pub related: Vec<RelatedSpan>,
 }
 
-/// Trait for domain-specific diagnostic types that know how to describe themselves.
-///
-/// Implementors provide their message, optional `help` / `help_on_span`, and category.
-/// The `into_diagnostic` default impl wraps them into a [`Diagnostic`].
-pub trait DiagnosticLike: Sized {
-    /// The primary message for this diagnostic.
-    #[must_use]
-    fn message(&self) -> String;
-
-    /// Optional help text suggesting how to fix the issue.
-    #[must_use]
-    fn help(&self) -> Option<String> {
-        None
-    }
-
-    /// Optional text on the span underline in terminal output (see [`Diagnostic::help_on_span`]).
-    #[must_use]
-    fn help_on_span(&self) -> Option<String> {
-        None
-    }
-
-    /// The severity category. Defaults to `Category::Flaw`.
-    #[must_use]
-    fn category(&self) -> Category {
-        Category::Flaw
-    }
-
-    /// Convert into a full `Diagnostic` anchored at the given source byte range.
-    #[must_use]
-    fn into_diagnostic(self, span: Span) -> Diagnostic
-    where
-        Self: Into<DiagnosticCode>,
-    {
-        let message = self.message();
-        let help_on_span = self.help_on_span();
-        let help = self.help();
-        let category = self.category();
-        let code: DiagnosticCode = self.into();
-        Diagnostic {
-            message,
-            help_on_span,
-            help,
-            category,
-            code,
-            span,
+impl Diagnostic {
+    /// Create a new diagnostic with the given kebab-code and human-readable message.
+    ///
+    /// The message should be a self-contained description. Use [`with_arg`](Self::with_arg)
+    /// to attach structured data for IDE quickfix extraction.
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: DiagnosticCode(code.into()),
+            message: message.into(),
+            help_on_span: None,
+            help: None,
+            span: Span::new(0, 0),
+            category: Category::Flaw,
+            args: Vec::new(),
             related: Vec::new(),
         }
     }
 
-    /// Resolve a [`SpanId`] through a table and build the diagnostic.
-    #[must_use]
-    fn into_diagnostic_id(self, span_id: SpanId, span_table: &SpanTable) -> Diagnostic
-    where
-        Self: Into<DiagnosticCode>,
-    {
-        self.into_diagnostic(span_table.get(span_id))
+    /// Attach a structured key-value pair for IDE quickfix extraction.
+    ///
+    /// Example: `Diagnostic::new("type-unknown-symbol", …).with_arg("name", "Foo")`
+    /// allows the LSP handler to do `diag.arg("name") → Some("Foo")` in O(1).
+    pub fn with_arg(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.args.push((key.into(), value.into()));
+        self
     }
-}
 
-impl Diagnostic {
+    pub fn with_help(mut self, help: impl Into<String>) -> Self {
+        self.help = Some(help.into());
+        self
+    }
+
+    pub fn with_help_on_span(mut self, text: impl Into<String>) -> Self {
+        self.help_on_span = Some(text.into());
+        self
+    }
+
+    /// Set the source byte range this diagnostic applies to.
+    pub fn at_span(mut self, span: Span) -> Self {
+        self.span = span;
+        self
+    }
+
+    /// Resolve a [`SpanId`] through a table and set the source span.
+    pub fn at_span_id(self, span_id: SpanId, table: &SpanTable) -> Self {
+        self.at_span(table.get(span_id))
+    }
+
+    pub fn with_category(mut self, category: Category) -> Self {
+        self.category = category;
+        self
+    }
+
+    /// Retrieve a structured arg by key (used by IDE quickfix code).
+    #[must_use]
+    pub fn arg(&self, key: &str) -> Option<&str> {
+        self.args
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+
     #[must_use]
     pub fn error_code(&self) -> &str {
-        self.code.slug()
+        &self.code.0
     }
 
     /// Pretty-print this diagnostic using ariadne with source context.
@@ -113,8 +219,8 @@ impl Diagnostic {
         use ariadne::{Label, Report, ReportKind, Source};
         use std::ops::Range;
 
-        let start = self.span.start;
-        let end = self.span.end;
+        let start = self.span.start();
+        let end = self.span.end();
 
         // Clamp span to source bounds
         let len = source.len();
@@ -128,8 +234,8 @@ impl Diagnostic {
         let msg = format!("[{}] {}", self.error_code(), self.message);
         let mut builder = Report::build(kind, (filename, span.clone())).with_message(msg);
 
-        // Let the domain type do custom rendering if needed.
-        if self.code.render_custom(self, source, filename) {
+        // Let custom rendering handle this if needed (e.g. unclosed strings).
+        if self.render_custom(source, filename) {
             return;
         }
 
@@ -205,8 +311,10 @@ impl Diagnostic {
 
         // Render related spans as secondary labels.
         for related in &self.related {
-            let rstart = related.span.start.min(len);
-            let rend = related.span.end.max(rstart).min(len);
+            let rstart = related.span.start();
+            let rend = related.span.end();
+            let rstart = rstart.min(len);
+            let rend = rend.max(rstart).min(len);
             if rstart < rend {
                 let label =
                     Label::new((filename, rstart..rend)).with_message(related.label.as_str());
@@ -218,5 +326,95 @@ impl Diagnostic {
         report
             .eprint((filename, Source::from(source)))
             .unwrap_or_else(|e| eprintln!("Failed to print diagnostic: {e}"));
+    }
+
+    /// Render this diagnostic with custom ariadne output.
+    /// Returns `true` if the diagnostic was fully handled (the caller should skip
+    /// default rendering).
+    pub fn render_custom(&self, source: &str, filename: &str) -> bool {
+        match self.code.slug() {
+            "lex-unclosed-string" => self.render_unclosed_string(source, filename),
+            _ => false,
+        }
+    }
+
+    /// Custom ariadne rendering for unclosed string literals: inserts a closing quote
+    /// suggestion into the displayed source.
+    fn render_unclosed_string(&self, source: &str, filename: &str) -> bool {
+        use ariadne::{Label, Report, ReportKind, Source};
+        use std::ops::Range;
+
+        let len = source.len();
+        let start = self.span.start();
+        let end = self.span.end();
+        let start = start.min(len);
+        let end = end.max(start).min(len);
+
+        if start >= end {
+            return false;
+        }
+
+        let mut display_source = source.to_string();
+        display_source.insert(end, '\'');
+
+        let quote_span = end..end + 1;
+        let kind = ReportKind::Custom(Category::Flaw.as_str(), Category::Flaw.color());
+        let span_range: Range<usize> = start..end;
+        let msg = format!("[{}] {}", self.error_code(), self.message);
+        let builder = Report::build(kind, (filename, span_range))
+            .with_message(&msg)
+            .with_label(
+                Label::new((filename, quote_span))
+                    .with_color(Category::Flaw.color())
+                    .with_message("add single quote here"),
+            );
+
+        let report = builder.finish();
+        report
+            .eprint((filename, Source::from(display_source)))
+            .unwrap_or_else(|e| eprintln!("Failed to print diagnostic: {e}"));
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn diagnostic_report_path_is_relative_to_normalized_base() {
+        let cwd = std::env::current_dir().unwrap();
+        let path = cwd.join("src").join("..").join("src").join("lib.rs");
+
+        assert_eq!(path.diagnostic_report_path(&cwd), "src/lib.rs");
+    }
+
+    #[test]
+    fn normalize_diagnostic_path_makes_relative_paths_absolute() {
+        let normalized = Path::new("src/../src/lib.rs").normalize_diagnostic_path();
+
+        assert!(normalized.is_absolute());
+        assert!(normalized.ends_with(Path::new("src/lib.rs")));
+    }
+
+    #[test]
+    fn builder_basics() {
+        let diag = Diagnostic::new("test-code", "test message")
+            .with_arg("key", "val")
+            .with_help("helpful text")
+            .at_span(Span::new(5, 10));
+
+        assert_eq!(diag.code.slug(), "test-code");
+        assert_eq!(diag.message, "test message");
+        assert_eq!(diag.arg("key"), Some("val"));
+        assert_eq!(diag.help.as_deref(), Some("helpful text"));
+        assert_eq!(diag.span, Span::new(5, 10));
+    }
+
+    #[test]
+    fn with_category_sets_category() {
+        let diag = Diagnostic::new("x", "y").with_category(Category::Help);
+        assert_eq!(diag.category, Category::Help);
     }
 }

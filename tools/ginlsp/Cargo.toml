@@ -1,7 +1,10 @@
 [package]
 name = "ginlsp"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+
+[lints]
+workspace = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -13,14 +16,14 @@ tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "io-std",
 dashmap = { workspace = true }
 flask = { workspace = true }
 ginfmt = { workspace = true }
-database = { workspace = true }
+analysis = { workspace = true }
 ast = { workspace = true }
 diagnostic = { workspace = true }
+typecheck = { workspace = true }
 lsp-types = { workspace = true }
 parser = { workspace = true }
 span = { workspace = true }
 resolve = { workspace = true }
 crossbeam-channel = { workspace = true }
-salsa = { workspace = true }
 internment = "0.8"
 futures = "0.3"

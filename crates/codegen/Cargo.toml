@@ -3,9 +3,12 @@ name = "codegen"
 version = "0.1.0"
 edition = "2024"
 
+[lints]
+workspace = true
+
 [dependencies]
 ast = { workspace = true }
-typed_ast = { workspace = true }
+
 typecheck = { workspace = true }
 parser = { workspace = true }
 diagnostic = { workspace = true }

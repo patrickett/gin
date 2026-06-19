@@ -1,12 +1,3 @@
-#![deny(unsafe_code)]
-#![warn(
-    clippy::correctness,
-    clippy::suspicious,
-    clippy::style,
-    clippy::complexity,
-    clippy::perf
-)]
-
 mod command;
 mod tui;
 
@@ -43,7 +34,13 @@ fn main() {
         return;
     }
 
-    let config = FlaskConfig::from_current_directory();
+    let config = match std::env::current_dir() {
+        Ok(dir) => FlaskConfig::find_package_config(&dir).map(|(cfg, _)| cfg),
+        Err(e) => {
+            eprintln!("error: cannot get current directory: {e}");
+            None
+        }
+    };
 
     if let Some(cmd) = &args.command {
         cmd.run(config)

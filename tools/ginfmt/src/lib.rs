@@ -1,17 +1,10 @@
-#![deny(unsafe_code)]
-#![warn(
-    clippy::correctness,
-    clippy::suspicious,
-    clippy::style,
-    clippy::complexity,
-    clippy::perf
-)]
 pub mod align_ast;
 pub mod ast_formatter;
 pub mod config;
 
 pub use ast_formatter::AstFormatter;
 pub use config::Config;
+use parser::query::SourceParseExt;
 
 /// Format Gin source code using the Gin AST parser.
 ///
@@ -23,7 +16,7 @@ pub fn format(source: &str) -> String {
 
 /// Format Gin source code using the provided configuration.
 pub fn format_with_config(source: &str, config: Config) -> String {
-    let output = parser::parse_source_full(source);
-    let mut formatter = AstFormatter::new(source, &config, output.ast.span_table());
+    let output = source.parse_source_full();
+    let mut formatter = AstFormatter::new(source, &config, &output.ast.span_table);
     formatter.format_file(&output.ast)
 }

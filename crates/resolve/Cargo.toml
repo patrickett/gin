@@ -3,9 +3,11 @@ name = "resolve"
 version = "0.1.0"
 edition = "2024"
 
+[lints]
+workspace = true
+
 [dependencies]
 ast = { workspace = true }
-typed_ast = { workspace = true }
 diagnostic = { workspace = true }
 parser = { workspace = true }
 flask = { workspace = true }

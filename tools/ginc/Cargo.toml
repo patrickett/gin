@@ -3,10 +3,12 @@ name = "ginc"
 version = "0.1.0"
 edition = "2024"
 
+[lints]
+workspace = true
+
 [dependencies]
 ast = { workspace = true }
 diagnostic = { workspace = true }
-typed_ast = { workspace = true }
 typecheck = { workspace = true }
 codegen = { workspace = true }
 resolve = { workspace = true }

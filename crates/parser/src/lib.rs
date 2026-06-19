@@ -1,23 +1,14 @@
-#![deny(unsafe_code)]
-#![warn(
-    clippy::correctness,
-    clippy::suspicious,
-    clippy::style,
-    clippy::complexity,
-    clippy::perf
-)]
 //! Parser for the Gin language.
 //!
 //! This crate contains the recursive-descent parser and content hashing.
-//! All public functions are pure — no Salsa or database dependency is required.
 
 pub mod content_hash;
-pub mod gin_walk;
-mod cursor;
+pub mod cursor;
 pub mod declare;
 pub mod expr;
-mod int_range;
+pub mod gin_walk;
 mod impl_block;
+mod int_range;
 pub mod module;
 pub mod params;
 pub mod path;
@@ -27,17 +18,13 @@ mod top_level;
 pub mod type_annotation;
 pub mod unescape;
 
-pub use cursor::ParseError;
-pub use unescape::*;
+use ast::FileAst;
 
-// Re-export convenience functions
-pub use expr::parse_source as parse_from_str;
-
-// Re-export full parsing API
-pub use query::{
-    ParseOutput, extract_local_import_paths, extract_package_import_paths, parse_source_full,
-};
-
-// Re-export module discovery
-pub use gin_walk::{collect_gin_files_under, is_gitignored};
-pub use module::{ModuleTree, discover_module, discover_module_at};
+/// Convenience function to parse Gin source text directly.
+///
+/// This is the primary entry point used by external consumers.
+/// It lexes the input, filters comments, runs the handwritten parser,
+/// and attaches lex errors as `parse_warnings` on the AST.
+pub fn parse_from_str(source: &str) -> FileAst {
+    cursor::TokenCursor::parse_source(source)
+}

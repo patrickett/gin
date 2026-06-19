@@ -1,11 +1,3 @@
-#![deny(unsafe_code)]
-#![warn(
-    clippy::correctness,
-    clippy::suspicious,
-    clippy::style,
-    clippy::complexity,
-    clippy::perf
-)]
 //! MLIR code generation infrastructure.
 
 pub mod emit;

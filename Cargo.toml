@@ -7,7 +7,6 @@ default-members = [
     "crates/lexer",
     "crates/parser",
     "crates/typecheck",
-    "crates/typed_ast",
     "crates/resolve",
     "crates/codegen",
     "crates/analysis",
@@ -32,12 +31,21 @@ members = [
     "tools/ginc",
     "tools/ginfmt",
     "tools/ginlsp",
-    "crates/typed_ast",
     "crates/typecheck",
     "crates/ast/signature",
     "crates/ast/format",
 ]
 resolver = "3"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+correctness = "warn"
+suspicious = "warn"
+style = "warn"
+complexity = "warn"
+perf = "warn"
 
 [workspace.dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -59,7 +67,6 @@ ginfmt = { path = "tools/ginfmt" }
 resolve = { path = "crates/resolve" }
 test-fixtures = { path = "crates/test-fixtures" }
 typecheck = { path = "crates/typecheck" }
-typed_ast = { path = "crates/typed_ast" }
 indexmap = "2"
 log = "0.4"
 thiserror = "2.0.11"

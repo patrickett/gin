@@ -3,7 +3,9 @@ name = "diagnostic"
 version = "0.1.0"
 edition = "2024"
 
+[lints]
+workspace = true
+
 [dependencies]
 span = { workspace = true }
 ariadne = "0.5.1"
-strum = { workspace = true }

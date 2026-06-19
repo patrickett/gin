@@ -3,6 +3,9 @@ name = "ginfmt"
 version = "0.1.0"
 edition = "2024"
 
+[lints]
+workspace = true
+
 [dependencies]
 parser = { workspace = true }
 ast = { workspace = true }
