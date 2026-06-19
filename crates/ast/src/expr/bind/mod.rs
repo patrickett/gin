@@ -3,12 +3,10 @@ use std::collections::HashMap;
 use indexmap::IndexMap;
 use internment::Intern;
 
-use crate::TraitBound;
 use crate::TypeExpr;
 use crate::doc_comment::DocComment;
 use crate::expr::Expr;
 use crate::expr::Typed;
-use crate::parameter::fmt_type_expr_surface;
 use crate::parameter::{GroupParam, ParamConvention, ParamSlot, Parameters};
 use crate::path::ModPath;
 use crate::span::SpanId;
@@ -29,8 +27,7 @@ pub struct MethodName<'a> {
 
 impl std::fmt::Display for MethodName<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        fmt_type_expr_surface(self.receiver, f)?;
-        write!(f, ".{}", self.name.as_str())
+        write!(f, "{:?}.{}", self.receiver, self.name.as_str())
     }
 }
 
@@ -66,8 +63,7 @@ pub struct Bind {
     /// Resolved/progressive return type. Populated during analysis.
     /// Replaces `return_type_name` + `return_tag` + the `fn_return_types` side-table.
     pub return_type: TyState,
-    /// `where T has Trait(field Pattern)` compile-time trait bounds.
-    pub trait_bounds: Vec<TraitBound>,
+
     /// Explicit type annotation with value args, e.g. `Maybe(3)` in `val Maybe(3): Some(3)`.
     pub type_annotation: Option<(Intern<String>, Vec<Typed<Expr>>)>,
     /// Qualified path for type annotation, e.g. `Maybe.Some` in `val Maybe.Some(3): ...`
@@ -96,7 +92,6 @@ impl Bind {
             return_type: TyState::Infer,
             type_annotation: None,
             type_annotation_qual: None,
-            trait_bounds: Vec::new(),
         }
     }
 
@@ -124,29 +119,9 @@ impl Bind {
         self
     }
 
-    pub fn name(&self) -> Intern<String> {
-        self.name
-    }
-
-    pub fn params(&self) -> &Option<Parameters> {
-        &self.params
-    }
-
-    pub fn doc_comment(&self) -> Option<&DocComment> {
-        self.doc_comment.as_ref()
-    }
-
     pub fn with_attributes(mut self, attrs: BindAttributes) -> Self {
         self.attributes = attrs;
         self
-    }
-
-    pub fn attributes(&self) -> &BindAttributes {
-        &self.attributes
-    }
-
-    pub fn value(&self) -> &BindValue {
-        &self.value
     }
 
     pub fn value_mut(&mut self) -> &mut BindValue {

@@ -1,0 +1,15 @@
+[package]
+name = "ast-signature"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ast = { workspace = true }
+i256 = { workspace = true }
+internment = "0.8"
+sha2 = "0.10"
+semver = { workspace = true }
+serde = { workspace = true, optional = true }
+
+[features]
+serialization = ["dep:serde"]

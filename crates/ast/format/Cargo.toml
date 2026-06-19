@@ -1,0 +1,8 @@
+[package]
+name = "ast-format"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ast = { workspace = true }
+internment = "0.8"

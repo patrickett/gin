@@ -3,7 +3,6 @@ use crate::span::SpanId;
 use internment::Intern;
 use std::hash::{Hash, Hasher};
 
-use crate::TraitBound;
 use crate::doc_comment::DocComment;
 use crate::parameter::Parameters;
 use crate::ty::Ty;
@@ -13,10 +12,10 @@ mod value;
 pub use attributes::*;
 pub use value::*;
 
-/// A trait implementation provided via `and has TraitName(field: expr, ...)`.
+/// A trait implementation provided by a `Type.Trait(...)` declaration.
 ///
-/// For example, in `Capacity has (count PointerSize) and has IsEmpty(is_empty: self.count > 0)`,
-/// this represents the `IsEmpty(is_empty: self.count > 0)` part.
+/// For example, in `Capacity.IsEmpty(is_empty: self.count > 0)`, this represents
+/// the `IsEmpty(is_empty: self.count > 0)` part.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProvidedTrait {
     pub trait_name: Intern<String>,
@@ -49,7 +48,6 @@ pub struct Declare {
     pub attributes: DeclareAttributes,
     pub value: DeclareValue,
     pub provided_traits: Vec<ProvidedTrait>,
-    pub trait_bounds: Vec<TraitBound>,
 }
 
 impl Declare {
@@ -64,7 +62,6 @@ impl Declare {
             attributes: DeclareAttributes::default(),
             value,
             provided_traits: Vec::new(),
-            trait_bounds: Vec::new(),
         }
     }
 
@@ -76,26 +73,6 @@ impl Declare {
     pub fn with_doc(mut self, doc: Option<DocComment>) -> Self {
         self.doc_comment = doc;
         self
-    }
-
-    pub fn doc_comment(&self) -> Option<&DocComment> {
-        self.doc_comment.as_ref()
-    }
-
-    pub fn name(&self) -> Intern<String> {
-        self.name
-    }
-
-    pub fn params(&self) -> &Option<Parameters> {
-        &self.params
-    }
-
-    pub fn value(&self) -> &DeclareValue {
-        &self.value
-    }
-
-    pub fn attributes(&self) -> &DeclareAttributes {
-        &self.attributes
     }
 
     pub fn with_attributes(mut self, attrs: DeclareAttributes) -> Self {

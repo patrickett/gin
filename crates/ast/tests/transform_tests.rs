@@ -8,11 +8,12 @@
 //! 5. Cross-file resolution
 
 use ast::prelude::*;
+use ast::source::SourceExt;
 use internment::Intern;
-use typed_ast::FileId;
-use typed_ast::TypedFileAst;
-use typed_ast::ty::Ty;
-use typed_ast::{BindBody, DefId, ExprId, TagId, TypedExprKind};
+use typecheck::FileId;
+use typecheck::TypedFileAst;
+use typecheck::ty::Ty;
+use typecheck::{BindBody, DefId, ExprId, TagId, TypedExprKind};
 
 mod support;
 use support::{transform_source, transform_source_with_typed_locals};
@@ -129,14 +130,11 @@ fn bool_when_arm_bare_true_false_not_unknown() {
     let flaws: Vec<_> = typed
         .all_flaws()
         .into_iter()
-        .filter_map(|(_, f)| match f {
-            diagnostic::TypeSymptom::UnknownSymbol { name, .. }
-                if name == "True" || name == "False" =>
-            {
-                Some(name.clone())
-            }
-            _ => None,
+        .filter(|&(_, f)| {
+            f.code.slug() == "type-unknown-symbol"
+                && (f.arg("name") == Some("True") || f.arg("name") == Some("False"))
         })
+        .map(|(_, f)| f.arg("name").unwrap_or("").to_string())
         .collect();
     assert!(
         flaws.is_empty(),
@@ -146,27 +144,24 @@ fn bool_when_arm_bare_true_false_not_unknown() {
 
 #[test]
 fn bool_when_arm_bare_true_false_with_cross_file_bool() {
+    use typecheck::FileId;
     use typecheck::transform::{TransformCtx, transform_file_with_ctx};
-    use typed_ast::FileId;
 
-    let bool_file = parser::parse_from_str("Bool is True or False");
+    let bool_file = parser::cursor::TokenCursor::parse_source("Bool is True or False");
     let typed_bool = typecheck::transform::transform_file(bool_file, FileId(0));
     let ctx = TransformCtx::from_typed_asts(&[&typed_bool]);
 
     let source = "is_copy(x Int) Bool := when x < 1 then True else False\n";
-    let file = parser::parse_from_str(source);
+    let file = parser::cursor::TokenCursor::parse_source(source);
     let typed = transform_file_with_ctx(&file, FileId(1), &ctx);
     let flaws: Vec<_> = typed
         .all_flaws()
         .into_iter()
-        .filter_map(|(_, f)| match f {
-            diagnostic::TypeSymptom::UnknownSymbol { name, .. }
-                if name == "True" || name == "False" =>
-            {
-                Some(name.clone())
-            }
-            _ => None,
+        .filter(|&(_, f)| {
+            f.code.slug() == "type-unknown-symbol"
+                && (f.arg("name") == Some("True") || f.arg("name") == Some("False"))
         })
+        .map(|(_, f)| f.arg("name").unwrap_or("").to_string())
         .collect();
     assert!(
         flaws.is_empty(),
@@ -190,10 +185,8 @@ fn test_unit_union_tag() {
     let unknown: Vec<_> = typed
         .declaration_flaws
         .iter()
-        .filter_map(|(_, f)| match f {
-            diagnostic::TypeSymptom::UnknownSymbol { name, .. } => Some(name.as_str()),
-            _ => None,
-        })
+        .filter(|&(_, f)| f.code.slug() == "type-unknown-symbol")
+        .map(|(_, f)| f.arg("name").unwrap_or(""))
         .collect();
     assert!(
         unknown.is_empty(),
@@ -208,10 +201,8 @@ fn test_unit_union_with_provided_trait_no_unknown_variant_tags() {
     let unknown: Vec<_> = typed
         .declaration_flaws
         .iter()
-        .filter_map(|(_, f)| match f {
-            diagnostic::TypeSymptom::UnknownSymbol { name, .. } => Some(name.as_str()),
-            _ => None,
-        })
+        .filter(|&(_, f)| f.code.slug() == "type-unknown-symbol")
+        .map(|(_, f)| f.arg("name").unwrap_or(""))
         .collect();
     assert!(
         !unknown.iter().any(|n| *n == "True" || *n == "False"),
@@ -226,7 +217,7 @@ fn test_unit_union_with_provided_trait_no_unknown_variant_tags() {
     let tag = typed.tags.get(&bool_id).expect("Bool tag exists");
     assert_eq!(
         tag.declaration_text, "Bool is True or False",
-        "hover declaration_text must omit and has trait clauses"
+        "hover declaration_text must omit trait implementation declarations"
     );
     assert_eq!(
         tag.provided_traits.len(),
@@ -254,8 +245,9 @@ fn test_log_level_literal_bind_has_const_union_type() {
         .hover_at(source, 3, 20)
         .expect("hover on string literal in bind");
     assert_eq!(
-        hover, "level union\n---\n\n",
-        "literal bind hover should show the variant and union type"
+        hover,
+        "```gin\nLogLevel is 'debug'\n         or 'info'\n         or 'warn'\n         or 'error'\n```",
+        "literal bind hover should show the full union declaration"
     );
 }
 
@@ -425,7 +417,7 @@ fn test_end_to_end_hover() {
 
     // Hover on the `x` in `main: x + 1` (not line 1 col 0 — that is `main`).
     let byte = source.find("main: x").expect("main body") + "main: ".len();
-    let (line, character) = ast::byte_offset_to_position(byte, source);
+    let (line, character) = source.byte_offset_to_position(byte);
     let hover_text = typed
         .hover_at(source, line, character)
         .expect("hover on x in main body should return something");
@@ -479,7 +471,7 @@ fn test_flow_use_after_move() {
     let flaws = typed.all_flaws();
     let _has_use_after_move = flaws
         .iter()
-        .any(|(_, f)| matches!(f, diagnostic::TypeSymptom::UseOfMovedValue { .. }));
+        .any(|(_, f)| f.code.slug() == "type-use-of-moved-value");
     // Use-after-move detection depends on the variable being tracked through flow.
     // The test is informational — flow analysis is best-effort.
     assert!(!typed.defs.is_empty());
@@ -492,10 +484,9 @@ fn test_flow_index_out_of_bounds() {
     // TupleGet with constant index 5 on an array of size 3 is out of bounds.
     let flaws = typed.all_flaws();
     let _has_bounds = flaws.iter().any(|(_, f)| {
-        matches!(
-            f,
-            diagnostic::TypeSymptom::IndexOutOfBounds { index: 5, size: 3 }
-        )
+        f.code.slug() == "type-out-of-range"
+            && f.arg("value") == Some("5")
+            && f.arg("size") == Some("3")
     });
     // Bounds checking requires constant-foldable types.
     assert!(!typed.defs.is_empty() || !typed.root_exprs.is_empty());
@@ -525,7 +516,7 @@ fn test_unknown_binding_flaw() {
     let typed = transform_source("main: undefined_fn()");
     let flaws = typed.all_flaws();
     let has_unknown = flaws.iter().any(|(_, f)| {
-        matches!(f, diagnostic::TypeSymptom::UnknownSymbol { name, .. } if name == "undefined_fn")
+        f.code.slug() == "type-unknown-symbol" && f.arg("name") == Some("undefined_fn")
     });
     assert!(has_unknown, "should detect UnknownSymbol for undefined_fn");
 }
@@ -535,9 +526,7 @@ fn test_type_mismatch_flaw() {
     // Binary op with int and float should produce Mismatch
     let typed = transform_source("main: 1 + 2.0");
     let flaws = typed.all_flaws();
-    let _has_mismatch = flaws
-        .iter()
-        .any(|(_, f)| matches!(f, diagnostic::TypeSymptom::Mismatch));
+    let _has_mismatch = flaws.iter().any(|(_, f)| f.code.slug() == "type-mismatch");
     // Just verify the transform doesn't crash.
     // Mismatch detection depends on type inference which may or may not fire.
     assert!(!typed.defs.is_empty() || !typed.root_exprs.is_empty());
@@ -550,7 +539,7 @@ fn test_missing_else_arm() {
     let flaws = typed.all_flaws();
     let _has_missing_else = flaws
         .iter()
-        .any(|(_, f)| matches!(f, diagnostic::TypeSymptom::MissingElseArm));
+        .any(|(_, f)| f.code.slug() == "type-missing-else-arm");
     // May or may not fire depending on how the when is lowered
     assert!(!typed.defs.is_empty() || !typed.root_exprs.is_empty());
 }
@@ -563,12 +552,9 @@ fn test_no_false_positive() {
     let flow_flaws: Vec<_> = flaws
         .iter()
         .filter(|(_, f)| {
-            matches!(
-                f,
-                diagnostic::TypeSymptom::UseOfMovedValue { .. }
-                    | diagnostic::TypeSymptom::LinValueNotConsumed { .. }
-                    | diagnostic::TypeSymptom::IndexOutOfBounds { .. }
-            )
+            f.code.slug() == "type-use-of-moved-value"
+                || f.code.slug() == "type-lin-value-not-consumed"
+                || f.code.slug() == "type-out-of-range"
         })
         .collect();
     // A simple literal should have no flow flaws
@@ -592,18 +578,18 @@ fn test_dot_type() {
 #[test]
 fn test_cross_file_transform() {
     // Test 5.1: Transform two files where the second references types from the first.
+    use typecheck::FileId;
     use typecheck::transform::{TransformCtx, transform_file_with_ctx};
-    use typed_ast::FileId;
 
     // File 1: defines a type.
-    let file1 = parser::parse_from_str("Maybe(x) is Some(x) or None");
+    let file1 = parser::cursor::TokenCursor::parse_source("Maybe(x) is Some(x) or None");
     let typed1 = typecheck::transform::transform_file(file1, FileId(0));
 
     // Build cross-file context from file 1.
     let ctx = TransformCtx::from_typed_asts(&[&typed1]);
 
     // File 2: uses the type from file 1.
-    let file2 = parser::parse_from_str("val Maybe(Int): Some(5)");
+    let file2 = parser::cursor::TokenCursor::parse_source("val Maybe(Int): Some(5)");
     let typed2 = transform_file_with_ctx(&file2, FileId(1), &ctx);
 
     // The typed AST should resolve correctly.
@@ -624,15 +610,15 @@ Architecture is 'x86_64' or 'arm64'
 Vendor is 'unknown'
 OperatingSystem is 'unknown'
 Target has (arch Architecture, vendor Vendor, os OperatingSystem)
-      and has Default(default: ( arch: 'x86_64', vendor: 'unknown', os: 'unknown', ))
+Target.Default(default: ( arch: 'x86_64', vendor: 'unknown', os: 'unknown', ))
 
 target Target
 ";
-    let mut file_ast = parser::parse_from_str(src);
+    let mut file_ast = parser::cursor::TokenCursor::parse_source(src);
     let _ = typecheck::prepare_file_ast(&mut file_ast, &flask::CompileTarget::Library);
     let typed = typecheck::transform::transform(
         &file_ast,
-        typed_ast::FileId(0),
+        typecheck::FileId(0),
         &typecheck::transform::TransformCtx::new(),
     );
     let target_id = DefId(Intern::new("target".to_string()));
@@ -656,14 +642,14 @@ fn test_unassigned_bind_declare_then_assign() {
     let flaws = typed.all_flaws();
     let has_unassigned = flaws
         .iter()
-        .any(|(_, f)| matches!(f, diagnostic::TypeSymptom::UnassignedBinding { .. }));
+        .any(|(_, f)| f.code.slug() == "type-unassigned-binding");
     assert!(
         !has_unassigned,
         "should not warn about unassigned: value was assigned"
     );
     let has_use_before = flaws
         .iter()
-        .any(|(_, f)| matches!(f, diagnostic::TypeSymptom::UseBeforeAssign { .. }));
+        .any(|(_, f)| f.code.slug() == "type-use-before-assign");
     assert!(
         !has_use_before,
         "should not error: value was assigned before use"
@@ -675,9 +661,9 @@ fn test_unassigned_bind_never_assigned() {
     // Declare without value, never assign — should warn.
     let typed = transform_source_with_typed_locals("main:\n    val Cell\n    return 0\n");
     let flaws = typed.all_flaws();
-    let has_unassigned = flaws.iter().any(|(_, f)| {
-        matches!(f, diagnostic::TypeSymptom::UnassignedBinding { name, .. } if name == "val")
-    });
+    let has_unassigned = flaws
+        .iter()
+        .any(|(_, f)| f.code.slug() == "type-unassigned-binding" && f.arg("name") == Some("val"));
     assert!(
         has_unassigned,
         "should warn: `val` was declared but never assigned"
@@ -690,9 +676,9 @@ fn test_unassigned_bind_use_before_assign() {
     let source = "main:\n    val Cell\n    result: val\n    val: Cell(n: 42)\n    return 0\n";
     let typed = transform_source_with_typed_locals(source);
     let flaws = typed.all_flaws();
-    let has_use_before = flaws.iter().any(|(_, f)| {
-        matches!(f, diagnostic::TypeSymptom::UseBeforeAssign { name, .. } if name == "val")
-    });
+    let has_use_before = flaws
+        .iter()
+        .any(|(_, f)| f.code.slug() == "type-use-before-assign" && f.arg("name") == Some("val"));
     assert!(has_use_before, "should flaw: using `val` before assignment");
 }
 
@@ -702,9 +688,9 @@ fn test_unassigned_bind_use_before_assign_via_call() {
     let source = "foo(x Cell) Cell: x\nmain:\n    val Cell\n    dummy: foo(val)\n    val: Cell(n: 42)\n    return 0\n";
     let typed = transform_source_with_typed_locals(source);
     let flaws = typed.all_flaws();
-    let has_use_before = flaws.iter().any(|(_, f)| {
-        matches!(f, diagnostic::TypeSymptom::UseBeforeAssign { name, .. } if name == "val")
-    });
+    let has_use_before = flaws
+        .iter()
+        .any(|(_, f)| f.code.slug() == "type-use-before-assign" && f.arg("name") == Some("val"));
     assert!(
         has_use_before,
         "should flaw: using `val` via function call before assignment"
@@ -720,12 +706,9 @@ fn test_unassigned_bind_no_false_positive() {
     let flow_flaws: Vec<_> = flaws
         .iter()
         .filter(|(_, f)| {
-            matches!(
-                f,
-                diagnostic::TypeSymptom::UseBeforeAssign { .. }
-                    | diagnostic::TypeSymptom::UnassignedBinding { .. }
-                    | diagnostic::TypeSymptom::UseOfMovedValue { .. }
-            )
+            f.code.slug() == "type-use-before-assign"
+                || f.code.slug() == "type-unassigned-binding"
+                || f.code.slug() == "type-use-of-moved-value"
         })
         .collect();
     assert!(
@@ -741,14 +724,14 @@ fn test_self_param_typed_warning() {
     let source = "\
 Point has (x Int, y Int)\n\
 \n\
-Point.distance(self Point, other Point) Int:\n\
-    return 0\n\
+Point.distance(self Point, other Point) Int:\
+    return 0\
 ";
     let typed = transform_source(source);
     let flaws = typed.all_flaws();
     let has_warning = flaws
         .iter()
-        .any(|(_, f)| matches!(f, diagnostic::TypeSymptom::SelfParamTyped));
+        .any(|(_, f)| f.code.slug() == "type-self-param-typed");
     assert!(has_warning, "should warn about redundant self param type");
 }
 
@@ -758,14 +741,14 @@ fn test_self_param_no_warning_without_type() {
     let source = "\
 Point has (x Int, y Int)\n\
 \n\
-Point.distance(self, other Point) Int:\n\
-    return 0\n\
+Point.distance(self, other Point) Int:\
+    return 0\
 ";
     let typed = transform_source(source);
     let flaws = typed.all_flaws();
     let has_warning = flaws
         .iter()
-        .any(|(_, f)| matches!(f, diagnostic::TypeSymptom::SelfParamTyped));
+        .any(|(_, f)| f.code.slug() == "type-self-param-typed");
     assert!(!has_warning, "should not warn on bare self");
 }
 
@@ -777,7 +760,7 @@ fn test_self_param_no_warning_non_method() {
     let flaws = typed.all_flaws();
     let has_warning = flaws
         .iter()
-        .any(|(_, f)| matches!(f, diagnostic::TypeSymptom::SelfParamTyped));
+        .any(|(_, f)| f.code.slug() == "type-self-param-typed");
     assert!(!has_warning, "should not warn on non-method function");
 }
 
@@ -788,10 +771,8 @@ fn test_unknown_tag_in_record_field_types_without_import() {
     let unknown_tags: Vec<_> = typed
         .all_flaws()
         .iter()
-        .filter_map(|(_, f)| match f {
-            diagnostic::TypeSymptom::UnknownSymbol { name, .. } => Some(name.as_str()),
-            _ => None,
-        })
+        .filter(|&(_, f)| f.code.slug() == "type-unknown-symbol")
+        .map(|(_, f)| f.arg("name").unwrap_or(""))
         .collect();
     assert_eq!(
         unknown_tags,
@@ -807,14 +788,14 @@ fn test_unknown_tag_spans_cover_type_names() {
     let span_table = &typed.span_table;
 
     for (span_id, flaw) in typed.all_flaws() {
-        let diagnostic::TypeSymptom::UnknownSymbol { name, .. } = flaw else {
+        if flaw.code.slug() != "type-unknown-symbol" {
             continue;
-        };
+        }
+        let name = flaw.arg("name").unwrap_or("");
         let span = span_table.get(span_id);
-        let snippet = source[span.start..span.end].trim();
+        let snippet = source[span.start()..span.end()].trim();
         assert_eq!(
-            snippet,
-            name.as_str(),
+            snippet, name,
             "diagnostic for `{name}` should highlight `{name}`, not `{snippet}`"
         );
     }
@@ -827,7 +808,7 @@ fn test_record_field_types_ok_with_import() {
     let has_unknown_tag = typed
         .all_flaws()
         .iter()
-        .any(|(_, f)| matches!(f, diagnostic::TypeSymptom::UnknownSymbol { .. }));
+        .any(|(_, f)| f.code.slug() == "type-unknown-symbol");
     assert!(
         !has_unknown_tag,
         "imported List and Byte should not be UnknownSymbol"

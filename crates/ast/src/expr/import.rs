@@ -122,11 +122,9 @@ impl ModuleImport {
     pub fn bound_name_spans(&self) -> Vec<(Intern<String>, SpanId)> {
         match &self.source {
             ImportSource::CurrentModule { member } => vec![(member.flat_name(), member.span)],
-            ImportSource::LocalBundle(b) => b
-                .members
-                .iter()
-                .map(|m| (m.flat_name(), m.span))
-                .collect(),
+            ImportSource::LocalBundle(b) => {
+                b.members.iter().map(|m| (m.flat_name(), m.span)).collect()
+            }
             ImportSource::LocalMember(m) => vec![(m.member.flat_name(), m.member.span)],
             _ => Vec::new(),
         }
@@ -168,13 +166,7 @@ impl BundleExportImport {
     pub fn flat_name(&self) -> Intern<String> {
         self.alias.unwrap_or_else(|| {
             let export = self.export.as_str();
-            Intern::new(
-                export
-                    .rsplit('.')
-                    .next()
-                    .unwrap_or(export)
-                    .to_string(),
-            )
+            Intern::new(export.rsplit('.').next().unwrap_or(export).to_string())
         })
     }
 }

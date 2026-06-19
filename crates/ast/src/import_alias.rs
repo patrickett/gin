@@ -4,7 +4,7 @@ use std::ops::ControlFlow;
 use internment::Intern;
 
 use crate::{
-    Expr, FileAst, FnCall, SymbolAlias, TagCall,
+    Expr, FileAst, FnCall, TagCall, TypeExpr, WhenArm,
     folder::*,
     path::ModPath,
     span::{SpanId, Spanned},
@@ -14,26 +14,30 @@ use ControlFlow::Continue;
 
 type AliasMap = HashMap<Intern<String>, Spanned<ModPath>>;
 
-/// Rewrite expressions so imported symbols can be referenced by their bare names.
-pub fn apply_symbol_aliases(ast: &mut FileAst) {
-    if ast.symbol_aliases.is_empty() {
-        return;
+impl FileAst {
+    /// Rewrite expressions so imported symbols can be referenced by their bare names.
+    pub fn apply_symbol_aliases(&mut self) {
+        if self.symbol_aliases.is_empty() {
+            return;
+        }
+        let alias_map = self.build_alias_map();
+        let mut folder = ImportAliasFolder {
+            alias_map,
+            alias_spans: Vec::new(),
+        };
+        let _ = walk_file_ast_mut(&mut folder, self);
+        self.symbol_alias_spans = folder.alias_spans;
     }
-    let alias_map = build_alias_map(&ast.symbol_aliases);
-    let mut folder = ImportAliasFolder {
-        alias_map,
-        alias_spans: Vec::new(),
-    };
-    let _ = walk_file_ast_mut(&mut folder, ast);
-    ast.symbol_alias_spans = folder.alias_spans;
 }
 
-fn build_alias_map(aliases: &[SymbolAlias]) -> AliasMap {
-    let mut map = HashMap::new();
-    for alias in aliases {
-        map.insert(alias.alias, alias.target.clone());
+impl FileAst {
+    fn build_alias_map(&self) -> AliasMap {
+        let mut map = HashMap::new();
+        for alias in &self.symbol_aliases {
+            map.insert(alias.alias, alias.target.clone());
+        }
+        map
     }
-    map
 }
 
 struct ImportAliasFolder {
@@ -42,7 +46,7 @@ struct ImportAliasFolder {
 }
 
 impl Folder for ImportAliasFolder {
-    fn fold_expr(&mut self, expr: &mut Expr) -> ControlFlow<()> {
+    fn visit_expr(&mut self, expr: &mut Expr) -> ControlFlow<()> {
         match expr {
             Expr::AnonymousTag(name) => {
                 if let Some(_target) = self.alias_map.get(name) {
@@ -55,33 +59,104 @@ impl Folder for ImportAliasFolder {
                 }
                 Continue(())
             }
+            Expr::Destructure { value, .. } => {
+                self.visit_expr(&mut value.value)?;
+                Continue(())
+            }
+            Expr::When(when) => {
+                if let Some(subject) = &mut when.subject {
+                    self.visit_expr(&mut subject.value)?;
+                }
+                for arm in &mut when.arms {
+                    self.visit_when_arm(arm)?;
+                }
+                Continue(())
+            }
             _ => walk_expr_mut(self, expr),
         }
     }
 
-    fn fold_fn_call(&mut self, call: &mut FnCall) -> ControlFlow<()> {
-        if let Some(span) = apply_alias_to_mod_path(&mut call.path, &self.alias_map) {
+    fn visit_when_arm(&mut self, arm: &mut WhenArm) -> ControlFlow<()> {
+        match arm {
+            WhenArm::Cond {
+                condition, body, ..
+            } => {
+                self.visit_expr(&mut condition.value)?;
+                self.visit_expr(&mut body.value)
+            }
+            WhenArm::Is { pattern, body, .. } => {
+                pattern.value.apply_alias(&self.alias_map);
+                self.visit_expr(&mut body.value)
+            }
+            WhenArm::Else(body, _) => self.visit_expr(&mut body.value),
+        }
+    }
+
+    fn visit_fn_call(&mut self, call: &mut FnCall) -> ControlFlow<()> {
+        if let Some(span) = call.path.apply_alias(&self.alias_map) {
             self.alias_spans.push(span);
         }
         walk_fn_call_mut(self, call)
     }
 
-    fn fold_tag_call(&mut self, tc: &mut TagCall) -> ControlFlow<()> {
+    fn visit_tag_call(&mut self, tc: &mut TagCall) -> ControlFlow<()> {
         if let Some(path) = &mut tc.qual_path {
-            apply_alias_to_mod_path(path, &self.alias_map);
+            path.apply_alias(&self.alias_map);
         }
         walk_tag_call_mut(self, tc)
     }
 }
 
-fn apply_alias_to_mod_path(path: &mut ModPath, alias_map: &AliasMap) -> Option<SpanId> {
-    if !path.segments.is_empty() {
-        return None;
+impl TypeExpr {
+    /// Apply symbol alias to this type expression (rewrite bare nominal to qualified path).
+    fn apply_alias(&mut self, alias_map: &AliasMap) {
+        match self {
+            TypeExpr::Nominal(name, span) => {
+                if let Some(target) = alias_map.get(name) {
+                    *self = TypeExpr::Qualified(Spanned::new(target.value.clone(), *span));
+                }
+            }
+            TypeExpr::Qualified(path) => {
+                path.value.apply_alias(alias_map);
+            }
+            TypeExpr::Generic { params, .. } => {
+                for (_, kind) in params {
+                    if let crate::ParameterKind::Tagged(sp) = kind {
+                        sp.value.apply_alias(alias_map);
+                    }
+                }
+            }
+            TypeExpr::Pointer(inner) | TypeExpr::Ref { inner, .. } => {
+                inner.value.apply_alias(alias_map);
+            }
+            TypeExpr::ListCons { head, tail } => {
+                head.value.apply_alias(alias_map);
+                tail.value.apply_alias(alias_map);
+            }
+            TypeExpr::Tuple(elems) => {
+                for elem in elems {
+                    elem.value.apply_alias(alias_map);
+                }
+            }
+            TypeExpr::Literal(..)
+            | TypeExpr::Unit
+            | TypeExpr::ListEmpty
+            | TypeExpr::InRange { .. } => {}
+        }
     }
-    if let Some(target) = alias_map.get(&path.root) {
-        path.root = target.root;
-        path.segments = target.segments.clone();
-        return Some(target.span_id);
+}
+
+impl ModPath {
+    /// Apply symbol alias to this mod path (rewrite root to qualified path when matched).
+    fn apply_alias(&mut self, alias_map: &AliasMap) -> Option<SpanId> {
+        if !self.segments.is_empty() {
+            return None;
+        }
+        if let Some(target) = alias_map.get(&self.root) {
+            self.root = target.root;
+            self.segments = target.segments.clone();
+            return Some(target.span_id);
+        }
+        None
     }
-    None
 }

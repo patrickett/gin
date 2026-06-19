@@ -20,12 +20,8 @@ impl DeclareAttributes {
         }
 
         for item in items {
-            if let AttributeItem::Call {
-                name: _, args: _, ..
-            } = item
-            {
-                // No intrinsic call attributes for declares currently.
-            } else if let AttributeItem::Flag { name: _, .. } = item {
+            if let AttributeItem::Call { .. } = item {
+            } else if let AttributeItem::Flag { .. } = item {
             }
         }
     }

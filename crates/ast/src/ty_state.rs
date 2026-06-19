@@ -29,11 +29,6 @@ pub enum TyState {
 }
 
 impl TyState {
-    /// Returns the concrete type if resolved, stripping any narrowing.
-    ///
-    /// For [`TyState::Resolved(ty)`] returns `Some(ty)`.
-    /// For [`TyState::Narrowed { original, .. }`] returns `Some(original)`.
-    /// For [`TyState::Infer`] or [`TyState::Explicit`] returns `None`.
     pub fn resolved_ty(&self) -> Option<&Ty> {
         match self {
             TyState::Resolved(ty) => Some(ty),
@@ -42,11 +37,6 @@ impl TyState {
         }
     }
 
-    /// Returns the current (possibly narrowed) type if resolved.
-    ///
-    /// For [`TyState::Resolved(ty)`] returns `Some(ty)`.
-    /// For [`TyState::Narrowed { current, .. }`] returns `Some(current)`.
-    /// For [`TyState::Infer`] or [`TyState::Explicit`] returns `None`.
     pub fn current_ty(&self) -> Option<&Ty> {
         match self {
             TyState::Resolved(ty) => Some(ty),

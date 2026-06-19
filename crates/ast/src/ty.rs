@@ -1,32 +1,34 @@
-//! Type representation and layout calculations.
+//! Type representation and type-level operations.
 
-use crate::ConstValue;
 use internment::Intern;
+use std::collections::{HashMap, HashSet};
+
+use crate::{ConstValue, HashFloat};
+
+/// One union variant: `(variant_name, [(field_name, field_type)])` in declaration order.
+pub type UnionVariant = (Intern<String>, Vec<(Intern<String>, Box<Ty>)>);
 
 /// Resolved type — the canonical representation after resolving declared type names against declarations.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Ty {
     Int {
         width: u8,
         signed: bool,
         /// Known compile-time value when constant-folded, otherwise `None`.
         value: Option<i128>,
+        /// Inclusive lower bound for `in N...M` / `is in N...M` types, when set.
+        min: Option<i128>,
+        /// Inclusive upper bound for `in N...M` / `is in N...M` types, when set.
+        max: Option<i128>,
     },
     Float {
         /// Known compile-time value when constant-folded, otherwise `None`.
-        value: Option<f64>,
+        value: Option<HashFloat>,
     },
-    Bool,
     Unit,
     Record {
         name: Intern<String>,
         fields: Vec<(Intern<String>, Box<Ty>)>,
-    },
-    Union {
-        name: Intern<String>,
-        /// Each variant: (variant_name, [(field_name, field_type)]) in declaration order.
-        #[allow(clippy::type_complexity)]
-        variants: Vec<(Intern<String>, Vec<(Intern<String>, Box<Ty>)>)>,
     },
     /// Unresolved / generic type — falls back to `i64` in codegen.
     Opaque(Intern<String>),
@@ -48,45 +50,18 @@ pub enum Ty {
     },
     /// Positional tuple VALUE — used for tuple literals `(e1, e2, …)`. Maps to an LLVM struct.
     Tuple(Vec<Ty>),
-    /// A closed set of compile-time-known literal values of a shared base type.
-    /// Runtime representation is a small integer discriminant.
-    ConstUnion {
+    /// A single compile-time-known literal (`'John'`, `42`, …) from a site bind.
+    Literal(ConstValue),
+    /// Tagged union. When [`Self::literal_values`] is set, every variant is a unit literal
+    /// (`LogLevel is 'debug' | 'info'`) and runtime layout is a small discriminant.
+    Union {
         name: Intern<String>,
-        /// The base type that all values inhabit (e.g. `str_record_ty()` for strings).
-        base: Box<Ty>,
-        /// The literal values in discriminant order.
-        values: Vec<ConstValue>,
+        variants: Vec<UnionVariant>,
+        literal_values: Option<Vec<ConstValue>>,
     },
 }
 
 impl Ty {
-    /// Return record fields in layout order.
-    ///
-    /// Fields are sorted by descending alignment (then descending size, then declaration order
-    /// for ties) so the compiler packs them without padding. The programmer writes fields in
-    /// any logical order; the physical layout is determined here.
-    /// Empty for non-record types.
-    pub fn record_fields_sorted(&self) -> Vec<(&Intern<String>, &Ty)> {
-        if let Ty::Record { fields, .. } = self {
-            let mut indexed: Vec<(usize, &Intern<String>, &Ty)> = fields
-                .iter()
-                .enumerate()
-                .map(|(i, (k, v))| (i, k, v.as_ref()))
-                .collect();
-            indexed.sort_by(|(i, _, a), (j, _, b)| {
-                let align_a = ty_alignment(a);
-                let align_b = ty_alignment(b);
-                align_b
-                    .cmp(&align_a)
-                    .then_with(|| ty_byte_size_static(b).cmp(&ty_byte_size_static(a)))
-                    .then_with(|| i.cmp(j))
-            });
-            indexed.into_iter().map(|(_, k, v)| (k, v)).collect()
-        } else {
-            vec![]
-        }
-    }
-
     pub fn is_int(&self) -> bool {
         matches!(self, Ty::Int { .. })
     }
@@ -115,29 +90,294 @@ impl Ty {
         matches!(self, Ty::Ref { mutable: true, .. })
     }
 
-    /// Returns `true` for types that can be used as a `when` condition:
-    /// `Ty::Bool` (from comparisons) or a `Ty::Union` with exactly two
-    /// unit variants (e.g. `Bool is True or False`).
-    pub fn is_bool_like(&self) -> bool {
-        match self {
-            Ty::Bool => true,
-            Ty::Union { variants, .. } => {
-                variants.len() == 2 && variants.iter().all(|(_, fields)| fields.is_empty())
-            }
-            _ => false,
-        }
-    }
-
     pub fn is_union(&self) -> bool {
         matches!(self, Ty::Union { .. })
     }
 
-    pub fn is_const_union(&self) -> bool {
-        matches!(self, Ty::ConstUnion { .. })
+    /// Union declared as `'a' | 'b'` or a site [`Ty::Literal`].
+    pub fn is_literal_shape(&self) -> bool {
+        matches!(self, Ty::Literal(_))
+            || matches!(
+                self,
+                Ty::Union {
+                    literal_values: Some(_),
+                    ..
+                }
+            )
+    }
+
+    /// Discriminant-order literal members for a literal-only union.
+    pub fn union_literal_values(&self) -> Option<&[ConstValue]> {
+        match self {
+            Ty::Union {
+                literal_values: Some(v),
+                ..
+            } => Some(v.as_slice()),
+            _ => None,
+        }
+    }
+
+    pub fn as_literal_const(&self) -> Option<&ConstValue> {
+        match self {
+            Ty::Literal(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn union_named(name: Intern<String>, variants: Vec<UnionVariant>) -> Self {
+        Ty::Union {
+            name,
+            variants,
+            literal_values: None,
+        }
+    }
+
+    pub fn union_of_literals(name: Intern<String>, values: Vec<ConstValue>) -> Self {
+        let variants = values
+            .iter()
+            .map(|cv| (cv.display_name(), Vec::new()))
+            .collect();
+        Ty::Union {
+            name,
+            variants,
+            literal_values: Some(values),
+        }
     }
 
     pub fn is_record(&self) -> bool {
         matches!(self, Ty::Record { .. })
+    }
+
+    /// Format this type for hover display.
+    pub fn format_for_hover(&self) -> String {
+        match self {
+            Ty::Int {
+                width,
+                signed,
+                value,
+                min,
+                max,
+            } => {
+                if let (Some(lo), Some(hi)) = (min, max) {
+                    if let Some(v) = value {
+                        format!("in {lo}...{hi} (= {v})")
+                    } else {
+                        format!("in {lo}...{hi}")
+                    }
+                } else {
+                    let prefix = if *signed { "i" } else { "u" };
+                    if let Some(v) = value {
+                        format!("{}{} = {}", prefix, width, v)
+                    } else {
+                        format!("{}{}", prefix, width)
+                    }
+                }
+            }
+            Ty::Float { value } => {
+                if let Some(HashFloat(v)) = value {
+                    format!("f64 = {}", v)
+                } else {
+                    "f64".to_string()
+                }
+            }
+            Ty::Unit => "()".to_string(),
+            Ty::Record { fields, .. } => {
+                let parts: Vec<String> = fields
+                    .iter()
+                    .map(|(fname, fty)| format!("{}: {}", fname.as_str(), fty.format_for_hover()))
+                    .collect();
+                parts.join(", ")
+            }
+            Ty::Union { name, .. } => format!("Union({})", name.as_str()),
+            Ty::Opaque(name) => name.as_str().to_string(),
+            Ty::Array { elem, size } => format!("[{}; {}]", elem.format_for_hover(), size),
+            Ty::Ptr { inner } => format!("*{}", inner.format_for_hover()),
+            Ty::Ref { inner, mutable } => {
+                let prefix = if *mutable { "mut " } else { "ref " };
+                format!("{}{}", prefix, inner.format_for_hover())
+            }
+            Ty::Tuple(tys) => {
+                let parts: Vec<String> = tys.iter().map(|t| t.format_for_hover()).collect();
+                format!("({})", parts.join(", "))
+            }
+            Ty::Literal(cv) => match cv {
+                ConstValue::String(s) => format!("'{}'", s),
+                other => other.to_hover_string(),
+            },
+        }
+    }
+
+    /// Build a `ConstValue` describing this type for the synthesized `Reflectable.shape` field.
+    pub fn to_const_value(&self) -> ConstValue {
+        let mut seen: HashSet<Intern<String>> = HashSet::new();
+        self.to_const_value_inner(&mut seen)
+    }
+
+    fn to_const_value_inner(&self, seen: &mut HashSet<Intern<String>>) -> ConstValue {
+        match self {
+            Ty::Int { width, signed, .. } => Self::tag(
+                "Primitive",
+                vec![
+                    ConstValue::Int(i128::from(*width)),
+                    ConstValue::Tag {
+                        name: Intern::from_ref(if *signed { "True" } else { "False" }),
+                        qual_path: None,
+                        args: vec![],
+                    },
+                ],
+            ),
+            Ty::Float { .. } => Self::tag(
+                "Primitive",
+                vec![
+                    ConstValue::Int(64),
+                    ConstValue::Tag {
+                        name: Intern::from_ref("True"),
+                        qual_path: None,
+                        args: vec![],
+                    },
+                ],
+            ),
+            Ty::Unit => Self::tag("Tuple", vec![ConstValue::List(vec![])]),
+            Ty::Record { name, fields } => {
+                if !seen.insert(*name) {
+                    return Self::tag(
+                        "Opaque",
+                        vec![ConstValue::String(name.as_str().to_string())],
+                    );
+                }
+                let named: Vec<ConstValue> = fields
+                    .iter()
+                    .map(|(fname, fty)| {
+                        Self::record_named(fname.as_str(), fty.to_const_value_inner(seen))
+                    })
+                    .collect();
+                seen.remove(name);
+                Self::tag(
+                    "Record",
+                    vec![
+                        ConstValue::String(name.as_str().to_string()),
+                        ConstValue::List(named),
+                    ],
+                )
+            }
+            Ty::Union {
+                name,
+                variants,
+                literal_values: Some(values),
+                ..
+            } if !values.is_empty() => {
+                if !seen.insert(*name) {
+                    return Self::tag(
+                        "Opaque",
+                        vec![ConstValue::String(name.as_str().to_string())],
+                    );
+                }
+                let variant_shapes: Vec<ConstValue> = values
+                    .iter()
+                    .map(|cv| {
+                        let vname = cv.to_hover_string();
+                        Self::record_variant(&vname, vec![Self::record_named("value", cv.clone())])
+                    })
+                    .collect();
+                seen.remove(name);
+                Self::tag(
+                    "Union",
+                    vec![
+                        ConstValue::String(name.as_str().to_string()),
+                        ConstValue::List(variant_shapes),
+                    ],
+                )
+            }
+            Ty::Union { name, variants, .. } => {
+                if !seen.insert(*name) {
+                    return Self::tag(
+                        "Opaque",
+                        vec![ConstValue::String(name.as_str().to_string())],
+                    );
+                }
+                let variant_shapes: Vec<ConstValue> = variants
+                    .iter()
+                    .map(|(vname, vfields)| {
+                        let fields: Vec<ConstValue> = vfields
+                            .iter()
+                            .map(|(fname, fty)| {
+                                Self::record_named(fname.as_str(), fty.to_const_value_inner(seen))
+                            })
+                            .collect();
+                        Self::record_variant(vname.as_str(), fields)
+                    })
+                    .collect();
+                seen.remove(name);
+                Self::tag(
+                    "Union",
+                    vec![
+                        ConstValue::String(name.as_str().to_string()),
+                        ConstValue::List(variant_shapes),
+                    ],
+                )
+            }
+            Ty::Tuple(elems) => {
+                let items: Vec<ConstValue> =
+                    elems.iter().map(|t| t.to_const_value_inner(seen)).collect();
+                Self::tag("Tuple", vec![ConstValue::List(items)])
+            }
+            Ty::Ptr { inner } => Self::tag("Ptr", vec![inner.to_const_value_inner(seen)]),
+            Ty::Ref { inner, mutable } => Self::tag(
+                "Ref",
+                vec![
+                    inner.to_const_value_inner(seen),
+                    ConstValue::Tag {
+                        name: Intern::from_ref(if *mutable { "True" } else { "False" }),
+                        qual_path: None,
+                        args: vec![],
+                    },
+                ],
+            ),
+            Ty::Array { elem, size } => Self::tag(
+                "Array",
+                vec![
+                    elem.to_const_value_inner(seen),
+                    ConstValue::Int(i128::try_from(*size).unwrap_or(0)),
+                ],
+            ),
+            Ty::Opaque(name) => Self::tag(
+                "Opaque",
+                vec![ConstValue::String(name.as_str().to_string())],
+            ),
+            Ty::Literal(cv) => Self::record_named("Literal", cv.clone()),
+        }
+    }
+
+    fn tag(name: &str, args: Vec<ConstValue>) -> ConstValue {
+        ConstValue::Tag {
+            name: Intern::new(name.to_string()),
+            qual_path: None,
+            args,
+        }
+    }
+
+    fn record_named(name: &str, ty: ConstValue) -> ConstValue {
+        ConstValue::Record {
+            fields: vec![
+                (
+                    Intern::new("name".to_string()),
+                    ConstValue::String(name.to_string()),
+                ),
+                (Intern::new("ty".to_string()), ty),
+            ],
+        }
+    }
+
+    fn record_variant(name: &str, fields: Vec<ConstValue>) -> ConstValue {
+        ConstValue::Record {
+            fields: vec![
+                (
+                    Intern::new("name".to_string()),
+                    ConstValue::String(name.to_string()),
+                ),
+                (Intern::new("fields".to_string()), ConstValue::List(fields)),
+            ],
+        }
     }
 
     /// Convenience constructor for a default-width signed integer type.
@@ -146,6 +386,8 @@ impl Ty {
             width: 64,
             signed: true,
             value: None,
+            min: None,
+            max: None,
         }
     }
 
@@ -155,189 +397,105 @@ impl Ty {
             width: 8,
             signed: false,
             value: None,
+            min: None,
+            max: None,
         }
     }
-}
 
-/// Type alias for union variant fields: (variant_name, [(field_name, field_type)])
-type UnionVariant<'a> = (Intern<String>, Vec<(Intern<String>, Box<Ty>)>);
-
-// Layout / size utilities
-
-pub fn ty_union_discriminant_size(num_variants: usize) -> usize {
-    if num_variants <= 256 {
-        1
-    } else if num_variants <= 65536 {
-        2
-    } else {
-        8
-    }
-}
-
-pub(crate) fn ty_union_max_field_size(variants: &[UnionVariant<'_>]) -> usize {
-    variants
-        .iter()
-        .flat_map(|(_, fields)| fields.iter().map(|(_, ft)| ty_byte_size_static(ft)))
-        .max()
-        .unwrap_or(0)
-}
-
-pub fn ty_alignment(ty: &Ty) -> usize {
-    match ty {
-        Ty::Int { width: 8, .. } | Ty::Bool => 1,
-        Ty::Int { width: 16, .. } => 2,
-        Ty::Int { width: 32, .. } => 4,
-        Ty::Int { width: 128, .. } => 16,
-        Ty::Int { .. } | Ty::Float { .. } | Ty::Array { .. } | Ty::Ptr { .. } | Ty::Ref { .. } => 8,
-        Ty::Unit => 1,
-        Ty::Opaque(_) => 8,
-        Ty::Record { fields, .. } => fields
-            .iter()
-            .map(|(_, ft)| ty_alignment(ft))
-            .max()
-            .unwrap_or(1),
-        Ty::Union { variants, .. } => {
-            let all_empty = variants.iter().all(|(_, fields)| fields.is_empty());
-            if all_empty {
-                1
-            } else {
-                variants
-                    .iter()
-                    .flat_map(|(_, fields)| fields.iter().map(|(_, ft)| ty_alignment(ft)))
-                    .max()
-                    .unwrap_or(8)
-            }
-        }
-        Ty::ConstUnion { .. } => 1,
-        Ty::Tuple(fields) => fields.iter().map(ty_alignment).max().unwrap_or(1),
-    }
-}
-
-/// Returns the in-memory size (bytes) of a type without recursing into the typeck context.
-pub fn ty_byte_size_static(ty: &Ty) -> usize {
-    match ty {
-        Ty::Int { width: 8, .. } | Ty::Bool => 1,
-        Ty::Int { width: 16, .. } => 2,
-        Ty::Int { width: 32, .. } => 4,
-        Ty::Int { width: 128, .. } => 16,
-        Ty::Int { .. } | Ty::Float { .. } => 8,
-        Ty::Array { .. } | Ty::Ptr { .. } | Ty::Ref { .. } => 8,
-        Ty::Unit => 0,
-        Ty::Opaque(_) => 8,
-        Ty::Record { fields, .. } => fields.iter().map(|(_, ft)| ty_byte_size_static(ft)).sum(),
-        Ty::Union { variants, .. } => {
-            let all_empty = variants.iter().all(|(_, fields)| fields.is_empty());
-            if all_empty && variants.len() <= 256 {
-                1
-            } else if all_empty {
-                ty_union_discriminant_size(variants.len())
-            } else {
-                let discriminant_size = ty_union_discriminant_size(variants.len());
-                let max_field_size = ty_union_max_field_size(variants);
-                discriminant_size + max_field_size
-            }
-        }
-        Ty::ConstUnion { values, .. } => {
-            if values.len() <= 256 {
-                1
-            } else {
-                ty_union_discriminant_size(values.len())
-            }
-        }
-        Ty::Tuple(fields) => fields.iter().map(ty_byte_size_static).sum(),
-    }
-}
-
-impl std::hash::Hash for Ty {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        std::mem::discriminant(self).hash(state);
-        match self {
+    pub fn is_bounded_int(&self) -> bool {
+        matches!(
+            self,
             Ty::Int {
-                width,
-                signed,
-                value,
-            } => {
-                width.hash(state);
-                signed.hash(state);
-                value.hash(state);
+                min: Some(_),
+                max: Some(_),
+                ..
             }
-            Ty::Float { value } => {
-                // Hash raw bits so NaN values with different bit patterns are distinct.
-                value.map(f64::to_bits).hash(state);
-            }
-            Ty::Bool => {}
-            Ty::Unit => {}
-            Ty::Record { name, fields } => {
-                name.hash(state);
-                fields.hash(state);
-            }
-            Ty::Union { name, variants } => {
-                name.hash(state);
-                variants.hash(state);
-            }
-            Ty::Opaque(name) => name.hash(state),
-            Ty::Array { elem, size } => {
-                elem.hash(state);
-                size.hash(state);
-            }
-            Ty::Ref { inner, mutable } => {
-                inner.hash(state);
-                mutable.hash(state);
-            }
-            Ty::Ptr { inner } => inner.hash(state),
+        )
+    }
 
-            Ty::Tuple(fields) => fields.hash(state),
-            Ty::ConstUnion { name, base, values } => {
-                name.hash(state);
-                base.hash(state);
-                values.hash(state);
-            }
+    /// Extract the name of a nominal type for compile-time trait lookup.
+    pub fn type_name(&self) -> Option<&Intern<String>> {
+        match self {
+            Ty::Record { name, .. } => Some(name),
+            Ty::Union { name, .. } => Some(name),
+            Ty::Opaque(name) => Some(name),
+            _ => None,
+        }
+    }
+
+    /// Substitute type variables, replacing only [`Ty::Opaque`] leaves that match an
+    /// entry in `subst`.
+    pub fn substitute(&self, subst: &HashMap<Intern<String>, Ty>) -> Ty {
+        match self {
+            Ty::Opaque(name) => subst.get(name).cloned().unwrap_or(Ty::Opaque(*name)),
+            Ty::Record { name, fields } => Ty::Record {
+                name: *name,
+                fields: fields
+                    .iter()
+                    .map(|(n, t)| (*n, Box::new(t.substitute(subst))))
+                    .collect(),
+            },
+            Ty::Union {
+                name,
+                variants,
+                literal_values,
+            } => Ty::Union {
+                name: *name,
+                variants: variants
+                    .iter()
+                    .map(|(vn, fields)| {
+                        let new_fields = fields
+                            .iter()
+                            .map(|(n, t)| (*n, Box::new(t.substitute(subst))))
+                            .collect();
+                        (*vn, new_fields)
+                    })
+                    .collect(),
+                literal_values: literal_values.clone(),
+            },
+            Ty::Literal(v) => Ty::Literal(v.clone()),
+            Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|t| t.substitute(subst)).collect()),
+            Ty::Array { elem, size } => Ty::Array {
+                elem: Box::new(elem.substitute(subst)),
+                size: *size,
+            },
+            Ty::Ptr { inner } => Ty::Ptr {
+                inner: Box::new(inner.substitute(subst)),
+            },
+            _ => self.clone(),
+        }
+    }
+
+    /// If this type is an array or tuple, return the element type.
+    /// Otherwise, look up the `List` type in `tag_types` and extract its `pointer` field.
+    pub fn list_elem_ty(&self, tag_types: &HashMap<Intern<String>, Ty>) -> Option<Ty> {
+        match self {
+            Ty::Array { elem, .. } => Some(*elem.clone()),
+            Ty::Tuple(elems) if !elems.is_empty() => Some(elems[0].clone()),
+            _ => tag_types
+                .get(&Intern::from_ref("List"))
+                .and_then(|list_ty| {
+                    if let Ty::Record { fields, .. } = list_ty {
+                        fields
+                            .iter()
+                            .find(|(n, _)| n.as_str() == "pointer")
+                            .map(|(_, t)| match t.as_ref() {
+                                Ty::Ptr { inner } => inner.as_ref().clone(),
+                                other => other.clone(),
+                            })
+                    } else {
+                        None
+                    }
+                }),
         }
     }
 }
 
-impl Eq for Ty {}
+/// Variant map entry: (union_name, discriminant, [(field_name, field_type)]).
+pub type VariantMapEntry = (Intern<String>, usize, Vec<(Intern<String>, Ty)>);
 
-/// Canonical `Str` record type: `{ pointer: Ptr(Byte), len: Int }`.
-static STR_RECORD_TY: std::sync::OnceLock<Ty> = std::sync::OnceLock::new();
+/// Map: variant_name → entries (for lookup by variant name across files).
+pub type VariantMap = HashMap<Intern<String>, Vec<VariantMapEntry>>;
 
-#[allow(unsafe_code)]
-unsafe impl salsa::Update for Ty {
-    unsafe fn maybe_update(old_pointer: *mut Self, new_value: Self) -> bool {
-        let old_ref: &mut Self = unsafe { &mut *old_pointer };
-        if *old_ref != new_value {
-            *old_ref = new_value;
-            true
-        } else {
-            false
-        }
-    }
-}
-
-pub fn str_record_ty() -> Ty {
-    STR_RECORD_TY
-        .get_or_init(|| Ty::Record {
-            name: Intern::<String>::from_ref("Str"),
-            fields: vec![
-                (
-                    Intern::<String>::from_ref("pointer"),
-                    Box::new(Ty::Ptr {
-                        inner: Box::new(Ty::Int {
-                            width: 8,
-                            signed: false,
-                            value: None,
-                        }),
-                    }),
-                ),
-                (
-                    Intern::<String>::from_ref("len"),
-                    Box::new(Ty::Int {
-                        width: 64,
-                        signed: false,
-                        value: None,
-                    }),
-                ),
-            ],
-        })
-        .clone()
-}
+/// Variant lookup result: (union_name, discriminant, &[(field_name, field_type)]).
+pub type VariantLookupResult<'a> = (Intern<String>, usize, &'a [(Intern<String>, Ty)]);

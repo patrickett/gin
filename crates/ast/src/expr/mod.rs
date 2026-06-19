@@ -292,10 +292,27 @@ pub enum Expr {
         base: Box<Typed<Expr>>,
         field: internment::Intern<String>,
     },
+    /// Record field write: `base.field: value`
+    RecordSet {
+        base: Box<Typed<Expr>>,
+        field: internment::Intern<String>,
+        value: Box<Typed<Expr>>,
+    },
+    /// Record literal: `(name: val, …)` — named fields, behaves as a record value.
+    RecordLit(Vec<(Intern<String>, Typed<Expr>)>),
     /// Tuple literal: `(e1, e2, …)` — at least two elements.
     TupleLit(Vec<Typed<Expr>>),
     /// List literal: `[e1, e2, …]` — homogeneous compile-time list.
     List(Vec<Typed<Expr>>),
+    /// Destructure bind: `Tag(field: bind, …) := expr`
+    Destructure {
+        /// The tag/type name being destructured
+        tag_name: internment::Intern<String>,
+        /// (field_name, bind_name) pairs
+        field_bindings: Vec<(internment::Intern<String>, internment::Intern<String>)>,
+        /// The value being destructured
+        value: Box<Typed<Expr>>,
+    },
 }
 
 impl From<crate::TypeExpr> for Expr {
@@ -306,7 +323,7 @@ impl From<crate::TypeExpr> for Expr {
             crate::TypeExpr::Generic { name, params, .. } => Expr::TypeGeneric { name, params },
             crate::TypeExpr::Ref { inner, mutable } => Expr::TypeRef {
                 inner: Box::new(Expr::TypeNominal(Intern::<String>::from_ref(
-                    crate::type_surface_mangle_name(&inner.value),
+                    inner.value.surface_mangle_name(),
                 ))),
                 mutable,
             },

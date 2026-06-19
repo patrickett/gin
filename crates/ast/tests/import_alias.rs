@@ -1,7 +1,7 @@
 use internment::Intern;
 
-use ast::{BindValue, Expr, FileAst, ModPath, SpanId, Spanned, SymbolAlias, apply_symbol_aliases};
-use parser::parse_source_full;
+use ast::{BindValue, Expr, FileAst, ModPath, SpanId, Spanned, SymbolAlias};
+use parser::query::SourceParseExt;
 
 fn add_symbol_alias(ast: &mut FileAst, alias: &str, root: &str, symbol: &str) {
     ast.symbol_aliases.push(SymbolAlias {
@@ -25,13 +25,13 @@ fn assert_alias_fn_call(expr: &Expr, expected_root: &str, expected_segments: &[&
 
 #[test]
 fn rewrites_function_call_alias() {
-    let mut out = parse_source_full("main:\n    true\nreturn\n");
+    let mut out = ("main:\n    true\nreturn\n").parse_source_full();
     add_symbol_alias(&mut out.ast, "true", "core", "true");
 
-    apply_symbol_aliases(&mut out.ast);
+    out.ast.apply_symbol_aliases();
 
-    let main = out.ast.defs().get(&Intern::from_ref("main")).unwrap();
-    if let BindValue::Body { exprs, .. } = main.value() {
+    let main = out.ast.defs.get(&Intern::from_ref("main")).unwrap();
+    if let BindValue::Body { exprs, .. } = &main.value {
         let first_expr = &exprs[0].value;
         assert_alias_fn_call(first_expr, "core", &["true"]);
     } else {
@@ -48,7 +48,7 @@ fn rewrites_anonymous_tag_alias() {
     ));
     add_symbol_alias(&mut ast, "Range", "core", "Range");
 
-    apply_symbol_aliases(&mut ast);
+    ast.apply_symbol_aliases();
 
     // AnonymousTag is handled by a separate pass, so it remains unchanged.
     let expr = &ast.exprs[0].0;
