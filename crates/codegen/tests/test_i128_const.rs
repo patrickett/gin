@@ -1,9 +1,9 @@
-use codegen::build_module_from_typed_ast;
+use codegen::CodegenContext;
 use diagnostic::Diagnostic;
 use melior::Context;
-use parser::parse_from_str;
+use parser::cursor::TokenCursor;
+use typecheck::FileId;
 use typecheck::transform::transform_file;
-use typed_ast::FileId;
 
 // TODO: Introduce `insta` snapshot testing for MLIR and LLVM IR output. Current tests use
 // `assert!(mlir_text.contains(...))` which only checks for scattered substrings — it catches
@@ -19,7 +19,7 @@ use typed_ast::FileId;
 
 /// Helper to generate MLIR text from a source string using the single codegen path.
 fn codegen_to_mlir_text(source: &str, filename: &str) -> (String, Vec<Diagnostic>) {
-    let ast = parse_from_str(source);
+    let ast = TokenCursor::parse_source(source);
     let typed = transform_file(ast, FileId(0));
 
     let context = Context::new();
@@ -29,7 +29,8 @@ fn codegen_to_mlir_text(source: &str, filename: &str) -> (String, Vec<Diagnostic
     context.get_or_load_dialect("scf");
     context.get_or_load_dialect("llvm");
 
-    let (module, symptoms) = build_module_from_typed_ast(&context, &typed, source, filename, None);
+    let (module, symptoms) =
+        CodegenContext::build_module_from_typed_ast(&context, &typed, source, filename, None);
     let mlir_text = module
         .expect("codegen should succeed")
         .as_operation()

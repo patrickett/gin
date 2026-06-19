@@ -37,7 +37,4 @@ impl std::str::FromStr for Profile {
     }
 }
 
-pub use native::{
-    build_module_text_from_typed, compile_to_object_from_typed, link_executable, native_from_mlir,
-    native_from_module,
-};
+pub use native::NativeCompiler;

@@ -340,7 +340,8 @@ impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
         let symbol_name = ctx.register_string(value);
 
         // llvm.mlir.addressof @symbol → !llvm.ptr
-        let ptr = crate::addressof_string_global(c, self, &symbol_name)
+        let ptr = ctx
+            .addressof_string_global(self, &symbol_name)
             .expect("addressof should succeed");
 
         // llvm.mlir.undef : !llvm.struct<(ptr, i64)>

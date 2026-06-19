@@ -1,9 +1,9 @@
-use codegen::build_module_from_typed_ast;
+use codegen::CodegenContext;
 use diagnostic::Diagnostic;
 use melior::Context;
 use parser::parse_from_str;
+use typecheck::FileId;
 use typecheck::transform::transform_file;
-use typed_ast::FileId;
 
 fn codegen_to_mlir_text(source: &str, filename: &str) -> (String, Vec<Diagnostic>) {
     let ast = parse_from_str(source);
@@ -16,7 +16,8 @@ fn codegen_to_mlir_text(source: &str, filename: &str) -> (String, Vec<Diagnostic
     context.get_or_load_dialect("scf");
     context.get_or_load_dialect("llvm");
 
-    let (module, symptoms) = build_module_from_typed_ast(&context, &typed, source, filename, None);
+    let (module, symptoms) =
+        CodegenContext::build_module_from_typed_ast(&context, &typed, source, filename, None);
     let mlir_text = module
         .expect("codegen should succeed")
         .as_operation()

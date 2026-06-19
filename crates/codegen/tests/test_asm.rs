@@ -1,10 +1,13 @@
-use codegen::build_module_with_context;
+use codegen::CodegenContext;
 use diagnostic::Diagnostic;
 use melior::Context;
-use parser::parse_from_str;
+use parser::cursor::TokenCursor;
+use typecheck::FileId;
+use typecheck::transform::transform_file;
 
 fn codegen_to_mlir_text(source: &str, filename: &str) -> (String, Vec<Diagnostic>) {
-    let mut ast = parse_from_str(source);
+    let ast = TokenCursor::parse_source(source);
+    let typed = transform_file(ast, FileId(0));
 
     let context = Context::new();
     melior::dialect::DialectHandle::llvm().register_dialect(&context);
@@ -13,7 +16,8 @@ fn codegen_to_mlir_text(source: &str, filename: &str) -> (String, Vec<Diagnostic
     context.get_or_load_dialect("scf");
     context.get_or_load_dialect("llvm");
 
-    let (module, symptoms) = build_module_with_context(&context, &mut ast, None, source, filename);
+    let (module, symptoms) =
+        CodegenContext::build_module_from_typed_ast(&context, &typed, source, filename, None);
     let mlir_text = module
         .expect("codegen should succeed")
         .as_operation()

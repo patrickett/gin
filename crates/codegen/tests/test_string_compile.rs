@@ -1,10 +1,10 @@
-use codegen::build_module_from_typed_ast;
+use codegen::CodegenContext;
 use diagnostic::Diagnostic;
 use internment::Intern;
 use melior::Context;
 use parser::parse_from_str;
+use typecheck::FileId;
 use typecheck::transform::transform_file;
-use typed_ast::FileId;
 
 /// Helper to generate MLIR text from a source string.
 fn codegen_to_mlir_text(source: &str, filename: &str) -> (String, Vec<Diagnostic>) {
@@ -18,7 +18,8 @@ fn codegen_to_mlir_text(source: &str, filename: &str) -> (String, Vec<Diagnostic
     context.get_or_load_dialect("scf");
     context.get_or_load_dialect("llvm");
 
-    let (module, symptoms) = build_module_from_typed_ast(&context, &typed, source, filename, None);
+    let (module, symptoms) =
+        CodegenContext::build_module_from_typed_ast(&context, &typed, source, filename, None);
     let mlir_text = module
         .expect("codegen should succeed")
         .as_operation()
@@ -30,7 +31,7 @@ fn codegen_to_mlir_text(source: &str, filename: &str) -> (String, Vec<Diagnostic
 fn test_parse_string_literal() {
     let src = "hello_text: 'hello'\n";
     let ast = parse_from_str(src);
-    assert!(ast.defs().contains_key(&Intern::from_ref("hello_text")));
+    assert!(ast.defs.contains_key(&Intern::from_ref("hello_text")));
 }
 
 #[test]

@@ -1,116 +1,102 @@
 use crate::prelude::*;
 
-use ast::{Expr, Typed};
+use ast::expr::{ClobberSpec, OperandKind, OperandSpec};
 
-/// Derive an LLVM constraint string from a typed constraint expression.
-///
-/// Each constraint is a value of the `Constraint` union type:
-/// - `Output(X)` → `"={x}"`
-/// - `LateOut(X)` → `"=&{x}"`
-/// - `Input(X)` → `"{x}"`
-/// - `InOut(X)` → `"={x}"`
-/// - `Clobber(X)` → `"~{x}"`
-/// - `ClobberMemory` → `"~{memory}"`
-///
-/// The register name is extracted from the constraint's type parameter
-/// (e.g. `X0` in `Output[X0]`).
-fn derive_constraint_string(
-    constraints: &[Typed<Expr>],
-    ctx: &CodegenContext<'_, '_>,
-) -> (String, Vec<usize>) {
-    let mut parts = Vec::new();
-    let mut output_indices = Vec::new();
+impl<'a, 'c> CodegenContext<'a, 'c> {
+    fn build_constraint_string(operands: &[OperandSpec], clobbers: &[ClobberSpec]) -> String {
+        let mut parts: Vec<String> = Vec::with_capacity(operands.len() + clobbers.len());
 
-    for (i, constraint) in constraints.iter().enumerate() {
-        let (prefix, register_name) = match &constraint.value {
-            Expr::TagCall(tc) => {
-                let prefix = match tc.name.as_str() {
-                    "Output" => "=",
-                    "LateOut" => "=&",
-                    "Input" => "",
-                    "InOut" => "=",
-                    "Clobber" => "~",
-                    _ => {
-                        ctx.emit_internal(format!(
-                            "unknown constraint variant: {}",
-                            tc.name.as_str()
-                        ));
-                        return (String::new(), Vec::new());
-                    }
-                };
-                let reg = tc.args.first().and_then(|arg| match &arg.value {
-                    Expr::AnonymousTag(name) => Some(name.as_str().to_lowercase()),
-                    _ => None,
-                });
-                if matches!(tc.name.as_str(), "Output" | "LateOut" | "InOut") {
-                    output_indices.push(i);
-                }
-                (prefix, reg)
-            }
-            Expr::AnonymousTag(name) if name.as_str() == "ClobberMemory" => {
-                ("~", Some("memory".to_string()))
-            }
-            _ => {
-                ctx.emit_internal(format!(
-                    "unsupported constraint expression: {:?}",
-                    constraint.value
-                ));
-                return (String::new(), Vec::new());
-            }
-        };
+        for op in operands {
+            let prefix = match op.kind {
+                OperandKind::Input => "",
+                OperandKind::Output => "=",
+                OperandKind::InOut => "=",
+                OperandKind::LateOut => "=&",
+            };
+            parts.push(format!("{prefix}{{{}}}", op.register.as_str()));
+        }
 
-        match register_name {
-            Some(rn) => parts.push(format!("{prefix}{{{rn}}}")),
-            None => {
-                ctx.emit_internal("constraint missing register name");
-                return (String::new(), Vec::new());
+        for clobber in clobbers {
+            match clobber {
+                ClobberSpec::Register(r) => parts.push(format!("~{{{}}}", r.as_str())),
+                ClobberSpec::Memory => parts.push("~{memory}".into()),
             }
         }
+
+        parts.join(",")
     }
-
-    (parts.join(","), output_indices)
-}
-
-impl<'c> Lower<'c> for ast::expr::AsmExpr {
-    fn lower(
+    /// Lower a typed-arena inline asm expression.
+    pub(crate) fn lower_typed_asm(
         &self,
-        ctx: &CodegenContext<'_, 'c>,
+        asm_expr: &ast::expr::AsmExpr,
         block: &BlockRef<'c, 'c>,
         symtab: &mut ScopedSymbolTable<'c>,
     ) -> Option<Value<'c, 'c>> {
-        let loc = ctx.location();
+        let loc = self.location();
 
-        let mut operand_values: Vec<Value<'c, 'c>> = Vec::with_capacity(self.operands.len());
-        for operand in &self.operands {
-            operand_values.push(operand.lower(ctx, block, symtab)?);
-        }
+        let constraint_str = Self::build_constraint_string(&asm_expr.operands, &asm_expr.clobbers);
 
-        let (constraint_str, _output_indices) = derive_constraint_string(&self.constraints, ctx);
+        // Lower operand values that consume a runtime value (Input, InOut).
+        // ASM operands are typically simple variable references or integer literals.
+        let values: Vec<Value<'c, 'c>> = asm_expr
+            .operands
+            .iter()
+            .zip(&asm_expr.operand_values)
+            .filter(|(op, _)| matches!(op.kind, OperandKind::Input | OperandKind::InOut))
+            .map(|(_, v)| self.lower_asm_operand(block, symtab, v))
+            .collect::<Option<Vec<_>>>()?;
 
-        let bool_true = IntegerAttribute::new(IntegerType::new(ctx.mlir, 1).into(), 1).into();
+        let bool_true = IntegerAttribute::new(IntegerType::new(self.mlir, 1).into(), 1).into();
 
         let asm_op = OperationBuilder::new("llvm.inline_asm", loc)
             .add_attributes(&[
                 (
-                    Identifier::new(ctx.mlir, "asm_string"),
-                    StringAttribute::new(ctx.mlir, self.template.as_str()).into(),
+                    Identifier::new(self.mlir, "asm_string"),
+                    StringAttribute::new(self.mlir, asm_expr.template.as_str()).into(),
                 ),
                 (
-                    Identifier::new(ctx.mlir, "constraints"),
-                    StringAttribute::new(ctx.mlir, &constraint_str).into(),
+                    Identifier::new(self.mlir, "constraints"),
+                    StringAttribute::new(self.mlir, &constraint_str).into(),
                 ),
-                (Identifier::new(ctx.mlir, "has_side_effects"), bool_true),
+                (Identifier::new(self.mlir, "has_side_effects"), bool_true),
             ])
-            .add_operands(&operand_values)
-            .add_results(&[ctx.mlir.i64()])
+            .add_operands(&values)
+            .add_results(&[self.mlir.i64()])
             .build();
 
         match asm_op {
             Ok(op) => Some(block.append_op(op)),
             Err(e) => {
-                ctx.emit_internal(format!("llvm.inline_asm: {e}"));
+                self.emit_internal(format!("llvm.inline_asm: {e}"));
                 None
             }
         }
+    }
+
+    /// Lower a single ASM operand value (variable reference or integer literal).
+    fn lower_asm_operand(
+        &self,
+        block: &BlockRef<'c, 'c>,
+        symtab: &mut ScopedSymbolTable<'c>,
+        expr: &ast::Typed<ast::Expr>,
+    ) -> Option<Value<'c, 'c>> {
+        // Simple variable lookup.
+        if let ast::Expr::FnCall(call) = &expr.value
+            && call.path.segments.is_empty()
+            && call.args.is_none()
+            && let Some(val) = symtab.get(call.path.root.as_str())
+        {
+            return Some(val);
+        }
+        // Integer literal.
+        if let ast::Expr::Lit(lit) = &expr.value {
+            match lit {
+                ast::Literal::Number(n) => return Some(block.const_i64(self.mlir, *n as i64)),
+                ast::Literal::Int(n) => return Some(block.const_i64(self.mlir, *n as i64)),
+                _ => {}
+            }
+        }
+        self.emit_internal("unsupported ASM operand type (expected variable or literal)");
+        None
     }
 }
