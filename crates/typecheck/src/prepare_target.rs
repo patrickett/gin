@@ -53,7 +53,11 @@ pub fn materialize_default_binds(ast: &mut FileAst) -> Vec<Diagnostic> {
             continue;
         };
         const_binds.insert(name, Some(cv.clone()));
-        updates.push((name, cv.clone(), default_expr_value_expr(&cv)));
+        updates.push((
+            name,
+            cv.clone(),
+            default_expr_value_expr(&cv, bind.name_span),
+        ));
     }
 
     for (name, cv, expr_value) in updates {
@@ -269,7 +273,7 @@ fn materialize_type_static_access_typed(expr: &mut Typed<Expr>, expansions: &Typ
         let field = call.path.value.segments[0];
         if let Some(cv) = lookup_type_static_expansion(expansions, type_name, field) {
             *expr = Typed {
-                value: default_expr_value_expr(&cv),
+                value: default_expr_value_expr(&cv, expr.span_id),
                 ty: expr.ty.clone(),
                 const_value: Some(cv),
                 span_id: expr.span_id,
@@ -289,7 +293,10 @@ fn materialize_type_static_access_expr(expr: &mut Expr, expansions: &TypeStaticE
         let type_name = call.path.value.root;
         let field = call.path.value.segments[0];
         if let Some(cv) = lookup_type_static_expansion(expansions, type_name, field) {
-            *expr = default_expr_value_expr(&cv);
+            // No Typed wrapper available at this level — use the Expr directly.
+            // The caller (materialize_type_static_access_typed) will set the span on
+            // the wrapping Typed.
+            *expr = default_expr_value_expr(&cv, SpanId::INVALID);
             return;
         }
     }
@@ -362,7 +369,7 @@ fn materialize_type_static_access_expr(expr: &mut Expr, expansions: &TypeStaticE
     }
 }
 
-fn default_expr_value_expr(cv: &ConstValue) -> Expr {
+fn default_expr_value_expr(cv: &ConstValue, span_id: SpanId) -> Expr {
     match cv {
         ConstValue::String(s) => Expr::Lit(Literal::String(s.clone())),
         ConstValue::Int(n) => {
@@ -381,11 +388,11 @@ fn default_expr_value_expr(cv: &ConstValue) -> Expr {
                 let parts: Vec<_> = s.split('.').map(Intern::from_ref).collect();
                 let root = parts[0];
                 let segments = parts.get(1..).unwrap_or(&[]).to_vec();
-                ast::Spanned::new(ast::ModPath::new(root, segments), SpanId::INVALID)
+                ast::Spanned::new(ast::ModPath::new(root, segments), span_id)
             }),
             args: args
                 .iter()
-                .map(|a| Typed::infer(default_expr_value_expr(a), SpanId::INVALID))
+                .map(|a| Typed::infer(default_expr_value_expr(a, span_id), span_id))
                 .collect(),
         }),
         ConstValue::Record { fields } => {
@@ -394,8 +401,8 @@ fn default_expr_value_expr(cv: &ConstValue) -> Expr {
                 fields
                     .iter()
                     .map(|(name, v)| {
-                        let value = default_expr_value_expr(v);
-                        let typed = Typed::infer(value, SpanId::INVALID);
+                        let value = default_expr_value_expr(v, span_id);
+                        let typed = Typed::infer(value, span_id);
                         (*name, typed)
                     })
                     .collect(),
@@ -404,7 +411,7 @@ fn default_expr_value_expr(cv: &ConstValue) -> Expr {
         ConstValue::List(items) => Expr::List(
             items
                 .iter()
-                .map(|i| Typed::infer(default_expr_value_expr(i), SpanId::INVALID))
+                .map(|i| Typed::infer(default_expr_value_expr(i, span_id), span_id))
                 .collect(),
         ),
     }
