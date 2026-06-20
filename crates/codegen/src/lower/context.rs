@@ -7,7 +7,7 @@
 
 use std::{
     cell::{Cell, RefCell},
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fmt,
 };
 
@@ -186,9 +186,7 @@ pub struct CodegenContext<'a, 'c> {
     pub strings: StringRegistry,
     /// Maps variable name → its resolved Ty, used for field-access lowering.
     pub var_types: RefCell<HashMap<Intern<String>, Ty>>,
-    /// Names of mutable (`:`) local variables — their symtab value is an alloca ptr.
-    /// Cleared at the start of each top-level function lower.
-    pub mutable_slots: RefCell<HashSet<String>>,
+
     /// Element type of global constant arrays (top-level `:=` TupleLit binds), keyed by name.
     pub global_const_elems: RefCell<HashMap<String, Ty>>,
     pub symptoms: SymptomCollector,
@@ -237,7 +235,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
             symbol_table,
             strings: StringRegistry::new(),
             var_types: RefCell::new(HashMap::new()),
-            mutable_slots: RefCell::new(HashSet::new()),
+
             global_const_elems: RefCell::new(HashMap::new()),
             symptoms: SymptomCollector::new(),
             current_span: Cell::new(SpanId::INVALID),
@@ -400,13 +398,24 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     .get(slot)
                     .map(|(_, ty)| self.ty_to_mlir(ty))
                     .unwrap_or_else(|| self.mlir.i64());
+                let default_ty = Ty::Int {
+                    width: 64,
+                    signed: true,
+                    value: None,
+                    min: None,
+                    max: None,
+                };
+                let field_ty = payload_fields
+                    .get(slot)
+                    .map(|(_, ty)| ty)
+                    .unwrap_or(&default_ty);
                 let extracted = block.append_op(self.mlir.llvm_extractvalue(
                     subject_val,
                     (slot + 1) as i64,
                     field_mlir_ty,
                     self.location(),
                 ));
-                symtab.insert(param_name.as_str().to_string(), extracted);
+                symtab.insert(*param_name, extracted, field_ty.clone(), false);
             }
         }
     }

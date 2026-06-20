@@ -10,17 +10,34 @@ pub use mlir_ext::{
     ArithOps, AttributeExt, BlockExt, ContextExt, FPredicates, OperationBuilderExt, Predicates,
 };
 
+use internment::Intern;
 use melior::ir::Value;
 use std::collections::HashMap;
+use typecheck::ty::Ty;
+
+/// A variable binding in the scoped symbol table.
+#[derive(Debug, Clone)]
+pub struct Slot<'c> {
+    /// The MLIR value (SSA value or alloca pointer).
+    pub value: Value<'c, 'c>,
+    /// The resolved type of this variable.
+    pub ty: Ty,
+    /// True if this variable has a stack slot (declared `:type` without a value, or
+    /// assigned after its first bind). Rebinding stores through the existing pointer
+    /// instead of creating a new SSA value.
+    pub is_slot: bool,
+}
 
 /// Scoped symbol table for MLIR values during codegen.
 /// This replaces RuntimeSymbolTable to avoid expensive HashMap cloning on every scope entry.
 /// Instead, scopes are pushed onto a stack and popped when exiting, providing O(1) scope management.
+///
+/// Each entry stores the MLIR value, its resolved type, and whether it owns a stack slot —
+/// eliminating the need for separate `var_types` and `mutable_slots` tracking.
 #[derive(Clone)]
 pub struct ScopedSymbolTable<'c> {
-    /// Stack of scopes, where each scope is a HashMap from variable name to MLIR Value.
-    /// The last scope in the vec is the current (innermost) scope.
-    scopes: Vec<HashMap<String, Value<'c, 'c>>>,
+    /// Stack of scopes, where each scope maps interned variable names to Slot info.
+    scopes: Vec<HashMap<Intern<String>, Slot<'c>>>,
 }
 
 impl<'c> ScopedSymbolTable<'c> {
@@ -51,27 +68,31 @@ impl<'c> ScopedSymbolTable<'c> {
     }
 
     /// Insert a variable binding in the current (innermost) scope.
-    pub fn insert(&mut self, name: String, value: Value<'c, 'c>) {
+    pub fn insert(&mut self, name: Intern<String>, value: Value<'c, 'c>, ty: Ty, is_slot: bool) {
         if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name, value);
+            scope.insert(name, Slot { value, ty, is_slot });
         }
     }
 
     /// Look up a variable by name, searching from innermost to outermost scope.
-    /// Returns the value from the first scope that contains the name.
-    pub fn get(&self, name: &str) -> Option<Value<'c, 'c>> {
-        // Search scopes from innermost to outermost
+    /// Returns the Slot from the first scope that contains the name.
+    pub fn get(&self, name: &Intern<String>) -> Option<&Slot<'c>> {
         for scope in self.scopes.iter().rev() {
-            if let Some(value) = scope.get(name) {
-                return Some(*value);
+            if let Some(slot) = scope.get(name) {
+                return Some(slot);
             }
         }
         None
     }
 
-    /// Check if a variable exists in any scope.
-    pub fn contains(&self, name: &str) -> bool {
-        self.get(name).is_some()
+    /// Look up a variable and return just its MLIR value.
+    pub fn get_value(&self, name: &Intern<String>) -> Option<Value<'c, 'c>> {
+        self.get(name).map(|s| s.value)
+    }
+
+    /// Check if a variable exists and is a stack slot.
+    pub fn is_slot(&self, name: &Intern<String>) -> bool {
+        self.get(name).map_or(false, |s| s.is_slot)
     }
 
     /// Get the number of active scopes (always at least 1).

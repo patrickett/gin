@@ -71,9 +71,9 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
             let blk = region.first_block().unwrap();
 
             // Insert parameter names into the symbol table.
-            for (i, (name, _)) in bind.params.iter().enumerate() {
+            for (i, (name, param_ty)) in bind.params.iter().enumerate() {
                 let val: melior::ir::Value<'c, 'c> = blk.argument(i).unwrap().into();
-                symtab.insert(name.as_str().to_string(), val);
+                symtab.insert(*name, val, param_ty.clone(), false);
             }
 
             // Lower the body expression.
@@ -205,7 +205,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
 
                 // Look up the var in the symtab if no args (variable reference).
                 if (args.is_none() || args.as_ref().is_none_or(|a| a.is_empty()))
-                    && let Some(val) = symtab.get(fn_name)
+                    && let Some(val) = symtab.get_value(&target.0)
                 {
                     return Some(val);
                 }
@@ -235,59 +235,37 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     let loc = self.location();
                     let mlir_ty = self.ty_to_mlir(expr_ref.ty);
                     let slot = block.alloca_typed(self.mlir, mlir_ty, loc);
-                    let name_str = name.as_str().to_string();
-                    symtab.insert(name_str, slot);
-                    self.var_types
-                        .borrow_mut()
-                        .insert(*name, expr_ref.ty.clone());
-                    self.mutable_slots
-                        .borrow_mut()
-                        .insert(name.as_str().to_string());
+                    symtab.insert(*name, slot, expr_ref.ty.clone(), true);
                     Some(slot)
                 } else {
                     let val = self.lower_typed_expr(*body, block, symtab)?;
-                    let name_str = name.as_str().to_string();
-                    if self.mutable_slots.borrow().contains(&name_str) {
+                    if symtab.is_slot(name) {
                         // Rebind — store new value to existing slot.
-                        if let Some(ptr) = symtab.get(&name_str) {
+                        if let Some(ptr) = symtab.get_value(name) {
                             block.store_typed(self, ptr, val, self.location())?;
-                            // Update the var type in case it changed (e.g., narrowed).
-                            self.var_types
-                                .borrow_mut()
-                                .insert(*name, expr_ref.ty.clone());
                             Some(val)
                         } else {
                             self.emit_internal(format!(
                                 "mutable slot '{}' not found in symtab",
-                                name_str
+                                name.as_str()
                             ));
                             None
                         }
                     } else {
-                        symtab.insert(name_str, val);
-                        self.var_types
-                            .borrow_mut()
-                            .insert(*name, expr_ref.ty.clone());
-                        self.mutable_slots
-                            .borrow_mut()
-                            .insert(name.as_str().to_string());
+                        symtab.insert(*name, val, expr_ref.ty.clone(), true);
                         Some(val)
                     }
                 }
             }
             typecheck::TypedExprKind::Reassign { name, value } => {
-                let name_str = name.as_str().to_string();
                 let val = self.lower_typed_expr(*value, block, symtab)?;
-                if let Some(ptr) = symtab.get(&name_str) {
+                if let Some(ptr) = symtab.get_value(name) {
                     block.store_typed(self, ptr, val, self.location())?;
-                    self.var_types
-                        .borrow_mut()
-                        .insert(*name, expr_ref.ty.clone());
                     Some(val)
                 } else {
                     self.emit_internal(format!(
                         "cannot reassign '{}': not found in symtab",
-                        name_str
+                        name.as_str()
                     ));
                     None
                 }
@@ -358,7 +336,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
             }
             typecheck::TypedExprKind::SelfRef { target } => {
                 // Look up `self` in the symbol table.
-                symtab.get(target.0.as_str())
+                symtab.get_value(&target.0)
             }
             typecheck::TypedExprKind::Range { start, end } => {
                 let _s = self.lower_typed_expr(*start, block, symtab)?;

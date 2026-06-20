@@ -1,4 +1,5 @@
 use crate::prelude::*;
+use typecheck::ty::Ty;
 
 impl<'a, 'c> CodegenContext<'a, 'c> {
     /// Lower a typed-arena loop expression.
@@ -83,7 +84,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                         loop_blk_ref.append_op(arith_dialect::index_cast(iv, self.mlir.i64(), loc));
 
                     let mut loop_symtab = symtab.clone();
-                    loop_symtab.insert(variable.as_str().to_string(), iv_i64);
+                    loop_symtab.insert(*variable, iv_i64, Ty::i64(), false);
 
                     for stmt_id in &loop_expr.stmts {
                         self.lower_typed_expr(*stmt_id, &loop_blk_ref, &mut loop_symtab)?;

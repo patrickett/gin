@@ -84,7 +84,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         if let ast::Expr::FnCall(call) = &expr.value
             && call.path.segments.is_empty()
             && call.args.is_none()
-            && let Some(val) = symtab.get(call.path.root.as_str())
+            && let Some(val) = symtab.get_value(&call.path.root)
         {
             return Some(val);
         }
