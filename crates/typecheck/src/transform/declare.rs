@@ -707,6 +707,13 @@ fn resolve_declare_value(
                                 Some(all_tags),
                             )
                         })
+                        // TODO: if return_ty is None and the member name matches a
+                        // constructor parameter of the declaring tag (e.g. `allocator` in
+                        // `RawList(x, allocator: GlobalAllocator) has (..., allocator,)`),
+                        // infer the field type from that parameter's type annotation or
+                        // default-value type instead of falling back to Ty::Unit.
+                        //
+                        // This is like shorthand object syntax
                         .unwrap_or(Ty::Unit);
                     (m.name, Box::new(field_ty))
                 })
