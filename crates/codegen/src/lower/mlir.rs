@@ -9,6 +9,8 @@
 use ast::{ConstValue, HashFloat};
 
 use crate::prelude::*;
+use melior::ir::Region;
+use melior::ir::operation::OperationBuilder;
 
 impl<'a, 'c> CodegenContext<'a, 'c> {
     /// This returns a pointer to the global that can be used in function calls.
@@ -35,6 +37,65 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 .expect("result 0 should exist on append_operation")
                 .into(),
         )
+    }
+
+    /// Emit all registered string constants as `llvm.mlir.global` operations.
+    /// Called at the end of module construction to ensure all strings referenced
+    /// by `addressof_string_global` have corresponding global definitions.
+    pub fn emit_string_globals(&self, module: &melior::ir::Module<'c>) {
+        for (symbol_name, value) in self.strings.iter_symbols() {
+            let loc = self.location();
+
+            // Null-terminated string bytes
+            let with_nul = format!("{}\0", value);
+            let Ok(byte_len) = u32::try_from(with_nul.len()) else {
+                continue;
+            };
+
+            let i8_type = Type::from(melior::ir::r#type::IntegerType::new(self.mlir, 8));
+            let array_type = melior::dialect::llvm::r#type::array(i8_type, byte_len);
+
+            let linkage_attr = melior::dialect::llvm::attributes::linkage(
+                self.mlir,
+                melior::dialect::llvm::attributes::Linkage::Internal,
+            );
+
+            let global = match OperationBuilder::new("llvm.mlir.global", loc)
+                .add_attributes(&[
+                    (
+                        Identifier::new(self.mlir, "sym_name"),
+                        self.mlir.str_attr(&symbol_name),
+                    ),
+                    (
+                        Identifier::new(self.mlir, "global_type"),
+                        melior::ir::attribute::TypeAttribute::new(array_type).into(),
+                    ),
+                    (
+                        Identifier::new(self.mlir, "value"),
+                        melior::ir::attribute::StringAttribute::new(self.mlir, &with_nul).into(),
+                    ),
+                    (Identifier::new(self.mlir, "linkage"), linkage_attr),
+                    (
+                        Identifier::new(self.mlir, "constant"),
+                        melior::ir::Attribute::unit(self.mlir),
+                    ),
+                    (
+                        Identifier::new(self.mlir, "addr_space"),
+                        melior::ir::attribute::IntegerAttribute::new(
+                            melior::ir::r#type::IntegerType::new(self.mlir, 32).into(),
+                            0,
+                        )
+                        .into(),
+                    ),
+                ])
+                .add_regions([Region::new()])
+                .build()
+            {
+                Ok(op) => op,
+                Err(_) => continue,
+            };
+            let _ = module.body().append_operation(global);
+        }
     }
 
     /// Lower a compile-time [`ConstValue`] to an MLIR value.

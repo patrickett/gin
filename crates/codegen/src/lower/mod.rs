@@ -124,6 +124,8 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
             }
         }
 
+        ctx.emit_string_globals(&module);
+
         let symptoms = ctx.drain_symptoms();
         (Some(module), symptoms)
     }
