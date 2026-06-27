@@ -30,6 +30,9 @@ pub use parameter::{GroupParam, ParamConvention, ParamInfo, ParamSlot, Parameter
 pub mod type_decl;
 pub use type_decl::TypeNameExt;
 
+pub mod const_expr;
+pub use const_expr::ConstExpr;
+
 pub mod const_value;
 pub use const_value::{ConstValue, TypeConstraint};
 
