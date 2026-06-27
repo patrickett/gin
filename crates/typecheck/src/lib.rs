@@ -49,6 +49,9 @@ pub use prepare_target::{
 pub mod const_expr;
 pub use const_expr::Normalize;
 
+pub mod subst;
+pub use subst::DepSubst;
+
 pub mod range_bounds;
 pub use range_bounds::InclusiveBounds;
 
