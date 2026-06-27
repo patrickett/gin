@@ -5,14 +5,219 @@
 //! and produces the canonical [`Ty`] that other passes consume.
 
 use crate::ty::Ty;
-use ast::{DeclareValue, FnCall, InRangeBounds, ParameterKind, Parameters, TypeExpr};
+use ast::{DeclareValue, FnCall, InRangeBounds, ParamKind, ParameterKind, Parameters, TypeExpr};
 use internment::Intern;
 use std::collections::HashMap;
 
-pub fn resolve_type_expr_from_map(e: &TypeExpr, tag_types: &HashMap<Intern<String>, Ty>) -> Ty {
-    let empty: HashMap<Intern<String>, Ty> = HashMap::new();
-    resolve_type_expr_with_subst(e, tag_types, &empty, None)
+/// Bundles the context needed to resolve [`TypeExpr`] to [`Ty`].
+///
+/// Pass this through the resolution tree instead of threading individual parameters.
+/// The `subst`, `tag_params`, and `tag_decls` fields are optional — most callers
+/// only need `tag_types`.
+pub struct TypeEnv<'a> {
+    pub tag_types: &'a HashMap<Intern<String>, Ty>,
+    pub subst: Option<&'a HashMap<Intern<String>, Ty>>,
+    pub tag_params: Option<&'a HashMap<Intern<String>, Parameters>>,
+    pub tag_decls: Option<&'a ast::TagMap>,
 }
+
+impl<'a> TypeEnv<'a> {
+    pub fn new(tag_types: &'a HashMap<Intern<String>, Ty>) -> Self {
+        TypeEnv {
+            tag_types,
+            subst: None,
+            tag_params: None,
+            tag_decls: None,
+        }
+    }
+
+    pub fn with_subst(&self, subst: &'a HashMap<Intern<String>, Ty>) -> Self {
+        TypeEnv {
+            tag_types: self.tag_types,
+            subst: Some(subst),
+            tag_params: self.tag_params,
+            tag_decls: self.tag_decls,
+        }
+    }
+
+    pub fn with_tag_params(&self, tag_params: &'a HashMap<Intern<String>, Parameters>) -> Self {
+        TypeEnv {
+            tag_types: self.tag_types,
+            subst: self.subst,
+            tag_params: Some(tag_params),
+            tag_decls: self.tag_decls,
+        }
+    }
+
+    pub fn with_opt_tag_params(
+        &self,
+        tag_params: Option<&'a HashMap<Intern<String>, Parameters>>,
+    ) -> Self {
+        match tag_params {
+            Some(p) => self.with_tag_params(p),
+            None => TypeEnv {
+                tag_types: self.tag_types,
+                subst: self.subst,
+                tag_params: None,
+                tag_decls: self.tag_decls,
+            },
+        }
+    }
+
+    pub fn with_tag_decls(&self, tag_decls: &'a ast::TagMap) -> Self {
+        TypeEnv {
+            tag_types: self.tag_types,
+            subst: self.subst,
+            tag_params: self.tag_params,
+            tag_decls: Some(tag_decls),
+        }
+    }
+
+    /// Resolve a type surface expression to a [`Ty`].
+    pub fn resolve(&self, e: &TypeExpr) -> Ty {
+        match e {
+            TypeExpr::Nominal(name, _) => {
+                if let Some(subst) = self.subst
+                    && let Some(t) = subst.get(name)
+                {
+                    return t.clone();
+                }
+                // Unresolved lowercase names are type variables.
+                if let Some(c) = name.as_str().chars().next()
+                    && c.is_ascii_lowercase()
+                {
+                    return Ty::Opaque(*name);
+                }
+                self.tag_types
+                    .get(name)
+                    .cloned()
+                    .unwrap_or(Ty::Opaque(*name))
+            }
+            TypeExpr::Generic { name, params, .. } => {
+                if let Some(subst) = self.subst
+                    && params
+                        .iter()
+                        .all(|(_, k)| matches!(k, ParameterKind::Generic))
+                    && params.len() == 1
+                    && let Some((var, _)) = params.first()
+                    && let Some(ty) = subst.get(var)
+                {
+                    return ty.clone();
+                }
+                let empty = HashMap::new();
+                let local_subst = self.build_subst_for_generic(params, name);
+                let merged_subst = merge_subst(self.subst.unwrap_or(&empty), &local_subst);
+                let with_subst = self.with_subst(&merged_subst);
+                if !local_subst.is_empty()
+                    && let Some(tag_decls) = self.tag_decls
+                    && let Some(ast::DeclareValue::Interface(members)) =
+                        tag_decls.get(name).map(|d| &d.value)
+                {
+                    let fields: Vec<(Intern<String>, Box<Ty>)> = members
+                        .iter()
+                        .map(|m| {
+                            let ty = m
+                                .return_ty
+                                .as_ref()
+                                .map(|rt| with_subst.resolve(&rt.value))
+                                .unwrap_or(Ty::Unit);
+                            (m.name, Box::new(ty))
+                        })
+                        .collect();
+                    return Ty::Record {
+                        name: *name,
+                        fields,
+                    };
+                }
+                if params.is_empty()
+                    && let Some(tag_decls) = self.tag_decls
+                    && let Some(ast::DeclareValue::Alias(sp)) =
+                        tag_decls.get(name).map(|d| &d.value)
+                {
+                    return with_subst.resolve(&sp.value);
+                }
+                let base = self
+                    .tag_types
+                    .get(name)
+                    .cloned()
+                    .unwrap_or(Ty::Opaque(*name));
+                if merged_subst.is_empty() {
+                    base
+                } else {
+                    base.substitute(&merged_subst)
+                }
+            }
+            TypeExpr::Qualified(path) => self
+                .tag_types
+                .get(&path.root)
+                .cloned()
+                .unwrap_or(Ty::Opaque(path.root)),
+            TypeExpr::Literal(..) => Ty::Opaque(Intern::new(String::new())),
+            TypeExpr::Pointer(inner) => Ty::Ptr {
+                inner: Box::new(self.resolve(&inner.value)),
+            },
+            TypeExpr::Ref { inner, mutable } => Ty::Ref {
+                inner: Box::new(self.resolve(&inner.value)),
+                mutable: *mutable,
+            },
+            TypeExpr::Unit => Ty::Unit,
+            TypeExpr::InRange { bounds, .. } => resolve_in_range_bounds(bounds, self.tag_types),
+            TypeExpr::ListEmpty | TypeExpr::ListCons { .. } => Ty::Unit,
+            TypeExpr::Tuple(elems) => {
+                Ty::Tuple(elems.iter().map(|e| self.resolve(&e.value)).collect())
+            }
+        }
+    }
+
+    fn build_subst_for_generic(
+        &self,
+        use_site_params: &[(Intern<String>, ParameterKind)],
+        tag_name: &Intern<String>,
+    ) -> HashMap<Intern<String>, Ty> {
+        let mut out = HashMap::new();
+
+        if let Some(tag_params) = self.tag_params
+            && let Some(decl_params) = tag_params.get(tag_name)
+        {
+            let decl_entries: Vec<_> = decl_params.iter().collect();
+            for (i, (name, kind)) in use_site_params.iter().enumerate() {
+                let resolved = match kind {
+                    ParameterKind::Tagged(sp) if sp.value.is_type_surface() => {
+                        self.resolve(&sp.value)
+                    }
+                    ParameterKind::Generic => Ty::Opaque(*name),
+                    _ => continue,
+                };
+                if let Some((decl_name, _)) = decl_entries.get(i) {
+                    out.insert(**decl_name, resolved);
+                }
+            }
+            for (decl_name, decl_kind) in decl_entries.iter().skip(use_site_params.len()) {
+                if let ParameterKind::Default(expr) = decl_kind
+                    && let Some(te) = expr.value.as_type_expr()
+                    && te.is_type_surface()
+                {
+                    let default_ty = self.resolve(&te);
+                    out.insert(**decl_name, default_ty);
+                }
+            }
+        } else {
+            for (name, kind) in use_site_params {
+                let resolved = match kind {
+                    ParameterKind::Tagged(sp) if sp.value.is_type_surface() => {
+                        self.resolve(&sp.value)
+                    }
+                    ParameterKind::Generic => Ty::Opaque(*name),
+                    _ => continue,
+                };
+                out.insert(*name, resolved);
+            }
+        }
+        out
+    }
+}
+
+// ---- Internal helpers ----
 
 fn merge_subst(
     outer: &HashMap<Intern<String>, Ty>,
@@ -21,152 +226,6 @@ fn merge_subst(
     let mut merged = outer.clone();
     merged.extend(local.iter().map(|(k, v)| (*k, v.clone())));
     merged
-}
-
-/// Resolve a type-surface [`TypeExpr`] to a [`Ty`], substituting any type-variable
-/// names found in `subst`.
-///
-/// `subst` maps method-scoped type variable names (e.g. `x` in
-/// `Range[x].new(start x, end x) Range[x]`) to the `Ty` they currently stand for.
-/// During typechecking of the method body itself, the substitution is the identity
-/// (`x -> Ty::Opaque(x)`) so the same opaque tag flows through params, body, and
-/// return type. At call sites, `subst` can bind `x` to a concrete type (e.g.
-/// `Ty::Int`) to instantiate the signature.
-///
-/// `tag_params` maps tag names to their declaration parameters. Used to fill
-/// default type arguments (e.g. `a: LibcAllocator` in `Box(x, a: LibcAllocator)`)
-/// when fewer args are provided at the use site.
-pub fn resolve_type_expr_with_subst(
-    e: &TypeExpr,
-    tag_types: &HashMap<Intern<String>, Ty>,
-    subst: &HashMap<Intern<String>, Ty>,
-    tag_params: Option<&HashMap<Intern<String>, Parameters>>,
-) -> Ty {
-    resolve_type_expr_with_subst_opts(e, tag_types, subst, tag_params, None)
-}
-
-/// Like [`resolve_type_expr_with_subst`] but can rebuild generic record tags (e.g. `List(NamedTy)`)
-/// from declaration field surfaces so nested params like `Pointer(x)` pick up substitutions.
-pub fn resolve_type_expr_with_subst_opts(
-    e: &TypeExpr,
-    tag_types: &HashMap<Intern<String>, Ty>,
-    subst: &HashMap<Intern<String>, Ty>,
-    tag_params: Option<&HashMap<Intern<String>, Parameters>>,
-    tag_decls: Option<&ast::TagMap>,
-) -> Ty {
-    match e {
-        TypeExpr::Nominal(name, _) => {
-            if let Some(t) = subst.get(name) {
-                return t.clone();
-            }
-            // Unresolved lowercase names are type variables (e.g. `x` in `Linear(x) is x`).
-            // Return Opaque so generic substitution can replace them.
-            if let Some(c) = name.as_str().chars().next()
-                && c.is_ascii_lowercase()
-            {
-                return Ty::Opaque(*name);
-            }
-            tag_types.get(name).cloned().unwrap_or(Ty::Opaque(*name))
-        }
-        TypeExpr::Generic { name, params, .. } => {
-            if params
-                .iter()
-                .all(|(_, k)| matches!(k, ParameterKind::Generic))
-                && params.len() == 1
-                && let Some((var, _)) = params.first()
-                && let Some(ty) = subst.get(var)
-            {
-                return ty.clone();
-            }
-            let local_subst =
-                build_subst_for_generic(params, tag_types, subst, tag_params, name, tag_decls);
-            let merged_subst = merge_subst(subst, &local_subst);
-            if !local_subst.is_empty()
-                && let Some(ast::DeclareValue::Interface(members)) =
-                    tag_decls.and_then(|tags| tags.get(name)).map(|d| &d.value)
-            {
-                let fields: Vec<(Intern<String>, Box<Ty>)> = members
-                    .iter()
-                    .map(|m| {
-                        let ty = m
-                            .return_ty
-                            .as_ref()
-                            .map(|rt| {
-                                resolve_type_expr_with_subst_opts(
-                                    &rt.value,
-                                    tag_types,
-                                    &merged_subst,
-                                    tag_params,
-                                    tag_decls,
-                                )
-                            })
-                            .unwrap_or(Ty::Unit);
-                        (m.name, Box::new(ty))
-                    })
-                    .collect();
-                return Ty::Record {
-                    name: *name,
-                    fields,
-                };
-            }
-            if params.is_empty()
-                && let Some(ast::DeclareValue::Alias(sp)) =
-                    tag_decls.and_then(|tags| tags.get(name)).map(|d| &d.value)
-            {
-                return resolve_type_expr_with_subst_opts(
-                    &sp.value,
-                    tag_types,
-                    &merged_subst,
-                    tag_params,
-                    tag_decls,
-                );
-            }
-            let base = tag_types.get(name).cloned().unwrap_or(Ty::Opaque(*name));
-            if merged_subst.is_empty() {
-                base
-            } else {
-                base.substitute(&merged_subst)
-            }
-        }
-        TypeExpr::Qualified(path) => tag_types
-            .get(&path.root)
-            .cloned()
-            .unwrap_or(Ty::Opaque(path.root)),
-        TypeExpr::Literal(..) => Ty::Opaque(Intern::new(String::new())),
-        TypeExpr::Pointer(inner) => Ty::Ptr {
-            inner: Box::new(resolve_type_expr_with_subst_opts(
-                &inner.value,
-                tag_types,
-                subst,
-                tag_params,
-                tag_decls,
-            )),
-        },
-        TypeExpr::Ref { inner, mutable } => Ty::Ref {
-            inner: Box::new(resolve_type_expr_with_subst_opts(
-                &inner.value,
-                tag_types,
-                subst,
-                tag_params,
-                tag_decls,
-            )),
-            mutable: *mutable,
-        },
-
-        TypeExpr::Unit => Ty::Unit,
-        TypeExpr::InRange { bounds, .. } => resolve_in_range_bounds(bounds, tag_types),
-        TypeExpr::ListEmpty | TypeExpr::ListCons { .. } => Ty::Unit,
-        TypeExpr::Tuple(elems) => Ty::Tuple(
-            elems
-                .iter()
-                .map(|e| {
-                    resolve_type_expr_with_subst_opts(
-                        &e.value, tag_types, subst, tag_params, tag_decls,
-                    )
-                })
-                .collect(),
-        ),
-    }
 }
 
 fn resolve_in_range_bounds(bounds: &InRangeBounds, tag_types: &HashMap<Intern<String>, Ty>) -> Ty {
@@ -233,28 +292,23 @@ pub fn resolve_name_from_files(
             raw.insert(*k, &v.value);
         }
     }
-    // Look up the name in the raw declare map
     if let Some(dv) = raw.get(&name) {
         match dv {
             DeclareValue::Alias(spanned) => {
-                let empty: HashMap<Intern<String>, Ty> = HashMap::new();
-                return resolve_type_expr_with_subst(&spanned.value, &empty, &empty, None);
+                let empty = HashMap::new();
+                let env = TypeEnv::new(&empty);
+                return env.resolve(&spanned.value);
             }
             DeclareValue::Interface(members) => {
+                let empty = HashMap::new();
+                let env = TypeEnv::new(&empty);
                 let fields: Vec<(Intern<String>, Box<Ty>)> = members
                     .iter()
                     .map(|m| {
                         let ty = m
                             .return_ty
                             .as_ref()
-                            .map(|rt| {
-                                resolve_type_expr_with_subst(
-                                    &rt.value,
-                                    &HashMap::new(),
-                                    &HashMap::new(),
-                                    None,
-                                )
-                            })
+                            .map(|rt| env.resolve(&rt.value))
                             .unwrap_or(Ty::Unit);
                         (m.name, Box::new(ty))
                     })
@@ -274,75 +328,42 @@ pub fn resolve_name_from_files(
     Ty::Opaque(name)
 }
 
-fn build_subst_for_generic(
-    use_site_params: &[(Intern<String>, ParameterKind)],
-    tag_types: &HashMap<Intern<String>, Ty>,
-    outer_subst: &HashMap<Intern<String>, Ty>,
-    tag_params: Option<&HashMap<Intern<String>, Parameters>>,
-    tag_name: &Intern<String>,
-    tag_decls: Option<&ast::TagMap>,
-) -> HashMap<Intern<String>, Ty> {
-    let mut out = HashMap::new();
-
-    // Process use-site args by positional correspondence with declaration params.
-    if let Some(decl_params) = tag_params.and_then(|tp| tp.get(tag_name)) {
-        let decl_entries: Vec<_> = decl_params.iter().collect();
-
-        for (i, (name, kind)) in use_site_params.iter().enumerate() {
-            let resolved = match kind {
-                ParameterKind::Tagged(sp) if sp.value.is_type_surface() => {
-                    resolve_type_expr_with_subst_opts(
-                        &sp.value,
-                        tag_types,
-                        outer_subst,
-                        tag_params,
-                        tag_decls,
-                    )
-                }
-                ParameterKind::Generic => Ty::Opaque(*name),
-                _ => continue,
-            };
-            // Map the resolved type to the declaration param at this position.
-            if let Some((decl_name, _)) = decl_entries.get(i) {
-                out.insert(**decl_name, resolved);
-            }
-        }
-
-        // Fill defaults for any remaining declaration params that weren't provided.
-        for (decl_name, decl_kind) in decl_entries.iter().skip(use_site_params.len()) {
-            if let ParameterKind::Default(expr) = decl_kind
-                && let Some(te) = expr.value.as_type_expr()
-                && te.is_type_surface()
-            {
-                let default_ty = resolve_type_expr_with_subst_opts(
-                    &te,
-                    tag_types,
-                    outer_subst,
-                    tag_params,
-                    tag_decls,
-                );
-                out.insert(**decl_name, default_ty);
-            }
-        }
-    } else {
-        // No declaration params available — fall back to old behavior.
-        for (name, kind) in use_site_params {
-            let resolved = match kind {
-                ParameterKind::Tagged(sp) if sp.value.is_type_surface() => {
-                    resolve_type_expr_with_subst_opts(
-                        &sp.value,
-                        tag_types,
-                        outer_subst,
-                        tag_params,
-                        tag_decls,
-                    )
-                }
-                ParameterKind::Generic => Ty::Opaque(*name),
-                _ => continue,
-            };
-            out.insert(*name, resolved);
-        }
+/// Check that the provided type application arguments match the declaration's expected kinds.
+pub fn check_type_application(
+    declared_params: &[(Intern<String>, ParamKind)],
+    provided_params: &Parameters,
+) -> Result<(), String> {
+    if provided_params.len() != declared_params.len() {
+        return Err(format!(
+            "expected {} type arguments, found {}",
+            declared_params.len(),
+            provided_params.len()
+        ));
     }
 
-    out
+    for (i, ((_decl_name, decl_kind), (_, prov_kind))) in declared_params
+        .iter()
+        .zip(provided_params.iter())
+        .enumerate()
+    {
+        match (decl_kind, prov_kind) {
+            (ParamKind::Type, ParameterKind::Tagged(_))
+            | (ParamKind::Type, ParameterKind::Generic) => {}
+            (ParamKind::Type, _) => {
+                return Err(format!(
+                    "expected type argument for `{}`, found const value",
+                    declared_params[i].0.as_str()
+                ));
+            }
+            (ParamKind::Value(_), ParameterKind::Tagged(_))
+            | (ParamKind::Value(_), ParameterKind::Generic) => {}
+            (ParamKind::Value(_), _) => {
+                return Err(format!(
+                    "expected const argument for `{}`, found type",
+                    declared_params[i].0.as_str()
+                ));
+            }
+        }
+    }
+    Ok(())
 }

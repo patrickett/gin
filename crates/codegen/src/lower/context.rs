@@ -274,7 +274,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
 
     pub fn resolve_type_surface(&self, e: &TypeExpr) -> Option<Ty> {
         e.is_type_surface()
-            .then(|| typecheck::analysis::resolve_type_expr_from_map(e, &self.tag_types))
+            .then(|| typecheck::analysis::TypeEnv::new(&self.tag_types).resolve(e))
     }
 
     pub fn param_types<'b>(&self, bind: &'b Bind) -> Vec<(&'b Intern<String>, Ty)> {

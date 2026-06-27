@@ -15,7 +15,7 @@ use diagnostic::Diagnostic;
 
 use super::TransformCtx;
 use super::lower_ty::nominalize_explicit_ty_surface;
-use crate::analysis::{resolve_type_expr_from_map, resolve_type_expr_with_subst_opts};
+use crate::analysis::TypeEnv;
 use crate::compile_time_trait::{RESERVED_TRAITS, synthesize_reflectable_trait};
 use crate::ty::{Ty, UnionVariant};
 use crate::typed::{
@@ -24,10 +24,41 @@ use crate::typed::{
 use ast::parameter::Parameters;
 use ast::prelude::*;
 use ast::type_decl::TypeNameExt;
-use ast::{BindValue, ConstValue, DeclareValue, HashFloat, ImportSource, Literal, TypeExpr};
+use ast::{
+    BindValue, ConstValue, DeclareValue, HashFloat, ImportSource, Literal, ParamKind, TypeExpr,
+};
 
 use ast_format::declare::{BindFormatExt, DeclareFormatExt};
 use ast_format::type_expr::TypeExprFormatExt;
+
+impl TypedTag {
+    pub fn resolve_param_kinds(
+        &self,
+        tag_types: &HashMap<Intern<String>, Ty>,
+    ) -> Vec<(Intern<String>, ParamKind)> {
+        let Some(params) = &self.params else {
+            return Vec::new();
+        };
+        params
+            .iter()
+            .filter_map(|(name, kind)| {
+                let kind = match kind {
+                    ParameterKind::Generic => ParamKind::Type,
+                    ParameterKind::Tagged(sp) => {
+                        let ty = TypeEnv::new(tag_types).resolve(&sp.value);
+                        ParamKind::Value(Box::new(ty))
+                    }
+                    ParameterKind::Default(expr) => {
+                        let te = expr.value.as_type_expr()?;
+                        let ty = TypeEnv::new(tag_types).resolve(&te);
+                        ParamKind::Value(Box::new(ty))
+                    }
+                };
+                Some((*name, kind))
+            })
+            .collect()
+    }
+}
 
 /// Takes `&FileAst` and returns a `TypedFileAst` with declarations
 /// resolved and the file-level index populated. The expression arena is left
@@ -609,14 +640,13 @@ fn resolve_declare_value(
     cross_file_tag_types: &HashMap<TagId, Ty>,
     resolved: &HashMap<Intern<String>, Ty>,
 ) -> Ty {
+    let tag_types = resolved_types(resolved, cross_file_tag_types);
+    let env = TypeEnv::new(&tag_types)
+        .with_tag_params(tag_params)
+        .with_tag_decls(all_tags);
+
     match value {
-        DeclareValue::Alias(sp) => resolve_type_expr_with_subst_opts(
-            &sp.value,
-            &resolved_types(resolved, cross_file_tag_types),
-            &HashMap::new(),
-            Some(tag_params),
-            Some(all_tags),
-        ),
+        DeclareValue::Alias(sp) => env.resolve(&sp.value),
         DeclareValue::Union { variants } => {
             let literal_values: Option<Vec<ConstValue>> = variants
                 .iter()
@@ -636,25 +666,11 @@ fn resolve_declare_value(
                                 .iter()
                                 .map(|(name, kind)| {
                                     let ty = match kind {
-                                        ParameterKind::Tagged(sp) => {
-                                            resolve_type_expr_with_subst_opts(
-                                                &sp.value,
-                                                &resolved_types(resolved, cross_file_tag_types),
-                                                &HashMap::new(),
-                                                Some(tag_params),
-                                                Some(all_tags),
-                                            )
-                                        }
+                                        ParameterKind::Tagged(sp) => env.resolve(&sp.value),
                                         ParameterKind::Generic => Ty::Opaque(*name),
                                         ParameterKind::Default(expr) => {
                                             if let Some(te) = expr.value.as_type_expr() {
-                                                resolve_type_expr_with_subst_opts(
-                                                    &te,
-                                                    &resolved_types(resolved, cross_file_tag_types),
-                                                    &HashMap::new(),
-                                                    Some(tag_params),
-                                                    Some(all_tags),
-                                                )
+                                                env.resolve(&te)
                                             } else {
                                                 Ty::i64()
                                             }
@@ -698,15 +714,7 @@ fn resolve_declare_value(
                     let field_ty = m
                         .return_ty
                         .as_ref()
-                        .map(|rt| {
-                            resolve_type_expr_with_subst_opts(
-                                &rt.value,
-                                &resolved_types(resolved, cross_file_tag_types),
-                                &HashMap::new(),
-                                Some(tag_params),
-                                Some(all_tags),
-                            )
-                        })
+                        .map(|rt| env.resolve(&rt.value))
                         // TODO: if return_ty is None and the member name matches a
                         // constructor parameter of the declaring tag (e.g. `allocator` in
                         // `RawList(x, allocator: GlobalAllocator) has (..., allocator,)`),
@@ -726,25 +734,13 @@ fn resolve_declare_value(
         DeclareValue::When(when) => {
             if let Some(subject) = &when.subject {
                 if let Some(subject_te) = subject.value.as_type_expr() {
-                    let subject_ty = resolve_type_expr_with_subst_opts(
-                        &subject_te,
-                        &resolved_types(resolved, cross_file_tag_types),
-                        &HashMap::new(),
-                        Some(tag_params),
-                        Some(all_tags),
-                    );
+                    let subject_ty = env.resolve(&subject_te);
                     // Try to simplify via compile-time constant folding
                     for arm in &when.arms {
                         if let WhenArm::Is { body, .. } = arm
                             && let Some(body_te) = body.value.as_type_expr()
                         {
-                            let body_ty = resolve_type_expr_with_subst_opts(
-                                &body_te,
-                                &resolved_types(resolved, cross_file_tag_types),
-                                &HashMap::new(),
-                                Some(tag_params),
-                                Some(all_tags),
-                            );
+                            let body_ty = env.resolve(&body_te);
                             return body_ty;
                         }
                     }
@@ -788,7 +784,7 @@ fn resolve_return_type(
     _cross_file: &HashMap<TagId, Ty>,
 ) -> Ty {
     if let Some(sp) = &bind.return_tag {
-        let ty = resolve_type_expr_from_map(&sp.value, tag_types);
+        let ty = TypeEnv::new(tag_types).resolve(&sp.value);
         return nominalize_explicit_ty_surface(&sp.value, ty);
     }
     if let Some(name) = &bind.return_type_name {
@@ -820,11 +816,11 @@ fn resolve_param_types(
         .iter()
         .map(|(name, kind)| {
             let ty = match kind {
-                ParameterKind::Tagged(sp) => resolve_type_expr_from_map(&sp.value, tag_types),
+                ParameterKind::Tagged(sp) => TypeEnv::new(tag_types).resolve(&sp.value),
                 ParameterKind::Generic => Ty::Opaque(*name),
                 ParameterKind::Default(expr) => {
                     if let Some(te) = expr.value.as_type_expr() {
-                        resolve_type_expr_from_map(&te, tag_types)
+                        TypeEnv::new(tag_types).resolve(&te)
                     } else {
                         Ty::i64()
                     }

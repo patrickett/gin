@@ -299,10 +299,7 @@ impl<'a> FlowAnalyzer<'a> {
         self.in_scope.insert(bind.name);
         if let Some(ty) = bind.return_tag.as_ref().and_then(|sp| {
             if sp.value.is_type_surface() {
-                Some(crate::analysis::type_surface::resolve_type_expr_from_map(
-                    &sp.value,
-                    self.tag_types,
-                ))
+                Some(crate::analysis::type_surface::TypeEnv::new(self.tag_types).resolve(&sp.value))
             } else {
                 None
             }

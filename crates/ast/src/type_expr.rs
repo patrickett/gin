@@ -296,7 +296,7 @@ impl TypeExpr {
     ///
     /// This is a simplified version kept in `ast` for `pub(crate)` callers.
     /// The full resolution (with generics/substitution) lives in
-    /// `typecheck::analysis::type_surface::resolve_type_expr_from_map`.
+    /// `typecheck::analysis::type_surface::TypeEnv`.
     fn resolve_type(&self, tag_types: &HashMap<Intern<String>, Ty>) -> Ty {
         match self {
             TypeExpr::Nominal(name, _) => tag_types.get(name).cloned().unwrap_or(Ty::Opaque(*name)),

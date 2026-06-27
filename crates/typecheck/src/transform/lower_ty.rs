@@ -9,9 +9,7 @@
 use internment::Intern;
 use std::collections::HashMap;
 
-use crate::analysis::{
-    TyInfer, TyInferEnv, resolve_type_expr_from_map, resolve_type_expr_with_subst,
-};
+use crate::analysis::{TyInfer, TyInferEnv, TypeEnv};
 use ast::path::ModPath;
 use ast::prelude::*;
 use ast::{ConstExpr, ConstValue, HashFloat};
@@ -365,13 +363,10 @@ pub(crate) fn resolve_expr_type(
             })
             .unwrap_or(Ty::Opaque(Intern::new("List".to_string()))),
         Expr::Asm(_) => Ty::Unit,
-        Expr::TypeInRange(bounds) => resolve_type_expr_from_map(
-            &TypeExpr::InRange {
-                bounds: bounds.clone(),
-                span: ast::span::SpanId::INVALID,
-            },
-            tag_types,
-        ),
+        Expr::TypeInRange(bounds) => TypeEnv::new(tag_types).resolve(&TypeExpr::InRange {
+            bounds: bounds.clone(),
+            span: ast::span::SpanId::INVALID,
+        }),
         Expr::TypeNominal(name) | Expr::TypeGeneric { name, .. } => {
             tag_types.get(name).cloned().unwrap_or(Ty::Opaque(*name))
         }
@@ -453,7 +448,7 @@ pub(crate) fn bind_explicit_ty(bind: &Bind, tag_types: &HashMap<Intern<String>, 
     if let Some(sp) = &bind.return_tag
         && sp.value.is_type_surface()
     {
-        let ty = resolve_type_expr_with_subst(&sp.value, tag_types, &HashMap::new(), None);
+        let ty = TypeEnv::new(tag_types).resolve(&sp.value);
         return Some(nominalize_explicit_ty_surface(&sp.value, ty));
     }
     if let Some(name) = &bind.return_type_name {

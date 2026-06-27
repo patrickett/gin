@@ -4,9 +4,40 @@ use internment::Intern;
 use std::collections::{HashMap, HashSet};
 
 use crate::{ConstExpr, ConstValue, HashFloat};
+use std::fmt;
 
 /// One union variant: `(variant_name, [(field_name, field_type)])` in declaration order.
 pub type UnionVariant = (Intern<String>, Vec<(Intern<String>, Box<Ty>)>);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TyArg {
+    Type(Box<Ty>),
+    Const(ConstExpr),
+}
+
+impl fmt::Display for TyArg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TyArg::Type(ty) => write!(f, "{}", ty.format_for_hover()),
+            TyArg::Const(expr) => write!(f, "{expr}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ParamKind {
+    Type,
+    Value(Box<Ty>),
+}
+
+impl fmt::Display for ParamKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ParamKind::Type => write!(f, "type"),
+            ParamKind::Value(ty) => write!(f, "{}", ty.format_for_hover()),
+        }
+    }
+}
 
 /// Resolved type — the canonical representation after resolving declared type names against declarations.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

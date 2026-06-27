@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use internment::Intern;
 
-use crate::analysis::type_surface::{mangled_fn_call_name, resolve_type_expr_with_subst};
+use crate::analysis::type_surface::{TypeEnv, mangled_fn_call_name};
 use crate::ty::Ty;
 use ast::{
     BinOp, Binary, Bind, BindValue, ConstExpr, Expr, FnCall, HashFloat, Literal, ParameterKind,
@@ -187,7 +187,10 @@ impl TyInfer for Bind {
         if let Some(sp) = &self.return_tag
             && sp.value.is_type_surface()
         {
-            return resolve_type_expr_with_subst(&sp.value, env.tag_types, &subst, env.tag_params);
+            return TypeEnv::new(env.tag_types)
+                .with_subst(&subst)
+                .with_opt_tag_params(env.tag_params)
+                .resolve(&sp.value);
         }
 
         let mut locals: HashMap<Intern<String>, Ty> = match self.params.as_ref() {
@@ -212,8 +215,10 @@ impl TyInfer for Bind {
         if let Some(sp) = self.receiver_type_surface()
             && sp.value.is_type_surface()
         {
-            let recv_ty =
-                resolve_type_expr_with_subst(&sp.value, env.tag_types, &subst, env.tag_params);
+            let recv_ty = TypeEnv::new(env.tag_types)
+                .with_subst(&subst)
+                .with_opt_tag_params(env.tag_params)
+                .resolve(&sp.value);
             locals.insert(Intern::<String>::from_ref("self"), recv_ty);
         }
 
@@ -388,7 +393,9 @@ impl TyInfer for Expr {
                     bounds: bounds.clone(),
                     span: ast::span::SpanId::INVALID,
                 };
-                resolve_type_expr_with_subst(&te, env.tag_types, &HashMap::new(), env.tag_params)
+                TypeEnv::new(env.tag_types)
+                    .with_opt_tag_params(env.tag_params)
+                    .resolve(&te)
             }
             Expr::TypeNominal(..)
             | Expr::TypeQualified(_)
@@ -423,7 +430,10 @@ pub fn resolve_parameter_kind_with_subst(
     match kind {
         ParameterKind::Tagged(sp) => {
             if sp.value.is_type_surface() {
-                resolve_type_expr_with_subst(&sp.value, tag_types, subst, tag_params)
+                TypeEnv::new(tag_types)
+                    .with_subst(subst)
+                    .with_opt_tag_params(tag_params)
+                    .resolve(&sp.value)
             } else {
                 Ty::Opaque(Intern::<String>::from_ref("?"))
             }
