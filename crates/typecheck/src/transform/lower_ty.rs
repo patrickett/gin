@@ -14,7 +14,7 @@ use crate::analysis::{
 };
 use ast::path::ModPath;
 use ast::prelude::*;
-use ast::{ConstValue, HashFloat};
+use ast::{ConstExpr, ConstValue, HashFloat};
 
 use crate::ty::Ty;
 use crate::typed::{DefId, ExprId, TypedExprKind, TypedFileAst, VariantMap};
@@ -176,7 +176,7 @@ pub(crate) fn resolve_expr_type(
             );
             Ty::Array {
                 elem: Box::new(elem_ty),
-                size: 0,
+                size: ConstExpr::from(0),
             }
         }
         Expr::TupleGet { base, .. } => extract_element_type(&resolve_expr_type(

@@ -58,7 +58,7 @@ impl JsonSerializer {
             }
             Ty::Opaque(name) => serde_json::json!({ "kind": "Opaque", "name": name.as_str() }),
             Ty::Array { elem, size } => serde_json::json!({
-                "kind": "Array", "elem": Self::ty_to_json(elem), "length": size,
+                "kind": "Array", "elem": Self::ty_to_json(elem), "length": size.to_string(),
             }),
             Ty::Ptr { inner } => serde_json::json!({
                 "kind": "Ptr", "inner": Self::ty_to_json(inner),

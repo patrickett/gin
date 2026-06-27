@@ -3,7 +3,7 @@
 use internment::Intern;
 use std::collections::{HashMap, HashSet};
 
-use crate::{ConstValue, HashFloat};
+use crate::{ConstExpr, ConstValue, HashFloat};
 
 /// One union variant: `(variant_name, [(field_name, field_type)])` in declaration order.
 pub type UnionVariant = (Intern<String>, Vec<(Intern<String>, Box<Ty>)>);
@@ -35,7 +35,7 @@ pub enum Ty {
     /// Fixed-size stack-allocated array (`(T.new; N)`). The value is a `!llvm.ptr`.
     Array {
         elem: Box<Ty>,
-        size: usize,
+        size: ConstExpr,
     },
     /// Raw pointer — erases `T` from layout, kept only for type checking. Maps to `!llvm.ptr`.
     Ptr {
@@ -333,13 +333,13 @@ impl Ty {
                     },
                 ],
             ),
-            Ty::Array { elem, size } => Self::tag(
-                "Array",
-                vec![
-                    elem.to_const_value_inner(seen),
-                    ConstValue::Int(i128::try_from(*size).unwrap_or(0)),
-                ],
-            ),
+            Ty::Array { elem, size } => {
+                let size_val = match size {
+                    ConstExpr::Value(v) => v.clone(),
+                    _ => ConstValue::Int(0),
+                };
+                Self::tag("Array", vec![elem.to_const_value_inner(seen), size_val])
+            }
             Ty::Opaque(name) => Self::tag(
                 "Opaque",
                 vec![ConstValue::String(name.as_str().to_string())],
@@ -457,7 +457,7 @@ impl Ty {
             Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|t| t.substitute(subst)).collect()),
             Ty::Array { elem, size } => Ty::Array {
                 elem: Box::new(elem.substitute(subst)),
-                size: *size,
+                size: size.clone(),
             },
             Ty::Ptr { inner } => Ty::Ptr {
                 inner: Box::new(inner.substitute(subst)),

@@ -137,13 +137,16 @@ fn reflect_ty_to_const_value_inner(ty: &Ty, seen: &mut HashSet<Intern<String>>) 
                 },
             ],
         ),
-        Ty::Array { elem, size } => tag(
-            "Array",
-            vec![
-                reflect_ty_to_const_value_inner(elem, seen),
-                ConstValue::Int(i128::try_from(*size).unwrap_or(0)),
-            ],
-        ),
+        Ty::Array { elem, size } => {
+            let size_val = match size {
+                ast::ConstExpr::Value(v) => v.clone(),
+                _ => ConstValue::Int(0),
+            };
+            tag(
+                "Array",
+                vec![reflect_ty_to_const_value_inner(elem, seen), size_val],
+            )
+        }
         Ty::Opaque(name) => tag(
             "Opaque",
             vec![ConstValue::String(name.as_str().to_string())],

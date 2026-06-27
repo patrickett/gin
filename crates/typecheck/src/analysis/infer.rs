@@ -12,8 +12,8 @@ use internment::Intern;
 use crate::analysis::type_surface::{mangled_fn_call_name, resolve_type_expr_with_subst};
 use crate::ty::Ty;
 use ast::{
-    BinOp, Binary, Bind, BindValue, Expr, FnCall, HashFloat, Literal, ParameterKind, Parameters,
-    TagCall, WhenArm, WhenExpr,
+    BinOp, Binary, Bind, BindValue, ConstExpr, Expr, FnCall, HashFloat, Literal, ParameterKind,
+    Parameters, TagCall, WhenArm, WhenExpr,
 };
 
 /// Abstracts over different "local variable" type representations.
@@ -311,7 +311,7 @@ impl TyInfer for Expr {
                 let elem = init.infer_ty(env);
                 Ty::Array {
                     elem: Box::new(elem),
-                    size: *size,
+                    size: ConstExpr::from(*size as i128),
                 }
             }
 

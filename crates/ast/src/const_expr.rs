@@ -41,6 +41,16 @@ impl From<i128> for ConstExpr {
     }
 }
 
+impl TryFrom<&ConstExpr> for usize {
+    type Error = ();
+
+    fn try_from(expr: &ConstExpr) -> Result<usize, ()> {
+        expr.as_const_int()
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or(())
+    }
+}
+
 impl PartialEq<ConstValue> for ConstExpr {
     fn eq(&self, other: &ConstValue) -> bool {
         matches!(self, ConstExpr::Value(v) if v == other)

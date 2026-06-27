@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use crate::ConstExpr;
 use crate::expr::Literal;
 use crate::parameter::ParameterKind;
 use crate::path::ModPath;
@@ -202,7 +203,7 @@ impl TypeExpr {
                     let tail_ty = match subject_ty {
                         Some(Ty::Array { elem, .. }) => Ty::Array {
                             elem: elem.clone(),
-                            size: 0,
+                            size: ConstExpr::from(0),
                         },
                         Some(ty) => ty.clone(),
                         None => Ty::Opaque(Intern::new("list_tail".to_string())),
@@ -272,7 +273,7 @@ impl TypeExpr {
                     let tail_ty = match subject_ty {
                         Some(Ty::Array { elem, .. }) => Ty::Array {
                             elem: elem.clone(),
-                            size: 0,
+                            size: ConstExpr::from(0),
                         },
                         _ => tag_types
                             .get(&Intern::from_ref("List"))
