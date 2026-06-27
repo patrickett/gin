@@ -7,22 +7,44 @@ use crate::ConstValue;
 use internment::Intern;
 use std::fmt;
 
-/// A symbolic compile-time constant expression.
-///
-/// `ConstExpr` is a pure data type — it holds the shape of the expression without
-/// evaluating it. Evaluation / normalization is handled by a separate pass.
+/// A symbolic compile-time constant expression — unevaluated, in contrast with
+/// [`ConstValue`]. Evaluation/normalization is handled by a separate pass.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ConstExpr {
-    /// A known concrete value, e.g. `3`, `true`.
     Value(ConstValue),
-    /// A variable reference, e.g. `n`, `m` from type parameters.
     Var(Intern<String>),
-    /// Addition: `left + right`
     Add(Box<ConstExpr>, Box<ConstExpr>),
-    /// Subtraction: `left - right`
     Sub(Box<ConstExpr>, Box<ConstExpr>),
-    /// Multiplication: `left * right`
     Mul(Box<ConstExpr>, Box<ConstExpr>),
+}
+
+impl ConstExpr {
+    pub fn is_zero(&self) -> bool {
+        *self == ConstValue::ZERO
+    }
+
+    pub fn is_one(&self) -> bool {
+        *self == ConstValue::ONE
+    }
+
+    pub fn as_const_int(&self) -> Option<i128> {
+        match self {
+            ConstExpr::Value(ConstValue::Int(n)) => Some(*n),
+            _ => None,
+        }
+    }
+}
+
+impl From<i128> for ConstExpr {
+    fn from(n: i128) -> Self {
+        ConstExpr::Value(ConstValue::Int(n))
+    }
+}
+
+impl PartialEq<ConstValue> for ConstExpr {
+    fn eq(&self, other: &ConstValue) -> bool {
+        matches!(self, ConstExpr::Value(v) if v == other)
+    }
 }
 
 impl fmt::Display for ConstExpr {
@@ -48,7 +70,6 @@ impl fmt::Display for ConstExpr {
                             if i > 0 {
                                 write!(f, ", ")?;
                             }
-                            // Recursively display ConstValue args via ConstExpr for consistency
                             write!(f, "{}", ConstExpr::Value(arg.clone()))?;
                         }
                         write!(f, ")")?;

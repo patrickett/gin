@@ -46,6 +46,9 @@ pub use prepare_target::{
     materialize_when_declare_subjects_from_package, validate_when_declare_exhaustiveness,
 };
 
+pub mod const_expr;
+pub use const_expr::Normalize;
+
 pub mod range_bounds;
 pub use range_bounds::InclusiveBounds;
 

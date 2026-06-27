@@ -62,6 +62,9 @@ pub enum ConstValue {
 }
 
 impl ConstValue {
+    pub const ZERO: ConstValue = ConstValue::Int(0);
+    pub const ONE: ConstValue = ConstValue::Int(1);
+
     pub fn as_const_size_int(&self) -> Option<i128> {
         match self {
             ConstValue::Int(n) => Some(*n),
