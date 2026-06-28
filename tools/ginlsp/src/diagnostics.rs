@@ -205,8 +205,8 @@ mod tests {
     use std::path::Path;
     use tower_lsp::lsp_types::Url;
 
-    fn quickfix_kind(data: &Option<serde_json::Value>) -> Option<&str> {
-        data.as_ref()?.as_object()?.get("gincQuickFix")?.as_str()
+    fn quickfix_kind(data: Option<&serde_json::Value>) -> Option<&str> {
+        data?.as_object()?.get("gincQuickFix")?.as_str()
     }
 
     /// `UnknownSymbol` uses the same `add-import` quickfix as undefined binds.
@@ -405,7 +405,7 @@ mod tests {
         .at_span(span::Span::new(0, 0));
         let converter = DiagnosticConverter::new(String::new(), LineIndex::new(""));
         assert_eq!(
-            quickfix_kind(&converter.diagnostic_quickfix_data(&diag, None)),
+            quickfix_kind(converter.diagnostic_quickfix_data(&diag, None).as_ref()),
             Some("replace-binding")
         );
     }
@@ -416,7 +416,7 @@ mod tests {
             .at_span(span::Span::new(0, 0));
         let converter = DiagnosticConverter::new(String::new(), LineIndex::new(""));
         assert_eq!(
-            quickfix_kind(&converter.diagnostic_quickfix_data(&diag, None)),
+            quickfix_kind(converter.diagnostic_quickfix_data(&diag, None).as_ref()),
             Some("omit-unreachable-else")
         );
     }

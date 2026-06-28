@@ -496,7 +496,7 @@ fn const_for_def_id(def_id: DefId, typed: &TypedFileAst) -> Option<ast::ConstVal
 /// Try to extract a [`ConstValue`] from a pattern parameter's [`ParameterKind`].
 fn param_kind_const(kind: &ParameterKind) -> Option<ast::ConstValue> {
     match kind {
-        ParameterKind::Tagged(sp) => match &sp.value {
+        ParameterKind::Tagged(sp) | ParameterKind::ValueParam { ty: sp } => match &sp.value {
             ast::TypeExpr::Literal(lit, _) => match lit {
                 ast::Literal::Int(n) => Some(ast::ConstValue::Int(*n as i128)),
                 ast::Literal::Number(n) => Some(ast::ConstValue::Int(*n as i128)),

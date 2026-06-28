@@ -35,7 +35,7 @@ target := Target.default
         "target initializer should be comptime-classified"
     );
     let BindValue::Expr(expr) = &target.value else {
-        panic!("expected Expr bind, got {:?}", &target.value);
+        panic!("expected Expr bind, got {:?}", target.value);
     };
     let Expr::FnCall(call) = &expr.value else {
         panic!("expected Target.default, got {:?}", expr.value);

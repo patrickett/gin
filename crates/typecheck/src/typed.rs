@@ -6,6 +6,8 @@ use ast::parameter::{ParameterKind, Parameters};
 use ast::prelude::*;
 use ast::source::SourceExt;
 use ast::span::{SpanId, SpanTable, SubSpan};
+use ast::ty::ParamKind;
+use ast::ty::PredicateExpr;
 use diagnostic::Diagnostic;
 use internment::Intern;
 
@@ -286,6 +288,9 @@ pub struct TypedTag {
     /// Only entries for members that have a doc are present.
     /// Populated during stage_declare alongside `record_field_types`.
     pub record_field_docs: HashMap<Intern<String>, String>,
+    /// For record fields, field name → refinement predicate (e.g. `and < n`).
+    /// Only entries for fields that have a refinement are present.
+    pub record_field_refinements: HashMap<Intern<String>, PredicateExpr>,
     /// Formatted declaration text (e.g. "Bool is True or False"), for use in hover.
     pub declaration_text: String,
     /// Trait implementations provided via `and has TraitName(field: expr, ...)` clauses.
@@ -304,8 +309,10 @@ pub struct TypedBind {
     pub return_type: Ty,
     /// User-written return type before linear threading desugar.
     pub declared_return_type: Ty,
-    /// Resolved parameter types.
+    /// Resolved parameter types (name, resolved Ty).
     pub params: Vec<(Intern<String>, Ty)>,
+    /// Whether each parameter is a type or value parameter.
+    pub param_kinds: Vec<ParamKind>,
     /// Receiver type for methods, if any.
     pub receiver_type: Option<Ty>,
     /// Bind attributes (e.g., `#[inline]`, visibility).
@@ -1733,6 +1740,7 @@ fn signature_param_surface(signature: &str, name: &str) -> Option<String> {
 fn param_kind_surface_for_hover(kind: &ParameterKind) -> String {
     match kind {
         ParameterKind::Tagged(sp) => type_expr_surface_for_hover(&sp.value),
+        ParameterKind::ValueParam { ty } => type_expr_surface_for_hover(&ty.value),
         ParameterKind::Generic => String::new(),
         ParameterKind::Default(expr) => format!(": {:?}", expr.value),
     }
@@ -1746,6 +1754,7 @@ fn type_expr_surface_for_hover(expr: &TypeExpr) -> String {
                 .iter()
                 .map(|(key, kind)| match kind {
                     ParameterKind::Tagged(sp) => type_expr_surface_for_hover(&sp.value),
+                    ParameterKind::ValueParam { ty } => type_expr_surface_for_hover(&ty.value),
                     ParameterKind::Generic => key.as_str().to_string(),
                     ParameterKind::Default(expr) => format!("{}: {:?}", key.as_str(), expr.value),
                 })

@@ -16,17 +16,29 @@ use crate::expr::ExprFn;
 impl<'src, 't> TokenCursor<'src, 't> {
     /// Classify the tokens that may follow an already-consumed parameter `name`.
     ///
+    /// When `for_declare` is true (type declaration context), an `id Tag` form
+    /// with a capitalized tag produces [`ParameterKind::ValueParam`] instead of
+    /// [`ParameterKind::Tagged`], signaling a const-value parameter.
+    ///
     /// Recognises (in order):
-    /// - `id Tag` / `id Tag(args)` → tagged parameter (concrete type)
-    /// - `id id` → tagged type variable (the second `id` is treated as a type
-    ///   variable name, e.g. `start x`)
+    /// - `id Tag` / `id Tag(args)` → value param (declare) or tagged (bind)
+    /// - `id id` → tagged type variable (if lowercase) or tagged (if uppercase)
     /// - `id : expr` → default value
     /// - bare `id` → generic parameter
     pub fn parse_param_after_name(
         &mut self,
         expr_parser: ExprFn,
         name: Intern<String>,
+        for_declare: bool,
     ) -> Option<(Intern<String>, ParameterKind)> {
+        // In type declarations, `id Tag` with a capitalized tag is a value parameter.
+        if for_declare
+            && matches!(self.peek(), Some(Token::Tag(_)))
+            && let Some(sp) = self.parse_type_annotation(expr_parser)
+        {
+            return Some((name, ParameterKind::ValueParam { ty: Box::new(sp) }));
+        }
+
         if let Some(sp) = self.parse_type_annotation(expr_parser) {
             return Some((name, ParameterKind::Tagged(Box::new(sp))));
         }

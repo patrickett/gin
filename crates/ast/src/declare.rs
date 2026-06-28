@@ -102,6 +102,7 @@ impl std::fmt::Display for InterfaceMember {
                 write!(f, "{}", k.as_str())?;
                 match v {
                     ParameterKind::Tagged(sp) => write!(f, " {:?}", sp.value)?,
+                    ParameterKind::ValueParam { ty } => write!(f, " {:?} (value)", ty.value)?,
                     ParameterKind::Default(expr) => write!(f, ": {:?}", expr)?,
                     ParameterKind::Generic => {}
                 }

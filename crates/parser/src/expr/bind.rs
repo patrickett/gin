@@ -570,7 +570,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             _ => return None,
         };
 
-        let (name, kind) = self.parse_param_after_name(expr_parser, name)?;
+        let (name, kind) = self.parse_param_after_name(expr_parser, name, false)?;
         Some((name, kind, convention, group_name))
     }
 

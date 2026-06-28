@@ -3,8 +3,9 @@
 mod const_expr;
 pub mod pattern;
 pub use const_expr::{
-    check_const_bind_after_declare, eval_compile_time_bind_call, eval_compile_time_expr_public,
-    eval_compile_time_expr_with_env, fold_compile_time_binds, validate_compile_time_binds,
+    check_const_bind_after_declare, check_construction_refinements, eval_compile_time_bind_call,
+    eval_compile_time_expr_public, eval_compile_time_expr_with_env, fold_compile_time_binds,
+    validate_compile_time_binds,
 };
 
 /// Body inference — determines whether each linear parameter is threaded

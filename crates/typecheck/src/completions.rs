@@ -934,7 +934,9 @@ pub fn format_params(params: &Parameters) -> String {
             }
             match kind {
                 ParameterKind::Generic => name.to_string(),
-                ParameterKind::Tagged(_) => format!("{name}{kind}"),
+                ParameterKind::Tagged(_) | ParameterKind::ValueParam { .. } => {
+                    format!("{name}{kind}")
+                }
                 ParameterKind::Default(expr) => format!("{name}: {expr:?}"),
             }
         })

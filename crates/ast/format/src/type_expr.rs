@@ -84,6 +84,10 @@ pub(crate) fn write_type_expr_surface(e: &TypeExpr, f: &mut fmt::Formatter<'_>) 
                             write_type_expr_surface(te, f)?;
                         }
                     }
+                    ParameterKind::ValueParam { ty } => {
+                        write!(f, "{} ", k.as_str())?;
+                        write_type_expr_surface(&ty.value, f)?;
+                    }
                     ParameterKind::Default(expr) => {
                         write!(f, "{}: {expr:?}", k.as_str())?;
                     }
@@ -145,13 +149,13 @@ pub(crate) fn write_variant_shape_surface(e: &TypeExpr, f: &mut fmt::Formatter<'
                     ParameterKind::Tagged(sp) => {
                         let type_str = sp.value.format_surface();
                         if type_str == k.as_str() {
-                            // Bare type reference (e.g. `Order(Ordering)` where the
-                            // mangled field name matches the type name) — omit the
-                            // redundant field name label.
                             write!(f, "{}", type_str)?;
                         } else {
                             write!(f, "{} {}", k.as_str(), type_str)?;
                         }
+                    }
+                    ParameterKind::ValueParam { ty } => {
+                        write!(f, "{} {}", k.as_str(), ty.value.format_surface())?;
                     }
                     ParameterKind::Generic => write!(f, "{}", k.as_str())?,
                     ParameterKind::Default(expr) => write!(f, "{}: {:?}", k.as_str(), expr)?,

@@ -42,6 +42,11 @@ pub enum ParameterKind {
     /// Type annotation for this parameter (`name Type` with no value).
     Tagged(Box<Spanned<TypeExpr>>),
     Default(Box<Typed<Expr>>),
+    /// Value parameter in a type declaration, e.g. `n Nat` in `Vector(x, n Nat)`.
+    /// The wrapped type is the value's type (e.g. `Nat`).
+    ValueParam {
+        ty: Box<Spanned<TypeExpr>>,
+    },
 }
 
 impl std::fmt::Display for ParameterKind {
@@ -52,6 +57,7 @@ impl std::fmt::Display for ParameterKind {
                 write!(f, " {:?}", sp.value)
             }
             ParameterKind::Default(expr) => write!(f, ": {:?}", expr),
+            ParameterKind::ValueParam { ty } => write!(f, " {:?} (value)", ty.value),
         }
     }
 }

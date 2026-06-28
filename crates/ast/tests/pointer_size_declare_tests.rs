@@ -159,7 +159,7 @@ fn pointer_size_exhaustive_subject_ty_covers_architecture() {
         merged.tags.contains_key(&Intern::from_ref("Architecture")),
         "merged package should include Architecture from target.gin"
     );
-    let subject_ty = infer_when_declare_subject_ty(&when.subject, &merged.tags);
+    let subject_ty = infer_when_declare_subject_ty(when.subject.as_deref(), &merged.tags);
     assert!(
         subject_ty.is_some(),
         "Architecture union should be inferred for target.arch; subject={:?}",

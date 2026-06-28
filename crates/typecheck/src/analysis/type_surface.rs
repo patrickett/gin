@@ -185,18 +185,26 @@ impl<'a> TypeEnv<'a> {
         if let Some(tag_params) = self.tag_params
             && let Some(decl_params) = tag_params.get(tag_name)
         {
+            // Validate that use-site param kinds match declared param kinds.
+            let declared: Vec<(Intern<String>, ParamKind)> = decl_params
+                .iter()
+                .map(|(n, k)| (*n, param_kind_from_decl_parameter_kind(k)))
+                .collect();
+            let _ = check_type_application(&declared, use_site_params);
             let decl_entries: Vec<_> = decl_params.iter().collect();
             for (i, (name, kind)) in use_site_params.iter().enumerate() {
                 if let Some((decl_name, _)) = decl_entries.get(i) {
                     match kind {
-                        ParameterKind::Tagged(sp)
+                        ParameterKind::Tagged(sp) | ParameterKind::ValueParam { ty: sp }
                             if sp.value.is_type_surface() && is_literal_type(&sp.value) =>
                         {
                             if let Some(cv) = literal_as_const(&sp.value) {
                                 consts.insert(**decl_name, cv);
                             }
                         }
-                        ParameterKind::Tagged(sp) if sp.value.is_type_surface() => {
+                        ParameterKind::Tagged(sp) | ParameterKind::ValueParam { ty: sp }
+                            if sp.value.is_type_surface() =>
+                        {
                             let ty = self.resolve(&sp.value);
                             types.insert(**decl_name, ty);
                         }
@@ -219,14 +227,16 @@ impl<'a> TypeEnv<'a> {
         } else {
             for (name, kind) in use_site_params {
                 match kind {
-                    ParameterKind::Tagged(sp)
+                    ParameterKind::Tagged(sp) | ParameterKind::ValueParam { ty: sp }
                         if sp.value.is_type_surface() && is_literal_type(&sp.value) =>
                     {
                         if let Some(cv) = literal_as_const(&sp.value) {
                             consts.insert(*name, cv);
                         }
                     }
-                    ParameterKind::Tagged(sp) if sp.value.is_type_surface() => {
+                    ParameterKind::Tagged(sp) | ParameterKind::ValueParam { ty: sp }
+                        if sp.value.is_type_surface() =>
+                    {
                         let ty = self.resolve(&sp.value);
                         types.insert(*name, ty);
                     }
@@ -355,7 +365,7 @@ pub fn resolve_name_from_files(
 /// Check that the provided type application arguments match the declaration's expected kinds.
 pub fn check_type_application(
     declared_params: &[(Intern<String>, ParamKind)],
-    provided_params: &Parameters,
+    provided_params: &[(Intern<String>, ParameterKind)],
 ) -> Result<(), String> {
     if provided_params.len() != declared_params.len() {
         return Err(format!(
@@ -372,15 +382,17 @@ pub fn check_type_application(
     {
         match (decl_kind, prov_kind) {
             (ParamKind::Type, ParameterKind::Tagged(_))
-            | (ParamKind::Type, ParameterKind::Generic) => {}
-            (ParamKind::Type, _) => {
+            | (ParamKind::Type, ParameterKind::Generic)
+            | (ParamKind::Type, ParameterKind::Default(_)) => {}
+            (ParamKind::Type, ParameterKind::ValueParam { .. }) => {
                 return Err(format!(
                     "expected type argument for `{}`, found const value",
                     declared_params[i].0.as_str()
                 ));
             }
             (ParamKind::Value(_), ParameterKind::Tagged(_))
-            | (ParamKind::Value(_), ParameterKind::Generic) => {}
+            | (ParamKind::Value(_), ParameterKind::Generic)
+            | (ParamKind::Value(_), ParameterKind::ValueParam { .. }) => {}
             (ParamKind::Value(_), _) => {
                 return Err(format!(
                     "expected const argument for `{}`, found type",
@@ -390,6 +402,18 @@ pub fn check_type_application(
         }
     }
     Ok(())
+}
+
+/// Convert a tag declaration's [`ParameterKind`] to the resolved [`ParamKind`].
+/// The inner type for `Value` is a placeholder since only the Type-vs-Value
+/// discriminant is used during kind-checking.
+fn param_kind_from_decl_parameter_kind(kind: &ParameterKind) -> ParamKind {
+    match kind {
+        ParameterKind::Generic | ParameterKind::Tagged(_) | ParameterKind::Default(_) => {
+            ParamKind::Type
+        }
+        ParameterKind::ValueParam { ty: _ } => ParamKind::Value(Box::new(crate::ty::Ty::i64())),
+    }
 }
 
 fn is_literal_type(expr: &TypeExpr) -> bool {

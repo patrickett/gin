@@ -155,6 +155,9 @@ impl TypeExpr {
                         {
                             match kind {
                                 ParameterKind::Tagged(sp) => sp.value.resolve_type(tag_types),
+                                ParameterKind::ValueParam { ty } => {
+                                    ty.value.resolve_type(tag_types)
+                                }
                                 ParameterKind::Generic => Ty::Opaque(*param_name),
                                 ParameterKind::Default(_) => continue,
                             }

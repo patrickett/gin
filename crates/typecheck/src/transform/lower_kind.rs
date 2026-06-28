@@ -10,13 +10,14 @@ use ast::prelude::*;
 use ast::span::{SpanId, Spanned, SubSpan};
 use internment::Intern;
 
-use crate::ty::Ty;
-
+use crate::analysis::unify_type_args;
 use crate::compile_time_trait::{CompileTimeTraitRegistry, trait_field_for_ty};
+use crate::ty::Ty;
 use crate::typed::{
     DefId, ExprId, TypedExprKind, TypedFileAst, TypedIfExpr, TypedLoop, TypedLoopKind,
     TypedWhenExpr,
 };
+use ast::ty::{ParamKind, TyArg};
 
 use super::lower_exprs::lower_typed_expr;
 use super::lower_exprs::{ExprLowerScope, LocalEnv};
@@ -112,12 +113,43 @@ pub(crate) fn lower_expr_kind(
 
         Expr::FnCall(fn_call) => {
             let target = resolve_fn_call_target(&fn_call.path.value, scope.tag_types);
-            let args = fn_call.args.as_ref().map(|args| {
+            let lowered: Option<Vec<ExprId>> = fn_call.args.as_ref().map(|args| {
                 args.iter()
                     .map(|a| lower_typed_expr(typed, a, &scope.child(), env))
                     .collect()
             });
-            TypedExprKind::FnCall { target, args }
+            if let Some(ref arg_ids) = lowered
+                && let Some(bind) = typed.defs.get(&target)
+                && !bind.param_kinds.is_empty()
+                && bind.param_kinds.len() == arg_ids.len()
+            {
+                let expected: Vec<TyArg> = bind
+                    .param_kinds
+                    .iter()
+                    .map(|k| match k {
+                        ParamKind::Type => {
+                            TyArg::Type(Box::new(Ty::Opaque(Intern::new(String::new()))))
+                        }
+                        ParamKind::Value(_) => TyArg::Const(ConstExpr::from(0)),
+                    })
+                    .collect();
+                let actual: Vec<TyArg> = arg_ids
+                    .iter()
+                    .enumerate()
+                    .map(|(i, eid)| {
+                        let arg_ty = typed.exprs.ty[eid.as_usize()].clone();
+                        match bind.param_kinds.get(i).unwrap_or(&ParamKind::Type) {
+                            ParamKind::Type => TyArg::Type(Box::new(arg_ty)),
+                            ParamKind::Value(_) => TyArg::Const(ConstExpr::from(0)),
+                        }
+                    })
+                    .collect();
+                let _ = unify_type_args(&expected, &actual);
+            }
+            TypedExprKind::FnCall {
+                target,
+                args: lowered,
+            }
         }
 
         Expr::TagCall(tag_call) => {

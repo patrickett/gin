@@ -84,10 +84,10 @@ impl Backend {
         }
 
         // Single "Remove unnecessary comma" action — uses the cursor-context diagnostic.
-        if let Some(first) = cursor_comma_diags.first() {
-            if let Some(action) = Self::remove_unnecessary_comma_code_action(uri, first, &source) {
-                out.push(CodeActionOrCommand::CodeAction(action));
-            }
+        if let Some(first) = cursor_comma_diags.first()
+            && let Some(action) = Self::remove_unnecessary_comma_code_action(uri, first, &source)
+        {
+            out.push(CodeActionOrCommand::CodeAction(action));
         }
 
         // Collect ALL unnecessary comma diagnostics from the engine for the bulk action.
@@ -110,12 +110,11 @@ impl Backend {
             })
             .collect();
 
-        if !all_comma_diags.is_empty() {
-            if let Some(action) =
+        if !all_comma_diags.is_empty()
+            && let Some(action) =
                 Self::remove_all_unnecessary_commas_code_action(uri, &all_comma_diags)
-            {
-                out.push(CodeActionOrCommand::CodeAction(action));
-            }
+        {
+            out.push(CodeActionOrCommand::CodeAction(action));
         }
 
         // Add "fix all" action if there are multiple indented returns.

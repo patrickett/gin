@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use diagnostic::Diagnostic;
 use internment::Intern;
 
+use crate::solver::ConstraintEnv;
 use crate::ty::Ty;
 use ast::span::{HasSpanId, SpanId};
 use ast::{Bind, BindValue, ConstValue, Expr, FileAst, TypeConstraint};
@@ -28,6 +29,8 @@ pub struct FlowContext {
     constants: HashMap<Intern<String>, ConstValue>,
     /// Parent context for nested scopes (blocks, loops, etc.).
     parent: Option<Box<FlowContext>>,
+    /// Known constant constraints for refinement predicate solving.
+    pub constraint_env: ConstraintEnv,
     /// Track whether each variable is alive or moved.
     var_states: HashMap<Intern<String>, VarState>,
 }
@@ -37,6 +40,17 @@ impl PartialEq for FlowContext {
         self.constraints == other.constraints
             && self.constants == other.constants
             && self.var_states == other.var_states
+            && self.constraint_env == other.constraint_env
+    }
+}
+
+fn mentions_var(expr: &ast::ConstExpr, var: &Intern<String>) -> bool {
+    match expr {
+        ast::ConstExpr::Var(name) => name == var,
+        ast::ConstExpr::Add(l, r) | ast::ConstExpr::Sub(l, r) | ast::ConstExpr::Mul(l, r) => {
+            mentions_var(l, var) || mentions_var(r, var)
+        }
+        _ => false,
     }
 }
 
@@ -47,6 +61,7 @@ impl FlowContext {
             constants: HashMap::new(),
             parent: None,
             var_states: HashMap::new(),
+            constraint_env: ConstraintEnv::default(),
         }
     }
 
@@ -56,6 +71,7 @@ impl FlowContext {
             constants: HashMap::new(),
             parent: Some(Box::new(parent)),
             var_states: HashMap::new(),
+            constraint_env: ConstraintEnv::default(),
         }
     }
 
@@ -110,6 +126,26 @@ impl FlowContext {
     /// Reset a variable's constant value (on reassignment).
     pub fn reset_constant(&mut self, var: &Intern<String>) {
         self.constants.remove(var);
+    }
+
+    /// Record a known less-than fact: `lhs < rhs`.
+    pub fn add_known_lt(&mut self, lhs: ast::ConstExpr, rhs: ast::ConstExpr) {
+        self.constraint_env.known_lt.push((lhs, rhs));
+    }
+
+    /// Record a known equal fact: `lhs == rhs`.
+    pub fn add_known_eq(&mut self, lhs: ast::ConstExpr, rhs: ast::ConstExpr) {
+        self.constraint_env.known_eq.push((lhs, rhs));
+    }
+
+    /// Remove all facts involving a variable (on reassignment).
+    pub fn remove_facts_for(&mut self, var: &Intern<String>) {
+        self.constraint_env
+            .known_lt
+            .retain(|(l, r)| !mentions_var(l, var) && !mentions_var(r, var));
+        self.constraint_env
+            .known_eq
+            .retain(|(l, r)| !mentions_var(l, var) && !mentions_var(r, var));
     }
 
     pub fn local_constants(&self) -> impl Iterator<Item = (&Intern<String>, &ConstValue)> {

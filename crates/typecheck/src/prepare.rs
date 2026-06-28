@@ -7,7 +7,8 @@
 use flask::CompileTarget;
 
 use crate::analysis::{
-    check_const_bind_after_declare, fold_compile_time_binds, validate_compile_time_binds,
+    check_const_bind_after_declare, check_construction_refinements, fold_compile_time_binds,
+    validate_compile_time_binds,
 };
 use crate::asm_intrinsics::inject_asm_exprs;
 use crate::intrinsic_fold::inject_compiler_intrinsics;
@@ -34,6 +35,7 @@ pub fn prepare_file_ast(ast: &mut FileAst, entry: &CompileTarget) -> Vec<Diagnos
     diags.extend(check_const_bind_after_declare(ast));
     diags.extend(validate_compile_time_binds(ast));
     fold_compile_time_binds(ast);
+    diags.extend(check_construction_refinements(ast));
     diags.extend(apply_entry_target_merge(ast, entry));
     diags.extend(validate_when_declare_exhaustiveness(ast, &ast.tags));
     inject_compiler_intrinsics(ast);

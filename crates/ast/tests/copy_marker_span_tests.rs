@@ -42,7 +42,7 @@ fn copy_gin_documents_trait_override_opt_out() {
     let _opt_out_pos = source
         .find("Type.Copy(can_copy: False)")
         .expect("copy.gin should document trait override opt-out");
-    let file_ast = parser::cursor::TokenCursor::parse_source(&source);
+    let file_ast = parser::cursor::TokenCursor::parse_source(source);
     let typed = typecheck::transform::transform_declare(
         &file_ast,
         typecheck::FileId(0),

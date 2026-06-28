@@ -925,9 +925,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             ));
         }
 
-        // Shared helper supports `id Tag`, `id id` (type variable, e.g.
-        // `Range[x] has (start x, end x)`), and bare `id` (generic).
-        self.parse_param_after_name(expr_parser, name)
+        self.parse_param_after_name(expr_parser, name, true)
     }
 
     fn make_variant(

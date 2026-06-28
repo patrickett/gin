@@ -32,6 +32,11 @@ impl DeclareFormatExt for Declare {
                         out.push_str(&sp.value.format_surface());
                         Ok(())
                     }
+                    ParameterKind::ValueParam { ty } => {
+                        let _ = write!(&mut out, "{} ", k.as_str());
+                        out.push_str(&ty.value.format_surface());
+                        Ok(())
+                    }
                     kind => write!(&mut out, "{}{kind}", k.as_str()),
                 };
             }
@@ -84,6 +89,10 @@ impl BindFormatExt for Bind {
                     ParameterKind::Tagged(sp) => {
                         sig.push(' ');
                         sig.push_str(&sp.value.format_surface());
+                    }
+                    ParameterKind::ValueParam { ty } => {
+                        sig.push(' ');
+                        sig.push_str(&ty.value.format_surface());
                     }
                     ParameterKind::Generic => {}
                     ParameterKind::Default(expr) => {
@@ -177,6 +186,10 @@ fn format_declare_value(value: &DeclareValue, continuation_indent: usize) -> Str
                             ast::ParameterKind::Tagged(sp) => {
                                 out.push(' ');
                                 out.push_str(&sp.value.format_surface());
+                            }
+                            ast::ParameterKind::ValueParam { ty } => {
+                                out.push(' ');
+                                out.push_str(&ty.value.format_surface());
                             }
                             kind => {
                                 let _ = write!(&mut out, "{kind}");

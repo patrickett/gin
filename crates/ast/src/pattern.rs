@@ -109,7 +109,9 @@ impl TypeExpr {
             TypeExpr::Generic { name, params, .. } => {
                 name.as_str() == variant
                     && params.iter().all(|(n, k)| {
-                        n.is_pattern_wildcard() || matches!(k, ParameterKind::Generic)
+                        n.is_pattern_wildcard()
+                            || matches!(k, ParameterKind::Generic)
+                            || matches!(k, ParameterKind::ValueParam { .. })
                     })
             }
             _ => false,

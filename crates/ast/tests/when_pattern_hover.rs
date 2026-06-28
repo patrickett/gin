@@ -165,7 +165,7 @@ is_copy(x Type) Bool := when x is
     let false_pos = arm_start + arm.find("False").expect("False in pattern");
     let (line, character) = src.byte_offset_to_position(false_pos);
     let hover = typed
-        .hover_at(&src, line, character)
+        .hover_at(src, line, character)
         .expect("hover on False in Ref pattern");
     assert_eq!(
         hover, "```gin\nFalse\n```",
@@ -201,7 +201,7 @@ is_copy(x Type) Bool := when x is
     let true_pos = arm_start + arm.rfind("True").expect("True in then body");
     let (line, character) = src.byte_offset_to_position(true_pos);
     let hover = typed
-        .hover_at_with_package(&src, line, character, Some(&index))
+        .hover_at_with_package(src, line, character, Some(&index))
         .expect("hover on True in then body");
     assert_eq!(
         hover.module_prefix.as_deref(),

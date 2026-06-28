@@ -28,14 +28,14 @@ BigInt is in 0...18446744073709551615
 --- Alias for the 8-bit unsigned integer type.
 Byte is TinyInt
 ";
-    let typed = transform_source(&src);
+    let typed = transform_source(src);
 
     let line = "SignedInt is in -2147483648...2147483647";
     let line_start = src.find(line).expect("SignedInt line");
     let range_pos = line_start + line.find("2147483647").expect("end of range");
     let (line, character) = src.byte_offset_to_position(range_pos);
     let hover = typed
-        .hover_at(&src, line, character)
+        .hover_at(src, line, character)
         .expect("hover on SignedInt range");
 
     assert_eq!(

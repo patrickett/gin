@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use ast::ConstExpr;
+use ast::{ConstExpr, PredicateExpr};
 use internment::Intern;
 
 use crate::const_expr::Normalize;
@@ -19,7 +19,7 @@ pub enum Predicate {
 }
 
 /// Known constraints on const variables, used to resolve predicate checks.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConstraintEnv {
     pub known_eq: Vec<(ConstExpr, ConstExpr)>,
     pub known_lt: Vec<(ConstExpr, ConstExpr)>,
@@ -72,29 +72,43 @@ impl ConstraintEnv {
         let l = subst.apply_to_const(l).normalize();
         let r = subst.apply_to_const(r).normalize();
 
-        match (l, r) {
-            (ConstExpr::Value(a), ConstExpr::Value(b))
-                if a.as_const_size_int()
-                    .zip(b.as_const_size_int())
-                    .is_some_and(|(a, b)| a < b) =>
+        // Check literal comparison
+        if let (ConstExpr::Value(a), ConstExpr::Value(b)) = (&l, &r) {
+            if a.as_const_size_int()
+                .zip(b.as_const_size_int())
+                .is_some_and(|(a, b)| a < b)
             {
-                ProveResult::Proven
+                return ProveResult::Proven;
             }
-            (ConstExpr::Value(_), ConstExpr::Value(_)) => ProveResult::Disproven,
-            _ => ProveResult::Unknown,
+            return ProveResult::Disproven;
         }
+
+        // Check known_lt facts in the constraint env
+        if self.known_lt.iter().any(|(kl, kr)| &l == kl && &r == kr) {
+            return ProveResult::Proven;
+        }
+
+        ProveResult::Unknown
     }
 
     fn prove_eq(&self, l: &ConstExpr, r: &ConstExpr, subst: &DepSubst) -> ProveResult {
         let l = subst.apply_to_const(l).normalize();
         let r = subst.apply_to_const(r).normalize();
 
+        // Check literal comparison
         match (&l, &r) {
-            (ConstExpr::Value(a), ConstExpr::Value(b)) if a == b => ProveResult::Proven,
-            (ConstExpr::Value(_), ConstExpr::Value(_)) => ProveResult::Disproven,
-            _ if l == r => ProveResult::Proven,
-            _ => ProveResult::Unknown,
+            (ConstExpr::Value(a), ConstExpr::Value(b)) if a == b => return ProveResult::Proven,
+            (ConstExpr::Value(_), ConstExpr::Value(_)) => return ProveResult::Disproven,
+            _ if l == r => return ProveResult::Proven,
+            _ => {}
         }
+
+        // Check known_eq facts in the constraint env
+        if self.known_eq.iter().any(|(kl, kr)| &l == kl && &r == kr) {
+            return ProveResult::Proven;
+        }
+
+        ProveResult::Unknown
     }
 }
 
@@ -113,6 +127,36 @@ impl ProveResult {
             (ProveResult::Unknown, _) | (_, ProveResult::Unknown) => ProveResult::Unknown,
             _ => ProveResult::Disproven,
         }
+    }
+}
+
+/// Convert a parse-level `PredicateExpr` to a resolved `Predicate` with the field value
+/// as the explicit left-hand side. Variables in the right-hand side are resolved from
+/// `var_values`.
+pub fn predicate_expr_to_predicate(
+    expr: &PredicateExpr,
+    field_value: ConstExpr,
+    var_values: &HashMap<Intern<String>, ConstExpr>,
+) -> Predicate {
+    let resolve = |rhs: &ConstExpr| -> ConstExpr {
+        match rhs {
+            ConstExpr::Var(name) => var_values.get(name).cloned().unwrap_or(rhs.clone()),
+            _ => rhs.clone(),
+        }
+    };
+    match expr {
+        PredicateExpr::Lt(rhs) => Predicate::Lt(field_value, resolve(rhs)),
+        PredicateExpr::Gt(rhs) => Predicate::Gt(field_value, resolve(rhs)),
+        PredicateExpr::Le(rhs) => Predicate::Le(field_value, resolve(rhs)),
+        PredicateExpr::Ge(rhs) => Predicate::Ge(field_value, resolve(rhs)),
+        PredicateExpr::Eq(rhs) => Predicate::Eq(field_value, resolve(rhs)),
+        PredicateExpr::Ne(rhs) => Predicate::Ne(field_value, resolve(rhs)),
+        PredicateExpr::And(preds) => Predicate::And(
+            preds
+                .iter()
+                .map(|p| predicate_expr_to_predicate(p, field_value.clone(), var_values))
+                .collect(),
+        ),
     }
 }
 

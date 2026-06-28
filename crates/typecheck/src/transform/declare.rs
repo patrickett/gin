@@ -48,6 +48,10 @@ impl TypedTag {
                         let ty = TypeEnv::new(tag_types).resolve(&sp.value);
                         ParamKind::Value(Box::new(ty))
                     }
+                    ParameterKind::ValueParam { ty } => {
+                        let ty = TypeEnv::new(tag_types).resolve(&ty.value);
+                        ParamKind::Value(Box::new(ty))
+                    }
                     ParameterKind::Default(expr) => {
                         let te = expr.value.as_type_expr()?;
                         let ty = TypeEnv::new(tag_types).resolve(&te);
@@ -134,10 +138,12 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
         }
 
         // Extract field/method type annotations from `has` bodies.
-        let (record_field_types, record_field_docs) = match &declare.value {
+        let (record_field_types, record_field_docs, record_field_refinements) = match &declare.value
+        {
             DeclareValue::Interface(members) => {
                 let mut map = HashMap::new();
                 let mut doc_map = HashMap::new();
+                let mut refinement_map = HashMap::new();
                 for m in members {
                     // Store just the return/error type surface (without method name),
                     // matching how record fields store `field_name → type_annotation`.
@@ -165,6 +171,10 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                                 ast::ParameterKind::Tagged(sp) => {
                                     ty_surface.push(' ');
                                     ty_surface.push_str(&sp.value.format_surface());
+                                }
+                                ast::ParameterKind::ValueParam { ty } => {
+                                    ty_surface.push(' ');
+                                    ty_surface.push_str(&ty.value.format_surface());
                                 }
                                 ast::ParameterKind::Default(expr) => {
                                     let _ = write!(&mut ty_surface, ": {:?}", expr);
@@ -195,10 +205,14 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                     {
                         doc_map.insert(m.name, doc.value.clone());
                     }
+                    // Collect refinement predicate
+                    if let Some(refinement) = &m.refinement {
+                        refinement_map.insert(m.name, refinement.clone());
+                    }
                 }
-                (map, doc_map)
+                (map, doc_map, refinement_map)
             }
-            _ => (HashMap::new(), HashMap::new()),
+            _ => (HashMap::new(), HashMap::new(), HashMap::new()),
         };
 
         let typed_tag = TypedTag {
@@ -208,6 +222,7 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
             attributes: declare.attributes.clone(),
             doc_comment: declare.doc_comment.clone(),
             record_field_docs,
+            record_field_refinements,
             params: declare.params.clone(),
             record_field_types,
             declaration_text: declare.surface_text(),
@@ -289,6 +304,17 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
             &ctx.cross_file_tag_types,
         );
 
+        let param_kinds = declare
+            .params
+            .as_ref()
+            .map(|params| {
+                params
+                    .iter()
+                    .map(|(_, k)| param_kind_from_parameter_kind(k, &tag_types_by_name))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let typed_bind = TypedBind {
             name: *name,
             name_span: declare.name_span,
@@ -296,6 +322,7 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
             return_type: return_ty.clone(),
             declared_return_type: return_ty.clone(),
             params: param_types,
+            param_kinds,
             receiver_type: None,
             unassigned_decl: matches!(declare.value, BindValue::Unassigned),
             is_constant: declare.is_constant,
@@ -667,6 +694,7 @@ fn resolve_declare_value(
                                 .map(|(name, kind)| {
                                     let ty = match kind {
                                         ParameterKind::Tagged(sp) => env.resolve(&sp.value),
+                                        ParameterKind::ValueParam { ty } => env.resolve(&ty.value),
                                         ParameterKind::Generic => Ty::Opaque(*name),
                                         ParameterKind::Default(expr) => {
                                             if let Some(te) = expr.value.as_type_expr() {
@@ -817,6 +845,7 @@ fn resolve_param_types(
         .map(|(name, kind)| {
             let ty = match kind {
                 ParameterKind::Tagged(sp) => TypeEnv::new(tag_types).resolve(&sp.value),
+                ParameterKind::ValueParam { ty } => TypeEnv::new(tag_types).resolve(&ty.value),
                 ParameterKind::Generic => Ty::Opaque(*name),
                 ParameterKind::Default(expr) => {
                     if let Some(te) = expr.value.as_type_expr() {
@@ -829,6 +858,33 @@ fn resolve_param_types(
             (*name, ty)
         })
         .collect()
+}
+
+fn param_kind_from_parameter_kind(
+    kind: &ParameterKind,
+    tag_types: &HashMap<Intern<String>, Ty>,
+) -> ParamKind {
+    match kind {
+        ParameterKind::Generic => ParamKind::Type,
+        ParameterKind::Tagged(sp) => {
+            let ty = TypeEnv::new(tag_types).resolve(&sp.value);
+            ParamKind::Value(Box::new(ty))
+        }
+        ParameterKind::ValueParam { ty } => {
+            let ty = TypeEnv::new(tag_types).resolve(&ty.value);
+            ParamKind::Value(Box::new(ty))
+        }
+        ParameterKind::Default(expr) => {
+            if let Some(te) = expr.value.as_type_expr()
+                && te.is_type_surface()
+            {
+                let ty = TypeEnv::new(tag_types).resolve(&te);
+                ParamKind::Value(Box::new(ty))
+            } else {
+                ParamKind::Type
+            }
+        }
+    }
 }
 
 fn populate_resolved_imports(

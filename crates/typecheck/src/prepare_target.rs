@@ -462,10 +462,10 @@ pub fn const_binds_from_prepared_ast(ast: &FileAst) -> HashMap<Intern<String>, O
 
 /// Subject type for `when target.arch is` — the `Architecture` literal union when present.
 pub fn infer_when_declare_subject_ty(
-    subject: &Option<Box<Typed<Expr>>>,
+    subject: Option<&Typed<Expr>>,
     tags: &ast::TagMap,
 ) -> Option<Ty> {
-    let subject = subject.as_ref()?;
+    let subject = subject?;
     let is_target_arch = match &subject.value {
         Expr::RecordGet { field, .. } => field.as_str() == "arch",
         Expr::FnCall(call) if call.args.is_none() && call.path.root.as_str() == "target" => call
@@ -529,7 +529,7 @@ pub fn validate_when_declare_exhaustiveness(
         let DeclareValue::When(w) = &decl.value else {
             continue;
         };
-        let subject_ty = infer_when_declare_subject_ty(&w.subject, tag_source);
+        let subject_ty = infer_when_declare_subject_ty(w.subject.as_deref(), tag_source);
         let has_else = w.arms.iter().any(|a| matches!(a, WhenArm::Else(..)));
         let exhaustive = when_declare_is_exhaustive(subject_ty.as_ref(), &w.arms);
         if !has_else && !exhaustive {

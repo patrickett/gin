@@ -246,7 +246,7 @@ impl<'a> AstFormatter<'a> {
             self.buffer.push_str(name.as_str());
             match kind {
                 ParameterKind::Generic => {}
-                ParameterKind::Tagged(sp) => {
+                ParameterKind::Tagged(sp) | ParameterKind::ValueParam { ty: sp } => {
                     self.buffer.push(' ');
                     self.buffer.push_str(&type_text(&sp.value));
                 }
@@ -282,7 +282,7 @@ impl<'a> AstFormatter<'a> {
                     self.buffer.push(' ');
                     match fkind {
                         ParameterKind::Generic => {}
-                        ParameterKind::Tagged(sp) => {
+                        ParameterKind::Tagged(sp) | ParameterKind::ValueParam { ty: sp } => {
                             self.buffer.push_str(&type_text(&sp.value));
                         }
                         ParameterKind::Default(expr) => {

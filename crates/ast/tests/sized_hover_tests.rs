@@ -110,7 +110,7 @@ fn hover_primitive_and_w_in_compute_size() {
     let prim = arm_start + arm.find("Primitive").expect("Primitive");
     let (line, character) = src.byte_offset_to_position(prim);
     let hover = typed
-        .hover_at_with_package(&src, line, character, Some(&index))
+        .hover_at_with_package(src, line, character, Some(&index))
         .expect("hover on Primitive")
         .markdown;
     assert_eq!(
@@ -120,7 +120,7 @@ fn hover_primitive_and_w_in_compute_size() {
     let w_pos = arm_start + arm.find('w').expect("w binder");
     let (line, character) = src.byte_offset_to_position(w_pos);
     let hover = typed
-        .hover_at_with_package(&src, line, character, Some(&index))
+        .hover_at_with_package(src, line, character, Some(&index))
         .expect("hover on w")
         .markdown;
     assert_eq!(hover, "```gin\nw in 0...18446744073709551615\n```");
@@ -138,7 +138,7 @@ fn hover_compute_size_with_package_index_shows_type_not_i64() {
     let span = typed.span_table.get(bind.name_span);
     let (line, character) = src.byte_offset_to_position(span.start());
     let hover = typed
-        .hover_at_with_package(&src, line, character, Some(&index))
+        .hover_at_with_package(src, line, character, Some(&index))
         .expect("hover on compute_size")
         .markdown;
     assert_eq!(hover, "```gin\ncompute_size(x Type) Size\n```");
@@ -162,14 +162,14 @@ fn hover_record_pattern_fields_and_variant_head() {
     let fields_pos = arm_start + arm.find("fields").expect("fields");
     let (line, character) = src.byte_offset_to_position(fields_pos);
     let fields_hover = typed
-        .hover_at_with_package(&src, line, character, Some(&index))
+        .hover_at_with_package(src, line, character, Some(&index))
         .expect("hover fields")
         .markdown;
     assert_eq!(fields_hover, "```gin\nfields List(NamedTy)\n```");
     let record_pos = arm_start + arm.find("Record").expect("Record");
     let (line, character) = src.byte_offset_to_position(record_pos);
     let record_hover = typed
-        .hover_at_with_package(&src, line, character, Some(&index))
+        .hover_at_with_package(src, line, character, Some(&index))
         .expect("hover Record")
         .markdown;
     assert_eq!(
@@ -180,7 +180,7 @@ fn hover_record_pattern_fields_and_variant_head() {
     let sum_named_pos = arm_start + arm.find("sum_named").expect("sum_named");
     let (line, character) = src.byte_offset_to_position(sum_named_pos);
     let sum_hover = typed
-        .hover_at_with_package(&src, line, character, Some(&index))
+        .hover_at_with_package(src, line, character, Some(&index))
         .expect("hover sum_named")
         .markdown;
     assert_eq!(
@@ -201,7 +201,7 @@ fn hover_compute_size_shows_type_param_not_i64() {
     let span = typed.span_table.get(bind.name_span);
     let (line, character) = src.byte_offset_to_position(span.start());
     let hover = typed
-        .hover_at(&src, line, character)
+        .hover_at(src, line, character)
         .expect("hover on compute_size");
     assert_eq!(hover, "```gin\ncompute_size(x Type) Size\n```");
 }

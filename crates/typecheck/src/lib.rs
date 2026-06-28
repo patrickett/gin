@@ -53,7 +53,7 @@ pub mod subst;
 pub use subst::DepSubst;
 
 pub mod solver;
-pub use solver::{ConstraintEnv, Predicate, ProveResult};
+pub use solver::{ConstraintEnv, Predicate, ProveResult, predicate_expr_to_predicate};
 
 pub mod range_bounds;
 pub use range_bounds::InclusiveBounds;

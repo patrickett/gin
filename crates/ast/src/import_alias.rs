@@ -121,8 +121,10 @@ impl TypeExpr {
             }
             TypeExpr::Generic { params, .. } => {
                 for (_, kind) in params {
-                    if let crate::ParameterKind::Tagged(sp) = kind {
-                        sp.value.apply_alias(alias_map);
+                    match kind {
+                        crate::ParameterKind::Tagged(sp) => sp.value.apply_alias(alias_map),
+                        crate::ParameterKind::ValueParam { ty } => ty.value.apply_alias(alias_map),
+                        _ => {}
                     }
                 }
             }

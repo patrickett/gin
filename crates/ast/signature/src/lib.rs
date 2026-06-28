@@ -48,7 +48,7 @@ pub fn compute_aggregated_interface_hash(
 /// Hash a tag definition: name + shape + parameter signatures.
 fn hash_tag_def(hasher: &mut Sha256, name: &Intern<String>, decl: &Declare) {
     let _ = write!(hasher, "TAG:{}", name);
-    hash_parameters(hasher, &decl.params);
+    hash_parameters(hasher, decl.params.as_ref());
 
     match &decl.value {
         DeclareValue::Alias(sp) => {
@@ -59,7 +59,7 @@ fn hash_tag_def(hasher: &mut Sha256, name: &Intern<String>, decl: &Declare) {
             let _ = write!(hasher, ":INTERFACE:");
             for m in members {
                 let _ = write!(hasher, "{}:", m.name.as_str());
-                hash_parameters(hasher, &Some(m.params.clone()));
+                hash_parameters(hasher, Some(&m.params));
                 for (_k, conv) in &m.conventions {
                     let _ = write!(hasher, "{:?}", conv);
                 }
@@ -109,7 +109,7 @@ fn hash_tag_def(hasher: &mut Sha256, name: &Intern<String>, decl: &Declare) {
 /// Hash a def signature: name + parameter names/types. Body is excluded.
 fn hash_def_signature(hasher: &mut Sha256, name: &Intern<String>, bind: &Bind) {
     let _ = write!(hasher, "DEF:{}", name.as_str());
-    hash_parameters(hasher, &bind.params);
+    hash_parameters(hasher, bind.params.as_ref());
     // Intentionally skip params.1 (BindValue) — that's the body.
     if let Some(complexity) = bind.attributes.complexity.as_ref() {
         let _ = write!(hasher, ":COMPLEXITY:{}", complexity.display_label());
@@ -118,7 +118,7 @@ fn hash_def_signature(hasher: &mut Sha256, name: &Intern<String>, bind: &Bind) {
 }
 
 /// Hash an optional parameter list.
-fn hash_parameters(hasher: &mut Sha256, params: &Option<Parameters>) {
+fn hash_parameters(hasher: &mut Sha256, params: Option<&Parameters>) {
     match params {
         Some(parameters) => {
             let _ = write!(hasher, "(");
@@ -145,8 +145,11 @@ fn hash_param_kind(hasher: &mut Sha256, kind: &ParameterKind) {
             let _ = write!(hasher, "TAGGED:");
             hash_type_expr(hasher, &sp.value);
         }
+        ParameterKind::ValueParam { ty } => {
+            let _ = write!(hasher, "VALUE:");
+            hash_type_expr(hasher, &ty.value);
+        }
         ParameterKind::Default(_) => {
-            // Default expressions are part of the implementation, not the interface.
             let _ = write!(hasher, "DEFAULT");
         }
     }
@@ -375,7 +378,7 @@ impl From<TagShapeSigRepr> for TagShapeSig {
     }
 }
 
-fn extract_params(params: &Option<Parameters>) -> Vec<(String, ParamKindSig)> {
+fn extract_params(params: Option<&Parameters>) -> Vec<(String, ParamKindSig)> {
     match params {
         Some(parameters) => {
             let mut pairs: Vec<_> = parameters
@@ -394,6 +397,10 @@ fn extract_param_kind(kind: &ParameterKind) -> ParamKindSig {
         ParameterKind::Generic => ParamKindSig::Generic,
         ParameterKind::Tagged(sp) => {
             let sig = extract_type_expr_sig(&sp.value);
+            ParamKindSig::Tagged(sig)
+        }
+        ParameterKind::ValueParam { ty } => {
+            let sig = extract_type_expr_sig(&ty.value);
             ParamKindSig::Tagged(sig)
         }
         ParameterKind::Default(_) => ParamKindSig::Default,
@@ -500,7 +507,7 @@ impl FileAstSignatureExt for FileAst {
             tags.insert(
                 name.to_string(),
                 TagSignature {
-                    params: extract_params(&decl.params),
+                    params: extract_params(decl.params.as_ref()),
                     shape: extract_tag_shape(&decl.value),
                 },
             );
@@ -511,7 +518,7 @@ impl FileAstSignatureExt for FileAst {
             defs.insert(
                 name.to_string(),
                 DefSignature {
-                    params: extract_params(&bind.params),
+                    params: extract_params(bind.params.as_ref()),
                     complexity: bind.attributes.complexity.as_ref().map(ComplexitySig::from),
                 },
             );

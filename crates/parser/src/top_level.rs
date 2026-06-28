@@ -758,9 +758,8 @@ impl TokenCursor<'_, '_> {
                             // Anonymous tags in default expressions are handled
                             // by collect_type_surface_tags elsewhere.
                         }
-                        ParameterKind::Tagged(sp) => {
-                            let te = &sp.value;
-                            Self::collect_type_surface_tags(te, tags);
+                        ParameterKind::Tagged(sp) | ParameterKind::ValueParam { ty: sp } => {
+                            Self::collect_type_surface_tags(&sp.value, tags);
                         }
                         ParameterKind::Generic => {}
                     }

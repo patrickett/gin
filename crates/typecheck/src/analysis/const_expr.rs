@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::solver::{ConstraintEnv, ProveResult, predicate_expr_to_predicate};
 use diagnostic::Diagnostic;
 use internment::Intern;
 
@@ -12,8 +13,8 @@ use crate::analysis::pattern::{collect_pattern_bindings, pattern_matches};
 use crate::prepare_target::eval_type_static_member;
 use ast::declare::DeclareValue;
 use ast::expr::{Expr, FnCall, FormatPart, Literal, Typed};
-use ast::span::SpanId;
-use ast::{Bind, BindValue, FileAst, LoopEnum, Parameters, Return, WhenArm};
+use ast::span::{HasSpanId, SpanId};
+use ast::{Bind, BindValue, ConstExpr, FileAst, LoopEnum, Parameters, Return, WhenArm};
 use ast::{ConstValue, HashFloat};
 
 const MAX_COMPILE_TIME_DEPTH: usize = 512;
@@ -150,7 +151,7 @@ pub fn validate_compile_time_binds(ast: &FileAst) -> Vec<Diagnostic> {
         if !bind.is_compile_time {
             continue;
         }
-        let mut runtime_names = param_names(&bind.params);
+        let mut runtime_names = param_names(bind.params.as_ref());
 
         match &bind.value {
             BindValue::Expr(expr) => {
@@ -180,9 +181,143 @@ pub fn validate_compile_time_binds(ast: &FileAst) -> Vec<Diagnostic> {
 }
 
 /// Warnings for `const_bind_after_declare` parsed at parse time.
-/// Warnings collected at parse time (e.g. declare-then-`:=`).
 pub fn check_const_bind_after_declare(ast: &FileAst) -> Vec<Diagnostic> {
     ast.parse_warnings.clone()
+}
+
+/// Check field refinements on tag constructions (e.g. `Index(3, 5)` with `value and < n`).
+pub fn check_construction_refinements(ast: &FileAst) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+    let const_binds: HashMap<Intern<String>, Option<ConstValue>> = ast
+        .defs
+        .iter()
+        .map(|(name, bind)| {
+            let cv = match &bind.value {
+                BindValue::Expr(expr) => expr.const_value.clone(),
+                _ => None,
+            };
+            (*name, cv)
+        })
+        .collect();
+    for bind in ast.defs.values() {
+        if !bind.is_compile_time {
+            continue;
+        }
+        match &bind.value {
+            BindValue::Expr(expr) => {
+                walk_tag_refinements(&expr.value, &const_binds, ast, &mut diagnostics);
+            }
+            BindValue::Body { exprs, ret } => {
+                for expr in exprs {
+                    walk_tag_refinements(&expr.value, &const_binds, ast, &mut diagnostics);
+                }
+                if let Some(te) = ret.value.as_ref() {
+                    walk_tag_refinements(&te.value, &const_binds, ast, &mut diagnostics);
+                }
+            }
+            BindValue::Extern | BindValue::Unassigned => {}
+        }
+    }
+    diagnostics
+}
+
+fn walk_tag_refinements(
+    expr: &Expr,
+    const_binds: &HashMap<Intern<String>, Option<ConstValue>>,
+    ast: &FileAst,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    match expr {
+        Expr::TagCall(call) => {
+            let Some(decl) = ast.tags.get(&call.name) else {
+                return;
+            };
+            let DeclareValue::Interface(members) = &decl.value else {
+                return;
+            };
+            let span_table = &ast.span_table;
+
+            for (i, member) in members.iter().enumerate() {
+                let Some(refinement) = &member.refinement else {
+                    continue;
+                };
+                let Some(arg) = call.args.get(i) else {
+                    continue;
+                };
+                let Some(cv) = eval_compile_time_expr(&arg.value, const_binds, ast) else {
+                    continue;
+                };
+                let field_value = ConstExpr::Value(cv);
+                let predicate =
+                    predicate_expr_to_predicate(refinement, field_value, &HashMap::new());
+                match ConstraintEnv::default().prove(&predicate, &HashMap::new()) {
+                    ProveResult::Proven => {}
+                    ProveResult::Disproven => {
+                        diagnostics.push(
+                            Diagnostic::new(
+                                "dep-refinement-failed",
+                                format!("refinement `{:?}` is false", refinement),
+                            )
+                            .at_span_id(arg.span_id(), span_table),
+                        );
+                    }
+                    ProveResult::Unknown => {
+                        diagnostics.push(
+                            Diagnostic::new(
+                                "dep-refinement-unproven",
+                                format!("cannot prove `{:?}` in this context", refinement),
+                            )
+                            .at_span_id(arg.span_id(), span_table),
+                        );
+                    }
+                }
+            }
+        }
+        Expr::Binary(bin) => {
+            walk_tag_refinements(&bin.lhs.value, const_binds, ast, diagnostics);
+            walk_tag_refinements(&bin.rhs.value, const_binds, ast, diagnostics);
+        }
+        Expr::Bind(b) => {
+            let span_table = &ast.span_table;
+            if let Some(Some(cv)) = const_binds.get(&b.name)
+                && let ConstValue::Tag { name, args, .. } = cv
+                && let Some(decl) = ast.tags.get(name)
+                && let DeclareValue::Interface(members) = &decl.value
+            {
+                for (i, member) in members.iter().enumerate() {
+                    let Some(refinement) = &member.refinement else {
+                        continue;
+                    };
+                    let Some(arg_cv) = args.get(i) else { continue };
+                    let field_value = ConstExpr::Value(arg_cv.clone());
+                    let predicate =
+                        predicate_expr_to_predicate(refinement, field_value, &HashMap::new());
+                    match ConstraintEnv::default().prove(&predicate, &HashMap::new()) {
+                        ProveResult::Proven => {}
+                        ProveResult::Disproven => {
+                            diagnostics.push(
+                                Diagnostic::new(
+                                    "dep-refinement-failed",
+                                    format!("refinement `{:?}` is false", refinement),
+                                )
+                                .at_span_id(b.name_span, span_table),
+                            );
+                        }
+                        ProveResult::Unknown => {
+                            diagnostics.push(
+                                Diagnostic::new(
+                                    "dep-refinement-unproven",
+                                    format!("cannot prove `{:?}` in this context", refinement),
+                                )
+                                .at_span_id(b.name_span, span_table),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Try to evaluate an expression tree to a compile-time constant.
@@ -591,7 +726,7 @@ fn eval_matching_when_arm(
 }
 
 /// Collect parameter names from a bind's optional parameter list.
-fn param_names(params: &Option<Parameters>) -> HashSet<Intern<String>> {
+fn param_names(params: Option<&Parameters>) -> HashSet<Intern<String>> {
     match params {
         Some(params) => params.keys().copied().collect(),
         None => HashSet::new(),
