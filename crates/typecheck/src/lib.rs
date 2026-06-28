@@ -52,6 +52,9 @@ pub use const_expr::Normalize;
 pub mod subst;
 pub use subst::DepSubst;
 
+pub mod solver;
+pub use solver::{ConstraintEnv, Predicate, ProveResult};
+
 pub mod range_bounds;
 pub use range_bounds::InclusiveBounds;
 

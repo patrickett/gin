@@ -920,21 +920,15 @@ impl<'src, 't> TokenCursor<'src, 't> {
         let first = self.parse_expression();
         self.skip_newlines();
 
-        // TupleAlloc: (init; size)
+        // TupleAlloc: (init; size) — size must be compile-time-known
         if self.eat(&Token::ColonSemi) {
-            let size = match self.advance() {
-                Some((Token::Int(n), _)) => n as usize,
-                _ => {
-                    self.error("expected integer size after ';'", self.current_span());
-                    0
-                }
-            };
+            let size = self.parse_expression();
             self.expect(&Token::ParenClose);
             let end_span = self.last_consumed_span();
             return Typed::infer(
                 Expr::TupleAlloc {
                     init: Box::new(first),
-                    size,
+                    size: Box::new(size),
                 },
                 self.merge_span(start_span, end_span),
             );

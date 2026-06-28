@@ -9,6 +9,20 @@ use std::fmt;
 /// One union variant: `(variant_name, [(field_name, field_type)])` in declaration order.
 pub type UnionVariant = (Intern<String>, Vec<(Intern<String>, Box<Ty>)>);
 
+/// A parse-level predicate on a field value, e.g. `and < n`.
+/// The field value is the implicit left-hand side.
+/// The right-hand side is a const expression (variable ref or literal).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PredicateExpr {
+    Lt(ConstExpr),
+    Gt(ConstExpr),
+    Le(ConstExpr),
+    Ge(ConstExpr),
+    Eq(ConstExpr),
+    Ne(ConstExpr),
+    And(Vec<PredicateExpr>),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TyArg {
     Type(Box<Ty>),

@@ -1,3 +1,4 @@
+use crate::ConstExpr;
 use crate::parameter::ParameterKind;
 use crate::path::ModPath;
 use crate::span::SpanId;
@@ -235,10 +236,11 @@ pub enum Expr {
         inner: Box<Expr>,
         mutable: bool,
     },
-    /// Stack-allocate an array: `(init_expr; N)` — emits `llvm.alloca N×sizeof(elem)`.
+    /// Stack-allocate an array: `(init_expr; size_expr)` — emits
+    /// `llvm.alloca N×sizeof(elem)`. `size_expr` must be compile-time-known.
     TupleAlloc {
         init: Box<Typed<Expr>>,
-        size: usize,
+        size: Box<Typed<Expr>>,
     },
     /// Positional element read: `arr.N` — emits GEP + load.
     TupleGet {
@@ -303,6 +305,10 @@ pub enum Expr {
     /// Tuple literal: `(e1, e2, …)` — at least two elements.
     TupleLit(Vec<Typed<Expr>>),
     /// List literal: `[e1, e2, …]` — homogeneous compile-time list.
+    ///
+    /// TODO: Evolve into a general-purpose sequential type with automatic
+    /// stack (Ty::Array) vs heap (vec) inference based on usage (mutation,
+    /// runtime size, escaping scope). Flow analysis already tracks this.
     List(Vec<Typed<Expr>>),
     /// Destructure bind: `Tag(field: bind, …) := expr`
     Destructure {
@@ -372,6 +378,17 @@ impl Expr {
                 bounds: bounds.clone(),
                 span: SpanId::INVALID,
             }),
+            _ => None,
+        }
+    }
+
+    /// Extract a `ConstExpr` from an expression used as a `TupleAlloc` size.
+    /// Returns `None` for non-const expressions (runtime values).
+    pub fn as_size_const_expr(&self) -> Option<ConstExpr> {
+        match self {
+            Expr::Lit(Literal::Int(n)) => Some(ConstExpr::from(*n as i128)),
+            Expr::Lit(Literal::Number(n)) => Some(ConstExpr::from(*n as i128)),
+            Expr::Bind(b) => Some(ConstExpr::Var(b.name)),
             _ => None,
         }
     }

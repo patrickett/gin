@@ -92,7 +92,7 @@ impl<'c> ScopedSymbolTable<'c> {
 
     /// Check if a variable exists and is a stack slot.
     pub fn is_slot(&self, name: &Intern<String>) -> bool {
-        self.get(name).map_or(false, |s| s.is_slot)
+        self.get(name).is_some_and(|s| s.is_slot)
     }
 
     /// Get the number of active scopes (always at least 1).

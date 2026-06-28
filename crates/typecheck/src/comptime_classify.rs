@@ -203,7 +203,9 @@ fn expr_has_runtime_ops(expr: &Expr) -> bool {
         Expr::TupleLit(elems) | Expr::List(elems) => {
             elems.iter().any(|e| expr_has_runtime_ops(&e.value))
         }
-        Expr::TupleAlloc { init, .. } => expr_has_runtime_ops(&init.value),
+        Expr::TupleAlloc { init, size } => {
+            expr_has_runtime_ops(&init.value) || expr_has_runtime_ops(&size.value)
+        }
         Expr::TupleGet { base, .. } | Expr::RecordGet { base, .. } => {
             expr_has_runtime_ops(&base.value)
         }

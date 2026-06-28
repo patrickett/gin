@@ -27,6 +27,9 @@ pub use type_surface::{
 pub(crate) mod desugar_threads;
 pub use desugar_threads::stage_desugar_threads;
 
+mod unify;
+pub use unify::unify_type_args;
+
 mod infer;
 pub use infer::{
     LayeredLocals, LocalTypes, TyInfer, TyInferEnv, resolve_parameter_kind_with_subst,

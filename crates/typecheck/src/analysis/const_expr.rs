@@ -954,9 +954,16 @@ fn validate_typed_expr(
                 diagnostics,
             );
         }
-        Expr::TupleAlloc { init, .. } => {
+        Expr::TupleAlloc { init, size } => {
             validate_typed_expr(
                 init,
+                runtime_names,
+                compile_time_names,
+                span_table,
+                diagnostics,
+            );
+            validate_typed_expr(
+                size,
                 runtime_names,
                 compile_time_names,
                 span_table,

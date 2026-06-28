@@ -70,7 +70,8 @@ pub use blanket_impl::BlanketImpl;
 
 pub mod ty;
 pub use ty::{
-    ParamKind, Ty, TyArg, UnionVariant, VariantLookupResult, VariantMap, VariantMapEntry,
+    ParamKind, PredicateExpr, Ty, TyArg, UnionVariant, VariantLookupResult, VariantMap,
+    VariantMapEntry,
 };
 
 pub mod range_bounds;

@@ -18,6 +18,13 @@ impl DepSubst {
         }
     }
 
+    pub fn from_maps(
+        types: HashMap<Intern<String>, Ty>,
+        consts: HashMap<Intern<String>, ConstExpr>,
+    ) -> Self {
+        DepSubst { types, consts }
+    }
+
     /// Merge another substitution into this one.
     pub fn extend(&mut self, other: DepSubst) {
         self.types.extend(other.types);

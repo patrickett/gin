@@ -4,8 +4,12 @@
 //! `HashMap`. Resolution unfolds aliases, computes union variants and const-unions,
 //! and produces the canonical [`Ty`] that other passes consume.
 
+use crate::subst::DepSubst;
 use crate::ty::Ty;
-use ast::{DeclareValue, FnCall, InRangeBounds, ParamKind, ParameterKind, Parameters, TypeExpr};
+use ast::{
+    ConstExpr, DeclareValue, FnCall, InRangeBounds, Literal, ParamKind, ParameterKind, Parameters,
+    TypeExpr,
+};
 use internment::Intern;
 use std::collections::HashMap;
 
@@ -104,11 +108,12 @@ impl<'a> TypeEnv<'a> {
                 {
                     return ty.clone();
                 }
+                let local_dep = self.build_dep_subst_for_generic(params, name);
                 let empty = HashMap::new();
-                let local_subst = self.build_subst_for_generic(params, name);
-                let merged_subst = merge_subst(self.subst.unwrap_or(&empty), &local_subst);
-                let with_subst = self.with_subst(&merged_subst);
-                if !local_subst.is_empty()
+                let merged_types = merge_subst(self.subst.unwrap_or(&empty), &local_dep.types);
+                let with_subst = self.with_subst(&merged_types);
+                let any_subst = !local_dep.types.is_empty() || !local_dep.consts.is_empty();
+                if any_subst
                     && let Some(tag_decls) = self.tag_decls
                     && let Some(ast::DeclareValue::Interface(members)) =
                         tag_decls.get(name).map(|d| &d.value)
@@ -141,10 +146,10 @@ impl<'a> TypeEnv<'a> {
                     .get(name)
                     .cloned()
                     .unwrap_or(Ty::Opaque(*name));
-                if merged_subst.is_empty() {
+                if merged_types.is_empty() && local_dep.consts.is_empty() {
                     base
                 } else {
-                    base.substitute(&merged_subst)
+                    DepSubst::from_maps(merged_types, local_dep.consts).apply_to_ty(&base)
                 }
             }
             TypeExpr::Qualified(path) => self
@@ -169,27 +174,37 @@ impl<'a> TypeEnv<'a> {
         }
     }
 
-    fn build_subst_for_generic(
+    fn build_dep_subst_for_generic(
         &self,
         use_site_params: &[(Intern<String>, ParameterKind)],
         tag_name: &Intern<String>,
-    ) -> HashMap<Intern<String>, Ty> {
-        let mut out = HashMap::new();
+    ) -> DepSubst {
+        let mut types = HashMap::new();
+        let mut consts = HashMap::new();
 
         if let Some(tag_params) = self.tag_params
             && let Some(decl_params) = tag_params.get(tag_name)
         {
             let decl_entries: Vec<_> = decl_params.iter().collect();
             for (i, (name, kind)) in use_site_params.iter().enumerate() {
-                let resolved = match kind {
-                    ParameterKind::Tagged(sp) if sp.value.is_type_surface() => {
-                        self.resolve(&sp.value)
-                    }
-                    ParameterKind::Generic => Ty::Opaque(*name),
-                    _ => continue,
-                };
                 if let Some((decl_name, _)) = decl_entries.get(i) {
-                    out.insert(**decl_name, resolved);
+                    match kind {
+                        ParameterKind::Tagged(sp)
+                            if sp.value.is_type_surface() && is_literal_type(&sp.value) =>
+                        {
+                            if let Some(cv) = literal_as_const(&sp.value) {
+                                consts.insert(**decl_name, cv);
+                            }
+                        }
+                        ParameterKind::Tagged(sp) if sp.value.is_type_surface() => {
+                            let ty = self.resolve(&sp.value);
+                            types.insert(**decl_name, ty);
+                        }
+                        ParameterKind::Generic => {
+                            types.insert(**decl_name, Ty::Opaque(*name));
+                        }
+                        _ => continue,
+                    }
                 }
             }
             for (decl_name, decl_kind) in decl_entries.iter().skip(use_site_params.len()) {
@@ -198,22 +213,31 @@ impl<'a> TypeEnv<'a> {
                     && te.is_type_surface()
                 {
                     let default_ty = self.resolve(&te);
-                    out.insert(**decl_name, default_ty);
+                    types.insert(**decl_name, default_ty);
                 }
             }
         } else {
             for (name, kind) in use_site_params {
-                let resolved = match kind {
-                    ParameterKind::Tagged(sp) if sp.value.is_type_surface() => {
-                        self.resolve(&sp.value)
+                match kind {
+                    ParameterKind::Tagged(sp)
+                        if sp.value.is_type_surface() && is_literal_type(&sp.value) =>
+                    {
+                        if let Some(cv) = literal_as_const(&sp.value) {
+                            consts.insert(*name, cv);
+                        }
                     }
-                    ParameterKind::Generic => Ty::Opaque(*name),
+                    ParameterKind::Tagged(sp) if sp.value.is_type_surface() => {
+                        let ty = self.resolve(&sp.value);
+                        types.insert(*name, ty);
+                    }
+                    ParameterKind::Generic => {
+                        types.insert(*name, Ty::Opaque(*name));
+                    }
                     _ => continue,
-                };
-                out.insert(*name, resolved);
+                }
             }
         }
-        out
+        DepSubst::from_maps(types, consts)
     }
 }
 
@@ -366,4 +390,16 @@ pub fn check_type_application(
         }
     }
     Ok(())
+}
+
+fn is_literal_type(expr: &TypeExpr) -> bool {
+    matches!(expr, TypeExpr::Literal(..))
+}
+
+fn literal_as_const(expr: &TypeExpr) -> Option<ConstExpr> {
+    match expr {
+        TypeExpr::Literal(Literal::Int(n), _) => Some(ConstExpr::from(*n as i128)),
+        TypeExpr::Literal(Literal::Number(n), _) => Some(ConstExpr::from(*n as i128)),
+        _ => None,
+    }
 }

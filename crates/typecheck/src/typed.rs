@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use ast::ConstExpr;
 use ast::HashFloat;
 use ast::parameter::{ParameterKind, Parameters};
 use ast::prelude::*;
@@ -218,7 +219,7 @@ pub enum TypedExprKind {
 
     TupleAlloc {
         init: ExprId,
-        size: usize,
+        size: ConstExpr,
     },
     TupleGet {
         base: ExprId,

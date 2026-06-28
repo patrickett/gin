@@ -5,6 +5,7 @@
 //! sibling modules for tag resolution, type resolution, and when-arm
 //! lowering.
 
+use ast::ConstExpr;
 use ast::prelude::*;
 use ast::span::{SpanId, Spanned, SubSpan};
 use internment::Intern;
@@ -398,9 +399,13 @@ pub(crate) fn lower_expr_kind(
 
         Expr::TupleAlloc { init, size } => {
             let init_id = lower_typed_expr(typed, init, &scope.child(), env);
+            let size = size
+                .value
+                .as_size_const_expr()
+                .unwrap_or(ConstExpr::from(0));
             TypedExprKind::TupleAlloc {
                 init: init_id,
-                size: *size,
+                size,
             }
         }
 

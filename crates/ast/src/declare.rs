@@ -2,7 +2,7 @@ use crate::doc_comment::DocComment;
 use crate::expr::{Expr, Typed};
 use crate::parameter::Parameters;
 use crate::span::SpanId;
-use crate::ty::Ty;
+use crate::ty::{PredicateExpr, Ty};
 use internment::Intern;
 use std::hash::{Hash, Hasher};
 
@@ -76,6 +76,8 @@ pub struct InterfaceMember {
     /// The error type after `or`, e.g. `AllocError` in `... Slice(Byte) or AllocError`.
     pub error_ty: Option<Box<Spanned<TypeExpr>>>,
     pub doc_comment: Option<DocComment>,
+    /// Refinement predicate, e.g. `and < n` on a field.
+    pub refinement: Option<PredicateExpr>,
 }
 
 impl std::fmt::Display for InterfaceMember {
@@ -131,6 +133,7 @@ impl Hash for InterfaceMember {
         self.return_ty.hash(state);
         self.error_ty.hash(state);
         self.doc_comment.hash(state);
+        self.refinement.hash(state);
     }
 }
 

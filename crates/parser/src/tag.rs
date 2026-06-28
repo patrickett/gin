@@ -353,6 +353,20 @@ impl<'src, 't> TokenCursor<'src, 't> {
         &mut self,
         expr_parser: ExprFn,
     ) -> Option<(Intern<String>, ParameterKind, ast::SpanId)> {
+        // Integer literal as const argument: `Vector(Int, 3)`
+        if let Some(&Token::Int(n)) = self.peek() {
+            let span = self.peek_span()?;
+            self.advance();
+            let key = Intern::<String>::from_ref(&n.to_string());
+            return Some((
+                key,
+                ParameterKind::Tagged(Box::new(Spanned {
+                    value: ast::TypeExpr::Literal(ast::expr::Literal::Int(n), span),
+                    span_id: span,
+                })),
+                span,
+            ));
+        }
         if matches!(self.peek(), Some(&Token::Tag(_))) {
             let sp = self.parse_type_expr(expr_parser)?;
             let key = Intern::<String>::from_ref(sp.value.surface_mangle_name());

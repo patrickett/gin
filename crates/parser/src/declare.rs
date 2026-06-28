@@ -4,8 +4,8 @@ use crate::cursor::TokenCursor;
 use crate::expr::ExprFn;
 use ast::span::SpanId;
 use ast::{
-    Declare, DeclareValue, DocComment, Expr, InterfaceMember, ParameterKind, Parameters,
-    ProvidedTrait, Spanned, TypeExpr, Typed, Variant,
+    ConstExpr, Declare, DeclareValue, DocComment, Expr, InterfaceMember, ParameterKind, Parameters,
+    PredicateExpr, ProvidedTrait, Spanned, TypeExpr, Typed, Variant,
 };
 use i256::I256;
 use internment::Intern;
@@ -178,6 +178,21 @@ impl<'src, 't> TokenCursor<'src, 't> {
             // Parse optional return type and error type
             let (return_ty, error_ty) = self.parse_method_return_type(expr_parser);
 
+            // Parse optional refinement predicate: `and < n`, `and > 0 and < n`, etc.
+            let refinement = if self.eat(&Token::And) {
+                let mut preds = vec![self.parse_one_predicate()];
+                while self.eat(&Token::And) {
+                    preds.push(self.parse_one_predicate());
+                }
+                Some(if preds.len() == 1 {
+                    preds.into_iter().next().unwrap()
+                } else {
+                    PredicateExpr::And(preds)
+                })
+            } else {
+                None
+            };
+
             members.push(InterfaceMember {
                 name: member_name.0,
                 name_span: member_name.1,
@@ -186,6 +201,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 return_ty,
                 error_ty,
                 doc_comment: member_doc,
+                refinement,
             });
 
             // Separator: comma or newline
@@ -954,6 +970,67 @@ impl<'src, 't> TokenCursor<'src, 't> {
             };
         }
     }
+
+    /// Parse a single predicate after `and`, e.g. `< n`, `> 0`, `<= n + 1`.
+    fn parse_one_predicate(&mut self) -> PredicateExpr {
+        match self.peek() {
+            Some(Token::Less) => {
+                self.advance();
+                PredicateExpr::Lt(self.parse_predicate_rhs())
+            }
+            Some(Token::Greater) => {
+                self.advance();
+                PredicateExpr::Gt(self.parse_predicate_rhs())
+            }
+            Some(Token::LessEq) => {
+                self.advance();
+                PredicateExpr::Le(self.parse_predicate_rhs())
+            }
+            Some(Token::GreaterEq) => {
+                self.advance();
+                PredicateExpr::Ge(self.parse_predicate_rhs())
+            }
+            Some(Token::EqEq) => {
+                self.advance();
+                PredicateExpr::Eq(self.parse_predicate_rhs())
+            }
+            Some(Token::NotEq) => {
+                self.advance();
+                PredicateExpr::Ne(self.parse_predicate_rhs())
+            }
+            _ => {
+                self.error(
+                    "expected predicate after 'and' (e.g. `< n`, `> 0`)",
+                    self.current_span(),
+                );
+                PredicateExpr::Lt(ConstExpr::from(0))
+            }
+        }
+    }
+
+    /// Parse the right-hand side of a predicate: a name or literal.
+    fn parse_predicate_rhs(&mut self) -> ConstExpr {
+        self.skip_layout();
+        let Some((token, _span)) = self.advance() else {
+            self.error(
+                "expected value after predicate operator",
+                self.current_span(),
+            );
+            return ConstExpr::from(0);
+        };
+        match token {
+            Token::Id(name) => ConstExpr::Var(Intern::from_ref(name)),
+            Token::Tag(name) => ConstExpr::Var(Intern::from_ref(name)),
+            Token::Int(n) => ConstExpr::from(n as i128),
+            _ => {
+                self.error(
+                    "expected value after predicate operator",
+                    self.current_span(),
+                );
+                ConstExpr::from(0)
+            }
+        }
+    }
 }
 
 struct ParsedTraitFields {
@@ -987,7 +1064,7 @@ Allocator has (
         let DeclareValue::Interface(members) = &allocator.value else {
             panic!(
                 "Allocator should be parsed as Interface, got {:?}",
-                &allocator.value
+                allocator.value
             );
         };
 
