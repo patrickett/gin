@@ -44,6 +44,7 @@ impl TypedTag {
             .filter_map(|(name, kind)| {
                 let kind = match kind {
                     ParameterKind::Generic => ParamKind::Type,
+                    ParameterKind::Tagged(sp) if is_type_param_marker(&sp.value) => ParamKind::Type,
                     ParameterKind::Tagged(sp) => {
                         let ty = TypeEnv::new(tag_types).resolve(&sp.value);
                         ParamKind::Value(Box::new(ty))
@@ -860,12 +861,17 @@ fn resolve_param_types(
         .collect()
 }
 
+fn is_type_param_marker(ty: &TypeExpr) -> bool {
+    matches!(ty, TypeExpr::Nominal(name, _) if name.as_str() == "Type")
+}
+
 fn param_kind_from_parameter_kind(
     kind: &ParameterKind,
     tag_types: &HashMap<Intern<String>, Ty>,
 ) -> ParamKind {
     match kind {
         ParameterKind::Generic => ParamKind::Type,
+        ParameterKind::Tagged(sp) if is_type_param_marker(&sp.value) => ParamKind::Type,
         ParameterKind::Tagged(sp) => {
             let ty = TypeEnv::new(tag_types).resolve(&sp.value);
             ParamKind::Value(Box::new(ty))

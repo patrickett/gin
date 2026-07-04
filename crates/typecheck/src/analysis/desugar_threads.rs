@@ -82,7 +82,7 @@ fn emit_return_consumed_in_expr(
     if idx >= typed.exprs.kind.len() {
         return;
     }
-    if let TypedExprKind::FnCall { target, args } = &typed.exprs.kind[idx]
+    if let TypedExprKind::FnCall { target, args, .. } = &typed.exprs.kind[idx]
         && args.as_ref().is_none_or(|a| a.is_empty())
         && consumed.contains(&target.0)
     {
@@ -164,7 +164,7 @@ pub fn stage_desugar_threads(
         let expr_count = typed.exprs.kind.len();
         for idx in 0..expr_count {
             let kind = &typed.exprs.kind[idx];
-            if let TypedExprKind::FnCall { target, args } = kind {
+            if let TypedExprKind::FnCall { target, args, .. } = kind {
                 if target != target_def_id {
                     continue;
                 }

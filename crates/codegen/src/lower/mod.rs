@@ -191,7 +191,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     )
                 }
             },
-            typecheck::TypedExprKind::FnCall { target, args } => {
+            typecheck::TypedExprKind::FnCall { target, args, .. } => {
                 // Lower arguments first.
                 let lowered_args: Vec<Value<'c, 'c>> = args
                     .as_ref()

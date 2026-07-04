@@ -174,7 +174,9 @@ fn mark_consumed_if_local_ref(typed: &TypedFileAst, expr_id: ExprId, flow_ctx: &
         TypedExprKind::Bind { name, .. } => {
             flow_ctx.set_var_state(*name, VarState::Consumed);
         }
-        TypedExprKind::FnCall { target, args } if args.as_ref().is_none_or(|a| a.is_empty()) => {
+        TypedExprKind::FnCall { target, args, .. }
+            if args.as_ref().is_none_or(|a| a.is_empty()) =>
+        {
             flow_ctx.set_var_state(target.0, VarState::Consumed);
         }
         _ => {}
@@ -209,7 +211,7 @@ impl<'a> WalkExprCtx<'a> {
                 self.walk(lhs);
                 self.walk(rhs);
             }
-            TypedExprKind::FnCall { target, args } => {
+            TypedExprKind::FnCall { target, args, .. } => {
                 if args.as_ref().is_none_or(|a| a.is_empty())
                     && let Some(cv) = self.local_const_values.get(&target.0).cloned()
                 {
@@ -495,9 +497,14 @@ impl<'a> WalkExprCtx<'a> {
                     .copied()
                     .or_else(|| ordered_fields.get(j).copied());
                 if let Some(fname) = fname
-                    && let Some(cv) = self.typed.exprs.const_value[arg_id.as_usize()].clone()
+                    && let Some(value) = expr_const_expr(
+                        &self.typed.exprs.kind,
+                        &self.typed.exprs.const_value,
+                        self.local_const_values,
+                        *arg_id,
+                    )
                 {
-                    m.insert(fname, ConstExpr::Value(cv));
+                    m.insert(fname, value);
                 }
             }
             m
@@ -515,14 +522,17 @@ impl<'a> WalkExprCtx<'a> {
             let Some(refinement) = refinements.get(&field_name) else {
                 continue;
             };
-            let arg_cv = self.typed.exprs.const_value[arg_id.as_usize()].clone();
-            let Some(cv) = arg_cv else {
+            let Some(field_value) = expr_const_expr(
+                &self.typed.exprs.kind,
+                &self.typed.exprs.const_value,
+                self.local_const_values,
+                *arg_id,
+            ) else {
                 continue;
             };
-            let field_value = ConstExpr::Value(cv);
             // Include sibling field values so the refinement can reference them.
-            // e.g. for `Index(n) with value and < n`, the `value` refinement
-            // references the `n` field — we need both in var_values.
+            // e.g. for `value Int and < n` on a record field, the refinement
+            // references the sibling field `n` — we need both in var_values.
             let mut var_values: HashMap<Intern<String>, ConstExpr> = self
                 .local_const_values
                 .iter()
@@ -713,6 +723,31 @@ pub(crate) fn eval_const_from_expr(typed: &TypedFileAst, idx: usize) -> Option<C
     }
 }
 
+fn expr_const_expr(
+    kinds: &[TypedExprKind],
+    const_values: &[Option<ConstValue>],
+    lcv: &HashMap<Intern<String>, ConstValue>,
+    expr_id: ExprId,
+) -> Option<ConstExpr> {
+    let idx = expr_id.as_usize();
+    if let Some(cv) = const_values.get(idx).and_then(Clone::clone) {
+        return Some(ConstExpr::Value(cv));
+    }
+    match kinds.get(idx)? {
+        TypedExprKind::Lit(lit) => match lit {
+            Literal::Int(n) => Some(ConstExpr::Value(ConstValue::Int(*n as i128))),
+            Literal::Number(n) => Some(ConstExpr::Value(ConstValue::Int(*n as i128))),
+            _ => None,
+        },
+        TypedExprKind::FnCall { target, args, .. } if args.is_none() => lcv
+            .get(&target.0)
+            .cloned()
+            .map(ConstExpr::Value)
+            .or(Some(ConstExpr::Var(target.0))),
+        _ => None,
+    }
+}
+
 /// Extract comparison facts from an `if` subject expression.
 /// Returns `(lhs, rhs, is_lt)` tuples where `is_lt` means `lhs < rhs`
 /// and `!is_lt` means `lhs <= rhs`.
@@ -728,7 +763,7 @@ fn subject_comparison_facts(
     lcv: &HashMap<Intern<String>, ConstValue>,
 ) -> Vec<(ConstExpr, ConstExpr, bool)> {
     let idx = subject.as_usize();
-    let Some(TypedExprKind::FnCall { target, args }) = kinds.get(idx) else {
+    let Some(TypedExprKind::FnCall { target, args, .. }) = kinds.get(idx) else {
         return Vec::new();
     };
     let Some(arg_ids) = args.as_ref() else {
@@ -750,7 +785,7 @@ fn subject_comparison_facts(
                 Literal::Number(n) => Some(ConstExpr::Value(ConstValue::Int(*n as i128))),
                 _ => None,
             },
-            TypedExprKind::FnCall { target, args } if args.is_none() => {
+            TypedExprKind::FnCall { target, args, .. } if args.is_none() => {
                 let var = target.0;
                 if let Some(cv) = lcv.get(&var) {
                     Some(ConstExpr::Value(cv.clone()))

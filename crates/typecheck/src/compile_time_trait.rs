@@ -14,7 +14,8 @@ use ast::declare::ProvidedTrait;
 
 pub const REFLECTABLE_TRAIT: &str = "Reflectable";
 pub const REFLECTABLE_SHAPE_FIELD: &str = "shape";
-pub const RESERVED_TRAITS: &[&str] = &["Reflectable"];
+pub const COMPARABLE_TRAIT: &str = "Comparable";
+pub const RESERVED_TRAITS: &[&str] = &["Reflectable", "Comparable"];
 
 /// Registry of blanket impls and dispatch helpers.
 #[derive(Debug, Clone)]

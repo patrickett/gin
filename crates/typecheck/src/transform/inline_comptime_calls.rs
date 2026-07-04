@@ -110,7 +110,7 @@ fn inline_in_expr(
         }
     }
 
-    let TypedExprKind::FnCall { target, args } = typed.exprs.kind[idx].clone() else {
+    let TypedExprKind::FnCall { target, args, .. } = typed.exprs.kind[idx].clone() else {
         return changed;
     };
 

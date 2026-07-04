@@ -291,11 +291,26 @@ fn test_fn_call() {
     let expr = typed.exprs.get(main_body.as_usize()).expect("main body");
 
     match &expr.kind {
-        TypedExprKind::FnCall { target, args } => {
+        TypedExprKind::FnCall { target, args, .. } => {
             assert!(target.0.as_str().contains("add"), "target contains add");
             if let Some(a) = args {
                 assert_eq!(a.len(), 2, "two args");
             }
+        }
+        other => panic!("Expected FnCall, got {:?}", other),
+    }
+}
+
+#[test]
+fn contextual_type_argument_is_not_lowered_as_runtime_arg() {
+    let typed = transform_source("id_ty(x Type) Int: 1\nmain: id_ty(Int)");
+    let main_body = body_expr_id(&typed, "main").expect("main has body");
+    let expr = typed.exprs.get(main_body.as_usize()).expect("main body");
+
+    match &expr.kind {
+        TypedExprKind::FnCall { target, args, .. } => {
+            assert_eq!(target.0.as_str(), "id_ty");
+            assert_eq!(args.as_ref().map(Vec::len), Some(0));
         }
         other => panic!("Expected FnCall, got {:?}", other),
     }

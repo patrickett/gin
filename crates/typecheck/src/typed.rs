@@ -178,6 +178,9 @@ pub enum TypedExprKind {
     FnCall {
         target: DefId,
         args: Option<Vec<ExprId>>,
+        /// When the target has const-generic params, the return type after
+        /// substituting type/const arguments from the call site.
+        substituted_ty: Option<Ty>,
     },
     TagCall {
         variant_id: VariantId,

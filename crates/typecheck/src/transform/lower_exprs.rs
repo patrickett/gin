@@ -401,8 +401,17 @@ pub(crate) fn lower_typed_expr(
         &mut flaws,
     );
 
+    // If the expression has a substituted type (from const-generic param resolution),
+    // use it instead of the inferred type.
+    let final_ty = match &kind {
+        TypedExprKind::FnCall {
+            substituted_ty: Some(ty),
+            ..
+        } => ty.clone(),
+        _ => resolved_ty,
+    };
     typed.exprs.kind.push(kind);
-    typed.exprs.ty.push(resolved_ty);
+    typed.exprs.ty.push(final_ty);
     typed.exprs.span.push(expr.span_id);
     typed.exprs.const_value.push(const_val);
     typed.exprs.flaws.push(flaws);

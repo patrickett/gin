@@ -10,8 +10,8 @@ use ast::prelude::*;
 use ast::span::{SpanId, Spanned, SubSpan};
 use internment::Intern;
 
-use crate::analysis::unify_type_args;
-use crate::compile_time_trait::{CompileTimeTraitRegistry, trait_field_for_ty};
+use crate::analysis::{TypeEnv, unify_type_args};
+use crate::compile_time_trait::{COMPARABLE_TRAIT, CompileTimeTraitRegistry, trait_field_for_ty};
 use crate::ty::Ty;
 use crate::typed::{
     DefId, ExprId, TypedExprKind, TypedFileAst, TypedIfExpr, TypedLoop, TypedLoopKind,
@@ -19,11 +19,35 @@ use crate::typed::{
 };
 use ast::ty::{ParamKind, TyArg};
 
+/// Comparison operator names that `<`, `<=`, `>`, `>=` desugar to.
+const COMPARISON_OPS: [&str; 4] = ["lt", "le", "gt", "ge"];
+
 use super::lower_exprs::lower_typed_expr;
 use super::lower_exprs::{ExprLowerScope, LocalEnv};
 use super::lower_tag::{resolve_discriminant, resolve_tag_call_variant};
 use super::lower_ty::{annotate_literal_union_literal, bind_explicit_ty, resolve_fn_call_target};
 use super::lower_when::lower_all_when_arms;
+
+/// If `target` is a comparison operator and `Comparable` is imported,
+/// return the `Bool` type to use as the call's resolved type.
+fn resolve_comparison_call(
+    target_name: &str,
+    _first_arg: &Typed<Expr>,
+    typed: &TypedFileAst,
+    scope: &ExprLowerScope<'_>,
+) -> Option<Ty> {
+    if !COMPARISON_OPS.contains(&target_name) {
+        return None;
+    }
+    if !typed
+        .imported_trait_names
+        .contains(&Intern::from_ref(COMPARABLE_TRAIT))
+    {
+        return None;
+    }
+    let bool_ty = scope.tag_types.get(&Intern::from_ref("Bool"))?.clone();
+    Some(bool_ty)
+}
 
 fn happy_pattern_for_subject(
     typed: &TypedFileAst,
@@ -90,6 +114,95 @@ pub(crate) fn lower_tag_call_arg(
     lower_typed_expr(typed, arg, &scope.child(), env)
 }
 
+fn lower_contextual_call_args(
+    typed: &mut TypedFileAst,
+    args: &[Typed<Expr>],
+    param_kinds: &[ParamKind],
+    scope: &ExprLowerScope<'_>,
+    env: &mut LocalEnv,
+) -> (Option<Vec<ExprId>>, Vec<TyArg>) {
+    if param_kinds.len() != args.len() {
+        return (
+            Some(
+                args.iter()
+                    .map(|arg| lower_typed_expr(typed, arg, &scope.child(), env))
+                    .collect(),
+            ),
+            Vec::new(),
+        );
+    }
+
+    let mut lowered = Vec::new();
+    let mut type_args = Vec::with_capacity(args.len());
+    let type_env = TypeEnv::new(scope.tag_types);
+
+    for (arg, kind) in args.iter().zip(param_kinds.iter()) {
+        match kind {
+            ParamKind::Type => {
+                if let Some(te) = type_arg_expr(arg) {
+                    type_args.push(TyArg::Type(Box::new(type_env.resolve(&te))));
+                } else {
+                    lowered.push(lower_typed_expr(typed, arg, &scope.child(), env));
+                }
+            }
+            ParamKind::Value(_) => {
+                lowered.push(lower_typed_expr(typed, arg, &scope.child(), env));
+                type_args.push(TyArg::Const(
+                    arg.value
+                        .as_size_const_expr()
+                        .unwrap_or_else(|| ConstExpr::from(0)),
+                ));
+            }
+        }
+    }
+
+    (Some(lowered), type_args)
+}
+
+fn type_arg_expr(arg: &Typed<Expr>) -> Option<TypeExpr> {
+    arg.value.as_type_expr().or_else(|| match &arg.value {
+        Expr::AnonymousTag(name) => Some(TypeExpr::Nominal(*name, arg.span_id)),
+        Expr::FnCall(call) if call.path.segments.is_empty() && call.args.is_none() => {
+            Some(TypeExpr::Nominal(call.path.root, arg.span_id))
+        }
+        Expr::TagCall(call) => tag_call_type_arg(call, arg.span_id),
+        Expr::Lit(lit) => Some(TypeExpr::Literal(lit.clone(), arg.span_id)),
+        _ => None,
+    })
+}
+
+fn tag_call_type_arg(call: &TagCall, span_id: SpanId) -> Option<TypeExpr> {
+    let mut params = Vec::with_capacity(call.args.len());
+    for arg in &call.args {
+        let key = type_arg_key(arg)?;
+        let te = type_arg_expr(arg)?;
+        let param = ParameterKind::Tagged(Box::new(Spanned {
+            value: te,
+            span_id: arg.span_id,
+        }));
+        params.push((key, param));
+    }
+    Some(TypeExpr::Generic {
+        name: call.name,
+        params,
+        param_spans: Vec::new(),
+        span: span_id,
+    })
+}
+
+fn type_arg_key(arg: &Typed<Expr>) -> Option<Intern<String>> {
+    match &arg.value {
+        Expr::AnonymousTag(name) => Some(*name),
+        Expr::FnCall(call) if call.path.segments.is_empty() && call.args.is_none() => {
+            Some(call.path.root)
+        }
+        Expr::Lit(Literal::Int(n)) => Some(Intern::from_ref(&n.to_string())),
+        Expr::Lit(Literal::Number(n)) => Some(Intern::from_ref(&n.to_string())),
+        Expr::TagCall(call) => Some(call.name),
+        _ => None,
+    }
+}
+
 /// Convert a parse-tree [`Expr`] to a [`TypedExprKind`] by recursively
 /// lowering sub-expressions and resolving types.
 pub(crate) fn lower_expr_kind(
@@ -113,42 +226,74 @@ pub(crate) fn lower_expr_kind(
 
         Expr::FnCall(fn_call) => {
             let target = resolve_fn_call_target(&fn_call.path.value, scope.tag_types);
-            let lowered: Option<Vec<ExprId>> = fn_call.args.as_ref().map(|args| {
-                args.iter()
-                    .map(|a| lower_typed_expr(typed, a, &scope.child(), env))
-                    .collect()
-            });
-            if let Some(ref arg_ids) = lowered
-                && let Some(bind) = typed.defs.get(&target)
-                && !bind.param_kinds.is_empty()
-                && bind.param_kinds.len() == arg_ids.len()
+            let args = fn_call.args.as_deref().unwrap_or(&[]);
+            let call_params = typed
+                .defs
+                .get(&target)
+                .map(|bind| (bind.param_kinds.clone(), bind.params.clone()));
+            let (lowered, type_args) = if let Some((param_kinds, _)) = call_params.as_ref() {
+                lower_contextual_call_args(typed, args, param_kinds, scope, env)
+            } else {
+                let lowered = fn_call.args.as_ref().map(|args| {
+                    args.iter()
+                        .map(|a| lower_typed_expr(typed, a, &scope.child(), env))
+                        .collect()
+                });
+                (lowered, Vec::new())
+            };
+            if let Some((param_kinds, params)) = call_params
+                && !param_kinds.is_empty()
+                && param_kinds.len() == args.len()
             {
-                let expected: Vec<TyArg> = bind
-                    .param_kinds
-                    .iter()
-                    .map(|k| match k {
-                        ParamKind::Type => {
-                            TyArg::Type(Box::new(Ty::Opaque(Intern::new(String::new()))))
-                        }
-                        ParamKind::Value(_) => TyArg::Const(ConstExpr::from(0)),
-                    })
-                    .collect();
-                let actual: Vec<TyArg> = arg_ids
+                let expected: Vec<TyArg> = param_kinds
                     .iter()
                     .enumerate()
-                    .map(|(i, eid)| {
-                        let arg_ty = typed.exprs.ty[eid.as_usize()].clone();
-                        match bind.param_kinds.get(i).unwrap_or(&ParamKind::Type) {
-                            ParamKind::Type => TyArg::Type(Box::new(arg_ty)),
-                            ParamKind::Value(_) => TyArg::Const(ConstExpr::from(0)),
-                        }
+                    .map(|(i, k)| match k {
+                        ParamKind::Type => TyArg::Type(Box::new(Ty::Opaque(
+                            params
+                                .get(i)
+                                .map(|(name, _)| *name)
+                                .unwrap_or_else(|| Intern::new(String::new())),
+                        ))),
+                        ParamKind::Value(_) => TyArg::Const(ConstExpr::Var(
+                            params
+                                .get(i)
+                                .map(|(name, _)| *name)
+                                .unwrap_or_else(|| Intern::new(String::new())),
+                        )),
                     })
                     .collect();
-                let _ = unify_type_args(&expected, &actual);
-            }
-            TypedExprKind::FnCall {
-                target,
-                args: lowered,
+                let substituted_ty =
+                    unify_type_args(&expected, &type_args)
+                        .ok()
+                        .and_then(|subst| {
+                            typed
+                                .defs
+                                .get(&target)
+                                .map(|b| subst.apply_to_ty(&b.return_type))
+                        });
+                TypedExprKind::FnCall {
+                    target,
+                    args: lowered,
+                    substituted_ty,
+                }
+            } else {
+                // Check if this is a comparison operator resolving through Comparable trait.
+                let substituted_ty = if COMPARISON_OPS.contains(&target.0.as_str())
+                    && typed
+                        .imported_trait_names
+                        .contains(&Intern::from_ref(COMPARABLE_TRAIT))
+                    && let Some(first_arg) = fn_call.args.as_ref().and_then(|a| a.first())
+                {
+                    resolve_comparison_call(&target.0, first_arg, typed, scope)
+                } else {
+                    None
+                };
+                TypedExprKind::FnCall {
+                    target,
+                    args: lowered,
+                    substituted_ty,
+                }
             }
         }
 
@@ -204,7 +349,11 @@ pub(crate) fn lower_expr_kind(
                 // Function-like bind (inline fn)
                 let target = DefId(bind.name);
                 let args: Option<Vec<ExprId>> = None;
-                TypedExprKind::FnCall { target, args }
+                TypedExprKind::FnCall {
+                    target,
+                    args,
+                    substituted_ty: None,
+                }
             } else if env.locals.contains(&bind.name) {
                 // Reassigning an existing variable — produce Reassign.
                 let value = match &bind.value {
