@@ -87,7 +87,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
             }
             Some(decl)
         } else {
-            self.error("expected 'is' or 'has'", self.current_span());
+            self.error(
+                "parse-expected-declare-keyword",
+                "expected 'is' or 'has'",
+                self.current_span(),
+            );
             None
         }
     }
@@ -126,6 +130,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
     fn parse_has_rhs(&mut self, expr_parser: ExprFn) -> DeclareValue {
         if !self.is_at(&Token::ParenOpen) {
             self.error(
+                "parse-expected-interface-body",
                 "expected interface body after 'has' (e.g. `has (method1, method2, ...)`)",
                 self.current_span(),
             );
@@ -159,6 +164,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 }
                 Some(_) => {
                     self.error(
+                        "parse-expected-method-name",
                         "expected method name in interface body",
                         self.current_span(),
                     );
@@ -210,6 +216,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             }
             if !self.eat_list_separator() {
                 self.error(
+                    "parse-expected-member-separator",
                     "expected ',' or newline between interface members",
                     self.current_span(),
                 );
@@ -300,6 +307,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 return (return_ty, Some(Box::new(sp)));
             }
             self.error(
+                "parse-expected-error-type",
                 "expected error type after 'or' in interface method return type",
                 self.current_span(),
             );
@@ -323,7 +331,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
             if let Some((a, b)) = self.parse_int_range() {
                 return (DeclareValue::InRange(a, b), None, Vec::new());
             }
-            self.error("expected integer range after 'in'", self.current_span());
+            self.error(
+                "parse-expected-integer-range",
+                "expected integer range after 'in'",
+                self.current_span(),
+            );
             return (
                 DeclareValue::InRange(I256::from_u128(0), I256::from_u128(0)),
                 None,
@@ -434,7 +446,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
                         variants.push(next_variant);
                     }
                     None => {
-                        self.error("expected variant after 'or'", self.current_span());
+                        self.error(
+                            "parse-expected-variant",
+                            "expected variant after 'or'",
+                            self.current_span(),
+                        );
                         break;
                     }
                 }
@@ -485,7 +501,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 loop {
                     self.skip_indents();
                     let Some(next) = self.parse_pattern_type_expr(expr_parser) else {
-                        self.error("expected interface name after 'and'", self.current_span());
+                        self.error(
+                            "parse-expected-interface-name",
+                            "expected interface name after 'and'",
+                            self.current_span(),
+                        );
                         break;
                     };
                     provided_traits.push(Self::provided_trait_from_type_expr(next));
@@ -524,6 +544,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
         }
 
         self.error(
+            "parse-expected-declare-body",
             "expected type declaration body after 'is'",
             self.current_span(),
         );
@@ -688,6 +709,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 let name = Intern::new(id);
                 if !lowercase {
                     self.error(
+                        "parse-invalid-blanket-impl",
                         "blanket impl requires a lowercase type variable; write `x.Trait(...)` instead",
                         self.current_span(),
                     );
@@ -697,6 +719,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             }
             Some(Token::Tag(_)) => {
                 self.error(
+                    "parse-invalid-blanket-impl",
                     "blanket impl requires a lowercase type variable; write `x.Trait(...)` instead",
                     self.current_span(),
                 );
@@ -704,6 +727,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             }
             _ => {
                 self.error(
+                    "parse-expected-type-variable",
                     "expected type variable before `has` in blanket impl",
                     self.current_span(),
                 );
@@ -712,6 +736,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
         };
         if !self.eat(&Token::Has) {
             self.error(
+                "parse-expected-has-token",
                 "expected `has` after type variable in legacy blanket impl",
                 self.current_span(),
             );
@@ -734,7 +759,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 (name, span)
             }
             _ => {
-                self.error("expected trait name after `has`", self.current_span());
+                self.error(
+                    "parse-expected-trait-name",
+                    "expected trait name after `has`",
+                    self.current_span(),
+                );
                 return None;
             }
         };
@@ -751,6 +780,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                         }
                         _ => {
                             self.error(
+                                "parse-expected-field-name",
                                 "expected field name in trait parameters",
                                 self.current_span(),
                             );
@@ -826,6 +856,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
         let checkpoint = self.checkpoint();
         if self.eat(&Token::And) && self.eat(&Token::Is) {
             self.error(
+                "parse-removed-marker-syntax",
                 "marker syntax removed; use `and has Copy(can_copy: False)` to opt out of copyability",
                 self.current_span(),
             );
@@ -855,6 +886,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             if let Some((key, kind)) = self.parse_one_declare_param(expr_parser) {
                 if seen_default && !matches!(kind, ParameterKind::Default(_)) {
                     self.error(
+                        "parse-parameter-after-default",
                         format!(
                             "positional parameter `{}` appears after a default parameter",
                             key.as_str()
@@ -877,6 +909,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             }
 
             self.error(
+                "parse-expected-param-separator",
                 "expected ',' or newline between parameters",
                 self.current_span(),
             );
@@ -998,6 +1031,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             }
             _ => {
                 self.error(
+                    "parse-expected-predicate",
                     "expected predicate after 'and' (e.g. `< n`, `> 0`)",
                     self.current_span(),
                 );
@@ -1011,6 +1045,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
         self.skip_layout();
         let Some((token, _span)) = self.advance() else {
             self.error(
+                "parse-expected-predicate-value",
                 "expected value after predicate operator",
                 self.current_span(),
             );
@@ -1022,6 +1057,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             Token::Int(n) => ConstExpr::from(n as i128),
             _ => {
                 self.error(
+                    "parse-expected-predicate-value",
                     "expected value after predicate operator",
                     self.current_span(),
                 );

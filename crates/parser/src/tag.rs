@@ -311,6 +311,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                     // triggering this flaw. Currently only positional type args are supported.
                     if seen_default && !matches!(kind, ParameterKind::Default(_)) {
                         self.error(
+                            "parse-parameter-after-default",
                             format!(
                                 "positional type parameter `{}` appears after a default parameter",
                                 name.as_str()
@@ -334,6 +335,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 }
 
                 self.error(
+                    "parse-expected-param-separator",
                     "expected ',' or newline between type parameters",
                     self.current_span(),
                 );

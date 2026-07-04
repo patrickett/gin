@@ -240,6 +240,7 @@ impl TokenCursor<'_, '_> {
 
         if matches!(self.peek(), Some(Token::ModuleDocComment(_))) {
             self.error(
+                "parse-module-doc-comment-position",
                 "module doc comments (--|) are only allowed at the start of the file",
                 self.peek_span().unwrap_or(SpanId::INVALID),
             );
@@ -332,6 +333,7 @@ impl TokenCursor<'_, '_> {
                     && Self::can_start_expr(next_tok)
                 {
                     self.error(
+                        "parse-expected-operator",
                         format!("expected operator between expressions, found {next_tok:?}"),
                         self.peek_span().unwrap_or(expr.span_id),
                     );

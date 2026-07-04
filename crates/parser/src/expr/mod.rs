@@ -72,7 +72,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
         // Convert cursor/lex errors to diagnostics and store on the AST.
         ast.parse_warnings.extend(lex_errors);
         for err in &hw_parse_errors {
-            if let Some(hint) = err.message.strip_prefix("__gin_hint__:") {
+            if let Some(hint) = err.message().strip_prefix("__gin_hint__:") {
                 match hint.trim() {
                     "unnecessary-comma" => {
                         ast.parse_warnings.push(
@@ -82,21 +82,21 @@ impl<'src, 't> TokenCursor<'src, 't> {
                                     "this comma is not needed since Gin uses newlines \
                                  to separate items; you can remove it",
                                 )
-                                .at_span_id(err.span, &ast.span_table),
+                                .at_span_id(err.span(), &ast.span_table),
                         );
                     }
                     hint => {
                         ast.parse_warnings.push(
                             Diagnostic::new("parse-indented-return", hint)
                                 .with_category(Category::Help)
-                                .at_span_id(err.span, &ast.span_table),
+                                .at_span_id(err.span(), &ast.span_table),
                         );
                     }
                 }
             } else {
                 ast.parse_warnings.push(
-                    Diagnostic::new("parse-custom", err.message.clone())
-                        .at_span_id(err.span, &ast.span_table),
+                    Diagnostic::new(err.code(), err.message().to_string())
+                        .at_span_id(err.span(), &ast.span_table),
                 );
             }
         }
@@ -130,6 +130,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             }
 
             self.error(
+                "parse-expected-arg-separator",
                 "expected ',' or newline between function call arguments",
                 self.current_span(),
             );
@@ -160,7 +161,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             Some(expr) => expr,
             None => {
                 let span = self.current_span();
-                self.error("expected expression", span);
+                self.error("parse-expected-expression", "expected expression", span);
                 return Typed::infer(Expr::AnonymousTag(self.intern("Error")), span);
             }
         };
@@ -379,7 +380,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                     return Typed::infer(Expr::Lit(lit.value), span);
                 }
                 let span = self.current_span();
-                self.error("expected expression", span);
+                self.error("parse-expected-expression", "expected expression", span);
                 // Advance past the unrecognised token so the caller makes progress
                 self.advance();
                 Typed::infer(Expr::AnonymousTag(self.intern("Error")), span)
@@ -703,7 +704,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
         }
 
         let span = self.current_span();
-        self.error("expected identifier", span);
+        self.error("parse-expected-identifier", "expected identifier", span);
         Typed::infer(Expr::AnonymousTag(self.intern("Error")), span)
     }
 
@@ -774,7 +775,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
         }
 
         let span = self.current_span();
-        self.error("expected tag", span);
+        self.error("parse-expected-tag", "expected tag", span);
         Typed::infer(Expr::AnonymousTag(self.intern("Error")), span)
     }
 
@@ -811,6 +812,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             }
 
             self.error(
+                "parse-expected-list-separator",
                 "expected ',' or newline between list elements",
                 self.current_span(),
             );
@@ -854,7 +856,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
                     (name, span)
                 }
                 _ => {
-                    self.error("expected record field name", self.current_span());
+                    self.error(
+                        "parse-expected-field-name",
+                        "expected record field name",
+                        self.current_span(),
+                    );
                     break;
                 }
             };
@@ -949,6 +955,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
             if !(self.eat_list_separator() || self.previous_token_was_newline_separator()) {
                 self.error(
+                    "parse-expected-tuple-separator",
                     "expected ',' or newline between tuple elements",
                     self.current_span(),
                 );
@@ -1211,7 +1218,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
                     ));
                 }
                 _ => {
-                    self.error("expected type name after 'as'", self.current_span());
+                    self.error(
+                        "parse-expected-type-name",
+                        "expected type name after 'as'",
+                        self.current_span(),
+                    );
                 }
             }
         }
@@ -1283,7 +1294,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 Some(Token::UnterminatedFormatString) | None => {
                     self.advance_drop();
                     let span = self.current_span();
-                    self.error("unterminated format string", span);
+                    self.error(
+                        "parse-unterminated-format-string",
+                        "unterminated format string",
+                        span,
+                    );
                     return Typed::infer(
                         Expr::FormatString(FormatString { parts }),
                         self.merge_span(start_span, span),
@@ -1291,7 +1306,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 }
                 _ => {
                     let span = self.current_span();
-                    self.error("unexpected token in format string", span);
+                    self.error(
+                        "parse-unexpected-token-in-format-string",
+                        "unexpected token in format string",
+                        span,
+                    );
                     self.advance();
                     self.advance_pop();
                 }
@@ -1305,7 +1324,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
         // expect (
         if !self.eat(&Token::ParenOpen) {
-            self.error("expected '(' after 'asm'", self.current_span());
+            self.error(
+                "parse-expected-paren",
+                "expected '(' after 'asm'",
+                self.current_span(),
+            );
             return Typed::infer(Expr::AnonymousTag(self.intern("Error")), start_span);
         }
 
@@ -1327,7 +1350,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
         // expect )
         if !self.eat(&Token::ParenClose) {
-            self.error("expected ')' after asm operands", self.current_span());
+            self.error(
+                "parse-expected-paren",
+                "expected ')' after asm operands",
+                self.current_span(),
+            );
             return Typed::infer(Expr::AnonymousTag(self.intern("Error")), start_span);
         }
 

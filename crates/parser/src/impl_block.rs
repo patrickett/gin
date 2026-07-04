@@ -21,6 +21,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
         // Expect dot
         if !self.eat(&Token::Dot) {
             self.error(
+                "parse-expected-dot",
                 "expected '.' after type name in impl block header",
                 self.current_span(),
             );
@@ -36,6 +37,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             }
             _ => {
                 self.error(
+                    "parse-expected-trait-name",
                     "expected trait name after '.' in impl block header",
                     self.current_span(),
                 );
@@ -45,7 +47,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
         // Expect '('
         if !self.eat(&Token::ParenOpen) {
-            self.error("expected '(' after impl block header", self.current_span());
+            self.error(
+                "parse-expected-paren",
+                "expected '(' after impl block header",
+                self.current_span(),
+            );
             return None;
         }
 
@@ -64,6 +70,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 // If we can't parse a bind and we're not at ')', emit error and break
                 if !self.is_at(&Token::ParenClose) {
                     self.error(
+                        "parse-expected-impl-block-item",
                         "expected bind or ')' in impl block body",
                         self.current_span(),
                     );
@@ -77,7 +84,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
         // Expect ')'
         if !self.eat(&Token::ParenClose) {
-            self.error("expected ')' to close impl block", self.current_span());
+            self.error(
+                "parse-expected-paren",
+                "expected ')' to close impl block",
+                self.current_span(),
+            );
             return None;
         }
 

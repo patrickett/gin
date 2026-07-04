@@ -54,10 +54,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 let path_str = *s;
                 if path_str.ends_with(".gin") {
                     self.advance();
-                    self.errors.push(crate::cursor::ParseError {
-                        message: "imports target folder modules, not `.gin` files".to_string(),
-                        span: span_id,
-                    });
+                    self.errors
+                        .push(crate::cursor::ParseError::invalid_import_target(
+                            "imports target folder modules, not `.gin` files",
+                            span_id,
+                        ));
                     return None;
                 }
                 let path = PathBuf::from(path_str);
@@ -173,10 +174,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
             }
             _ => {
                 let span = self.peek_span().unwrap_or(SpanId::INVALID);
-                self.errors.push(crate::cursor::ParseError {
-                    message: "expected string path or module path after `use`".to_string(),
-                    span,
-                });
+                self.errors
+                    .push(crate::cursor::ParseError::expected_import_source(
+                        "expected string path or module path after `use`",
+                        span,
+                    ));
                 return None;
             }
         };
@@ -242,10 +244,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
         if self.is_at(&Token::ParenClose) {
             let span = self.peek_span().unwrap_or(SpanId::INVALID);
-            self.errors.push(crate::cursor::ParseError {
-                message: "expected at least one export inside `.(...)`".to_string(),
-                span,
-            });
+            self.errors
+                .push(crate::cursor::ParseError::empty_import_bundle(
+                    "expected at least one export inside `.(...)`",
+                    span,
+                ));
             return Some(members);
         }
 
@@ -275,6 +278,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             }
 
             self.error(
+                "parse-expected-export-separator",
                 "expected ',' or newline between exports",
                 self.current_span(),
             );

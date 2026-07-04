@@ -152,7 +152,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
                     self.advance_pop();
                     self.try_consume_body_comma();
                     if self.pos() == pos_before {
-                        self.error("expression parser made no progress", self.current_span());
+                        self.error(
+                            "parse-parser-progress",
+                            "expression parser made no progress",
+                            self.current_span(),
+                        );
                         self.advance();
                     }
                 }

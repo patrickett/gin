@@ -56,7 +56,7 @@ impl SourceParseExt for str {
 
         // Parse errors -- some carry magic prefixes that indicate non-fatal hints.
         for err in &hw_parse_errors {
-            if let Some(hint) = err.message.strip_prefix("__gin_hint__:") {
+            if let Some(hint) = err.message().strip_prefix("__gin_hint__:") {
                 match hint.trim() {
                     "unnecessary-comma" => {
                         symptoms.push(
@@ -66,21 +66,21 @@ impl SourceParseExt for str {
                                     "this comma is not needed since Gin uses newlines \
                                  to separate items; you can remove it",
                                 )
-                                .at_span_id(err.span, &span_table),
+                                .at_span_id(err.span(), &span_table),
                         );
                     }
                     hint => {
                         symptoms.push(
                             Diagnostic::new("parse-indented-return", hint)
                                 .with_category(Category::Help)
-                                .at_span_id(err.span, &span_table),
+                                .at_span_id(err.span(), &span_table),
                         );
                     }
                 }
             } else {
                 symptoms.push(
-                    Diagnostic::new("parse-custom", err.message.clone())
-                        .at_span_id(err.span, &span_table),
+                    Diagnostic::new(err.code(), err.message().to_string())
+                        .at_span_id(err.span(), &span_table),
                 );
             }
         }
@@ -99,7 +99,7 @@ impl SourceParseExt for str {
                     ImportSource::LocalBundle(b) if module_import.alias.is_some() => {
                         symptoms.push(
                             Diagnostic::new(
-                                "parse-custom",
+                                "parse-unsupported-import-alias",
                                 "`as` alias on `use pkg.(...)` is not supported; use `export as alias` inside the list",
                             )
                             .at_span_id(b.span_id(), spans),
@@ -108,7 +108,7 @@ impl SourceParseExt for str {
                     ImportSource::Local(path, span) if module_import.alias.is_none() => {
                         symptoms.push(
                             Diagnostic::new(
-                                "parse-custom",
+                                "parse-missing-import-alias",
                                 format!(
                                     "folder module import requires `as` (e.g. `use '{}' as name`)",
                                     path.display()

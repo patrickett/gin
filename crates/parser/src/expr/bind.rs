@@ -70,7 +70,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             } else if self.eat(&Token::Colon) {
                 false
             } else {
-                self.error("expected ':', ':=' or 'extern'", self.current_span());
+                self.error("parse-expected-bind-operator", "expected ':', ':=' or 'extern'", self.current_span());
                 return None;
             };
             let (value, postfix_doc) = self.parse_bind_value(expr_parser);
@@ -354,9 +354,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 }
 
                 self.error(
-                    "expected ',' or newline between type annotation arguments",
-                    self.current_span(),
-                );
+                                    "parse-expected-annotation-separator",
+                                    "expected ',' or newline between type annotation arguments",
+                                    self.current_span(),
+                                );
                 break;
             }
         }
@@ -383,7 +384,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             self.eat(&Token::Dedent);
 
             let ret = self.parse_return(expr_parser).unwrap_or_else(|| {
-                self.error("expected 'return' after bind body", self.current_span());
+                self.error("parse-expected-return", "expected 'return' after bind body", self.current_span());
                 Return {
                     value: None,
                     span_id: self.current_span(),
@@ -483,12 +484,13 @@ impl<'src, 't> TokenCursor<'src, 't> {
             if let Some((key, kind, conv, group)) = self.parse_one_param(expr_parser) {
                 if seen_default && !matches!(kind, ParameterKind::Default(_)) {
                     self.error(
-                        format!(
-                            "positional parameter `{}` appears after a default parameter",
-                            key.as_str()
-                        ),
-                        self.current_span(),
-                    );
+                                            "parse-parameter-after-default",
+                                            format!(
+                                                "positional parameter `{}` appears after a default parameter",
+                                                key.as_str()
+                                            ),
+                                            self.current_span(),
+                                        );
                 }
                 if matches!(kind, ParameterKind::Default(_)) {
                     seen_default = true;
@@ -505,9 +507,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
             }
 
             self.error(
-                "expected ',' or newline between parameters",
-                self.current_span(),
-            );
+                            "parse-expected-param-separator",
+                            "expected ',' or newline between parameters",
+                            self.current_span(),
+                        );
             break;
         }
 

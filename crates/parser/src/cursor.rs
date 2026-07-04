@@ -6,8 +6,55 @@ use lexer::Token;
 
 #[derive(Debug, Clone)]
 pub struct ParseError {
-    pub message: String,
-    pub span: SpanId,
+    code: &'static str,
+    message: String,
+    span: SpanId,
+}
+
+impl ParseError {
+    fn new(code: &'static str, message: impl Into<String>, span: SpanId) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            span,
+        }
+    }
+
+    pub fn code(&self) -> &'static str {
+        self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn span(&self) -> SpanId {
+        self.span
+    }
+
+    pub fn hint(message: impl Into<String>, span: SpanId) -> Self {
+        Self::new("parse-hint", message, span)
+    }
+
+    pub fn expected_token(message: impl Into<String>, span: SpanId) -> Self {
+        Self::new("parse-expected-token", message, span)
+    }
+
+    pub fn unexpected_token(message: impl Into<String>, span: SpanId) -> Self {
+        Self::new("parse-unexpected-token", message, span)
+    }
+
+    pub fn invalid_import_target(message: impl Into<String>, span: SpanId) -> Self {
+        Self::new("parse-invalid-import-target", message, span)
+    }
+
+    pub fn expected_import_source(message: impl Into<String>, span: SpanId) -> Self {
+        Self::new("parse-expected-import-source", message, span)
+    }
+
+    pub fn empty_import_bundle(message: impl Into<String>, span: SpanId) -> Self {
+        Self::new("parse-empty-import-bundle", message, span)
+    }
 }
 
 impl HasSpanId for ParseError {
@@ -150,10 +197,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 .peek()
                 .map(|t| format!("{t:?}"))
                 .unwrap_or_else(|| "end of input".to_string());
-            self.errors.push(ParseError {
-                message: format!("expected {:?}, found {found}", token),
+            self.errors.push(ParseError::expected_token(
+                format!("expected {:?}, found {found}", token),
                 span,
-            });
+            ));
             None
         }
     }
@@ -310,10 +357,8 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 || self.is_at(&Token::BracketClose)
             {
                 let span = self.last_consumed_span();
-                self.errors.push(ParseError {
-                    message: "__gin_hint__:unnecessary-comma".to_string(),
-                    span,
-                });
+                self.errors
+                    .push(ParseError::hint("__gin_hint__:unnecessary-comma", span));
             }
 
             return true;
@@ -417,11 +462,16 @@ impl<'src, 't> TokenCursor<'src, 't> {
         self.invalidate_cache();
     }
 
-    pub fn error(&mut self, message: impl Into<String>, span: SpanId) {
-        self.errors.push(ParseError {
-            message: message.into(),
-            span,
-        });
+    pub fn error(&mut self, code: &'static str, message: impl Into<String>, span: SpanId) {
+        self.errors.push(ParseError::new(code, message, span));
+    }
+
+    pub fn hint(&mut self, message: impl Into<String>, span: SpanId) {
+        self.errors.push(ParseError::hint(message, span));
+    }
+
+    pub fn expected_token(&mut self, message: impl Into<String>, span: SpanId) {
+        self.errors.push(ParseError::expected_token(message, span));
     }
 
     pub fn unexpected_token(
@@ -430,7 +480,23 @@ impl<'src, 't> TokenCursor<'src, 't> {
         _suggestion: Option<String>,
         span: SpanId,
     ) {
-        self.error(message, span);
+        self.errors
+            .push(ParseError::unexpected_token(message, span));
+    }
+
+    pub fn invalid_import_target(&mut self, message: impl Into<String>, span: SpanId) {
+        self.errors
+            .push(ParseError::invalid_import_target(message, span));
+    }
+
+    pub fn expected_import_source(&mut self, message: impl Into<String>, span: SpanId) {
+        self.errors
+            .push(ParseError::expected_import_source(message, span));
+    }
+
+    pub fn empty_import_bundle(&mut self, message: impl Into<String>, span: SpanId) {
+        self.errors
+            .push(ParseError::empty_import_bundle(message, span));
     }
 
     pub fn checkpoint(&self) -> usize {

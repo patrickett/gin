@@ -95,7 +95,7 @@ impl TokenCursor<'_, '_> {
         // Detect improperly indented return inside the if body.
         if has_indent && self.is_at(&Token::Return) {
             let span = self.peek_span().unwrap_or(SpanId::INVALID);
-            self.error("__gin_hint__:indented-return", span);
+            self.hint("__gin_hint__:indented-return", span);
         }
 
         if has_indent {
@@ -106,7 +106,11 @@ impl TokenCursor<'_, '_> {
 
         let ret = self.parse_return(expr_parser);
         if ret.is_none() {
-            self.error("expected 'return' after if body", self.current_span());
+            self.error(
+                "parse-expected-return",
+                "expected 'return' after if body",
+                self.current_span(),
+            );
         }
         let ret = ret?;
 
@@ -246,7 +250,11 @@ impl TokenCursor<'_, '_> {
 
             let cond = expr_parser(self);
             if !self.eat(&Token::Then) {
-                self.error("expected 'then'", self.current_span());
+                self.error(
+                    "parse-expected-then",
+                    "expected 'then'",
+                    self.current_span(),
+                );
                 break;
             }
             let body = expr_parser(self);
@@ -305,7 +313,11 @@ impl TokenCursor<'_, '_> {
                 self.peek(),
                 Some(Token::String(_)) | Some(Token::Int(_)) | Some(Token::Float(_))
             ) {
-                self.error("expected literal pattern after 'or'", self.current_span());
+                self.error(
+                    "parse-expected-literal-pattern",
+                    "expected literal pattern after 'or'",
+                    self.current_span(),
+                );
                 break;
             }
             let Some(Spanned {
@@ -313,7 +325,11 @@ impl TokenCursor<'_, '_> {
                 span_id: span,
             }) = self.parse_literal()
             else {
-                self.error("expected literal pattern after 'or'", self.current_span());
+                self.error(
+                    "parse-expected-literal-pattern",
+                    "expected literal pattern after 'or'",
+                    self.current_span(),
+                );
                 break;
             };
             patterns.push(Spanned {
@@ -347,7 +363,11 @@ impl TokenCursor<'_, '_> {
                 self.skip_newlines();
                 self.skip_indents();
                 if !self.is_at(&Token::Dedent) && !self.is_eof() {
-                    self.error("`else` must be the last `when` arm", self.current_span());
+                    self.error(
+                        "parse-misplaced-else",
+                        "`else` must be the last `when` arm",
+                        self.current_span(),
+                    );
                 }
                 break;
             }
@@ -360,7 +380,11 @@ impl TokenCursor<'_, '_> {
                 } else if !self.can_start_when_is_pattern() {
                     let condition = expr_parser(self);
                     if !self.eat(&Token::Then) {
-                        self.error("expected 'then'", self.current_span());
+                        self.error(
+                            "parse-expected-then",
+                            "expected 'then'",
+                            self.current_span(),
+                        );
                         break;
                     }
                     let body = expr_parser(self);
@@ -385,7 +409,11 @@ impl TokenCursor<'_, '_> {
 
             // Accept either `then` (single-line `is x then y`) or `:` (multi-line `is x: y`)
             if !self.eat(&Token::Then) && !self.eat(&Token::Colon) {
-                self.error("expected 'then' or ':'", self.current_span());
+                self.error(
+                    "parse-expected-then-or-colon",
+                    "expected 'then' or ':'",
+                    self.current_span(),
+                );
                 return None;
             }
 
@@ -418,7 +446,7 @@ impl TokenCursor<'_, '_> {
             let pat = self.parse_for_pattern()?;
 
             if !self.eat(&Token::In) {
-                self.error("expected 'in'", self.current_span());
+                self.error("parse-expected-in", "expected 'in'", self.current_span());
                 return None;
             }
 
@@ -431,7 +459,11 @@ impl TokenCursor<'_, '_> {
             self.eat(&Token::Dedent);
 
             if !self.eat(&Token::Loop) {
-                self.error("expected 'loop'", self.current_span());
+                self.error(
+                    "parse-expected-loop",
+                    "expected 'loop'",
+                    self.current_span(),
+                );
                 return None;
             }
 
@@ -453,7 +485,11 @@ impl TokenCursor<'_, '_> {
             self.eat(&Token::Dedent);
 
             if !self.eat(&Token::Loop) {
-                self.error("expected 'loop'", self.current_span());
+                self.error(
+                    "parse-expected-loop",
+                    "expected 'loop'",
+                    self.current_span(),
+                );
                 return None;
             }
 
