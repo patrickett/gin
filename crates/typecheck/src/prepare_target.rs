@@ -92,13 +92,15 @@ pub fn apply_entry_target_merge(ast: &mut FileAst, entry: &CompileTarget) -> Vec
 
     match expr.const_value.as_mut() {
         Some(ConstValue::Record { fields }) => {
+            let mut new_fields: Vec<_> = fields.iter().cloned().collect();
             for (key, value) in triple.field_overrides() {
-                if let Some((_, slot)) = fields.iter_mut().find(|(n, _)| n.as_str() == key) {
+                if let Some((_, slot)) = new_fields.iter_mut().find(|(n, _)| n.as_str() == key) {
                     *slot = ConstValue::String(value);
                 } else {
-                    fields.push((Intern::from_ref(key), ConstValue::String(value)));
+                    new_fields.push((Intern::from_ref(key), ConstValue::String(value)));
                 }
             }
+            *fields = new_fields.into();
         }
         Some(ConstValue::Tag { name, args, .. }) if name.as_str() == "Target" => {
             let mut field_names: Vec<_> = ast
@@ -114,13 +116,15 @@ pub fn apply_entry_target_merge(ast: &mut FileAst, entry: &CompileTarget) -> Vec
                     Intern::from_ref("os"),
                 ];
             }
+            let mut new_args: Vec<ConstValue> = args.to_vec();
             for (key, value) in triple.field_overrides() {
-                if let Some(idx) = field_names.iter().position(|field| field.as_str() == key)
-                    && let Some(slot) = args.get_mut(idx)
-                {
-                    *slot = ConstValue::String(value);
+                if let Some(idx) = field_names.iter().position(|field| field.as_str() == key) {
+                    if idx < new_args.len() {
+                        new_args[idx] = ConstValue::String(value);
+                    }
                 }
             }
+            *args = new_args.into();
         }
         _ => return Vec::new(),
     }

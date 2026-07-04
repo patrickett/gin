@@ -6,6 +6,7 @@
 
 use crate::HashFloat;
 use internment::Intern;
+use std::sync::Arc;
 
 /// Represents a narrowed type constraint on a variable.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -53,12 +54,12 @@ pub enum ConstValue {
     Tag {
         name: Intern<String>,
         qual_path: Option<String>,
-        args: Vec<ConstValue>,
+        args: Arc<[ConstValue]>,
     },
     Record {
-        fields: Vec<(Intern<String>, ConstValue)>,
+        fields: Arc<[(Intern<String>, ConstValue)]>,
     },
-    List(Vec<ConstValue>),
+    List(Arc<[ConstValue]>),
 }
 
 impl ConstValue {
@@ -79,7 +80,7 @@ impl ConstValue {
         ConstValue::Tag {
             name: Intern::from_ref("Const"),
             qual_path: None,
-            args: vec![ConstValue::Int(n)],
+            args: vec![ConstValue::Int(n)].into(),
         }
     }
 
@@ -87,7 +88,7 @@ impl ConstValue {
         ConstValue::Tag {
             name: Intern::from_ref("Dynamic"),
             qual_path: None,
-            args: vec![],
+            args: vec![].into(),
         }
     }
 
@@ -139,7 +140,7 @@ impl ConstValue {
                 Some(ConstValue::Tag {
                     name: Intern::from_ref(if result { "True" } else { "False" }),
                     qual_path: None,
-                    args: vec![],
+                    args: vec![].into(),
                 })
             }
             (ConstValue::Int(a), ConstValue::Int(b)) => match op {
@@ -235,7 +236,7 @@ impl ConstValue {
     /// If this is a `ConstValue::List`, return a reference to the items.
     pub fn as_list(&self) -> Option<&[ConstValue]> {
         match self {
-            ConstValue::List(items) => Some(items.as_slice()),
+            ConstValue::List(items) => Some(items),
             _ => None,
         }
     }

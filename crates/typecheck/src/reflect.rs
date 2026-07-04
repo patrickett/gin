@@ -23,7 +23,7 @@ fn reflect_ty_to_const_value_inner(ty: &Ty, seen: &mut HashSet<Intern<String>>) 
                 ConstValue::Tag {
                     name: Intern::from_ref(if *signed { "True" } else { "False" }),
                     qual_path: None,
-                    args: vec![],
+                    args: vec![].into(),
                 },
             ],
         ),
@@ -34,11 +34,11 @@ fn reflect_ty_to_const_value_inner(ty: &Ty, seen: &mut HashSet<Intern<String>>) 
                 ConstValue::Tag {
                     name: Intern::from_ref("True"),
                     qual_path: None,
-                    args: vec![],
+                    args: vec![].into(),
                 },
             ],
         ),
-        Ty::Unit => tag("Tuple", vec![ConstValue::List(vec![])]),
+        Ty::Unit => tag("Tuple", vec![ConstValue::List(vec![].into())]),
         Ty::Record { name, fields } => {
             // Break nominal cycles like `NamedTy.ty: Type` (and `Type` includes `NamedTy`).
             if !seen.insert(*name) {
@@ -58,7 +58,7 @@ fn reflect_ty_to_const_value_inner(ty: &Ty, seen: &mut HashSet<Intern<String>>) 
                 "Record",
                 vec![
                     ConstValue::String(name.as_str().to_string()),
-                    ConstValue::List(named),
+                    ConstValue::List(named.into()),
                 ],
             )
         }
@@ -86,7 +86,7 @@ fn reflect_ty_to_const_value_inner(ty: &Ty, seen: &mut HashSet<Intern<String>>) 
                 "Union",
                 vec![
                     ConstValue::String(name.as_str().to_string()),
-                    ConstValue::List(variant_shapes),
+                    ConstValue::List(variant_shapes.into()),
                 ],
             )
         }
@@ -114,7 +114,7 @@ fn reflect_ty_to_const_value_inner(ty: &Ty, seen: &mut HashSet<Intern<String>>) 
                 "Union",
                 vec![
                     ConstValue::String(name.as_str().to_string()),
-                    ConstValue::List(variant_shapes),
+                    ConstValue::List(variant_shapes.into()),
                 ],
             )
         }
@@ -123,7 +123,7 @@ fn reflect_ty_to_const_value_inner(ty: &Ty, seen: &mut HashSet<Intern<String>>) 
                 .iter()
                 .map(|t| reflect_ty_to_const_value_inner(t, seen))
                 .collect();
-            tag("Tuple", vec![ConstValue::List(items)])
+            tag("Tuple", vec![ConstValue::List(items.into())])
         }
         Ty::Ptr { inner } => tag("Ptr", vec![reflect_ty_to_const_value_inner(inner, seen)]),
         Ty::Ref { inner, mutable } => tag(
@@ -133,7 +133,7 @@ fn reflect_ty_to_const_value_inner(ty: &Ty, seen: &mut HashSet<Intern<String>>) 
                 ConstValue::Tag {
                     name: Intern::from_ref(if *mutable { "True" } else { "False" }),
                     qual_path: None,
-                    args: vec![],
+                    args: vec![].into(),
                 },
             ],
         ),
@@ -159,7 +159,7 @@ fn tag(name: &str, args: Vec<ConstValue>) -> ConstValue {
     ConstValue::Tag {
         name: Intern::new(name.to_string()),
         qual_path: None,
-        args,
+        args: args.into(),
     }
 }
 
@@ -171,7 +171,8 @@ fn record_named(name: &str, ty: ConstValue) -> ConstValue {
                 ConstValue::String(name.to_string()),
             ),
             (Intern::new("ty".to_string()), ty),
-        ],
+        ]
+        .into(),
     }
 }
 
@@ -182,8 +183,12 @@ fn record_variant(name: &str, fields: Vec<ConstValue>) -> ConstValue {
                 Intern::new("name".to_string()),
                 ConstValue::String(name.to_string()),
             ),
-            (Intern::new("fields".to_string()), ConstValue::List(fields)),
-        ],
+            (
+                Intern::new("fields".to_string()),
+                ConstValue::List(fields.into()),
+            ),
+        ]
+        .into(),
     }
 }
 

@@ -145,7 +145,7 @@ pub(crate) fn pattern_matches(pattern: &TypeExpr, cv: &ConstValue) -> bool {
             if !pattern_matches(&head.value, &items[0]) {
                 return false;
             }
-            let rest = ConstValue::List(items[1..].to_vec());
+            let rest = ConstValue::List(items[1..].to_vec().into());
             pattern_matches(&tail.value, &rest)
         }
         (TypeExpr::ListEmpty, ConstValue::List(items)) => items.is_empty(),
@@ -265,7 +265,7 @@ pub(crate) fn collect_pattern_bindings(
         }
         (TypeExpr::ListCons { head, tail }, ConstValue::List(items)) if !items.is_empty() => {
             collect_pattern_bindings(&head.value, &items[0], env);
-            let rest = ConstValue::List(items[1..].to_vec());
+            let rest = ConstValue::List(items[1..].into());
             collect_pattern_bindings(&tail.value, &rest, env);
         }
         (TypeExpr::ListEmpty, _) => {}
@@ -344,7 +344,7 @@ mod tests {
         });
         let pat = TypeExpr::ListCons { head, tail };
 
-        let cv = ConstValue::List(vec![ConstValue::Int(42)]);
+        let cv = ConstValue::List(vec![ConstValue::Int(42)].into());
 
         assert!(pattern_matches(&pat, &cv));
     }
@@ -370,7 +370,7 @@ mod tests {
         });
         let pat = TypeExpr::ListCons { head, tail };
 
-        let cv = ConstValue::List(vec![ConstValue::Int(42)]);
+        let cv = ConstValue::List(vec![ConstValue::Int(42)].into());
 
         assert!(!pattern_matches(&pat, &cv));
     }
@@ -378,7 +378,7 @@ mod tests {
     #[test]
     fn test_list_nil_matches_empty() {
         let pat = TypeExpr::ListEmpty;
-        let cv = ConstValue::List(vec![]);
+        let cv = ConstValue::List(vec![].into());
         assert!(pattern_matches(&pat, &cv));
     }
 
@@ -430,7 +430,7 @@ mod tests {
         let cv = ConstValue::Tag {
             name: Intern::new("True".to_string()),
             qual_path: None,
-            args: Vec::new(),
+            args: Vec::new().into(),
         };
         let body = find_matching_when_body(&arms, &cv);
         assert!(body.is_some());
@@ -442,7 +442,7 @@ mod tests {
         let head = TypeExpr::Nominal(Intern::new("x".to_string()), span_id());
         let _tail = TypeExpr::Nominal(Intern::new("_".to_string()), span_id());
         let items = vec![ConstValue::Int(10), ConstValue::Int(20)];
-        let cv = ConstValue::List(items);
+        let cv = ConstValue::List(items.into());
 
         let mut env = HashMap::new();
         collect_pattern_bindings(&head, &cv, &mut env);

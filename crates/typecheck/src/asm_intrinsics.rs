@@ -191,13 +191,14 @@ pub(crate) fn try_fold_asm_builder(method: &str, args: &[ConstValue]) -> Option<
                     ),
                     (
                         Intern::new("operands".to_string()),
-                        ConstValue::List(Vec::new()),
+                        ConstValue::List(Vec::new().into()),
                     ),
                     (
                         Intern::new("clobbers".to_string()),
-                        ConstValue::List(Vec::new()),
+                        ConstValue::List(Vec::new().into()),
                     ),
-                ],
+                ]
+                .into(),
             })
         }
         "input" | "output" | "inout" if args.len() >= 2 => {
@@ -220,24 +221,26 @@ pub(crate) fn try_fold_asm_builder(method: &str, args: &[ConstValue]) -> Option<
                         ConstValue::Tag {
                             name: Intern::new(kind_str.to_string()),
                             qual_path: None,
-                            args: Vec::new(),
+                            args: Vec::new().into(),
                         },
                     ),
                     (Intern::new("register".to_string()), ConstValue::String(reg)),
-                ],
+                ]
+                .into(),
             });
             Some(ConstValue::Record {
                 fields: vec![
                     (Intern::new("template".to_string()), builder_template),
                     (
                         Intern::new("operands".to_string()),
-                        ConstValue::List(builder_operands),
+                        ConstValue::List(builder_operands.into()),
                     ),
                     (
                         Intern::new("clobbers".to_string()),
-                        ConstValue::List(builder_clobbers),
+                        ConstValue::List(builder_clobbers.into()),
                     ),
-                ],
+                ]
+                .into(),
             })
         }
         "lateout" if args.len() >= 2 => {
@@ -254,24 +257,26 @@ pub(crate) fn try_fold_asm_builder(method: &str, args: &[ConstValue]) -> Option<
                         ConstValue::Tag {
                             name: Intern::new("LateOut".to_string()),
                             qual_path: None,
-                            args: Vec::new(),
+                            args: Vec::new().into(),
                         },
                     ),
                     (Intern::new("register".to_string()), ConstValue::String(reg)),
-                ],
+                ]
+                .into(),
             });
             Some(ConstValue::Record {
                 fields: vec![
                     (Intern::new("template".to_string()), builder_template),
                     (
                         Intern::new("operands".to_string()),
-                        ConstValue::List(builder_operands),
+                        ConstValue::List(builder_operands.into()),
                     ),
                     (
                         Intern::new("clobbers".to_string()),
-                        ConstValue::List(builder_clobbers),
+                        ConstValue::List(builder_clobbers.into()),
                     ),
-                ],
+                ]
+                .into(),
             })
         }
         "clobber" if args.len() >= 2 => {
@@ -284,20 +289,21 @@ pub(crate) fn try_fold_asm_builder(method: &str, args: &[ConstValue]) -> Option<
             builder_clobbers.push(ConstValue::Tag {
                 name: Intern::new("ClobberRegister".to_string()),
                 qual_path: None,
-                args: vec![ConstValue::String(reg)],
+                args: vec![ConstValue::String(reg)].into(),
             });
             Some(ConstValue::Record {
                 fields: vec![
                     (Intern::new("template".to_string()), builder_template),
                     (
                         Intern::new("operands".to_string()),
-                        ConstValue::List(builder_operands),
+                        ConstValue::List(builder_operands.into()),
                     ),
                     (
                         Intern::new("clobbers".to_string()),
-                        ConstValue::List(builder_clobbers),
+                        ConstValue::List(builder_clobbers.into()),
                     ),
-                ],
+                ]
+                .into(),
             })
         }
         "clobber_memory" if !args.is_empty() => {
@@ -309,20 +315,21 @@ pub(crate) fn try_fold_asm_builder(method: &str, args: &[ConstValue]) -> Option<
             builder_clobbers.push(ConstValue::Tag {
                 name: Intern::new("ClobberMemory".to_string()),
                 qual_path: None,
-                args: Vec::new(),
+                args: Vec::new().into(),
             });
             Some(ConstValue::Record {
                 fields: vec![
                     (Intern::new("template".to_string()), builder_template),
                     (
                         Intern::new("operands".to_string()),
-                        ConstValue::List(builder_operands),
+                        ConstValue::List(builder_operands.into()),
                     ),
                     (
                         Intern::new("clobbers".to_string()),
-                        ConstValue::List(builder_clobbers),
+                        ConstValue::List(builder_clobbers.into()),
                     ),
-                ],
+                ]
+                .into(),
             })
         }
         "build" if !args.is_empty() => {
@@ -336,13 +343,14 @@ pub(crate) fn try_fold_asm_builder(method: &str, args: &[ConstValue]) -> Option<
                     (Intern::new("template".to_string()), builder_template),
                     (
                         Intern::new("operands".to_string()),
-                        ConstValue::List(builder_operands),
+                        ConstValue::List(builder_operands.into()),
                     ),
                     (
                         Intern::new("clobbers".to_string()),
-                        ConstValue::List(builder_clobbers),
+                        ConstValue::List(builder_clobbers.into()),
                     ),
-                ],
+                ]
+                .into(),
             })
         }
         _ => None,

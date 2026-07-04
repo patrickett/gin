@@ -296,7 +296,7 @@ pub(crate) fn lower_typed_expr(
                             Some(ast::ConstValue::Tag {
                                 name: target.0,
                                 qual_path: None,
-                                args: vec![],
+                                args: vec![].into(),
                             })
                         } else {
                             None
@@ -310,7 +310,7 @@ pub(crate) fn lower_typed_expr(
                 Some(ast::ConstValue::Tag {
                     name: *name,
                     qual_path: None,
-                    args: vec![],
+                    args: vec![].into(),
                 })
             } else {
                 None
@@ -521,7 +521,7 @@ pub(crate) fn pattern_value_const(
                 return Some(ast::ConstValue::Tag {
                     name: *name,
                     qual_path: None,
-                    args: Vec::new(),
+                    args: Vec::new().into(),
                 });
             }
         }
@@ -533,7 +533,7 @@ pub(crate) fn pattern_value_const(
                 return Some(ast::ConstValue::Tag {
                     name: *variant_name,
                     qual_path: None,
-                    args: Vec::new(),
+                    args: Vec::new().into(),
                 });
             }
         }
@@ -550,7 +550,7 @@ pub(crate) fn pattern_value_const(
                 return Some(ast::ConstValue::Tag {
                     name: *name,
                     qual_path: None,
-                    args,
+                    args: args.into(),
                 });
             }
         }

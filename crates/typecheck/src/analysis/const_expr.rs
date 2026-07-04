@@ -353,7 +353,7 @@ fn eval_compile_time_expr_depth(
         Expr::AnonymousTag(name) => Some(ConstValue::Tag {
             name: *name,
             qual_path: None,
-            args: Vec::new(),
+            args: Vec::new().into(),
         }),
         Expr::RecordLit(fields) => {
             // Record literal: `(arch: 'x86_64', vendor: 'unknown')` → ConstValue::Record
@@ -371,7 +371,9 @@ fn eval_compile_time_expr_depth(
                 })
                 .collect();
             if pairs.len() == fields.len() {
-                Some(ConstValue::Record { fields: pairs })
+                Some(ConstValue::Record {
+                    fields: pairs.into(),
+                })
             } else {
                 None
             }
@@ -412,13 +414,13 @@ fn eval_compile_time_expr_depth(
                 Some(ConstValue::Tag {
                     name: call.name,
                     qual_path,
-                    args,
+                    args: args.into(),
                 })
             } else {
                 Some(ConstValue::Tag {
                     name: call.name,
                     qual_path,
-                    args,
+                    args: args.into(),
                 })
             }
         }
@@ -494,7 +496,7 @@ fn eval_compile_time_expr_depth(
                 })
                 .collect();
             if items.len() == elems.len() {
-                Some(ConstValue::List(items))
+                Some(ConstValue::List(items.into()))
             } else {
                 None
             }
@@ -606,7 +608,7 @@ fn compare_int_values(
         (ConstValue::Int(x), ConstValue::Int(y)) => Some(ConstValue::Tag {
             name: Intern::from_ref(if cmp(*x, *y) { "True" } else { "False" }),
             qual_path: None,
-            args: vec![],
+            args: vec![].into(),
         }),
         _ => None,
     }

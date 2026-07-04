@@ -459,7 +459,7 @@ fn list_pattern_matches_empty_and_cons() {
     let empty_pat = TypeExpr::ListEmpty;
     assert!(pattern_matches_public(
         &empty_pat,
-        &ConstValue::List(vec![])
+        &ConstValue::List(vec![].into())
     ));
 
     let cons_pat = TypeExpr::ListCons {
@@ -472,11 +472,14 @@ fn list_pattern_matches_empty_and_cons() {
             span_id: ast::span::SpanId::INVALID,
         }),
     };
-    let cv = ConstValue::List(vec![ConstValue::Tag {
-        name: Intern::new("Const".to_string()),
-        qual_path: None,
-        args: vec![ConstValue::Int(8)],
-    }]);
+    let cv = ConstValue::List(
+        vec![ConstValue::Tag {
+            name: Intern::new("Const".to_string()),
+            qual_path: None,
+            args: vec![ConstValue::Int(8)].into(),
+        }]
+        .into(),
+    );
     assert!(pattern_matches_public(&cons_pat, &cv));
 }
 

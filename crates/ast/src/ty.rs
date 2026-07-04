@@ -267,7 +267,7 @@ impl Ty {
                     ConstValue::Tag {
                         name: Intern::from_ref(if *signed { "True" } else { "False" }),
                         qual_path: None,
-                        args: vec![],
+                        args: vec![].into(),
                     },
                 ],
             ),
@@ -278,11 +278,11 @@ impl Ty {
                     ConstValue::Tag {
                         name: Intern::from_ref("True"),
                         qual_path: None,
-                        args: vec![],
+                        args: vec![].into(),
                     },
                 ],
             ),
-            Ty::Unit => Self::tag("Tuple", vec![ConstValue::List(vec![])]),
+            Ty::Unit => Self::tag("Tuple", vec![ConstValue::List(vec![].into())]),
             Ty::Record { name, fields } => {
                 if !seen.insert(*name) {
                     return Self::tag(
@@ -301,7 +301,7 @@ impl Ty {
                     "Record",
                     vec![
                         ConstValue::String(name.as_str().to_string()),
-                        ConstValue::List(named),
+                        ConstValue::List(named.into()),
                     ],
                 )
             }
@@ -329,7 +329,7 @@ impl Ty {
                     "Union",
                     vec![
                         ConstValue::String(name.as_str().to_string()),
-                        ConstValue::List(variant_shapes),
+                        ConstValue::List(variant_shapes.into()),
                     ],
                 )
             }
@@ -357,14 +357,14 @@ impl Ty {
                     "Union",
                     vec![
                         ConstValue::String(name.as_str().to_string()),
-                        ConstValue::List(variant_shapes),
+                        ConstValue::List(variant_shapes.into()),
                     ],
                 )
             }
             Ty::Tuple(elems) => {
                 let items: Vec<ConstValue> =
                     elems.iter().map(|t| t.to_const_value_inner(seen)).collect();
-                Self::tag("Tuple", vec![ConstValue::List(items)])
+                Self::tag("Tuple", vec![ConstValue::List(items.into())])
             }
             Ty::Ptr { inner } => Self::tag("Ptr", vec![inner.to_const_value_inner(seen)]),
             Ty::Ref { inner, mutable } => Self::tag(
@@ -374,7 +374,7 @@ impl Ty {
                     ConstValue::Tag {
                         name: Intern::from_ref(if *mutable { "True" } else { "False" }),
                         qual_path: None,
-                        args: vec![],
+                        args: vec![].into(),
                     },
                 ],
             ),
@@ -397,7 +397,7 @@ impl Ty {
         ConstValue::Tag {
             name: Intern::new(name.to_string()),
             qual_path: None,
-            args,
+            args: args.into(),
         }
     }
 
@@ -409,7 +409,8 @@ impl Ty {
                     ConstValue::String(name.to_string()),
                 ),
                 (Intern::new("ty".to_string()), ty),
-            ],
+            ]
+            .into(),
         }
     }
 
@@ -420,8 +421,12 @@ impl Ty {
                     Intern::new("name".to_string()),
                     ConstValue::String(name.to_string()),
                 ),
-                (Intern::new("fields".to_string()), ConstValue::List(fields)),
-            ],
+                (
+                    Intern::new("fields".to_string()),
+                    ConstValue::List(fields.into()),
+                ),
+            ]
+            .into(),
         }
     }
 
