@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use ast::{ConstExpr, Ty};
+use ast::{ConstExpr, Ty, TyArg, UnionVariant};
 use internment::Intern;
 
 /// A substitution that tracks mappings for both type variables and const variables.
@@ -16,6 +16,22 @@ impl DepSubst {
             types: HashMap::new(),
             consts: HashMap::new(),
         }
+    }
+
+    /// Build a substitution from a slice of (name, TyArg) pairs.
+    pub fn from_ty_args(args: &[(Intern<String>, TyArg)]) -> Self {
+        let mut s = Self::new();
+        for (name, arg) in args {
+            match arg {
+                TyArg::Type(ty) => {
+                    s.types.insert(*name, *ty.clone());
+                }
+                TyArg::Const(cv) => {
+                    s.consts.insert(*name, cv.clone());
+                }
+            }
+        }
+        s
     }
 
     pub fn from_maps(
@@ -47,19 +63,22 @@ impl DepSubst {
                 name,
                 variants,
                 literal_values,
+                ..
             } => Ty::Union {
                 name: *name,
                 variants: variants
                     .iter()
-                    .map(|(vn, fields)| {
-                        let new_fields = fields
+                    .map(|v| {
+                        let new_fields = v
+                            .fields
                             .iter()
                             .map(|(n, t)| (*n, Box::new(self.apply_to_ty(t))))
                             .collect();
-                        (*vn, new_fields)
+                        UnionVariant::new(v.name, new_fields)
                     })
                     .collect(),
                 literal_values: literal_values.clone(),
+                resolved_params: None,
             },
             Ty::Literal(v) => Ty::Literal(v.clone()),
             Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|t| self.apply_to_ty(t)).collect()),
@@ -202,7 +221,7 @@ mod tests {
         );
         let ty = Ty::Union {
             name: Intern::from_ref("Maybe"),
-            variants: vec![(
+            variants: vec![UnionVariant::new(
                 Intern::from_ref("Some"),
                 vec![(
                     Intern::from_ref("value"),
@@ -210,10 +229,11 @@ mod tests {
                 )],
             )],
             literal_values: None,
+            resolved_params: None,
         };
         let result = subst.apply_to_ty(&ty);
         if let Ty::Union { variants, .. } = &result {
-            assert!(variants[0].1[0].1.is_signed_int());
+            assert!(variants[0].fields[0].1.is_signed_int());
         } else {
             panic!("expected Union");
         }

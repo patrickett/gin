@@ -18,7 +18,7 @@ fn variant_doc(v: &Variant) -> Option<&str> {
         Variant::Local {
             doc_comment: None, ..
         }
-        | Variant::External(_) => None,
+        | Variant::External { .. } => None,
     }
 }
 

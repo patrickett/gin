@@ -46,7 +46,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                             self.emit_discriminant_extend(block, subject, n)
                         }
                         typecheck::ty::Ty::Union { variants, .. }
-                            if variants.iter().all(|(_, fields)| fields.is_empty()) =>
+                            if variants.iter().all(|v| v.fields.is_empty()) =>
                         {
                             self.emit_discriminant_extend(block, subject, variants.len())
                         }

@@ -99,7 +99,7 @@ fn maybe_variants_have_doc_comments() {
     assert_eq!(variants.len(), 2);
     let some_doc = match &variants[0] {
         ast::Variant::Local { doc_comment, .. } => doc_comment,
-        ast::Variant::External(_) => panic!("expected Local"),
+        ast::Variant::External { .. } => panic!("expected Local"),
     };
     assert_eq!(
         some_doc.as_ref().unwrap().value.as_str(),
@@ -108,7 +108,7 @@ fn maybe_variants_have_doc_comments() {
 
     let none_doc = match &variants[1] {
         ast::Variant::Local { doc_comment, .. } => doc_comment,
-        ast::Variant::External(_) => panic!("expected Local"),
+        ast::Variant::External { .. } => panic!("expected Local"),
     };
     assert_eq!(none_doc.as_ref().unwrap().value.as_str(), "Has no value");
 }

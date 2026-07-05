@@ -80,10 +80,10 @@ fn union_variants_covered(ty: &Ty, patterns: &[&TypeExpr]) -> bool {
     let Ty::Union { variants, .. } = ty else {
         return false;
     };
-    variants.iter().all(|(name, _)| {
+    variants.iter().all(|v| {
         patterns
             .iter()
-            .any(|p| p.surface_mangle_name() == name.as_str())
+            .any(|p| p.surface_mangle_name() == v.name.as_str())
     })
 }
 
@@ -194,6 +194,7 @@ pub fn when_declare_is_exhaustive(subject_ty: Option<&Ty>, arms: &[WhenArm]) -> 
 mod tests {
     use super::*;
     use crate::ty::Ty;
+    use crate::ty::UnionVariant;
     use crate::typed::TypedWhenArm;
     use ast::ConstValue;
     use ast::Literal;
@@ -351,7 +352,10 @@ mod tests {
     fn bool_union_two_arms_exhaustive() {
         let ty = Ty::union_named(
             intern("Bool"),
-            vec![(intern("True"), vec![]), (intern("False"), vec![])],
+            vec![
+                UnionVariant::new(intern("True"), vec![]),
+                UnionVariant::new(intern("False"), vec![]),
+            ],
         );
         let arms = vec![is_arm("True"), is_arm("False")];
         assert!(ty.when_subject_exhaustive(&arms));
@@ -361,7 +365,10 @@ mod tests {
     fn bool_union_one_arm_not_exhaustive() {
         let ty = Ty::union_named(
             intern("Bool"),
-            vec![(intern("True"), vec![]), (intern("False"), vec![])],
+            vec![
+                UnionVariant::new(intern("True"), vec![]),
+                UnionVariant::new(intern("False"), vec![]),
+            ],
         );
         let arms = vec![is_arm("True")];
         assert!(!ty.when_subject_exhaustive(&arms));

@@ -132,7 +132,7 @@ pub(crate) fn variant_belongs_to_union(
     }
     if let Some(ty) = tag_types.get(&union) {
         if let Ty::Union { variants, .. } = ty {
-            return variants.iter().any(|(v, _)| *v == variant);
+            return variants.iter().any(|v| v.name == variant);
         }
         if let Some(values) = ty.union_literal_values() {
             return values.iter().any(|cv| cv.display_name() == variant);

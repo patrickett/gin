@@ -8,6 +8,7 @@ mod support;
 use support::transform_source;
 
 use ast::HoverDoc;
+use ast::UnionVariant;
 use ast::source::SourceExt;
 use internment::Intern;
 use typecheck::HoverTarget;
@@ -176,10 +177,11 @@ fn hover_doc_matches_tag_golden_shape() {
             &Ty::Union {
                 name: Intern::from_ref("Bool"),
                 variants: vec![
-                    (Intern::from_ref("True"), vec![]),
-                    (Intern::from_ref("False"), vec![]),
+                    UnionVariant::new(Intern::from_ref("True"), vec![]),
+                    UnionVariant::new(Intern::from_ref("False"), vec![]),
                 ],
                 literal_values: None,
+                resolved_params: None,
             },
             &(),
             &(),
@@ -188,10 +190,11 @@ fn hover_doc_matches_tag_golden_shape() {
             &Ty::Union {
                 name: Intern::from_ref("Bool"),
                 variants: vec![
-                    (Intern::from_ref("True"), vec![]),
-                    (Intern::from_ref("False"), vec![]),
+                    UnionVariant::new(Intern::from_ref("True"), vec![]),
+                    UnionVariant::new(Intern::from_ref("False"), vec![]),
                 ],
                 literal_values: None,
+                resolved_params: None,
             },
             &(),
             &(),

@@ -247,7 +247,7 @@ impl TyInfer for TagCall {
     fn infer_ty(&self, env: &TyInferEnv) -> Ty {
         if let Some(ty) = env.tag_types.values().find_map(|ty| {
             if let Ty::Union { variants, .. } = ty
-                && variants.iter().any(|(vname, _)| *vname == self.name)
+                && variants.iter().any(|v| v.name == self.name)
             {
                 return Some(ty.clone());
             }

@@ -8,28 +8,38 @@ use crate::span::Spanned;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Variant {
-    /// this comes from somewhere else its just one of the possible values
-    /// holds its own doc comments
-    External(Box<Spanned<TypeExpr>>),
-    /// defined within the current declare
+    External {
+        shape: Box<Spanned<TypeExpr>>,
+        /// Optional `-> result_type` (e.g. `Nil -> Vec(x, 0)`).
+        result_ty: Option<Box<Spanned<TypeExpr>>>,
+    },
     Local {
         doc_comment: Option<DocComment>,
         shape: Box<Spanned<TypeExpr>>,
+        /// Optional `-> result_type` (e.g. `Cons -> Vec(x, n + 1)`).
+        result_ty: Option<Box<Spanned<TypeExpr>>>,
     },
 }
 
 impl Variant {
     pub fn shape(&self) -> &Spanned<TypeExpr> {
         match self {
-            Variant::External(sp) => sp,
-            Variant::Local { shape, .. } => shape,
+            Variant::External { shape, .. } | Variant::Local { shape, .. } => shape,
         }
     }
 
     pub fn doc_comment(&self) -> Option<&DocComment> {
         match self {
-            Variant::External(_) => None,
+            Variant::External { .. } => None,
             Variant::Local { doc_comment, .. } => doc_comment.as_ref(),
+        }
+    }
+
+    pub fn result_ty(&self) -> Option<&Spanned<TypeExpr>> {
+        match self {
+            Variant::External { result_ty, .. } | Variant::Local { result_ty, .. } => {
+                result_ty.as_ref().map(|b| b.as_ref())
+            }
         }
     }
 }
@@ -44,11 +54,7 @@ impl Hash for Variant {
     fn hash<H: Hasher>(&self, state: &mut H) {
         std::mem::discriminant(self).hash(state);
         match self {
-            Self::External(sp) => sp.hash(state),
-            Self::Local { doc_comment, shape } => {
-                doc_comment.hash(state);
-                shape.hash(state);
-            }
+            Self::External { shape, .. } | Self::Local { shape, .. } => shape.hash(state),
         }
     }
 }

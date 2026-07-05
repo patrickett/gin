@@ -240,7 +240,88 @@ fn refinement_rejected_outside_if_body() {
 }
 
 #[test]
-fn const_generic_call_substitutes_return_type() {
+fn indexed_adt_parses() {
+    let typed = transform_source_with_typed_locals(
+        "Vec(n Int) is\n\
+             Nil -> Vec(0)\n\
+             Cons(head Int, tail Vec(n)) -> Vec(n)\n",
+    );
+    let vec_id = typecheck::TagId(Intern::new("Vec".to_string()));
+    let tag = typed.tags.get(&vec_id).expect("Vec tag exists");
+    if let Ty::Union { variants, .. } = &tag.resolved_ty {
+        assert_eq!(variants.len(), 2, "two variants");
+        let nil = &variants[0];
+        assert_eq!(nil.name.as_str(), "Nil");
+        assert!(nil.result_ty.is_some(), "Nil should have result_ty");
+        let cons = &variants[1];
+        assert_eq!(cons.name.as_str(), "Cons");
+        assert!(cons.result_ty.is_some(), "Cons should have result_ty");
+    } else {
+        panic!("Expected Union, got {:?}", tag.resolved_ty);
+    }
+}
+
+#[test]
+fn const_generic_union_stores_resolved_params() {
+    // When a union type is applied with concrete params (e.g. `Vec(3)`),
+    // the resolved Ty should carry those params in `resolved_params`.
+    let typed = transform_source_with_typed_locals(
+        "Vec(n Int) is\n\
+             Nil -> Vec(0)\n\
+             Cons(head Int, tail Vec(n)) -> Vec(n)\n\
+         v Vec(3)\n",
+    );
+    let vec_ty = typed
+        .tag_types
+        .get(&typecheck::TagId(Intern::new("Vec".to_string())))
+        .cloned()
+        .expect("Vec type");
+    // The base union type should NOT have resolved_params (none set on the tag itself).
+    if let Ty::Union {
+        resolved_params, ..
+    } = &vec_ty
+    {
+        assert!(
+            resolved_params.is_none(),
+            "base union type should not have resolved_params; found: {:?}",
+            resolved_params
+        );
+    } else {
+        panic!("Expected Union, got {:?}", vec_ty);
+    }
+}
+
+#[test]
+fn pattern_bindings_substituted_from_resolved_params() {
+    // When a when-expression matches on a const-generic union with concrete
+    // params, the pattern bindings should have the concrete types substituted.
+    let typed = transform_source_with_typed_locals(
+        "Vec(n Int) is\n\
+             Nil -> Vec(0)\n\
+             Cons(head Int, tail Vec(n)) -> Vec(n)\n\
+         test:\n\
+             v Vec(3)\n\
+             when v is\n\
+                 Cons(_, t) then t\n",
+    );
+    // The `t` binding should have type `Vec(3)` instead of `Vec(n)`.
+    // Verify by checking there are no unknown-symbol flaws from opaque params.
+    // (Before this fix, `t` would have type `Vec(Opaque("n"))` which would
+    //  cause unknown-symbol errors when used.)
+    let unknown_syms: Vec<_> = typed
+        .all_flaws()
+        .iter()
+        .filter(|(_, f)| f.code.slug() == "type-unknown-symbol")
+        .collect();
+    assert!(
+        unknown_syms.is_empty(),
+        "expected no unknown-symbol flaws from pattern bindings, got: {:?}",
+        unknown_syms
+    );
+}
+
+#[test]
+fn const_generic_call_substituted_return_type() {
     let typed = transform_source_with_typed_locals(
         "id_ty(x Type) Bool := Bool.True\n\
          main: id_ty(Int)\n",

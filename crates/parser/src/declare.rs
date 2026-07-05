@@ -590,19 +590,20 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 value: TypeExpr::Literal(lit, span),
                 span_id: span,
             });
-            // Only consume doc comment if immediately after the value (same line)
             let doc_after = if matches!(self.peek_at(0), Some(Token::DocComment(_))) {
                 self.parse_doc_comment()
             } else {
                 None
             };
             let doc = DocComment::combine(doc_before, doc_after);
+            let result_ty = self.parse_variant_result_ty(expr_parser);
             return Some(match doc.filter(|d| !d.is_empty()) {
                 Some(d) => Variant::Local {
                     doc_comment: Some(d),
                     shape,
+                    result_ty,
                 },
-                None => Variant::External(shape),
+                None => Variant::External { shape, result_ty },
             });
         }
 
@@ -610,7 +611,6 @@ impl<'src, 't> TokenCursor<'src, 't> {
         let shape = self.parse_pattern_type_expr(expr_parser)?;
         let sp = Box::new(shape);
 
-        // Only consume doc comment if immediately after the variant (same line)
         let doc_after = if matches!(self.peek_at(0), Some(Token::DocComment(_))) {
             self.parse_doc_comment()
         } else {
@@ -618,13 +618,28 @@ impl<'src, 't> TokenCursor<'src, 't> {
         };
 
         let doc = DocComment::combine(doc_before, doc_after);
+        let result_ty = self.parse_variant_result_ty(expr_parser);
         Some(match doc.filter(|d| !d.is_empty()) {
             Some(d) => Variant::Local {
                 doc_comment: Some(d),
                 shape: sp,
+                result_ty,
             },
-            None => Variant::External(sp),
+            None => Variant::External {
+                shape: sp,
+                result_ty,
+            },
         })
+    }
+
+    /// Parse optional `-> result_type` after a union variant.
+    fn parse_variant_result_ty(&mut self, expr_parser: ExprFn) -> Option<Box<Spanned<TypeExpr>>> {
+        self.skip_layout();
+        if self.eat(&Token::ArrowRight) {
+            self.parse_type_expr(expr_parser).map(Box::new)
+        } else {
+            None
+        }
     }
 
     /// True when `cursor` points at a lowercase `Id` followed by `has` (blanket impl start).
@@ -972,8 +987,12 @@ impl<'src, 't> TokenCursor<'src, 't> {
             Some(d) => Variant::Local {
                 doc_comment: Some(d),
                 shape: sp,
+                result_ty: None,
             },
-            None => Variant::External(sp),
+            None => Variant::External {
+                shape: sp,
+                result_ty: None,
+            },
         }
     }
 
@@ -981,22 +1000,31 @@ impl<'src, 't> TokenCursor<'src, 't> {
         if let Some(doc) = doc.filter(|d| !d.is_empty())
             && let Some(prev) = variants.last_mut()
         {
-            let placeholder = Variant::External(Box::new(Spanned {
-                value: TypeExpr::Nominal(Intern::new(String::new()), SpanId::INVALID),
-                span_id: SpanId::INVALID,
-            }));
+            let placeholder = Variant::External {
+                shape: Box::new(Spanned {
+                    value: TypeExpr::Nominal(Intern::new(String::new()), SpanId::INVALID),
+                    span_id: SpanId::INVALID,
+                }),
+                result_ty: None,
+            };
             let prev_owned = std::mem::replace(prev, placeholder);
             *prev = match prev_owned {
-                Variant::External(shape) => Variant::Local {
+                Variant::External { shape, result_ty } => Variant::Local {
                     doc_comment: Some(doc),
                     shape,
+                    result_ty,
                 },
                 Variant::Local {
                     mut doc_comment,
                     shape,
+                    result_ty,
                 } => {
                     doc_comment = DocComment::combine(doc_comment, Some(doc));
-                    Variant::Local { doc_comment, shape }
+                    Variant::Local {
+                        doc_comment,
+                        shape,
+                        result_ty,
+                    }
                 }
             };
         }

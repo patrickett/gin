@@ -1,7 +1,7 @@
 //! `Reflectable` synthesis and compile-time trait helpers.
 
 use ast::span::SpanId;
-use ast::{ConstValue, ParameterKind, TypeExpr};
+use ast::{ConstValue, ParameterKind, TypeExpr, UnionVariant};
 use internment::Intern;
 use typecheck::analysis::{TyCopyExt, eval_compile_time_expr_with_env, pattern_matches_public};
 use typecheck::ty::Ty;
@@ -328,10 +328,11 @@ fn bool_is_copy_via_blanket() {
     let ty = Ty::Union {
         name: Intern::from_ref("Bool"),
         variants: vec![
-            (Intern::from_ref("True"), vec![]),
-            (Intern::from_ref("False"), vec![]),
+            UnionVariant::new(Intern::from_ref("True"), vec![]),
+            UnionVariant::new(Intern::from_ref("False"), vec![]),
         ],
         literal_values: None,
+        resolved_params: None,
     };
     let typed = empty_typed();
     let shape = reflect_ty_to_const_value(&ty);
@@ -524,10 +525,11 @@ fn bool_reflects_as_union() {
     let ty = Ty::Union {
         name: Intern::from_ref("Bool"),
         variants: vec![
-            (Intern::from_ref("True"), vec![]),
-            (Intern::from_ref("False"), vec![]),
+            UnionVariant::new(Intern::from_ref("True"), vec![]),
+            UnionVariant::new(Intern::from_ref("False"), vec![]),
         ],
         literal_values: None,
+        resolved_params: None,
     };
     let cv = reflect_ty_to_const_value(&ty);
     let pat = TypeExpr::Generic {

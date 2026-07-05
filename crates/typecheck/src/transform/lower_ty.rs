@@ -435,10 +435,12 @@ pub(crate) fn nominalize_explicit_ty_surface(surface: &TypeExpr, ty: Ty) -> Ty {
             name: existing,
             variants,
             literal_values,
+            ..
         } if existing.as_str() == "union" => Ty::Union {
             name: *name,
             variants,
             literal_values,
+            resolved_params: None,
         },
         other => other,
     }

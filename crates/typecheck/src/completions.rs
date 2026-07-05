@@ -751,12 +751,12 @@ pub fn dot_completions_for_ty(ty: Ty) -> Vec<CompletionCandidate> {
     let qualifier = name.as_str();
     variants
         .iter()
-        .map(|(variant_name, fields)| {
-            let label = if fields.is_empty() {
-                variant_name.to_string()
+        .map(|v| {
+            let label = if v.fields.is_empty() {
+                v.name.to_string()
             } else {
-                let names: Vec<String> = fields.iter().map(|(n, _)| n.to_string()).collect();
-                format!("{}({})", variant_name, names.join(", "))
+                let names: Vec<String> = v.fields.iter().map(|(n, _)| n.to_string()).collect();
+                format!("{}({})", v.name, names.join(", "))
             };
             CompletionCandidate {
                 label: label.clone(),
@@ -947,7 +947,7 @@ pub fn format_params(params: &Parameters) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ty::Ty;
+    use crate::ty::UnionVariant;
     use ast::span::SpanId;
     use ast::{Literal, Spanned, Typed};
     use indexmap::IndexMap;
@@ -1324,9 +1324,9 @@ main:
         let ty = Ty::union_named(
             Intern::new("Color".to_string()),
             vec![
-                (Intern::new("Red".to_string()), vec![]),
-                (Intern::new("Green".to_string()), vec![]),
-                (Intern::new("Blue".to_string()), vec![]),
+                UnionVariant::new(Intern::new("Red".to_string()), vec![]),
+                UnionVariant::new(Intern::new("Green".to_string()), vec![]),
+                UnionVariant::new(Intern::new("Blue".to_string()), vec![]),
             ],
         );
         let items = dot_completions_for_ty(ty);
@@ -1369,8 +1369,8 @@ main:
         let ty = Ty::union_named(
             Intern::new("Color".to_string()),
             vec![
-                (Intern::new("Red".to_string()), vec![]),
-                (Intern::new("Blue".to_string()), vec![]),
+                UnionVariant::new(Intern::new("Red".to_string()), vec![]),
+                UnionVariant::new(Intern::new("Blue".to_string()), vec![]),
             ],
         );
         let mut tag_types = HashMap::new();
@@ -1606,8 +1606,8 @@ Greeting is 'hello' | 'goodbye'
         let ty = Ty::union_named(
             Intern::new("Color".to_string()),
             vec![
-                (Intern::new("Red".to_string()), vec![]),
-                (Intern::new("Blue".to_string()), vec![]),
+                UnionVariant::new(Intern::new("Red".to_string()), vec![]),
+                UnionVariant::new(Intern::new("Blue".to_string()), vec![]),
             ],
         );
         let mut tag_types = HashMap::new();

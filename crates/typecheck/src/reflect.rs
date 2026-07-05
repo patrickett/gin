@@ -99,14 +99,15 @@ fn reflect_ty_to_const_value_inner(ty: &Ty, seen: &mut HashSet<Intern<String>>) 
             }
             let variant_shapes: Vec<ConstValue> = variants
                 .iter()
-                .map(|(vname, vfields)| {
-                    let fields: Vec<ConstValue> = vfields
+                .map(|v| {
+                    let fields: Vec<ConstValue> = v
+                        .fields
                         .iter()
                         .map(|(fname, fty)| {
                             record_named(fname.as_str(), reflect_ty_to_const_value_inner(fty, seen))
                         })
                         .collect();
-                    record_variant(vname.as_str(), fields)
+                    record_variant(v.name.as_str(), fields)
                 })
                 .collect();
             seen.remove(name);
@@ -275,7 +276,7 @@ pub fn const_value_to_expr(cv: &ConstValue) -> Expr {
 mod tests {
     use super::*;
     use crate::compile_time_trait::synthesize_reflectable_trait;
-    use crate::ty::Ty;
+    use crate::ty::{Ty, UnionVariant};
     use internment::Intern;
 
     fn intern(s: &str) -> Intern<String> {
@@ -297,7 +298,7 @@ mod tests {
         };
         let type_union = Ty::Union {
             name: intern("Type"),
-            variants: vec![(
+            variants: vec![UnionVariant::new(
                 intern("Record"),
                 vec![
                     (intern("name"), Box::new(Ty::Opaque(intern("String")))),
@@ -305,6 +306,7 @@ mod tests {
                 ],
             )],
             literal_values: None,
+            resolved_params: None,
         };
         let _ = reflect_ty_to_const_value(&type_union);
         let _ = reflect_ty_to_const_value(&named_ty);
@@ -315,10 +317,11 @@ mod tests {
         let ty = Ty::Union {
             name: Intern::from_ref("Bool"),
             variants: vec![
-                (Intern::from_ref("True"), vec![]),
-                (Intern::from_ref("False"), vec![]),
+                UnionVariant::new(Intern::from_ref("True"), vec![]),
+                UnionVariant::new(Intern::from_ref("False"), vec![]),
             ],
             literal_values: None,
+            resolved_params: None,
         };
         let pt = synthesize_reflectable_trait(&ty);
         let shape = &pt.fields[0].1;

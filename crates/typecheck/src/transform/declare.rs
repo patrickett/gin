@@ -622,11 +622,11 @@ fn push_union_variants_to_map(
             literal_values: None,
             ..
         } => {
-            for (disc, (vname, vfields)) in variants.iter().enumerate() {
+            for (disc, v) in variants.iter().enumerate() {
                 let fields: Vec<(Intern<String>, Ty)> =
-                    vfields.iter().map(|(n, t)| (*n, *t.clone())).collect();
+                    v.fields.iter().map(|(n, t)| (*n, *t.clone())).collect();
                 variant_map
-                    .entry(*vname)
+                    .entry(v.name)
                     .or_default()
                     .push((union_name, disc, fields));
             }
@@ -688,7 +688,7 @@ fn resolve_declare_value(
                 .iter()
                 .map(|v| {
                     let shape = v.shape();
-                    match &shape.value {
+                    let (name, fields) = match &shape.value {
                         TypeExpr::Generic { name, params, .. } => {
                             let fields: Vec<(Intern<String>, Box<Ty>)> = params
                                 .iter()
@@ -717,6 +717,12 @@ fn resolve_declare_value(
                             Intern::new(String::new()),
                             Vec::<(Intern<String>, Box<Ty>)>::new(),
                         ),
+                    };
+                    let result_ty = v.result_ty().map(|rt| env.resolve(&rt.value));
+                    UnionVariant {
+                        name,
+                        fields,
+                        result_ty,
                     }
                 })
                 .collect();
@@ -724,6 +730,7 @@ fn resolve_declare_value(
                 name: *declaring_name,
                 variants: resolved_variants,
                 literal_values: None,
+                resolved_params: None,
             }
         }
 

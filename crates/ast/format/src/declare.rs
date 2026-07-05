@@ -258,7 +258,10 @@ mod tests {
     }
 
     fn variant(shape: TypeExpr) -> Variant {
-        Variant::External(Box::new(spanned(shape)))
+        Variant::External {
+            shape: Box::new(spanned(shape)),
+            result_ty: None,
+        }
     }
 
     #[test]

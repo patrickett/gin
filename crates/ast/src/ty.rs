@@ -6,8 +6,25 @@ use std::collections::{HashMap, HashSet};
 use crate::{ConstExpr, ConstValue, HashFloat};
 use std::fmt;
 
-/// One union variant: `(variant_name, [(field_name, field_type)])` in declaration order.
-pub type UnionVariant = (Intern<String>, Vec<(Intern<String>, Box<Ty>)>);
+/// One union variant with an optional indexed result type.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UnionVariant {
+    pub name: Intern<String>,
+    pub fields: Vec<(Intern<String>, Box<Ty>)>,
+    /// Result type with const-generic indices, e.g. `Vec(x, 0)` for `Nil`.
+    /// `None` means the default — same as the parent union's type parameters.
+    pub result_ty: Option<Ty>,
+}
+
+impl UnionVariant {
+    pub fn new(name: Intern<String>, fields: Vec<(Intern<String>, Box<Ty>)>) -> Self {
+        Self {
+            name,
+            fields,
+            result_ty: None,
+        }
+    }
+}
 
 /// A parse-level predicate on a field value, e.g. `and < n`.
 /// The field value is the implicit left-hand side.
@@ -103,6 +120,10 @@ pub enum Ty {
         name: Intern<String>,
         variants: Vec<UnionVariant>,
         literal_values: Option<Vec<ConstValue>>,
+        /// When this union was resolved from a const-generic type application
+        /// (e.g. `Vec(Int, 3)`), stores the concrete type/const args as
+        /// `(param_name, TyArg)` pairs, preserving declaration order.
+        resolved_params: Option<Vec<(Intern<String>, TyArg)>>,
     },
 }
 
@@ -172,6 +193,7 @@ impl Ty {
     pub fn union_named(name: Intern<String>, variants: Vec<UnionVariant>) -> Self {
         Ty::Union {
             name,
+            resolved_params: None,
             variants,
             literal_values: None,
         }
@@ -180,12 +202,13 @@ impl Ty {
     pub fn union_of_literals(name: Intern<String>, values: Vec<ConstValue>) -> Self {
         let variants = values
             .iter()
-            .map(|cv| (cv.display_name(), Vec::new()))
+            .map(|cv| UnionVariant::new(cv.display_name(), Vec::new()))
             .collect();
         Ty::Union {
             name,
             variants,
             literal_values: Some(values),
+            resolved_params: None,
         }
     }
 
@@ -342,14 +365,15 @@ impl Ty {
                 }
                 let variant_shapes: Vec<ConstValue> = variants
                     .iter()
-                    .map(|(vname, vfields)| {
-                        let fields: Vec<ConstValue> = vfields
+                    .map(|v| {
+                        let fields: Vec<ConstValue> = v
+                            .fields
                             .iter()
                             .map(|(fname, fty)| {
                                 Self::record_named(fname.as_str(), fty.to_const_value_inner(seen))
                             })
                             .collect();
-                        Self::record_variant(vname.as_str(), fields)
+                        Self::record_variant(v.name.as_str(), fields)
                     })
                     .collect();
                 seen.remove(name);
@@ -489,19 +513,26 @@ impl Ty {
                 name,
                 variants,
                 literal_values,
+                resolved_params,
             } => Ty::Union {
                 name: *name,
                 variants: variants
                     .iter()
-                    .map(|(vn, fields)| {
-                        let new_fields = fields
+                    .map(|v| {
+                        let new_fields = v
+                            .fields
                             .iter()
                             .map(|(n, t)| (*n, Box::new(t.substitute(subst))))
                             .collect();
-                        (*vn, new_fields)
+                        UnionVariant {
+                            name: v.name,
+                            fields: new_fields,
+                            result_ty: v.result_ty.as_ref().map(|rt| rt.substitute(subst)),
+                        }
                     })
                     .collect(),
                 literal_values: literal_values.clone(),
+                resolved_params: resolved_params.clone(),
             },
             Ty::Literal(v) => Ty::Literal(v.clone()),
             Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|t| t.substitute(subst)).collect()),

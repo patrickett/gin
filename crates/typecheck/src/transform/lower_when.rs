@@ -6,6 +6,7 @@
 
 use ast::prelude::*;
 
+use crate::subst::DepSubst;
 use crate::ty::Ty;
 use crate::typed::ExprId;
 
@@ -26,6 +27,18 @@ fn with_pattern_locals(
         scope.variant_map,
         scope.tag_types,
     ));
+    // If the scrutinee has resolved params (e.g. `Vec(Int, 3)`), substitute
+    // the opaque type/const params in the pattern bindings with concrete values.
+    if let Some(Ty::Union {
+        resolved_params: Some(params),
+        ..
+    }) = subject_ty
+    {
+        let subst = DepSubst::from_ty_args(params);
+        for ty in arm_env.types.values_mut() {
+            *ty = subst.apply_to_ty(ty);
+        }
+    }
     arm_env
 }
 

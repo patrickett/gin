@@ -8,7 +8,7 @@
 //! Each test documents current behaviour — some assertions record expected
 //! diagnostics that may become unnecessary as the compiler matures.
 
-use ast::ty::Ty;
+use ast::ty::{Ty, UnionVariant};
 use internment::Intern;
 use typecheck::{DefId, TagId};
 
@@ -278,18 +278,18 @@ Status is
             // Pending should have named fields.
             let pending = variants
                 .iter()
-                .find(|(n, _)| n.as_str() == "Pending")
+                .find(|v| v.name.as_str() == "Pending")
                 .expect("Pending variant");
-            assert_eq!(pending.1.len(), 2, "Pending has two fields");
-            assert_eq!(pending.1[0].0.as_str(), "eta", "first field name");
-            assert_eq!(pending.1[1].0.as_str(), "message", "second field name");
+            assert_eq!(pending.fields.len(), 2, "Pending has two fields");
+            assert_eq!(pending.fields[0].0.as_str(), "eta", "first field name");
+            assert_eq!(pending.fields[1].0.as_str(), "message", "second field name");
 
             // Complete should have no fields.
             let complete = variants
                 .iter()
-                .find(|(n, _)| n.as_str() == "Complete")
+                .find(|v| v.name.as_str() == "Complete")
                 .expect("Complete variant");
-            assert!(complete.1.is_empty(), "Complete has no fields");
+            assert!(complete.fields.is_empty(), "Complete has no fields");
         }
         other => panic!("Expected Union type, got {other:?}"),
     }
@@ -325,16 +325,16 @@ fn union_with_generic_variant() {
 
             let some = variants
                 .iter()
-                .find(|(n, _)| n.as_str() == "Some")
+                .find(|v| v.name.as_str() == "Some")
                 .expect("Some variant");
-            assert_eq!(some.1.len(), 1, "Some has one field");
-            assert_eq!(some.1[0].0.as_str(), "value", "field name");
+            assert_eq!(some.fields.len(), 1, "Some has one field");
+            assert_eq!(some.fields[0].0.as_str(), "value", "field name");
 
             let none = variants
                 .iter()
-                .find(|(n, _)| n.as_str() == "None")
+                .find(|v| v.name.as_str() == "None")
                 .expect("None variant");
-            assert!(none.1.is_empty(), "None has no fields");
+            assert!(none.fields.is_empty(), "None has no fields");
         }
         other => panic!("Expected Union type, got {other:?}"),
     }

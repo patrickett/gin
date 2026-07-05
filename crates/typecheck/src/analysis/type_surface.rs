@@ -8,7 +8,7 @@ use crate::subst::DepSubst;
 use crate::ty::Ty;
 use ast::{
     ConstExpr, DeclareValue, FnCall, InRangeBounds, Literal, ParamKind, ParameterKind, Parameters,
-    TypeExpr,
+    TyArg, TypeExpr,
 };
 use internment::Intern;
 use std::collections::HashMap;
@@ -149,7 +149,30 @@ impl<'a> TypeEnv<'a> {
                 if merged_types.is_empty() && local_dep.consts.is_empty() {
                     base
                 } else {
-                    DepSubst::from_maps(merged_types, local_dep.consts).apply_to_ty(&base)
+                    let subst = DepSubst::from_maps(merged_types, local_dep.consts);
+                    let mut resolved = subst.apply_to_ty(&base);
+                    // Store the resolved params on union types for pattern matching.
+                    if let Ty::Union {
+                        ref mut resolved_params,
+                        ..
+                    } = resolved
+                    {
+                        let params: Vec<(Intern<String>, TyArg)> = subst
+                            .types
+                            .iter()
+                            .map(|(k, v)| (*k, TyArg::Type(Box::new(v.clone()))))
+                            .chain(
+                                subst
+                                    .consts
+                                    .iter()
+                                    .map(|(k, v)| (*k, TyArg::Const(v.clone()))),
+                            )
+                            .collect();
+                        if !params.is_empty() {
+                            *resolved_params = Some(params);
+                        }
+                    }
+                    resolved
                 }
             }
             TypeExpr::Qualified(path) => self
@@ -354,6 +377,7 @@ pub fn resolve_name_from_files(
                     name,
                     variants: Vec::new(),
                     literal_values: None,
+                    resolved_params: None,
                 };
             }
             _ => {}

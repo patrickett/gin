@@ -657,11 +657,12 @@ impl TokenCursor<'_, '_> {
             let unique_tags: HashSet<_> = tag_buffer.drain(..).collect();
             let variants: Vec<Variant> = unique_tags
                 .into_iter()
-                .map(|(name, span)| {
-                    Variant::External(Box::new(Spanned {
+                .map(|(name, span)| Variant::External {
+                    shape: Box::new(Spanned {
                         value: TypeExpr::Nominal(name, span),
                         span_id: span,
-                    }))
+                    }),
+                    result_ty: None,
                 })
                 .collect();
 

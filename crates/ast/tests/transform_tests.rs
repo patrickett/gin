@@ -177,8 +177,8 @@ fn test_unit_union_tag() {
     if let Ty::Union { name, variants, .. } = &tag.resolved_ty {
         assert_eq!(name.as_str(), "Bool");
         assert_eq!(variants.len(), 2, "two variants");
-        assert_eq!(variants[0].0.as_str(), "True");
-        assert_eq!(variants[1].0.as_str(), "False");
+        assert_eq!(variants[0].name.as_str(), "True");
+        assert_eq!(variants[1].name.as_str(), "False");
     } else {
         panic!("Expected Union type, got {:?}", tag.resolved_ty);
     }

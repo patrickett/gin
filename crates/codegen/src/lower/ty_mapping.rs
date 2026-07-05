@@ -66,7 +66,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
             Ty::Int { .. } => mlir_ctx.i64(),
             Ty::Float { .. } => mlir_ctx.f64(),
             Ty::Union { variants, .. } => {
-                let all_empty = variants.iter().all(|(_, fields)| fields.is_empty());
+                let all_empty = variants.iter().all(|v| v.fields.is_empty());
                 let disc_bytes = Self::union_discriminant_byte_size(variants.len());
                 if all_empty && variants.len() <= 256 {
                     if variants.len() == 2 {
@@ -79,16 +79,12 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     IntegerType::new(mlir_ctx, discriminant_bits).into()
                 } else {
                     let discriminant_bits = (disc_bytes * 8) as u32;
-                    let max_fields = variants
-                        .iter()
-                        .map(|(_, fields)| fields.len())
-                        .max()
-                        .unwrap_or(0);
+                    let max_fields = variants.iter().map(|v| v.fields.len()).max().unwrap_or(0);
                     let mut slot_types = vec![IntegerType::new(mlir_ctx, discriminant_bits).into()];
                     for slot_idx in 0..max_fields {
                         let widest = variants
                             .iter()
-                            .filter_map(|(_, fields)| fields.get(slot_idx))
+                            .filter_map(|v| v.fields.get(slot_idx))
                             .map(|(_, ft)| self.sized_byte_size(ft).unwrap_or(8))
                             .max()
                             .unwrap_or(8);

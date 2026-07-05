@@ -626,10 +626,10 @@ fn when_is_exhaustive_with_value_patterns(
                     .any(|pattern| pattern_matches_const_with_values(pattern, value, typed))
             })
         }
-        Ty::Union { variants, .. } => variants.iter().all(|(variant_name, _)| {
+        Ty::Union { variants, .. } => variants.iter().all(|v| {
             patterns
                 .iter()
-                .any(|pattern| pattern_matches_variant_with_values(pattern, *variant_name, typed))
+                .any(|pattern| pattern_matches_variant_with_values(pattern, v.name, typed))
         }),
         _ => when_is_exhaustive(subject_ty.into(), arms),
     }

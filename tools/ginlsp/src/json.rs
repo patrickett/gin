@@ -3,7 +3,9 @@
 
 use ast::source::SourceExt;
 use ast::ty::Ty;
-use ast::{BindValue, ConstValue, DeclareValue, Expr, FileAst, HasSpanId, SpanId, SpanTable};
+use ast::{
+    BindValue, ConstValue, DeclareValue, Expr, FileAst, HasSpanId, SpanId, SpanTable, UnionVariant,
+};
 use serde_json::Value;
 
 pub struct JsonSerializer;
@@ -35,10 +37,11 @@ impl JsonSerializer {
                 name,
                 variants,
                 literal_values,
+                ..
             } => {
                 let vars: Vec<Value> = variants
                     .iter()
-                    .map(|(vn, fields)| {
+                    .map(|UnionVariant { name: vn, fields, .. }| {
                         let flds: Vec<Value> = fields
                             .iter()
                             .map(|(fn_, ft)| {
@@ -181,7 +184,7 @@ impl JsonSerializer {
                             "shape": shape_src,
                         });
                         match v {
-                            ast::Variant::External(_) => {
+                            ast::Variant::External { .. } => {
                                 obj["kind"] = Value::String("external".into());
                             }
                             ast::Variant::Local { doc_comment, .. } => {
