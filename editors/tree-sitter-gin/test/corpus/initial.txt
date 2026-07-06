@@ -17,7 +17,7 @@ use core as c
 declare record fields
 ================================================================================
 
-Slice(x) has (pointer Pointer(x), length PointerSize)
+Slice(x) has pointer Pointer(x), length PointerSize
 
 --------------------------------------------------------------------------------
 
@@ -27,7 +27,7 @@ Slice(x) has (pointer Pointer(x), length PointerSize)
     (parameters
       (parameter
         name: (identifier)))
-    (record_fields
+    (decl_member_list
       (record_field
         name: (identifier)
         type: (tag
@@ -43,17 +43,16 @@ Slice(x) has (pointer Pointer(x), length PointerSize)
 declare interface signatures
 ================================================================================
 
-Allocator has (
-    allocate(ref self, l Layout) Slice(Byte) or AllocError,
-    deallocate(ref self, p Pointer(Byte), l Layout),
-)
+Allocator has
+    allocate(ref self, l Layout) Slice(Byte) or AllocError
+    deallocate(ref self, p Pointer(Byte), l Layout)
 
 --------------------------------------------------------------------------------
 
 (source_file
   (declare_statement
     name: (type_identifier)
-    (record_fields
+    (decl_member_list
       (record_signature
         name: (identifier)
         (parameters
@@ -121,8 +120,6 @@ x: 42
     value: (literal
       (number))))
 
-
-
 ================================================================================
 bind with camelCase name
 ================================================================================
@@ -148,7 +145,7 @@ regConstraint(reg Register) String: ''
 blanket impl
 ================================================================================
 
-x has Sized(size: compute_size(x))
+x.Sized has size: compute_size(x)
 
 --------------------------------------------------------------------------------
 
@@ -156,18 +153,20 @@ x has Sized(size: compute_size(x))
   (blanket_impl
     type_var: (identifier)
     trait: (type_identifier)
-    (trait_field
-      name: (identifier)
-      value: (call_expression
-        function: (identifier)
-        arguments: (argument_list
-          (identifier))))))
+    (provided_member_list
+      (provided_member
+        (provided_value
+          name: (identifier)
+          value: (call_expression
+            function: (identifier)
+            arguments: (argument_list
+              (identifier))))))))
 
 ================================================================================
 blanket impl with multiple fields
 ================================================================================
 
-x has Copy(can_copy: is_copy(x))
+x.Copy has can_copy: is_copy(x)
 
 --------------------------------------------------------------------------------
 
@@ -175,12 +174,14 @@ x has Copy(can_copy: is_copy(x))
   (blanket_impl
     type_var: (identifier)
     trait: (type_identifier)
-    (trait_field
-      name: (identifier)
-      value: (call_expression
-        function: (identifier)
-        arguments: (argument_list
-          (identifier))))))
+    (provided_member_list
+      (provided_member
+        (provided_value
+          name: (identifier)
+          value: (call_expression
+            function: (identifier)
+            arguments: (argument_list
+              (identifier))))))))
 
 ================================================================================
 when arms with logical and body
@@ -365,17 +366,16 @@ add(
 newline tests: record fields
 ================================================================================
 
-Point has (
+Point has
     x Int
     y Int
-)
 
 --------------------------------------------------------------------------------
 
 (source_file
   (declare_statement
     name: (type_identifier)
-    (record_fields
+    (decl_member_list
       (record_field
         name: (identifier)
         type: (tag
@@ -384,3 +384,105 @@ Point has (
         name: (identifier)
         type: (tag
           (type_identifier))))))
+
+================================================================================
+declare unit
+================================================================================
+
+Unit is ()
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declare_statement
+    (type_identifier)
+    (unit_type)))
+
+================================================================================
+declare member defaults
+================================================================================
+
+Widget has
+    label Str: 'ok'
+    size Int := compute_size()
+    render(self) Str := label
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declare_statement
+    (type_identifier)
+    (decl_member_list
+      (record_field
+        (identifier)
+        (tag
+          (type_identifier))
+        (field_default
+          (literal
+            (string))))
+      (record_field
+        (identifier)
+        (tag
+          (type_identifier))
+        (field_default
+          (call_expression
+            (identifier)
+            (argument_list))))
+      (record_signature
+        (identifier)
+        (parameters
+          (parameter
+            (self_parameter)))
+        (tag
+          (type_identifier))
+        (member_default
+          (identifier))))))
+
+================================================================================
+provisions with has members
+================================================================================
+
+Bool.ToString
+Bool.ToString has to_string: 'true'
+x.Copy has can_copy: is_copy(x)
+Bool.ToString has to_string(self) Str := 'true'
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (member_expression
+    (type_identifier)
+    (type_identifier))
+  (member_expression
+    (type_identifier)
+    (type_identifier))
+  (identifier)
+  (bind_statement
+    (identifier)
+    (literal
+      (string)))
+  (blanket_impl
+    (identifier)
+    (type_identifier)
+    (provided_member_list
+      (provided_member
+        (provided_value
+          (identifier)
+          (call_expression
+            (identifier)
+            (argument_list
+              (identifier)))))))
+  (provided_impl
+    (type_identifier)
+    (type_identifier)
+    (provided_member_list
+      (provided_member
+        (provided_method
+          (identifier)
+          (parameters
+            (parameter
+              (self_parameter)))
+          (tag
+            (type_identifier))
+          (literal
+            (string)))))))

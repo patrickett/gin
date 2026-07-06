@@ -23,11 +23,11 @@ module.exports = grammar({
 
   conflicts: ($) => [
     [$.parameters, $.argument_list],
+    [$.parameters, $.unit_type],
     [$.parameter, $._expression],
     [$.tag, $._expression],
     [$.tuple_set, $.buf_set, $._expression],
     [$.qualified_tag, $._expression],
-    // identifier.identifier sequences conflict across multiple rule types.
     [
       $.qualified_tag,
       $.impl_block,
@@ -36,13 +36,12 @@ module.exports = grammar({
       $._expression,
     ],
     [$.provided_impl, $._expression],
-    [$.provided_trait],
-    [$.provided_trait, $.impl_block],
-    [$.provided_trait, $.tag],
-    [$.provided_trait_chain],
+    [$.blanket_impl, $._expression],
+    [$.provided_impl, $.impl_block],
+    [$.provided_impl, $.qualified_tag],
     [$.intersection_type],
-    [$.trait_field, $._bind_value],
-    // [$.when_expression, $.when_is_arm],  -- removed: when_expression no longer references when_is_arm
+    [$.provided_value, $._bind_value],
+    [$.provided_method, $.method_definition],
     [$.path],
   ],
 
@@ -59,11 +58,6 @@ module.exports = grammar({
     line_comment: ($) => token(prec(-1, seq("--", /[^\n]*/))),
 
     private_section: ($) => seq("private", repeat($._top_level_item)),
-
-    // use http.web, crypto.hash
-    // use './math' as math
-    // use 'int'.(Int, Byte)
-    // use dep.(Foo, Bar as Baz)
 
     use_statement: ($) => seq("use", sep1(",", $.module_import)),
 
@@ -96,12 +90,6 @@ module.exports = grammar({
         $._expression,
       ),
 
-    // Bool is True or False
-    // Maybe[x] is Some(x) or None
-    // Person has (name Str, age Int)
-    // Int is -2147483648...2147483647
-    // DiceThrow is in 1...6
-
     declare_statement: ($) =>
       prec(
         2,
@@ -109,46 +97,52 @@ module.exports = grammar({
           field("name", $.type_identifier),
           optional($.parameters),
           choice(
-            seq("has", $._declare_record_value),
+            seq("has", $.decl_member_list),
             seq("is", $._declare_type_value),
           ),
-          repeat(seq("and", "is", optional("not"), $._declare_type_value)),
-          optional($.provided_trait_clause),
         ),
       ),
 
-    provided_trait_clause: ($) => seq("and", "has", $.provided_trait_chain),
+    decl_member_list: ($) => prec.right(nlist($, $._decl_member)),
 
-    provided_trait_chain: ($) =>
-      seq(
-        $.provided_trait,
-        repeat(seq("and", optional("has"), $.provided_trait)),
-      ),
-
-    provided_trait: ($) =>
-      seq(
-        field("trait", $.type_identifier),
-        optional(seq("(", optional(list($, $.trait_field)), ")")),
-      ),
-
-    _declare_record_value: ($) =>
-      choice($.record_fields, $.provided_trait_chain, $.tag),
-
-    record_fields: ($) => seq("(", optional(nlist($, $._record_member)), ")"),
-
-    _record_member: ($) => choice($.record_signature, $.record_field),
+    _decl_member: ($) => choice($.record_signature, $.record_field),
 
     record_signature: ($) =>
-      seq(
-        field("name", $.identifier),
-        $.parameters,
-        optional(field("return_type", $._type_hint)),
+      prec.right(
+        seq(
+          field("name", $.identifier),
+          $.parameters,
+          optional(field("return_type", $._type_hint)),
+          optional($.member_default),
+        ),
       ),
 
-    record_field: ($) => seq(field("name", $.identifier), field("type", $.tag)),
+    record_field: ($) =>
+      seq(
+        field("name", $.identifier),
+        field("type", $._type_hint),
+        optional($.field_default),
+      ),
+
+    field_default: ($) =>
+      seq(field("operator", choice(":=", ":")), field("value", $._expression)),
+
+    member_default: ($) =>
+      choice(
+        seq(field("operator", ":="), field("value", $._expression)),
+        seq(field("operator", ":"), field("body", $.block_body)),
+      ),
+
+    block_body: ($) => seq(repeat($._statement), $.return_statement),
 
     _declare_type_value: ($) =>
-      choice($.range_type, $.in_range_type, $.intersection_type, $.union_type),
+      choice(
+        $.unit_type,
+        $.range_type,
+        $.in_range_type,
+        $.intersection_type,
+        $.union_type,
+      ),
 
     range_type: ($) =>
       seq(optional("-"), $.number, "...", optional("-"), $.number),
@@ -162,10 +156,6 @@ module.exports = grammar({
 
     variant: ($) =>
       choice(prec(3, seq($.type_identifier, $.parameters)), $.tag),
-
-    // Int                   nominal
-    // Maybe[x]              generic
-    // Bool.True             qualified
 
     tag: ($) =>
       choice(
@@ -198,37 +188,42 @@ module.exports = grammar({
     qualified_tag: ($) =>
       prec.left(seq($.type_identifier, repeat1(seq(".", $.type_identifier)))),
 
-    // Type.Trait(field: value)
-    // x.Trait(field: value)
-
     provided_impl: ($) =>
       seq(
-        field("type", choice($.type_identifier, $.identifier)),
+        field("receiver", $.type_identifier),
         ".",
-        $.provided_trait,
+        field("trait", $.type_identifier),
+        optional(seq("has", $.provided_member_list)),
       ),
-
-    // x has Sized(size: compute_size(x))
-    // x has Copy(can_copy: is_copy(x))
 
     blanket_impl: ($) =>
-      seq(
-        field("type_var", $.identifier),
-        "has",
-        field("trait", $.type_identifier),
-        "(",
-        optional(list($, $.trait_field)),
-        ")",
+      prec(
+        2,
+        seq(
+          field("type_var", $.identifier),
+          ".",
+          field("trait", $.type_identifier),
+          optional(seq("has", $.provided_member_list)),
+        ),
       ),
 
-    trait_field: ($) =>
+    provided_member_list: ($) => prec.right(nlist($, $.provided_member)),
+
+    provided_member: ($) => choice($.provided_value, $.provided_method),
+
+    provided_value: ($) =>
       seq(field("name", $.identifier), ":", field("value", $._expression)),
 
-    // Args.Iterator (
-    //     next:
-    //         ...
-    //     return result
-    // )
+    provided_method: ($) =>
+      seq(
+        field("name", $.identifier),
+        $.parameters,
+        optional(field("return_type", $._type_hint)),
+        choice(
+          seq(field("operator", ":="), field("value", $._expression)),
+          seq(field("operator", ":"), field("body", $.block_body)),
+        ),
+      ),
 
     impl_block: ($) =>
       seq(
@@ -240,11 +235,6 @@ module.exports = grammar({
         ")",
       ),
 
-    // Person.greet(self): ...
-
-    // Person.greet(self): ...                   bare-Tag receiver
-    // Range[x].new(start x, end x) Range[x]:    generic-Tag receiver
-    // Maybe.Some.unwrap:                        qualified receiver
     method_definition: ($) =>
       seq(
         field(
@@ -254,15 +244,6 @@ module.exports = grammar({
         ".",
         $.bind_statement,
       ),
-
-    // x: 42                       mutable bind
-    // x := 42                     const bind
-    // add(a Int, b Int) Int: a + b
-    // allocate(ref self, l Layout) Slice(Byte) or AllocError
-    // main:
-    //     print('hello')
-    // return
-    // syscall := extern
 
     bind_statement: ($) =>
       prec.right(
@@ -277,18 +258,15 @@ module.exports = grammar({
         ),
       ),
 
-    _type_hint: ($) => choice($.type_union, $.tag),
+    _type_hint: ($) => choice($.type_union, $.unit_type, $.tag),
+
+    unit_type: ($) => seq("(", ")"),
 
     type_union: ($) => prec.left(seq($.tag, repeat1(seq("or", $.tag)))),
 
     _bind_value: ($) => choice("extern", $._expression),
 
     return_statement: ($) => prec.right(seq("return", optional($._expression))),
-
-    // (a Int, b Int)
-    // (ref self, l Layout)
-    // (x)
-    // (p: 123)
 
     parameters: ($) => seq("(", optional(nlist($, $.parameter)), ")"),
 
@@ -310,18 +288,12 @@ module.exports = grammar({
 
     self_parameter: ($) => prec(1, "self"),
 
-    // #[test, inline]
-
     attributes: ($) => seq("#", "[", list($, $._attribute_item), "]"),
 
     _attribute_item: ($) => choice("debug", "test", "inline"),
 
     _statement: ($) =>
       choice($.bind_statement, $.tuple_set, $.buf_set, $._expression),
-
-    // if val is Some(v)
-    //     four: v + 1
-    // return four
 
     if_expression: ($) =>
       prec.right(
@@ -333,15 +305,6 @@ module.exports = grammar({
           $.return_statement,
         ),
       ),
-
-    // when scrutinee is
-    //     pattern then consequent
-    //     pattern then consequent
-    //               else fallback
-    //
-    // when x > 0 then x
-    //      y < 0 then y
-    //            else 0
 
     when_expression: ($) =>
       prec.right(
@@ -373,10 +336,6 @@ module.exports = grammar({
       prec.right(seq($.binary_expression, "then", $._expression)),
     when_else_arm: ($) => seq("else", $._expression),
 
-    // for i in 1...50
-    //     print(i)
-    // loop
-
     for_expression: ($) =>
       seq(
         "for",
@@ -386,10 +345,6 @@ module.exports = grammar({
         repeat($._statement),
         "loop",
       ),
-
-    // while x < 10
-    //     x: x + 1
-    // loop
 
     while_expression: ($) =>
       seq(
@@ -403,9 +358,6 @@ module.exports = grammar({
 
     tuple_pattern: ($) => seq("(", nlist($, $.identifier), ")"),
 
-    // Patterns after `is` in `if`/`when`. Lowercase identifiers are binders,
-    // uppercase tags are variant/type patterns, and list patterns support
-    // JS-style rest syntax: `[head, ...tail]`.
     is_pattern: ($) =>
       choice($.tag, $.identifier, $.list_pattern, $.tuple_is_pattern),
 
@@ -495,8 +447,6 @@ module.exports = grammar({
           field("type", $.type_identifier),
         ),
       ),
-
-    // ── Member / tuple / buffer access ─────────────────
 
     member_expression: ($) =>
       prec.left(
@@ -599,13 +549,10 @@ module.exports = grammar({
   },
 });
 
-/// Comma separated list.
 function list($, rule) {
   return seq(rule, repeat(seq(",", rule)));
 }
 
-/// Comma-or-newline separated list with optional trailing separator.
-/// Uses external scanner's NEWLINE token for newline separation.
 function nlist($, rule) {
   return seq(
     rule,

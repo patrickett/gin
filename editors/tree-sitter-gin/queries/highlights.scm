@@ -36,6 +36,12 @@
 (record_field
   name: (identifier) @property)
 
+(provided_value
+  name: (identifier) @property)
+
+(provided_method
+  name: (identifier) @function.method)
+
 ; Function calls
 (call_expression
   function: (identifier) @function.call)
