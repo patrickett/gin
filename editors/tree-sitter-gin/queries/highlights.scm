@@ -59,9 +59,7 @@
     field: (type_identifier) @function.method))
 
 ; Method definitions should highlight method names
-(method_definition
-  (bind_statement
-    name: (identifier) @function.method))
+
 
 ; Self
 "self" @variable.builtin

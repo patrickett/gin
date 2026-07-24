@@ -14,6 +14,27 @@ use core as c
       (identifier))))
 
 ================================================================================
+consecutive selective uses
+================================================================================
+
+use '../target/'.target
+use BigInt, Int
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (use_statement
+    (module_import
+      (string)
+      (import_symbol
+        (identifier))))
+  (use_statement
+    (module_import
+      (type_identifier))
+    (module_import
+      (type_identifier))))
+
+================================================================================
 declare record fields
 ================================================================================
 
@@ -24,9 +45,8 @@ Slice(x) has pointer Pointer(x), length PointerSize
 (source_file
   (declare_statement
     name: (type_identifier)
-    (parameters
-      (parameter
-        name: (identifier)))
+    (declaration_parameters
+      (type_variable))
     (decl_member_list
       (record_field
         name: (identifier)
@@ -142,46 +162,57 @@ regConstraint(reg Register) String: ''
       (string))))
 
 ================================================================================
-blanket impl
+auto trait
 ================================================================================
 
-x.Sized has size: compute_size(x)
+#auto
+Sized has size Size: compute_size(Self)
 
 --------------------------------------------------------------------------------
 
 (source_file
-  (blanket_impl
-    type_var: (identifier)
-    trait: (type_identifier)
-    (provided_member_list
-      (provided_member
-        (provided_value
-          name: (identifier)
+  (declare_statement
+    (attributes
+      (identifier))
+    name: (type_identifier)
+    (decl_member_list
+      (record_field
+        name: (identifier)
+        type: (tag
+          (type_identifier))
+        (field_default
           value: (call_expression
             function: (identifier)
             arguments: (argument_list
-              (identifier))))))))
+              (self_type))))))))
 
 ================================================================================
-blanket impl with multiple fields
+auto trait with callable attribute
 ================================================================================
 
-x.Copy has can_copy: is_copy(x)
+#target("wasm32")
+Copy has can_copy Bool: is_copy(Self)
 
 --------------------------------------------------------------------------------
 
 (source_file
-  (blanket_impl
-    type_var: (identifier)
-    trait: (type_identifier)
-    (provided_member_list
-      (provided_member
-        (provided_value
-          name: (identifier)
+  (declare_statement
+    (attributes
+      (attribute_call
+        name: (identifier)
+        arguments: (argument_list
+          (format_string))))
+    name: (type_identifier)
+    (decl_member_list
+      (record_field
+        name: (identifier)
+        type: (tag
+          (type_identifier))
+        (field_default
           value: (call_expression
             function: (identifier)
             arguments: (argument_list
-              (identifier))))))))
+              (self_type))))))))
 
 ================================================================================
 when arms with logical and body
@@ -328,9 +359,9 @@ use 'mod'.(
   (use_statement
     (module_import
       (string)
-      (bundle_export
+      (import_symbol
         (type_identifier))
-      (bundle_export
+      (import_symbol
         (type_identifier)))))
 
 ================================================================================
@@ -444,7 +475,6 @@ provisions with has members
 
 Bool.ToString
 Bool.ToString has to_string: 'true'
-x.Copy has can_copy: is_copy(x)
 Bool.ToString has to_string(self) Str := 'true'
 
 --------------------------------------------------------------------------------
@@ -453,28 +483,22 @@ Bool.ToString has to_string(self) Str := 'true'
   (member_expression
     (type_identifier)
     (type_identifier))
-  (member_expression
-    (type_identifier)
-    (type_identifier))
-  (identifier)
-  (bind_statement
-    (identifier)
-    (literal
-      (string)))
-  (blanket_impl
-    (identifier)
-    (type_identifier)
+  (provided_impl
+    (tag
+      (type_identifier))
+    (tag
+      (type_identifier))
     (provided_member_list
       (provided_member
         (provided_value
           (identifier)
-          (call_expression
-            (identifier)
-            (argument_list
-              (identifier)))))))
+          (literal
+            (string))))))
   (provided_impl
-    (type_identifier)
-    (type_identifier)
+    (tag
+      (type_identifier))
+    (tag
+      (type_identifier))
     (provided_member_list
       (provided_member
         (provided_method
@@ -486,3 +510,59 @@ Bool.ToString has to_string(self) Str := 'true'
             (type_identifier))
           (literal
             (string)))))))
+
+================================================================================
+parenthesized has members are rejected
+================================================================================
+
+Coord has (x Int, y Int)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declare_statement
+    (type_identifier)
+    (ERROR)
+    (decl_member_list
+      (record_field
+        (identifier)
+        (tag
+          (type_identifier)))
+      (record_field
+        (identifier)
+        (tag
+          (type_identifier)))))
+  (ERROR))
+
+================================================================================
+grouped attributes are rejected
+================================================================================
+
+#[inline, complexity(Constant)]
+get(i Int) Byte: buf.(i)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (bind_statement
+    (attributes
+      (ERROR)
+      (identifier))
+    (ERROR
+      (identifier)
+      (parameters
+        (parameter
+          (tag
+            (type_identifier)))))
+    (identifier)
+    (parameters
+      (parameter
+        (identifier)
+        (tag
+          (type_identifier))))
+    (tag
+      (type_identifier))
+    (member_expression
+      (identifier)
+      (argument_list
+        (identifier)))))

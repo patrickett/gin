@@ -28,21 +28,13 @@ module.exports = grammar({
     [$.tag, $._expression],
     [$.tuple_set, $.buf_set, $._expression],
     [$.qualified_tag, $._expression],
-    [
-      $.qualified_tag,
-      $.impl_block,
-      $.method_definition,
-      $.provided_impl,
-      $._expression,
-    ],
-    [$.provided_impl, $._expression],
-    [$.blanket_impl, $._expression],
-    [$.provided_impl, $.impl_block],
-    [$.provided_impl, $.qualified_tag],
+    [$.tag, $.qualified_tag, $._expression],
+    [$.declaration_parameters, $.type_application],
+
     [$.intersection_type],
     [$.provided_value, $._bind_value],
-    [$.provided_method, $.method_definition],
     [$.path],
+    [$.record_signature, $.record_field],
   ],
 
   rules: {
@@ -61,9 +53,9 @@ module.exports = grammar({
 
     use_statement: ($) => seq("use", sep1(",", $.module_import)),
 
-    bundle_export: ($) =>
+    import_symbol: ($) =>
       seq(
-        $.type_identifier,
+        choice($.identifier, $.type_identifier),
         optional(seq("as", choice($.identifier, $.type_identifier))),
       ),
 
@@ -72,7 +64,8 @@ module.exports = grammar({
         choice($.path, $.string, $.type_identifier),
         optional(
           choice(
-            seq(".", "(", nlist($, $.bundle_export), ")"),
+            seq(".", "(", nlist($, $.import_symbol), ")"),
+            seq(".", $.import_symbol),
             seq("as", $.identifier),
           ),
         ),
@@ -82,9 +75,6 @@ module.exports = grammar({
       choice(
         $.declare_statement,
         $.provided_impl,
-        $.blanket_impl,
-        $.impl_block,
-        $.method_definition,
         $.bind_statement,
         $.return_statement,
         $._expression,
@@ -92,10 +82,11 @@ module.exports = grammar({
 
     declare_statement: ($) =>
       prec(
-        2,
+        10,
         seq(
+          optional($.attributes),
           field("name", $.type_identifier),
-          optional($.parameters),
+          optional($.declaration_parameters),
           choice(
             seq("has", $.decl_member_list),
             seq("is", $._declare_type_value),
@@ -103,9 +94,13 @@ module.exports = grammar({
         ),
       ),
 
+    declaration_parameters: ($) =>
+      seq("(", optional(nlist($, alias($.identifier, $.type_variable))), ")"),
+
     decl_member_list: ($) => prec.right(nlist($, $._decl_member)),
 
-    _decl_member: ($) => choice($.record_signature, $.record_field),
+    _decl_member: ($) =>
+      choice($.record_signature, $.record_field, $.record_property),
 
     record_signature: ($) =>
       prec.right(
@@ -118,11 +113,17 @@ module.exports = grammar({
       ),
 
     record_field: ($) =>
-      seq(
-        field("name", $.identifier),
-        field("type", $._type_hint),
-        optional($.field_default),
+      prec.right(
+        2,
+        seq(
+          field("name", $.identifier),
+          field("type", $._type_hint),
+          optional($.field_default),
+        ),
       ),
+
+    record_property: ($) =>
+      prec.right(seq(field("name", $.identifier), optional($.field_default))),
 
     field_default: ($) =>
       seq(field("operator", choice(":=", ":")), field("value", $._expression)),
@@ -163,13 +164,14 @@ module.exports = grammar({
         $.generic_tag,
         $.qualified_tag,
         $.type_identifier,
+        $.self_type,
       ),
 
     type_application: ($) =>
       prec(
         2,
         seq(
-          $.type_identifier,
+          choice($.type_identifier, $.self_type),
           "(",
           nlist($, choice($.tag, alias($.identifier, $.type_variable))),
           ")",
@@ -189,20 +191,12 @@ module.exports = grammar({
       prec.left(seq($.type_identifier, repeat1(seq(".", $.type_identifier)))),
 
     provided_impl: ($) =>
-      seq(
-        field("receiver", $.type_identifier),
-        ".",
-        field("trait", $.type_identifier),
-        optional(seq("has", $.provided_member_list)),
-      ),
-
-    blanket_impl: ($) =>
       prec(
-        2,
+        10,
         seq(
-          field("type_var", $.identifier),
+          field("receiver", $.tag),
           ".",
-          field("trait", $.type_identifier),
+          field("trait", $.tag),
           optional(seq("has", $.provided_member_list)),
         ),
       ),
@@ -223,26 +217,6 @@ module.exports = grammar({
           seq(field("operator", ":="), field("value", $._expression)),
           seq(field("operator", ":"), field("body", $.block_body)),
         ),
-      ),
-
-    impl_block: ($) =>
-      seq(
-        field("type", $.type_identifier),
-        ".",
-        field("trait", $.type_identifier),
-        "(",
-        repeat(choice($.bind_statement, $.return_statement)),
-        ")",
-      ),
-
-    method_definition: ($) =>
-      seq(
-        field(
-          "receiver",
-          choice($.generic_tag, $.qualified_tag, $.type_identifier),
-        ),
-        ".",
-        $.bind_statement,
       ),
 
     bind_statement: ($) =>
@@ -288,9 +262,12 @@ module.exports = grammar({
 
     self_parameter: ($) => prec(1, "self"),
 
-    attributes: ($) => seq("#", "[", list($, $._attribute_item), "]"),
+    attributes: ($) => repeat1(seq("#", $._attribute_item, optional(","))),
 
-    _attribute_item: ($) => choice("debug", "test", "inline"),
+    _attribute_item: ($) => choice($.identifier, $.attribute_call),
+
+    attribute_call: ($) =>
+      seq(field("name", $.identifier), field("arguments", $.argument_list)),
 
     _statement: ($) =>
       choice($.bind_statement, $.tuple_set, $.buf_set, $._expression),
@@ -394,6 +371,7 @@ module.exports = grammar({
         $.parenthesized_expression,
         $.format_string,
         $.literal,
+        $.self_type,
         $.type_identifier,
         $.identifier,
       ),
@@ -494,13 +472,20 @@ module.exports = grammar({
         seq(
           field(
             "function",
-            choice($.member_expression, $.type_identifier, $.identifier),
+            choice(
+              $.member_expression,
+              $.type_identifier,
+              $.self_type,
+              $.identifier,
+            ),
           ),
           field("arguments", $.argument_list),
         ),
       ),
 
     argument_list: ($) => seq("(", optional(nlist($, $._expression)), ")"),
+
+    self_type: ($) => "Self",
 
     self_expression: ($) =>
       prec.right(

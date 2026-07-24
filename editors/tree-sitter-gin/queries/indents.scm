@@ -1,5 +1,6 @@
 [
-  (impl_block)
+  (declare_statement)
+  (provided_impl)
   (for_expression)
   (while_expression)
   (if_expression)

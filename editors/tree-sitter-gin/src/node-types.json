@@ -56,6 +56,10 @@
           "named": true
         },
         {
+          "type": "self_type",
+          "named": true
+        },
+        {
           "type": "tuple_alloc",
           "named": true
         },
@@ -83,9 +87,49 @@
     }
   },
   {
+    "type": "attribute_call",
+    "named": true,
+    "fields": {
+      "arguments": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "argument_list",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "attributes",
     "named": true,
-    "fields": {}
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "attribute_call",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        }
+      ]
+    }
   },
   {
     "type": "binary_expression",
@@ -141,6 +185,10 @@
           },
           {
             "type": "self_expression",
+            "named": true
+          },
+          {
+            "type": "self_type",
             "named": true
           },
           {
@@ -296,6 +344,10 @@
             "named": true
           },
           {
+            "type": "self_type",
+            "named": true
+          },
+          {
             "type": "tuple_alloc",
             "named": true
           },
@@ -426,6 +478,10 @@
             "named": true
           },
           {
+            "type": "self_type",
+            "named": true
+          },
+          {
             "type": "tuple_alloc",
             "named": true
           },
@@ -462,42 +518,6 @@
         },
         {
           "type": "parameters",
-          "named": true
-        }
-      ]
-    }
-  },
-  {
-    "type": "blanket_impl",
-    "named": true,
-    "fields": {
-      "trait": {
-        "multiple": false,
-        "required": true,
-        "types": [
-          {
-            "type": "type_identifier",
-            "named": true
-          }
-        ]
-      },
-      "type_var": {
-        "multiple": false,
-        "required": true,
-        "types": [
-          {
-            "type": "identifier",
-            "named": true
-          }
-        ]
-      }
-    },
-    "children": {
-      "multiple": false,
-      "required": false,
-      "types": [
-        {
-          "type": "provided_member_list",
           "named": true
         }
       ]
@@ -569,6 +589,10 @@
         },
         {
           "type": "self_expression",
+          "named": true
+        },
+        {
+          "type": "self_type",
           "named": true
         },
         {
@@ -669,6 +693,10 @@
             "named": true
           },
           {
+            "type": "self_type",
+            "named": true
+          },
+          {
             "type": "tuple_alloc",
             "named": true
           },
@@ -707,25 +735,6 @@
     }
   },
   {
-    "type": "bundle_export",
-    "named": true,
-    "fields": {},
-    "children": {
-      "multiple": true,
-      "required": true,
-      "types": [
-        {
-          "type": "identifier",
-          "named": true
-        },
-        {
-          "type": "type_identifier",
-          "named": true
-        }
-      ]
-    }
-  },
-  {
     "type": "call_expression",
     "named": true,
     "fields": {
@@ -749,6 +758,10 @@
           },
           {
             "type": "member_expression",
+            "named": true
+          },
+          {
+            "type": "self_type",
             "named": true
           },
           {
@@ -826,6 +839,10 @@
             "named": true
           },
           {
+            "type": "self_type",
+            "named": true
+          },
+          {
             "type": "tuple_alloc",
             "named": true
           },
@@ -866,7 +883,26 @@
           "named": true
         },
         {
+          "type": "record_property",
+          "named": true
+        },
+        {
           "type": "record_signature",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "declaration_parameters",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "type_variable",
           "named": true
         }
       ]
@@ -892,7 +928,15 @@
       "required": true,
       "types": [
         {
+          "type": "attributes",
+          "named": true
+        },
+        {
           "type": "decl_member_list",
+          "named": true
+        },
+        {
+          "type": "declaration_parameters",
           "named": true
         },
         {
@@ -901,10 +945,6 @@
         },
         {
           "type": "intersection_type",
-          "named": true
-        },
-        {
-          "type": "parameters",
           "named": true
         },
         {
@@ -993,6 +1033,10 @@
             "named": true
           },
           {
+            "type": "self_type",
+            "named": true
+          },
+          {
             "type": "tuple_alloc",
             "named": true
           },
@@ -1074,6 +1118,10 @@
           },
           {
             "type": "self_expression",
+            "named": true
+          },
+          {
+            "type": "self_type",
             "named": true
           },
           {
@@ -1171,6 +1219,10 @@
         },
         {
           "type": "self_expression",
+          "named": true
+        },
+        {
+          "type": "self_type",
           "named": true
         },
         {
@@ -1299,6 +1351,10 @@
             "named": true
           },
           {
+            "type": "self_type",
+            "named": true
+          },
+          {
             "type": "tuple_alloc",
             "named": true
           },
@@ -1400,6 +1456,10 @@
           "named": true
         },
         {
+          "type": "self_type",
+          "named": true
+        },
+        {
           "type": "tuple_alloc",
           "named": true
         },
@@ -1431,40 +1491,19 @@
     }
   },
   {
-    "type": "impl_block",
+    "type": "import_symbol",
     "named": true,
-    "fields": {
-      "trait": {
-        "multiple": false,
-        "required": true,
-        "types": [
-          {
-            "type": "type_identifier",
-            "named": true
-          }
-        ]
-      },
-      "type": {
-        "multiple": false,
-        "required": true,
-        "types": [
-          {
-            "type": "type_identifier",
-            "named": true
-          }
-        ]
-      }
-    },
+    "fields": {},
     "children": {
       "multiple": true,
-      "required": false,
+      "required": true,
       "types": [
         {
-          "type": "bind_statement",
+          "type": "identifier",
           "named": true
         },
         {
-          "type": "return_statement",
+          "type": "type_identifier",
           "named": true
         }
       ]
@@ -1539,6 +1578,10 @@
         },
         {
           "type": "self_expression",
+          "named": true
+        },
+        {
+          "type": "self_type",
           "named": true
         },
         {
@@ -1729,6 +1772,10 @@
             "named": true
           },
           {
+            "type": "self_type",
+            "named": true
+          },
+          {
             "type": "tuple_alloc",
             "named": true
           },
@@ -1813,6 +1860,10 @@
             "named": true
           },
           {
+            "type": "self_type",
+            "named": true
+          },
+          {
             "type": "tuple_alloc",
             "named": true
           },
@@ -1863,40 +1914,6 @@
     }
   },
   {
-    "type": "method_definition",
-    "named": true,
-    "fields": {
-      "receiver": {
-        "multiple": false,
-        "required": true,
-        "types": [
-          {
-            "type": "generic_tag",
-            "named": true
-          },
-          {
-            "type": "qualified_tag",
-            "named": true
-          },
-          {
-            "type": "type_identifier",
-            "named": true
-          }
-        ]
-      }
-    },
-    "children": {
-      "multiple": false,
-      "required": true,
-      "types": [
-        {
-          "type": "bind_statement",
-          "named": true
-        }
-      ]
-    }
-  },
-  {
     "type": "module_import",
     "named": true,
     "fields": {},
@@ -1905,11 +1922,11 @@
       "required": true,
       "types": [
         {
-          "type": "bundle_export",
+          "type": "identifier",
           "named": true
         },
         {
-          "type": "identifier",
+          "type": "import_symbol",
           "named": true
         },
         {
@@ -1986,6 +2003,10 @@
           },
           {
             "type": "self_expression",
+            "named": true
+          },
+          {
+            "type": "self_type",
             "named": true
           },
           {
@@ -2126,6 +2147,10 @@
           "named": true
         },
         {
+          "type": "self_type",
+          "named": true
+        },
+        {
           "type": "tuple_alloc",
           "named": true
         },
@@ -2203,10 +2228,6 @@
           "named": true
         },
         {
-          "type": "blanket_impl",
-          "named": true
-        },
-        {
           "type": "call_expression",
           "named": true
         },
@@ -2235,19 +2256,11 @@
           "named": true
         },
         {
-          "type": "impl_block",
-          "named": true
-        },
-        {
           "type": "literal",
           "named": true
         },
         {
           "type": "member_expression",
-          "named": true
-        },
-        {
-          "type": "method_definition",
           "named": true
         },
         {
@@ -2268,6 +2281,10 @@
         },
         {
           "type": "self_expression",
+          "named": true
+        },
+        {
+          "type": "self_type",
           "named": true
         },
         {
@@ -2306,7 +2323,7 @@
         "required": true,
         "types": [
           {
-            "type": "type_identifier",
+            "type": "tag",
             "named": true
           }
         ]
@@ -2316,7 +2333,7 @@
         "required": true,
         "types": [
           {
-            "type": "type_identifier",
+            "type": "tag",
             "named": true
           }
         ]
@@ -2476,6 +2493,10 @@
             "named": true
           },
           {
+            "type": "self_type",
+            "named": true
+          },
+          {
             "type": "tuple_alloc",
             "named": true
           },
@@ -2580,6 +2601,10 @@
             "named": true
           },
           {
+            "type": "self_type",
+            "named": true
+          },
+          {
             "type": "tuple_alloc",
             "named": true
           },
@@ -2679,6 +2704,10 @@
             "named": true
           },
           {
+            "type": "self_type",
+            "named": true
+          },
+          {
             "type": "tuple_alloc",
             "named": true
           },
@@ -2757,6 +2786,10 @@
             "named": true
           },
           {
+            "type": "self_type",
+            "named": true
+          },
+          {
             "type": "tuple_alloc",
             "named": true
           },
@@ -2827,6 +2860,32 @@
           },
           {
             "type": "unit_type",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
+        {
+          "type": "field_default",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "record_property",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
             "named": true
           }
         ]
@@ -2948,6 +3007,10 @@
           "named": true
         },
         {
+          "type": "self_type",
+          "named": true
+        },
+        {
           "type": "tuple_alloc",
           "named": true
         },
@@ -3008,6 +3071,7 @@
   {
     "type": "source_file",
     "named": true,
+    "root": true,
     "fields": {},
     "children": {
       "multiple": true,
@@ -3019,10 +3083,6 @@
         },
         {
           "type": "bind_statement",
-          "named": true
-        },
-        {
-          "type": "blanket_impl",
           "named": true
         },
         {
@@ -3054,19 +3114,11 @@
           "named": true
         },
         {
-          "type": "impl_block",
-          "named": true
-        },
-        {
           "type": "literal",
           "named": true
         },
         {
           "type": "member_expression",
-          "named": true
-        },
-        {
-          "type": "method_definition",
           "named": true
         },
         {
@@ -3091,6 +3143,10 @@
         },
         {
           "type": "self_expression",
+          "named": true
+        },
+        {
+          "type": "self_type",
           "named": true
         },
         {
@@ -3138,6 +3194,10 @@
         },
         {
           "type": "qualified_tag",
+          "named": true
+        },
+        {
+          "type": "self_type",
           "named": true
         },
         {
@@ -3205,6 +3265,10 @@
           },
           {
             "type": "self_expression",
+            "named": true
+          },
+          {
+            "type": "self_type",
             "named": true
           },
           {
@@ -3314,6 +3378,10 @@
         },
         {
           "type": "self_expression",
+          "named": true
+        },
+        {
+          "type": "self_type",
           "named": true
         },
         {
@@ -3435,6 +3503,10 @@
             "named": true
           },
           {
+            "type": "self_type",
+            "named": true
+          },
+          {
             "type": "tuple_alloc",
             "named": true
           },
@@ -3470,6 +3542,10 @@
       "multiple": true,
       "required": true,
       "types": [
+        {
+          "type": "self_type",
+          "named": true
+        },
         {
           "type": "tag",
           "named": true
@@ -3573,6 +3649,10 @@
           },
           {
             "type": "self_expression",
+            "named": true
+          },
+          {
+            "type": "self_type",
             "named": true
           },
           {
@@ -3744,6 +3824,10 @@
           "named": true
         },
         {
+          "type": "self_type",
+          "named": true
+        },
+        {
           "type": "tuple_alloc",
           "named": true
         },
@@ -3824,6 +3908,10 @@
         },
         {
           "type": "self_expression",
+          "named": true
+        },
+        {
+          "type": "self_type",
           "named": true
         },
         {
@@ -3910,6 +3998,10 @@
             "named": true
           },
           {
+            "type": "self_type",
+            "named": true
+          },
+          {
             "type": "tuple_alloc",
             "named": true
           },
@@ -3986,6 +4078,10 @@
         },
         {
           "type": "self_expression",
+          "named": true
+        },
+        {
+          "type": "self_type",
           "named": true
         },
         {
@@ -4084,6 +4180,10 @@
             "named": true
           },
           {
+            "type": "self_type",
+            "named": true
+          },
+          {
             "type": "tuple_alloc",
             "named": true
           },
@@ -4178,6 +4278,10 @@
             "named": true
           },
           {
+            "type": "self_type",
+            "named": true
+          },
+          {
             "type": "tuple_alloc",
             "named": true
           },
@@ -4262,6 +4366,10 @@
         },
         {
           "type": "self_expression",
+          "named": true
+        },
+        {
+          "type": "self_type",
           "named": true
         },
         {
@@ -4416,12 +4524,9 @@
     "named": false
   },
   {
-    "type": "debug",
-    "named": false
-  },
-  {
     "type": "doc_comment",
-    "named": true
+    "named": true,
+    "extra": true
   },
   {
     "type": "else",
@@ -4460,16 +4565,13 @@
     "named": false
   },
   {
-    "type": "inline",
-    "named": false
-  },
-  {
     "type": "is",
     "named": false
   },
   {
     "type": "line_comment",
-    "named": true
+    "named": true,
+    "extra": true
   },
   {
     "type": "loop",
@@ -4477,7 +4579,8 @@
   },
   {
     "type": "module_doc_comment",
-    "named": true
+    "named": true,
+    "extra": true
   },
   {
     "type": "not",
@@ -4504,12 +4607,12 @@
     "named": false
   },
   {
-    "type": "string",
+    "type": "self_type",
     "named": true
   },
   {
-    "type": "test",
-    "named": false
+    "type": "string",
+    "named": true
   },
   {
     "type": "then",
