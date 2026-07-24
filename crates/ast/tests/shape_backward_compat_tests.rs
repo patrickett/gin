@@ -14,9 +14,9 @@ use support::transform_source;
 #[test]
 fn trait_declarations() {
     let src = "\
-Copy has (can_copy Bool)
-Sized has (size Int)
-Default(value) has (default value)";
+Copy has can_copy Bool
+Sized has size Int
+Default(value) has default value";
     let typed = transform_source(src);
 
     // All three should be valid record tags.
@@ -59,12 +59,12 @@ Default(value) has (default value)";
 #[test]
 fn interface_method_declarations() {
     let src = "\
-Slice(Byte) has (pointer Int, length Int)
+Slice(Byte) has pointer Int, length Int
 AllocError is Oom or InvalidLayout
-Allocator has (
+Allocator has
     reserve(ref self, l Int) Slice(Byte) or AllocError,
     release(ref self, p Int, l Int),
-)";
+";
     let typed = transform_source(src);
 
     for name in &["Slice", "AllocError", "Allocator"] {
@@ -90,8 +90,8 @@ Allocator has (
 fn record_with_constructor() {
     let src = "\
 Int is in 1...400
-String has (bytes List(Byte))
-Coord has (x Int, y Int)
+String has bytes List(Byte)
+Coord has x Int, y Int
 Coord.make(x Int, y Int) Coord: Coord(x, y)";
     let typed = transform_source(src);
 
@@ -109,34 +109,11 @@ Coord.make(x Int, y Int) Coord: Coord(x, y)";
     let _ = flaws;
 }
 
-/// 11.4 — Blanket impl (`x has Trait(...)` with lowercase quantified var).
-///
-/// Note: `transform_source` uses a bare `TransformCtx` with no pre-loaded
-/// blanket impls.  The blanket impl IS recorded on `FileAst` but does not
-/// flow into `TypedFileAst.blanket_impls` without a properly populated ctx.
-#[test]
-fn blanket_impl() {
-    let src = "x has Sized(size: 8)";
-    let typed = transform_source(src);
-
-    // Should NOT create a tag for `x`.
-    assert!(
-        !typed
-            .tags
-            .contains_key(&TagId(Intern::new("x".to_string()))),
-        "lowercase blanket subject should not create a tag"
-    );
-
-    // Transform should not crash.
-    let flaws = typed.all_flaws();
-    let _ = flaws;
-}
-
-/// 11.5 — Core Bool/Maybe style declarations with `and has Trait(...)`.
 #[test]
 fn bool_style_and_has_trait() {
     let src = "\
-Bool is True or False and has Copy(can_copy: True)";
+Bool is True or False
+Bool.Copy has can_copy: True";
     let typed = transform_source(src);
 
     let bool_id = TagId(Intern::new("Bool".to_string()));
@@ -151,7 +128,6 @@ Bool is True or False and has Copy(can_copy: True)";
         other => panic!("Expected Union, got {other:?}"),
     }
 
-    // The `and has Copy(...)` should produce a ProvidedTrait.
     let has_copy = tag
         .provided_traits
         .iter()

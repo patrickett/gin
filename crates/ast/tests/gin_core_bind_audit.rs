@@ -64,7 +64,7 @@ compute_size(x Type) Size := when x is
 #[test]
 fn target_is_constant_foldable_value() {
     let source = "\
-Target has (arch Str, vendor Str, os Str)
+Target has arch Str, vendor Str, os Str
 target := Target('x86_64', 'unknown', 'unknown')
 ";
     let (ast, bind) = prepare_and_check(source, "target");

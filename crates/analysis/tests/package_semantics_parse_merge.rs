@@ -12,9 +12,9 @@ fn is_unexpected_equals_token(diag: &Diagnostic) -> bool {
 }
 
 const STRING_GIN_SOURCE: &str = "\
-String has (bytes List(Byte))\n\
+String has bytes List(Byte)\n\
 \n\
-ToString has (to_string String)\n\
+ToString has to_string String\n\
 ";
 
 #[test]

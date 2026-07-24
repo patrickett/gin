@@ -26,7 +26,7 @@ fn when_record_pattern_with_field_binders() {
 Int is in 1...400
 Bool is True or False
 
-Coord has (x Int, y Int, z Int)
+Coord has x Int, y Int, z Int
 
 process(p Coord) Int:
     when p is
@@ -58,7 +58,7 @@ fn when_record_pattern_with_literal_guard() {
 Int is in 1...400
 Bool is True or False
 
-Coord has (x Int, y Int, z Int)
+Coord has x Int, y Int, z Int
 
 process(p Coord) Int:
     when p is
@@ -100,7 +100,7 @@ fn when_record_pattern_omits_fields() {
 Int is in 1...400
 Bool is True or False
 
-Coord has (x Int, y Int, z Int)
+Coord has x Int, y Int, z Int
 
 process(p Coord) Int:
     when p is
@@ -178,7 +178,7 @@ fn when_union_variant_with_typed_fields() {
 Int is in 1...400
 Bool is True or False
 
-Primitive has (width Int, signed Bool)
+Primitive has width Int, signed Bool
 Type is Primitive(width Int, signed Bool) or Other
 
 process(ty Type) Int:
@@ -208,7 +208,7 @@ fn when_union_variant_with_wildcard() {
 Bool is True or False
 Int is in 1...400
 
-Primitive has (width Int, signed Bool)
+Primitive has width Int, signed Bool
 Type is Primitive(width Int, signed Bool) or Other
 
 process(ty Type) Int:
@@ -249,7 +249,7 @@ process(ty Type) Int:
 fn destructure_bind() {
     let src = "\
 Int is in 1...400
-Coord has (x Int, y Int, z Int)
+Coord has x Int, y Int, z Int
 
 p := Coord(x: 1, y: 2, z: 3)
 Coord(x: px, y: py, z: pz) := p
@@ -278,7 +278,7 @@ Coord(x: px, y: py, z: pz) := p
 fn shorthand_destructure() {
     let src = "\
 Int is in 1...400
-Coord has (x Int, y Int, z Int)
+Coord has x Int, y Int, z Int
 
 p := Coord(x: 1, y: 2, z: 3)
 Coord(x, y, z) := p
@@ -308,7 +308,7 @@ fn when_pattern_with_record_field_dot_access() {
     let src = "\
 Int is in 1...400
 
-Coord has (x Int, y Int, z Int)
+Coord has x Int, y Int, z Int
 
 sum(p Coord) Int:
     p.x + p.y + p.z

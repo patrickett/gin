@@ -207,6 +207,14 @@ fn test_operators() {
 }
 
 #[test]
+fn arrow_right_is_two_tokens() {
+    let mut lexer = Lexer::new("->");
+    let tokens: Vec<_> = lexer.by_ref().map(|(token, _)| token).collect();
+
+    assert!(matches!(tokens.as_slice(), [Token::Minus, Token::Greater]));
+}
+
+#[test]
 fn test_punctuation() {
     let src = "( ) [ ] { } , . : ; ...";
 

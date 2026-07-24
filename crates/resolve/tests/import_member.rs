@@ -44,7 +44,7 @@ fn resolve_self_dep_from_nested_file_like_gin_core() {
     pkg.write_flask_with_deps("core", r#"{"self":{"path":"."},"arch":{"path":"arch"}}"#);
     pkg.write("primitive/bool.gin", "Bool is Unit\n");
     pkg.write("primitive/list.gin", "List is Unit\n");
-    const COPY: &str = "use self.primitive.(Bool, List)\n\nCopy has ()\n";
+    const COPY: &str = "use self.primitive.(Bool, List)\n\nCopy has \n";
     let copy_path = pkg.write("marker/copy.gin", COPY);
 
     let deps = copy_path.flask_path_dependencies();
@@ -69,14 +69,11 @@ fn resolve_self_dep_from_nested_file_like_gin_core() {
 fn resolve_core_bundle_dotted_members_like_target_gin() {
     let pkg = TempPackage::new("core_target_bundle");
     pkg.write_flask_with_deps("core", r#"{"core":{"path":"."}}"#);
-    pkg.write(
-        "default/default.gin",
-        "Default(value) has (default value)\n",
-    );
+    pkg.write("default/default.gin", "Default(value) has default value\n");
     pkg.write("target/arch/arch.gin", "Architecture is 'x86_64'\n");
     pkg.write("target/os/os.gin", "OperatingSystem is 'linux'\n");
     pkg.write("target/vendor/vendor.gin", "Vendor is 'unknown'\n");
-    const TARGET: &str = "use core.(default.Default, target.arch.Architecture, target.os.OperatingSystem, target.vendor.Vendor)\n\nTarget has (arch Architecture, vendor Vendor, os OperatingSystem)\n";
+    const TARGET: &str = "use core.(default.Default, target.arch.Architecture, target.os.OperatingSystem, target.vendor.Vendor)\n\nTarget has arch Architecture, vendor Vendor, os OperatingSystem\n";
     let target_path = pkg.write("target/target.gin", TARGET);
 
     let source = TARGET.to_string();

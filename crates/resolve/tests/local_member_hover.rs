@@ -8,9 +8,9 @@ use test_fixtures::TempPackage;
 const STRING_GIN: &str = r#"use core.primitive.(Byte, List)
 
 --- Canonical `String` type used for printing/codegen.
-String has (bytes List(Byte))
+String has bytes List(Byte)
 
-ToString has (to_string String)
+ToString has to_string String
 "#;
 
 const BOOL_GIN: &str = r#"use core.Happy
@@ -25,8 +25,8 @@ use core.ToString
 ---
 --- `if` requires a `Bool` value as its conditional.
 Bool is True or False
-Bool.Happy(value: Bool.True)
-Bool.ToString(to_string: when self then 'true' else 'false')
+Bool.Happy has value: Bool.True
+Bool.ToString has to_string: when self then 'true' else 'false'
 
 
 false := Bool.False
@@ -97,7 +97,7 @@ fn local_member_import_hover_matches_definition_in_string_module() {
         .expect("ToString in string.gin");
     let (line, character) = string_source.byte_offset_to_position(def_byte);
     let def_hover = string_typed
-        .hover_at(&string_source, line, character)
+        .hover_at(string_source, line, character)
         .expect("hover on ToString definition");
 
     for byte in [

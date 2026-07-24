@@ -196,7 +196,8 @@ fn test_unit_union_tag() {
 
 #[test]
 fn test_unit_union_with_provided_trait_no_unknown_variant_tags() {
-    let source = "Bool is True or False and\n    has ToString(to_string: when self then 'true' else 'false')\n";
+    let source =
+        "Bool is True or False\nBool.ToString has to_string: when self then 'true' else 'false'\n";
     let typed = transform_source(source);
     let unknown: Vec<_> = typed
         .declaration_flaws
@@ -253,7 +254,7 @@ fn test_log_level_literal_bind_has_const_union_type() {
 
 #[test]
 fn test_record_tag() {
-    let typed = transform_source("Range(x) has (start Int, end Int)");
+    let typed = transform_source("Range(x) has start Int, end Int");
     let range_id = TagId(Intern::new("Range".to_string()));
     let tag = typed.tags.get(&range_id).expect("Range tag exists");
     if let Ty::Record { name, fields } = &tag.resolved_ty {
@@ -583,7 +584,7 @@ fn test_no_false_positive() {
 #[test]
 fn test_dot_type() {
     // dot_type should resolve field types
-    let source = "Point has (x Int, y Int)\np: Point(1, 2)";
+    let source = "Point has x Int, y Int)\np: Point(1, 2";
     let typed = transform_source(source);
     // dot_type at position after `p.` — approximate line 1, char 2
     let _dot = typed.dot_type(source, 1, 2);
@@ -624,8 +625,8 @@ fn test_module_level_unassigned_declare_like_target() {
 Architecture is 'x86_64' or 'arm64'
 Vendor is 'unknown'
 OperatingSystem is 'unknown'
-Target has (arch Architecture, vendor Vendor, os OperatingSystem)
-Target.Default(default: ( arch: 'x86_64', vendor: 'unknown', os: 'unknown', ))
+Target has arch Architecture, vendor Vendor, os OperatingSystem
+Target.Default has default: ( arch: 'x86_64', vendor: 'unknown', os: 'unknown', )
 
 target Target
 ";
@@ -737,7 +738,7 @@ fn test_unassigned_bind_no_false_positive() {
 fn test_self_param_typed_warning() {
     // A method with `self TypeName` should warn about redundant type.
     let source = "\
-Point has (x Int, y Int)\n\
+Point has x Int, y Int\n\
 \n\
 Point.distance(self Point, other Point) Int:\
     return 0\
@@ -754,7 +755,7 @@ Point.distance(self Point, other Point) Int:\
 fn test_self_param_no_warning_without_type() {
     // A method with bare `self` should NOT warn.
     let source = "\
-Point has (x Int, y Int)\n\
+Point has x Int, y Int\n\
 \n\
 Point.distance(self, other Point) Int:\
     return 0\
@@ -781,7 +782,7 @@ fn test_self_param_no_warning_non_method() {
 
 #[test]
 fn test_unknown_tag_in_record_field_types_without_import() {
-    let source = "String has (bytes List(Byte))\n\nToString has (to_string String)\n";
+    let source = "String has bytes List(Byte)\n\nToString has to_string String\n";
     let typed = transform_source(source);
     let unknown_tags: Vec<_> = typed
         .all_flaws()
@@ -798,7 +799,7 @@ fn test_unknown_tag_in_record_field_types_without_import() {
 
 #[test]
 fn test_unknown_tag_spans_cover_type_names() {
-    let source = "String has (bytes List(Byte))\n";
+    let source = "String has bytes List(Byte)\n";
     let typed = transform_source(source);
     let span_table = &typed.span_table;
 
@@ -818,7 +819,7 @@ fn test_unknown_tag_spans_cover_type_names() {
 
 #[test]
 fn test_record_field_types_ok_with_import() {
-    let source = "use List, Byte\n\nString has (bytes List(Byte))\n";
+    let source = "use List, Byte\n\nString has bytes List(Byte)\n";
     let typed = transform_source(source);
     let has_unknown_tag = typed
         .all_flaws()

@@ -1,7 +1,7 @@
 //! Parser tests for method binds with parameterized-type receivers,
 //! e.g. `Range(x).new(start x, end x) Range(x): (start, end)`.
 
-use ast::{Expr, ParameterKind, TypeExpr};
+use ast::{DeclareValue, Expr, HasFunctionKind, HasMember, ParameterKind, TypeExpr};
 use internment::Intern;
 
 use parser::cursor::TokenCursor;
@@ -14,7 +14,7 @@ fn intern(s: &str) -> Intern<String> {
 #[test]
 fn parses_generic_method_bind_with_typevar_params_and_return() {
     let src =
-        "Range(x) has (start x, end x)\n\nRange(x).new(start x, end x) Range(x): (start, end)\n";
+        "Range(x) has start x, end x\n\nRange(x).new(start x, end x) Range(x): (start, end)\n";
     let ast = TokenCursor::parse_source(src);
 
     // Tag declaration is recorded as `Range`
@@ -100,12 +100,12 @@ fn parses_method_bind_with_nontypevar_params() {
 
 #[test]
 fn parses_custom_range_no_type_param_for_contrast() {
-    // Per the design: `CustomRange has (start, end)` (no `(x)` after the type
+    // Per the design: `CustomRange has start, end` (no `(x)` after the type
     // name) leaves both fields independently generic. The corresponding method
     // `CustomRange.new(start, end) CustomRange: (start, end)` should likewise
     // parse cleanly without forcing the two params to share a type variable.
     let src =
-        "CustomRange has (start, end)\n\nCustomRange.new(start, end) CustomRange: (start, end)\n";
+        "CustomRange has start, end\n\nCustomRange.new(start, end) CustomRange: (start, end)\n";
     let ast = TokenCursor::parse_source(src);
 
     assert!(ast.tags.contains_key(&intern("CustomRange")));
@@ -132,7 +132,7 @@ fn parses_custom_range_no_type_param_for_contrast() {
 #[test]
 fn doc_comment_attaches_to_method_bind() {
     let src = "\
-Range(x) has (start x, end x)
+Range(x) has start x, end x
 
 --- create a new range
 Range(x).new(start x, end x) Range(x): (start, end)
@@ -151,7 +151,7 @@ Range(x).new(start x, end x) Range(x): (start, end)
 #[test]
 fn parses_module_rooted_generic_method_call() {
     let src = "\
-Range(x) has (start x, end x)
+Range(x) has start x, end x
 
 Range(x).new(start x, end x) Range(x): (start, end)
 
@@ -176,7 +176,7 @@ core.Range.new(12, 1200)
 #[test]
 fn method_with_typed_self_has_receiver_and_tagged_self_param() {
     let src = "\
-Point has (x Int, y Int)\n\
+Point has x Int, y Int\n\
 \n\
 Point.distance(self Point, other Point) Int:\
     return 0\n\
@@ -207,4 +207,182 @@ return\n";
         bind.value,
         ast::BindValue::Body { .. } | ast::BindValue::Expr(_)
     ));
+}
+
+#[test]
+fn has_member_classifies_property() {
+    let src = "Range(x) has start x\n";
+    let ast = TokenCursor::parse_source(src);
+
+    let range = ast
+        .tags
+        .get(&intern("Range"))
+        .expect("Range tag should exist");
+
+    let DeclareValue::Has(members) = &range.value else {
+        panic!("expected DeclareValue::Has, got {:?}", range.value);
+    };
+    assert_eq!(members.len(), 1, "expected 1 member");
+    let HasMember::Property(start) = &members[0] else {
+        panic!("start should be a property member");
+    };
+    assert_eq!(start.name.as_str(), "start");
+    assert!(start.ty.is_some());
+}
+
+#[test]
+fn explicit_empty_params_classify_associated_function() {
+    let out = "Factory has create() Factory\n".parse_source_full();
+    assert!(out.symptoms.is_empty(), "symptoms: {:?}", out.symptoms);
+    let factory = out.ast.tags.get(&intern("Factory")).expect("Factory");
+    let DeclareValue::Has(members) = &factory.value else {
+        panic!("expected has members");
+    };
+    let HasMember::Function(create) = &members[0] else {
+        panic!("create() should be a function member");
+    };
+    assert!(create.params.is_empty());
+    assert_eq!(create.kind, HasFunctionKind::Associated);
+}
+
+#[test]
+fn has_member_classifies_property_and_instance_method() {
+    let src = "Range(x) has start x, contains(self, value x) Bool\n";
+    let ast = TokenCursor::parse_source(src);
+
+    let range = ast
+        .tags
+        .get(&intern("Range"))
+        .expect("Range tag should exist");
+
+    let DeclareValue::Has(members) = &range.value else {
+        panic!("expected DeclareValue::Has, got {:?}", range.value);
+    };
+    assert_eq!(members.len(), 2, "expected 2 members");
+    let HasMember::Property(start) = &members[0] else {
+        panic!("start should be a property member");
+    };
+    assert_eq!(start.name.as_str(), "start");
+    assert!(start.body.is_none());
+
+    let HasMember::Function(contains) = &members[1] else {
+        panic!("contains should be a function member");
+    };
+    assert_eq!(contains.name.as_str(), "contains");
+    assert!(contains.params.contains_key(&intern("self")));
+    assert!(contains.body.is_none());
+    assert!(
+        contains.return_ty.is_some(),
+        "contains should have return type"
+    );
+}
+
+#[test]
+fn has_block_body_retains_receiver_and_self_expression() {
+    let out =
+        "Region has\n    reset(ref self) Region:\n        self\n    return\n".parse_source_full();
+    assert!(out.symptoms.is_empty(), "symptoms: {:?}", out.symptoms);
+    let region = out.ast.tags.get(&intern("Region")).expect("Region");
+    let DeclareValue::Has(members) = &region.value else {
+        panic!("expected has members");
+    };
+    let HasMember::Function(reset) = &members[0] else {
+        panic!("reset should be a function member");
+    };
+    assert!(reset.params.contains_key(&intern("self")));
+    let Some(ast::HasMemberBody::Overrideable(body)) = &reset.body else {
+        panic!("reset should have an overrideable body");
+    };
+    let ast::BindValue::Body { exprs, ret } = body else {
+        panic!("reset should have a block body");
+    };
+    assert!(matches!(exprs.as_slice(), [body] if matches!(body.value, Expr::SelfRef)));
+    assert!(ret.value.is_none());
+}
+
+#[test]
+fn nested_has_method_registers_only_qualified_name() {
+    let out =
+        "Range(x) has\n    start x\n    end x\n\n    new(start x, end x) Self: Self(start, end)\n"
+            .parse_source_full();
+    assert!(out.symptoms.is_empty(), "symptoms: {:?}", out.symptoms);
+    assert!(out.ast.defs.contains_key(&intern("Range.new")));
+    assert!(!out.ast.defs.contains_key(&intern("new")));
+    assert_eq!(out.ast.method_binds.len(), 1);
+    let return_ty = out.ast.method_binds[0]
+        .return_tag
+        .as_ref()
+        .expect("method return type");
+    assert!(
+        matches!(&return_ty.value, TypeExpr::Nominal(name, _) if name.as_str() == "Self"),
+        "expected Self return type, got {:?}",
+        return_ty.value
+    );
+}
+
+#[test]
+fn method_with_body_after_colon_parses() {
+    let out = "Range(x).new(start x, end x): Range(start, end)\n".parse_source_full();
+    assert!(
+        out.symptoms.is_empty(),
+        "expected method bind to parse, got symptoms: {:?}",
+        out.symptoms,
+    );
+}
+
+#[test]
+fn range_gin_method_form_parses() {
+    let src = "\
+use '../'.Bounded
+
+--- Range utilities.
+Range(x) has start x, end x
+Range(x).Bounded has
+    min: self.start
+    max: self.end
+
+--- create a new range
+Range(x).new(start x, end x): Range(start, end)
+";
+    let out = src.parse_source_full();
+    assert!(
+        out.symptoms.is_empty(),
+        "expected range snippet to parse, got symptoms: {:#?}",
+        out.symptoms,
+    );
+    let range = out.ast.tags.get(&intern("Range")).expect("Range");
+    let bounded = range
+        .provided_traits
+        .iter()
+        .find(|provided| provided.trait_name.as_str() == "Bounded")
+        .expect("Bounded provision");
+    assert_eq!(bounded.fields.len(), 2);
+    let min_span = out.ast.span_table.get(bounded.fields[0].1.span_id);
+    let self_start = src.find("self.start").expect("self.start");
+    assert!(min_span.contains(self_start));
+    assert!(min_span.contains(self_start + "self.".len()));
+}
+
+#[test]
+fn parenthesized_has_members_emit_removed_syntax_error() {
+    let out = "Coord has (x Int, y Int)".parse_source_full();
+    assert!(
+        out.symptoms
+            .iter()
+            .any(|d| d.code.slug() == "parse-removed-has-parens"),
+        "expected parse-removed-has-parens, got symptoms: {:?}",
+        out.symptoms,
+    );
+}
+
+#[test]
+fn paren_provision_syntax_emits_error() {
+    let out = "Range.Bounded(min: self.start, max: self.end)\n".parse_source_full();
+    assert!(
+        out.symptoms
+            .iter()
+            .any(|d| d.code.slug() == "parse-removed-provision-parens"),
+        "expected parse-removed-provision-parens, got symptoms: {:?}",
+        out.symptoms,
+    );
 }

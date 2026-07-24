@@ -56,19 +56,11 @@ fn reflect_opaque_is_dynamic_size() {
     assert!(pattern_matches_public(&opaque_pat, &cv));
     let registry = marker_trait_registry();
     assert!(registry.trait_in_scope("Sized"));
-    assert!(registry.blanket_for("Sized").is_some());
-    let blanket = registry.blanket_for("Sized").expect("Sized blanket");
-    let (_, field_expr) = blanket
-        .fields
-        .iter()
-        .find(|(n, _)| n.as_str() == "size")
-        .expect("size field");
-    let field_cv = eval_compile_time_expr_with_env(
-        &field_expr.value,
-        &std::collections::HashMap::from([(blanket.type_var, Some(cv.clone()))]),
-        registry.eval_ast.as_ref(),
+    assert!(
+        registry
+            .auto_trait_decl("Sized")
+            .is_some_and(|decl| decl.attributes.auto)
     );
-    assert!(field_cv.is_some(), "blanket field eval failed");
     let typed = empty_typed();
     let size = trait_field_for_ty("Sized", "size", &ty, &typed, &registry).expect("Sized.size");
     let ConstValue::Tag { name, .. } = &size else {
@@ -105,7 +97,7 @@ fn reflect_record_fields_in_shape() {
 #[test]
 fn synthesize_reflectable_on_tag() {
     let source = "\
-Point has (x Int, y Int)
+Point has x Int, y Int
 ";
     let typed = transform_source(source);
     let tag = typed
@@ -128,8 +120,8 @@ Point has (x Int, y Int)
 #[test]
 fn user_reflectable_impl_is_rejected() {
     let source = "\
-Bad has (x Int)
-Bad.Reflectable(shape: Opaque('hidden'))
+Bad has x Int
+Bad.Reflectable has shape: Opaque('hidden')
 ";
     let typed = transform_source(source);
     assert!(typed.declaration_flaws.iter().any(|(_, flaw)| {
@@ -155,15 +147,15 @@ Type is Primitive(width BigInt, signed Bool)
      or Ptr(inner Type)
      or Opaque(name String)
 
-NamedTy has (name String, ty Type)
-VariantShape has (name String, fields List(NamedTy))
+NamedTy has name String, ty Type
+VariantShape has name String, fields List(NamedTy)
 Bool is True or False
 BigInt is in 0...18446744073709551615
-List(x) has (pointer Pointer(x), length BigInt)
-String has (bytes List(BigInt))
+List(x) has pointer Pointer(x), length BigInt
+String has bytes List(BigInt)
 
-Copy has (can_copy Bool)
-x.Copy(can_copy: is_copy(x))
+#auto
+Copy has can_copy Bool: is_copy(Self)
 
 is_copy(x Type) Bool := when x is
     Primitive(_, _)     then True
@@ -181,19 +173,17 @@ all_variants_copy(variants List(VariantShape)) Bool := when variants is
     [v, ...rest]        then all_named_copy(v.fields) and all_variants_copy(rest)
 ";
     let copy_file = parser::cursor::TokenCursor::parse_source(copy_source);
-    assert_eq!(
-        copy_file.blanket_impls.len(),
-        1,
-        "copy.gin blankets: {:?}",
-        copy_file.blanket_impls[0].trait_name.as_str()
+    assert!(
+        copy_file
+            .tags
+            .get(&Intern::from_ref("Copy"))
+            .is_some_and(|decl| decl.attributes.auto)
     );
     assert!(
-        !eval.blanket_impls.is_empty(),
-        "eval blankets: {:?}",
-        eval.blanket_impls
-            .iter()
-            .map(|b| b.trait_name.as_str())
-            .collect::<Vec<_>>()
+        eval.eval_ast
+            .tags
+            .get(&Intern::from_ref("Copy"))
+            .is_some_and(|decl| decl.attributes.auto)
     );
     let sized_source = "\
 Type is Primitive(width BigInt, signed Bool)
@@ -202,16 +192,16 @@ Type is Primitive(width BigInt, signed Bool)
      or Ptr(inner Type)
      or Opaque(name String)
 
-NamedTy has (name String, ty Type)
-VariantShape has (name String, fields List(NamedTy))
+NamedTy has name String, ty Type
+VariantShape has name String, fields List(NamedTy)
 Bool is True or False
 BigInt is in 0...18446744073709551615
-List(x) has (pointer Pointer(x), length BigInt)
-String has (bytes List(BigInt))
+List(x) has pointer Pointer(x), length BigInt
+String has bytes List(BigInt)
 
 Size is Const(BigInt) or Dynamic
-Sized has (size Size)
-x.Sized(size: compute_size(x))
+#auto
+Sized has size Size: compute_size(Self)
 
 compute_size(x Type) Size := when x is
     Primitive(w, _)     then Const(w / 8)
@@ -244,6 +234,12 @@ max_size(a Size, b Size) Size := when (a, b) is
                          else Dynamic
 ";
     let sized_only = parser::cursor::TokenCursor::parse_source(sized_source);
+    assert!(
+        sized_only
+            .tags
+            .get(&Intern::from_ref("Sized"))
+            .is_some_and(|decl| decl.attributes.auto)
+    );
     let sized_names: Vec<_> = sized_only.defs.keys().map(|k| k.as_str()).collect();
     assert!(
         sized_only
@@ -266,8 +262,8 @@ Type is Primitive(width BigInt, signed Bool)
 Bool is True or False
 BigInt is in 0...18446744073709551615
 
-Copy has (can_copy Bool)
-x.Copy(can_copy: is_copy(x))
+#auto
+Copy has can_copy Bool: is_copy(Self)
 
 is_copy(x Type) Bool := when x is
     Primitive(_, _)     then True
@@ -301,7 +297,7 @@ all_variants_copy(variants List(VariantShape)) Bool := when variants is
 }
 
 #[test]
-fn bool_is_copy_via_blanket() {
+fn bool_is_copy_via_auto_default() {
     let registry = marker_trait_registry();
     let bind = registry
         .eval_ast
@@ -319,7 +315,7 @@ fn bool_is_copy_via_blanket() {
     match &bind.value {
         ast::BindValue::Expr(e) => match &e.value {
             ast::Expr::When(w) => {
-                assert!(!w.arms.is_empty(), "is_copy when has no arms: {:?}", w.arms)
+                assert!(!w.arms.is_empty(), "is_copy when has no arms: {:?}", w.arms);
             }
             other => panic!("is_copy body not when: {other:?}"),
         },
@@ -348,15 +344,15 @@ Type is Primitive(width BigInt, signed Bool)
      or Ptr(inner Type)
      or Opaque(name String)
 
-NamedTy has (name String, ty Type)
-VariantShape has (name String, fields List(NamedTy))
+NamedTy has name String, ty Type
+VariantShape has name String, fields List(NamedTy)
 Bool is True or False
 BigInt is in 0...18446744073709551615
-List(x) has (pointer Pointer(x), length BigInt)
-String has (bytes List(BigInt))
+List(x) has pointer Pointer(x), length BigInt
+String has bytes List(BigInt)
 
-Copy has (can_copy Bool)
-x.Copy(can_copy: is_copy(x))
+#auto
+Copy has can_copy Bool: is_copy(Self)
 
 is_copy(x Type) Bool := when x is
     Primitive(_, _)     then True
@@ -389,30 +385,10 @@ all_variants_copy(variants List(VariantShape)) Bool := when variants is
         assert!(matched, "no is_copy arm matched {sub_cv:?}");
     }
     assert!(
-        !registry.blanket_impls.is_empty(),
-        "blankets: {:?}",
         registry
-            .blanket_impls
-            .iter()
-            .map(|b| b.trait_name.as_str())
-            .collect::<Vec<_>>()
+            .auto_trait_decl("Copy")
+            .is_some_and(|decl| decl.attributes.auto)
     );
-    let copy_blanket = registry
-        .blanket_impls
-        .iter()
-        .find(|b| b.trait_name.as_str() == "Copy")
-        .expect("Copy blanket");
-    let (_, field_expr) = copy_blanket
-        .fields
-        .iter()
-        .find(|(n, _)| n.as_str() == "can_copy")
-        .expect("can_copy field");
-    let cv_field = eval_compile_time_expr_with_env(
-        &field_expr.value,
-        &std::collections::HashMap::from([(copy_blanket.type_var, Some(shape.clone()))]),
-        registry.eval_ast.as_ref(),
-    );
-    assert!(cv_field.is_some(), "blanket field eval failed");
     let cv = trait_field_for_ty("Copy", "can_copy", &ty, &typed, &registry).expect("Copy.can_copy");
     let ConstValue::Tag { name, .. } = &cv else {
         panic!("expected Bool tag");
@@ -425,8 +401,8 @@ fn copy_override_contradicts_structure() {
     let source = "\
 Int is in 1...400
 
-AllInts has (x Int, y Int)
-AllInts.Copy(can_copy: False)
+AllInts has x Int, y Int
+AllInts.Copy has can_copy: False
 ";
     let typed = transform_with_marker_package(source);
     let registry = marker_trait_registry();
@@ -440,17 +416,6 @@ AllInts.Copy(can_copy: False)
     };
     assert_eq!(name.as_str(), "False");
     assert!(!ty.is_copyable(&registry, &typed));
-}
-
-#[test]
-fn parse_blanket_impl() {
-    let source = "\
-x.Sized(size: Const(0))
-";
-    let file = parser::cursor::TokenCursor::parse_source(source);
-    assert_eq!(file.blanket_impls.len(), 1);
-    assert_eq!(file.blanket_impls[0].trait_name.as_str(), "Sized");
-    assert_eq!(file.blanket_impls[0].type_var.as_str(), "x");
 }
 
 #[test]

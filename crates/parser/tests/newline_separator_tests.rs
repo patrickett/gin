@@ -7,7 +7,7 @@
 //! - Function parameter lists
 //! - Type parameter lists
 //! - Declare (tag) parameter lists
-//! - Interface member lists
+//! - `has` member lists
 
 use internment::Intern;
 use parser::query::SourceParseExt;
@@ -193,7 +193,7 @@ distance(
 
 #[test]
 fn declare_params_comma_separated_inline_works() {
-    let src = "Pair(x, y) has (first x, second y)\n";
+    let src = "Pair(x, y) has first x, second y\n";
     let out = src.parse_source_full();
     assert_eq!(count_errors(&out), 0, "comma-separated type params inline");
     assert!(has_tag(&out, "Pair"));
@@ -205,7 +205,7 @@ fn declare_params_newline_separated() {
 Pair(
     x
     y
-) has (
+) has
     first x
     second y
 )
@@ -221,21 +221,20 @@ Pair(
 }
 
 #[test]
-fn declare_params_newline_with_trailing_comma() {
+fn declare_params_and_has_members_use_newline_separators() {
     let src = "\
 Pair(
-    x,
-    y,
-) has (
-    first x,
-    second y,
-)
+    x
+    y
+) has
+    first x
+    second y
 ";
     let out = src.parse_source_full();
     assert_eq!(
         count_errors(&out),
         0,
-        "type params with trailing commas and newlines"
+        "type params and has members with newline separators"
     );
     assert!(has_tag(&out, "Pair"));
 }
@@ -254,7 +253,7 @@ Map(
     key
     value
     allocator: DefaultAllocator
-) has ()
+) has
 ";
     let out = src.parse_source_full();
     assert_eq!(
@@ -307,106 +306,92 @@ bar(x Int) Maybe(
     assert!(has_def(&out, "bar"));
 }
 
-// ── Interface member lists ──────────────────────────────────────────
-
 #[test]
-fn interface_members_comma_separated_inline() {
-    let src = "Allocator has (allocate(size Int) Ptr, free(ptr Ptr))\n";
+fn has_members_comma_separated_inline() {
+    let src = "Allocator has allocate(size Int) Ptr, free(ptr Ptr)\n";
     let out = src.parse_source_full();
-    assert_eq!(
-        count_errors(&out),
-        0,
-        "comma-separated interface members inline"
-    );
+    assert_eq!(count_errors(&out), 0, "comma-separated has members inline");
     assert!(has_tag(&out, "Allocator"));
 }
 
 #[test]
-fn interface_members_newline_separated() {
+fn has_members_newline_separated() {
     let src = "\
-Allocator has (
+Allocator has
     allocate(size Int) Ptr
     free(ptr Ptr)
-)
 ";
     let out = src.parse_source_full();
     assert_eq!(
         count_errors(&out),
         0,
-        "newline-separated interface members: {:?}",
+        "newline-separated has members: {:?}",
         out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
     );
     assert!(has_tag(&out, "Allocator"));
 }
 
 #[test]
-fn interface_members_trailing_comma() {
+fn has_members_multiline_without_commas() {
     let src = "\
-Allocator has (
-    allocate(size Int) Ptr,
-    free(ptr Ptr),
-)
+Allocator has
+    allocate(size Int) Ptr
+    free(ptr Ptr)
 ";
     let out = src.parse_source_full();
-    assert_eq!(
-        count_errors(&out),
-        0,
-        "interface members with trailing commas and newlines"
-    );
+    assert_eq!(count_errors(&out), 0, "has members with newline separators");
     assert!(has_tag(&out, "Allocator"));
 }
 
 #[test]
-fn interface_members_same_line_missing_comma_rejected() {
-    let src = "Allocator has (allocate(size Int) Ptr free(ptr Ptr))\n";
+fn has_members_same_line_missing_comma_rejected() {
+    let src = "Allocator has allocate(size Int) Ptr free(ptr Ptr)\n";
     let out = src.parse_source_full();
     let errors = count_errors(&out);
     assert!(
         errors > 0,
-        "same-line interface members without comma should produce an error"
+        "same-line has members without comma should produce an error"
     );
 }
 
 #[test]
-fn interface_members_empty_works() {
-    let src = "Marker has ()\n";
+fn has_members_empty_works() {
+    let src = "Marker has \n";
     let out = src.parse_source_full();
-    assert_eq!(count_errors(&out), 0, "empty interface must work");
+    assert_eq!(count_errors(&out), 0, "empty has declaration must work");
     assert!(has_tag(&out, "Marker"));
 }
 
 #[test]
-fn interface_members_three_methods_multiline() {
+fn has_members_three_methods_multiline() {
     let src = "\
-Allocator has (
+Allocator has
     allocate(size Int) Ptr
     free(ptr Ptr)
     resize(ptr Ptr, old_size Int, new_size Int) Ptr
-)
 ";
     let out = src.parse_source_full();
     assert_eq!(
         count_errors(&out),
         0,
-        "three newline-separated interface members: {:?}",
+        "three newline-separated has members: {:?}",
         out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
     );
     assert!(has_tag(&out, "Allocator"));
 }
 
 #[test]
-fn interface_members_with_return_type_newline() {
+fn has_members_with_return_type_newline() {
     let src = "\
-Hasher has (
+Hasher has
     hash(data Slice(Byte)) Int
     reset()
-)
 ";
     let out = src.parse_source_full();
     assert_eq!(
         count_errors(&out),
         0,
-        "interface members with return types and newline separators"
+        "has members with return types and newline separators"
     );
     assert!(has_tag(&out, "Hasher"));
 }

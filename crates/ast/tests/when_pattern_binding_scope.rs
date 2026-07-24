@@ -9,8 +9,8 @@ fn copy_src() -> &'static str {
     // Types resolve from the marker package fixture; only need the is_copy
     // definitions whose binder names are being tested.
     "\
-Copy has (can_copy Bool)
-x.Copy(can_copy: is_copy(x))
+#auto
+Copy has can_copy Bool: is_copy(Self)
 
 is_copy(x Type) Bool := when x is
     Primitive(_, _)     then True

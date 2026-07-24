@@ -16,7 +16,7 @@ fn tag_name_in_shape_literal_shows_record_type() {
     let src = "\
 Int is in 1...400
 
-Coord has (x Int, y Int, z Int)
+Coord has x Int, y Int, z Int
 origin := Coord(x: 0, y: 0, z: 0)";
     let typed = transform_source(src);
 
@@ -32,11 +32,7 @@ origin := Coord(x: 0, y: 0, z: 0)";
         hover,
         "\
 ```gin
-Coord has (
-    x Int,
-    y Int,
-    z Int,
-)
+Coord has x Int, y Int, z Int
 ```"
     );
 }
@@ -46,7 +42,7 @@ fn bind_to_shape_literal_shows_type() {
     let src = "\
 Int is in 1...400
 
-Coord has (x Int, y Int, z Int)
+Coord has x Int, y Int, z Int
 origin := Coord(x: 0, y: 0, z: 0)";
     let typed = transform_source(src);
 
@@ -69,11 +65,11 @@ origin
 }
 
 #[test]
-fn shorthand_field_x_in_call_shows_bind_surface() {
+fn shorthand_field_x_in_call_shows_bind_value() {
     let src = "\
 Int is in 1...400
 
-Coord has (x Int, y Int, z Int)
+Coord has x Int, y Int, z Int
 x := 1
 y := 2
 z := 3
@@ -90,26 +86,21 @@ p := Coord(x, y, z)";
     let hover = typed
         .hover_at(src, line, character)
         .expect("hover on shorthand field x");
-    // Hover on the shorthand field `x` resolves back to the `x` variable
-    // definition and shows its full signature surface (name + entire body).
     assert_eq!(
         hover,
         "\
 ```gin
-x := 1
-y := 2
-z := 3
-p := Coord(x, y, z)
+x 1
 ```"
     );
 }
 
 #[test]
-fn shorthand_field_y_in_call_shows_type() {
+fn shorthand_field_y_in_call_shows_bind_value() {
     let src = "\
 Int is in 1...400
 
-Coord has (x Int, y Int, z Int)
+Coord has x Int, y Int, z Int
 x := 1
 y := 2
 z := 3
@@ -129,7 +120,7 @@ p := Coord(x, y, z)";
         hover,
         "\
 ```gin
-y Int
+y 2
 ```"
     );
 }
@@ -139,7 +130,7 @@ fn field_access_x_shows_field_type() {
     let src = "\
 Int is in 1...400
 
-Coord has (x Int, y Int, z Int)
+Coord has x Int, y Int, z Int
 p := Coord(x: 1, y: 2, z: 3)
 p.x";
     let typed = transform_source(src);
@@ -166,7 +157,7 @@ fn field_access_p_receiver_shows_definition_surface() {
     let src = "\
 Int is in 1...400
 
-Coord has (x Int, y Int, z Int)
+Coord has x Int, y Int, z Int
 p := Coord(x: 1, y: 2, z: 3)
 p.x";
     let typed = transform_source(src);
@@ -179,14 +170,11 @@ p.x";
     let hover = typed
         .hover_at(src, line, character)
         .expect("hover on receiver p in p.x");
-    // Hover on the receiver `p` resolves back to the bind definition,
-    // showing the entire bind's signature surface (name + body expression).
     assert_eq!(
         hover,
         "\
 ```gin
-p := Coord(x: 1, y: 2, z: 3)
-p.x
+p
 ```"
     );
 }

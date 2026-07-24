@@ -9,7 +9,7 @@ use support::transform_source;
 #[test]
 fn duplicate_field_name_reported() {
     let src = "\
-Coord has (x Int, y Int, z Int)
+Coord has x Int, y Int, z Int
 p := Coord(x: 1, x: 2, y: 3, z: 4)
 ";
     let typed = transform_source(src);
@@ -27,7 +27,7 @@ p := Coord(x: 1, x: 2, y: 3, z: 4)
 #[test]
 fn unknown_field_name_reported() {
     let src = "\
-Coord has (x Int, y Int, z Int)
+Coord has x Int, y Int, z Int
 p := Coord(x: 1, y: 2, w: 3)
 ";
     let typed = transform_source(src);
@@ -47,7 +47,7 @@ p := Coord(x: 1, y: 2, w: 3)
 #[test]
 fn missing_field_reported() {
     let src = "\
-Coord has (x Int, y Int, z Int)
+Coord has x Int, y Int, z Int
 p := Coord(x: 1, y: 2)
 ";
     let typed = transform_source(src);
@@ -65,7 +65,7 @@ p := Coord(x: 1, y: 2)
 #[test]
 fn field_type_mismatch_reported() {
     let src = "\
-Coord has (x Int, y Int, z Int)
+Coord has x Int, y Int, z Int
 p := Coord(x: \"hello\", y: 2, z: 3)
 ";
     let typed = transform_source(src);

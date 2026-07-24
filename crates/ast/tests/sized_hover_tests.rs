@@ -10,12 +10,12 @@ use typecheck::transform::{TransformCtx, transform};
 const PRIMITIVES_SRC: &str = "\
 BigInt is in 0...18446744073709551615
 Bool is True or False
-List(x) has (pointer Pointer(x), length BigInt)
+List(x) has pointer Pointer(x), length BigInt
 Pointer(x) is @x
 PointerSize is BigInt
-String has (bytes List(BigInt))
-ToString has (to_string String)
-Happy has (value Bool)
+String has bytes List(BigInt)
+ToString has to_string String
+Happy has value Bool
 ";
 
 /// The `Type` tag definition (equivalent to `reflect/type.gin`).
@@ -29,19 +29,18 @@ Type is Primitive(width BigInt, signed Bool)
      or Array(elem Type, size BigInt)
      or Opaque(name String)
 
-NamedTy has (name String, ty Type)
-VariantShape has (name String, fields List(NamedTy))
+NamedTy has name String, ty Type
+VariantShape has name String, fields List(NamedTy)
 
-Reflectable has (shape Type)
+Reflectable has shape Type
 ";
 
 /// The `sized.gin` equivalent.
 const SIZED_SRC: &str = "\
 Size is Const(BigInt) or Dynamic
 
-Sized has (size Size)
-
-x.Sized(size: compute_size(x))
+#auto
+Sized has size Size: compute_size(Self)
 
 compute_size(x Type) Size := when x is
     Primitive(w, _)     then Const(w / 8)

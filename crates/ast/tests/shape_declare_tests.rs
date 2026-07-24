@@ -1,14 +1,14 @@
 //! Tests for shape declarations, trait implementations, unions, and methods.
 //!
 //! Layer 7: shape declarations (`has` bodies)
-//! Layer 8: trait implementations (`Type.Trait(...)`)
+//! Layer 8: trait provisions (`Type.Trait has ...`
 //! Layer 9: union declarations with payload variants
 //! Layer 10: namespaced and receiver methods
 //!
 //! Each test documents current behaviour — some assertions record expected
 //! diagnostics that may become unnecessary as the compiler matures.
 
-use ast::ty::{Ty, UnionVariant};
+use ast::ty::Ty;
 use internment::Intern;
 use typecheck::{DefId, TagId};
 
@@ -17,7 +17,7 @@ use support::transform_source;
 
 #[test]
 fn simple_shape_with_fields() {
-    let src = "Int is in 1...400\n\nCoord has (x Int, y Int, z Int)";
+    let src = "Int is in 1...400\n\nCoord has x Int, y Int, z Int";
     let typed = transform_source(src);
 
     let coord_id = TagId(Intern::new("Coord".to_string()));
@@ -50,10 +50,44 @@ fn simple_shape_with_fields() {
     assert!(unknown.is_empty(), "no unknown-symbol flaws: {unknown:?}");
 }
 
+/// 7.1b — Has members with methods don't become record fields.
+#[test]
+fn has_method_does_not_become_record_field() {
+    let src =
+        "Int is in 1...400\n\nRange(x) has start x, end x, contains(ref self, value x) Bool\n";
+    let typed = transform_source(src);
+
+    let range_id = TagId(Intern::new("Range".to_string()));
+    let tag = typed.tags.get(&range_id).expect("Range tag exists");
+
+    match &tag.resolved_ty {
+        Ty::Record { name, fields } => {
+            assert_eq!(name.as_str(), "Range", "record name");
+            assert_eq!(fields.len(), 2, "only 2 fields (not contains)");
+
+            let field_names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
+            assert_eq!(field_names, vec!["start", "end"], "field names");
+
+            assert!(
+                !field_names.contains(&"contains"),
+                "contains should not be a record field"
+            );
+        }
+        other => panic!("Expected Record type, got {other:?}"),
+    }
+
+    let flaws = typed.all_flaws();
+    let unknown: Vec<_> = flaws
+        .iter()
+        .filter(|(_, f)| f.code.slug() == "type-unknown-symbol")
+        .collect();
+    assert!(unknown.is_empty(), "no unknown-symbol flaws: {unknown:?}");
+}
+
 /// 7.2 — Generic shape with type parameters.
 #[test]
 fn generic_shape_with_type_params() {
-    let src = "Pair(a, b) has (first a, second b)";
+    let src = "Pair(a, b) has first a, second b";
     let typed = transform_source(src);
 
     let pair_id = TagId(Intern::new("Pair".to_string()));
@@ -102,7 +136,7 @@ fn generic_shape_with_type_params() {
 /// 7.3 — Shape with method signature as member.
 #[test]
 fn shape_with_interface_member() {
-    let src = "Iterator(item) has (next Maybe(item))";
+    let src = "Iterator(item) has next Maybe(item)";
     let typed = transform_source(src);
 
     // Should not crash during transform.
@@ -126,10 +160,10 @@ fn shape_with_interface_member() {
 fn shape_with_parameterized_interface_members() {
     let src = "\
 AllocError is Oom or InvalidLayout
-Allocator has (
-    reserve(ref self, l Int) Slice(Byte) or AllocError,
-    release(ref self, p Int, l Int),
-)";
+Allocator has
+    reserve(ref self, l Int) Slice(Byte) or AllocError
+    release(ref self, p Int, l Int)
+";
     let typed = transform_source(src);
 
     // Transform should not crash.
@@ -152,9 +186,9 @@ Allocator has (
 fn separate_trait_impl() {
     let src = "\
 Int is in 1...400
-Coord has (x Int, y Int)
-Default has (default Self)
-Coord has Default(default: Coord(x: 0, y: 0))";
+Coord has x Int, y Int
+Default has default Self
+Coord.Default has default: Coord(x: 0, y: 0)";
     let typed = transform_source(src);
 
     let flaws = typed.all_flaws();
@@ -178,8 +212,8 @@ Coord has Default(default: Coord(x: 0, y: 0))";
 fn trait_impl_with_dot_syntax() {
     let src = "\
 Int is in 1...400
-Coord has (x Int, y Int)
-Coord.Default(default: Coord(x: 0, y: 0))";
+Coord has x Int, y Int
+Coord.Default has default: Coord(x: 0, y: 0)";
     let typed = transform_source(src);
 
     let coord_id = TagId(Intern::new("Coord".to_string()));
@@ -207,14 +241,13 @@ Coord.Default(default: Coord(x: 0, y: 0))";
     let _ = flaws;
 }
 
-/// 8.3 — Overriding a blanket impl with an explicit `Type.Trait(...)` implementation.
 #[test]
-fn overriding_blanket_impl() {
+fn explicit_copy_provision() {
     let src = "\
 Int is in 1...400
-Copy has (can_copy Bool)
-UniqueId has (id Int)
-UniqueId.Copy(can_copy: False)";
+Copy has can_copy Bool
+UniqueId has id Int
+UniqueId.Copy has can_copy: False";
     let typed = transform_source(src);
 
     let uid_id = TagId(Intern::new("UniqueId".to_string()));
@@ -230,29 +263,6 @@ UniqueId.Copy(can_copy: False)";
         tag.provided_traits
     );
 
-    let flaws = typed.all_flaws();
-    let _ = flaws;
-}
-
-/// 8.4 — Blanket impl unchanged (lowercase subject = quantified impl).
-///
-/// Note: `transform_source` uses a bare `TransformCtx` with no pre-loaded
-/// blanket impls.  The blanket impl IS recorded on `FileAst` but does not
-/// flow into `TypedFileAst.blanket_impls` without a properly populated ctx.
-#[test]
-fn blanket_impl_unchanged() {
-    let src = "x.Copy(can_copy: True)";
-    let typed = transform_source(src);
-
-    // Lowercase subject `x` should NOT produce a tag.
-    assert!(
-        !typed
-            .tags
-            .contains_key(&TagId(Intern::new("x".to_string()))),
-        "lowercase x should NOT produce a tag"
-    );
-
-    // The transform does not crash, which is the primary assertion.
     let flaws = typed.all_flaws();
     let _ = flaws;
 }
@@ -364,7 +374,7 @@ d := Status.Complete";
 fn namespaced_method() {
     let src = "\
 Int is in 1...400
-Coord has (x Int, y Int)
+Coord has x Int, y Int
 Coord.new(x Int, y Int) Int: 0";
     let typed = transform_source(src);
 
@@ -391,7 +401,7 @@ Coord.new(x Int, y Int) Int: 0";
 fn receiver_method_with_explicit_self() {
     let src = "\
 Int is in 1...400
-Coord has (x Int, y Int)
+Coord has x Int, y Int
 Coord.length(self Int) Int: self";
     let typed = transform_source(src);
 
@@ -416,7 +426,7 @@ Coord.length(self Int) Int: self";
 fn unit_return_method() {
     let src = "\
 Int is in 1...400
-Coord has (x Int, y Int)
+Coord has x Int, y Int
 Coord.reset(self Int):
     self + 0";
     let typed = transform_source(src);

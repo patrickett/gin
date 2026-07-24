@@ -45,7 +45,7 @@ fn transform_resolved_package(files: Vec<(PathBuf, String)>) -> Vec<typecheck::T
     for file in &resolved {
         compile_time_eval_ast.merge_from(file.output.ast.clone());
     }
-    let ctx = TransformCtx::with_package_compile_time(Vec::new(), compile_time_eval_ast);
+    let ctx = TransformCtx::with_package_compile_time(compile_time_eval_ast);
     let file_asts: Vec<(ast::FileAst, FileId)> = resolved
         .into_iter()
         .enumerate()
@@ -62,26 +62,20 @@ fn transform_resolved_package(files: Vec<(PathBuf, String)>) -> Vec<typecheck::T
 fn core_bundle_import_types_like_target_gin() {
     let pkg = TempPackage::new("target_bundle_types");
     pkg.write_flask_with_deps("core", r#"{"core":{"path":"."}}"#);
-    pkg.write(
-        "default/default.gin",
-        "Default(value) has (default value)\n",
-    );
+    pkg.write("default/default.gin", "Default(value) has default value\n");
     pkg.write("target/arch/arch.gin", "Architecture is 'x86_64'\n");
     pkg.write("target/os/os.gin", "OperatingSystem is 'linux'\n");
     pkg.write("target/vendor/vendor.gin", "Vendor is 'unknown'\n");
     const TARGET: &str = "\
 use core.(default.Default, target.arch.Architecture, target.os.OperatingSystem, target.vendor.Vendor)
 
-Target has (arch Architecture, vendor Vendor, os OperatingSystem)
-Target.Default(default: (arch: 'x86_64', vendor: 'unknown', os: 'unknown'))
+Target has arch Architecture, vendor Vendor, os OperatingSystem
+Target.Default has default: (arch: 'x86_64', vendor: 'unknown', os: 'unknown')
 
 target := Target.default
 ";
     let target_path = pkg.write("target/target.gin", TARGET);
-    let default_path = pkg.write(
-        "default/default.gin",
-        "Default(value) has (default value)\n",
-    );
+    let default_path = pkg.write("default/default.gin", "Default(value) has default value\n");
     let arch_path = pkg.write("target/arch/arch.gin", "Architecture is 'x86_64'\n");
     let os_path = pkg.write("target/os/os.gin", "OperatingSystem is 'linux'\n");
     let vendor_path = pkg.write("target/vendor/vendor.gin", "Vendor is 'unknown'\n");

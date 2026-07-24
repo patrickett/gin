@@ -22,8 +22,8 @@ use core.ToString
 ---
 --- `if` requires a `Bool` value as its conditional.
 Bool is True or False
-Bool.Happy(value: Bool.True)
-Bool.ToString(to_string: when self then 'true' else 'false')
+Bool.Happy has value: Bool.True
+Bool.ToString has to_string: when self then 'true' else 'false'
 
 
 false := Bool.False
@@ -41,10 +41,8 @@ use '../primitive/'.(BigInt, List)
 --- Compile-time byte size of a type.
 Size is Const(BigInt) or Dynamic
 
-Sized has (size Size)
-
--- generic, if Sized is in scope it applies to all types
-x.Sized(size: compute_size(x))
+#auto
+Sized has size Size: compute_size(Self)
 
 compute_size(x Type) Size := when x is
     Primitive(w, _)     then Const(w / 8)
@@ -101,23 +99,21 @@ Type is Primitive(width BigInt, signed Bool)
      or Array(elem Type, size BigInt)
      or Opaque(name String)
 
-NamedTy has (name String, ty Type)
-VariantShape has (name String, fields List(NamedTy))
+NamedTy has name String, ty Type
+VariantShape has name String, fields List(NamedTy)
 
 --- Reserved: the compiler synthesizes `shape` for every type.
---- User-written `Type.Reflectable(...)` is a compile error.
-Reflectable has (shape Type)
+--- User-written `Type.Reflectable has ...` is a compile error.
+Reflectable has shape Type
 "#;
 
 const COPY_GIN: &str = r#"use core.reflect.(Type, NamedTy, VariantShape)
 use core.primitive.(Bool, List)
 
 --- Types that can be implicitly copied.
---- Opt out with `Type.Copy(can_copy: False)`.
-Copy has (can_copy Bool)
-
--- Blanket: copyability follows structural rules on reflected shape.
-x.Copy(can_copy: is_copy(x))
+--- Opt out with `Copy.can_copy: False`.
+#auto
+Copy has can_copy Bool: is_copy(Self)
 
 is_copy(x Type) Bool := when x is
     Primitive(_, _)     then True
@@ -419,7 +415,7 @@ fn cursor_definition_dep_bundle_member_in_folder() {
     pkg.write("primitive/bool.gin", "Bool is Unit\n");
     pkg.write(
         "marker/copy.gin",
-        "use self.primitive.(Bool)\n\nCopy has ()\n",
+        "use self.primitive.(Bool)\n\nCopy has \n",
     );
 
     let copy = pkg.join("marker/copy.gin");
@@ -448,15 +444,12 @@ fn cursor_definition_dep_bundle_member_in_folder() {
 fn cursor_definition_body_bundle_flat_name() {
     let pkg = TempPackage::new("body_bundle_goto");
     pkg.write_flask_with_deps("core", r#"{"core":{"path":"."}}"#);
-    pkg.write(
-        "default/default.gin",
-        "Default(value) has (default value)\n",
-    );
+    pkg.write("default/default.gin", "Default(value) has default value\n");
     pkg.write("target/arch/arch.gin", "Architecture is 'x86_64'\n");
     const TARGET: &str = "\
 use core.(default.Default, target.arch.Architecture)
 
-Target has (arch Architecture)
+Target has arch Architecture
 ";
     let target_path = pkg.write("target/target.gin", TARGET);
     let source = std::fs::read_to_string(&target_path).unwrap();
@@ -465,12 +458,12 @@ Target has (arch Architecture)
     let arch_pos = source[body_start..]
         .find("Architecture")
         .map(|i| body_start + i)
-        .expect("Architecture in Target has (...)");
+        .expect("Architecture in Target has ...");
 
     let def = cursor_definition(&target_path, &output.ast, &source, arch_pos, &|p| {
         resolve::ParsedFile::read(p)
     })
-    .expect("goto-def on Architecture in Target has (...)");
+    .expect("goto-def on Architecture in Target has ...");
 
     match def {
         CursorDefinition::OtherFile(loc) => {

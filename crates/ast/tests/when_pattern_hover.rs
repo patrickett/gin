@@ -8,12 +8,12 @@ use support::{transform_source, transform_with_marker_package};
 fn hover_wildcard_in_record_pattern() {
     let src = "\
 Type is Primitive(width BigInt, signed Bool) or Record(name Str, fields List(NamedTy))
-NamedTy has (name Str, ty Type)
-List(x) has (pointer Pointer(x), length BigInt)
+NamedTy has name Str, ty Type
+List(x) has pointer Pointer(x), length BigInt
 BigInt is in 0...1000
 Str is in 0...255
 Bool is True or False
-Pointer(x) has (addr BigInt)
+Pointer(x) has addr BigInt
 
 f(x Type) Bool := when x is
     Record(_, fields) then True
@@ -40,13 +40,13 @@ fn reflect_type_record_variant_map_resolves_forward_refs() {
 
     // Self-contained: no gin_core fixture load (avoids multi-GB Reflectable shape materialization).
     let src = "\
-NamedTy has (name String, ty Type)
-List(x) has (pointer Pointer(x), length BigInt)
+NamedTy has name String, ty Type
+List(x) has pointer Pointer(x), length BigInt
 BigInt is in 0...1000
-String has (bytes List(Byte))
+String has bytes List(Byte)
 Byte is in 0...255
 Bool is True or False
-Pointer(x) has (addr BigInt)
+Pointer(x) has addr BigInt
 Type is Primitive(width BigInt, signed Bool) or Record(name String, fields List(NamedTy))
 ";
     let typed = support::transform_source(src);
@@ -77,13 +77,13 @@ Type is Primitive(width BigInt, signed Bool) or Record(name String, fields List(
 #[test]
 fn record_pattern_fields_hover_matches_reflect_type() {
     let src = "\
-NamedTy has (name String, ty Type)
-List(x) has (pointer Pointer(x), length BigInt)
+NamedTy has name String, ty Type
+List(x) has pointer Pointer(x), length BigInt
 BigInt is in 0...1000
-String has (bytes List(Byte))
+String has bytes List(Byte)
 Byte is in 0...255
 Bool is True or False
-Pointer(x) has (addr BigInt)
+Pointer(x) has addr BigInt
 Type is Primitive(width BigInt, signed Bool) or Record(name String, fields List(NamedTy))
 
 f(x Type) Bool := when x is
@@ -119,12 +119,12 @@ f(x Type) Bool := when x is
 fn hover_record_variant_head_in_pattern() {
     let src = "\
 Type is Primitive(width BigInt, signed Bool) or Record(name Str, fields List(NamedTy))
-NamedTy has (name Str, ty Type)
-List(x) has (pointer Pointer(x), length BigInt)
+NamedTy has name Str, ty Type
+List(x) has pointer Pointer(x), length BigInt
 BigInt is in 0...1000
 Str is in 0...255
 Bool is True or False
-Pointer(x) has (addr BigInt)
+Pointer(x) has addr BigInt
 
 f(x Type) Bool := when x is
     Record(_, fields) then True
@@ -152,8 +152,8 @@ BigInt is in 0...18446744073709551615
 Type is Primitive(width BigInt, signed Bool)
      or Ref(inner Type, mutable Bool)
 
-Copy has (can_copy Bool)
-x.Copy(can_copy: is_copy(x))
+#auto
+Copy has can_copy Bool: is_copy(Self)
 
 is_copy(x Type) Bool := when x is
     Ref(_, False)       then True
@@ -183,8 +183,8 @@ BigInt is in 0...18446744073709551615
 Type is Primitive(width BigInt, signed Bool)
      or Ref(inner Type, mutable Bool)
 
-Copy has (can_copy Bool)
-x.Copy(can_copy: is_copy(x))
+#auto
+Copy has can_copy Bool: is_copy(Self)
 
 is_copy(x Type) Bool := when x is
     Ref(_, False)       then True
@@ -213,12 +213,12 @@ is_copy(x Type) Bool := when x is
 #[test]
 fn hover_list_pattern_variables_not_bool() {
     let src = "\
-List(x) has (pointer Pointer(x), length BigInt)\n\
+List(x) has pointer Pointer(x), length BigInt\n\
 BigInt is in 0...1000\n\
 Bool is True or False\n\
 Pointer(x) is @x\n\
-NamedTy has (name String, ty Type)\n\
-String has (bytes List(Byte))\n\
+NamedTy has name String, ty Type\n\
+String has bytes List(Byte)\n\
 Byte is in 0...255\n\
 Type is Primitive(width BigInt, signed Bool) or Record(name String, fields List(NamedTy))\n\
 \

@@ -63,8 +63,8 @@ fn when_subject_resolves_when_target_imported() {
 Architecture is 'x86_64' or 'wasm32'
 Vendor is 'unknown'
 OperatingSystem is 'unknown'
-Target has (arch Architecture, vendor Vendor, os OperatingSystem)
-Target.Default(default: ( arch: 'x86_64', vendor: 'unknown', os: 'unknown', ))
+Target has arch Architecture, vendor Vendor, os OperatingSystem
+Target.Default has default: ( arch: 'x86_64', vendor: 'unknown', os: 'unknown', )
 
 target Target
 

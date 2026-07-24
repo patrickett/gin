@@ -1,4 +1,4 @@
-//! `modules/gin_core/marker/copy.gin` documents opt-out via `Type.Copy(can_copy: False)`.
+//! `modules/gin_core/marker/copy.gin` documents opt-out via `Copy.can_copy: False`.
 
 mod support;
 
@@ -6,11 +6,9 @@ const COPY_GIN: &str = r#"use core.reflect.(Type, NamedTy, VariantShape)
 use core.primitive.(Bool, List)
 
 --- Types that can be implicitly copied.
---- Opt out with `Type.Copy(can_copy: False)`.
-Copy has (can_copy Bool)
-
--- Blanket: copyability follows structural rules on reflected shape.
-x.Copy(can_copy: is_copy(x))
+--- Opt out with `Copy.can_copy: False`.
+#auto
+Copy has can_copy Bool: is_copy(Self)
 
 is_copy(x Type) Bool := when x is
     Primitive(_, _)     then True
@@ -40,7 +38,7 @@ all_variants_copy(variants List(VariantShape)) Bool := when variants is
 fn copy_gin_documents_trait_override_opt_out() {
     let source = COPY_GIN;
     let _opt_out_pos = source
-        .find("Type.Copy(can_copy: False)")
+        .find("Copy.can_copy: False")
         .expect("copy.gin should document trait override opt-out");
     let file_ast = parser::cursor::TokenCursor::parse_source(source);
     let typed = typecheck::transform::transform_declare(

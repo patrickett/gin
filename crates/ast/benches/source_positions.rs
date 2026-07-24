@@ -20,10 +20,10 @@ fn synthetic_gin() -> &'static str {
         for i in 0..200 {
             s.push_str("register_");
             s.push_str(&i.to_string());
-            s.push_str(" has (value Str)\n\n");
+            s.push_str(" has value Str\n\n");
             s.push_str("AsmSpec_");
             s.push_str(&i.to_string());
-            s.push_str(" has (template Str, constraints Str)\n\n");
+            s.push_str(" has template Str, constraints Str\n\n");
         }
         // Ensure at least 7KB
         while s.len() < 7_000 {

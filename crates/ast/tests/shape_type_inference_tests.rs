@@ -7,7 +7,7 @@ mod support;
 use internment::Intern;
 use typecheck::TypedFileAst;
 use typecheck::ty::Ty;
-use typecheck::{BindBody, DefId, ExprId};
+use typecheck::{BindBody, DefId, ExprId, TypedExprKind};
 
 use support::transform_source;
 
@@ -29,9 +29,47 @@ fn body_expr_id(typed: &TypedFileAst, def_name: &str) -> Option<ExprId> {
 }
 
 #[test]
+fn generic_has_method_call_retains_record_type() {
+    let src = "\
+Range(x) has
+    start x
+    end x
+
+    new(start x, end x) Self: Self(start, end)
+
+main: Range.new(12, 1200)
+";
+    let typed = transform_source(src);
+    let method = typed
+        .defs
+        .get(&DefId(Intern::new("Range.new".to_string())))
+        .expect("Range.new definition");
+    assert!(
+        matches!(method.return_type, Ty::Record { ref name, .. } if name.as_str() == "Range"),
+        "Range.new declaration should return Range, got {:?}; receiver: {:?}",
+        method.return_type,
+        method.receiver_type
+    );
+
+    let (_, call_ty) = typed
+        .exprs
+        .kind
+        .iter()
+        .zip(&typed.exprs.ty)
+        .find(|(kind, _)| {
+            matches!(kind, TypedExprKind::FnCall { target, .. } if target.0.as_str() == "Range.new")
+        })
+        .expect("Range.new call");
+    assert!(
+        matches!(call_ty, Ty::Record { name, .. } if name.as_str() == "Range"),
+        "Range.new call should return Range, got {call_ty:?}"
+    );
+}
+
+#[test]
 fn shape_literal_infers_record_type() {
     let src = "\
-Coord has (x Int, y Int, z Int)
+Coord has x Int, y Int, z Int
 p := Coord(x: 1, y: 2, z: 3)
 ";
     let typed = transform_source(src);
@@ -61,7 +99,7 @@ p := Coord(x: 1, y: 2, z: 3)
 #[test]
 fn return_type_inferred_from_shape_literal() {
     let src = "\
-Coord has (x Int, y Int, z Int)
+Coord has x Int, y Int, z Int
 Coord.new(x Int, y Int, z Int):
     Coord(x, y, z)
 ";
@@ -120,7 +158,7 @@ Maybe.some(v Int):
 #[test]
 fn shape_literal_with_generic_params_resolved() {
     let src = "\
-Pair(a, b) has (first a, second b)
+Pair(a, b) has first a, second b
 p := Pair(first: 1, second: 2)
 ";
     let typed = transform_source(src);
@@ -149,7 +187,7 @@ p := Pair(first: 1, second: 2)
 #[test]
 fn method_body_shape_literal_inferred() {
     let src = "\
-Coord has (x Int, y Int, z Int)
+Coord has x Int, y Int, z Int
 Coord.origin: Coord(x: 0, y: 0, z: 0)
 Coord.new(x Int, y Int, z Int): Coord(x, y, z)
 ";

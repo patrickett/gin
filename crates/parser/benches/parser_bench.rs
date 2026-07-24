@@ -36,7 +36,7 @@ BigInt is in 0...18446744073709551615
 Byte is TinyInt
 ";
 
-/// Blanket impl + when-is (~32 lines, ~820 bytes).
+/// Auto trait + when-is (~32 lines, ~820 bytes).
 const COPY_GIN: &str = "\
 Type is Primitive(width BigInt, signed Bool)
      or Record(name String, fields List(NamedTy))
@@ -44,15 +44,15 @@ Type is Primitive(width BigInt, signed Bool)
      or Ptr(inner Type)
      or Opaque(name String)
 
-NamedTy has (name String, ty Type)
-VariantShape has (name String, fields List(NamedTy))
+NamedTy has name String, ty Type
+VariantShape has name String, fields List(NamedTy)
 Bool is True or False
 BigInt is in 0...18446744073709551615
-List(x) has (pointer Pointer(x), length BigInt)
-String has (bytes List(BigInt))
+List(x) has pointer Pointer(x), length BigInt
+String has bytes List(BigInt)
 
-Copy has (can_copy Bool)
-x.Copy(can_copy: is_copy(x))
+#auto
+Copy has can_copy Bool: is_copy(Self)
 
 is_copy(x Type) Bool := when x is
     Primitive(_, _)     then True
@@ -78,16 +78,16 @@ Type is Primitive(width BigInt, signed Bool)
      or Ptr(inner Type)
      or Opaque(name String)
 
-NamedTy has (name String, ty Type)
-VariantShape has (name String, fields List(NamedTy))
+NamedTy has name String, ty Type
+VariantShape has name String, fields List(NamedTy)
 Bool is True or False
 BigInt is in 0...18446744073709551615
-List(x) has (pointer Pointer(x), length BigInt)
-String has (bytes List(BigInt))
+List(x) has pointer Pointer(x), length BigInt
+String has bytes List(BigInt)
 
 Size is Const(BigInt) or Dynamic
-Sized has (size Size)
-x.Sized(size: compute_size(x))
+#auto
+Sized has size Size: compute_size(Self)
 
 compute_size(x Type) Size := when x is
     Primitive(w, _)     then Const(w / 8)
@@ -144,19 +144,17 @@ println(s String):
 
 /// A larger module with declares, methods, format strings (~100 lines, ~5KB).
 const ASM_GIN: &str = "\
-Register has (value Str)
+Register has value Str
 
-AsmSpec has (
+AsmSpec has
     template    Str,
     constraints Str,
-)
 
-AsmBuilder has (
+AsmBuilder has
     template  Str,
     outputs   List(Str),
     inputs    List(Str),
     clobbers  List(Str),
-)
 
 AsmBuilder.new(template Str) AsmBuilder:
     return AsmBuilder(template, [], [], [])

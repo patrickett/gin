@@ -42,7 +42,7 @@ const INT_TAG: &str = "Int is in 1...400\n\n";
 fn field_read_dot_access() {
     let src = format!(
         "{INT_TAG}\
-Coord has (x Int, y Int, z Int)
+Coord has x Int, y Int, z Int
 p := Coord(x: 1, y: 2, z: 3)
 "
     );
@@ -70,7 +70,7 @@ p := Coord(x: 1, y: 2, z: 3)
 fn field_write_dot_setter() {
     let src = format!(
         "{INT_TAG}\
-Coord has (x Int, y Int, z Int)
+Coord has x Int, y Int, z Int
 p := Coord(x: 1, y: 2, z: 3)
 p.x: 10
 "
@@ -87,8 +87,8 @@ p.x: 10
 fn chained_field_access() {
     let src = format!(
         "{INT_TAG}\
-Primitive has (width Int, signed Int)
-NamedTy has (name Int, ty Primitive)
+Primitive has width Int, signed Int
+NamedTy has name Int, ty Primitive
 coord_ty := NamedTy(name: 1, ty: Primitive(width: 64, signed: 1))
 "
     );
@@ -110,7 +110,7 @@ coord_ty := NamedTy(name: 1, ty: Primitive(width: 64, signed: 1))
 fn field_write_changes_value() {
     let src = format!(
         "{INT_TAG}\
-Coord has (x Int, y Int, z Int)
+Coord has x Int, y Int, z Int
 p := Coord(x: 1, y: 2, z: 3)
 p.x: 10
 "
@@ -127,7 +127,7 @@ p.x: 10
 fn field_write_with_expression() {
     let src = format!(
         "{INT_TAG}\
-Coord has (x Int, y Int, z Int)
+Coord has x Int, y Int, z Int
 p := Coord(x: 1, y: 2, z: 3)
 p.x: p.x + 1
 "
@@ -144,7 +144,7 @@ p.x: p.x + 1
 fn cannot_write_non_existent_field() {
     let src = format!(
         "{INT_TAG}\
-Coord has (x Int, y Int, z Int)
+Coord has x Int, y Int, z Int
 p := Coord(x: 1, y: 2, z: 3)
 p.w: 5
 "
@@ -152,11 +152,9 @@ p.w: 5
     let typed = transform_source(&src);
     let flaws = typed.all_flaws();
 
-    let has_no_field_w = flaws.iter().any(|(_, f)| {
-        f.message.contains("no field")
-            || f.message.contains("w")
-            || (f.code.slug() == "type-unknown-field" && f.arg("name") == Some("w"))
-    });
+    let has_no_field_w = flaws
+        .iter()
+        .any(|(_, flaw)| flaw.code.slug() == "type-unknown-field" && flaw.arg("name") == Some("w"));
     assert!(
         has_no_field_w,
         "expected diagnostic about `Coord` having no field `w`, got: {flaws:?}"

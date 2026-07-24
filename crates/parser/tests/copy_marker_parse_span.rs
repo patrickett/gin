@@ -1,15 +1,8 @@
-use ast::{BindValue, DeclareValue, Expr, TypeExpr, WhenArm};
+use ast::{BindValue, DeclareValue, Expr, HasMember, TypeExpr, WhenArm};
 use parser::query::SourceParseExt;
 
-const COPY_GIN: &str = r#"use core.reflect.(Type, NamedTy, VariantShape)
-use core.primitive.(Bool, List)
-
---- Types that can be implicitly copied.
---- Opt out with `Type.Copy(can_copy: False)`.
-Copy has (can_copy Bool)
-
--- Blanket: copyability follows structural rules on reflected shape.
-x.Copy(can_copy: is_copy(x))
+const COPY_GIN: &str = r#"#auto
+Copy has can_copy Bool: is_copy(Self)
 
 is_copy(x Type) Bool := when x is
     Primitive(_, _)     then True
@@ -38,7 +31,13 @@ all_variants_copy(variants List(VariantShape)) Bool := when variants is
 #[test]
 fn copy_trait_declares_can_copy_field() {
     let source = COPY_GIN;
-    let file = source.parse_source_full().ast;
+    let output = source.parse_source_full();
+    assert!(
+        output.symptoms.is_empty(),
+        "copy.gin parse symptoms: {:?}",
+        output.symptoms,
+    );
+    let file = output.ast;
     assert!(
         file.parse_warnings.is_empty(),
         "copy.gin should parse without warnings: {:?}",
@@ -47,17 +46,25 @@ fn copy_trait_declares_can_copy_field() {
     let copy_decl = file
         .tags
         .get(&internment::Intern::new("Copy".to_string()))
-        .expect("Copy tag");
+        .unwrap_or_else(|| {
+            panic!(
+                "Copy tag missing; tags={:?}, defs={:?}",
+                file.tags.keys().collect::<Vec<_>>(),
+                file.defs.keys().collect::<Vec<_>>(),
+            )
+        });
 
-    let DeclareValue::Interface(members) = &copy_decl.value else {
+    let DeclareValue::Has(members) = &copy_decl.value else {
         panic!(
-            "Copy should be `has (can_copy Bool)`, got {:?}",
+            "Copy should be `has can_copy Bool`, got {:?}",
             copy_decl.value
         );
     };
     assert!(
-        members.iter().any(|m| m.name.as_str() == "can_copy"),
-        "Copy trait should declare can_copy member"
+        members.iter().any(
+            |member| matches!(member, HasMember::Property(property) if property.name.as_str() == "can_copy")
+        ),
+        "Copy trait should declare can_copy property"
     );
 }
 

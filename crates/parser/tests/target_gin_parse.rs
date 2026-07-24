@@ -10,9 +10,9 @@ fn parse_target_gin_fixture() {
 Architecture is 'x86_64' or 'arm64' or 'wasm32'
 Vendor is 'unknown'
 OperatingSystem is 'unknown'
-Default(value) has (default value)
-Target has (arch Architecture, vendor Vendor, os OperatingSystem)
-Target.Default(default: (arch: 'x86_64', vendor: 'unknown', os: 'unknown'))
+Default(value) has default value
+Target has arch Architecture, vendor Vendor, os OperatingSystem
+Target.Default has default: (arch: 'x86_64', vendor: 'unknown', os: 'unknown')
 target := Target.default
 "#;
     let ast = src.parse_source_full().ast;

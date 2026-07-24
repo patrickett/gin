@@ -53,7 +53,6 @@ fn marker_fixtures() -> &'static MarkerPackageFixtures {
         let eval_typed = transform_declare(eval_ast.as_ref(), FileId(1), &TransformCtx::new());
         let mut transform_ctx = TransformCtx::from_typed_asts(&[&eval_typed]);
         transform_ctx.compile_time_eval_ast = Arc::clone(&eval_ast);
-        transform_ctx.package_blanket_impls = eval_ast.blanket_impls.clone();
         transform_ctx.ide_package = true;
         MarkerPackageFixtures {
             eval_ast,
@@ -65,7 +64,7 @@ fn marker_fixtures() -> &'static MarkerPackageFixtures {
 
 /// Load `gin_core` marker/reflect sources into a merged eval AST and trait registry.
 pub fn marker_trait_registry() -> CompileTimeTraitRegistry {
-    // Trait tests want blanket impls and compile-time bodies from marker modules.
+    // Trait tests want auto trait defaults and compile-time bodies from marker modules.
     // Keep this separate from the lightweight hover/pattern fixture.
     let eval = Arc::new(load_marker_eval_ast_full());
     let mut imported = HashSet::new();
@@ -88,9 +87,7 @@ pub fn marker_trait_registry() -> CompileTimeTraitRegistry {
     ] {
         imported.insert(Intern::new(name.to_string()));
     }
-    let blanket_impls = eval.blanket_impls.clone();
     CompileTimeTraitRegistry {
-        blanket_impls,
         imported_traits: imported,
         eval_ast: eval,
     }
@@ -152,13 +149,13 @@ Int is in 0...4294967295
 
 Bool is True or False
 
-List(x) has (pointer Pointer(x), length BigInt)
+List(x) has pointer Pointer(x), length BigInt
 Pointer(x) is @x
 PointerSize is BigInt
 
-String has (bytes List(BigInt))
-ToString has (to_string String)
-Happy has (value Bool)
+String has bytes List(BigInt)
+ToString has to_string String
+Happy has value Bool
 
 Type is Primitive(width BigInt, signed Bool)
      or Record(name String, fields List(NamedTy))
@@ -169,10 +166,10 @@ Type is Primitive(width BigInt, signed Bool)
      or Array(elem Type, size BigInt)
      or Opaque(name String)
 
-NamedTy has (name String, ty Type)
-VariantShape has (name String, fields List(NamedTy))
+NamedTy has name String, ty Type
+VariantShape has name String, fields List(NamedTy)
 
-Reflectable has (shape Type)
+Reflectable has shape Type
 ";
 
 fn load_marker_eval_ast_light() -> FileAst {
@@ -190,13 +187,13 @@ Int is in 0...4294967295
 
 Bool is True or False
 
-List(x) has (pointer Pointer(x), length BigInt)
+List(x) has pointer Pointer(x), length BigInt
 Pointer(x) is @x
 PointerSize is BigInt
 
-String has (bytes List(BigInt))
-ToString has (to_string String)
-Happy has (value Bool)
+String has bytes List(BigInt)
+ToString has to_string String
+Happy has value Bool
 
 Type is Primitive(width BigInt, signed Bool)
      or Record(name String, fields List(NamedTy))
@@ -207,15 +204,15 @@ Type is Primitive(width BigInt, signed Bool)
      or Array(elem Type, size BigInt)
      or Opaque(name String)
 
-NamedTy has (name String, ty Type)
-VariantShape has (name String, fields List(NamedTy))
+NamedTy has name String, ty Type
+VariantShape has name String, fields List(NamedTy)
 
-Reflectable has (shape Type)
+Reflectable has shape Type
 
 Size is Const(BigInt) or Dynamic
 
-Sized has (size Size)
-x.Sized(size: compute_size(x))
+#auto
+Sized has size Size: compute_size(Self)
 
 compute_size(x Type) Size := when x is
     Primitive(w, _)     then Const(w / 8)
@@ -258,8 +255,8 @@ max_size(a Size, b Size) Size := when (a, b) is
 
 union_size(variants List(VariantShape)) Size := add(union_disc(variants), union_max_payload(variants))
 
-Copy has (can_copy Bool)
-x.Copy(can_copy: is_copy(x))
+#auto
+Copy has can_copy Bool: is_copy(Self)
 
 is_copy(x Type) Bool := when x is
     Primitive(_, _)     then True
@@ -293,13 +290,11 @@ fn load_marker_eval_ast_full() -> FileAst {
     eval
 }
 
-/// Like `transform_source` but prepends a small record tag (`Cell has (n Int)`)
+/// Like `transform_source` but prepends a small record tag (`Cell has n Int`
 /// and a numeric `Int` tag so tests that exercise typed local bindings have a
 /// known schema available without loading `gin_core`.
 pub fn transform_source_with_typed_locals(source: &str) -> TypedFileAst {
-    transform_source(&format!(
-        "Int is in 1...400\n\nCell has (n Int)\n\n{source}"
-    ))
+    transform_source(&format!("Int is in 1...400\n\nCell has n Int\n\n{source}"))
 }
 
 /// Resident set size for the current process (best-effort; 0 if unavailable).

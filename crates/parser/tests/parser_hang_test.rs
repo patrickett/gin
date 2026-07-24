@@ -93,7 +93,7 @@ fn find_sum_coords(ast: &ast::FileAst) -> &ast::Typed<ast::Expr> {
 
 #[test]
 fn dotted_path_without_call_is_record_get() {
-    let src = "Coord has (x Int, y Int)\n\nsum_coords(a Coord, b Coord) Int: a.x + b.x\n";
+    let src = "Coord has x Int, y Int\n\nsum_coords(a Coord, b Coord) Int: a.x + b.x\n";
     let ast = src.parse_source_full().ast;
     let body = find_sum_coords(&ast);
     let Expr::Binary(bin) = &body.value else {
@@ -232,7 +232,7 @@ Int is in 1...400
 
 --- Find the index of a target value in a buffer.
 --- Scans each byte from left to right until a match is found.
-#[complexity(Linear(len))]
+#complexity(Linear(len))
 find_index(target Byte, buf Buffer, len Int) Int:
     i: 0
     while i < len
@@ -288,9 +288,9 @@ return
 
 #[test]
 fn doc_comment_before_attribute_attaches_to_bind() {
-    // Regression: doc comment immediately before `#[complexity(...)]` was
-    // previously consumed by attribute parsing and lost.
-    let src = "--- Find the index of a target value in a buffer.\n--- Scans each byte from left to right until a match is found.\n#[complexity(Linear(len))]\nfind_index(target Byte, buf Buffer, len Int) Int:\n    i: 0\nreturn -1\n";
+    // Regression: a doc comment immediately before an attribute was previously
+    // consumed by attribute parsing and lost.
+    let src = "--- Find the index of a target value in a buffer.\n--- Scans each byte from left to right until a match is found.\n#complexity(Linear(len))\nfind_index(target Byte, buf Buffer, len Int) Int:\n    i: 0\nreturn -1\n";
     let ast = assert_handwritten_parses(src);
 
     let bind = first_def_bind(&ast, "find_index");
@@ -334,7 +334,7 @@ Int is in 1...400
 
 --- Find the index of a target value in a buffer.
 --- Scans each byte from left to right until a match is found.
-#[complexity(Linear(len))]
+#complexity(Linear(len))
 find_index(target Byte, buf Buffer, len Int) Int:
     i: 0
     while i < len
@@ -387,10 +387,20 @@ return
 }
 
 #[test]
-fn attribute_block_with_inline_and_complexity_parses() {
-    // Unique parser path: multiple attributes in a single `#[..., ...]` block.
-    // Other parser tests only exercise single-attribute blocks.
-    let src = "#[inline, complexity(Constant)]\nget(i Int) Byte: buf.(i)\nreturn buf.(i)\n";
+fn grouped_attributes_emit_removed_syntax_error() {
+    let out = "#[inline, complexity(Constant)]\nget(i Int) Byte: buf.(i)\n".parse_source_full();
+    assert!(
+        out.symptoms
+            .iter()
+            .any(|d| d.code.slug() == "parse-removed-grouped-attributes"),
+        "expected parse-removed-grouped-attributes, got symptoms: {:?}",
+        out.symptoms,
+    );
+}
+
+#[test]
+fn consecutive_inline_and_complexity_attributes_parse() {
+    let src = "#inline\n#complexity(Constant)\nget(i Int) Byte: buf.(i)\nreturn buf.(i)\n";
     let ast = assert_handwritten_parses(src);
     let bind = first_def_bind(&ast, "get");
     assert!(bind.attributes.inline_always);
@@ -404,11 +414,7 @@ fn attribute_block_with_inline_and_complexity_parses() {
 
 #[test]
 fn record_declaration_with_provided_trait_parses_ast_shape() {
-    // Record (not union) with a `has ... and has Trait(field: expr)` clause.
-    // Only the union form (`Bool is True or False and has ToString(...)`) is
-    // covered in ast/tests/bool_provided_trait_tests.rs — this guards the
-    // record-shaped variant against future regressions in the parser.
-    let source = "Capacity has (count PointerSize) and has IsEmpty(is_empty: self.count > 0)\n";
+    let source = "Capacity has count PointerSize\nCapacity.IsEmpty has is_empty: self.count > 0\n";
     let ast = assert_handwritten_parses(source);
     let cap_tag = ast
         .tags
@@ -435,8 +441,8 @@ fn record_declaration_with_provided_trait_parses_ast_shape() {
 }
 
 #[test]
-fn record_declaration_with_multiple_provided_traits_uses_single_has_chain() {
-    let source = "Capacity has (count PointerSize) and has IsEmpty(is_empty: self.count > 0) and Display(text: 'capacity')\n";
+fn record_declaration_with_multiple_provided_traits_parse() {
+    let source = "Capacity has count PointerSize\nCapacity.IsEmpty has is_empty: self.count > 0\nCapacity.Display has text: 'capacity'\n";
     let ast = assert_handwritten_parses(source);
     let decl = ast
         .tags
@@ -476,7 +482,7 @@ fn interface_composition_uses_is_and() {
 
 #[test]
 fn dot_provided_trait_attaches_to_declaration() {
-    let source = "Capacity has (count PointerSize)\nCapacity.IsEmpty(is_empty: self.count > 0)\n";
+    let source = "Capacity has count PointerSize\nCapacity.IsEmpty has is_empty: self.count > 0\n";
     let ast = assert_handwritten_parses(source);
     let decl = ast
         .tags
@@ -493,17 +499,8 @@ fn dot_provided_trait_attaches_to_declaration() {
 }
 
 #[test]
-fn dot_blanket_impl_parses() {
-    let source = "x.Copy(can_copy: is_copy(x))\n";
-    let ast = assert_handwritten_parses(source);
-    assert_eq!(ast.blanket_impls.len(), 1);
-    assert_eq!(ast.blanket_impls[0].type_var.as_str(), "x");
-    assert_eq!(ast.blanket_impls[0].trait_name.as_str(), "Copy");
-}
-
-#[test]
 fn dot_impl_of_composed_interface_flattens_components() {
-    let source = "Input has (read)\nOutput has (write)\nInOut is Input and Output\nX0.InOut\n";
+    let source = "Input has read\nOutput has write\nInOut is Input and Output\nX0.InOut\n";
     let ast = assert_handwritten_parses(source);
     let decl = ast
         .tags

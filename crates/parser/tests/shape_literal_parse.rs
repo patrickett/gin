@@ -13,9 +13,27 @@ fn intern(s: &str) -> Intern<String> {
 }
 
 #[test]
+fn top_level_record_field_write_parses_as_record_set() {
+    let out = "Int is in 1...400\n\nCoord has x Int, y Int, z Int\np := Coord(x: 1, y: 2, z: 3)\np.x: 10\n"
+        .parse_source_full();
+    assert!(
+        out.symptoms
+            .iter()
+            .all(|symptom| symptom.category != diagnostic::Category::Flaw),
+        "symptoms: {:?}",
+        out.symptoms,
+    );
+    assert!(
+        matches!(out.ast.exprs.as_slice(), [expr] if matches!(expr.0, Expr::RecordSet { .. })),
+        "expected RecordSet, got {:?}",
+        out.ast.exprs,
+    );
+}
+
+#[test]
 fn shape_literal_named_fields() {
     let source = "\
-Coord has (x Int, y Int, z Int)
+Coord has x Int, y Int, z Int
 origin := Coord(x: 0, y: 0, z: 0)
 ";
     let out = source.parse_source_full();
@@ -53,7 +71,7 @@ origin := Coord(x: 0, y: 0, z: 0)
 #[test]
 fn shape_literal_shorthand() {
     let source = "\
-Coord has (x Int, y Int, z Int)
+Coord has x Int, y Int, z Int
 x := 1; y := 2; z := 3
 p := Coord(x, y, z)
 ";
@@ -99,7 +117,7 @@ p := Coord(x, y, z)
 #[test]
 fn shape_literal_mixed_shorthand_and_explicit() {
     let source = "\
-Coord has (x Int, y Int, z Int)
+Coord has x Int, y Int, z Int
 x := 1
 p := Coord(x, y: x + 1, z: x + 2)
 ";
@@ -164,7 +182,7 @@ p := Coord(x, y: x + 1, z: x + 2)
 #[test]
 fn shape_literal_reordered_fields() {
     let source = "\
-Coord has (x Int, y Int, z Int)
+Coord has x Int, y Int, z Int
 p := Coord(z: 3, x: 1, y: 2)
 ";
     let out = source.parse_source_full();
@@ -197,7 +215,7 @@ p := Coord(z: 3, x: 1, y: 2)
 #[test]
 fn shape_literal_accepts_bare_expressions() {
     let source = "\
-Coord has (x Int, y Int, z Int)
+Coord has x Int, y Int, z Int
 x: Coord(1, 2, 3)
 ";
     let out = source.parse_source_full();
@@ -229,7 +247,7 @@ x: Coord(1, 2, 3)
 #[test]
 fn shape_literal_accepts_bare_non_identifier() {
     let source = "\
-Coord has (x Int, y Int, z Int)
+Coord has x Int, y Int, z Int
 x := 1
 p: Coord(x + 1, y, z)
 ";
@@ -532,8 +550,8 @@ fn variant_construction_type_annotation_no_diag() {
 #[test]
 fn nested_shape_literals() {
     let source = "\
-Primitive has (width Int, signed Bool)
-NamedTy has (name String, ty Type)
+Primitive has width Int, signed Bool
+NamedTy has name String, ty Type
 coord_ty := NamedTy(name: \"Coord\", ty: Primitive(width: 64, signed: True))
 ";
     let out = source.parse_source_full();

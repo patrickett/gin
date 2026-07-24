@@ -18,9 +18,9 @@ fn type_static_default_field_expands_target_default() {
 Architecture is 'x86_64' or 'arm64'
 Vendor is 'unknown'
 OperatingSystem is 'unknown'
-Default(value) has (default value)
-Target has (arch Architecture, vendor Vendor, os OperatingSystem)
-Target.Default(default: ( arch: 'x86_64', vendor: 'unknown', os: 'unknown', ))
+Default(value) has default value
+Target has arch Architecture, vendor Vendor, os OperatingSystem
+Target.Default has default: ( arch: 'x86_64', vendor: 'unknown', os: 'unknown', )
 target := Target.default
 "#;
     let ast = prepare_source(source, &CompileTarget::Library);
@@ -43,10 +43,10 @@ target := Target.default
 #[test]
 fn default_trait_materializes_kind_variant() {
     let source = r#"
-Default(value) has (default value)
+Default(value) has default value
 
 Kind is A or B or C
-Kind.Default(default: Kind.A)
+Kind.Default has default: Kind.A
 
 k Kind
 "#;
@@ -65,8 +65,8 @@ k Kind
 #[test]
 fn record_default_does_not_leak_top_level_defs() {
     let source = r#"
-Target has (arch Architecture)
-Target.Default(default: ( arch: 'x86_64', ))
+Target has arch Architecture
+Target.Default has default: ( arch: 'x86_64', )
 target Target
 "#;
     let ast = TokenCursor::parse_source(source);
@@ -80,9 +80,9 @@ fn full_target_fixture_parses() {
 Architecture is 'x86_64' or 'arm64' or 'wasm32'
 Vendor is 'unknown'
 OperatingSystem is 'linux' or 'macOS' or 'windows' or 'unknown'
-Default(value) has (default value)
-Target has (arch Architecture, vendor Vendor, os OperatingSystem)
-Target.Default(default: ( arch: 'x86_64', vendor: 'unknown', os: 'unknown', ))
+Default(value) has default value
+Target has arch Architecture, vendor Vendor, os OperatingSystem
+Target.Default has default: ( arch: 'x86_64', vendor: 'unknown', os: 'unknown', )
 target Target
 "#;
     let ast = TokenCursor::parse_source(source);
@@ -101,10 +101,10 @@ Architecture is 'x86_64' or 'arm64' or 'wasm32'
 Vendor is 'unknown'
 OperatingSystem is 'linux' or 'macOS' or 'windows' or 'unknown'
 
-Default(value) has (default value)
+Default(value) has default value
 
-Target has (arch Architecture, vendor Vendor, os OperatingSystem)
-Target.Default(default: ( arch: 'x86_64', vendor: 'unknown', os: 'unknown', ))
+Target has arch Architecture, vendor Vendor, os OperatingSystem
+Target.Default has default: ( arch: 'x86_64', vendor: 'unknown', os: 'unknown', )
 
 target Target
 "#;

@@ -21,6 +21,117 @@ fn classify(source: &str, line: u32, character: u32) -> Option<HoverTarget> {
     typed.classify_hover(source, byte_offset, &word, None)
 }
 
+fn classify_at_needle(source: &str, needle: &str) -> Option<HoverTarget> {
+    let typed = transform_source(source);
+    let byte_offset = source.find(needle)?;
+    let word = source.symbol_at_byte_offset(byte_offset)?;
+    typed.classify_hover(source, byte_offset, &word, None)
+}
+
+#[test]
+fn self_in_has_method_body_classified_as_selfref() {
+    let source = "Region has\n    reset(self) Region: self\n";
+    let target = classify_at_needle(source, "self\n").expect("classify body self");
+    match target {
+        HoverTarget::SelfRef { modifier, .. } => {
+            assert_eq!(modifier.as_str(), "self");
+        }
+        other => panic!("expected SelfRef hover, got {other:?}"),
+    }
+}
+
+#[test]
+fn ref_and_mut_self_in_has_method_body_include_modifier() {
+    let cases = [
+        ("Region has\n    reset(ref self) Region: self\n", "ref self"),
+        ("Region has\n    reset(mut self) Region: self\n", "mut self"),
+    ];
+
+    for (source, expected_name) in cases {
+        let target = classify_at_needle(source, "self\n").expect("classify body self");
+        match target {
+            HoverTarget::SelfRef { modifier, .. } => {
+                assert_eq!(modifier.as_str(), expected_name);
+            }
+            other => panic!("expected SelfRef hover, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn self_in_associated_has_method_reports_specific_diagnostic_inline_body() {
+    let source = "Region has
+    allocate(size Int) Int: self
+";
+    let typed = transform_source(source);
+    let codes: Vec<_> = typed
+        .all_flaws()
+        .iter()
+        .map(|(_, diagnostic)| diagnostic.code.slug())
+        .collect();
+    assert!(
+        codes.contains(&"no-self-in-associated-method"),
+        "expected no-self-in-associated-method in inline body, got {codes:?}"
+    );
+}
+
+#[test]
+fn self_in_associated_has_method_reports_specific_diagnostic_block_body() {
+    // Block body style: method body is indented after colon
+    let source = "Region has
+    allocate(size Int) Int:
+        self
+";
+    let typed = transform_source(source);
+    let codes: Vec<_> = typed
+        .all_flaws()
+        .iter()
+        .map(|(_, diagnostic)| diagnostic.code.slug())
+        .collect();
+    assert!(
+        codes.contains(&"no-self-in-associated-method"),
+        "expected no-self-in-associated-method in block body, got {codes:?}"
+    );
+}
+
+#[test]
+fn has_block_body_full_region() {
+    let source = r#"Region has
+    start Int
+    end Int
+
+    new(start Int, end Int) Self: Self(start, end)
+"#;
+    let typed = transform_source(source);
+    let has_parse_error = typed.all_flaws().iter().any(|(_, d)| {
+        d.code.slug() == "parse-expected-expression" || d.code.slug() == "parse-expected-return"
+    });
+    assert!(
+        !has_parse_error,
+        "expected no parse errors, got: {:?}",
+        typed
+            .all_flaws()
+            .iter()
+            .map(|(_, d)| (d.code.slug(), &d.message))
+            .collect::<Vec<_>>()
+    );
+
+    let has_self_error = typed
+        .all_flaws()
+        .iter()
+        .any(|(_, d)| d.code.slug() == "type-unknown-symbol" && d.message.contains("Self"));
+
+    assert!(
+        !has_self_error,
+        "Self should resolve in this context: {:?}",
+        typed
+            .all_flaws()
+            .iter()
+            .map(|(_, d)| (d.code.slug(), &d.message))
+            .collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn definition_name_classified() {
     let source = "two := 1 + 1\n";

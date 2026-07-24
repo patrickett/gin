@@ -75,7 +75,7 @@ is_copy(x Type) Bool := when x is
 #[test]
 fn copy_gin_with_trait_decl() {
     let src = "\
-Copy has (can_copy Bool)
+Copy has can_copy Bool
 
 is_copy(x Type) Bool := when x is
     Primitive(w, _)     then True
@@ -96,55 +96,11 @@ is_copy(x Type) Bool := when x is
 }
 
 #[test]
-fn parse_copy_blanket_impl() {
-    let src = "x has Copy(can_copy: is_copy(x))\n";
-    let file = src.parse_source_full().ast;
-    assert_eq!(file.blanket_impls.len(), 1);
-    assert_eq!(file.blanket_impls[0].trait_name.as_str(), "Copy");
-}
-
-#[test]
-fn copy_gin_prefix_has_blanket() {
-    let src = "\
-use '../reflect/'.(Type, NamedTy, VariantShape, Reflectable)
-use '../primitive/'.Bool
-
-Copy has (can_copy Bool)
-
-x has Copy(can_copy: True)
-";
-    let file = src.parse_source_full().ast;
-    assert_eq!(file.blanket_impls.len(), 1);
-}
-
-#[test]
-fn full_copy_gin_has_blanket_impl() {
-    // Parser-only: just needs a blanket impl (`x.Trait(...)`) to parse.
-    let src = "\
-Bool is True or False
-
-Copy has (can_copy Bool)
-x.Copy(can_copy: is_copy(x))
-
-is_copy(x) Bool := True
-";
-    let file = src.parse_source_full().ast;
-    assert!(
-        !file.blanket_impls.is_empty(),
-        "blankets={:?}",
-        file.blanket_impls
-            .iter()
-            .map(|b| b.trait_name.as_str())
-            .collect::<Vec<_>>()
-    );
-}
-
-#[test]
 fn full_sized_gin_parses_compile_time_helpers() {
-    // Parser-only: no type defs needed — just a blanket impl + defs with when bodies.
     let src = "\
 Size is Const(BigInt) or Dynamic
-x.Sized(size: compute_size(x))
+#auto
+Sized has size Size: compute_size(Self)
 
 compute_size(x) Size := when x is
     Primitive(w, _)     then Const(w / 8)
@@ -170,16 +126,14 @@ add(a Size, b Size) Size := when (a, b) is
             file.defs.keys().map(|k| k.as_str()).collect::<Vec<_>>()
         );
     }
-    assert_eq!(file.blanket_impls.len(), 1);
-    assert_eq!(file.blanket_impls[0].type_var.as_str(), "x");
 }
 
 #[test]
 fn full_copy_gin_is_copy_body() {
     // Parser-only: no type defs needed — just the `when` body + list-when helpers.
     let src = "\
-Copy has (can_copy Bool)
-x.Copy(can_copy: is_copy(x))
+#auto
+Copy has can_copy Bool: is_copy(Self)
 
 is_copy(x) Bool := when x is
     Primitive(_, _)     then True

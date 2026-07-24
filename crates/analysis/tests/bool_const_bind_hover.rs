@@ -20,8 +20,8 @@ use core.ToString
 ---
 --- `if` requires a `Bool` value as its conditional.
 Bool is True or False
-Bool.Happy(value: Bool.True)
-Bool.ToString(to_string: when self then 'true' else 'false')
+Bool.Happy has value: Bool.True
+Bool.ToString has to_string: when self then 'true' else 'false'
 
 
 false := Bool.False

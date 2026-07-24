@@ -1,4 +1,4 @@
-//! `Type.Copy(can_copy: …)` overrides the blanket `is_copy` rule.
+//! Explicit `Copy.can_copy` provisions override the auto `is_copy` default.
 
 mod support;
 
@@ -16,17 +16,17 @@ const INT_TAG: &str = "Int is in 1...400\n\n";
 fn source_with_copy_override() -> String {
     format!(
         "{INT_TAG}\
-Coord has (x Int, y Int)
+Coord has x Int, y Int
 
-UniqueId has (id Int)
-UniqueId.Copy(can_copy: False)
+UniqueId has id Int
+UniqueId.Copy has can_copy: False
 "
     )
 }
 
 #[test]
-fn copy_blanket_without_override() {
-    let src = format!("{INT_TAG}Coord has (x Int, y Int)\n");
+fn copy_auto_default_without_override() {
+    let src = format!("{INT_TAG}Coord has x Int, y Int\n");
     let typed = transform_with_marker_package(&src);
     let registry = marker_trait_registry();
     let ty = typed
@@ -53,7 +53,7 @@ fn copy_override_false_on_copyable_record() {
 }
 
 #[test]
-fn copy_override_wins_over_blanket() {
+fn copy_override_wins_over_auto_default() {
     let typed = transform_with_marker_package(&source_with_copy_override());
     let registry = marker_trait_registry();
     let ty = typed
@@ -77,8 +77,7 @@ fn hover_shows_not_copy_for_override() {
         .hover_at(&src, line, character)
         .expect("hover on UniqueId");
     assert_eq!(
-        hover,
-        ["```gin", "UniqueId has (", "    id Int,", ")", "```",].join("\n"),
+        hover, "```gin\nUniqueId has id Int\n```",
         "expected hover on UniqueId"
     );
 }
@@ -87,8 +86,8 @@ fn hover_shows_not_copy_for_override() {
 fn non_copy_override_use_after_move() {
     let src = format!(
         "{INT_TAG}\
-UniqueId has (id Int)
-UniqueId.Copy(can_copy: False)
+UniqueId has id Int
+UniqueId.Copy has can_copy: False
 
 drop(eat x Int) Int: 0
 
@@ -117,7 +116,7 @@ return 0
 fn sum_coords_field_access_no_flaws() {
     let src = format!(
         "{INT_TAG}\
-Coord has (x Int, y Int)\n\
+Coord has x Int, y Int\n\
 \n\
 sum_coords(a Coord, b Coord) Int: a.x + b.x + a.y + b.y\n"
     );

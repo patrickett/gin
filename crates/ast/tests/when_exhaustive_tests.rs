@@ -69,7 +69,7 @@ fn transform_resolved_package(files: Vec<(PathBuf, String)>) -> Vec<typecheck::T
     for file in &resolved {
         compile_time_eval_ast.merge_from(file.output.ast.clone());
     }
-    let ctx = TransformCtx::with_package_compile_time(Vec::new(), compile_time_eval_ast);
+    let ctx = TransformCtx::with_package_compile_time(compile_time_eval_ast);
     let file_asts: Vec<_> = resolved
         .into_iter()
         .enumerate()

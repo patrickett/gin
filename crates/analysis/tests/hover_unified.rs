@@ -18,8 +18,8 @@ use core.ToString
 ---
 --- `if` requires a `Bool` value as its conditional.
 Bool is True or False
-Bool.Happy(value: Bool.True)
-Bool.ToString(to_string: when self then 'true' else 'false')
+Bool.Happy has value: Bool.True
+Bool.ToString has to_string: when self then 'true' else 'false'
 
 
 false := Bool.False
@@ -32,7 +32,7 @@ true  := Bool.True
 "#;
 
 const DEFAULT_GIN: &str = r#"--- Provides a default value for a type.
-Default(value) has (default value)
+Default(value) has default value
 "#;
 
 const MAYBE_GIN: &str = r#"use core.Happy
@@ -40,7 +40,7 @@ const MAYBE_GIN: &str = r#"use core.Happy
 Maybe(x) is    --- Used to represent values that may or may not be present.
     Some(x) or --- Has some value `x`
     None       --- Has no value
-Maybe.Happy(value: Maybe.Some)
+Maybe.Happy has value: Maybe.Some
 "#;
 
 const TYPE_GIN: &str = r#"use '../primitive/'.(BigInt, Bool, List)
@@ -56,12 +56,12 @@ Type is Primitive(width BigInt, signed Bool)
      or Array(elem Type, size BigInt)
      or Opaque(name String)
 
-NamedTy has (name String, ty Type)
-VariantShape has (name String, fields List(NamedTy))
+NamedTy has name String, ty Type
+VariantShape has name String, fields List(NamedTy)
 
 --- Reserved: the compiler synthesizes `shape` for every type.
---- User-written `Type.Reflectable(...)` is a compile error.
-Reflectable has (shape Type)
+--- User-written `Type.Reflectable has ...` is a compile error.
+Reflectable has shape Type
 "#;
 
 const INT_GIN: &str = r#"--- The 8-bit signed integer type.
@@ -95,15 +95,15 @@ const LIST_GIN: &str = r#"use Pointer, PointerSize
 --- A homogeneous list type.
 --- List literals use bracket syntax: ['linux', 'macos'].
 --- Generic over element type: `List(x)`.
-List(x) has (pointer Pointer(x), length PointerSize)
+List(x) has pointer Pointer(x), length PointerSize
 "#;
 
 const STRING_GIN: &str = r#"use core.primitive.(Byte, List)
 
 --- Canonical `String` type used for printing/codegen.
-String has (bytes List(Byte))
+String has bytes List(Byte)
 
-ToString has (to_string String)
+ToString has to_string String
 "#;
 
 #[test]
@@ -271,9 +271,7 @@ fn hover_default_in_core_default_shows_core_default_module_path() {
             "```",
             "",
             "```gin",
-            "Default(value) has (",
-            "    default value,",
-            ")",
+            "Default(value) has default value",
             "```",
             "---",
             "",
@@ -497,19 +495,19 @@ fn hover_cross_file_tag_shows_tag_declaration() {
 }
 
 /// Tag name referenced inside another tag's body (e.g. `Bool` in
-/// `has (b Bool)`) must resolve to the tag declaration.
+/// `has b Bool`) must resolve to the tag declaration.
 #[test]
 fn hover_tag_name_in_another_tags_body_shows_tag_declaration() {
     let pkg = TempPackage::new("nested_tag_ref");
     pkg.write_flask("nested_tag_ref");
-    let source = "Bool is True or False\n\nContainer(x) has (b Bool)\n";
+    let source = "Bool is True or False\n\nContainer(x) has b Bool\n";
     let path = pkg.write("main.gin", source);
 
     let (tx, _rx) = unbounded();
     let mut engine = CacheEngine::new(tx);
     engine.add_file(path.clone()).unwrap();
 
-    // Hover on `Bool` in `has (b Bool)`
+    // Hover on `Bool` in `has b Bool`
     let byte = source.rfind("Bool").expect("`Bool` in body") as u32;
     let HoverContent { markdown, .. } = engine
         .hover(&path, byte)
@@ -523,19 +521,19 @@ fn hover_tag_name_in_another_tags_body_shows_tag_declaration() {
 }
 
 /// Hovering a record field name inside a tag body (e.g. `pointer` in
-/// `has (pointer Pointer(x))`) should show the field and its type.
+/// `has pointer Pointer(x)`) should show the field and its type.
 #[test]
 fn hover_record_field_in_tag_body_shows_field() {
     let pkg = TempPackage::new("field_hover");
     pkg.write_flask("field_hover");
-    let source = "Pointer(x) is @x\n\nContainer(x) has (ptr Pointer(x))\n";
+    let source = "Pointer(x) is @x\n\nContainer(x) has ptr Pointer(x)\n";
     let path = pkg.write("main.gin", source);
 
     let (tx, _rx) = unbounded();
     let mut engine = CacheEngine::new(tx);
     engine.add_file(path.clone()).unwrap();
 
-    // Hover on `ptr` in `has (ptr Pointer(x))`
+    // Hover on `ptr` in `has ptr Pointer(x)`
     let byte = source.rfind("ptr").expect("`ptr` in body") as u32;
     let HoverContent { markdown, .. } = engine.hover(&path, byte).expect("hover on `ptr` field");
 
@@ -549,7 +547,7 @@ fn hover_record_field_in_tag_body_shows_field() {
 /// Hovering record fields when the named type is in the same file.
 #[test]
 fn hover_record_field_same_file_shows_named_type() {
-    let source = "Pointer(x) is @x\n\nContainer(x) has (ptr Pointer(x))\n";
+    let source = "Pointer(x) is @x\n\nContainer(x) has ptr Pointer(x)\n";
     let pkg = TempPackage::new("same_file");
     pkg.write_flask("same_file");
     let path = pkg.write("main.gin", source);
@@ -649,7 +647,7 @@ two 2\n```"
 #[test]
 fn interface_method_signatures_display_correctly() {
     let source = r#"
-Allocator has (
+Allocator has
     --- Attempt to allocate.
     allocate(ref self, l Layout) Slice(Byte) or AllocError,
     --- Free a block.
@@ -667,20 +665,20 @@ Allocator has (
     // Hover on `Allocator` tag name
     let byte = source.find("Allocator").expect("`Allocator` in source") as u32;
     let hover = engine.hover(&path, byte).expect("hover on `Allocator` tag");
+    let HoverContent { markdown, .. } = hover;
 
     // The hover should show the declaration text
     assert_eq!(
-        hover.markdown,
+        markdown,
         [
             "```gin",
             "interface_methods",
             "```",
             "",
             "```gin",
-            "Allocator has (",
-            "    allocate(ref self, l Layout) Slice(Byte) or AllocError,",
-            "    deallocate(ref self, p Pointer(Byte), l Layout),",
-            ")",
+            "Allocator has",
+            "    allocate(ref self, l Layout) Slice(Byte) or AllocError",
+            "    deallocate(ref self, p Pointer(Byte), l Layout)",
             "```",
         ]
         .join("\n"),
@@ -688,11 +686,56 @@ Allocator has (
     );
 }
 
+#[test]
+fn hover_has_method_name_returns_method_hover_without_extra_space() {
+    let source = r#"
+Allocator has
+    --- Attempt to allocate.
+    reserve(ref self, l Layout) Slice(Byte) or AllocError,
+    --- Free a block.
+    release(ref self, p Pointer(Byte), l Layout),
+)
+"#;
+    let pkg = TempPackage::new("interface_method_hover");
+    pkg.write_flask("interface_method_hover");
+    let path = pkg.write("main.gin", source);
+
+    let (tx, _rx) = unbounded();
+    let mut engine = CacheEngine::new(tx);
+    engine.add_file(path.clone()).unwrap();
+
+    let byte = source.find("release").expect("`release` in source") as u32;
+    let HoverContent { markdown, .. } = engine
+        .hover(&path, byte)
+        .expect("hover on `release` method");
+
+    assert_eq!(
+        markdown,
+        [
+            "```gin",
+            "interface_method_hover.Allocator",
+            "```",
+            "",
+            "```gin",
+            "release(ref self, p Pointer(Byte), l Layout)",
+            "```",
+            "---",
+            "",
+            "Free a block.",
+        ]
+        .join("\n")
+    );
+    assert!(
+        !markdown.contains("release ("),
+        "method hover should not add a space after the name"
+    );
+}
+
 /// Hovering on an interface member name should show its doc comment.
 #[test]
 fn hover_interface_member_shows_doc_comment() {
     let source = r#"
-Allocator has (
+Allocator has
     --- Attempt to allocate a block of memory.
     allocate(ref self, l Layout) Slice(Byte) or AllocError,
     --- Free a block of memory.
@@ -741,3 +784,104 @@ Allocator has (
 //   - `module_path_classified`
 //   - `module_path_root_classified`
 //   - `module_path_not_classified_for_final_segment`
+
+/// Hovering on `self` inside a has method body shows the full type with the
+/// receiver type (e.g. `self Region`), not just the keyword doc.
+#[test]
+fn hover_self_in_has_method_body_shows_type() {
+    let source = "Region has\n    reset(self) Region: self\n";
+    let pkg = TempPackage::new("self_hover");
+    pkg.write_flask("self_hover");
+    let path = pkg.write("main.gin", source);
+
+    let (tx, _rx) = unbounded();
+    let mut engine = CacheEngine::new(tx);
+    engine.add_file(path.clone()).unwrap();
+
+    // Hover on the `self` inside the method body (not the parameter self).
+    let byte = source.rfind("self").expect("body `self`") as u32;
+    let hover = engine.hover(&path, byte).expect("hover on body self");
+    assert_eq!(
+        hover.markdown,
+        ["```gin", "self Region", "```"].join("\n"),
+        "hover on `self` in has method body should show `self Region`"
+    );
+}
+
+/// Hovering on `ref self` in a has method body shows `ref self Type`.
+#[test]
+fn hover_ref_self_in_has_method_body_shows_ref_type() {
+    let source = "Region has\n    reset(ref self) Region: self\n";
+    let pkg = TempPackage::new("ref_self_hover");
+    pkg.write_flask("ref_self_hover");
+    let path = pkg.write("main.gin", source);
+
+    let (tx, _rx) = unbounded();
+    let mut engine = CacheEngine::new(tx);
+    engine.add_file(path.clone()).unwrap();
+
+    let byte = source.rfind("self").expect("body `self`") as u32;
+    let hover = engine.hover(&path, byte).expect("hover on body self");
+    assert_eq!(
+        hover.markdown,
+        ["```gin", "ref self Region", "```"].join("\n"),
+        "hover on `self` in has method body should show `ref self Region`"
+    );
+}
+
+/// Hovering on `self` inside a has method with a block body shows the type
+/// (e.g. `self Type`, `ref self Type`, `mut self Type`).
+#[test]
+fn hover_self_in_has_block_body_shows_ref_type() {
+    let source = "Region has\n    reset(ref self) Region:\n        self\n";
+    let pkg = TempPackage::new("block_self_hover");
+    pkg.write_flask("block_self_hover");
+    let path = pkg.write("main.gin", source);
+
+    let (tx, _rx) = unbounded();
+    let mut engine = CacheEngine::new(tx);
+    engine.add_file(path.clone()).unwrap();
+
+    let byte = source.rfind("self").expect("body `self`") as u32;
+    let hover = engine.hover(&path, byte).expect("hover on body self");
+    assert_eq!(
+        hover.markdown,
+        ["```gin", "ref self Region", "```"].join("\n"),
+        "hover on `self` in has block body should show `ref self Region`"
+    );
+}
+
+/// Hovering on `self` in a block body with multiple expressions and a return
+/// (mirroring the real region.gin `allocate` method) shows the full type.
+#[test]
+fn hover_self_in_block_body_with_multiple_exprs_and_return() {
+    let source = r#"Region has
+    base Pointer(Byte)
+    cursor Pointer(Byte)
+    end Pointer(Byte)
+
+    allocate(ref self, size PointerSize) Pointer(Byte):
+        self
+        -- a comment
+    return self.cursor
+"#;
+    let pkg = TempPackage::new("multi_expr_self");
+    pkg.write_flask("multi_expr_self");
+    let path = pkg.write("main.gin", source);
+
+    let (tx, _rx) = unbounded();
+    let mut engine = CacheEngine::new(tx);
+    engine.add_file(path.clone()).unwrap();
+
+    // Hover on the standalone `self` expression at line 6, character 8.
+    let (line, character) = (6u32, 8u32);
+    let byte_offset = source.position_to_byte_offset(line, character).unwrap();
+    let hover = engine
+        .hover(&path, byte_offset as u32)
+        .expect("hover on body self");
+    assert_eq!(
+        hover.markdown,
+        ["```gin", "ref self Region", "```"].join("\n"),
+        "hover on `self` in block body with return should show `ref self Region`"
+    );
+}

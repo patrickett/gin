@@ -1,4 +1,4 @@
-//! `bool.gin`-style `Type.Trait(...)` declarations must resolve trait names in scope.
+//! `bool.gin`-style `Type.Trait has ...` declarations must resolve trait names in scope.
 
 use typecheck::TypedFileAst;
 
@@ -7,7 +7,7 @@ use support::transform_source;
 
 const BOOL_WITH_TOSTRING: &str = "\
 Bool is True or False
-Bool.ToString(to_string: when self then 'true' else 'false')
+Bool.ToString has to_string: when self then 'true' else 'false'
 ";
 
 fn unknown_symbol_names(typed: &TypedFileAst) -> Vec<&str> {
@@ -61,10 +61,10 @@ fn provided_trait_to_string_unknown_without_import() {
 #[test]
 fn provided_trait_to_string_ok_when_declared_in_same_file() {
     let source = "\
-ToString has (to_string String)
+ToString has to_string String
 
 Bool is True or False
-Bool.ToString(to_string: when self then 'true' else 'false')
+Bool.ToString has to_string: when self then 'true' else 'false'
 ";
     let typed = transform_source(source);
     let unknown = unknown_symbol_names(&typed);

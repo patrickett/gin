@@ -18,13 +18,13 @@ fn marker_fixture_reuse_stays_bounded() {
 
     let snippet = "\
 Type is Primitive(width BigInt, signed Bool) or Record(name String, fields List(NamedTy))
-NamedTy has (name String, ty Type)
-List(x) has (pointer Pointer(x), length BigInt)
+NamedTy has name String, ty Type
+List(x) has pointer Pointer(x), length BigInt
 BigInt is in 0...1000
-String has (bytes List(Byte))
+String has bytes List(Byte)
 Byte is in 0...255
 Bool is True or False
-Pointer(x) has (addr BigInt)
+Pointer(x) has addr BigInt
 
 f(x Type) Bool := when x is
     Record(_, fields) then True

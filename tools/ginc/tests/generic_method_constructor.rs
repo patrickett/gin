@@ -1,6 +1,6 @@
 //! End-to-end ginc test: declare and use a parameterized-receiver method.
 //!
-//! Compiles a small program defining `Range(x).new(start x, end x) Range(x): (start, end)`
+//! Compiles a small program defining `Range(x).new(start x, end x) Range(x): Self(start, end)`
 //! and calling `Range.new(12, 1200)`, asserting the resulting record's
 //! `.start` field can be returned from main and observed as the exit code.
 //!
@@ -28,9 +28,11 @@ fn ginc_debug_exe() -> PathBuf {
 }
 
 const RANGE_PROGRAM: &str = "\
-Range(x) has (start x, end x)
+Range(x) has
+    start x
+    end x
 
-Range(x).new(start x, end x) Range(x): (start, end)
+    new(start x, end x) Range(x): Self(start, end)
 
 main:
     r : Range.new(12, 1200)
@@ -38,9 +40,9 @@ main:
 return
 ";
 
-/// Gin-core-shaped `Range` definitions (tuple return — compiles end-to-end).
+/// Gin-core-shaped `Range` definitions.
 const GIN_CORE_RANGE_GIN: &str =
-    "Range(x) has (start x, end x)\n\nRange(x).new(start x, end x) Range(x): (start, end)\n";
+    "Range(x) has\n    start x\n    end x\n\n    new(start x, end x) Range(x): Self(start, end)\n";
 
 const RANGE_PKG_MAIN: &str =
     "use Range\n\nmain:\n    r : Range.new(12, 1200)\n    return r.start\nreturn\n";

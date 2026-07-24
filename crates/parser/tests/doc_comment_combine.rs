@@ -1,6 +1,6 @@
 //! Tests for combined pre+postfix doc comments on declares and union variants.
 
-use ast::{DeclareValue, Variant};
+use ast::{DeclareValue, HasMember, Variant};
 use diagnostic::Category;
 use internment::Intern;
 use parser::query::SourceParseExt;
@@ -196,7 +196,7 @@ Comparison is Less
 
 /// Hover tests for module docs appear in `ast/tests/hover_classify_tests.rs`.
 /// This test validates that a `declare` followed by a different top-level element
-/// (e.g. `x has Trait(...)`) each keep their own doc comments.
+/// (e.g. `x has Trait(...)` each keep their own doc comments.
 #[test]
 fn doc_comment_stays_with_own_element_across_multiple_elements() {
     // Two separate declares with docs
@@ -300,14 +300,12 @@ my_fn() Int := 99
     );
 }
 
-/// Doc comment on a single interface member.
 #[test]
-fn doc_on_single_interface_member() {
+fn doc_on_single_has_member() {
     let src = "\
-MyType has (
+MyType has
     --- allocate doc
-    allocate(ref self),
-)
+    allocate(ref self)
 ";
     let out = src.parse_source_full();
     let flaws: Vec<_> = out
@@ -321,13 +319,14 @@ MyType has (
         flaws.iter().map(|d| &d.message).collect::<Vec<_>>()
     );
 
-    let ast::DeclareValue::Interface(members) =
-        &out.ast.tags.get(&intern("MyType")).expect("MyType").value
+    let DeclareValue::Has(members) = &out.ast.tags.get(&intern("MyType")).expect("MyType").value
     else {
-        panic!("expected Interface");
+        panic!("expected Has");
     };
     assert_eq!(members.len(), 1);
-    let allocate = &members[0];
+    let HasMember::Function(allocate) = &members[0] else {
+        panic!("allocate should be a function member");
+    };
     assert_eq!(allocate.name.as_str(), "allocate");
     assert_eq!(
         allocate.doc_comment.as_ref().map(|d| d.value.as_str()),
@@ -336,20 +335,18 @@ MyType has (
     );
 }
 
-/// Doc comments on interface members inside `has (...)` blocks.
 #[test]
-fn doc_on_interface_members() {
+fn doc_on_has_members() {
     let src = "\
 --- Doc for the type.
-MyType has (
+MyType has
     --- Multi-line doc for the allocate method.
     ---
     --- Returns the allocated bytes on success, or `AllocError` on failure.
-    allocate(ref self) Slice(Byte) or AllocError,
+    allocate(ref self) Slice(Byte) or AllocError
 
     --- Single-line doc for deallocate.
-    deallocate(ref self),
-)
+    deallocate(ref self)
 ";
     let out = src.parse_source_full();
     let flaws: Vec<_> = out
@@ -370,13 +367,14 @@ MyType has (
         "MyType should get its own doc"
     );
 
-    // Check interface members
-    let ast::DeclareValue::Interface(members) = &my_type.value else {
-        panic!("expected Interface");
+    let DeclareValue::Has(members) = &my_type.value else {
+        panic!("expected Has");
     };
-    assert_eq!(members.len(), 2, "should have 2 interface members");
+    assert_eq!(members.len(), 2, "should have 2 has members");
 
-    let allocate = &members[0];
+    let HasMember::Function(allocate) = &members[0] else {
+        panic!("allocate should be a function member");
+    };
     assert_eq!(allocate.name.as_str(), "allocate");
     let doc = allocate
         .doc_comment
@@ -388,7 +386,9 @@ MyType has (
         "allocate doc"
     );
 
-    let deallocate = &members[1];
+    let HasMember::Function(deallocate) = &members[1] else {
+        panic!("deallocate should be a function member");
+    };
     assert_eq!(deallocate.name.as_str(), "deallocate");
     match &deallocate.doc_comment {
         Some(d) => assert_eq!(

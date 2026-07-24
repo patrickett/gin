@@ -29,8 +29,8 @@ fn dotted_bundle_members_not_unused_when_flat_name_used_in_body() {
     let source = "\
 use core.(default.Default, target.arch.Architecture, target.os.OperatingSystem, target.vendor.Vendor)
 
-Target has (arch Architecture, vendor Vendor, os OperatingSystem)
-Target.Default(default: (arch: 'x86_64', vendor: 'unknown', os: 'unknown'))
+Target has arch Architecture, vendor Vendor, os OperatingSystem
+Target.Default has default: (arch: 'x86_64', vendor: 'unknown', os: 'unknown')
 ";
     let output = source.parse_source_full();
     let import = &output.ast.uses[0];

@@ -105,8 +105,8 @@ fn inline_forward_refs_not_unknown() {
 Size is Const(BigInt) or Dynamic
 BigInt is in 0...18446744073709551615
 
-Sized has (size Size)
-x.Sized(size: compute_size(x))
+#auto
+Sized has size Size: compute_size(Self)
 
 compute_size(x Type) Size := when x is
     Primitive(w, _)     then Const(w / 8)
@@ -118,11 +118,11 @@ Type is Primitive(width BigInt, signed Bool)
      or Union(name String, variants List(VariantShape))
      or Opaque(name String)
 
-NamedTy has (name String, ty Type)
-VariantShape has (name String, fields List(NamedTy))
+NamedTy has name String, ty Type
+VariantShape has name String, fields List(NamedTy)
 Bool is True or False
-List(x) has (pointer Pointer(x), length BigInt)
-String has (bytes List(BigInt))
+List(x) has pointer Pointer(x), length BigInt
+String has bytes List(BigInt)
 
 sum_named(fields List(NamedTy)) Size := when fields is
     []                  then Const(0)

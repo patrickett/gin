@@ -4,9 +4,9 @@ use support::transform_source;
 
 /// Record field types that reference undeclared tags (`List`, `Byte`) without imports.
 const STRING_GIN_SOURCE: &str = "\
-String has (bytes List(Byte))\n\
+String has bytes List(Byte)\n\
 \n\
-ToString has (to_string String)\n\
+ToString has to_string String\n\
 ";
 
 #[test]

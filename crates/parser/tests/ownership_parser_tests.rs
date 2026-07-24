@@ -310,7 +310,7 @@ return
 
 #[test]
 fn test_parse_and_has_copy_override() {
-    let src = "Transaction has (id Int) and has Copy(can_copy: False)\n";
+    let src = "Transaction has id Int\nTransaction.Copy has can_copy: False\n";
     let ast = src.parse_source_full().ast;
     let decl = ast.tags.get(&Intern::from_ref("Transaction")).unwrap();
     let pt = decl
@@ -324,7 +324,7 @@ fn test_parse_and_has_copy_override() {
 
 #[test]
 fn test_parse_and_is_not_copy_rejected() {
-    let src = "Transaction has (id Int)\n     and is not Copy\n";
+    let src = "Transaction has id Int\n     and is not Copy\n";
     let out = src.parse_source_full();
     assert!(
         out.symptoms

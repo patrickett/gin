@@ -6,8 +6,8 @@ use typecheck::FileId;
 use typecheck::transform::{TransformCtx, transform};
 
 const TARGET_FIXTURE: &str = r#"
-Target has (arch Architecture, vendor Vendor, os OperatingSystem)
-Target.Default(default: (arch: 'x86_64', vendor: 'unknown', os: 'unknown'))
+Target has arch Architecture, vendor Vendor, os OperatingSystem
+Target.Default has default: (arch: 'x86_64', vendor: 'unknown', os: 'unknown')
 
 target Target
 "#;
@@ -47,8 +47,8 @@ fn target_gin_target_type_not_unknown_single_file() {
 #[test]
 fn target_gin_target_type_not_unknown_minimal() {
     let source = r#"
-Target has (arch Architecture, vendor Vendor, os OperatingSystem)
-Target.Default(default: (arch: 'x86_64', vendor: 'unknown', os: 'unknown'))
+Target has arch Architecture, vendor Vendor, os OperatingSystem
+Target.Default has default: (arch: 'x86_64', vendor: 'unknown', os: 'unknown')
 
 target Target
 "#;
