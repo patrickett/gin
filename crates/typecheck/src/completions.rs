@@ -6,6 +6,7 @@ use ast::{
     SpanTable, TypeExpr, WhenArm,
 };
 use ast::{ConstValue, HashFloat};
+use ast_format::type_expr::TypeExprFormatExt;
 use internment::Intern;
 use std::collections::HashMap;
 
@@ -929,15 +930,21 @@ pub fn format_params(params: &Parameters) -> String {
                 && let TypeExpr::Nominal(type_name, _) = &sp.value
                 && name.eq_ignore_ascii_case(type_name.as_str())
             {
-                let short = name.chars().next().unwrap_or('p').to_string();
-                return format!("{short}{kind}");
+                let short = name.chars().next().unwrap_or('p');
+                return format!("{short} {}", sp.value.format_surface());
             }
             match kind {
                 ParameterKind::Generic => name.to_string(),
-                ParameterKind::Tagged(_) | ParameterKind::ValueParam { .. } => {
-                    format!("{name}{kind}")
+                ParameterKind::Tagged(ty) => {
+                    format!("{name} {}", ty.value.format_surface())
                 }
-                ParameterKind::Default(expr) => format!("{name}: {expr:?}"),
+                ParameterKind::ValueParam { ty } => {
+                    format!("{name} {}", ty.value.format_surface())
+                }
+                ParameterKind::Default(expr) => match &expr.value {
+                    Expr::Lit(literal) => format!("{name}: {literal}"),
+                    _ => format!("{name}: {expr:?}"),
+                },
             }
         })
         .collect();
@@ -1050,10 +1057,7 @@ mod tests {
             intern("x"),
             ParameterKind::Default(Box::new(Typed::infer(expr, SpanId::new(0)))),
         )]);
-        assert_eq!(
-            format_params(&params),
-            "(x: Typed { value: Lit(Number(42)), ty: Infer, const_value: None, span_id: SpanId(0), flaws: [] })"
-        );
+        assert_eq!(format_params(&params), "(x: 42)");
     }
 
     #[test]

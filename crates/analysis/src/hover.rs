@@ -60,6 +60,5 @@ const KEYWORD_DOCS: &[(&str, &str)] = &[
     ("continue", "Skip to next iteration"),
     ("as", "Type cast"),
     ("private", "Private declaration"),
-    ("self", "Current instance in method bodies"),
     ("extern", "External function declaration"),
 ];
