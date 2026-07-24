@@ -14,7 +14,7 @@ use crate::analysis::{TypeEnv, unify_type_args};
 use crate::compile_time_trait::{COMPARABLE_TRAIT, CompileTimeTraitRegistry, trait_field_for_ty};
 use crate::ty::Ty;
 use crate::typed::{
-    DefId, ExprId, TypedExprKind, TypedFileAst, TypedIfExpr, TypedLoop, TypedLoopKind,
+    BindBody, DefId, ExprId, TypedExprKind, TypedFileAst, TypedIfExpr, TypedLoop, TypedLoopKind,
     TypedWhenExpr,
 };
 use ast::ty::{ParamKind, TyArg};
@@ -55,7 +55,6 @@ fn happy_pattern_for_subject(
     span_id: SpanId,
 ) -> Option<Box<Spanned<TypeExpr>>> {
     let registry = CompileTimeTraitRegistry {
-        blanket_impls: typed.blanket_impls.clone(),
         imported_traits: typed.imported_trait_names.clone(),
         eval_ast: typed.eval_ast.clone(),
     };
@@ -298,6 +297,19 @@ pub(crate) fn lower_expr_kind(
         }
 
         Expr::TagCall(tag_call) => {
+            let self_call;
+            let tag_call = if tag_call.name.as_str() == "Self"
+                && let Some(Ty::Record { name, .. } | Ty::Union { name, .. }) = scope.receiver_type
+            {
+                self_call = ast::expr::TagCall {
+                    name: *name,
+                    qual_path: None,
+                    args: tag_call.args.clone(),
+                };
+                &self_call
+            } else {
+                tag_call
+            };
             let variant_id = resolve_tag_call_variant(
                 tag_call,
                 scope.variant_map,
@@ -617,11 +629,29 @@ pub(crate) fn lower_expr_kind(
             // Resolve the field index from the base expression's record type.
             let base_ty = &typed.exprs.ty[base_id.as_usize()];
             let field_idx = if let Ty::Record { fields, .. } = base_ty {
-                fields
-                    .iter()
-                    .position(|(n, _)| n.as_str() == field.as_str())
+                fields.iter().position(|(name, _)| name == field)
             } else {
-                None
+                let target = match typed.exprs.kind.get(base_id.as_usize()) {
+                    Some(TypedExprKind::FnCall { target, .. }) => Some(*target),
+                    _ => None,
+                };
+                target.and_then(|target| {
+                    let bind = typed.defs.get(&target)?;
+                    let body = match &bind.body {
+                        BindBody::Expr(expr) => Some(*expr),
+                        BindBody::Body { exprs, ret } => (*ret).or_else(|| exprs.last().copied()),
+                        BindBody::Extern => None,
+                    }?;
+                    let tag_id = match typed.exprs.kind.get(body.as_usize()) {
+                        Some(TypedExprKind::TagCall { variant_id, .. }) => Some(variant_id.union),
+                        _ => None,
+                    }?;
+                    let tag = typed.tags.get(&tag_id)?;
+                    let Ty::Record { fields, .. } = &tag.resolved_ty else {
+                        return None;
+                    };
+                    fields.iter().position(|(name, _)| name == field)
+                })
             };
             if let Some(idx) = field_idx {
                 TypedExprKind::TupleGet {

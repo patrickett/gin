@@ -121,7 +121,7 @@ impl<'src> Lexer<'src> {
         }
     }
 
-    /// Recompute `line_end` if it's stale (pos has moved past it).
+    /// Recompute `line_end` if it's stale (pos has moved past it.
     #[inline]
     fn ensure_line_end(&mut self) {
         if self.line_end < self.pos {
@@ -609,13 +609,6 @@ impl<'src> Lexer<'src> {
                             Some(self.lex_comment(start, 2, CommentKind::Doc))
                         }
                         (Some(b'-'), _) => Some(self.lex_comment(start, 1, CommentKind::Line)),
-                        (Some(b'>'), _) => {
-                            self.pos += 1;
-                            Some((
-                                Token::ArrowRight,
-                                self.insert_span(self.current_span(start)),
-                            ))
-                        }
                         _ => Some((Token::Minus, self.insert_span(self.current_span(start)))),
                     };
                 }

@@ -32,7 +32,7 @@ pub trait GinPackageExt {
     ///
     /// First searches parsed AST defs/tags. When that fails, falls back to a
     /// source-text search that checks whether the symbol appears as a top-level
-    /// declaration (`Tag is …`, `Tag has …`, `name:` or `name :=`).
+    /// declaration (`Tag is …`, `Tag has …`, `name:` or `name :=`.
     fn find_public_def(&self, symbol_name: &str) -> Option<PathBuf>;
 
     /// Whether `symbol_name` is a public definition under this directory.

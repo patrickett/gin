@@ -102,22 +102,17 @@ impl GinCompiler {
         let trait_registry: Option<CompileTimeTraitRegistry>;
         {
             let mut compile_time_eval_ast = FileAst::default();
-            let mut package_blanket_impls = Vec::new();
             for f in &files {
                 compile_time_eval_ast.merge_from(f.output.ast.clone());
-                package_blanket_impls.extend(f.output.ast.blanket_impls.clone());
             }
 
             let compile_time_eval_ast_arc = Arc::new(compile_time_eval_ast);
             trait_registry = Some(CompileTimeTraitRegistry::from_parse_ast(
                 &compile_time_eval_ast_arc,
-                &package_blanket_impls,
                 compile_time_eval_ast_arc.clone(),
             ));
-            let package_ctx = TransformCtx::with_package_compile_time_arc(
-                package_blanket_impls,
-                compile_time_eval_ast_arc,
-            );
+            let package_ctx =
+                TransformCtx::with_package_compile_time_arc(compile_time_eval_ast_arc);
 
             let file_asts: Vec<(ast::FileAst, FileId)> = files
                 .iter()

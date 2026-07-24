@@ -56,7 +56,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 span,
             });
         }
-        self.error("parse-expected-type-or-range", "expected integer range or type name after 'in'", span);
+        self.error(
+            "parse-expected-type-or-range",
+            "expected integer range or type name after 'in'",
+            span,
+        );
         None
     }
 }

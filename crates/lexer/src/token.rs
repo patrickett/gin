@@ -32,7 +32,6 @@ pub enum Token<'src> {
     Ampersand,
     And,
     ArrowLeft,
-    ArrowRight,
     Asm,
     As,
     At,

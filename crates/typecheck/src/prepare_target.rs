@@ -118,10 +118,10 @@ pub fn apply_entry_target_merge(ast: &mut FileAst, entry: &CompileTarget) -> Vec
             }
             let mut new_args: Vec<ConstValue> = args.to_vec();
             for (key, value) in triple.field_overrides() {
-                if let Some(idx) = field_names.iter().position(|field| field.as_str() == key) {
-                    if idx < new_args.len() {
-                        new_args[idx] = ConstValue::String(value);
-                    }
+                if let Some(idx) = field_names.iter().position(|field| field.as_str() == key)
+                    && idx < new_args.len()
+                {
+                    new_args[idx] = ConstValue::String(value);
                 }
             }
             *args = new_args.into();

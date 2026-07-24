@@ -162,7 +162,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             None => {
                 let span = self.current_span();
                 self.error("parse-expected-expression", "expected expression", span);
-                return Typed::infer(Expr::AnonymousTag(self.intern("Error")), span);
+                return Typed::infer(Expr::AnonymousTag(self.intern("__parse_error")), span);
             }
         };
 
@@ -371,9 +371,9 @@ impl<'src, 't> TokenCursor<'src, 't> {
                     _ => unreachable!(),
                 };
                 self.unexpected_token(format!("unexpected token {desc}"), None, span);
-                Typed::infer(Expr::AnonymousTag(self.intern("Error")), span)
+                Typed::infer(Expr::AnonymousTag(self.intern("__parse_error")), span)
             }
-            Some(Token::Tag(_)) => self.parse_tag_atom(),
+            Some(Token::Tag(_)) | Some(Token::SelfTag) => self.parse_tag_atom(),
             _ => {
                 if let Some(lit) = self.parse_literal() {
                     let span = lit.span_id;
@@ -383,7 +383,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 self.error("parse-expected-expression", "expected expression", span);
                 // Advance past the unrecognised token so the caller makes progress
                 self.advance();
-                Typed::infer(Expr::AnonymousTag(self.intern("Error")), span)
+                Typed::infer(Expr::AnonymousTag(self.intern("__parse_error")), span)
             }
         }
     }
@@ -670,6 +670,40 @@ impl<'src, 't> TokenCursor<'src, 't> {
             );
         }
 
+        if matches!(self.peek(), Some(Token::Id(_)))
+            && self.peek_at(1) == Some(&Token::Dot)
+            && matches!(self.peek_at(2), Some(Token::Id(_)))
+            && matches!(self.peek_at(3), Some(Token::Colon | Token::ColonEq))
+        {
+            let Some((Token::Id(base_name), base_span)) = self.advance() else {
+                unreachable!()
+            };
+            self.advance();
+            let Some((Token::Id(field_name), _)) = self.advance() else {
+                unreachable!()
+            };
+            if !self.eat(&Token::ColonEq) {
+                self.advance();
+            }
+            let value = self.parse_expression();
+            let end_span = self.last_consumed_span();
+            let base = Typed::infer(
+                Expr::FnCall(FnCall {
+                    path: Spanned::new(ModPath::new(self.intern(base_name), vec![]), base_span),
+                    args: None,
+                }),
+                base_span,
+            );
+            return Typed::infer(
+                Expr::RecordSet {
+                    base: Box::new(base),
+                    field: self.intern(field_name),
+                    value: Box::new(value),
+                },
+                self.merge_span(base_span, end_span),
+            );
+        }
+
         // ── FnCall: name, name(args), name.path(args) ──
         // Dotted paths without `(` are field access (`a.x`), not qualified symbols (`a.x`).
         if let Some(path) = self.parse_path() {
@@ -705,7 +739,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
         let span = self.current_span();
         self.error("parse-expected-identifier", "expected identifier", span);
-        Typed::infer(Expr::AnonymousTag(self.intern("Error")), span)
+        Typed::infer(Expr::AnonymousTag(self.intern("__parse_error")), span)
     }
 
     // ─── Tag-based Atoms: TagCall, AnonymousTag, Tag-rooted FnCall ────────────────
@@ -713,7 +747,8 @@ impl<'src, 't> TokenCursor<'src, 't> {
     fn parse_tag_atom(&mut self) -> Typed<Expr> {
         // Single-pass lookahead avoids speculative parsing with rewind.
         // The common case (bare Tag or Tag(args)) skips all path parsing.
-        if matches!(self.peek(), Some(Token::Tag(_))) && matches!(self.peek_at(1), Some(Token::Dot))
+        if matches!(self.peek(), Some(Token::Tag(_) | Token::SelfTag))
+            && matches!(self.peek_at(1), Some(Token::Dot))
         {
             // Qualified variant: Tag.Tag[(args)]
             if matches!(self.peek_at(2), Some(Token::Tag(_)))
@@ -754,9 +789,13 @@ impl<'src, 't> TokenCursor<'src, 't> {
         }
 
         // Simple Tag(args) → TagCall, or bare Tag → AnonymousTag
-        if let Some((Token::Tag(name), tag_span)) = self.advance() {
-            let name_interned = self.intern(name);
-
+        if let Some((token, tag_span)) = self.advance()
+            && let Some(name_interned) = match token {
+                Token::Tag(name) => Some(self.intern(name)),
+                Token::SelfTag => Some(self.intern("Self")),
+                _ => None,
+            }
+        {
             if self.is_at(&Token::ParenOpen) {
                 let args = self.parse_paren_args().unwrap_or_default();
                 let end_span = self.last_consumed_span();
@@ -776,7 +815,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
         let span = self.current_span();
         self.error("parse-expected-tag", "expected tag", span);
-        Typed::infer(Expr::AnonymousTag(self.intern("Error")), span)
+        Typed::infer(Expr::AnonymousTag(self.intern("__parse_error")), span)
     }
 
     fn parse_list_lit(&mut self) -> Typed<Expr> {
@@ -1055,19 +1094,9 @@ impl<'src, 't> TokenCursor<'src, 't> {
     fn parse_self_ref(&mut self) -> Typed<Expr> {
         let (_, span) = self
             .advance()
-            .expect("peek confirmed 'self' token before parse_self_ref"); // self
-        let start = span;
-
-        // self.field
-        if self.eat(&Token::Dot)
-            && let Some((Token::Id(_field), field_span)) = self.advance()
-        {
-            let merged_span = self.merge_span(start, field_span);
-            return Typed::infer(Expr::SelfRef, merged_span);
-        }
-
-        // Bare self
-        Typed::infer(Expr::SelfRef, start)
+            .expect("peek confirmed 'self' token before parse_self_ref");
+        // Return bare SelfRef — apply_postfix handles `.field` → RecordGet.
+        Typed::infer(Expr::SelfRef, span)
     }
 
     /// Map a comparison token to the function name it desugars to.
@@ -1153,7 +1182,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 let lhs_span = lhs.span_id;
 
                 // Check for field write: p.field: value
-                if self.is_at(&Token::Colon) && lhs_span.is_valid() {
+                if self.is_at(&Token::Colon) {
                     self.advance(); // Colon
                     let value = self.parse_expression();
                     let end_span = self.last_consumed_span();
@@ -1329,7 +1358,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 "expected '(' after 'asm'",
                 self.current_span(),
             );
-            return Typed::infer(Expr::AnonymousTag(self.intern("Error")), start_span);
+            return Typed::infer(Expr::AnonymousTag(self.intern("__parse_error")), start_span);
         }
 
         // Parse the spec expression (an AsmSpec value constructed with :=)
@@ -1355,7 +1384,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 "expected ')' after asm operands",
                 self.current_span(),
             );
-            return Typed::infer(Expr::AnonymousTag(self.intern("Error")), start_span);
+            return Typed::infer(Expr::AnonymousTag(self.intern("__parse_error")), start_span);
         }
 
         // Consume any trailing dedent tokens that were produced by the indent-aware lexer

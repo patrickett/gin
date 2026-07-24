@@ -57,7 +57,6 @@ impl<'src> fmt::Display for Token<'src> {
             Token::NotEq => write!(f, "[/=]"),
             Token::LessEq => write!(f, "[<=]"),
             Token::ArrowLeft => write!(f, "[<-]"),
-            Token::ArrowRight => write!(f, "[->]"),
             Token::GreaterEq => write!(f, "[>=]"),
             Token::Eq => write!(f, "[=]"),
             Token::Less => write!(f, "[<]"),

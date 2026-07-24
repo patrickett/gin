@@ -47,9 +47,16 @@ impl std::str::FromStr for Profile {
 }
 
 /// A native compiler that owns an MLIR context and manages the compilation pipeline.
-#[derive(Default)]
 pub struct NativeCompiler {
     context: Context,
+}
+
+impl Default for NativeCompiler {
+    fn default() -> Self {
+        Self {
+            context: Self::create_context(),
+        }
+    }
 }
 
 impl NativeCompiler {

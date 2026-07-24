@@ -2,12 +2,15 @@ use crate::HashFloat;
 use std::fmt;
 
 #[derive(Debug, Clone, Hash)]
+#[allow(clippy::derived_hash_with_manual_eq)]
 pub enum Literal {
     Number(usize),
     Float(HashFloat),
     Int(u128),
     String(String),
 }
+
+impl Eq for Literal {}
 
 impl PartialEq for Literal {
     fn eq(&self, other: &Self) -> bool {
@@ -21,15 +24,13 @@ impl PartialEq for Literal {
     }
 }
 
-impl Eq for Literal {}
-
 impl fmt::Display for Literal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Literal::Number(n) => write!(f, "{n}"),
-            Literal::Float(v) => write!(f, "{v}"),
-            Literal::Int(n) => write!(f, "{n}"),
             Literal::String(s) => write!(f, "'{s}'"),
+            Literal::Number(n) => write!(f, "{n}"),
+            Literal::Float(hf) => write!(f, "{}", hf.0),
+            Literal::Int(n) => write!(f, "{n}"),
         }
     }
 }

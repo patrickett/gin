@@ -4,8 +4,9 @@ use crate::cursor::TokenCursor;
 use crate::expr::ExprFn;
 use ast::span::SpanId;
 use ast::{
-    ConstExpr, Declare, DeclareValue, DocComment, Expr, InterfaceMember, ParameterKind, Parameters,
-    PredicateExpr, ProvidedTrait, Spanned, TypeExpr, Typed, Variant,
+    ConstExpr, Declare, DeclareValue, DocComment, Expr, HasFunction, HasFunctionKind, HasMember,
+    HasMemberBody, HasProperty, ParameterKind, Parameters, PredicateExpr, ProvidedTrait, Spanned,
+    TypeExpr, Typed, Variant,
 };
 use i256::I256;
 use internment::Intern;
@@ -20,7 +21,11 @@ type ParseResultType = (
 /// asd
 impl<'src, 't> TokenCursor<'src, 't> {
     pub fn parse_declare(&mut self, expr_parser: ExprFn) -> Option<Declare> {
+        let checkpoint = self.checkpoint();
         let doc_before = self.parse_doc_comment();
+        if doc_before.is_some() {
+            self.skip_newlines();
+        }
         let attrs = self.parse_declare_attributes();
         self.eat(&Token::Indent);
 
@@ -31,7 +36,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 self.advance();
                 (name, span)
             }
-            _ => return None,
+            _ => {
+                self.rewind(checkpoint);
+                return None;
+            }
         };
 
         let params = self.parse_params_for_declare(expr_parser);
@@ -60,19 +68,23 @@ impl<'src, 't> TokenCursor<'src, 't> {
             Some(decl)
         } else if self.eat(&Token::Has) {
             self.parse_doc_comment();
-            self.eat(&Token::Indent);
+            let has_block_body = self.eat(&Token::Indent);
 
             let (value, provided_traits) = if self.is_at(&Token::ParenOpen) {
-                let value = self.parse_has_rhs(expr_parser);
-                let provided_traits = self.parse_provided_trait_clauses(expr_parser);
-                (value, provided_traits)
+                self.error(
+                    "parse-removed-has-parens",
+                    "parenthesized `has` members are no longer valid; remove the parentheses",
+                    self.current_span(),
+                );
+                self.recover_removed_parenthesized_has_rhs();
+                (DeclareValue::Has(Vec::new()), Vec::new())
             } else if matches!(self.peek(), Some(Token::Tag(_))) {
                 (
-                    DeclareValue::Interface(Vec::new()),
+                    DeclareValue::Has(Vec::new()),
                     self.parse_trait_chain_after_has(expr_parser),
                 )
             } else {
-                (self.parse_has_rhs(expr_parser), Vec::new())
+                (self.parse_has_rhs(expr_parser, has_block_body), Vec::new())
             };
             self.eat(&Token::Dedent);
             self.reject_removed_marker_syntax();
@@ -97,54 +109,33 @@ impl<'src, 't> TokenCursor<'src, 't> {
     }
 
     fn parse_declare_attributes(&mut self) -> Option<ast::DeclareAttributes> {
-        if !self.is_at(&Token::Pound) {
-            return None;
-        }
-        self.advance();
-
-        self.expect(&Token::BracketOpen)?;
-
-        let mut items: Vec<ast::AttributeItem> = Vec::new();
-
-        if !self.is_at(&Token::BracketClose) {
-            loop {
-                if let Some(item) = self.parse_one_attribute_item() {
-                    items.push(item);
-                }
-                if self.eat(&Token::Comma) {
-                    continue;
-                }
-                break;
-            }
-        }
-
-        self.expect(&Token::BracketClose);
-
+        let items = self.parse_attribute_items()?;
         let mut attrs = ast::DeclareAttributes {
             raw_attributes: Some(items),
+            ..Default::default()
         };
         attrs.extract_intrinsic_attributes();
         Some(attrs)
     }
 
-    fn parse_has_rhs(&mut self, expr_parser: ExprFn) -> DeclareValue {
-        if !self.is_at(&Token::ParenOpen) {
-            self.error(
-                "parse-expected-interface-body",
-                "expected interface body after 'has' (e.g. `has (method1, method2, ...)`)",
-                self.current_span(),
-            );
-            return DeclareValue::Interface(Vec::new());
+    fn recover_removed_parenthesized_has_rhs(&mut self) {
+        self.advance();
+        let mut depth = 1;
+        while depth > 0 {
+            match self.advance_raw() {
+                Some((Token::ParenOpen, _)) => depth += 1,
+                Some((Token::ParenClose, _)) => depth -= 1,
+                Some(_) => {}
+                None => break,
+            }
         }
+    }
 
-        self.expect(&Token::ParenOpen);
-        self.skip_indents();
-
+    fn parse_has_rhs(&mut self, expr_parser: ExprFn, has_block_body: bool) -> DeclareValue {
         let mut members = Vec::new();
 
         loop {
-            // Allow trailing comma before closing paren
-            if self.is_at(&Token::ParenClose) {
+            if matches!(self.raw_peek(), Some(Token::Dedent)) {
                 break;
             }
 
@@ -173,11 +164,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 None => break,
             };
 
-            let (params, conventions, _param_groups) = if self.is_at(&Token::ParenOpen) {
-                // Method with parameters: `name(params...)`
+            let is_function = self.is_at(&Token::ParenOpen);
+            let (params, conventions, _param_groups) = if is_function {
                 self.parse_params(expr_parser)
             } else {
-                // No params — method with empty parameter list
                 (Some(Parameters::new()), IndexMap::new(), IndexMap::new())
             };
 
@@ -199,38 +189,72 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 None
             };
 
-            members.push(InterfaceMember {
-                name: member_name.0,
-                name_span: member_name.1,
-                params: params.unwrap_or_else(Parameters::new),
-                conventions,
-                return_ty,
-                error_ty,
-                doc_comment: member_doc,
-                refinement,
-            });
+            let body = if self.eat(&Token::ColonEq) {
+                let (value, _) = self.parse_bind_value(expr_parser);
+                Some(HasMemberBody::Final(value))
+            } else if self.eat(&Token::Colon) {
+                let (value, _) = self.parse_bind_value(expr_parser);
+                Some(HasMemberBody::Overrideable(value))
+            } else {
+                None
+            };
 
-            // Separator: comma or newline
-            if self.is_at(&Token::ParenClose) {
-                break;
+            let params = params.unwrap_or_else(Parameters::new);
+            let member = if is_function {
+                let kind = if params.contains_key(&Intern::from_ref("self")) {
+                    HasFunctionKind::Instance
+                } else {
+                    HasFunctionKind::Associated
+                };
+                HasMember::Function(HasFunction {
+                    name: member_name.0,
+                    name_span: member_name.1,
+                    params,
+                    conventions,
+                    return_ty,
+                    error_ty,
+                    body,
+                    doc_comment: member_doc,
+                    refinement,
+                    kind,
+                })
+            } else {
+                HasMember::Property(HasProperty {
+                    name: member_name.0,
+                    name_span: member_name.1,
+                    ty: return_ty,
+                    body,
+                    doc_comment: member_doc,
+                    refinement,
+                })
+            };
+            members.push(member);
+
+            if self.eat(&Token::Comma) {
+                self.skip_layout();
+                continue;
             }
-            if !self.eat_list_separator() {
-                self.error(
-                    "parse-expected-member-separator",
-                    "expected ',' or newline between interface members",
-                    self.current_span(),
-                );
-                break;
+
+            if has_block_body {
+                let checkpoint = self.checkpoint();
+                self.skip_newlines();
+                if matches!(self.raw_peek(), Some(Token::Dedent | Token::Comma)) {
+                    self.rewind(checkpoint);
+                    break;
+                }
+                if self.checkpoint() != checkpoint {
+                    continue;
+                }
             }
+
+            break;
         }
-
-        self.expect(&Token::ParenClose);
 
         if members.is_empty() {
-            // Empty interface: `Allocator has ()`
+            // Empty interface: `Allocator has `
         }
 
-        DeclareValue::Interface(members)
+        DeclareValue::Has(members)
     }
 
     /// Parse the return type (and optional error type) after a method's parameter list.
@@ -261,7 +285,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
         // a tuple type — skip unit check since parse_type_expr handles it.
         let can_start = matches!(
             self.peek(),
-            Some(Token::Tag(_)) | Some(Token::Ref) | Some(Token::Mut) | Some(Token::At)
+            Some(Token::Tag(_) | Token::SelfTag)
+                | Some(Token::Ref)
+                | Some(Token::Mut)
+                | Some(Token::At)
         ) || matches!(self.peek(), Some(Token::ParenOpen) if self.peek_at(1) == Some(&Token::ParenClose));
 
         if !can_start {
@@ -478,7 +505,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
         ) && let Some(variant) = self.parse_variant(expr_parser)
         {
             // Only consume doc comment if immediately after the value (same line)
-            let doc = if matches!(self.peek_at(0), Some(Token::DocComment(_))) {
+            let doc = if matches!(self.raw_peek(), Some(Token::DocComment(_))) {
                 self.parse_doc_comment()
             } else {
                 None
@@ -514,19 +541,19 @@ impl<'src, 't> TokenCursor<'src, 't> {
                         break;
                     }
                 }
-                let doc = if matches!(self.peek_at(0), Some(Token::DocComment(_))) {
+                let doc = if matches!(self.raw_peek(), Some(Token::DocComment(_))) {
                     self.parse_doc_comment()
                 } else {
                     None
                 };
-                return (DeclareValue::Interface(Vec::new()), doc, provided_traits);
+                return (DeclareValue::Has(Vec::new()), doc, provided_traits);
             }
         }
         self.rewind(composition_checkpoint);
 
         // Try pattern type expression (allows parens for params): `Register(value: 'rax')`
         if let Some(sp) = self.parse_pattern_type_expr(expr_parser) {
-            let doc = if matches!(self.peek_at(0), Some(Token::DocComment(_))) {
+            let doc = if matches!(self.raw_peek(), Some(Token::DocComment(_))) {
                 self.parse_doc_comment()
             } else {
                 None
@@ -535,7 +562,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
         }
 
         if let Some(sp) = self.parse_type_expr(expr_parser) {
-            let doc = if matches!(self.peek_at(0), Some(Token::DocComment(_))) {
+            let doc = if matches!(self.raw_peek(), Some(Token::DocComment(_))) {
                 self.parse_doc_comment()
             } else {
                 None
@@ -590,20 +617,22 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 value: TypeExpr::Literal(lit, span),
                 span_id: span,
             });
-            let doc_after = if matches!(self.peek_at(0), Some(Token::DocComment(_))) {
+            let doc_after = if matches!(self.raw_peek(), Some(Token::DocComment(_))) {
                 self.parse_doc_comment()
             } else {
                 None
             };
             let doc = DocComment::combine(doc_before, doc_after);
-            let result_ty = self.parse_variant_result_ty(expr_parser);
             return Some(match doc.filter(|d| !d.is_empty()) {
                 Some(d) => Variant::Local {
                     doc_comment: Some(d),
                     shape,
-                    result_ty,
+                    result_ty: None,
                 },
-                None => Variant::External { shape, result_ty },
+                None => Variant::External {
+                    shape,
+                    result_ty: None,
+                },
             });
         }
 
@@ -611,80 +640,23 @@ impl<'src, 't> TokenCursor<'src, 't> {
         let shape = self.parse_pattern_type_expr(expr_parser)?;
         let sp = Box::new(shape);
 
-        let doc_after = if matches!(self.peek_at(0), Some(Token::DocComment(_))) {
+        let doc_after = if matches!(self.raw_peek(), Some(Token::DocComment(_))) {
             self.parse_doc_comment()
         } else {
             None
         };
 
         let doc = DocComment::combine(doc_before, doc_after);
-        let result_ty = self.parse_variant_result_ty(expr_parser);
         Some(match doc.filter(|d| !d.is_empty()) {
             Some(d) => Variant::Local {
                 doc_comment: Some(d),
                 shape: sp,
-                result_ty,
+                result_ty: None,
             },
             None => Variant::External {
                 shape: sp,
-                result_ty,
+                result_ty: None,
             },
-        })
-    }
-
-    /// Parse optional `-> result_type` after a union variant.
-    fn parse_variant_result_ty(&mut self, expr_parser: ExprFn) -> Option<Box<Spanned<TypeExpr>>> {
-        self.skip_layout();
-        if self.eat(&Token::ArrowRight) {
-            self.parse_type_expr(expr_parser).map(Box::new)
-        } else {
-            None
-        }
-    }
-
-    /// True when `cursor` points at a lowercase `Id` followed by `has` (blanket impl start).
-    pub fn is_blanket_impl_start(&self) -> bool {
-        let Some(Token::Id(name)) = self.peek() else {
-            return false;
-        };
-        let Some(c) = name.chars().next() else {
-            return false;
-        };
-        if !c.is_ascii_lowercase() {
-            return false;
-        }
-        matches!(self.peek_at(1), Some(Token::Has))
-    }
-
-    pub fn is_dot_blanket_impl_start(&self) -> bool {
-        let Some(Token::Id(name)) = self.peek() else {
-            return false;
-        };
-        let Some(c) = name.chars().next() else {
-            return false;
-        };
-        c.is_ascii_lowercase()
-            && matches!(self.peek_at(1), Some(Token::Dot))
-            && matches!(self.peek_at(2), Some(Token::Tag(_)))
-    }
-
-    pub fn parse_dot_blanket_impl(&mut self, expr_parser: ExprFn) -> Option<ast::BlanketImpl> {
-        let type_var = match self.peek() {
-            Some(Token::Id(n)) => {
-                let name = Intern::new(n.to_string());
-                self.advance();
-                name
-            }
-            _ => return None,
-        };
-        if !self.eat(&Token::Dot) {
-            return None;
-        }
-        let parsed = self.parse_trait_fields(expr_parser)?;
-        Some(ast::BlanketImpl {
-            trait_name: parsed.trait_name,
-            type_var,
-            fields: parsed.fields,
         })
     }
 
@@ -700,6 +672,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             }
             _ => return None,
         };
+        self.parse_params_for_declare(expr_parser);
         if !self.eat(&Token::Dot) {
             return None;
         }
@@ -712,57 +685,6 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 fields: parsed.fields,
             },
         ))
-    }
-
-    /// Parse legacy `x has TraitName(field: expr, ...)` where `x` is a lowercase type variable.
-    pub fn parse_blanket_impl(&mut self, expr_parser: ExprFn) -> Option<ast::BlanketImpl> {
-        let type_var = match self.peek() {
-            Some(Token::Id(n)) => {
-                let id = n.to_string();
-                let lowercase = id.chars().next().is_some_and(|c| c.is_ascii_lowercase());
-                self.advance();
-                let name = Intern::new(id);
-                if !lowercase {
-                    self.error(
-                        "parse-invalid-blanket-impl",
-                        "blanket impl requires a lowercase type variable; write `x.Trait(...)` instead",
-                        self.current_span(),
-                    );
-                    return None;
-                }
-                name
-            }
-            Some(Token::Tag(_)) => {
-                self.error(
-                    "parse-invalid-blanket-impl",
-                    "blanket impl requires a lowercase type variable; write `x.Trait(...)` instead",
-                    self.current_span(),
-                );
-                return None;
-            }
-            _ => {
-                self.error(
-                    "parse-expected-type-variable",
-                    "expected type variable before `has` in blanket impl",
-                    self.current_span(),
-                );
-                return None;
-            }
-        };
-        if !self.eat(&Token::Has) {
-            self.error(
-                "parse-expected-has-token",
-                "expected `has` after type variable in legacy blanket impl",
-                self.current_span(),
-            );
-            return None;
-        }
-        let parsed = self.parse_trait_fields(expr_parser)?;
-        Some(ast::BlanketImpl {
-            trait_name: parsed.trait_name,
-            type_var,
-            fields: parsed.fields,
-        })
     }
 
     fn parse_trait_fields(&mut self, expr_parser: ExprFn) -> Option<ParsedTraitFields> {
@@ -783,36 +705,22 @@ impl<'src, 't> TokenCursor<'src, 't> {
             }
         };
 
-        let mut fields = Vec::new();
-        if self.eat(&Token::ParenOpen) {
-            if !self.is_at(&Token::ParenClose) {
-                loop {
-                    let field_name = match self.peek() {
-                        Some(Token::Id(n)) => {
-                            let id = self.intern(n);
-                            self.advance();
-                            id
-                        }
-                        _ => {
-                            self.error(
-                                "parse-expected-field-name",
-                                "expected field name in trait parameters",
-                                self.current_span(),
-                            );
-                            break;
-                        }
-                    };
-                    if self.expect(&Token::Colon).is_none() {
-                        break;
-                    }
-                    fields.push((field_name, expr_parser(self)));
-                    if !self.eat(&Token::Comma) {
-                        break;
-                    }
-                }
-            }
-            self.expect(&Token::ParenClose)?;
-        }
+        let fields = if self.eat(&Token::Has) {
+            let has_block_body = self.eat(&Token::Indent);
+            self.parse_provided_trait_field_list(expr_parser, has_block_body)?
+        } else if self.is_at(&Token::ParenOpen) {
+            self.error(
+                "parse-removed-provision-parens",
+                format!(
+                    "`Trait(...)` provision syntax is no longer valid; use `Type.{} has ...` instead",
+                    trait_name.as_str(),
+                ),
+                self.current_span(),
+            );
+            return None;
+        } else {
+            Vec::new()
+        };
         Some(ParsedTraitFields {
             trait_name,
             trait_name_span,
@@ -820,6 +728,52 @@ impl<'src, 't> TokenCursor<'src, 't> {
         })
     }
 
+    fn parse_provided_trait_field_list(
+        &mut self,
+        expr_parser: ExprFn,
+        has_block_body: bool,
+    ) -> Option<Vec<(Intern<String>, Typed<Expr>)>> {
+        let mut fields = Vec::new();
+
+        loop {
+            if matches!(self.raw_peek(), Some(Token::Dedent)) {
+                break;
+            }
+            self.skip_newlines();
+
+            if has_block_body && !matches!(self.peek(), Some(Token::Id(_))) {
+                break;
+            }
+
+            let field_name = match self.peek() {
+                Some(Token::Id(n)) => {
+                    let id = self.intern(n);
+                    self.advance();
+                    id
+                }
+                _ => {
+                    self.error(
+                        "parse-expected-field-name",
+                        "expected field name in trait parameters",
+                        self.current_span(),
+                    );
+                    return None;
+                }
+            };
+            self.expect(&Token::Colon)?;
+            fields.push((field_name, expr_parser(self)));
+
+            if self.eat(&Token::Comma) {
+                self.skip_layout();
+            } else if !has_block_body {
+                break;
+            }
+        }
+
+        Some(fields)
+    }
+
+    /// Parse a provided trait chain after `is`: `and has Trait(...) and Other(...)`.
     /// Parse provided-trait clauses after a declaration.
     fn parse_provided_trait_clauses(&mut self, expr_parser: ExprFn) -> Vec<ProvidedTrait> {
         self.skip_indents();
@@ -1108,14 +1062,76 @@ mod tests {
     use ast::ParamConvention;
 
     #[test]
-    fn parses_interface_method_signatures() {
+    fn parses_auto_declare_attribute() {
+        let ast = "#auto\nCopy has can_copy Bool\n".parse_source_full().ast;
+        let copy = ast
+            .tags
+            .get(&Intern::new("Copy".to_string()))
+            .expect("Copy tag should exist");
+
+        assert!(copy.attributes.auto);
+    }
+
+    #[test]
+    fn parses_stacked_declare_attributes() {
+        let ast = "#auto\n#target(\"wasm32\")\nCopy has can_copy Bool\n"
+            .parse_source_full()
+            .ast;
+        let copy = ast
+            .tags
+            .get(&Intern::new("Copy".to_string()))
+            .expect("Copy tag should exist");
+        let attrs = copy
+            .attributes
+            .raw_attributes
+            .as_ref()
+            .expect("raw attributes should be present");
+
+        assert!(copy.attributes.auto);
+        assert_eq!(attrs.len(), 2);
+    }
+
+    #[test]
+    fn parses_same_line_declare_attributes() {
+        let ast = "#auto, #target(\"wasm32\")\nCopy has can_copy Bool\n"
+            .parse_source_full()
+            .ast;
+        let copy = ast
+            .tags
+            .get(&Intern::new("Copy".to_string()))
+            .expect("Copy tag should exist");
+        let attrs = copy
+            .attributes
+            .raw_attributes
+            .as_ref()
+            .expect("raw attributes should be present");
+
+        assert!(copy.attributes.auto);
+        assert_eq!(attrs.len(), 2);
+    }
+
+    #[test]
+    fn detached_declare_attribute_reports_diagnostic() {
+        let output = "#auto\n\nCopy has can_copy Bool\n".parse_source_full();
+
+        assert!(
+            output
+                .symptoms
+                .iter()
+                .any(|d| d.code.slug() == "parse-detached-attribute"),
+            "symptoms: {:?}",
+            output.symptoms
+        );
+    }
+
+    #[test]
+    fn parses_has_function_signatures() {
         let source = r#"
-Allocator has (
+Allocator has
     --- Attempt to allocate.
     allocate(ref self, l Layout) Slice(Byte) or AllocError,
     --- Free a block.
     deallocate(ref self, p Pointer(Byte), l Layout),
-)
 "#;
         let ast = source.parse_source_full().ast;
         let allocator = ast
@@ -1123,17 +1139,18 @@ Allocator has (
             .get(&Intern::new("Allocator".to_string()))
             .expect("Allocator tag should exist");
 
-        let DeclareValue::Interface(members) = &allocator.value else {
+        let DeclareValue::Has(members) = &allocator.value else {
             panic!(
-                "Allocator should be parsed as Interface, got {:?}",
+                "Allocator should be parsed as Has, got {:?}",
                 allocator.value
             );
         };
 
-        assert_eq!(members.len(), 2, "expected 2 interface members");
+        assert_eq!(members.len(), 2, "expected 2 has members");
 
-        // First member: allocate(ref self, l Layout) Slice(Byte) or AllocError
-        let allocate = &members[0];
+        let HasMember::Function(allocate) = &members[0] else {
+            panic!("allocate should be a function member");
+        };
         assert_eq!(allocate.name.as_str(), "allocate");
         assert!(
             allocate.doc_comment.is_some(),
@@ -1179,8 +1196,9 @@ Allocator has (
             other => panic!("allocate error type should be AllocError, got {:?}", other),
         }
 
-        // Second member: deallocate(ref self, p Pointer(Byte), l Layout) (no return)
-        let deallocate = &members[1];
+        let HasMember::Function(deallocate) = &members[1] else {
+            panic!("deallocate should be a function member");
+        };
         assert_eq!(deallocate.name.as_str(), "deallocate");
         assert!(
             deallocate.doc_comment.is_some(),

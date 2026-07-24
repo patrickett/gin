@@ -414,7 +414,7 @@ impl TyInfer for Expr {
 /// (`Generic`) params can be resolved as a fresh `Ty::Opaque(name)`
 /// type variable rather than the legacy `Int64` fallback.
 ///
-/// This makes `start` and `end` in `CustomRange has (start, end)` (and the
+/// This makes `start` and `end` in `CustomRange has start, end)` (and the
 /// matching `CustomRange.new(start, end) ...` method) into independent fresh
 /// type variables — call sites can then bind each to any type without
 /// rejecting mixed inputs (`CustomRange.new(1, "hi")`). For shared-type

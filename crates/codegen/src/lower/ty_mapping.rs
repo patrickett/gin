@@ -23,7 +23,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         let typed = self.typed_ast?;
         let registry = self.trait_registry?;
 
-        // Ty::Literal doesn't route through the Sized blanket cleanly since its
+        // Ty::Literal doesn't route through the Sized auto default cleanly since its
         // Reflectable.shape wraps the value in Record { name: "Literal", ty: <cv> }
         // which compute_size can't handle. Handle inline with rough estimates
         // (16 for strings, 8 for everything else) to avoid falling back to 0.

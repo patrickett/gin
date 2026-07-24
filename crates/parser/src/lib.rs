@@ -7,7 +7,6 @@ pub mod cursor;
 pub mod declare;
 pub mod expr;
 pub mod gin_walk;
-mod impl_block;
 mod int_range;
 pub mod module;
 pub mod params;

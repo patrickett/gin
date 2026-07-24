@@ -1,4 +1,4 @@
-//! Compile-time trait dispatch: `Reflectable`, blanket impls, and provided trait overrides.
+//! Compile-time trait dispatch: `Reflectable`, auto trait defaults, and provided trait overrides.
 
 use std::collections::{HashMap, HashSet};
 
@@ -7,7 +7,6 @@ use internment::Intern;
 use crate::reflect::{const_value_for_provided_trait_field, reflect_ty_to_const_value};
 use crate::ty::Ty;
 use crate::typed::{TagId, TypedFileAst, TypedTag};
-use ast::BlanketImpl;
 use ast::ConstValue;
 use ast::FileAst;
 use ast::declare::ProvidedTrait;
@@ -17,10 +16,8 @@ pub const REFLECTABLE_SHAPE_FIELD: &str = "shape";
 pub const COMPARABLE_TRAIT: &str = "Comparable";
 pub const RESERVED_TRAITS: &[&str] = &["Reflectable", "Comparable"];
 
-/// Registry of blanket impls and dispatch helpers.
 #[derive(Debug, Clone)]
 pub struct CompileTimeTraitRegistry {
-    pub blanket_impls: Vec<BlanketImpl>,
     pub imported_traits: HashSet<Intern<String>>,
     /// Shared package-level eval AST; cloning the registry only bumps the Arc refcount
     /// instead of duplicating ~32 files' worth of definitions per `TypedFileAst`.
@@ -30,7 +27,6 @@ pub struct CompileTimeTraitRegistry {
 impl Default for CompileTimeTraitRegistry {
     fn default() -> Self {
         Self {
-            blanket_impls: Vec::new(),
             imported_traits: HashSet::new(),
             eval_ast: std::sync::Arc::new(FileAst::empty_for_tests()),
         }
@@ -39,23 +35,12 @@ impl Default for CompileTimeTraitRegistry {
 
 impl CompileTimeTraitRegistry {
     pub fn from_file_ast(file: &FileAst) -> Self {
-        Self::from_parse_ast(file, &[], std::sync::Arc::new(file.clone()))
+        Self::from_parse_ast(file, std::sync::Arc::new(file.clone()))
     }
 
-    pub fn from_parse_ast(
-        file_ast: &FileAst,
-        package_blankets: &[BlanketImpl],
-        eval_ast: std::sync::Arc<FileAst>,
-    ) -> Self {
-        let mut blanket_impls = file_ast.blanket_impls.clone();
-        blanket_impls.extend(package_blankets.iter().cloned());
-        let mut imported_traits = file_ast.imported_trait_names();
-        for b in &blanket_impls {
-            imported_traits.insert(b.trait_name);
-        }
+    pub fn from_parse_ast(file_ast: &FileAst, eval_ast: std::sync::Arc<FileAst>) -> Self {
         Self {
-            blanket_impls,
-            imported_traits,
+            imported_traits: file_ast.imported_trait_names(),
             eval_ast,
         }
     }
@@ -66,14 +51,14 @@ impl CompileTimeTraitRegistry {
             .any(|t| t.as_str() == trait_name)
     }
 
-    pub fn blanket_for(&self, trait_name: &str) -> Option<&BlanketImpl> {
+    pub fn auto_trait_decl(&self, trait_name: &str) -> Option<&ast::Declare> {
         if !self.trait_in_scope(trait_name) {
             return None;
         }
-        self.blanket_impls
-            .iter()
-            .rev()
-            .find(|b| b.trait_name.as_str() == trait_name)
+        self.eval_ast
+            .tags
+            .get(&Intern::from_ref(trait_name))
+            .filter(|decl| decl.attributes.auto)
     }
 }
 
@@ -130,15 +115,18 @@ pub fn trait_field_for_type_name(
         }
     }
 
-    if let Some(blanket) = registry.blanket_for(trait_name) {
-        let eval_ast = file.unwrap_or(registry.eval_ast.as_ref());
-        return evaluate_blanket_field(blanket, field_name, type_name, typed, eval_ast);
+    let eval_ast = file.unwrap_or(registry.eval_ast.as_ref());
+    if let Some(auto_trait) = registry.auto_trait_decl(trait_name)
+        && let Some(shape) = reflectable_shape_for_type(type_name, typed)
+        && let Some(cv) = evaluate_auto_trait_field(auto_trait, field_name, shape, eval_ast)
+    {
+        return Some(cv);
     }
 
     None
 }
 
-/// Look up a trait field for any resolved type (uses blanket impls when applicable).
+/// Look up a trait field for any resolved type, including auto trait defaults.
 pub fn trait_field_for_ty(
     trait_name: &str,
     field_name: &str,
@@ -169,14 +157,16 @@ pub fn trait_field_for_ty(
     {
         return Some(cv);
     }
-    if let Some(blanket) = registry.blanket_for(trait_name) {
-        let shape = reflect_ty_to_const_value(ty);
-        return evaluate_blanket_field_with_shape(
-            blanket,
+    let shape = reflect_ty_to_const_value(ty);
+    if let Some(auto_trait) = registry.auto_trait_decl(trait_name)
+        && let Some(cv) = evaluate_auto_trait_field(
+            auto_trait,
             field_name,
-            shape,
+            shape.clone(),
             registry.eval_ast.as_ref(),
-        );
+        )
+    {
+        return Some(cv);
     }
     None
 }
@@ -240,28 +230,75 @@ fn provided_trait_field(
     None
 }
 
-fn evaluate_blanket_field(
-    blanket: &BlanketImpl,
-    field_name: &str,
-    type_name: Intern<String>,
-    typed: &TypedFileAst,
-    eval_ast: &FileAst,
-) -> Option<ConstValue> {
-    let shape = reflectable_shape_for_type(type_name, typed)?;
-    evaluate_blanket_field_with_shape(blanket, field_name, shape, eval_ast)
-}
-
-fn evaluate_blanket_field_with_shape(
-    blanket: &BlanketImpl,
+fn evaluate_auto_trait_field(
+    trait_decl: &ast::Declare,
     field_name: &str,
     shape: ConstValue,
     eval_ast: &FileAst,
 ) -> Option<ConstValue> {
-    let (_, expr) = blanket
-        .fields
-        .iter()
-        .find(|(n, _)| n.as_str() == field_name)?;
+    let expr = auto_trait_field_expr(trait_decl, field_name)?;
     let mut env = HashMap::new();
-    env.insert(blanket.type_var, Some(shape));
+    env.insert(Intern::from_ref("Self"), Some(shape));
     crate::analysis::eval_compile_time_expr_with_env(&expr.value, &env, eval_ast)
+}
+
+fn auto_trait_field_expr<'a>(
+    trait_decl: &'a ast::Declare,
+    field_name: &str,
+) -> Option<&'a ast::Typed<ast::Expr>> {
+    match &trait_decl.value {
+        ast::DeclareValue::Has(members) => members.iter().find_map(|member| match member {
+            ast::HasMember::Property(property) if property.name.as_str() == field_name => {
+                property.body.as_ref()?.as_expr()
+            }
+            ast::HasMember::Function(function) if function.name.as_str() == field_name => {
+                function.body.as_ref()?.as_expr()
+            }
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::prepare_file_ast;
+    use crate::transform::{TransformCtx, transform};
+    use crate::typed::FileId;
+    use flask::CompileTarget;
+    use parser::cursor::TokenCursor;
+
+    #[test]
+    fn auto_trait_default_evaluates_with_self_shape() {
+        let source = "\
+Type is Primitive(width BigInt, signed Bool) or Ptr(inner Type)
+Bool is True or False
+BigInt is in 0...18446744073709551615
+#auto
+Copy has can_copy Bool: is_copy(Self)
+
+is_copy(x Type) Bool := when x is
+    Primitive(_, _) then True
+    Ptr(_)          then False
+";
+        let mut ast = TokenCursor::parse_source(source);
+        let diags = prepare_file_ast(&mut ast, &CompileTarget::Library);
+        assert!(diags.is_empty(), "diags: {diags:?}");
+
+        let typed = transform(&ast, FileId(0), &TransformCtx::new());
+        let registry = CompileTimeTraitRegistry::from_file_ast(&ast);
+        let ty = Ty::Int {
+            width: 64,
+            signed: true,
+            value: None,
+            min: None,
+            max: None,
+        };
+
+        assert!(matches!(
+            trait_field_for_ty("Copy", "can_copy", &ty, &typed, &registry),
+            Some(ConstValue::Tag { name, .. }) if name.as_str() == "True"
+        ));
+    }
 }

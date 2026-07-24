@@ -19,7 +19,7 @@ use crate::analysis::TypeEnv;
 use crate::compile_time_trait::{RESERVED_TRAITS, synthesize_reflectable_trait};
 use crate::ty::{Ty, UnionVariant};
 use crate::typed::{
-    DefId, FileId, ResolvedImport, TagId, TypedBind, TypedFileAst, TypedTag, VariantMap,
+    DefId, ExprId, FileId, ResolvedImport, TagId, TypedBind, TypedFileAst, TypedTag, VariantMap,
 };
 use ast::parameter::Parameters;
 use ast::prelude::*;
@@ -70,6 +70,39 @@ impl TypedTag {
 /// empty — it will be filled in Stage 2.
 pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) -> TypedFileAst {
     let mut typed = TypedFileAst::new(file_id, file_ast.span_table.clone());
+    for declare in file_ast.tags.values() {
+        let ast::DeclareValue::Has(members) = &declare.value else {
+            continue;
+        };
+        for member in members {
+            let ast::HasMember::Function(function) = member else {
+                continue;
+            };
+            let self_name = Intern::<String>::from_ref("self");
+            if !function.params.contains_key(&self_name) {
+                continue;
+            }
+            let Some(body) = function.body.as_ref() else {
+                continue;
+            };
+            let value = match body {
+                ast::HasMemberBody::Overrideable(value) | ast::HasMemberBody::Final(value) => value,
+            };
+            let modifier = match function.conventions.get(&self_name) {
+                Some(ast::ParamConvention::Ref(false)) => "ref self",
+                Some(ast::ParamConvention::Ref(true)) => "mut self",
+                Some(ast::ParamConvention::Eat) => "eat self",
+                Some(ast::ParamConvention::Inferred) | None => "self",
+            };
+            let mut spans = Vec::new();
+            collect_bind_value_self_ref_spans(value, &mut spans);
+            typed.self_contexts.extend(
+                spans
+                    .into_iter()
+                    .map(|span| (span, declare.name, Intern::<String>::from_ref(modifier))),
+            );
+        }
+    }
     typed.resolved_imports = populate_resolved_imports(file_ast, ctx);
     // Collect raw ModPaths from imports for module path hover detection.
     for import in &file_ast.uses {
@@ -79,11 +112,7 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
             }
         }
     }
-    typed.blanket_impls = ctx.package_blanket_impls.clone();
     typed.imported_trait_names = file_ast.imported_trait_names();
-    for b in &ctx.package_blanket_impls {
-        typed.imported_trait_names.insert(b.trait_name);
-    }
     typed.eval_ast = Arc::clone(&ctx.compile_time_eval_ast);
 
     // 1. Walk tag declarations and resolve them (fixpoint for forward refs in the same file).
@@ -133,6 +162,51 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
 
         let mut provided_traits = declare.provided_traits.clone();
         provided_traits.retain(|pt| !RESERVED_TRAITS.contains(&pt.trait_name.as_str()));
+
+        // Register provision field expression spans in the typed expression index
+        // so `self` in `Type.Trait has field: self.member` can be found by hover/go-to-def.
+        let record_fields = if let Ty::Record { ref fields, .. } = resolved_ty {
+            Some(fields)
+        } else {
+            None
+        };
+        for pt in &provided_traits {
+            for (_, expr) in &pt.fields {
+                if expr.span_id.is_valid() {
+                    let expr_id = ExprId(typed.exprs.kind.len() as u32);
+                    // Try to resolve the expression type for better hover.
+                    // If the expression is `self.field`, look up the field type.
+                    let expr_ty: Ty = match &expr.value {
+                        ast::Expr::RecordGet { field, .. } => {
+                            if let Some(fields) = record_fields {
+                                fields
+                                    .iter()
+                                    .find(|(n, _)| n.as_str() == field.as_str())
+                                    .map(|(_, ty)| (**ty).clone())
+                                    .unwrap_or(resolved_ty.clone())
+                            } else {
+                                resolved_ty.clone()
+                            }
+                        }
+                        _ => resolved_ty.clone(),
+                    };
+                    typed
+                        .exprs
+                        .kind
+                        .push(crate::typed::TypedExprKind::Lit(ast::Literal::Number(0)));
+                    typed.exprs.ty.push(expr_ty);
+                    typed.exprs.span.push(expr.span_id);
+                    typed.exprs.const_value.push(None);
+                    typed.exprs.flaws.push(Vec::new());
+                    let span = typed.span_table.get(expr.span_id);
+                    typed
+                        .span_to_expr
+                        .entry(span.start_u32())
+                        .or_insert(expr_id);
+                }
+            }
+        }
+
         // Reflectable.shape materializes the whole `Type` graph; skip for IDE package transforms.
         if !ctx.ide_package && name.as_str() != crate::compile_time_trait::REFLECTABLE_TRAIT {
             provided_traits.push(synthesize_reflectable_trait(&resolved_ty));
@@ -141,74 +215,94 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
         // Extract field/method type annotations from `has` bodies.
         let (record_field_types, record_field_docs, record_field_refinements) = match &declare.value
         {
-            DeclareValue::Interface(members) => {
+            DeclareValue::Has(members) => {
                 let mut map = HashMap::new();
                 let mut doc_map = HashMap::new();
                 let mut refinement_map = HashMap::new();
                 for m in members {
-                    // Store just the return/error type surface (without method name),
-                    // matching how record fields store `field_name → type_annotation`.
-                    // The hover code prepends the word/name itself.
                     use std::fmt::Write;
                     let mut ty_surface = String::new();
-                    if !m.params.is_empty() {
-                        ty_surface.push('(');
-                        let mut first = true;
-                        for (param_name, kind) in &m.params {
-                            if !first {
-                                ty_surface.push_str(", ");
+                    match m {
+                        ast::HasMember::Property(p) => {
+                            // Property: `name Type`
+                            if let Some(ty) = &p.ty {
+                                let _ = write!(&mut ty_surface, "{}", ty.value.format_surface());
                             }
-                            first = false;
-                            if let Some(conv) = m.conventions.get(param_name) {
-                                match conv {
-                                    ast::ParamConvention::Ref(false) => ty_surface.push_str("ref "),
-                                    ast::ParamConvention::Ref(true) => ty_surface.push_str("mut "),
-                                    ast::ParamConvention::Eat => ty_surface.push_str("eat "),
-                                    ast::ParamConvention::Inferred => {}
-                                }
+                            map.insert(p.name, ty_surface);
+                            if let Some(doc) = &p.doc_comment
+                                && !doc.value.is_empty()
+                            {
+                                doc_map.insert(p.name, doc.value.clone());
                             }
-                            let _ = write!(&mut ty_surface, "{}", param_name.as_str());
-                            match kind {
-                                ast::ParameterKind::Tagged(sp) => {
-                                    ty_surface.push(' ');
-                                    ty_surface.push_str(&sp.value.format_surface());
-                                }
-                                ast::ParameterKind::ValueParam { ty } => {
-                                    ty_surface.push(' ');
-                                    ty_surface.push_str(&ty.value.format_surface());
-                                }
-                                ast::ParameterKind::Default(expr) => {
-                                    let _ = write!(&mut ty_surface, ": {:?}", expr);
-                                }
-                                ast::ParameterKind::Generic => {}
+                            if let Some(refinement) = &p.refinement {
+                                refinement_map.insert(p.name, refinement.clone());
                             }
                         }
-                        ty_surface.push(')');
-                        // Space before return type when there are params
-                        if m.return_ty.is_some() {
-                            ty_surface.push(' ');
+                        ast::HasMember::Function(f) => {
+                            // Function: `name(params...) RetType`
+                            if !f.params.is_empty() {
+                                ty_surface.push('(');
+                                let mut first = true;
+                                for (param_name, kind) in &f.params {
+                                    if !first {
+                                        ty_surface.push_str(", ");
+                                    }
+                                    first = false;
+                                    if let Some(conv) = f.conventions.get(param_name) {
+                                        match conv {
+                                            ast::ParamConvention::Ref(false) => {
+                                                ty_surface.push_str("ref ")
+                                            }
+                                            ast::ParamConvention::Ref(true) => {
+                                                ty_surface.push_str("mut ")
+                                            }
+                                            ast::ParamConvention::Eat => {
+                                                ty_surface.push_str("eat ")
+                                            }
+                                            ast::ParamConvention::Inferred => {}
+                                        }
+                                    }
+                                    let _ = write!(&mut ty_surface, "{}", param_name.as_str());
+                                    match kind {
+                                        ast::ParameterKind::Tagged(sp) => {
+                                            ty_surface.push(' ');
+                                            ty_surface.push_str(&sp.value.format_surface());
+                                        }
+                                        ast::ParameterKind::ValueParam { ty } => {
+                                            ty_surface.push(' ');
+                                            ty_surface.push_str(&ty.value.format_surface());
+                                        }
+                                        ast::ParameterKind::Default(expr) => {
+                                            let _ = write!(&mut ty_surface, ": {:?}", expr);
+                                        }
+                                        ast::ParameterKind::Generic => {}
+                                    }
+                                }
+                                ty_surface.push(')');
+                            }
+                            if let Some(rt) = &f.return_ty {
+                                if !ty_surface.is_empty() {
+                                    ty_surface.push(' ');
+                                }
+                                ty_surface.push_str(&rt.value.format_surface());
+                            }
+                            if let Some(et) = &f.error_ty {
+                                ty_surface.push_str(" or ");
+                                ty_surface.push_str(&et.value.format_surface());
+                            }
+                            if ty_surface.is_empty() {
+                                ty_surface.push_str("()");
+                            }
+                            map.insert(f.name, ty_surface);
+                            if let Some(doc) = &f.doc_comment
+                                && !doc.value.is_empty()
+                            {
+                                doc_map.insert(f.name, doc.value.clone());
+                            }
+                            if let Some(refinement) = &f.refinement {
+                                refinement_map.insert(f.name, refinement.clone());
+                            }
                         }
-                    }
-                    if let Some(rt) = &m.return_ty {
-                        ty_surface.push_str(&rt.value.format_surface());
-                    }
-                    if let Some(et) = &m.error_ty {
-                        ty_surface.push_str(" or ");
-                        ty_surface.push_str(&et.value.format_surface());
-                    }
-                    if ty_surface.is_empty() {
-                        ty_surface.push_str("()");
-                    }
-                    map.insert(m.name, ty_surface);
-                    // Collect doc comment
-                    if let Some(doc) = &m.doc_comment
-                        && !doc.value.is_empty()
-                    {
-                        doc_map.insert(m.name, doc.value.clone());
-                    }
-                    // Collect refinement predicate
-                    if let Some(refinement) = &m.refinement {
-                        refinement_map.insert(m.name, refinement.clone());
                     }
                 }
                 (map, doc_map, refinement_map)
@@ -292,15 +386,22 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
             .iter()
             .map(|(id, ty)| (id.0, ty.clone()))
             .collect();
+        let receiver_type = declare
+            .receiver_type_surface()
+            .map(|receiver| TypeEnv::new(&tag_types_by_name).resolve(&receiver.value));
+        let mut method_tag_types = tag_types_by_name.clone();
+        if let Some(receiver_type) = &receiver_type {
+            method_tag_types.insert(Intern::<String>::from_ref("Self"), receiver_type.clone());
+        }
         let return_ty = resolve_return_type(
             declare,
-            &tag_types_by_name,
+            &method_tag_types,
             &tag_params,
             &ctx.cross_file_tag_types,
         );
         let param_types = resolve_param_types(
             declare,
-            &tag_types_by_name,
+            &method_tag_types,
             &tag_params,
             &ctx.cross_file_tag_types,
         );
@@ -324,7 +425,7 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
             declared_return_type: return_ty.clone(),
             params: param_types,
             param_kinds,
-            receiver_type: None,
+            receiver_type,
             unassigned_decl: matches!(declare.value, BindValue::Unassigned),
             is_constant: declare.is_constant,
             body: crate::typed::BindBody::Extern,
@@ -488,6 +589,190 @@ fn check_declare_value_type_scope(
     push_flaw: &mut dyn FnMut(SpanId, Diagnostic),
 ) {
     check_union_variant_shape_type_scope(declare_value, type_scope, push_flaw);
+    check_has_associated_method_self(declare_value, push_flaw);
+}
+
+fn check_has_associated_method_self(
+    declare_value: &DeclareValue,
+    push_flaw: &mut dyn FnMut(SpanId, Diagnostic),
+) {
+    let DeclareValue::Has(members) = declare_value else {
+        return;
+    };
+
+    for member in members {
+        let ast::HasMember::Function(function) = member else {
+            continue;
+        };
+        if function.kind != ast::HasFunctionKind::Associated {
+            continue;
+        }
+        let Some(body) = &function.body else {
+            continue;
+        };
+        let value = match body {
+            ast::HasMemberBody::Overrideable(value) | ast::HasMemberBody::Final(value) => value,
+        };
+        let mut spans = Vec::new();
+        collect_bind_value_self_ref_spans(value, &mut spans);
+        for span in spans {
+            push_flaw(
+                span,
+                Diagnostic::new(
+                    "no-self-in-associated-method",
+                    "associated method has no `self` parameter",
+                )
+                .with_help("add a `self`, `ref self`, or `mut self` parameter, or call through an explicit value"),
+            );
+        }
+    }
+}
+
+pub(crate) fn collect_bind_value_self_ref_spans(value: &BindValue, spans: &mut Vec<SpanId>) {
+    match value {
+        BindValue::Expr(expr) => collect_self_ref_spans(expr, spans),
+        BindValue::Body { exprs, ret } => {
+            for expr in exprs {
+                collect_self_ref_spans(expr, spans);
+            }
+            if let Some(expr) = &ret.value {
+                collect_self_ref_spans(expr, spans);
+            }
+        }
+        BindValue::Extern | BindValue::Unassigned => {}
+    }
+}
+
+pub(crate) fn collect_self_ref_spans(expr: &Typed<Expr>, spans: &mut Vec<SpanId>) {
+    match &expr.value {
+        Expr::SelfRef => spans.push(expr.span_id),
+        Expr::Loop(loop_expr) => match loop_expr {
+            ast::Loop::While(while_loop) => {
+                collect_self_ref_spans(&while_loop.cond, spans);
+                for expr in &while_loop.exprs {
+                    collect_self_ref_spans(expr, spans);
+                }
+            }
+            ast::Loop::ForIn(for_in) => {
+                collect_self_ref_spans(&for_in.iter, spans);
+                for expr in &for_in.exprs {
+                    collect_self_ref_spans(expr, spans);
+                }
+            }
+        },
+        Expr::Binary(binary) => {
+            collect_self_ref_spans(&binary.lhs, spans);
+            collect_self_ref_spans(&binary.rhs, spans);
+        }
+        Expr::FnCall(call) => {
+            if let Some(args) = &call.args {
+                for arg in args {
+                    collect_self_ref_spans(arg, spans);
+                }
+            }
+        }
+        Expr::FormatString(format_string) => {
+            for part in &format_string.parts {
+                if let ast::FormatPart::Expr(expr, _) = part {
+                    collect_self_ref_spans(expr, spans);
+                }
+            }
+        }
+        Expr::Range(range) => {
+            collect_self_ref_spans(&range.start, spans);
+            collect_self_ref_spans(&range.end, spans);
+        }
+        Expr::Bind(bind) => match &bind.value {
+            BindValue::Expr(expr) => collect_self_ref_spans(expr, spans),
+            BindValue::Body { exprs, ret } => {
+                for expr in exprs {
+                    collect_self_ref_spans(expr, spans);
+                }
+                if let Some(expr) = &ret.value {
+                    collect_self_ref_spans(expr, spans);
+                }
+            }
+            BindValue::Extern | BindValue::Unassigned => {}
+        },
+        Expr::When(when) => {
+            if let Some(subject) = &when.subject {
+                collect_self_ref_spans(subject, spans);
+            }
+            for arm in &when.arms {
+                match arm {
+                    ast::WhenArm::Cond {
+                        condition, body, ..
+                    } => {
+                        collect_self_ref_spans(condition, spans);
+                        collect_self_ref_spans(body, spans);
+                    }
+                    ast::WhenArm::Is { body, .. } | ast::WhenArm::Else(body, _) => {
+                        collect_self_ref_spans(body, spans);
+                    }
+                }
+            }
+        }
+        Expr::If(if_expr) => {
+            collect_self_ref_spans(&if_expr.subject, spans);
+            for expr in &if_expr.body {
+                collect_self_ref_spans(expr, spans);
+            }
+            if let Some(expr) = &if_expr.ret.value {
+                collect_self_ref_spans(expr, spans);
+            }
+        }
+        Expr::TagCall(call) => {
+            for arg in &call.args {
+                collect_self_ref_spans(arg, spans);
+            }
+        }
+        Expr::TupleAlloc { init, size } => {
+            collect_self_ref_spans(init, spans);
+            collect_self_ref_spans(size, spans);
+        }
+        Expr::TupleGet { base, .. } | Expr::RecordGet { base, .. } => {
+            collect_self_ref_spans(base, spans);
+        }
+        Expr::TupleSet { base, value, .. } | Expr::RecordSet { base, value, .. } => {
+            collect_self_ref_spans(base, spans);
+            collect_self_ref_spans(value, spans);
+        }
+        Expr::Cast { expr, .. }
+        | Expr::TakePtr(expr)
+        | Expr::Ref { inner: expr, .. }
+        | Expr::ConsumeArg(expr)
+        | Expr::Eat(expr)
+        | Expr::Deref(expr)
+        | Expr::Negate(expr) => collect_self_ref_spans(expr, spans),
+        Expr::BufGet { buf, index } => {
+            collect_self_ref_spans(buf, spans);
+            collect_self_ref_spans(index, spans);
+        }
+        Expr::BufSet { buf, index, value } => {
+            collect_self_ref_spans(buf, spans);
+            collect_self_ref_spans(index, spans);
+            collect_self_ref_spans(value, spans);
+        }
+        Expr::RecordLit(fields) => {
+            for (_, expr) in fields {
+                collect_self_ref_spans(expr, spans);
+            }
+        }
+        Expr::TupleLit(exprs) | Expr::List(exprs) => {
+            for expr in exprs {
+                collect_self_ref_spans(expr, spans);
+            }
+        }
+        Expr::Destructure { value, .. } => collect_self_ref_spans(value, spans),
+        Expr::Lit(_)
+        | Expr::AnonymousTag(_)
+        | Expr::TypeNominal(_)
+        | Expr::TypeInRange(_)
+        | Expr::TypeQualified(_)
+        | Expr::TypeGeneric { .. }
+        | Expr::TypeRef { .. }
+        | Expr::Asm(_) => {}
+    }
 }
 
 fn check_params_for_in_range_on_bounded_tag(
@@ -739,27 +1024,18 @@ fn resolve_declare_value(
             Ty::range_value_record(Intern::new("range_value".to_string()), *start, *end)
         }
         DeclareValue::Set() => Ty::Unit,
-        DeclareValue::Interface(members) => {
-            // Resolve interface members as record fields with function-typed shapes.
-            // Each method signature becomes a field whose type is the return type
-            // (or `Ty::Unit` if no return type). In a future phase this can become
-            // a dedicated `Ty::Interface` with richer method metadata.
+        DeclareValue::Has(members) => {
             let resolved_fields: Vec<(Intern<String>, Box<Ty>)> = members
                 .iter()
-                .map(|m| {
-                    let field_ty = m
-                        .return_ty
-                        .as_ref()
-                        .map(|rt| env.resolve(&rt.value))
-                        // TODO: if return_ty is None and the member name matches a
-                        // constructor parameter of the declaring tag (e.g. `allocator` in
-                        // `RawList(x, allocator: GlobalAllocator) has (..., allocator,)`),
-                        // infer the field type from that parameter's type annotation or
-                        // default-value type instead of falling back to Ty::Unit.
-                        //
-                        // This is like shorthand object syntax
-                        .unwrap_or(Ty::Unit);
-                    (m.name, Box::new(field_ty))
+                .filter_map(|m| match m {
+                    HasMember::Property(p) => {
+                        let field_ty =
+                            p.ty.as_ref()
+                                .map(|ty| env.resolve(&ty.value))
+                                .unwrap_or(Ty::Unit);
+                        Some((p.name, Box::new(field_ty)))
+                    }
+                    HasMember::Function(_) => None,
                 })
                 .collect();
             Ty::Record {

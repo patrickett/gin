@@ -352,16 +352,8 @@ impl PackageCache {
 
     /// Stage 2: Run the typed AST transform on prepared ASTs.
     fn stage_transform(&self, asts: &[ast::FileAst], _file_paths: &[PathBuf]) -> Vec<TypedFileAst> {
-        let package_blanket_impls: Vec<_> = asts
-            .iter()
-            .flat_map(|ast| ast.blanket_impls.clone())
-            .collect();
         let compile_time_eval_ast = Arc::new(ast::FileAst::default());
-
-        let package_ctx = TransformCtx::with_package_compile_time_arc(
-            package_blanket_impls,
-            compile_time_eval_ast,
-        );
+        let package_ctx = TransformCtx::with_package_compile_time_arc(compile_time_eval_ast);
 
         let file_asts: Vec<(ast::FileAst, FileId)> = asts
             .iter()
@@ -519,7 +511,11 @@ impl PackageCache {
         let word = source.word_at_byte_offset(byte_pos).unwrap_or_default();
 
         // 1. Parse-only hover (keywords, literals)
-        if let Some(h) = crate::hover::HoverSnippet::keyword(&source, byte_pos) {
+        // Skip `self` — the typed hover provides the receiver type (e.g. `self Type`,
+        // `ref self Type`, `mut self Type`) which is more useful than a generic keyword doc.
+        if word != "self"
+            && let Some(h) = crate::hover::HoverSnippet::keyword(&source, byte_pos)
+        {
             return Some(HoverContent {
                 markdown: h.markdown,
                 byte_range: h.byte_range,
@@ -541,6 +537,15 @@ impl PackageCache {
         // 3. Typed hover (with package context when possible)
         let result = self.typed_hover(path, &source, byte_pos);
         if result.is_none() {
+            // Fall back to keyword hover for `self` if the typed hover didn't resolve.
+            if word == "self"
+                && let Some(h) = crate::hover::HoverSnippet::keyword(&source, byte_pos)
+            {
+                return Some(HoverContent {
+                    markdown: h.markdown,
+                    byte_range: h.byte_range,
+                });
+            }
             eprintln!(
                 "[ginlsp] hover returned None for word={word:?} at byte={byte_pos} in {:?}",
                 path

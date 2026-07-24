@@ -8,6 +8,7 @@ use ast::source::SourceExt;
 use ast::span::{SpanId, SpanTable, SubSpan};
 use ast::ty::ParamKind;
 use ast::ty::PredicateExpr;
+use ast_format::type_expr::TypeExprFormatExt;
 use diagnostic::Diagnostic;
 use internment::Intern;
 
@@ -403,9 +404,8 @@ pub struct TypedFileAst {
     /// Display text and doc comment for each variant, keyed by `"{union_tag}.{variant_name}"`.
     /// Populated during stage_declare from the AST `Variant` shapes.
     pub variant_annotations: HashMap<String, (String, Option<String>)>,
-    /// Blanket compile-time trait impls from `x has Trait(...)`.
-    pub blanket_impls: Vec<ast::BlanketImpl>,
     pub imported_trait_names: HashSet<Intern<String>>,
+    pub(crate) self_contexts: Vec<(SpanId, Intern<String>, Intern<String>)>,
     pub eval_ast: std::sync::Arc<ast::FileAst>,
     /// Declaration-level warnings.
     pub warnings: Vec<Diagnostic>,
@@ -472,8 +472,17 @@ pub enum HoverTarget {
         name: Intern<String>,
         surface: String,
     },
+    SelfRef {
+        /// e.g. "ref self", "mut self", "self", "eat self"
+        modifier: Intern<String>,
+        tag_name: Intern<String>,
+    },
     TagDecl(Intern<String>),
     TagAtByte(Intern<String>),
+    RecordField {
+        name: Intern<String>,
+        surface: String,
+    },
     TypePattern(HoverResult),
     Variant {
         union_name: Intern<String>,
@@ -487,6 +496,58 @@ pub enum HoverTarget {
 }
 
 impl TypedFileAst {
+    fn has_self_context_at_byte(
+        &self,
+        byte_offset: usize,
+    ) -> Option<(Intern<String>, Intern<String>)> {
+        if let Some((_, tag_name, modifier)) = self
+            .self_contexts
+            .iter()
+            .find(|(span, _, _)| self.span_table.get(*span).contains(byte_offset))
+        {
+            return Some((*tag_name, *modifier));
+        }
+
+        let self_name = Intern::<String>::from_ref("self");
+        for declare in self.eval_ast.tags.values() {
+            let ast::DeclareValue::Has(members) = &declare.value else {
+                continue;
+            };
+            for member in members {
+                let ast::HasMember::Function(function) = member else {
+                    continue;
+                };
+                if !function.params.contains_key(&self_name) {
+                    continue;
+                }
+                let Some(body) = function.body.as_ref() else {
+                    continue;
+                };
+                let value = match body {
+                    ast::HasMemberBody::Overrideable(value) | ast::HasMemberBody::Final(value) => {
+                        value
+                    }
+                };
+                let mut self_spans = Vec::new();
+                crate::transform::collect_bind_value_self_ref_spans(value, &mut self_spans);
+                let ast_span_matches = self_spans
+                    .iter()
+                    .any(|span| self.span_table.get(*span).contains(byte_offset));
+                if !ast_span_matches {
+                    continue;
+                }
+                let modifier = match function.conventions.get(&self_name) {
+                    Some(ast::ParamConvention::Ref(false)) => "ref self",
+                    Some(ast::ParamConvention::Ref(true)) => "mut self",
+                    Some(ast::ParamConvention::Eat) => "eat self",
+                    Some(ast::ParamConvention::Inferred) | None => "self",
+                };
+                return Some((declare.name, Intern::<String>::from_ref(modifier)));
+            }
+        }
+        None
+    }
+
     fn param_at_byte(
         &self,
         source: &str,
@@ -570,8 +631,8 @@ impl TypedFileAst {
             fn_return_types: HashMap::new(),
             variant_map: HashMap::new(),
             variant_annotations: HashMap::new(),
-            blanket_impls: Vec::new(),
             imported_trait_names: HashSet::new(),
+            self_contexts: Vec::new(),
             eval_ast: std::sync::Arc::new(ast::FileAst::empty_for_tests()),
             warnings: Vec::new(),
             declaration_flaws: Vec::new(),
@@ -702,14 +763,13 @@ impl TypedFileAst {
     ///   Bool represents a value...
     ///
     /// The data is already available on `tag.provided_traits` (each `ProvidedTrait`
-    /// has `trait_name` and `fields`). Use `tag.declaration_text` for the type
+    /// has `trait_name` and `fields`. Use `tag.declaration_text` for the type
     /// signature block, then insert a `HoverSection::Prose` (or a new section variant)
     /// that lists trait names and links to their declarations. Also consider:
     ///
     /// - Auto-synthesized traits (e.g. `Reflectable` via `synthesize_reflectable_trait`)
     ///   — include them but perhaps distinguish from user-written `and has` clauses.
-    /// - Blanket implementations from the package index (`PackageSemanticIndex`)
-    ///   that apply to this type.
+    /// - Auto trait defaults that apply to this type.
     fn hover_for_tag(&self, tag: &TypedTag) -> String {
         ast::hover_format::HoverDoc::new()
             .gin(&tag.declaration_text)
@@ -1172,6 +1232,15 @@ impl TypedFileAst {
         let word_interned = Intern::<String>::from_ref(word);
         let tag_id = TagId(word_interned);
 
+        // 0. Cursor is on `self` keyword — show the actual type (`self Type`,
+        //    `ref self Type`, `mut self Type`) using the tag's resolved type.
+        //    Must run before param_at_byte since `self` may also appear as a parameter.
+        if word == "self"
+            && let Some((tag_name, modifier)) = self.has_self_context_at_byte(byte_offset)
+        {
+            return Some(HoverTarget::SelfRef { modifier, tag_name });
+        }
+
         // 1. Cursor is exactly on a definition name.
         if self.defs.values().any(|b| {
             b.name.as_str() == word && self.span_table.get(b.name_span).contains(byte_offset)
@@ -1182,6 +1251,17 @@ impl TypedFileAst {
         // 1a. Cursor is on a function parameter declaration or a use in that function body.
         if let Some((name, surface)) = self.param_at_byte(source, byte_offset, word) {
             return Some(HoverTarget::Param { name, surface });
+        }
+
+        // 1b. Cursor is on a type parameter (e.g. `x` in `Range(x) has start x`.
+        if let Some((_, tag)) = self.tag_at_byte(byte_offset, word)
+            && let Some(params) = &tag.params
+            && params.contains_key(&Intern::<String>::from_ref(word))
+        {
+            return Some(HoverTarget::Param {
+                name: Intern::<String>::from_ref(word),
+                surface: "type parameter".to_string(),
+            });
         }
 
         // 2. Cursor is exactly on a tag declaration name.
@@ -1244,7 +1324,7 @@ impl TypedFileAst {
         }
 
         // 4. Word is a known tag name referenced inside a type annotation or tag
-        //    body (e.g. `Bool` in `has (b Bool)` or `Pointer` in `pointer Pointer(x)`).
+        //    body (e.g. `Bool` in `has b Bool` or `Pointer` in `pointer Pointer(x)`).
         //    Route to tag declaration directly — checked before `tag_at_byte` so
         //    it wins over the containing tag's body hover.
         if self.tags.contains_key(&tag_id) {
@@ -1270,6 +1350,13 @@ impl TypedFileAst {
         // 7. Cursor is on a non-final segment of a qualified module path (import).
         if let Some(module) = self.module_path_at_byte(byte_offset) {
             return Some(HoverTarget::ModulePath(module));
+        }
+
+        if let Some(surface) = self.record_field_surface_at_byte(byte_offset, word) {
+            return Some(HoverTarget::RecordField {
+                name: word_interned,
+                surface,
+            });
         }
 
         // 8. Cursor is on an expression.
@@ -1319,7 +1406,62 @@ impl TypedFileAst {
                 let result = HoverResult::single(self.hover_for_def(bind));
                 Some(result.with_def_module(package, &name))
             }
+            HoverTarget::SelfRef { modifier, tag_name } => {
+                let owned_tag_types;
+                let owned_tag_params;
+                let (tag_types, tag_params) = match package {
+                    Some(p) => (&p.tag_types, Some(&p.tag_params)),
+                    None => {
+                        owned_tag_types = self.tag_types_by_name();
+                        owned_tag_params = self.tag_params_by_name();
+                        (&owned_tag_types, Some(&owned_tag_params))
+                    }
+                };
+                // Resolve the receiver type from the tag declaration.
+                let ty = self.tags.get(&TagId(tag_name)).map(|tag| &tag.resolved_ty);
+                if let Some(ty) = ty {
+                    let ty_str = type_annotation_surface_for_hover(ty, tag_types, tag_params);
+                    let rendered = if modifier.as_str() == "self" {
+                        format!("self {ty_str}")
+                    } else {
+                        format!("{} {ty_str}", modifier.as_str())
+                    };
+                    Some(HoverResult::single(
+                        ast::hover_format::HoverDoc::new().gin(rendered).render(),
+                    ))
+                } else {
+                    // Tag not found locally — check package index for cross-file tags.
+                    let ty_str = package
+                        .and_then(|p| p.tag_types.get(&tag_name))
+                        .map(|ty| type_annotation_surface_for_hover(ty, tag_types, tag_params));
+                    if let Some(ty_str) = ty_str {
+                        let rendered = if modifier.as_str() == "self" {
+                            format!("self {ty_str}")
+                        } else {
+                            format!("{} {ty_str}", modifier.as_str())
+                        };
+                        Some(HoverResult::single(
+                            ast::hover_format::HoverDoc::new().gin(rendered).render(),
+                        ))
+                    } else {
+                        // Last resort: just show the tag name.
+                        let rendered = if modifier.as_str() == "self" {
+                            format!("self {tag_name}")
+                        } else {
+                            format!("{} {tag_name}", modifier.as_str())
+                        };
+                        Some(HoverResult::single(
+                            ast::hover_format::HoverDoc::new().gin(rendered).render(),
+                        ))
+                    }
+                }
+            }
             HoverTarget::Param { name, surface } => Some(HoverResult::single(
+                ast::hover_format::HoverDoc::new()
+                    .gin(format!("{} {}", name.as_str(), surface))
+                    .render(),
+            )),
+            HoverTarget::RecordField { name, surface } => Some(HoverResult::single(
                 ast::hover_format::HoverDoc::new()
                     .gin(format!("{} {}", name.as_str(), surface))
                     .render(),
@@ -1342,38 +1484,140 @@ impl TypedFileAst {
             HoverTarget::TagAtByte(name) => {
                 let tag_id = TagId(name);
                 let tag = self.tags.get(&tag_id)?;
-                // Check if the word is a field name in the tag's record type.
-                if let Ty::Record { fields, .. } = &tag.resolved_ty {
-                    let field_key = Intern::<String>::from_ref(word);
-                    if let Some((_, fty)) = fields.iter().find(|(n, _)| *n == field_key) {
-                        // Use the original type annotation surface from the tag's
-                        // record field definitions, preserved during stage_declare.
-                        let field_surface = tag.record_field_types.get(&field_key);
-                        let ty_str = field_surface.cloned().unwrap_or_else(|| {
-                            // Fallback: format the inner type directly.
-                            let tag_types = self.tag_types_by_name();
-                            let display_ty: &Ty = match &**fty {
-                                Ty::Ptr { inner } => inner.as_ref(),
-                                other => other,
-                            };
-                            type_annotation_surface_for_hover(display_ty, &tag_types, None)
-                        });
-                        // No space between field name and surface when surface starts with `(`
-                        // (e.g. `allocate(ref self, ...)` not `allocate (ref self, ...)`).
-                        let shape = if ty_str.starts_with('(') {
-                            format!("{}{}", word, ty_str)
-                        } else {
-                            format!("{} {}", word, ty_str)
-                        };
-                        // Include member doc comment if available
-                        let member_doc = tag.record_field_docs.get(&field_key).map(|s| s.as_str());
-                        let mut hover = ast::hover_format::HoverDoc::new().gin(shape);
-                        if let Some(doc) = member_doc {
-                            hover = hover.prose(doc.to_string());
+
+                if let Some(decl) = self.eval_ast.tags.get(&name)
+                    && let ast::DeclareValue::Has(members) = &decl.value
+                {
+                    for member in members {
+                        match member {
+                            ast::HasMember::Property(p)
+                                if p.name.as_str() == word
+                                    && self.span_table.get(p.name_span).contains(byte_offset) =>
+                            {
+                                let member_key = Intern::<String>::from_ref(word);
+                                let ty_surface = tag
+                                    .record_field_types
+                                    .get(&member_key)
+                                    .cloned()
+                                    .unwrap_or_else(|| {
+                                        p.ty.as_ref()
+                                            .map(|ty| ty.value.format_surface())
+                                            .unwrap_or_default()
+                                    });
+                                let mut hover = ast::hover_format::HoverDoc::new().gin(format!(
+                                    "{}{}",
+                                    word,
+                                    ty_surface.trim_start()
+                                ));
+                                if let Some(doc) = tag.record_field_docs.get(&member_key) {
+                                    hover = hover.prose(doc.clone());
+                                }
+                                let result = HoverResult::single(hover.render());
+                                return Some(result.with_qualified_union(package, &tag_id.0));
+                            }
+                            ast::HasMember::Function(f)
+                                if f.name.as_str() == word
+                                    && self.span_table.get(f.name_span).contains(byte_offset) =>
+                            {
+                                let mut signature = String::new();
+                                if !f.params.is_empty() {
+                                    signature.push('(');
+                                    let mut first = true;
+                                    for (k, v) in &f.params {
+                                        if !first {
+                                            signature.push_str(", ");
+                                        }
+                                        first = false;
+                                        if let Some(conv) = f.conventions.get(k) {
+                                            match conv {
+                                                ast::ParamConvention::Ref(false) => {
+                                                    signature.push_str("ref ")
+                                                }
+                                                ast::ParamConvention::Ref(true) => {
+                                                    signature.push_str("mut ")
+                                                }
+                                                ast::ParamConvention::Eat => {
+                                                    signature.push_str("eat ")
+                                                }
+                                                ast::ParamConvention::Inferred => {}
+                                            }
+                                        }
+                                        signature.push_str(k.as_str());
+                                        match v {
+                                            ast::ParameterKind::Tagged(sp) => {
+                                                signature.push(' ');
+                                                signature.push_str(&sp.value.format_surface());
+                                            }
+                                            ast::ParameterKind::ValueParam { ty } => {
+                                                signature.push(' ');
+                                                signature.push_str(&ty.value.format_surface());
+                                            }
+                                            ast::ParameterKind::Default(expr) => {
+                                                use std::fmt::Write as _;
+                                                let _ = write!(&mut signature, ": {:?}", expr);
+                                            }
+                                            ast::ParameterKind::Generic => {}
+                                        }
+                                    }
+                                    signature.push(')');
+                                }
+                                if let Some(rt) = &f.return_ty {
+                                    signature.push(' ');
+                                    signature.push_str(&rt.value.format_surface());
+                                }
+                                if let Some(et) = &f.error_ty {
+                                    signature.push_str(" or ");
+                                    signature.push_str(&et.value.format_surface());
+                                }
+                                let rendered =
+                                    format!("```gin\n{}{}\n```", f.name.as_str(), signature)
+                                        .replacen(" (", "(", 1);
+                                let result = HoverResult::single(rendered);
+                                return Some(result.with_qualified_union(package, &tag_id.0));
+                            }
+                            _ => {}
                         }
-                        let result = HoverResult::single(hover.render());
-                        return Some(result.with_qualified_union(package, &tag_id.0));
                     }
+                }
+
+                let member_key = Intern::<String>::from_ref(word);
+                if let Some(ty_surface) = tag.record_field_types.get(&member_key) {
+                    let shape = if ty_surface.starts_with('(') {
+                        format!("{}{}", word, ty_surface)
+                    } else {
+                        format!("{} {}", word, ty_surface)
+                    };
+                    let mut hover = ast::hover_format::HoverDoc::new().gin(shape);
+                    if let Some(doc) = tag.record_field_docs.get(&member_key) {
+                        hover = hover.prose(doc.clone());
+                    }
+                    let result = HoverResult::single(hover.render());
+                    return Some(result.with_qualified_union(package, &tag_id.0));
+                }
+
+                if let Ty::Record { fields, .. } = &tag.resolved_ty
+                    && let Some((_, fty)) = fields.iter().find(|(n, _)| *n == member_key)
+                {
+                    let ty_str = {
+                        let tag_types = self.tag_types_by_name();
+                        let display_ty: &Ty = match &**fty {
+                            Ty::Ptr { inner } => inner.as_ref(),
+                            other => other,
+                        };
+                        type_annotation_surface_for_hover(display_ty, &tag_types, None)
+                    };
+                    let shape = if ty_str.starts_with('(') {
+                        format!("{}{}", word, ty_str)
+                    } else {
+                        format!("{} {}", word, ty_str)
+                    };
+                    let member_doc = tag.record_field_docs.get(&member_key).map(|s| s.as_str());
+                    let mut hover = ast::hover_format::HoverDoc::new().gin(shape);
+                    if let Some(doc) = member_doc {
+                        hover = hover.prose(doc.to_string());
+                    }
+                    let result = HoverResult::single(hover.render());
+                    return Some(result.with_qualified_union(package, &tag_id.0));
                 }
                 let result = HoverResult::single(self.hover_for_tag(tag));
                 Some(result.with_tag_module(package, &name))
@@ -1533,6 +1777,50 @@ impl TypedFileAst {
                 ))
             }
         }
+    }
+
+    fn record_field_surface_at_byte(&self, byte_offset: usize, word: &str) -> Option<String> {
+        let field = Intern::<String>::from_ref(word);
+        for (expr_index, kind) in self.exprs.kind.iter().enumerate() {
+            let TypedExprKind::TupleGet { base, index } = kind else {
+                continue;
+            };
+            if !self
+                .span_table
+                .get(self.exprs.span[expr_index])
+                .contains(byte_offset)
+            {
+                continue;
+            }
+            if let Some(Ty::Record { fields, .. }) = self.exprs.ty.get(base.as_usize())
+                && let Some((name, ty)) = fields.get(*index)
+                && *name == field
+            {
+                return Some(format_ty_for_hover(ty));
+            }
+            let TypedExprKind::FnCall { target, .. } = self.exprs.kind.get(base.as_usize())? else {
+                continue;
+            };
+            let bind = self.defs.get(target)?;
+            let body = match &bind.body {
+                BindBody::Expr(expr) => Some(*expr),
+                BindBody::Body { exprs, ret } => (*ret).or_else(|| exprs.last().copied()),
+                BindBody::Extern => None,
+            }?;
+            let TypedExprKind::TagCall { variant_id, .. } = self.exprs.kind.get(body.as_usize())?
+            else {
+                continue;
+            };
+            let tag = self.tags.get(&variant_id.union)?;
+            let Ty::Record { fields, .. } = &tag.resolved_ty else {
+                continue;
+            };
+            let (name, _) = fields.get(*index)?;
+            if *name == field {
+                return tag.record_field_types.get(&field).cloned();
+            }
+        }
+        None
     }
 
     /// Resolve the type of a field access expression at a source position.

@@ -13,7 +13,7 @@
 //!
 //! TODO: Structural multiline formatting — when an inline list exceeds
 //! `max_line_width`, emit newline-separated layout instead:
-//! ```
+//! ```gin
 //! // instead of:
 //! fn(a Int, b Int, c Int, d Int) Int := a + b + c + d
 //! // emit:
@@ -28,13 +28,19 @@
 //! - Pre-measuring list width before emitting
 //! - Choosing between inline (comma) vs block (newline) layout per list
 //! - Tracking indentation depth across multiline delimiter pairs
+//!
+//! TODO(ginfmt): Order members in `has` bodies:
+//!   1. Required/computed zero-input properties (no params, stored/computed fields)
+//!   2. `Self.` associated members (static methods)
+//!   3. Argument-taking instance methods (methods with params)
+//!   Within each group, members should be sorted for stable output.
 
 use std::collections::HashMap;
 
 use ast::{
-    BindValue, BundleExportImport, Declare, DeclareValue, DocComment, Expr, FileAst, HashFloat,
-    ImportSource, Literal, ModuleImport, ParameterKind, Parameters, SpanTable, Spanned, TypeExpr,
-    Typed, Variant,
+    BindValue, BundleExportImport, Declare, DeclareValue, DocComment, Expr, FileAst, HasMember,
+    HasMemberBody, HashFloat, ImportSource, Literal, ModuleImport, ParameterKind, Parameters,
+    SpanTable, Spanned, TypeExpr, Typed, Variant,
 };
 use ast_format::type_expr::TypeExprFormatExt;
 use internment::Intern;
@@ -172,36 +178,53 @@ impl<'a> AstFormatter<'a> {
                 self.buffer.push_str(" is ");
                 self.format_union_variants(variants);
             }
-            DeclareValue::Interface(members) => {
-                self.buffer.push_str(" has (");
-                let mut first = true;
-                for m in members {
-                    if !first {
-                        self.buffer.push_str(", ");
+            DeclareValue::Has(members) => {
+                self.buffer.push_str(" has");
+                for (index, member) in members.iter().enumerate() {
+                    if index > 0 {
+                        self.buffer.push(',');
                     }
-                    first = false;
-                    if let Some(doc) = &m.doc_comment {
-                        self.emit_doc_comment(doc);
-                    }
-                    self.buffer.push_str(m.name.as_str());
-                    if !m.params.is_empty() {
-                        self.buffer.push('(');
-                        self.format_params(&m.params);
-                        self.buffer.push(')');
-                    }
-                    if let Some(rt) = &m.return_ty {
-                        self.buffer.push(' ');
-                        let span = st.get(rt.span_id());
-                        self.buffer.push_str(span.extract(src));
-                    }
-                    if let Some(et) = &m.error_ty {
-                        self.buffer.push_str(" or ");
-                        let span = st.get(et.span_id());
-                        self.buffer.push_str(span.extract(src));
+                    match member {
+                        HasMember::Property(p) => {
+                            self.buffer.push(' ');
+                            self.buffer.push_str(p.name.as_str());
+                            if let Some(ty) = &p.ty {
+                                self.buffer.push(' ');
+                                let span = st.get(ty.span_id());
+                                self.buffer.push_str(span.extract(src));
+                            }
+                            if let Some(body) = &p.body {
+                                match body {
+                                    HasMemberBody::Overrideable(_) => self.buffer.push_str(": ..."),
+                                    HasMemberBody::Final(_) => self.buffer.push_str(":= ..."),
+                                }
+                            }
+                        }
+                        HasMember::Function(f) => {
+                            self.buffer.push(' ');
+                            self.buffer.push_str(f.name.as_str());
+                            self.format_params(&f.params);
+                            if let Some(rt) = &f.return_ty {
+                                self.buffer.push(' ');
+                                let span = st.get(rt.span_id());
+                                self.buffer.push_str(span.extract(src));
+                            }
+                            if let Some(et) = &f.error_ty {
+                                self.buffer.push_str(" or ");
+                                let span = st.get(et.span_id());
+                                self.buffer.push_str(span.extract(src));
+                            }
+                            if let Some(body) = &f.body {
+                                match body {
+                                    HasMemberBody::Overrideable(_) => self.buffer.push_str(": ..."),
+                                    HasMemberBody::Final(_) => self.buffer.push_str(":= ..."),
+                                }
+                            }
+                        }
                     }
                 }
-                self.buffer.push(')');
             }
+
             DeclareValue::Alias(target) => {
                 self.buffer.push_str(" is ");
                 let span = st.get(target.span_id());
@@ -714,6 +737,16 @@ mod tests {
         let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
         let r = f.format_file(&out.ast);
         assert_eq!(r, "Maybe is Some or None\nResult is Ok or Error\n");
+    }
+
+    #[test]
+    fn test_has_members_use_canonical_no_paren_syntax() {
+        let source = "Range(x) has start x, contains(self, value x) Bool\n";
+        let out = source.parse_source_full();
+        let cfg = Config::default();
+        let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
+        let r = f.format_file(&out.ast);
+        assert_eq!(r, "Range(x) has start x, contains(self, value x) Bool\n");
     }
 
     #[test]

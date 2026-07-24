@@ -4,8 +4,8 @@ use std::collections::HashSet;
 
 use ast::warnings::BindWarningsExt;
 use ast::{
-    Bind, BindValue, Declare, DeclareValue, Expr, FileAst, HasSpanId, ImplBlock, ParameterKind,
-    Spanned, TypeExpr, Typed, Variant,
+    Bind, BindValue, Declare, DeclareValue, Expr, FileAst, HasSpanId, ParameterKind, Spanned,
+    TypeExpr, Typed, Variant,
 };
 use indexmap::IndexMap;
 use internment::Intern;
@@ -16,8 +16,6 @@ use crate::expr::ExprFn;
 enum TopLevelValue {
     Tag(Declare),
     Bind(Box<Bind>),
-    ImplBlock(ImplBlock),
-    BlanketImpl(ast::BlanketImpl),
     ProvidedImpl(Intern<String>, ast::ProvidedTrait),
     Expr(Typed<Expr>),
 }
@@ -66,7 +64,6 @@ impl TokenCursor<'_, '_> {
         let mut private_defs = HashSet::new();
         let mut private_tags = HashSet::new();
         let mut exprs = Vec::new();
-        let mut blanket_impls = Vec::new();
         let mut provided_impls: IndexMap<Intern<String>, Vec<ast::ProvidedTrait>> = IndexMap::new();
 
         for el in public_elements {
@@ -75,7 +72,6 @@ impl TokenCursor<'_, '_> {
                 &mut tags_scratch,
                 &mut defs_scratch,
                 &mut exprs,
-                &mut blanket_impls,
                 &mut provided_impls,
             );
         }
@@ -88,26 +84,13 @@ impl TokenCursor<'_, '_> {
                 TopLevelValue::Bind(bind) => {
                     private_defs.insert(bind.name);
                 }
-                TopLevelValue::ImplBlock(block) => {
-                    for method_name in block.methods.keys() {
-                        let mangled = Intern::<String>::new(format!(
-                            "{}.{}",
-                            block.type_name.as_str(),
-                            method_name.as_str()
-                        ));
-                        private_defs.insert(mangled);
-                    }
-                }
-                TopLevelValue::BlanketImpl(..)
-                | TopLevelValue::ProvidedImpl(..)
-                | TopLevelValue::Expr(..) => {}
+                TopLevelValue::ProvidedImpl(..) | TopLevelValue::Expr(..) => {}
             }
             Self::collect_top_level(
                 el,
                 &mut tags_scratch,
                 &mut defs_scratch,
                 &mut exprs,
-                &mut blanket_impls,
                 &mut provided_impls,
             );
         }
@@ -124,11 +107,24 @@ impl TokenCursor<'_, '_> {
         for (name, impls) in provided_impls {
             tags.insert(
                 name,
-                Declare::new(name, SpanId::INVALID, DeclareValue::Interface(Vec::new()))
+                Declare::new(name, SpanId::INVALID, DeclareValue::Has(Vec::new()))
                     .with_provided_traits(impls),
             );
         }
         Self::expand_composed_provided_traits(&mut tags);
+        let method_binds = Self::materialize_has_method_binds(&tags);
+        for bind in &method_binds {
+            let name = Intern::<String>::new(format!(
+                "{}.{}",
+                bind.receiver_type_surface()
+                    .expect("has method receiver")
+                    .value
+                    .surface_mangle_name(),
+                bind.name
+            ));
+            defs_scratch.entry(name).or_default().push(bind.clone());
+        }
+
         let mut defs = ast::DefMap::new();
         let mut parse_warnings = Vec::new();
         for (name, binds) in defs_scratch {
@@ -149,13 +145,14 @@ impl TokenCursor<'_, '_> {
             uses: imports,
             tags,
             defs,
+            method_binds,
+            provided_impls: Vec::new(),
             private_defs,
             private_tags,
             exprs,
             symbol_aliases: Vec::new(),
             symbol_alias_spans: Vec::new(),
             span_table: SpanTable::new(),
-            blanket_impls,
             parse_warnings,
         }
     }
@@ -234,6 +231,7 @@ impl TokenCursor<'_, '_> {
     }
 
     fn parse_top_level_element(&mut self, expr_parser: ExprFn) -> Option<TopLevelValue> {
+        self.skip_newlines();
         if self.is_eof() {
             return None;
         }
@@ -270,18 +268,6 @@ impl TokenCursor<'_, '_> {
         match effective {
             Token::Tag(_) => self.dispatch_tag_element(expr_parser, start_offset),
             Token::Id(_) => {
-                if self.is_dot_blanket_impl_start() {
-                    if let Some(blanket) = self.parse_dot_blanket_impl(expr_parser) {
-                        return Some(TopLevelValue::BlanketImpl(blanket));
-                    }
-                    return None;
-                }
-                if self.is_blanket_impl_start() {
-                    if let Some(blanket) = self.parse_blanket_impl(expr_parser) {
-                        return Some(TopLevelValue::BlanketImpl(blanket));
-                    }
-                    return None;
-                }
                 // Deterministic dispatch: if next token after id is : or :=, it's definitely a bind.
                 // No checkpoint/rewind needed for the common case (x: expr, x := expr).
                 // For id(...) and id Tag, use speculative parsing only for the truly ambiguous cases.
@@ -340,14 +326,16 @@ impl TokenCursor<'_, '_> {
                 }
                 Some(TopLevelValue::Expr(expr))
             }
-            Token::Pound => {
-                // #[...] always starts a bind, no speculation needed
-                if let Some(bind) = self.parse_bind(expr_parser) {
-                    return Some(TopLevelValue::Bind(Box::new(bind)));
+            Token::Pound => match self.peek_at(start_offset) {
+                Some(Token::Tag(_)) => self.dispatch_tag_element(expr_parser, start_offset),
+                Some(Token::Id(_)) => self
+                    .parse_bind(expr_parser)
+                    .map(|bind| TopLevelValue::Bind(Box::new(bind))),
+                _ => {
+                    let expr = expr_parser(self);
+                    Some(TopLevelValue::Expr(expr))
                 }
-                let expr = expr_parser(self);
-                Some(TopLevelValue::Expr(expr))
-            }
+            },
             _ => {
                 let expr = expr_parser(self);
                 Some(TopLevelValue::Expr(expr))
@@ -362,21 +350,7 @@ impl TokenCursor<'_, '_> {
     ) -> Option<TopLevelValue> {
         let after_tag = tag_offset + 1;
 
-        // Helper: given an offset that may be at a method separator (. or ::),
-        // return the offset just past it if found.
-        let sep_past = |offset: usize| -> Option<usize> {
-            if self.peek_at(offset) == Some(&Token::Dot) {
-                Some(offset + 1)
-            } else if matches!(self.peek_at(offset), Some(Token::Colon))
-                && self.peek_at(offset + 1) == Some(&Token::Colon)
-            {
-                Some(offset + 2)
-            } else {
-                None
-            }
-        };
-
-        // Tag.Tag → provided interface implementation, with legacy impl-block fallback.
+        // Tag.Tag → provided trait declaration.
         if matches!(self.peek_at(after_tag), Some(Token::Dot))
             && matches!(self.peek_at(after_tag + 1), Some(Token::Tag(_)))
         {
@@ -385,13 +359,10 @@ impl TokenCursor<'_, '_> {
                 return Some(TopLevelValue::ProvidedImpl(type_name, provided_trait));
             }
             self.rewind(checkpoint);
-            return self
-                .parse_impl_block(expr_parser)
-                .map(TopLevelValue::ImplBlock);
         }
 
         // Tag.Id or Tag::Id → method_bind (deterministic: no checkpoint/rewind needed)
-        if let Some(past_sep) = sep_past(after_tag)
+        if let Some(past_sep) = self.method_separator_past(after_tag)
             && matches!(
                 self.peek_at(past_sep),
                 Some(Token::Id(_)) | Some(Token::Tag(_))
@@ -400,19 +371,36 @@ impl TokenCursor<'_, '_> {
             return self.parse_method_bind(expr_parser);
         }
 
-        // Tag(...).Id / Tag(...)::Id or Tag[...].Id / Tag[...]::Id → generic-receiver method_bind
-        if let Some(after_parens) = self.skip_balanced_parens_offset(after_tag)
-            && let Some(past_sep) = sep_past(after_parens)
-            && matches!(
-                self.peek_at(past_sep),
-                Some(Token::Id(_)) | Some(Token::Tag(_))
-            )
-        {
-            return self.parse_method_bind(expr_parser);
+        // Tag(...).Tag → provided interface implementation (generic receiver)
+        if let Some(after_parens) = self.skip_balanced_parens_offset(after_tag) {
+            let past_sep = if self.peek_at(after_parens) == Some(&Token::Dot) {
+                Some(after_parens + 1)
+            } else if matches!(self.peek_at(after_parens), Some(Token::Colon))
+                && self.peek_at(after_parens + 1) == Some(&Token::Colon)
+            {
+                Some(after_parens + 2)
+            } else {
+                None
+            };
+            if let Some(past_sep) = past_sep {
+                match self.peek_at(past_sep) {
+                    Some(Token::Tag(_)) => {
+                        let checkpoint = self.checkpoint();
+                        if let Some(provided) = self.parse_dot_provided_impl(expr_parser) {
+                            return Some(TopLevelValue::ProvidedImpl(provided.0, provided.1));
+                        }
+                        self.rewind(checkpoint);
+                    }
+                    Some(Token::Id(_)) => {
+                        return self.parse_method_bind(expr_parser);
+                    }
+                    _ => {}
+                }
+            }
         }
 
         if let Some(after_brackets) = self.skip_balanced_brackets_offset(after_tag)
-            && let Some(past_sep) = sep_past(after_brackets)
+            && let Some(past_sep) = self.method_separator_past(after_brackets)
             && matches!(
                 self.peek_at(past_sep),
                 Some(Token::Id(_)) | Some(Token::Tag(_))
@@ -564,16 +552,60 @@ impl TokenCursor<'_, '_> {
         Some(TopLevelValue::Bind(Box::new(bind)))
     }
 
+    fn materialize_has_method_binds(tags: &ast::TagMap) -> Vec<Bind> {
+        let mut binds = Vec::new();
+        for declare in tags.values() {
+            let DeclareValue::Has(members) = &declare.value else {
+                continue;
+            };
+            let receiver = if let Some(params) = &declare.params {
+                TypeExpr::Generic {
+                    name: declare.name,
+                    params: params
+                        .iter()
+                        .map(|(name, kind)| (*name, kind.clone()))
+                        .collect(),
+                    param_spans: Vec::new(),
+                    span: declare.name_span,
+                }
+            } else {
+                TypeExpr::Nominal(declare.name, declare.name_span)
+            };
+            let receiver = Spanned::new(receiver, declare.span);
+
+            for member in members {
+                let ast::HasMember::Function(function) = member else {
+                    continue;
+                };
+                let Some(body) = &function.body else {
+                    continue;
+                };
+                let value = match body {
+                    ast::HasMemberBody::Overrideable(value) | ast::HasMemberBody::Final(value) => {
+                        value.clone()
+                    }
+                };
+                let mut bind = Bind::new(function.name, function.name_span, value)
+                    .with_params(Some(function.params.clone()))
+                    .with_receiver_type(Some(Box::new(receiver.clone())))
+                    .with_doc(function.doc_comment.clone());
+                bind.param_conventions = function.conventions.clone();
+                bind.return_tag = function.return_ty.clone();
+                bind.is_constant = matches!(body, ast::HasMemberBody::Final(_));
+                binds.push(bind);
+            }
+        }
+        binds
+    }
+
     fn collect_top_level(
         el: TopLevelValue,
         tags: &mut IndexMap<Intern<String>, Vec<Declare>>,
         defs: &mut IndexMap<Intern<String>, Vec<Bind>>,
         exprs: &mut Vec<(Expr, SpanId)>,
-        blanket_impls: &mut Vec<ast::BlanketImpl>,
         provided_impls: &mut IndexMap<Intern<String>, Vec<ast::ProvidedTrait>>,
     ) {
         match el {
-            TopLevelValue::BlanketImpl(b) => blanket_impls.push(b),
             TopLevelValue::ProvidedImpl(type_name, provided_trait) => {
                 provided_impls
                     .entry(type_name)
@@ -596,24 +628,21 @@ impl TokenCursor<'_, '_> {
                 };
                 defs.entry(name).or_default().push(*bind);
             }
-            TopLevelValue::ImplBlock(block) => {
-                let recv = Box::new(Spanned {
-                    value: TypeExpr::Nominal(block.type_name, block.type_name_span),
-                    span_id: block.type_name_span,
-                });
-                for (method_name, bind) in block.methods {
-                    let bind = bind.with_receiver_type(Some(recv.clone()));
-                    let mangled = Intern::<String>::new(format!(
-                        "{}.{}",
-                        block.type_name.as_str(),
-                        method_name.as_str()
-                    ));
-                    defs.entry(mangled).or_default().push(bind);
-                }
-            }
             TopLevelValue::Expr(expr) => {
                 exprs.push((expr.value, expr.span_id));
             }
+        }
+    }
+
+    fn method_separator_past(&self, offset: usize) -> Option<usize> {
+        if self.peek_at(offset) == Some(&Token::Dot) {
+            Some(offset + 1)
+        } else if matches!(self.peek_at(offset), Some(Token::Colon))
+            && self.peek_at(offset + 1) == Some(&Token::Colon)
+        {
+            Some(offset + 2)
+        } else {
+            None
         }
     }
 
@@ -682,28 +711,26 @@ impl TokenCursor<'_, '_> {
                 }
                 Some(Token::Pound) => {
                     offset += 1;
-                    // Track bracket nesting to handle `#[attr([inner])]` correctly.
-                    // Depth starts at 0; the `BracketOpen` immediately after `#`
-                    // increments to 1, and we break when it returns to 0.
-                    let mut depth = 0u32;
-                    loop {
-                        match self.peek_at(offset) {
-                            Some(Token::BracketOpen) => {
-                                depth += 1;
-                                offset += 1;
-                            }
-                            Some(Token::BracketClose) => {
-                                depth -= 1;
-                                offset += 1;
-                                if depth == 0 {
-                                    break;
-                                }
-                            }
-                            None => return offset,
-                            _ => {
-                                offset += 1;
-                            }
+                    if matches!(self.peek_at(offset), Some(Token::BracketOpen)) {
+                        if let Some(after_group) = self.skip_balanced_brackets_offset(offset) {
+                            offset = after_group;
+                            continue;
                         }
+                        return offset;
+                    }
+                    match self.peek_at(offset) {
+                        Some(Token::Id(_)) => offset += 1,
+                        _ => return offset,
+                    }
+                    if matches!(self.peek_at(offset), Some(Token::ParenOpen)) {
+                        if let Some(after_args) = self.skip_balanced_parens_offset(offset) {
+                            offset = after_args;
+                        } else {
+                            return offset;
+                        }
+                    }
+                    if matches!(self.peek_at(offset), Some(Token::Comma)) {
+                        offset += 1;
                     }
                 }
                 _ => return offset,
@@ -717,6 +744,14 @@ impl TokenCursor<'_, '_> {
             offset = next;
         } else if let Some(next) = self.skip_balanced_brackets_offset(offset) {
             offset = next;
+        }
+
+        // Type.Trait has/is: skip the .Tag qualifier for provided impls
+        // e.g. Range(x).Bounded has → offset past Bounded
+        if self.peek_at(offset) == Some(&Token::Dot)
+            && matches!(self.peek_at(offset + 1), Some(Token::Tag(_)))
+        {
+            offset += 2;
         }
 
         matches!(self.peek_at(offset), Some(Token::Is) | Some(Token::Has))

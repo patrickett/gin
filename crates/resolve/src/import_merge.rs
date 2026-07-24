@@ -310,7 +310,7 @@ mod tests {
 
     #[test]
     fn merge_combines_local_member_with_new_symbol() {
-        let source = "use '../primitive/'.List\n\nString has (bytes List(Byte))\n";
+        let source = "use '../primitive/'.List\n\nString has bytes List(Byte)\n";
         let collected = collect_member_imports(source);
         let raw = RawSuggestion {
             root: ImportRoot::LocalPath("../primitive/".to_string()),

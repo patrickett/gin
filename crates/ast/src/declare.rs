@@ -1,5 +1,6 @@
 use crate::doc_comment::DocComment;
-use crate::expr::{Expr, Typed};
+use crate::expr::{BindValue, Expr, Typed};
+
 use crate::parameter::Parameters;
 use crate::span::SpanId;
 use crate::ty::{PredicateExpr, Ty};
@@ -15,76 +16,124 @@ use crate::span::Spanned;
 use i256::I256;
 use indexmap::IndexMap;
 
-#[derive(Default, Debug, Clone, PartialEq, Eq)]
-pub struct DeclareAttributes {
-    /// Raw parsed attributes before semantic extraction.
-    /// `None` means no `#[...]` block was present at all.
-    /// `Some(vec![])` means an empty `#[]` was present.
-    pub raw_attributes: Option<Vec<AttributeItem>>,
+/// How a `has` member body is declared: overrideable (`:`) or final (`:=`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum HasMemberBody {
+    /// `name Type: body` — may be overridden by impls.
+    Overrideable(BindValue),
+    /// `name Type := body` — final, cannot be overridden.
+    Final(BindValue),
 }
 
-impl DeclareAttributes {
-    /// Extract compiler-known intrinsic attributes from `raw_attributes` into typed fields.
-    /// Should be called after parsing.
-    pub fn extract_intrinsic_attributes(&mut self) {
-        let Some(items) = &self.raw_attributes else {
-            return;
-        };
-        if items.is_empty() {
-            return;
-        }
-
-        for item in items {
-            if let AttributeItem::Call { .. } = item {
-            } else if let AttributeItem::Flag { .. } = item {
+impl HasMemberBody {
+    pub fn as_expr(&self) -> Option<&Typed<Expr>> {
+        match self {
+            Self::Overrideable(BindValue::Expr(expr)) | Self::Final(BindValue::Expr(expr)) => {
+                Some(expr)
             }
+            _ => None,
         }
     }
 }
 
-/// A method signature in an interface body (`has (...)`).
-///
-/// Analogous to a function declaration without a body — the implementor
-/// must provide a matching function.
-///
-/// ```gin
-/// Allocator has (
-///     allocate(ref self, l Layout) Slice(Byte) or AllocError,
-/// )
-/// ```
-///
-/// becomes:
-/// ```ignore
-/// InterfaceMember {
-///     name: "allocate",
-///     params: [ref self, l Layout],
-///     return_ty: Some(Slice(Byte)),
-///     error_ty: Some(AllocError),
-///     doc_comment: Some("..."),
-/// }
-/// ```
+/// Whether a function member is an instance method or associated method.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum HasFunctionKind {
+    Instance,
+    Associated,
+}
+
+/// A property (stored field or computed projection) in a `has` body.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InterfaceMember {
+pub struct HasProperty {
     pub name: Intern<String>,
     pub name_span: SpanId,
-    /// Method parameters (names → kinds).
-    pub params: Parameters,
-    /// Parameter convention metadata (ref/mut/eat) for each named param.
-    pub conventions: IndexMap<Intern<String>, ParamConvention>,
-    /// The return type, e.g. `Slice(Byte)` in `allocate(...) Slice(Byte)`.
-    pub return_ty: Option<Box<Spanned<TypeExpr>>>,
-    /// The error type after `or`, e.g. `AllocError` in `... Slice(Byte) or AllocError`.
-    pub error_ty: Option<Box<Spanned<TypeExpr>>>,
+    pub ty: Option<Box<Spanned<TypeExpr>>>,
+    pub body: Option<HasMemberBody>,
     pub doc_comment: Option<DocComment>,
-    /// Refinement predicate, e.g. `and < n` on a field.
     pub refinement: Option<PredicateExpr>,
 }
 
-impl std::fmt::Display for InterfaceMember {
+impl Hash for HasProperty {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+        self.name_span.hash(state);
+        self.ty.hash(state);
+        self.body.hash(state);
+        self.doc_comment.hash(state);
+        self.refinement.hash(state);
+    }
+}
+
+/// A function member (instance or associated method) in a `has` body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HasFunction {
+    pub name: Intern<String>,
+    pub name_span: SpanId,
+    pub params: Parameters,
+    pub conventions: IndexMap<Intern<String>, ParamConvention>,
+    pub return_ty: Option<Box<Spanned<TypeExpr>>>,
+    pub error_ty: Option<Box<Spanned<TypeExpr>>>,
+    pub body: Option<HasMemberBody>,
+    pub doc_comment: Option<DocComment>,
+    pub refinement: Option<PredicateExpr>,
+    pub kind: HasFunctionKind,
+}
+
+impl Hash for HasFunction {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+        self.name_span.hash(state);
+        for (k, v) in &self.params {
+            k.hash(state);
+            v.hash(state);
+        }
+        for (k, conv) in &self.conventions {
+            k.hash(state);
+            conv.hash(state);
+        }
+        self.return_ty.hash(state);
+        self.error_ty.hash(state);
+        self.body.hash(state);
+        self.doc_comment.hash(state);
+        self.refinement.hash(state);
+        self.kind.hash(state);
+    }
+}
+
+/// A member of a `has` body — either a property/field or a function (method).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HasMember {
+    Property(HasProperty),
+    Function(HasFunction),
+}
+
+impl Hash for HasMember {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            HasMember::Property(p) => p.hash(state),
+            HasMember::Function(f) => f.hash(state),
+        }
+    }
+}
+
+impl std::fmt::Display for HasProperty {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.name.as_str())?;
-        if !self.params.is_empty() {
-            write!(f, "(")?;
+        if let Some(ty) = &self.ty {
+            write!(f, " {:?}", ty.value)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Display for HasFunction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.params.is_empty() {
+            write!(f, "{}", self.name.as_str())?;
+        } else {
+            write!(f, "{}(", self.name.as_str())?;
             let mut first = true;
             for (k, v) in &self.params {
                 if !first {
@@ -119,22 +168,40 @@ impl std::fmt::Display for InterfaceMember {
     }
 }
 
-impl Hash for InterfaceMember {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.name.hash(state);
-        self.name_span.hash(state);
-        for (k, v) in &self.params {
-            k.hash(state);
-            v.hash(state);
+impl std::fmt::Display for HasMember {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HasMember::Property(p) => write!(f, "{p}"),
+            HasMember::Function(fn_m) => write!(f, "{fn_m}"),
         }
-        for (k, conv) in &self.conventions {
-            k.hash(state);
-            conv.hash(state);
+    }
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct DeclareAttributes {
+    pub auto: bool,
+    pub raw_attributes: Option<Vec<AttributeItem>>,
+}
+
+impl DeclareAttributes {
+    /// Extract compiler-known intrinsic attributes from `raw_attributes` into typed fields.
+    /// Should be called after parsing.
+    pub fn extract_intrinsic_attributes(&mut self) {
+        let Some(items) = &self.raw_attributes else {
+            return;
+        };
+        if items.is_empty() {
+            return;
         }
-        self.return_ty.hash(state);
-        self.error_ty.hash(state);
-        self.doc_comment.hash(state);
-        self.refinement.hash(state);
+
+        for item in items {
+            match item {
+                AttributeItem::Flag { name, .. } if name.as_str() == "auto" => {
+                    self.auto = true;
+                }
+                _ => {}
+            }
+        }
     }
 }
 
@@ -150,8 +217,7 @@ pub enum DeclareValue {
     Range(I256, I256),
     // DiceThrow is in 1...6 (element of range)
     InRange(I256, I256),
-    /// Interface method signatures: `Allocator has (allocate(...), deallocate(...))`.
-    Interface(Vec<InterfaceMember>),
+    Has(Vec<HasMember>),
 }
 
 impl std::fmt::Display for DeclareValue {
@@ -180,8 +246,8 @@ impl std::fmt::Display for DeclareValue {
                 }
                 Ok(())
             }
-            Self::Interface(members) => {
-                write!(f, " (")?;
+            Self::Has(members) => {
+                write!(f, " ")?;
                 let mut first = true;
                 for m in members {
                     if !first {
@@ -190,7 +256,7 @@ impl std::fmt::Display for DeclareValue {
                     first = false;
                     write!(f, "{m}")?;
                 }
-                write!(f, ")")
+                Ok(())
             }
             Self::Set() => write!(f, "set"),
             Self::Range(start, end) => write!(f, "{start}...{end}"),
@@ -210,7 +276,7 @@ impl Hash for DeclareValue {
                     variant.hash(state);
                 }
             }
-            Self::Interface(members) => {
+            Self::Has(members) => {
                 for m in members {
                     m.hash(state);
                 }
@@ -224,10 +290,10 @@ impl Hash for DeclareValue {
     }
 }
 
-/// A trait implementation provided by a `Type.Trait(...)` declaration.
+/// A trait implementation provided by a `Type.Trait has ...` declaration.
 ///
-/// For example, in `Capacity.IsEmpty(is_empty: self.count > 0)`, this represents
-/// the `IsEmpty(is_empty: self.count > 0)` part.
+/// For example, in `Capacity.IsEmpty has is_empty: self.count > 0`, this represents
+/// the `IsEmpty has is_empty: self.count > 0` part.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProvidedTrait {
     pub trait_name: Intern<String>,

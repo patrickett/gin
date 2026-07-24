@@ -1,4 +1,3 @@
-use crate::blanket_impl::BlanketImpl;
 use crate::path::ModPath;
 use crate::prelude::*;
 use crate::span::{SpanId, SpanTable, Spanned};
@@ -173,6 +172,8 @@ pub struct FileAst {
     pub uses: Vec<Import>,
     pub tags: TagMap,
     pub defs: DefMap,
+    pub method_binds: Vec<Bind>,
+    pub provided_impls: Vec<(Intern<String>, ProvidedTrait)>,
     pub private_defs: HashSet<Intern<String>>,
     pub private_tags: HashSet<Intern<String>>,
     pub exprs: Vec<(Expr, SpanId)>,
@@ -180,8 +181,6 @@ pub struct FileAst {
     pub symbol_alias_spans: Vec<SpanId>,
     /// Span table mapping SpanId → Span (byte ranges).
     pub span_table: SpanTable,
-    /// Quantified trait impls: `x.Trait(...)`.
-    pub blanket_impls: Vec<BlanketImpl>,
     /// Parse-time warnings (e.g. `name Ty` then `name := expr`).
     pub parse_warnings: Vec<diagnostic::Diagnostic>,
 }
@@ -313,7 +312,6 @@ impl FileAst {
             }
             self.defs.insert(name, bind);
         }
-        self.blanket_impls.extend(other.blanket_impls);
         self.parse_warnings.extend(other.parse_warnings);
     }
 

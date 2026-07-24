@@ -7,7 +7,7 @@ use ast::ConstValue;
 
 /// Extension trait providing `Ty::is_copyable` — trait logic lives in `typecheck`.
 pub trait TyCopyExt {
-    /// Determine whether this type is copyable via `Copy.can_copy` (blanket or `and has Copy` override).
+    /// Determine whether this type is copyable via `Copy.can_copy` defaults or explicit overrides.
     fn is_copyable(&self, trait_registry: &CompileTimeTraitRegistry, typed: &TypedFileAst) -> bool;
 }
 

@@ -270,7 +270,7 @@ mod tests {
             "flask.jsonc",
             r#"{"name":"core","version":"0.0.0","authors":[]}"#,
         );
-        pkg.write("string/string.gin", "ToString has (to_string String)\n");
+        pkg.write("string/string.gin", "ToString has to_string String\n");
         pkg.write(
             "primitive/bool.gin",
             "Bool is True or False and\n    has ToString(to_string: when self then 'true' else 'false')\n",
@@ -295,7 +295,7 @@ mod tests {
             "flask.jsonc",
             r#"{"name":"core","version":"0.0.0","authors":[]}"#,
         );
-        pkg.write("string/string.gin", "ToString has (to_string String)\n");
+        pkg.write("string/string.gin", "ToString has to_string String\n");
         pkg.write("primitive/bool.gin", "Bool is True or False\n");
 
         let source = fs::read_to_string(pkg.path().join("primitive/bool.gin")).unwrap();
@@ -317,7 +317,7 @@ mod tests {
         );
         pkg.write(
             "marker/marker.gin",
-            "Marker has (infect Unit)\nInfection is Unit\n",
+            "Marker has infect Unit\nInfection is Unit\n",
         );
         let source = "use Marker\n\nCopy is Marker(Unit)\n";
         pkg.write("marker/copy.gin", source);
@@ -342,7 +342,7 @@ mod tests {
         );
         pkg.write("primitive/list.gin", "List(x) is Unit\n");
         pkg.write("primitive/int.gin", "Byte is Unit\n");
-        let source = "use '../primitive/'.List\n\nString has (bytes List(Byte))\n";
+        let source = "use '../primitive/'.List\n\nString has bytes List(Byte)\n";
         pkg.write("string/string.gin", source);
 
         let path = pkg.path().join("string/string.gin");

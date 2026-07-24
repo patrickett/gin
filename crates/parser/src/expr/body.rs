@@ -23,6 +23,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             token,
             Token::Id(_)
                 | Token::Tag(_)
+                | Token::SelfTag
                 | Token::Int(_)
                 | Token::Float(_)
                 | Token::String(_)

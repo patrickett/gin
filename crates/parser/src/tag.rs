@@ -241,6 +241,12 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 self.advance();
                 (name, span)
             }
+            Token::SelfTag => {
+                let name = Intern::from_ref("Self");
+                let span = self.peek_span()?;
+                self.advance();
+                (name, span)
+            }
             Token::Id(n) => {
                 // Lowercase identifiers in type position are type variables
                 // (e.g., `x` in `@x` or `x` in `Range[x]`).

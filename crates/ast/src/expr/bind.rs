@@ -305,7 +305,7 @@ impl Complexity {
     }
 }
 
-/// A single item inside `#[...]` — either a function call or a bare identifier flag.
+/// A parsed `#attr` item.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum AttributeItem {
     /// A call like `complexity(Linear(n))`
@@ -329,11 +329,10 @@ pub struct BindAttributes {
     pub inline_always: bool,
     /// Strip in release builds (`#[debug]`).
     pub debug_only: bool,
-    /// Time complexity annotation (`#[complexity(...)]`). `None` means unannotated.
+    /// Time complexity annotation (`#complexity(...)`). `None` means unannotated.
     pub complexity: Option<Complexity>,
     /// Raw parsed attributes before semantic extraction.
-    /// `None` means no `#[...]` block was present at all.
-    /// `Some(vec![])` means an empty `#[]` was present.
+    /// `None` means no attributes were present.
     pub raw_attributes: Option<Vec<AttributeItem>>,
 }
 

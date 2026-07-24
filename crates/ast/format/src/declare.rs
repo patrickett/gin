@@ -1,7 +1,7 @@
 use std::fmt::Write;
 
 use crate::type_expr::TypeExprFormatExt;
-use ast::declare::{Declare, DeclareValue};
+use ast::declare::{Declare, DeclareValue, HasMember};
 use ast::expr::Bind;
 use ast::parameter::ParameterKind;
 
@@ -9,7 +9,7 @@ use ast::parameter::ParameterKind;
 pub trait DeclareFormatExt {
     /// Type surface for hover and docs: name, params, and `is`/`has` value only.
     ///
-    /// Omits `Type.Trait(...)` implementations (those live in
+    /// Omits `Type.Trait has ...` provisions (those live in
     /// [`Declare::provided_traits`]).
     fn surface_text(&self) -> String;
 }
@@ -42,7 +42,7 @@ impl DeclareFormatExt for Declare {
             }
             out.push(')');
         }
-        if matches!(&self.value, DeclareValue::Interface(members) if members.is_empty())
+        if matches!(&self.value, DeclareValue::Has(members) if members.is_empty())
             && !self.provided_traits.is_empty()
             && self.provided_traits.iter().all(|pt| pt.fields.is_empty())
         {
@@ -59,7 +59,7 @@ impl DeclareFormatExt for Declare {
         }
 
         let continuation_indent = out.len() + 1;
-        if let DeclareValue::Interface(_) = &self.value {
+        if matches!(&self.value, DeclareValue::Has(_)) {
             out.push_str(" has")
         }
         out.push_str(&format_declare_value(&self.value, continuation_indent));
@@ -155,59 +155,108 @@ fn format_declare_value(value: &DeclareValue, continuation_indent: usize) -> Str
             }
             out
         }
-        DeclareValue::Interface(members) => {
+
+        DeclareValue::Has(members) => {
             if members.is_empty() {
-                return " ()".to_string();
+                return String::new();
             }
-            let mut out = " (\n".to_string();
-            for (i, m) in members.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(",\n");
-                }
-                let _ = write!(&mut out, "    {}", m.name.as_str());
-                if !m.params.is_empty() {
-                    out.push('(');
-                    let mut param_first = true;
-                    for (k, v) in &m.params {
-                        if !param_first {
-                            out.push_str(", ");
-                        }
-                        param_first = false;
-                        if let Some(conv) = m.conventions.get(k) {
-                            match conv {
-                                ast::ParamConvention::Ref(false) => out.push_str("ref "),
-                                ast::ParamConvention::Ref(true) => out.push_str("mut "),
-                                ast::ParamConvention::Eat => out.push_str("eat "),
-                                ast::ParamConvention::Inferred => {}
+
+            if members.iter().all(|m| match m {
+                HasMember::Property(_) => true,
+                HasMember::Function(f) => f.body.is_none() && f.params.is_empty(),
+            }) && members.len() <= 3
+            {
+                let mut inline = String::new();
+                for (i, m) in members.iter().enumerate() {
+                    if i > 0 {
+                        inline.push_str(", ");
+                    }
+                    match m {
+                        HasMember::Property(p) => {
+                            let _ = write!(inline, "{}", p.name.as_str());
+                            if let Some(ty) = &p.ty {
+                                let _ = write!(inline, " {}", ty.value.format_surface());
                             }
                         }
-                        let _ = write!(&mut out, "{}", k.as_str());
-                        match v {
-                            ast::ParameterKind::Tagged(sp) => {
-                                out.push(' ');
-                                out.push_str(&sp.value.format_surface());
+                        HasMember::Function(f) => {
+                            let _ = write!(inline, "{}", f.name.as_str());
+                            if let Some(rt) = &f.return_ty {
+                                let _ = write!(inline, " {}", rt.value.format_surface());
                             }
-                            ast::ParameterKind::ValueParam { ty } => {
-                                out.push(' ');
-                                out.push_str(&ty.value.format_surface());
-                            }
-                            kind => {
-                                let _ = write!(&mut out, "{kind}");
+                            if let Some(et) = &f.error_ty {
+                                let _ = write!(inline, " or {}", et.value.format_surface());
                             }
                         }
                     }
-                    out.push(')');
                 }
-                if let Some(rt) = &m.return_ty {
+                // Total rendered line = name + " has" + " " + inline
+                // = (continuation_indent - 1) + 4 + 1 + inline.len()
+                // = continuation_indent + 4 + inline.len()
+                if continuation_indent + 4 + inline.len() <= 40 {
+                    let mut out = String::new();
                     out.push(' ');
-                    out.push_str(&rt.value.format_surface());
-                }
-                if let Some(et) = &m.error_ty {
-                    out.push_str(" or ");
-                    out.push_str(&et.value.format_surface());
+                    out.push_str(&inline);
+                    return out;
                 }
             }
-            out.push_str(",\n)");
+
+            let mut out = String::new();
+            for m in members.iter() {
+                match m {
+                    ast::HasMember::Property(p) => {
+                        let _ = write!(&mut out, "\n    {}", p.name.as_str());
+                        if let Some(ty) = &p.ty {
+                            out.push(' ');
+                            out.push_str(&ty.value.format_surface());
+                        }
+                    }
+                    ast::HasMember::Function(f) if f.body.is_none() => {
+                        let _ = write!(&mut out, "\n    {}", f.name.as_str());
+                        if !f.params.is_empty() {
+                            out.push('(');
+                            let mut first = true;
+                            for (k, v) in &f.params {
+                                if !first {
+                                    out.push_str(", ");
+                                }
+                                first = false;
+                                if let Some(conv) = f.conventions.get(k) {
+                                    match conv {
+                                        ast::ParamConvention::Ref(false) => out.push_str("ref "),
+                                        ast::ParamConvention::Ref(true) => out.push_str("mut "),
+                                        ast::ParamConvention::Eat => out.push_str("eat "),
+                                        ast::ParamConvention::Inferred => {}
+                                    }
+                                }
+                                out.push_str(k.as_str());
+                                match v {
+                                    ast::ParameterKind::Tagged(sp) => {
+                                        out.push(' ');
+                                        out.push_str(&sp.value.format_surface());
+                                    }
+                                    ast::ParameterKind::ValueParam { ty } => {
+                                        out.push(' ');
+                                        out.push_str(&ty.value.format_surface());
+                                    }
+                                    kind => {
+                                        let _ = write!(&mut out, "{kind}");
+                                    }
+                                }
+                            }
+                            out.push(')');
+                        }
+                        if let Some(rt) = &f.return_ty {
+                            out.push(' ');
+                            out.push_str(&rt.value.format_surface());
+                        }
+                        if let Some(et) = &f.error_ty {
+                            out.push_str(" or ");
+                            out.push_str(&et.value.format_surface());
+                        }
+                    }
+                    ast::HasMember::Function(_) => {}
+                }
+            }
             out
         }
         DeclareValue::Set() => " is set".to_string(),
@@ -218,10 +267,12 @@ fn format_declare_value(value: &DeclareValue, continuation_indent: usize) -> Str
 
 #[cfg(test)]
 mod tests {
-    use ast::declare::{Declare, DeclareValue};
+    use ast::declare::{
+        Declare, DeclareValue, HasFunction, HasFunctionKind, HasMember, HasMemberBody, HasProperty,
+    };
     use ast::parameter::ParameterKind;
     use ast::span::{SpanId, Spanned};
-    use ast::{TypeExpr, Variant};
+    use ast::{BindValue, Expr, TypeExpr, Typed, Variant};
     use internment::Intern;
 
     use super::DeclareFormatExt;
@@ -278,14 +329,101 @@ mod tests {
     }
 
     #[test]
-    fn declaration_surface_empty_interface_uses_compact_parens() {
+    fn declaration_surface_empty_has_uses_has_keyword() {
         let declare = Declare::new(
             intern("AllocError"),
             SpanId::INVALID,
-            DeclareValue::Interface(Vec::new()),
+            DeclareValue::Has(Vec::new()),
         );
 
-        assert_eq!(declare.surface_text(), "AllocError has ()");
+        assert_eq!(declare.surface_text(), "AllocError has");
+    }
+
+    #[test]
+    fn declaration_surface_simple_has_uses_inline() {
+        let declare = Declare::new(
+            intern("Bounded"),
+            SpanId::INVALID,
+            DeclareValue::Has(vec![
+                HasMember::Property(HasProperty {
+                    name: intern("min"),
+                    name_span: SpanId::INVALID,
+                    ty: None,
+                    body: None,
+                    doc_comment: None,
+                    refinement: None,
+                }),
+                HasMember::Property(HasProperty {
+                    name: intern("max"),
+                    name_span: SpanId::INVALID,
+                    ty: None,
+                    body: None,
+                    doc_comment: None,
+                    refinement: None,
+                }),
+            ]),
+        );
+
+        assert_eq!(declare.surface_text(), "Bounded has min, max");
+    }
+
+    #[test]
+    fn declaration_surface_has_members_uses_surface_types() {
+        let declare = Declare::new(
+            intern("Allocator"),
+            SpanId::INVALID,
+            DeclareValue::Has(vec![
+                HasMember::Function(HasFunction {
+                    name: intern("reserve"),
+                    name_span: SpanId::INVALID,
+                    params: vec![(intern("l"), tagged(nominal("Layout")))]
+                        .into_iter()
+                        .collect(),
+                    conventions: Default::default(),
+                    return_ty: Some(Box::new(spanned(generic(
+                        "Slice",
+                        vec![("Byte", nominal("Byte"))],
+                    )))),
+                    error_ty: Some(Box::new(spanned(nominal("AllocError")))),
+                    body: None,
+                    doc_comment: None,
+                    refinement: None,
+                    kind: HasFunctionKind::Instance,
+                }),
+                HasMember::Function(HasFunction {
+                    name: intern("new"),
+                    name_span: SpanId::INVALID,
+                    params: vec![(intern("size"), tagged(nominal("PointerSize")))]
+                        .into_iter()
+                        .collect(),
+                    conventions: Default::default(),
+                    return_ty: Some(Box::new(spanned(nominal("Self")))),
+                    error_ty: None,
+                    body: Some(HasMemberBody::Overrideable(BindValue::Expr(Box::new(
+                        Typed::infer(Expr::AnonymousTag(intern("Self")), SpanId::INVALID),
+                    )))),
+                    doc_comment: None,
+                    refinement: None,
+                    kind: HasFunctionKind::Associated,
+                }),
+                HasMember::Property(HasProperty {
+                    name: intern("length"),
+                    name_span: SpanId::INVALID,
+                    ty: Some(Box::new(spanned(generic(
+                        "Pointer",
+                        vec![("Byte", nominal("Byte"))],
+                    )))),
+                    body: None,
+                    doc_comment: None,
+                    refinement: None,
+                }),
+            ]),
+        );
+
+        assert_eq!(
+            declare.surface_text(),
+            "Allocator has\n    reserve(l Layout) Slice(Byte) or AllocError\n    length Pointer(Byte)"
+        );
     }
 
     #[test]

@@ -7,7 +7,6 @@
 
 use crate::analysis::desugar_threads::stage_desugar_threads;
 use crate::analysis::infer_convention::infer_param_conventions;
-use ast::BlanketImpl;
 use ast::FileAst;
 use ast::prelude::*;
 
@@ -26,6 +25,7 @@ mod lower_ty;
 mod lower_util;
 mod lower_when;
 
+pub(crate) use declare::collect_bind_value_self_ref_spans;
 pub use declare::stage_declare;
 pub use flow::{RefTracker, stage_flow};
 pub use lower_exprs::stage_lower;
@@ -41,8 +41,6 @@ pub struct TransformCtx {
     pub cross_file_fn_return_types: HashMap<DefId, crate::ty::Ty>,
     /// Variant map entries from other files.
     pub cross_file_variant_map: HashMap<Intern<String>, Vec<VariantMapEntry>>,
-    /// Blanket impls from all package files (for cross-file trait dispatch).
-    pub package_blanket_impls: Vec<BlanketImpl>,
     /// Merged package AST used to evaluate compile-time trait bodies.
     pub compile_time_eval_ast: Arc<FileAst>,
     /// IDE package pipeline: skip comptime inlining and heavy Reflectable synthesis.
@@ -55,25 +53,17 @@ impl TransformCtx {
             cross_file_tag_types: HashMap::new(),
             cross_file_fn_return_types: HashMap::new(),
             cross_file_variant_map: HashMap::new(),
-            package_blanket_impls: Vec::new(),
             compile_time_eval_ast: Arc::new(FileAst::empty_for_tests()),
             ide_package: false,
         }
     }
 
-    pub fn with_package_compile_time(
-        package_blanket_impls: Vec<BlanketImpl>,
-        compile_time_eval_ast: FileAst,
-    ) -> Self {
-        Self::with_package_compile_time_arc(package_blanket_impls, Arc::new(compile_time_eval_ast))
+    pub fn with_package_compile_time(compile_time_eval_ast: FileAst) -> Self {
+        Self::with_package_compile_time_arc(Arc::new(compile_time_eval_ast))
     }
 
-    pub fn with_package_compile_time_arc(
-        package_blanket_impls: Vec<BlanketImpl>,
-        compile_time_eval_ast: Arc<FileAst>,
-    ) -> Self {
+    pub fn with_package_compile_time_arc(compile_time_eval_ast: Arc<FileAst>) -> Self {
         Self {
-            package_blanket_impls,
             compile_time_eval_ast,
             ..Self::new()
         }
@@ -208,7 +198,6 @@ pub fn transform_package(
     opts: PackageTransformOptions,
 ) -> Vec<TypedFileAst> {
     let mut accumulated_ctx = TransformCtx {
-        package_blanket_impls: package_ctx.package_blanket_impls.clone(),
         compile_time_eval_ast: Arc::clone(&package_ctx.compile_time_eval_ast),
         ide_package: opts.ide_package,
         ..TransformCtx::new()
@@ -228,7 +217,6 @@ pub fn transform_package(
 
     let declared_refs: Vec<&TypedFileAst> = declared.iter().collect();
     let mut full_ctx = TransformCtx::from_typed_asts(&declared_refs);
-    full_ctx.package_blanket_impls = package_ctx.package_blanket_impls.clone();
     full_ctx.compile_time_eval_ast = Arc::clone(&package_ctx.compile_time_eval_ast);
     full_ctx.ide_package = opts.ide_package;
 

@@ -4,7 +4,8 @@
 use ast::source::SourceExt;
 use ast::ty::Ty;
 use ast::{
-    BindValue, ConstValue, DeclareValue, Expr, FileAst, HasSpanId, SpanId, SpanTable, UnionVariant,
+    BindValue, ConstValue, DeclareValue, Expr, FileAst, HasFunctionKind, HasMember, HasSpanId,
+    SpanId, SpanTable, UnionVariant,
 };
 use serde_json::Value;
 
@@ -168,6 +169,46 @@ impl JsonSerializer {
 
     fn declare_value_json(value: &DeclareValue, span_table: &SpanTable, source: &str) -> Value {
         match value {
+            DeclareValue::Has(members) => {
+                let mems: Vec<Value> = members
+                    .iter()
+                    .map(|m| match m {
+                        HasMember::Property(p) => {
+                            let ty_src = p.ty.as_ref().map(|ty| {
+                                let sp = span_table.get(ty.span_id());
+                                source.get(sp.start()..sp.end()).unwrap_or("<span err>")
+                            });
+                            serde_json::json!({
+                                "kind": "property",
+                                "name": p.name.as_str(),
+                                "type": ty_src,
+                            })
+                        }
+                        HasMember::Function(f) => {
+                            let return_src = f.return_ty.as_ref().map(|rt| {
+                                let sp = span_table.get(rt.span_id);
+                                source.get(sp.start()..sp.end()).unwrap_or("<span err>")
+                            });
+                            let error_src = f.error_ty.as_ref().map(|et| {
+                                let sp = span_table.get(et.span_id);
+                                source.get(sp.start()..sp.end()).unwrap_or("<span err>")
+                            });
+                            let kind = match f.kind {
+                                HasFunctionKind::Instance => "instance_method",
+                                HasFunctionKind::Associated => "associated_method",
+                            };
+                            serde_json::json!({
+                                "kind": kind,
+                                "name": f.name.as_str(),
+                                "params": Self::params_json(&f.params),
+                                "return_ty": return_src,
+                                "error_ty": error_src,
+                            })
+                        }
+                    })
+                    .collect();
+                serde_json::json!({"kind": "has", "members": mems})
+            }
             DeclareValue::Alias(sp) => {
                 let span = span_table.get(sp.span_id);
                 let src = source.get(span.start()..span.end()).unwrap_or("<span err>");
@@ -207,28 +248,6 @@ impl JsonSerializer {
                 serde_json::json!({"kind": "in_range", "start": start.to_string(), "end": end.to_string()})
             }
             DeclareValue::When(_) => serde_json::json!({"kind": "when"}),
-            DeclareValue::Interface(members) => {
-                let methods: Vec<Value> = members
-                    .iter()
-                    .map(|m| {
-                        let return_src = m.return_ty.as_ref().map(|rt| {
-                            let sp = span_table.get(rt.span_id);
-                            source.get(sp.start()..sp.end()).unwrap_or("<span err>")
-                        });
-                        let error_src = m.error_ty.as_ref().map(|et| {
-                            let sp = span_table.get(et.span_id);
-                            source.get(sp.start()..sp.end()).unwrap_or("<span err>")
-                        });
-                        serde_json::json!({
-                            "name": m.name.as_str(),
-                            "params": Self::params_json(&m.params),
-                            "return_ty": return_src,
-                            "error_ty": error_src,
-                        })
-                    })
-                    .collect();
-                serde_json::json!({"kind": "interface", "methods": methods})
-            }
         }
     }
 

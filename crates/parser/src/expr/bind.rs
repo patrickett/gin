@@ -34,10 +34,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
     pub fn parse_bind(&mut self, expr_parser: ExprFn) -> Option<Bind> {
         self.skip_newlines();
 
-        // Doc comments may appear before or after attributes; try both positions.
-        let doc_before_attrs = self.parse_doc_comment();
+        let doc_before = self.parse_doc_comment();
+        if doc_before.is_some() {
+            self.skip_newlines();
+        }
         let attrs = self.parse_bind_attributes();
-        let doc_before = self.parse_doc_comment().or(doc_before_attrs);
 
         self.eat(&Token::Indent);
 
@@ -70,7 +71,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
             } else if self.eat(&Token::Colon) {
                 false
             } else {
-                self.error("parse-expected-bind-operator", "expected ':', ':=' or 'extern'", self.current_span());
+                self.error(
+                    "parse-expected-bind-operator",
+                    "expected ':', ':=' or 'extern'",
+                    self.current_span(),
+                );
                 return None;
             };
             let (value, postfix_doc) = self.parse_bind_value(expr_parser);
@@ -113,35 +118,93 @@ impl<'src, 't> TokenCursor<'src, 't> {
     }
 
     pub fn parse_bind_attributes(&mut self) -> Option<BindAttributes> {
-        if !self.is_at(&Token::Pound) {
-            return None;
-        }
-        self.advance();
-
-        self.expect(&Token::BracketOpen)?;
-
-        let mut items: Vec<AttributeItem> = Vec::new();
-
-        if !self.is_at(&Token::BracketClose) {
-            loop {
-                if let Some(item) = self.parse_one_attribute_item() {
-                    items.push(item);
-                }
-                if self.eat(&Token::Comma) {
-                    continue;
-                }
-                break;
-            }
-        }
-
-        self.expect(&Token::BracketClose);
-
+        let items = self.parse_attribute_items()?;
         let mut attrs = BindAttributes {
             raw_attributes: Some(items),
             ..Default::default()
         };
         attrs.extract_intrinsic_attributes();
         Some(attrs)
+    }
+
+    pub(crate) fn parse_attribute_items(&mut self) -> Option<Vec<AttributeItem>> {
+        if !matches!(self.raw_peek(), Some(Token::Pound)) {
+            return None;
+        }
+        if matches!(self.peek_at(1), Some(Token::BracketOpen)) {
+            self.error(
+                "parse-removed-grouped-attributes",
+                "grouped attributes are no longer valid; write each attribute as `#name`",
+                self.span_at(self.pos() + 1),
+            );
+            self.advance_raw();
+            self.advance_raw();
+            let mut depth = 1;
+            while depth > 0 {
+                match self.advance_raw() {
+                    Some((Token::BracketOpen, _)) => depth += 1,
+                    Some((Token::BracketClose, _)) => depth -= 1,
+                    Some(_) => {}
+                    None => break,
+                }
+            }
+            if matches!(self.raw_peek(), Some(Token::Newline)) {
+                self.advance_raw();
+            }
+            return Some(Vec::new());
+        }
+
+        let mut items = Vec::new();
+        loop {
+            self.advance_raw();
+            if let Some(item) = self.parse_one_attribute_item() {
+                items.push(item);
+            } else {
+                self.error(
+                    "parse-expected-attribute",
+                    "expected attribute name after `#`",
+                    self.current_span(),
+                );
+            }
+
+            if matches!(self.raw_peek(), Some(Token::Comma)) {
+                self.advance_raw();
+                continue;
+            }
+
+            match self.raw_peek() {
+                Some(Token::Newline) => {
+                    self.advance_raw();
+                    if matches!(self.raw_peek(), Some(Token::Pound)) {
+                        continue;
+                    }
+                    if self.blank_line_between_last_consumed_and_raw_peek()
+                        || matches!(
+                            self.raw_peek(),
+                            Some(Token::Newline | Token::Comment(_) | Token::DocComment(_))
+                        )
+                    {
+                        self.error(
+                            "parse-detached-attribute",
+                            "attribute must be on the line directly above the item it attaches to",
+                            self.current_span(),
+                        );
+                    }
+                    break;
+                }
+                Some(Token::Pound) => continue,
+                _ => {
+                    self.error(
+                        "parse-attribute-line",
+                        "attribute must appear on the line directly above the item it attaches to",
+                        self.current_span(),
+                    );
+                    break;
+                }
+            }
+        }
+
+        Some(items)
     }
 
     pub(crate) fn parse_one_attribute_item(&mut self) -> Option<AttributeItem> {
@@ -354,10 +417,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 }
 
                 self.error(
-                                    "parse-expected-annotation-separator",
-                                    "expected ',' or newline between type annotation arguments",
-                                    self.current_span(),
-                                );
+                    "parse-expected-annotation-separator",
+                    "expected ',' or newline between type annotation arguments",
+                    self.current_span(),
+                );
                 break;
             }
         }
@@ -368,10 +431,30 @@ impl<'src, 't> TokenCursor<'src, 't> {
         args
     }
 
-    fn parse_bind_value(&mut self, expr_parser: ExprFn) -> (BindValue, Option<DocComment>) {
+    pub(crate) fn parse_bind_value(
+        &mut self,
+        expr_parser: ExprFn,
+    ) -> (BindValue, Option<DocComment>) {
         // extern → BindValue::Extern
         if self.eat(&Token::Extern) {
             return (BindValue::Extern, None);
+        }
+
+        if self.is_at(&Token::Newline) && matches!(self.peek_at(1), Some(Token::Return)) {
+            self.advance();
+        }
+
+        if self.is_at(&Token::Return) {
+            let ret = self
+                .parse_return(expr_parser)
+                .expect("return token checked");
+            return (
+                BindValue::Body {
+                    exprs: Vec::new(),
+                    ret,
+                },
+                None,
+            );
         }
 
         // Indent → multi-line body
@@ -384,7 +467,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
             self.eat(&Token::Dedent);
 
             let ret = self.parse_return(expr_parser).unwrap_or_else(|| {
-                self.error("parse-expected-return", "expected 'return' after bind body", self.current_span());
+                self.error(
+                    "parse-expected-return",
+                    "expected 'return' after bind body",
+                    self.current_span(),
+                );
                 Return {
                     value: None,
                     span_id: self.current_span(),
@@ -484,13 +571,13 @@ impl<'src, 't> TokenCursor<'src, 't> {
             if let Some((key, kind, conv, group)) = self.parse_one_param(expr_parser) {
                 if seen_default && !matches!(kind, ParameterKind::Default(_)) {
                     self.error(
-                                            "parse-parameter-after-default",
-                                            format!(
-                                                "positional parameter `{}` appears after a default parameter",
-                                                key.as_str()
-                                            ),
-                                            self.current_span(),
-                                        );
+                        "parse-parameter-after-default",
+                        format!(
+                            "positional parameter `{}` appears after a default parameter",
+                            key.as_str()
+                        ),
+                        self.current_span(),
+                    );
                 }
                 if matches!(kind, ParameterKind::Default(_)) {
                     seen_default = true;
@@ -507,10 +594,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
             }
 
             self.error(
-                            "parse-expected-param-separator",
-                            "expected ',' or newline between parameters",
-                            self.current_span(),
-                        );
+                "parse-expected-param-separator",
+                "expected ',' or newline between parameters",
+                self.current_span(),
+            );
             break;
         }
 

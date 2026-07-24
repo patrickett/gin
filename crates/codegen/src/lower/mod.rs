@@ -212,12 +212,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     return Some(val);
                 }
 
-                // Determine return type from the typed AST.
-                let return_ty = typed_ast
-                    .fn_return_types
-                    .get(target)
-                    .map(|t| self.ty_to_mlir(t))
-                    .unwrap_or_else(|| self.mlir.i64());
+                let return_ty = self.ty_to_mlir(expr_ref.ty);
 
                 Some(block.call(self.mlir, fn_name, &lowered_args, return_ty, loc))
             }

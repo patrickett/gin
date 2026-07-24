@@ -57,16 +57,16 @@ pub mod doc_comment;
 pub use doc_comment::DocComment;
 
 pub mod declare;
-pub use declare::{Declare, DeclareAttributes, DeclareValue, InterfaceMember, ProvidedTrait};
+pub use declare::{
+    Declare, DeclareAttributes, DeclareValue, HasFunction, HasFunctionKind, HasMember,
+    HasMemberBody, HasProperty, ProvidedTrait,
+};
 
 pub mod pattern;
 pub use pattern::PatternNameExt;
 
 pub mod span;
 pub use span::{HasSpanId, Span, SpanId, SpanTable, Spanned, SubSpan};
-
-pub mod blanket_impl;
-pub use blanket_impl::BlanketImpl;
 
 pub mod ty;
 pub use ty::{
@@ -80,16 +80,13 @@ pub use range_bounds::InclusiveBounds;
 pub mod hover_format;
 pub use hover_format::{HoverDoc, HoverSection, SECTION_SEP};
 
-mod impl_block;
-pub use impl_block::ImplBlock;
-
 pub mod prelude {
     pub use crate::declare::*;
     pub use crate::doc_comment::*;
     pub use crate::expr::*;
     pub use crate::file_ast::*;
     pub use crate::folder::*;
-    pub use crate::impl_block::*;
+
     pub use crate::parameter::*;
     pub use crate::path::*;
     pub use crate::pattern::*;

@@ -5,7 +5,8 @@
 //! not by the core compilation pipeline.
 
 use ast::{
-    Bind, Declare, DeclareValue, FileAst, InRangeBounds, ParameterKind, Parameters, TypeExpr,
+    Bind, Declare, DeclareValue, FileAst, HasMember, InRangeBounds, ParameterKind, Parameters,
+    TypeExpr,
 };
 use ast::{Complexity, ComplexityExpr};
 use i256::I256;
@@ -50,30 +51,16 @@ fn hash_tag_def(hasher: &mut Sha256, name: &Intern<String>, decl: &Declare) {
     let _ = write!(hasher, "TAG:{}", name);
     hash_parameters(hasher, decl.params.as_ref());
 
+    if decl.attributes.auto {
+        let _ = write!(hasher, ":ATTR:auto");
+    }
+
     match &decl.value {
         DeclareValue::Alias(sp) => {
             let _ = write!(hasher, ":ALIAS:");
             hash_type_expr(hasher, &sp.value);
         }
-        DeclareValue::Interface(members) => {
-            let _ = write!(hasher, ":INTERFACE:");
-            for m in members {
-                let _ = write!(hasher, "{}:", m.name.as_str());
-                hash_parameters(hasher, Some(&m.params));
-                for (_k, conv) in &m.conventions {
-                    let _ = write!(hasher, "{:?}", conv);
-                }
-                if let Some(rt) = &m.return_ty {
-                    let _ = write!(hasher, ":RET:");
-                    hash_type_expr(hasher, &rt.value);
-                }
-                if let Some(et) = &m.error_ty {
-                    let _ = write!(hasher, ":ERR:");
-                    hash_type_expr(hasher, &et.value);
-                }
-                let _ = write!(hasher, ";");
-            }
-        }
+
         DeclareValue::Union { variants } => {
             let _ = write!(hasher, ":UNION:");
             for variant in variants {
@@ -93,9 +80,38 @@ fn hash_tag_def(hasher: &mut Sha256, name: &Intern<String>, decl: &Declare) {
         DeclareValue::InRange(start, end) => {
             let _ = write!(hasher, ":INRANGE:{start}..{end}");
         }
+        DeclareValue::Has(members) => {
+            let _ = write!(hasher, ":INTERFACE:");
+            for member in members {
+                match member {
+                    HasMember::Property(property) => {
+                        let _ = write!(hasher, "{}:PROPERTY:", property.name.as_str());
+                        if let Some(ty) = &property.ty {
+                            hash_type_expr(hasher, &ty.value);
+                        }
+                    }
+                    HasMember::Function(function) => {
+                        let _ = write!(hasher, "{}:", function.name.as_str());
+                        hash_parameters(hasher, Some(&function.params));
+                        for convention in function.conventions.values() {
+                            let _ = write!(hasher, "{convention:?}");
+                        }
+                        if let Some(return_ty) = &function.return_ty {
+                            let _ = write!(hasher, ":RET:");
+                            hash_type_expr(hasher, &return_ty.value);
+                        }
+                        if let Some(error_ty) = &function.error_ty {
+                            let _ = write!(hasher, ":ERR:");
+                            hash_type_expr(hasher, &error_ty.value);
+                        }
+                    }
+                }
+                let _ = write!(hasher, ";");
+            }
+        }
     }
 
-    // Hash provided traits from `Type.Trait(...)` implementation declarations.
+    // Hash provided traits from `Type.Trait has ...` provisions.
     for pt in &decl.provided_traits {
         let _ = write!(hasher, ":PROVIDES:{}:", pt.trait_name.as_str());
         for (field_name, _) in &pt.fields {
@@ -439,14 +455,7 @@ fn extract_type_expr_sig(e: &TypeExpr) -> TagSig {
 fn extract_tag_shape(value: &DeclareValue) -> TagShapeSig {
     match value {
         DeclareValue::Alias(sp) => TagShapeSig::Alias(extract_type_expr_sig(&sp.value)),
-        DeclareValue::Interface(members) => {
-            let sigs: Vec<ast::declare::InterfaceMember> = members.clone();
-            TagShapeSig::Interface(
-                sigs.into_iter()
-                    .map(|m| (m.name.to_string(), "method".to_string()))
-                    .collect(),
-            )
-        }
+
         DeclareValue::Union { variants } => TagShapeSig::Union(
             variants
                 .iter()
@@ -457,6 +466,19 @@ fn extract_tag_shape(value: &DeclareValue) -> TagShapeSig {
         DeclareValue::Set() => TagShapeSig::Set,
         DeclareValue::Range(start, end) => TagShapeSig::Range(*start, *end),
         DeclareValue::InRange(start, end) => TagShapeSig::InRange(*start, *end),
+        DeclareValue::Has(members) => TagShapeSig::Interface(
+            members
+                .iter()
+                .map(|member| match member {
+                    HasMember::Property(property) => {
+                        (property.name.to_string(), "property".to_string())
+                    }
+                    HasMember::Function(function) => {
+                        (function.name.to_string(), "method".to_string())
+                    }
+                })
+                .collect(),
+        ),
     }
 }
 

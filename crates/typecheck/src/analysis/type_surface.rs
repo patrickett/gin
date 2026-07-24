@@ -115,18 +115,21 @@ impl<'a> TypeEnv<'a> {
                 let any_subst = !local_dep.types.is_empty() || !local_dep.consts.is_empty();
                 if any_subst
                     && let Some(tag_decls) = self.tag_decls
-                    && let Some(ast::DeclareValue::Interface(members)) =
+                    && let Some(ast::DeclareValue::Has(members)) =
                         tag_decls.get(name).map(|d| &d.value)
                 {
                     let fields: Vec<(Intern<String>, Box<Ty>)> = members
                         .iter()
-                        .map(|m| {
-                            let ty = m
-                                .return_ty
-                                .as_ref()
-                                .map(|rt| with_subst.resolve(&rt.value))
-                                .unwrap_or(Ty::Unit);
-                            (m.name, Box::new(ty))
+                        .filter_map(|member| match member {
+                            ast::HasMember::Property(property) => {
+                                let ty = property
+                                    .ty
+                                    .as_ref()
+                                    .map(|ty| with_subst.resolve(&ty.value))
+                                    .unwrap_or(Ty::Unit);
+                                Some((property.name, Box::new(ty)))
+                            }
+                            ast::HasMember::Function(_) => None,
                         })
                         .collect();
                     return Ty::Record {
@@ -356,18 +359,21 @@ pub fn resolve_name_from_files(
                 let env = TypeEnv::new(&empty);
                 return env.resolve(&spanned.value);
             }
-            DeclareValue::Interface(members) => {
+            DeclareValue::Has(members) => {
                 let empty = HashMap::new();
                 let env = TypeEnv::new(&empty);
                 let fields: Vec<(Intern<String>, Box<Ty>)> = members
                     .iter()
-                    .map(|m| {
-                        let ty = m
-                            .return_ty
-                            .as_ref()
-                            .map(|rt| env.resolve(&rt.value))
-                            .unwrap_or(Ty::Unit);
-                        (m.name, Box::new(ty))
+                    .filter_map(|member| match member {
+                        ast::HasMember::Property(property) => {
+                            let ty = property
+                                .ty
+                                .as_ref()
+                                .map(|ty| env.resolve(&ty.value))
+                                .unwrap_or(Ty::Unit);
+                            Some((property.name, Box::new(ty)))
+                        }
+                        ast::HasMember::Function(_) => None,
                     })
                     .collect();
                 return Ty::Record { name, fields };

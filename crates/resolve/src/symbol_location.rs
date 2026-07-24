@@ -442,6 +442,8 @@ pub fn union_variant_def_location(
     let mut search_dirs = Vec::new();
     if let Some(pkg) = find_package_root(file_path) {
         search_dirs.push(pkg);
+    } else if let Some(module_root) = file_path.parent().and_then(Path::parent) {
+        search_dirs.push(module_root.to_path_buf());
     }
     if let Some(parent) = file_path.parent() {
         let parent = parent.to_path_buf();
@@ -487,6 +489,28 @@ pub fn cursor_definition(
         return Some(CursorDefinition::SameFile(span));
     }
 
+    // `self` keyword → receiver type.
+    if word == "self"
+        && let Some(span) = self_keyword_def_span(ast, byte_pos)
+    {
+        return Some(CursorDefinition::SameFile(span));
+    }
+
+    // Type parameter reference (e.g. `x` in `start x` inside `Range(x) has ...`.
+    if let Some(span) = type_param_def_span(ast, source, &word, byte_pos) {
+        return Some(CursorDefinition::SameFile(span));
+    }
+
+    // `self.field` in provisions → has-member field definition.
+    if let Some(span) = record_get_field_def_span(ast, byte_pos, &word) {
+        return Some(CursorDefinition::SameFile(span));
+    }
+
+    // Has-body method name (e.g. `new` in `new(start x, ...)`) → method declaration.
+    if let Some(span) = has_method_def_span(ast, byte_pos, &word) {
+        return Some(CursorDefinition::SameFile(span));
+    }
+
     if ast
         .union_variant_reference_at_byte(source, byte_pos)
         .is_some()
@@ -508,8 +532,20 @@ pub fn cursor_definition(
         return Some(CursorDefinition::SameFile(span));
     }
 
-    ast.find_import_definition_span(&word, source)
-        .map(CursorDefinition::SameFile)
+    if let Some(span) = ast.find_import_definition_span(&word, source) {
+        return Some(CursorDefinition::SameFile(span));
+    }
+
+    if word.starts_with(char::is_uppercase)
+        && let Some(loc) = union_variant_def_location(file_path, &word, file_reader)
+    {
+        if loc.file == file_path {
+            return Some(CursorDefinition::SameFile(loc.byte_range));
+        }
+        return Some(CursorDefinition::OtherFile(loc));
+    }
+
+    None
 }
 
 fn parameter_definition_span(
@@ -520,6 +556,7 @@ fn parameter_definition_span(
 ) -> Option<Range<usize>> {
     let span_table = &ast.span_table;
     let key = internment::Intern::<String>::from_ref(word);
+    // Search standard defs (top-level binds).
     for bind in ast.defs.values() {
         let Some(params) = bind.params.as_ref() else {
             continue;
@@ -529,6 +566,207 @@ fn parameter_definition_span(
         }
         if let Some(span) = inferred_param_name_span(span_table, source, bind, word) {
             return Some(span);
+        }
+    }
+    // Search has-body function params.
+    for decl in ast.tags.values() {
+        if !span_table.get(decl.span).contains(byte_pos) {
+            continue;
+        }
+        let members = match &decl.value {
+            ast::DeclareValue::Has(members) => members,
+            _ => continue,
+        };
+        for m in members {
+            if let ast::HasMember::Function(f) = m
+                && f.params.contains_key(&key)
+                && byte_in_has_function_body(f, byte_pos, span_table)
+                && let Some(span) = has_param_name_span_from_fn(span_table, source, f, word)
+            {
+                return Some(span);
+            }
+        }
+    }
+    None
+}
+
+/// Check if a byte position falls within a HasFunction's body expression.
+fn byte_in_has_function_body(
+    f: &ast::HasFunction,
+    byte_pos: usize,
+    span_table: &ast::span::SpanTable,
+) -> bool {
+    f.body.as_ref().is_some_and(|body| {
+        let value = match body {
+            ast::HasMemberBody::Overrideable(value) | ast::HasMemberBody::Final(value) => value,
+        };
+        match value {
+            ast::BindValue::Expr(expr) => span_table.get(expr.span_id).contains(byte_pos),
+            ast::BindValue::Body { exprs, ret } => {
+                let start = exprs
+                    .first()
+                    .map(|expr| span_table.get(expr.span_id).start())
+                    .unwrap_or_else(|| span_table.get(ret.span_id).start());
+                let end = span_table.get(ret.span_id).end();
+                (start..end).contains(&byte_pos)
+            }
+            ast::BindValue::Extern | ast::BindValue::Unassigned => false,
+        }
+    })
+}
+
+/// Find a param name span in a HasFunction by scanning source between name and return type.
+fn has_param_name_span_from_fn(
+    span_table: &ast::span::SpanTable,
+    source: &str,
+    f: &ast::HasFunction,
+    param_name: &str,
+) -> Option<Range<usize>> {
+    let start = span_table.get(f.name_span).end();
+    let end = f
+        .return_ty
+        .as_ref()
+        .map(|rt| span_table.get(rt.span_id).start())
+        .unwrap_or(start);
+    find_param_name_between(source, start, end, param_name).map(|pos| pos..pos + param_name.len())
+}
+
+/// Find the tag definition that `self` refers to.
+/// Searches provided trait field expressions and has-body members
+/// to find the containing tag.
+fn self_keyword_def_span(ast: &FileAst, byte_pos: usize) -> Option<Range<usize>> {
+    let span_table = &ast.span_table;
+    for decl in ast.tags.values() {
+        // Check provided trait fields (e.g. `Range.Bounded has min: self.start`.
+        for pt in &decl.provided_traits {
+            for (_, expr) in &pt.fields {
+                if span_table.get(expr.span_id).contains(byte_pos) {
+                    let span = span_table.get(decl.name_span);
+                    return Some(span.start()..span.end());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Find a `HasMember::Function` declaration matching the word at the byte position.
+/// Used for goto-def on method names in calls.
+fn has_method_def_span(ast: &FileAst, byte_pos: usize, word: &str) -> Option<Range<usize>> {
+    let span_table = &ast.span_table;
+    let key = internment::Intern::<String>::from_ref(word);
+    for decl in ast.tags.values() {
+        if !span_table.get(decl.span).contains(byte_pos) {
+            continue;
+        }
+        let members = match &decl.value {
+            ast::DeclareValue::Has(members) => members,
+            _ => continue,
+        };
+        for m in members {
+            if let ast::HasMember::Function(f) = m
+                && f.name == key
+            {
+                let span = span_table.get(f.name_span);
+                return Some(span.start()..span.end());
+            }
+        }
+    }
+    None
+}
+
+/// Find the has-member field definition that a `self.field` expression refers to.
+/// Searches `ProvidedTrait` field expressions and `HasMember::Property` definitions.
+fn record_get_field_def_span(ast: &FileAst, byte_pos: usize, word: &str) -> Option<Range<usize>> {
+    let span_table = &ast.span_table;
+    let field_key = internment::Intern::<String>::from_ref(word);
+
+    // Search provided trait field expressions for `RecordGet { base: SelfRef, field }`.
+    for decl in ast.tags.values() {
+        for pt in &decl.provided_traits {
+            for (_, expr) in &pt.fields {
+                if !span_table.get(expr.span_id).contains(byte_pos) {
+                    continue;
+                }
+                // Found an expression at this byte. Check if it's a RecordGet for our field.
+                if let ast::Expr::RecordGet { field, .. } = &expr.value
+                    && *field == field_key
+                {
+                    // Find the field definition in this tag's has members.
+                    return find_has_member_def_span(ast, &decl.name, &field_key, span_table);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Search a tag's `DeclareValue::Has` members for a property/function with the given name,
+/// and return its name span.
+fn find_has_member_def_span(
+    ast: &FileAst,
+    tag_name: &internment::Intern<String>,
+    member_name: &internment::Intern<String>,
+    span_table: &ast::span::SpanTable,
+) -> Option<Range<usize>> {
+    let decl = ast.tags.get(tag_name)?;
+    let members = match &decl.value {
+        ast::DeclareValue::Has(members) => members,
+        _ => return None,
+    };
+    for m in members {
+        let (name, name_span) = match m {
+            ast::HasMember::Property(p) => (p.name, p.name_span),
+            ast::HasMember::Function(f) => (f.name, f.name_span),
+        };
+        if name == *member_name {
+            let span = span_table.get(name_span);
+            return Some(span.start()..span.end());
+        }
+    }
+    None
+}
+
+/// Find the type parameter definition that a word refers to.
+/// For example, `x` in property `start x` inside `Range(x) has ...`
+/// should resolve to the `x` in `Range(x)`.
+fn type_param_def_span(
+    ast: &FileAst,
+    source: &str,
+    word: &str,
+    byte_pos: usize,
+) -> Option<Range<usize>> {
+    let span_table = &ast.span_table;
+    let key = internment::Intern::<String>::from_ref(word);
+    for decl in ast.tags.values() {
+        if !span_table.get(decl.span).contains(byte_pos) {
+            continue;
+        }
+        let Some(params) = &decl.params else {
+            continue;
+        };
+        if !params.contains_key(&key) {
+            continue;
+        }
+        // Scan between name end and next `) or newline for the param name.
+        let name_span = span_table.get(decl.name_span);
+        let close_paren = source[name_span.end()..].find(')')? + name_span.end();
+        let param_str = source.get(name_span.end()..close_paren)?;
+        // Find `word` as a token in the param string.
+        let mut search_start = 0;
+        while let Some(rel) = param_str[search_start..].find(word) {
+            let abs = name_span.end() + search_start + rel;
+            let before = abs
+                .checked_sub(1)
+                .and_then(|i| source.as_bytes().get(i))
+                .copied();
+            let after = source.as_bytes().get(abs + word.len()).copied();
+            let word_start = |b: u8| b.is_ascii_whitespace() || b == b'(' || b == b',';
+            let word_end = |b: u8| b.is_ascii_whitespace() || b == b')' || b == b',';
+            if word_start(before.unwrap_or(b'(')) && after.is_none_or(word_end) {
+                return Some(abs..abs + word.len());
+            }
+            search_start += rel + 1;
         }
     }
     None

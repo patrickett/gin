@@ -409,13 +409,19 @@ pub fn resolve_local_symbol_hover(
     file_path: &Path,
     local_import_path: &Path,
     symbol: &str,
-    _file_reader: &dyn Fn(&Path) -> Option<ParsedFile>,
+    file_reader: &dyn Fn(&Path) -> Option<ParsedFile>,
 ) -> Option<String> {
-    // TODO: re-implement hover for local bundle symbols using
-    //   typed = typecheck::transform_file(ast.clone(), typecheck::FileId(0));
-    //   and typed.hover_at(...); `definition_span` was moved to resolve.
-    let _ = (file_path, local_import_path, symbol);
-    None
+    let def_loc = crate::symbol_location::local_bundle_def_location(
+        file_path,
+        local_import_path,
+        symbol,
+        file_reader,
+    )?;
+    let parsed = file_reader(&def_loc.file)?;
+    let typed = typecheck::transform::transform_file(parsed.output.ast, typecheck::FileId(0));
+    let source = &parsed.source;
+    let (line, character) = source.byte_offset_to_position(def_loc.byte_range.start);
+    typed.hover_at(source, line, character)
 }
 
 pub fn resolve_local_symbol_def_span(

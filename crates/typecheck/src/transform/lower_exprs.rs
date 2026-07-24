@@ -824,6 +824,7 @@ fn types_are_incompatible(arg_ty: &Ty, field_ty: &Ty) -> bool {
         (Ty::Literal(ConstValue::Int(_)), Ty::Union { .. }) => true,
         // String literal assigned to union (Bool is True/False)
         (Ty::Literal(ConstValue::String(_)), Ty::Union { .. }) => true,
+        (Ty::Opaque(actual), Ty::Opaque(expected)) => actual != expected,
         _ => false,
     }
 }
@@ -1027,11 +1028,34 @@ fn check_type_flaws(
             }
         }
         TypedExprKind::RecordSet { base, field, .. } => {
-            // Check that the field exists on the base record type
-            let base_ty = typed.exprs.ty.get(base.as_usize());
-            if let Some(Ty::Record { fields, .. }) = base_ty
-                && !fields.iter().any(|(n, _)| n.as_str() == field.as_str())
-            {
+            let field_exists = typed.exprs.ty.get(base.as_usize()).and_then(|ty| match ty {
+                Ty::Record { fields, .. } => Some(fields.iter().any(|(name, _)| name == field)),
+                _ => None,
+            });
+            let field_exists = field_exists.or_else(|| {
+                let TypedExprKind::FnCall { target, args, .. } =
+                    typed.exprs.kind.get(base.as_usize())?
+                else {
+                    return None;
+                };
+                if args.as_ref().is_some_and(|args| !args.is_empty()) {
+                    return None;
+                }
+                let bind = typed.defs.get(target)?;
+                let body = match &bind.body {
+                    BindBody::Expr(expr) => Some(*expr),
+                    BindBody::Body { exprs, ret } => (*ret).or_else(|| exprs.last().copied()),
+                    BindBody::Extern => None,
+                }?;
+                let TypedExprKind::TagCall { variant_id, .. } =
+                    typed.exprs.kind.get(body.as_usize())?
+                else {
+                    return None;
+                };
+                let tag = typed.tags.get(&variant_id.union)?;
+                Some(tag.record_field_types.contains_key(field))
+            });
+            if field_exists == Some(false) {
                 flaws.push(
                     Diagnostic::new(
                         "type-unknown-field",

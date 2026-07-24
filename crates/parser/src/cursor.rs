@@ -261,6 +261,26 @@ impl<'src, 't> TokenCursor<'src, 't> {
         }
     }
 
+    pub fn advance_raw(&mut self) -> Option<(Token<'src>, SpanId)> {
+        let item = self.tokens.get(self.pos)?;
+        self.last_consumed_pos = Some(self.pos);
+        self.pos += 1;
+        self.invalidate_cache();
+        Some((item.0, item.1))
+    }
+
+    pub fn blank_line_between_last_consumed_and_raw_peek(&self) -> bool {
+        let Some(last_pos) = self.last_consumed_pos else {
+            return false;
+        };
+        let Some((_, next_span_id)) = self.tokens.get(self.pos) else {
+            return false;
+        };
+        let last_span = self.span_table.get(self.tokens[last_pos].1);
+        let next_span = self.span_table.get(*next_span_id);
+        next_span.start() > last_span.end()
+    }
+
     pub fn eof_span(&self) -> SpanId {
         self.tokens
             .last()

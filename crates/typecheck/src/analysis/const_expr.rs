@@ -232,13 +232,20 @@ fn walk_tag_refinements(
             let Some(decl) = ast.tags.get(&call.name) else {
                 return;
             };
-            let DeclareValue::Interface(members) = &decl.value else {
+            let DeclareValue::Has(members) = &decl.value else {
                 return;
             };
             let span_table = &ast.span_table;
 
-            for (i, member) in members.iter().enumerate() {
-                let Some(refinement) = &member.refinement else {
+            for (i, property) in members
+                .iter()
+                .filter_map(|member| match member {
+                    ast::HasMember::Property(property) => Some(property),
+                    ast::HasMember::Function(_) => None,
+                })
+                .enumerate()
+            {
+                let Some(refinement) = &property.refinement else {
                     continue;
                 };
                 let Some(arg) = call.args.get(i) else {
@@ -282,10 +289,17 @@ fn walk_tag_refinements(
             if let Some(Some(cv)) = const_binds.get(&b.name)
                 && let ConstValue::Tag { name, args, .. } = cv
                 && let Some(decl) = ast.tags.get(name)
-                && let DeclareValue::Interface(members) = &decl.value
+                && let DeclareValue::Has(members) = &decl.value
             {
-                for (i, member) in members.iter().enumerate() {
-                    let Some(refinement) = &member.refinement else {
+                for (i, property) in members
+                    .iter()
+                    .filter_map(|member| match member {
+                        ast::HasMember::Property(property) => Some(property),
+                        ast::HasMember::Function(_) => None,
+                    })
+                    .enumerate()
+                {
+                    let Some(refinement) = &property.refinement else {
                         continue;
                     };
                     let Some(arg_cv) = args.get(i) else { continue };
@@ -350,10 +364,12 @@ fn eval_compile_time_expr_depth(
             Literal::String(s) => Some(ConstValue::String(s.clone())),
             Literal::Number(n) => Some(ConstValue::Int(*n as i128)),
         },
-        Expr::AnonymousTag(name) => Some(ConstValue::Tag {
-            name: *name,
-            qual_path: None,
-            args: Vec::new().into(),
+        Expr::AnonymousTag(name) => const_binds.get(name).and_then(|cv| cv.clone()).or_else(|| {
+            Some(ConstValue::Tag {
+                name: *name,
+                qual_path: None,
+                args: Vec::new().into(),
+            })
         }),
         Expr::RecordLit(fields) => {
             // Record literal: `(arch: 'x86_64', vendor: 'unknown')` → ConstValue::Record
@@ -406,23 +422,11 @@ fn eval_compile_time_expr_depth(
                 }
                 s
             });
-            if let Some(decl) = ast.tags.get(&call.name)
-                && let DeclareValue::Interface(members) = &decl.value
-                && !members.is_empty()
-            {
-                // Interface tags can't be constructed with positional args.
-                Some(ConstValue::Tag {
-                    name: call.name,
-                    qual_path,
-                    args: args.into(),
-                })
-            } else {
-                Some(ConstValue::Tag {
-                    name: call.name,
-                    qual_path,
-                    args: args.into(),
-                })
-            }
+            Some(ConstValue::Tag {
+                name: call.name,
+                qual_path,
+                args: args.into(),
+            })
         }
         Expr::RecordSet { .. } | Expr::Destructure { .. } => None,
         Expr::RecordGet { base, field } => {

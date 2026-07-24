@@ -62,8 +62,14 @@ pub(crate) fn resolve_expr_type(
             };
             fn_call.infer_ty(&env)
         }
+        Expr::TagCall(tag_call) if tag_call.name.as_str() == "Self" => {
+            receiver_type.cloned().unwrap_or(Ty::Opaque(tag_call.name))
+        }
         Expr::TagCall(tag_call) => {
             resolve_tag_call_type(&tag_call.name, tag_types, variant_map, expected_ty)
+        }
+        Expr::AnonymousTag(name) if name.as_str() == "Self" => {
+            receiver_type.cloned().unwrap_or(Ty::Opaque(*name))
         }
         Expr::AnonymousTag(name) => {
             resolve_tag_call_type(name, tag_types, variant_map, expected_ty)
