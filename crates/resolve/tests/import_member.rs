@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use parser::query::SourceParseExt;
-use resolve::{GinPackageExt, ParsedFile, resolve_import_symptoms};
+use resolve::{GinPackageExt, ParsedFile, resolve_import_symptoms, resolve_imports};
 use test_fixtures::TempPackage;
 
 #[test]
@@ -121,6 +121,34 @@ fn resolve_dep_bundle_with_folder_path() {
         main_diags.is_empty(),
         "expected no import errors for `use self.primitive.(Bool, List)`, got: {:?}",
         main_diags
+    );
+}
+
+#[test]
+fn resolve_imports_excludes_unreferenced_dependency_files() {
+    let pkg = TempPackage::new("all_dependency_files");
+    pkg.write_flask_with_deps("app", r#"{"core":{"path":"core"}}"#);
+    pkg.write(
+        "core/flask.jsonc",
+        r#"{"name":"core","version":"0.0.0","authors":[]}"#,
+    );
+    pkg.write("core/int.gin", "Int is Unit\n");
+    let extra_path = pkg.write("core/extra.gin", "Extra is Unit\n");
+    let main_path = pkg.write("main.gin", "use core.Int\n\nmain:\nreturn\n");
+
+    let source = std::fs::read_to_string(&main_path).unwrap();
+    let entry = ParsedFile {
+        path: main_path,
+        output: source.parse_source_full(),
+        source,
+    };
+    let mut deps = HashMap::new();
+    deps.insert("core".to_string(), pkg.join("core"));
+
+    let resolved = resolve_imports(vec![entry], &deps);
+    assert!(
+        resolved.iter().all(|file| file.path != extra_path),
+        "unreferenced dependency source should not be compiled"
     );
 }
 

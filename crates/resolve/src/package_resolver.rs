@@ -8,12 +8,12 @@ use ast::{
 use diagnostic::{Diagnostic, SpanId, SpanTable};
 
 use crate::ParsedFile;
-use crate::file_helpers::GinPackageExt;
+
 use crate::folder_module::{
     NormalizePathError, normalize_local_import_path, resolve_logical_module_dir,
     split_dep_path_segments,
 };
-use crate::graph::{ResolveGraph, ResolveNode, build_import_closure};
+use crate::graph::{ResolveGraph, build_import_closure};
 use flask::FlaskPathExt;
 
 /// Whether to qualify ASTs or collect import symptoms only.
@@ -58,25 +58,7 @@ pub fn resolve_imports(
     entry_files: Vec<ParsedFile>,
     dependencies: &HashMap<String, PathBuf>,
 ) -> Vec<ParsedFile> {
-    let (mut graph, available) = build_import_closure(entry_files, dependencies);
-
-    for dep_dir in dependencies.values() {
-        for file_path in dep_dir.collect_gin_files() {
-            if !graph.nodes.iter().any(|n| n.path == file_path) {
-                let qual = dep_dir
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                graph.nodes.push(ResolveNode {
-                    path: file_path,
-                    qualifier: qual,
-                });
-                graph.adj.push(Vec::new());
-                graph.node_aliases.push(Vec::new());
-            }
-        }
-    }
-
+    let (graph, available) = build_import_closure(entry_files, dependencies);
     resolve(graph, &mut |path| available.get(path).cloned())
 }
 
@@ -215,7 +197,7 @@ pub(crate) fn resolve_module_import(
             },
         ),
         ImportSource::CurrentModule { member } => {
-            resolve_current_module_import(member, base_dir, spans, symptoms)
+            resolve_current_module_import(member, base_dir, spans, symptoms, find_public_def)
         }
         ImportSource::LocalMember(m) => {
             resolve_local_member_import(m, base_dir, spans, symptoms, find_public_def)
@@ -228,10 +210,10 @@ fn resolve_current_module_import(
     file_dir: &Path,
     spans: &SpanTable,
     symptoms: &mut Vec<Diagnostic>,
+    find_public_def: &dyn Fn(&Path, &str) -> Option<PathBuf>,
 ) -> ResolvedModule {
     let symbol = member.export.as_str();
-    // Sibling import: same folder module only (other `.gin` files in this directory).
-    if crate::public_symbols::find_public_def(file_dir, symbol, false).is_none() {
+    if find_public_def(file_dir, symbol).is_none() {
         symptoms.push(
             Diagnostic::new(
                 "use-not-exported",
@@ -1049,6 +1031,7 @@ fn resolve_folder_module_files(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_helpers::GinPackageExt;
     use crate::graph::{ResolveGraph, ResolveNode, discovery};
     use diagnostic::Span;
     use internment::Intern;

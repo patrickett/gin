@@ -66,24 +66,21 @@ struct ParseEntry {
     line_index: Arc<LineIndex>,
 }
 
-/// Generation-based cache for parsed files and package analysis.
+/// Cache for parsed files and package analysis.
 ///
-/// # Cache invalidation
-///
-/// A global generation counter is bumped every time `set_contents` is called.
-/// Each cached package entry records the generation at which it was computed.
-/// On lookup, if the current generation is newer, the entry is stale and
-/// gets recomputed lazily.
+/// Packages with `flask.jsonc` are invalidated independently. Files without a
+/// package configuration fall back to their parent directory and retain global
+/// invalidation so independently registered files cannot reuse a stale entry.
 pub struct PackageCache {
     /// File path → (source text, parse output)
     files: Mutex<HashMap<PathBuf, ParseEntry>>,
     /// Package root → cached package entry
     packages: Mutex<HashMap<PathBuf, Arc<PackageEntry>>>,
-    /// Package root → generation at which the entry was computed
+    /// Package root → generation at which an unconfigured package was computed
     package_gens: Mutex<HashMap<PathBuf, u64>>,
     /// File path → package root (reverse lookup)
     file_pkg: Mutex<HashMap<PathBuf, PathBuf>>,
-    /// Global generation counter, bumped on every file content change
+    /// Generation for unconfigured package fallbacks
     next_gen: AtomicU64,
     /// File watcher for disk changes (kept alive for the lifetime of the cache)
     _watcher: Arc<Mutex<Debouncer<RecommendedWatcher>>>,
@@ -133,12 +130,14 @@ impl PackageCache {
             },
         );
         if let Some(pkg_root) = resolve::find_package_root(&path) {
-            self.file_pkg.lock().unwrap().insert(path, pkg_root);
+            self.file_pkg.lock().unwrap().insert(path, pkg_root.clone());
+            self.packages.lock().unwrap().remove(&pkg_root);
+            self.package_gens.lock().unwrap().remove(&pkg_root);
         }
         Ok(())
     }
 
-    /// Update a file's contents, re-parse it, and bump the global generation.
+    /// Update a file's contents, re-parse it, and evict its package analysis.
     pub fn set_contents(&self, path: &Path, contents: String) {
         let parse = Arc::new(contents.parse_source_full());
         let line_index = Arc::new(LineIndex::new(&contents));
@@ -150,7 +149,6 @@ impl PackageCache {
                 line_index,
             },
         );
-        // Bump global generation to invalidate cached package entries.
         self.next_gen.fetch_add(1, Ordering::SeqCst);
         // Re-discover package root mapping (in case it changed), then drop the
         // stale typed package immediately instead of retaining it until the next
@@ -161,10 +159,8 @@ impl PackageCache {
                 .unwrap()
                 .insert(path.to_path_buf(), pkg_root.clone());
             self.packages.lock().unwrap().remove(&pkg_root);
-            self.package_gens.lock().unwrap().remove(&pkg_root);
         } else if let Some(pkg_root) = self.file_pkg.lock().unwrap().get(path).cloned() {
             self.packages.lock().unwrap().remove(&pkg_root);
-            self.package_gens.lock().unwrap().remove(&pkg_root);
         }
     }
 
@@ -204,9 +200,10 @@ impl PackageCache {
     fn package_file_paths(&self, path: &Path) -> Option<Vec<PathBuf>> {
         let pkg_root = self.resolve_package_root(path)?;
         let files = self.files.lock().unwrap();
+        let file_pkg = self.file_pkg.lock().unwrap();
         let mut pkg_files: Vec<PathBuf> = files
             .keys()
-            .filter(|f| f.starts_with(&pkg_root))
+            .filter(|file| file_pkg.get(*file) == Some(&pkg_root))
             .cloned()
             .collect();
         if pkg_files.is_empty() {
@@ -234,20 +231,21 @@ impl PackageCache {
             // Parent always exists for valid file paths; `paths[0]` is valid.
             .expect("every valid file path has a parent directory");
 
-        // Fast path: cached entry is not stale.
-        {
-            let pkg_gens = self.package_gens.lock().unwrap();
-            if let Some(r#gen) = pkg_gens.get(&pkg_root) {
-                let current_gen = self.next_gen.load(Ordering::SeqCst);
-                if *r#gen >= current_gen
-                    && let Some(entry) = self.packages.lock().unwrap().get(&pkg_root)
-                {
-                    return Some(Arc::clone(entry));
-                }
+        let configured = pkg_root.join(flask::PACKAGE_CONFIG_NAME).is_file();
+        if configured {
+            if let Some(entry) = self.packages.lock().unwrap().get(&pkg_root) {
+                return Some(Arc::clone(entry));
+            }
+        } else {
+            let current_gen = self.next_gen.load(Ordering::SeqCst);
+            if self.package_gens.lock().unwrap().get(&pkg_root) == Some(&current_gen)
+                && let Some(entry) = self.packages.lock().unwrap().get(&pkg_root)
+            {
+                return Some(Arc::clone(entry));
             }
         }
 
-        // Slow path: recompute using ALL files in the package.
+        // Slow path: compute using all registered files in the package.
         let all_files = self.package_file_paths(&paths[0])?;
         let entry = self.compute_package(&pkg_root, &all_files)?;
 
@@ -256,10 +254,12 @@ impl PackageCache {
             .lock()
             .unwrap()
             .insert(pkg_root.clone(), Arc::clone(&entry));
-        self.package_gens
-            .lock()
-            .unwrap()
-            .insert(pkg_root, self.next_gen.load(Ordering::SeqCst));
+        if !configured {
+            self.package_gens
+                .lock()
+                .unwrap()
+                .insert(pkg_root, self.next_gen.load(Ordering::SeqCst));
+        }
         Some(entry)
     }
 
@@ -595,7 +595,6 @@ impl PackageCache {
     pub fn invalidate_package_cache_for(&self, path: &Path) {
         if let Some(pkg_root) = self.file_pkg.lock().unwrap().get(path).cloned() {
             self.packages.lock().unwrap().remove(&pkg_root);
-            self.package_gens.lock().unwrap().remove(&pkg_root);
         }
     }
 
@@ -694,5 +693,86 @@ impl ResolveAndPrepareExt for Vec<ParsedFile> {
             file.output.symptoms.append(&mut diags);
         }
         files
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PackageCache;
+    use crossbeam_channel::unbounded;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    fn package_file(root: &std::path::Path, package: &str) -> PathBuf {
+        let package_dir = root.join(package);
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(
+            package_dir.join("flask.jsonc"),
+            format!(r#"{{"name":"{package}","version":"0.0.0","authors":[]}}"#),
+        )
+        .unwrap();
+        let source = package_dir.join("main.gin");
+        fs::write(&source, "value := 1\n").unwrap();
+        source
+    }
+
+    #[test]
+    fn editing_one_package_preserves_other_package_cache_entry() {
+        let root = std::env::temp_dir().join(format!(
+            "gin_package_cache_isolation_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let first_path = package_file(&root, "first");
+        let second_path = package_file(&root, "second");
+
+        let (tx, _rx) = unbounded();
+        let cache = PackageCache::new(tx);
+        cache.add_file(first_path.clone()).unwrap();
+        cache.add_file(second_path.clone()).unwrap();
+
+        let first_entry = cache
+            .get_or_compute_package(std::slice::from_ref(&first_path))
+            .unwrap();
+        let second_entry = cache
+            .get_or_compute_package(std::slice::from_ref(&second_path))
+            .unwrap();
+
+        cache.set_contents(&first_path, "value := 2\n".to_string());
+
+        let updated_first_entry = cache
+            .get_or_compute_package(std::slice::from_ref(&first_path))
+            .unwrap();
+        let reused_second_entry = cache
+            .get_or_compute_package(std::slice::from_ref(&second_path))
+            .unwrap();
+
+        assert!(!Arc::ptr_eq(&first_entry, &updated_first_entry));
+        assert!(Arc::ptr_eq(&second_entry, &reused_second_entry));
+
+        let first_sibling = first_path.parent().unwrap().join("sibling.gin");
+        fs::write(&first_sibling, "sibling := 1\n").unwrap();
+        cache.add_file(first_sibling.clone()).unwrap();
+        let expanded_first_entry = cache
+            .get_or_compute_package(std::slice::from_ref(&first_path))
+            .unwrap();
+
+        assert!(!Arc::ptr_eq(&updated_first_entry, &expanded_first_entry));
+        assert!(expanded_first_entry.file_paths.contains(&first_sibling));
+
+        let nested_path = package_file(&root.join("first"), "nested");
+        cache.add_file(nested_path.clone()).unwrap();
+        let parent_entry = cache
+            .get_or_compute_package(std::slice::from_ref(&first_path))
+            .unwrap();
+        let nested_entry = cache
+            .get_or_compute_package(std::slice::from_ref(&nested_path))
+            .unwrap();
+
+        assert!(!parent_entry.file_paths.contains(&nested_path));
+        assert_eq!(nested_entry.file_paths, vec![nested_path]);
+        let _ = fs::remove_dir_all(root);
     }
 }

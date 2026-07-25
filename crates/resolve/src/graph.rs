@@ -7,11 +7,12 @@
 //! Import resolution (matching import statements to files) is delegated to
 //! [`super::resolve_module_import`] and related functions in `package_resolver.rs`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use ast::{HasSpanId, SymbolAlias};
+use ast::{HasSpanId, ImportSource, SymbolAlias};
 use diagnostic::{Diagnostic, Span};
+use flask::PACKAGE_CONFIG_NAME;
 
 use parser::query::SourceParseExt;
 
@@ -36,6 +37,93 @@ pub struct ResolveGraph {
     pub symptoms: Vec<(usize, Diagnostic)>,
 }
 
+struct PublicSymbolIndex {
+    by_module: HashMap<PathBuf, HashMap<String, PathBuf>>,
+    canonical_modules: HashMap<PathBuf, Option<PathBuf>>,
+}
+
+impl PublicSymbolIndex {
+    fn from_parsed_files(files: &HashMap<PathBuf, ParsedFile>) -> Self {
+        let mut paths: Vec<&PathBuf> = files.keys().collect();
+        paths.sort();
+
+        let mut index = Self {
+            by_module: HashMap::new(),
+            canonical_modules: HashMap::new(),
+        };
+        for path in paths {
+            let ast = &files[path].output.ast;
+            for name in ast.defs.keys() {
+                if !ast.private_defs.contains(name) {
+                    index.insert(path, name.as_str());
+                }
+            }
+            for name in ast.tags.keys() {
+                if !ast.private_tags.contains(name) {
+                    index.insert(path, name.as_str());
+                }
+            }
+        }
+        index
+    }
+
+    fn insert(&mut self, file_path: &Path, symbol: &str) {
+        let Some(parent) = file_path.parent() else {
+            return;
+        };
+
+        self.insert_in_module(parent, symbol, file_path);
+
+        let mut ancestor = parent.parent();
+        while let Some(module_dir) = ancestor {
+            if module_dir.join(PACKAGE_CONFIG_NAME).is_file() {
+                self.insert_in_module(module_dir, symbol, file_path);
+            }
+            ancestor = module_dir.parent();
+        }
+    }
+
+    fn insert_in_module(&mut self, module_dir: &Path, symbol: &str, file_path: &Path) {
+        for module_key in self.module_keys(module_dir) {
+            self.by_module
+                .entry(module_key)
+                .or_default()
+                .entry(symbol.to_string())
+                .or_insert_with(|| file_path.to_path_buf());
+        }
+    }
+
+    fn module_keys(&mut self, module_dir: &Path) -> Vec<PathBuf> {
+        let module_dir = module_dir.to_path_buf();
+        let canonical = self
+            .canonical_modules
+            .entry(module_dir.clone())
+            .or_insert_with(|| module_dir.canonicalize().ok())
+            .clone();
+
+        let mut keys = vec![module_dir.clone()];
+        if let Some(canonical) = canonical
+            && canonical != module_dir
+        {
+            keys.push(canonical);
+        }
+        keys
+    }
+
+    fn find(&self, module_dir: &Path, symbol: &str) -> Option<PathBuf> {
+        self.by_module
+            .get(module_dir)
+            .or_else(|| {
+                module_dir
+                    .canonicalize()
+                    .ok()
+                    .and_then(|path| self.by_module.get(&path))
+            })
+            .and_then(|symbols| symbols.get(symbol))
+            .cloned()
+    }
+}
+
 /// Collect all `.gin` files for a package, parse any that aren't already
 /// parsed, discover their imports, and build the [`ResolveGraph`].
 pub(crate) fn build_import_closure(
@@ -44,9 +132,27 @@ pub(crate) fn build_import_closure(
 ) -> (ResolveGraph, HashMap<PathBuf, ParsedFile>) {
     let entry_paths: Vec<PathBuf> = entry_files.iter().map(|f| f.path.clone()).collect();
 
+    let dependency_roots: HashSet<String> = entry_files
+        .iter()
+        .flat_map(|file| file.output.ast.uses.iter())
+        .flat_map(|use_stmt| use_stmt.0.iter())
+        .filter_map(|module_import| match &module_import.source {
+            ImportSource::Package(path) => Some(path.root.to_string()),
+            ImportSource::LocalBundle(bundle) if bundle.local_path.is_none() => {
+                Some(bundle.root.to_string())
+            }
+            ImportSource::Local(..)
+            | ImportSource::LocalBundle(..)
+            | ImportSource::CurrentModule { .. }
+            | ImportSource::LocalMember(..) => None,
+        })
+        .collect();
+
     let mut all_paths = entry_paths.clone();
-    for dep_dir in dependencies.values() {
-        all_paths.extend(dep_dir.collect_gin_files());
+    for dependency_root in dependency_roots {
+        if let Some(dep_dir) = dependencies.get(&dependency_root) {
+            all_paths.extend(dep_dir.collect_gin_files());
+        }
     }
     all_paths.sort();
     all_paths.dedup();
@@ -71,8 +177,9 @@ pub(crate) fn build_import_closure(
         }
     }
 
+    let public_symbols = PublicSymbolIndex::from_parsed_files(&available);
     let graph = discovery(&available, &entry_paths, dependencies, &|dir, sym| {
-        dir.find_public_def(sym)
+        public_symbols.find(dir, sym)
     });
 
     (graph, available)
@@ -239,5 +346,97 @@ pub(crate) fn discovery(
         adj,
         node_aliases,
         symptoms,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PublicSymbolIndex, discovery};
+    use crate::ParsedFile;
+    use parser::query::SourceParseExt;
+    use std::collections::HashMap;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    fn parsed_file(path: &Path) -> ParsedFile {
+        let source = fs::read_to_string(path).unwrap();
+        let output = source.parse_source_full();
+        ParsedFile {
+            path: path.to_path_buf(),
+            source,
+            output,
+        }
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("gin_resolve_graph_{name}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn discovery_uses_parsed_public_symbol_index_after_dependency_source_is_removed() {
+        let root = temp_dir("parsed_symbol_index");
+        let core_dir = root.join("core");
+        fs::create_dir_all(&core_dir).unwrap();
+        fs::write(core_dir.join("flask.jsonc"), "{}").unwrap();
+
+        let main_path = root.join("main.gin");
+        let int_path = core_dir.join("int.gin");
+        fs::write(&main_path, "use core.Int\n").unwrap();
+        fs::write(&int_path, "Int is Unit\n").unwrap();
+
+        let main = parsed_file(&main_path);
+        let int = parsed_file(&int_path);
+        let mut available = HashMap::new();
+        available.insert(main_path.clone(), main);
+        available.insert(int_path.clone(), int);
+        let public_symbols = PublicSymbolIndex::from_parsed_files(&available);
+        fs::remove_file(&int_path).unwrap();
+
+        let mut dependencies = HashMap::new();
+        dependencies.insert("core".to_string(), core_dir);
+        let graph = discovery(&available, &[main_path], &dependencies, &|dir, symbol| {
+            public_symbols.find(dir, symbol)
+        });
+
+        assert!(graph.symptoms.is_empty(), "{:#?}", graph.symptoms);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_import_closure_skips_dependencies_without_entry_imports() {
+        let root = temp_dir("unused_dependency");
+        let dependency_dir = root.join("dependency");
+        fs::create_dir_all(&dependency_dir).unwrap();
+        fs::write(dependency_dir.join("unused.gin"), "this is not valid gin\n").unwrap();
+
+        let main_path = root.join("main.gin");
+        fs::write(&main_path, "main:\nreturn\n").unwrap();
+        let mut dependencies = HashMap::new();
+        dependencies.insert("dependency".to_string(), dependency_dir);
+
+        let (_graph, available) =
+            super::build_import_closure(vec![parsed_file(&main_path)], &dependencies);
+
+        assert_eq!(available.len(), 1);
+        assert!(available.contains_key(&main_path));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn public_symbol_index_excludes_private_definitions() {
+        let root = temp_dir("private_symbol");
+        let file_path = root.join("private.gin");
+        fs::write(&file_path, "private\nHidden is Unit\n").unwrap();
+
+        let mut files = HashMap::new();
+        files.insert(file_path.clone(), parsed_file(&file_path));
+        let public_symbols = PublicSymbolIndex::from_parsed_files(&files);
+
+        assert!(public_symbols.find(&root, "Hidden").is_none());
+        let _ = fs::remove_dir_all(root);
     }
 }
