@@ -1,7 +1,7 @@
 //! Parser tests for the ownership system: `eat` consume-parameter syntax
 //! and `eat expr` call-site consume argument syntax.
 
-use ast::{Expr, ParamConvention, TypeExpr};
+use ast::{ConstExpr, Expr, ParamConvention, ParameterKind, PredicateExpr, TypeExpr};
 use internment::Intern;
 use parser::query::SourceParseExt;
 
@@ -26,7 +26,7 @@ return
     let bind = ast.defs.get(&Intern::from_ref("process")).unwrap();
     assert_eq!(
         bind.param_conventions.get(&Intern::from_ref("db")),
-        Some(&ParamConvention::Eat)
+        Some(&ParamConvention::Consume)
     );
     // Bare params (Inferred, default) are not stored in the map.
     assert!(
@@ -55,6 +55,42 @@ return
     assert!(
         bind.return_tag.is_some(),
         "return_tag should be Some for Int return type"
+    );
+}
+
+#[test]
+fn test_parse_typed_hidden_state_parameters() {
+    let src = "List(x, length PointerSize: ?, capacity PointerSize: ?, storage StorageIdentity: ?) has\n    pointer Pointer(x)\n";
+    let output = src.parse_source_full();
+    assert!(output.symptoms.is_empty(), "{:?}", output.symptoms);
+    let declaration = output.ast.tags.get(&Intern::from_ref("List")).unwrap();
+    let params = declaration.params.as_ref().unwrap();
+
+    assert!(matches!(
+        params.get(&Intern::from_ref("x")),
+        Some(ParameterKind::Generic)
+    ));
+    for name in ["length", "capacity", "storage"] {
+        assert!(matches!(
+            params.get(&Intern::from_ref(name)),
+            Some(ParameterKind::Inferred { .. })
+        ));
+    }
+}
+
+#[test]
+fn test_parse_parameter_refinement_chain() {
+    let src = "get(ref array Array(x, n), index Int and >= 0 and < n) ref x: array.(index)\n";
+    let output = src.parse_source_full();
+    assert!(output.symptoms.is_empty(), "{:?}", output.symptoms);
+    let bind = output.ast.defs.get(&Intern::from_ref("get")).unwrap();
+
+    assert_eq!(
+        bind.param_refinements.get(&Intern::from_ref("index")),
+        Some(&PredicateExpr::And(vec![
+            PredicateExpr::Ge(ConstExpr::from(0)),
+            PredicateExpr::Lt(ConstExpr::Var(Intern::from_ref("n"))),
+        ]))
     );
 }
 
@@ -97,7 +133,7 @@ return
     let bind = ast.defs.get(&Intern::from_ref("read")).unwrap();
     assert_eq!(
         bind.param_conventions.get(&Intern::from_ref("e")),
-        Some(&ParamConvention::Ref(false))
+        Some(&ParamConvention::Observe)
     );
 }
 
@@ -111,7 +147,7 @@ return
     let bind = ast.defs.get(&Intern::from_ref("write")).unwrap();
     assert_eq!(
         bind.param_conventions.get(&Intern::from_ref("e")),
-        Some(&ParamConvention::Ref(true))
+        Some(&ParamConvention::Mutate)
     );
     // hp is bare - should be Inferred (not stored)
     assert!(
@@ -131,7 +167,7 @@ return
     let bind = ast.defs.get(&Intern::from_ref("consume")).unwrap();
     assert_eq!(
         bind.param_conventions.get(&Intern::from_ref("e")),
-        Some(&ParamConvention::Eat)
+        Some(&ParamConvention::Consume)
     );
 }
 
@@ -145,21 +181,20 @@ return
     let bind = ast.defs.get(&Intern::from_ref("attack")).unwrap();
     assert_eq!(
         bind.param_conventions.get(&Intern::from_ref("a")),
-        Some(&ParamConvention::Ref(false))
+        Some(&ParamConvention::Observe)
     );
     assert_eq!(
         bind.param_conventions.get(&Intern::from_ref("d")),
-        Some(&ParamConvention::Ref(false))
+        Some(&ParamConvention::Observe)
     );
 }
 
 #[test]
 fn test_parse_local_ref_type_annotation() {
-    // ref type annotation on a local bind: `r ref Entity: ref e`
     let src = "\
 main:
     e: Entity(10, 10)
-    r ref Entity: ref e
+    ref r Entity: e
     return 0
 return
 ";
@@ -185,8 +220,13 @@ return
         // Check that the return_tag has TypeExpr::Ref wrapping Entity
         if let Some(return_tag) = &r_bind.return_tag {
             match &return_tag.value {
-                TypeExpr::Ref { inner, mutable } => {
+                TypeExpr::Ref {
+                    inner,
+                    mutable,
+                    group,
+                } => {
                     assert!(!mutable, "expected immutable ref");
+                    assert!(group.is_none());
                     match &inner.value {
                         TypeExpr::Nominal(name, _) => {
                             assert_eq!(name.as_str(), "Entity");
@@ -206,11 +246,10 @@ return
 
 #[test]
 fn test_parse_local_mut_type_annotation() {
-    // mut type annotation: `r mut Entity: mut e`
     let src = "\
 main:
     e: Entity(10, 10)
-    r mut Entity: mut e
+    mut r Entity: e
     return 0
 return
 ";
@@ -234,8 +273,13 @@ return
 
         if let Some(return_tag) = &r_bind.return_tag {
             match &return_tag.value {
-                TypeExpr::Ref { inner, mutable } => {
+                TypeExpr::Ref {
+                    inner,
+                    mutable,
+                    group,
+                } => {
                     assert!(*mutable, "expected mutable ref");
+                    assert!(group.is_none());
                     match &inner.value {
                         TypeExpr::Nominal(name, _) => {
                             assert_eq!(name.as_str(), "Entity");
@@ -256,7 +300,7 @@ return
 #[test]
 fn test_parse_group_annotation_immutable() {
     let src = "\
-process[r Entity](ref[r] a Entity, ref[r] d Entity) Int:
+process(ref{r} a Entity, ref{r} d Entity) Int:
     return a.hp + d.hp
 return
 ";
@@ -271,7 +315,7 @@ return
 #[test]
 fn test_parse_group_annotation_mutable() {
     let src = "\
-attack[mut r Entity](ref[r] a Entity, ref[r] d Entity):
+attack(mut{r} a Entity, mut{r} d Entity):
     d.hp: d.hp - a.calculate_damage(d)
 return
 ";
@@ -286,7 +330,7 @@ return
 #[test]
 fn test_parse_multiple_group_annotations() {
     let src = "\
-process[e Entity, mut rr Ring](ref[e] entity Entity, mut[rr] ring Ring):
+process(ref{e} entity Entity, mut{rr} ring Ring):
     ring.power: ring.power + entity.energy
 return
 ";
@@ -306,6 +350,44 @@ return
         bind.param_groups.get(&Intern::from_ref("ring")),
         Some(&Intern::from_ref("rr"))
     );
+}
+
+#[test]
+fn test_group_is_preserved_on_parameter_and_return_reference_types() {
+    let src = "\
+borrow(ref{r} value Entity) ref{r} Entity: value
+";
+    let ast = src.parse_source_full().ast;
+    let bind = ast.defs.get(&Intern::from_ref("borrow")).unwrap();
+    let parameter = bind
+        .params
+        .as_ref()
+        .unwrap()
+        .get(&Intern::from_ref("value"))
+        .unwrap();
+
+    for ty in [
+        match parameter {
+            ast::ParameterKind::Tagged(ty) => &ty.value,
+            other => panic!("expected tagged parameter, got {other:?}"),
+        },
+        &bind.return_tag.as_ref().unwrap().value,
+    ] {
+        match ty {
+            TypeExpr::Ref {
+                inner,
+                mutable,
+                group,
+            } => {
+                assert!(!mutable);
+                assert_eq!(group.as_ref().map(|name| name.as_str()), Some("r"));
+                assert!(
+                    matches!(&inner.value, TypeExpr::Nominal(name, _) if name.as_str() == "Entity")
+                );
+            }
+            other => panic!("expected grouped reference type, got {other:?}"),
+        }
+    }
 }
 
 #[test]
@@ -337,9 +419,8 @@ fn test_parse_and_is_not_copy_rejected() {
 
 #[test]
 fn test_parse_group_annotation_param_groups_mapped() {
-    // Verify that param_groups correctly maps param names to group names.
     let src = "\
-process[e Entity, mut rr Ring](ref[e] entity Entity, mut[rr] ring Ring):
+process(ref{e} entity Entity, mut{rr} ring Ring):
     ring.power: ring.power + entity.energy
 return
 ";
@@ -358,13 +439,13 @@ return
         Some(&Intern::from_ref("rr"))
     );
 
-    // Verify conventions: ref entity → Ref(false), mut[rr] ring → Ref(true)
+    // Verify conventions: ref entity → Ref(false), mut{rr} ring → Ref(true)
     assert_eq!(
         bind.param_conventions.get(&Intern::from_ref("entity")),
-        Some(&ParamConvention::Ref(false))
+        Some(&ParamConvention::Observe)
     );
     assert_eq!(
         bind.param_conventions.get(&Intern::from_ref("ring")),
-        Some(&ParamConvention::Ref(true))
+        Some(&ParamConvention::Mutate)
     );
 }

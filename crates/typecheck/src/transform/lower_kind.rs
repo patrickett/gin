@@ -5,17 +5,18 @@
 //! sibling modules for tag resolution, type resolution, and when-arm
 //! lowering.
 
-use ast::ConstExpr;
 use ast::prelude::*;
 use ast::span::{SpanId, Spanned, SubSpan};
+use ast::{BinderId, BinderOwner, ConstExpr};
 use internment::Intern;
 
 use crate::analysis::{TypeEnv, unify_type_args};
 use crate::compile_time_trait::{COMPARABLE_TRAIT, CompileTimeTraitRegistry, trait_field_for_ty};
+use crate::subst::DependentInstantiation;
 use crate::ty::Ty;
 use crate::typed::{
-    BindBody, DefId, ExprId, TypedExprKind, TypedFileAst, TypedIfExpr, TypedLoop, TypedLoopKind,
-    TypedWhenExpr,
+    BindBody, DefId, ExprId, ReferenceTargetGroup, TypedCallableSignature, TypedExprKind,
+    TypedFileAst, TypedIfExpr, TypedLoop, TypedLoopKind, TypedWhenExpr,
 };
 use ast::ty::{ParamKind, TyArg};
 
@@ -25,7 +26,7 @@ const COMPARISON_OPS: [&str; 4] = ["lt", "le", "gt", "ge"];
 use super::lower_exprs::lower_typed_expr;
 use super::lower_exprs::{ExprLowerScope, LocalEnv};
 use super::lower_tag::{resolve_discriminant, resolve_tag_call_variant};
-use super::lower_ty::{annotate_literal_union_literal, bind_explicit_ty, resolve_fn_call_target};
+use super::lower_ty::{annotate_literal_union_literal, resolve_fn_call_target};
 use super::lower_when::lower_all_when_arms;
 
 /// If `target` is a comparison operator and `Comparable` is imported,
@@ -209,6 +210,7 @@ pub(crate) fn lower_expr_kind(
     expr: &Typed<Expr>,
     scope: &ExprLowerScope<'_>,
     env: &mut LocalEnv,
+    reserved_expr_id: Option<ExprId>,
 ) -> TypedExprKind {
     match &expr.value {
         Expr::Lit(lit) => TypedExprKind::Lit(lit.clone()),
@@ -226,11 +228,24 @@ pub(crate) fn lower_expr_kind(
         Expr::FnCall(fn_call) => {
             let target = resolve_fn_call_target(&fn_call.path.value, scope.tag_types);
             let args = fn_call.args.as_deref().unwrap_or(&[]);
-            let call_params = typed
-                .defs
-                .get(&target)
-                .map(|bind| (bind.param_kinds.clone(), bind.params.clone()));
-            let (lowered, type_args) = if let Some((param_kinds, _)) = call_params.as_ref() {
+            let local_signature = typed.defs.get(&target).map(TypedCallableSignature::from);
+            let signature = local_signature
+                .as_ref()
+                .or_else(|| scope.callable_signatures.get(&target));
+            let call_signature = signature.map(|signature| {
+                let call_id = reserved_expr_id.expect("function calls reserve an expression ID");
+                let binder = BinderId::new(typed.file_id.0, BinderOwner::Expression(call_id.0));
+                let mut instantiation =
+                    DependentInstantiation::new(signature.dependent_binder, binder);
+                let params: Vec<(Intern<String>, Ty)> = signature
+                    .params
+                    .iter()
+                    .map(|(name, ty)| (*name, instantiation.apply_to_ty(ty)))
+                    .collect();
+                let return_type = instantiation.apply_to_ty(&signature.return_type);
+                (signature.param_kinds.clone(), params, return_type)
+            });
+            let (lowered, type_args) = if let Some((param_kinds, _, _)) = call_signature.as_ref() {
                 lower_contextual_call_args(typed, args, param_kinds, scope, env)
             } else {
                 let lowered = fn_call.args.as_ref().map(|args| {
@@ -240,7 +255,7 @@ pub(crate) fn lower_expr_kind(
                 });
                 (lowered, Vec::new())
             };
-            if let Some((param_kinds, params)) = call_params
+            if let Some((ref param_kinds, ref params, ref return_type)) = call_signature
                 && !param_kinds.is_empty()
                 && param_kinds.len() == args.len()
             {
@@ -262,15 +277,9 @@ pub(crate) fn lower_expr_kind(
                         )),
                     })
                     .collect();
-                let substituted_ty =
-                    unify_type_args(&expected, &type_args)
-                        .ok()
-                        .and_then(|subst| {
-                            typed
-                                .defs
-                                .get(&target)
-                                .map(|b| subst.apply_to_ty(&b.return_type))
-                        });
+                let substituted_ty = unify_type_args(&expected, &type_args)
+                    .ok()
+                    .map(|subst| subst.apply_to_ty(return_type));
                 TypedExprKind::FnCall {
                     target,
                     args: lowered,
@@ -278,7 +287,9 @@ pub(crate) fn lower_expr_kind(
                 }
             } else {
                 // Check if this is a comparison operator resolving through Comparable trait.
-                let substituted_ty = if COMPARISON_OPS.contains(&target.0.as_str())
+                let substituted_ty = if let Some((_, _, return_type)) = call_signature {
+                    Some(return_type)
+                } else if COMPARISON_OPS.contains(&target.0.as_str())
                     && typed
                         .imported_trait_names
                         .contains(&Intern::from_ref(COMPARABLE_TRAIT))
@@ -412,7 +423,19 @@ pub(crate) fn lower_expr_kind(
                     BindValue::Extern | BindValue::Unassigned => (vec![], ExprId(0), false),
                 };
 
-                let declared_ty = bind_explicit_ty(bind, scope.tag_types);
+                let bind_id = reserved_expr_id.expect("local binds reserve an expression ID");
+                let binder = BinderId::new(typed.file_id.0, BinderOwner::Expression(bind_id.0));
+                let initializer_ty = has_value
+                    .then(|| typed.exprs.ty.get(body.as_usize()).cloned())
+                    .flatten();
+                let declared_ty = super::lower_ty::bind_local_explicit_ty(
+                    bind,
+                    scope.tag_types,
+                    scope.tag_params,
+                    scope.tag_decls,
+                    binder,
+                    initializer_ty.as_ref(),
+                );
                 if has_value
                     && let Some(explicit) = &declared_ty
                     && body.as_usize() < typed.exprs.ty.len()
@@ -433,7 +456,22 @@ pub(crate) fn lower_expr_kind(
                         .unwrap_or(Ty::Unit)
                 });
                 env.locals.insert(bind.name);
-                env.types.insert(bind.name, local_ty);
+                env.types.insert(bind.name, local_ty.clone());
+                let target_group = if matches!(local_ty, Ty::Ref { .. }) {
+                    typed
+                        .exprs
+                        .target_group
+                        .get(body.as_usize())
+                        .cloned()
+                        .flatten()
+                } else {
+                    Some(ReferenceTargetGroup::Local(bind.name))
+                };
+                if let Some(target_group) = target_group {
+                    env.target_groups.insert(bind.name, target_group);
+                } else {
+                    env.target_groups.remove(&bind.name);
+                }
                 if has_value
                     && let Some(cv) = typed
                         .exprs
@@ -814,6 +852,7 @@ pub(crate) fn lower_expr_kind(
                 &Typed::infer(*inner.clone(), SpanId::INVALID),
                 scope,
                 env,
+                None,
             );
             TypedExprKind::Ref(ExprId(0)) // placeholder
         }

@@ -18,6 +18,7 @@ pub enum VarState {
     /// Variable has been declared with a type but not yet assigned a value.
     /// Reading a variable in this state is a flaw.
     Declared,
+    Invalidated,
 }
 
 /// Flow-sensitive type information at a program point.

@@ -39,7 +39,7 @@ fn reflect_ty_to_const_value_inner(ty: &Ty, seen: &mut HashSet<Intern<String>>) 
             ],
         ),
         Ty::Unit => tag("Tuple", vec![ConstValue::List(vec![].into())]),
-        Ty::Record { name, fields } => {
+        Ty::Record { name, fields, .. } => {
             // Break nominal cycles like `NamedTy.ty: Type` (and `Type` includes `NamedTy`).
             if !seen.insert(*name) {
                 return tag(
@@ -287,6 +287,7 @@ mod tests {
     fn reflect_type_union_cycle_stays_bounded() {
         let named_ty = Ty::Record {
             name: intern("NamedTy"),
+            resolved_params: None,
             fields: vec![
                 (intern("name"), Box::new(Ty::Opaque(intern("String")))),
                 (intern("ty"), Box::new(Ty::Opaque(intern("Type")))),
@@ -294,6 +295,7 @@ mod tests {
         };
         let list_named = Ty::Record {
             name: intern("List"),
+            resolved_params: None,
             fields: vec![(intern("pointer"), Box::new(Ty::Opaque(intern("Pointer"))))],
         };
         let type_union = Ty::Union {

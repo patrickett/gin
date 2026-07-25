@@ -10,7 +10,7 @@ use crate::parameter::{GroupParam, ParamConvention, ParamSlot, Parameters};
 use crate::path::ModPath;
 use crate::prelude::*;
 use crate::span::{SpanId, Spanned};
-use crate::ty::Ty;
+use crate::ty::{PredicateExpr, Ty};
 use crate::ty_state::TyState;
 
 /// Lazily-formatted method name (e.g., "Single(a).method")
@@ -33,10 +33,10 @@ pub struct Bind {
     pub params: Option<Parameters>,
     pub param_slots: IndexMap<Intern<String>, ParamSlot>,
     pub param_conventions: IndexMap<Intern<String>, ParamConvention>,
-    /// Group annotations: `[mut r T]` or `[r T]`.
+    /// Derived from the first parameter reference carrying each group.
     pub group_params: Vec<GroupParam>,
-    /// Maps param names to group names for params with `ref[r]` / `mut[r]` syntax.
     pub param_groups: IndexMap<Intern<String>, Intern<String>>,
+    pub param_refinements: IndexMap<Intern<String>, PredicateExpr>,
     pub attributes: BindAttributes,
     pub value: BindValue,
     /// Method receiver — structural [`TypeExpr`].
@@ -75,6 +75,7 @@ impl Bind {
             param_conventions: IndexMap::new(),
             group_params: Vec::new(),
             param_groups: IndexMap::new(),
+            param_refinements: IndexMap::new(),
             attributes: BindAttributes::default(),
             value,
             receiver_type: None,

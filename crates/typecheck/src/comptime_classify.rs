@@ -91,7 +91,9 @@ fn params_are_comptime_surfaces(bind: &Bind) -> bool {
         return true;
     };
     params.values().all(|kind| match kind {
-        ParameterKind::Tagged(sp) | ParameterKind::ValueParam { ty: sp } => {
+        ParameterKind::Tagged(sp)
+        | ParameterKind::ValueParam { ty: sp }
+        | ParameterKind::Inferred { ty: sp } => {
             sp.value.is_type_surface() && !is_value_type_parameter(&sp.value)
         }
         ParameterKind::Generic => true,

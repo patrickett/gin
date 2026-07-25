@@ -185,9 +185,9 @@ fn pattern_param_matches(name: &Intern<String>, kind: &ParameterKind, cv: &Const
                 || name.as_str() == "_"
                 || matches!(cv, ConstValue::Tag { name: cv_name, .. } if name == cv_name)
         }
-        ParameterKind::Tagged(sp) | ParameterKind::ValueParam { ty: sp } => {
-            pattern_matches(&sp.value, cv)
-        }
+        ParameterKind::Tagged(sp)
+        | ParameterKind::ValueParam { ty: sp }
+        | ParameterKind::Inferred { ty: sp } => pattern_matches(&sp.value, cv),
         ParameterKind::Default(expr) => default_expr_matches(&expr.value, cv),
     }
 }
@@ -299,9 +299,9 @@ fn collect_pattern_param_binding(
         ParameterKind::Generic if name.as_str() != "_" && is_lowercase_type_var(name) => {
             env.insert(*name, cv.clone());
         }
-        ParameterKind::Tagged(sp) | ParameterKind::ValueParam { ty: sp } => {
-            collect_pattern_bindings(&sp.value, cv, env)
-        }
+        ParameterKind::Tagged(sp)
+        | ParameterKind::ValueParam { ty: sp }
+        | ParameterKind::Inferred { ty: sp } => collect_pattern_bindings(&sp.value, cv, env),
         ParameterKind::Generic | ParameterKind::Default(_) => {}
     }
 }

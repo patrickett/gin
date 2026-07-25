@@ -273,6 +273,11 @@ impl<'a> AstFormatter<'a> {
                     self.buffer.push(' ');
                     self.buffer.push_str(&type_text(&sp.value));
                 }
+                ParameterKind::Inferred { ty } => {
+                    self.buffer.push(' ');
+                    self.buffer.push_str(&type_text(&ty.value));
+                    self.buffer.push_str(": ?");
+                }
                 ParameterKind::Default(expr) => {
                     let text = span_text(expr, st, src);
                     self.buffer.push_str(": ");
@@ -307,6 +312,10 @@ impl<'a> AstFormatter<'a> {
                         ParameterKind::Generic => {}
                         ParameterKind::Tagged(sp) | ParameterKind::ValueParam { ty: sp } => {
                             self.buffer.push_str(&type_text(&sp.value));
+                        }
+                        ParameterKind::Inferred { ty } => {
+                            self.buffer.push_str(&type_text(&ty.value));
+                            self.buffer.push_str(": ?");
                         }
                         ParameterKind::Default(expr) => {
                             let text = span_text(expr, st, src);
@@ -633,7 +642,7 @@ fn type_text(expr: &TypeExpr) -> String {
             s.push_str(&type_text(&inner.value));
             s
         }
-        TypeExpr::Ref { inner, mutable } => {
+        TypeExpr::Ref { inner, mutable, .. } => {
             let prefix = if *mutable { "mut " } else { "ref " };
             let mut s = String::from(prefix);
             s.push_str(&type_text(&inner.value));

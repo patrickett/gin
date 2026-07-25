@@ -75,6 +75,7 @@ impl<'src> fmt::Display for Token<'src> {
             Token::Dot => write!(f, "[.]"),
             Token::At => write!(f, "[@]"),
             Token::Pound => write!(f, "[#]"),
+            Token::Question => write!(f, "[?]"),
             Token::ColonEq => write!(f, "[:=]"),
             Token::Colon => write!(f, "[:]"),
             Token::ColonSemi => write!(f, "[;]"),

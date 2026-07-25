@@ -4,6 +4,7 @@
 
 mod support;
 
+use ast::TyArg;
 use internment::Intern;
 use typecheck::TypedFileAst;
 use typecheck::ty::Ty;
@@ -83,7 +84,7 @@ p := Coord(x: 1, y: 2, z: 3)
     let body_ty = typed.exprs.ty.get(body.as_usize()).expect("p body type");
 
     match body_ty {
-        Ty::Record { name, fields } => {
+        Ty::Record { name, fields, .. } => {
             assert_eq!(name.as_str(), "Coord", "p should have type Coord");
             assert_eq!(fields.len(), 3, "Coord has three fields");
 
@@ -182,6 +183,32 @@ p := Pair(first: 1, second: 2)
             panic!("expected Ty::Record {{ name: \"Pair\", .. }}, got {other:?}");
         }
     }
+}
+
+#[test]
+fn generic_record_application_retains_resolved_params_in_declaration_order() {
+    let typed = transform_source("Pair(a, b) has first a, second b\nvalue Pair(Int, String)");
+    let value = typed
+        .defs
+        .get(&DefId(Intern::from_ref("value")))
+        .expect("value bind");
+    let Ty::Record {
+        resolved_params: Some(params),
+        ..
+    } = &value.return_type
+    else {
+        panic!("expected resolved Pair record, got {:?}", value.return_type);
+    };
+
+    assert_eq!(
+        params
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b"]
+    );
+    assert!(matches!(&params[0].1, TyArg::Type(_)));
+    assert!(matches!(&params[1].1, TyArg::Type(_)));
 }
 
 #[test]

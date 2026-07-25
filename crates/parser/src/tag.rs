@@ -155,27 +155,26 @@ impl<'src, 't> TokenCursor<'src, 't> {
             });
         }
 
-        // Reference type: `ref T` or `mut T`
-        if self.eat(&Token::Ref) {
+        if matches!(self.peek(), Some(Token::Ref) | Some(Token::Mut)) {
+            let mutable = self.eat(&Token::Mut);
+            if !mutable {
+                self.advance();
+            }
+            let group = if self.eat(&Token::CurlyOpen) {
+                let group = self.parse_id()?;
+                self.expect(&Token::CurlyClose)?;
+                Some(group)
+            } else {
+                None
+            };
             let inner = self.parse_type_expr_with(expr_parser)?;
             let end_span = inner.span_id;
             let span = self.merge_span(start_span, end_span);
             return Some(Spanned {
                 value: TypeExpr::Ref {
                     inner: Box::new(inner),
-                    mutable: false,
-                },
-                span_id: span,
-            });
-        }
-        if self.eat(&Token::Mut) {
-            let inner = self.parse_type_expr_with(expr_parser)?;
-            let end_span = inner.span_id;
-            let span = self.merge_span(start_span, end_span);
-            return Some(Spanned {
-                value: TypeExpr::Ref {
-                    inner: Box::new(inner),
-                    mutable: true,
+                    mutable,
+                    group,
                 },
                 span_id: span,
             });

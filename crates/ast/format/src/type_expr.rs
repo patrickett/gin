@@ -88,6 +88,11 @@ pub(crate) fn write_type_expr_surface(e: &TypeExpr, f: &mut fmt::Formatter<'_>) 
                         write!(f, "{} ", k.as_str())?;
                         write_type_expr_surface(&ty.value, f)?;
                     }
+                    ParameterKind::Inferred { ty } => {
+                        write!(f, "{} ", k.as_str())?;
+                        write_type_expr_surface(&ty.value, f)?;
+                        write!(f, ": ?")?;
+                    }
                     ParameterKind::Default(expr) => {
                         write!(f, "{}: {expr:?}", k.as_str())?;
                     }
@@ -103,12 +108,20 @@ pub(crate) fn write_type_expr_surface(e: &TypeExpr, f: &mut fmt::Formatter<'_>) 
             write!(f, "@")?;
             write_type_expr_surface(&inner.value, f)
         }
-        TypeExpr::Ref { inner, mutable } => {
+        TypeExpr::Ref {
+            inner,
+            mutable,
+            group,
+        } => {
             if *mutable {
-                write!(f, "mut ")?;
+                write!(f, "mut")?;
             } else {
-                write!(f, "ref ")?;
+                write!(f, "ref")?;
             }
+            if let Some(group) = group {
+                write!(f, "{{{}}}", group.as_str())?;
+            }
+            write!(f, " ")?;
             write_type_expr_surface(&inner.value, f)
         }
         TypeExpr::Unit => write!(f, "()"),
@@ -157,6 +170,9 @@ pub(crate) fn write_variant_shape_surface(e: &TypeExpr, f: &mut fmt::Formatter<'
                     ParameterKind::ValueParam { ty } => {
                         write!(f, "{} {}", k.as_str(), ty.value.format_surface())?;
                     }
+                    ParameterKind::Inferred { ty } => {
+                        write!(f, "{} {}: ?", k.as_str(), ty.value.format_surface())?;
+                    }
                     ParameterKind::Generic => write!(f, "{}", k.as_str())?,
                     ParameterKind::Default(expr) => write!(f, "{}: {:?}", k.as_str(), expr)?,
                 }
@@ -176,12 +192,20 @@ pub(crate) fn write_variant_shape_surface(e: &TypeExpr, f: &mut fmt::Formatter<'
             write!(f, "@")?;
             write_variant_shape_surface(&inner.value, f)
         }
-        TypeExpr::Ref { inner, mutable } => {
+        TypeExpr::Ref {
+            inner,
+            mutable,
+            group,
+        } => {
             if *mutable {
-                write!(f, "mut ")?;
+                write!(f, "mut")?;
             } else {
-                write!(f, "ref ")?;
+                write!(f, "ref")?;
             }
+            if let Some(group) = group {
+                write!(f, "{{{}}}", group.as_str())?;
+            }
+            write!(f, " ")?;
             write_variant_shape_surface(&inner.value, f)
         }
         TypeExpr::Unit => write!(f, "()"),

@@ -27,6 +27,22 @@ pub struct ConstraintEnv {
 }
 
 impl ConstraintEnv {
+    pub fn assume(&mut self, predicate: &Predicate) {
+        match predicate {
+            Predicate::Lt(left, right) => self.known_lt.push((left.clone(), right.clone())),
+            Predicate::Gt(left, right) => self.known_lt.push((right.clone(), left.clone())),
+            Predicate::Le(left, right) => self.known_le.push((left.clone(), right.clone())),
+            Predicate::Ge(left, right) => self.known_le.push((right.clone(), left.clone())),
+            Predicate::Eq(left, right) => self.known_eq.push((left.clone(), right.clone())),
+            Predicate::Ne(_, _) => {}
+            Predicate::And(predicates) => {
+                for predicate in predicates {
+                    self.assume(predicate);
+                }
+            }
+        }
+    }
+
     /// Check whether a predicate holds given the current constraint environment.
     ///
     /// Variables in the predicate are looked up in `var_values` first — if a
@@ -99,6 +115,9 @@ impl ConstraintEnv {
         match (&l, &r) {
             (ConstExpr::Value(a), ConstExpr::Value(b)) if a == b => return ProveResult::Proven,
             (ConstExpr::Value(_), ConstExpr::Value(_)) => return ProveResult::Disproven,
+            (ConstExpr::Inferred(a), ConstExpr::Inferred(b)) if a != b => {
+                return ProveResult::Disproven;
+            }
             _ if l == r => return ProveResult::Proven,
             _ => {}
         }
@@ -163,7 +182,7 @@ pub fn predicate_expr_to_predicate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ast::{ConstExpr, ConstValue};
+    use ast::{BinderId, BinderOwner, ConstExpr, ConstValue, DependentArgId};
     use internment::Intern;
 
     fn env() -> ConstraintEnv {
@@ -172,6 +191,13 @@ mod tests {
 
     fn vals() -> HashMap<Intern<String>, ConstExpr> {
         HashMap::new()
+    }
+
+    fn inferred(slot: u32) -> ConstExpr {
+        ConstExpr::Inferred(DependentArgId::new(
+            BinderId::new(4, BinderOwner::Definition(Intern::from_ref("Vector"))),
+            slot,
+        ))
     }
 
     #[test]
@@ -286,6 +312,36 @@ mod tests {
             ConstExpr::Var(Intern::from_ref("n")),
         );
         assert_eq!(env().prove(&p, &vals()), ProveResult::Proven);
+    }
+
+    #[test]
+    fn identical_inferred_witnesses_are_equal() {
+        let p = Predicate::Eq(inferred(0), inferred(0));
+        assert_eq!(env().prove(&p, &vals()), ProveResult::Proven);
+    }
+
+    #[test]
+    fn distinct_inferred_witnesses_are_disproven_equal() {
+        let p = Predicate::Eq(inferred(0), inferred(1));
+        assert_eq!(env().prove(&p, &vals()), ProveResult::Disproven);
+    }
+
+    #[test]
+    fn inferred_witness_and_concrete_value_have_unknown_equality() {
+        let p = Predicate::Eq(inferred(0), ConstExpr::Value(ConstValue::Int(3)));
+        assert_eq!(env().prove(&p, &vals()), ProveResult::Unknown);
+    }
+
+    #[test]
+    fn distinct_inferred_witnesses_are_proven_unequal() {
+        let p = Predicate::Ne(inferred(0), inferred(1));
+        assert_eq!(env().prove(&p, &vals()), ProveResult::Proven);
+    }
+
+    #[test]
+    fn inferred_ordering_is_unknown() {
+        let p = Predicate::Lt(inferred(0), inferred(1));
+        assert_eq!(env().prove(&p, &vals()), ProveResult::Unknown);
     }
 
     #[test]

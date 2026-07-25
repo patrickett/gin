@@ -165,10 +165,15 @@ impl<'src, 't> TokenCursor<'src, 't> {
             };
 
             let is_function = self.is_at(&Token::ParenOpen);
-            let (params, conventions, _param_groups) = if is_function {
+            let (params, conventions, _param_groups, _param_refinements) = if is_function {
                 self.parse_params(expr_parser)
             } else {
-                (Some(Parameters::new()), IndexMap::new(), IndexMap::new())
+                (
+                    Some(Parameters::new()),
+                    IndexMap::new(),
+                    IndexMap::new(),
+                    IndexMap::new(),
+                )
             };
 
             // Parse optional return type and error type
@@ -853,7 +858,12 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
         loop {
             if let Some((key, kind)) = self.parse_one_declare_param(expr_parser) {
-                if seen_default && !matches!(kind, ParameterKind::Default(_)) {
+                if seen_default
+                    && !matches!(
+                        kind,
+                        ParameterKind::Default(_) | ParameterKind::Inferred { .. }
+                    )
+                {
                     self.error(
                         "parse-parameter-after-default",
                         format!(
@@ -863,7 +873,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
                         self.current_span(),
                     );
                 }
-                if matches!(kind, ParameterKind::Default(_)) {
+                if matches!(
+                    kind,
+                    ParameterKind::Default(_) | ParameterKind::Inferred { .. }
+                ) {
                     seen_default = true;
                 }
                 params.insert(key, kind);
@@ -985,7 +998,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
     }
 
     /// Parse a single predicate after `and`, e.g. `< n`, `> 0`, `<= n + 1`.
-    fn parse_one_predicate(&mut self) -> PredicateExpr {
+    pub(crate) fn parse_one_predicate(&mut self) -> PredicateExpr {
         match self.peek() {
             Some(Token::Less) => {
                 self.advance();
@@ -1023,7 +1036,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
     }
 
     /// Parse the right-hand side of a predicate: a name or literal.
-    fn parse_predicate_rhs(&mut self) -> ConstExpr {
+    pub(crate) fn parse_predicate_rhs(&mut self) -> ConstExpr {
         self.skip_layout();
         let Some((token, _span)) = self.advance() else {
             self.error(
@@ -1166,7 +1179,7 @@ Allocator has
         );
         assert_eq!(
             allocate.conventions.get(&Intern::new("self".to_string())),
-            Some(&ParamConvention::Ref(false)),
+            Some(&ParamConvention::Observe),
         );
 
         // Check return type: Slice(Byte)

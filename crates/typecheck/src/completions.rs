@@ -941,6 +941,9 @@ pub fn format_params(params: &Parameters) -> String {
                 ParameterKind::ValueParam { ty } => {
                     format!("{name} {}", ty.value.format_surface())
                 }
+                ParameterKind::Inferred { ty } => {
+                    format!("{name} {}: ?", ty.value.format_surface())
+                }
                 ParameterKind::Default(expr) => match &expr.value {
                     Expr::Lit(literal) => format!("{name}: {literal}"),
                     _ => format!("{name}: {expr:?}"),

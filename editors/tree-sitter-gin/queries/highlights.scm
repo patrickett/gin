@@ -87,7 +87,10 @@
 "private" @keyword
 "has" @keyword.type
 "is" @keyword.operator
-"ref" @keyword.modifier
+[
+  "ref"
+  "mut"
+] @keyword.modifier
 "or" @keyword.operator
 "and" @keyword.operator
 "not" @keyword.operator

@@ -8,10 +8,11 @@ pub use completions::{
     CompletionCandidate, CompletionKind, dot_completions_for_ty, fn_call_at, signature_for_fn,
 };
 pub use typed::{
-    BindBody, DefId, ExprId, FileId, HoverResult, HoverTarget, PackageSemanticIndex,
-    ResolvedImport, TagId, TypedBind, TypedExpr, TypedExprKind, TypedFileAst, TypedIfExpr,
-    TypedLoop, TypedLoopKind, TypedTag, TypedWhenArm, TypedWhenExpr, VariantId,
-    VariantLookupResult, VariantMap, VariantMapEntry, collect_package_variant_map,
+    AppliedEffectTarget, BindBody, DefId, EffectTarget, ExprId, FileId, FunctionEffects, GroupId,
+    HoverResult, HoverTarget, Overlap, PackageSemanticIndex, ReferenceTargetGroup, ResolvedImport,
+    TagId, TargetIndex, TypedBind, TypedCallableSignature, TypedExpr, TypedExprKind, TypedFileAst,
+    TypedGroup, TypedIfExpr, TypedLoop, TypedLoopKind, TypedTag, TypedWhenArm, TypedWhenExpr,
+    VariantId, VariantLookupResult, VariantMap, VariantMapEntry, collect_package_variant_map,
     format_ty_for_hover,
 };
 

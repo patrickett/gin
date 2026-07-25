@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use crate::analysis::{TyInfer, TyInferEnv, TypeEnv};
 use ast::path::ModPath;
 use ast::prelude::*;
-use ast::{ConstExpr, ConstValue, HashFloat};
+use ast::{BinderId, ConstExpr, ConstValue, HashFloat, Parameters};
 
 use crate::ty::Ty;
 use crate::typed::{DefId, ExprId, TypedExprKind, TypedFileAst, VariantMap};
@@ -168,7 +168,7 @@ pub(crate) fn resolve_expr_type(
             .unwrap_or_else(|| Ty::Opaque(Intern::new("self".to_string()))),
         Expr::FormatString(_) => Ty::Opaque(Intern::new("format_string".to_string())),
         Expr::Range(_) => Ty::Opaque(Intern::new("range_expr".to_string())),
-        Expr::TupleAlloc { init, .. } => {
+        Expr::TupleAlloc { init, size } => {
             let elem_ty = resolve_expr_type(
                 init,
                 tag_types,
@@ -180,7 +180,10 @@ pub(crate) fn resolve_expr_type(
             );
             Ty::Array {
                 elem: Box::new(elem_ty),
-                size: ConstExpr::from(0),
+                size: size
+                    .value
+                    .as_size_const_expr()
+                    .unwrap_or_else(|| ConstExpr::from(0)),
             }
         }
         Expr::TupleGet { base, .. } => extract_element_type(&resolve_expr_type(
@@ -433,9 +436,11 @@ pub(crate) fn nominalize_explicit_ty_surface(surface: &TypeExpr, ty: Ty) -> Ty {
         Ty::Record {
             name: existing,
             fields,
+            resolved_params,
         } if existing.as_str() == "record" => Ty::Record {
             name: *name,
             fields,
+            resolved_params,
         },
         Ty::Union {
             name: existing,
@@ -449,6 +454,57 @@ pub(crate) fn nominalize_explicit_ty_surface(surface: &TypeExpr, ty: Ty) -> Ty {
             resolved_params: None,
         },
         other => other,
+    }
+}
+
+pub(crate) fn bind_local_explicit_ty(
+    bind: &Bind,
+    tag_types: &HashMap<Intern<String>, Ty>,
+    tag_params: &HashMap<Intern<String>, Parameters>,
+    tag_decls: &ast::TagMap,
+    binder: BinderId,
+    initializer_ty: Option<&Ty>,
+) -> Option<Ty> {
+    let surface = bind
+        .return_tag
+        .as_ref()
+        .and_then(|sp| sp.value.is_type_surface().then_some(&sp.value));
+    let Some(surface) = surface else {
+        return bind_explicit_ty(bind, tag_types);
+    };
+    let resolved = TypeEnv::new(tag_types)
+        .with_tag_params(tag_params)
+        .with_tag_decls(tag_decls)
+        .with_dependent_binder(binder)
+        .resolve(surface);
+    let resolved = nominalize_explicit_ty_surface(surface, resolved);
+
+    match (initializer_ty, &resolved) {
+        (
+            Some(
+                initializer @ Ty::Record {
+                    name: initializer_name,
+                    ..
+                },
+            ),
+            Ty::Record {
+                name: resolved_name,
+                ..
+            },
+        ) if initializer_name == resolved_name => Some(initializer.clone()),
+        (
+            Some(
+                initializer @ Ty::Union {
+                    name: initializer_name,
+                    ..
+                },
+            ),
+            Ty::Union {
+                name: resolved_name,
+                ..
+            },
+        ) if initializer_name == resolved_name => Some(initializer.clone()),
+        _ => Some(resolved),
     }
 }
 

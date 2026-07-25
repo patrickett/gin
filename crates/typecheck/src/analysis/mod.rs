@@ -8,10 +8,6 @@ pub use const_expr::{
     validate_compile_time_binds,
 };
 
-/// Body inference — determines whether each linear parameter is threaded
-/// (appears in all return paths) or consumed (never returned).
-pub mod infer_convention;
-
 mod flow;
 pub use flow::{
     FlowAnalysis, FlowAnalyzer, FlowContext, ImpossibleCheck, IndexOutOfBounds, VarState,
@@ -25,8 +21,8 @@ pub use type_surface::{
     TypeEnv, check_type_application, mangled_fn_call_name, resolve_name_from_files,
 };
 
-pub(crate) mod desugar_threads;
-pub use desugar_threads::stage_desugar_threads;
+pub(crate) mod validate_consumption;
+pub use validate_consumption::stage_validate_consumption;
 
 mod unify;
 pub use unify::unify_type_args;

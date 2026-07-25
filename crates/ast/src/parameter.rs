@@ -8,19 +8,14 @@ use crate::ty_state::TyState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ParamConvention {
-    /// Bare `name Type` — compiler infers from body whether the param is
-    /// threaded (appears in return) or consumed (never returned).
     #[default]
-    Inferred,
-    /// `ref name Type` — immutable reference parameter.
-    /// The parameter is borrowed, not consumed.
-    Ref(bool),
-    /// `eat name Type` — explicit consume parameter.
-    Eat,
+    Own,
+    Observe,
+    Mutate,
+    Consume,
 }
 
-/// A group parameter on a function: `[mut r T]` or `[r T]`.
-/// Declares that multiple params may alias because they belong to the same group.
+/// Compatibility view derived from grouped parameter reference types.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GroupParam {
     pub name: Intern<String>,
@@ -47,6 +42,9 @@ pub enum ParameterKind {
     ValueParam {
         ty: Box<Spanned<TypeExpr>>,
     },
+    Inferred {
+        ty: Box<Spanned<TypeExpr>>,
+    },
 }
 
 impl std::fmt::Display for ParameterKind {
@@ -58,6 +56,7 @@ impl std::fmt::Display for ParameterKind {
             }
             ParameterKind::Default(expr) => write!(f, ": {:?}", expr),
             ParameterKind::ValueParam { ty } => write!(f, " {:?} (value)", ty.value),
+            ParameterKind::Inferred { ty } => write!(f, " {:?}: ?", ty.value),
         }
     }
 }

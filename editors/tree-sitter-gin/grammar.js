@@ -24,11 +24,13 @@ module.exports = grammar({
   conflicts: ($) => [
     [$.parameters, $.argument_list],
     [$.parameters, $.unit_type],
+    [$.unit_type, $.argument_list],
     [$.parameter, $._expression],
     [$.tag, $._expression],
     [$.tuple_set, $.buf_set, $._expression],
     [$.qualified_tag, $._expression],
     [$.tag, $.qualified_tag, $._expression],
+    [$.tag, $.qualified_tag],
     [$.declaration_parameters, $.type_application],
 
     [$.intersection_type],
@@ -95,7 +97,23 @@ module.exports = grammar({
       ),
 
     declaration_parameters: ($) =>
-      seq("(", optional(nlist($, alias($.identifier, $.type_variable))), ")"),
+      choice(
+        seq("(", optional(nlist($, alias($.identifier, $.type_variable))), ")"),
+        seq(
+          "(",
+          alias($.identifier, $.type_variable),
+          ",",
+          nlist($, $.declaration_parameter),
+          ")",
+        ),
+      ),
+
+    declaration_parameter: ($) =>
+      seq(
+        field("name", $.identifier),
+        field("type", $._type_hint),
+        optional(seq(":", field("default", choice("?", $._expression)))),
+      ),
 
     decl_member_list: ($) => prec.right(nlist($, $._decl_member)),
 
@@ -163,6 +181,7 @@ module.exports = grammar({
         $.type_application,
         $.generic_tag,
         $.qualified_tag,
+        $.reference_type,
         $.type_identifier,
         $.self_type,
       ),
@@ -189,6 +208,17 @@ module.exports = grammar({
 
     qualified_tag: ($) =>
       prec.left(seq($.type_identifier, repeat1(seq(".", $.type_identifier)))),
+
+    reference_type: ($) =>
+      prec.right(
+        seq(
+          field("modifier", choice("ref", "mut")),
+          optional($.reference_group),
+          field("type", $.tag),
+        ),
+      ),
+
+    reference_group: ($) => seq("{", field("name", $.identifier), "}"),
 
     provided_impl: ($) =>
       prec(
@@ -224,6 +254,7 @@ module.exports = grammar({
         1,
         seq(
           optional($.attributes),
+          optional(field("binding_modifier", choice("ref", "mut"))),
           field("name", $.identifier),
           optional($.parameters),
           optional(field("return_type", $._type_hint)),
@@ -247,7 +278,8 @@ module.exports = grammar({
     parameter: ($) =>
       choice(
         seq(
-          optional(field("modifier", "ref")),
+          optional(field("modifier", choice("ref", "mut"))),
+          optional($.reference_group),
           field("name", choice($.identifier, $.self_parameter)),
           optional(
             choice(

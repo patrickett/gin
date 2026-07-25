@@ -22,7 +22,7 @@ impl JsonSerializer {
                 "kind": "Float",
             }),
             Ty::Unit => serde_json::json!({ "kind": "Unit", "size": 0 }),
-            Ty::Record { name, fields } => {
+            Ty::Record { name, fields, .. } => {
                 let flds: Vec<Value> = fields
                     .iter()
                     .map(

@@ -107,6 +107,7 @@ fn unify_const(
             Ok(())
         }
         (ConstExpr::Value(a), ConstExpr::Value(b)) if a == b => Ok(()),
+        (ConstExpr::Inferred(a), ConstExpr::Inferred(b)) if a == b => Ok(()),
         (ConstExpr::Add(l1, r1), ConstExpr::Add(l2, r2))
         | (ConstExpr::Sub(l1, r1), ConstExpr::Sub(l2, r2))
         | (ConstExpr::Mul(l1, r1), ConstExpr::Mul(l2, r2)) => {

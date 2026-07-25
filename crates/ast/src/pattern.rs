@@ -575,6 +575,7 @@ mod tests {
         // Subject type: List(NamedTy) = Record { pointer: Ptr(NamedTy), length: ... }
         let named_ty = Ty::Record {
             name: intern("NamedTy"),
+            resolved_params: None,
             fields: vec![
                 (intern("name"), Box::new(Ty::Opaque(intern("String")))),
                 (intern("ty"), Box::new(Ty::Opaque(intern("Type")))),
@@ -594,6 +595,7 @@ mod tests {
         ];
         let list_record = Ty::Record {
             name: intern("List"),
+            resolved_params: None,
             fields: list_record_fields,
         };
         let mut tag_types = HashMap::new();
@@ -602,6 +604,7 @@ mod tests {
 
         let subject_ty = Some(Ty::Record {
             name: intern("List"),
+            resolved_params: None,
             fields: vec![
                 (
                     intern("pointer"),
@@ -627,7 +630,7 @@ mod tests {
         // rest should have List(NamedTy) type
         let rest_ty = bindings.get(&intern("rest")).expect("rest binding");
         match rest_ty {
-            Ty::Record { name, fields } => {
+            Ty::Record { name, fields, .. } => {
                 assert_eq!(name.as_str(), "List", "rest should be a List");
                 let has_pointer = fields.iter().any(|(n, _)| n.as_str() == "pointer");
                 assert!(has_pointer, "rest List should have pointer field");

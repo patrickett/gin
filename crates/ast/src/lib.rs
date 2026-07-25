@@ -31,7 +31,7 @@ pub mod type_decl;
 pub use type_decl::TypeNameExt;
 
 pub mod const_expr;
-pub use const_expr::ConstExpr;
+pub use const_expr::{BinderId, BinderOwner, ConstExpr, DependentArgId};
 
 pub mod const_value;
 pub use const_value::{ConstValue, TypeConstraint};

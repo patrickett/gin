@@ -90,6 +90,7 @@ pub enum Token<'src> {
     Plus,
     Pound,
     Private,
+    Question,
     Ref,
     Return,
     SelfInstance,

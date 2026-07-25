@@ -4,23 +4,26 @@
 //! `FlowContext` at each program point, and attaches flow-related flaws
 //! (ownership, bounds, narrowing, lin-value checks, etc.).
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 
-use crate::analysis::infer_convention::ConventionInference;
-use crate::analysis::{FlowContext, VarState};
+use crate::analysis::{FlowContext, TyCopyExt, VarState};
+use crate::compile_time_trait::CompileTimeTraitRegistry;
 use crate::reflect::reflect_ty_to_const_value;
-use crate::solver::{ProveResult, predicate_expr_to_predicate};
+use crate::solver::{ConstraintEnv, ProveResult, predicate_expr_to_predicate};
 use ast::const_expr::ConstExpr;
 use ast::expr::Literal;
-use ast::{ConstValue, HashFloat};
+use ast::{ConstValue, HashFloat, ParamConvention};
 use diagnostic::Diagnostic;
 
 use crate::ty::Ty;
 use crate::typed::{
-    DefId, ExprId, TypedExprKind, TypedFileAst, TypedLoopKind, TypedWhenArm, VariantId,
+    DefId, ExprId, Overlap, ReferenceTargetGroup, TargetIndex, TypedCallableSignature,
+    TypedExprKind, TypedFileAst, TypedLoopKind, TypedWhenArm, VariantId,
 };
 use internment::Intern;
+
+use super::effects::applied_effect_targets;
+use super::lower_exprs::target_index_for_expr;
 
 /// Build a map from local bind variable names to their resolved types
 /// by scanning the typed expression arena for `TypedExprKind::Bind` entries.
@@ -40,29 +43,72 @@ fn collect_local_var_types(typed: &TypedFileAst) -> HashMap<Intern<String>, Ty> 
     var_types
 }
 
-thread_local! {
-    static REF_TRACKER: RefCell<Option<RefTracker>> = const { RefCell::new(None) };
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceValidity {
+    Valid,
+    PermanentlyInvalid,
+    MaybeInvalid,
 }
 
-/// Clear the ref tracker after stage_flow completes.
-fn clear_ref_tracker() {
-    REF_TRACKER.with(|rt| {
-        *rt.borrow_mut() = None;
-    });
+pub struct RefTracker {
+    targets: HashMap<Intern<String>, ReferenceTargetGroup>,
+    validity: HashMap<Intern<String>, ReferenceValidity>,
 }
-
-/// Tracks ref-to-source dependencies for child-group invalidation.
-pub struct RefTracker {}
 
 impl RefTracker {
     fn new() -> Self {
-        Self {}
+        Self {
+            targets: HashMap::new(),
+            validity: HashMap::new(),
+        }
+    }
+
+    fn register(&mut self, reference: Intern<String>, target: Option<ReferenceTargetGroup>) {
+        if let Some(target) = target {
+            self.targets.insert(reference, target);
+            self.validity.insert(reference, ReferenceValidity::Valid);
+        }
+    }
+
+    fn replace(&mut self, place: &ReferenceTargetGroup, constraints: &ConstraintEnv) {
+        let affected: Vec<_> = self
+            .targets
+            .iter()
+            .filter_map(|(reference, target)| {
+                (target.overlap(place, constraints) != Overlap::Disjoint).then_some(*reference)
+            })
+            .collect();
+        for reference in &affected {
+            self.validity
+                .insert(*reference, ReferenceValidity::MaybeInvalid);
+        }
+        for reference in affected {
+            self.validity.insert(reference, ReferenceValidity::Valid);
+        }
+    }
+
+    fn permanently_invalidate(
+        &mut self,
+        source: &ReferenceTargetGroup,
+        flow_ctx: &mut FlowContext,
+    ) {
+        for (reference, target) in &self.targets {
+            if target.overlap(source, &flow_ctx.constraint_env) != Overlap::Disjoint {
+                self.validity
+                    .insert(*reference, ReferenceValidity::PermanentlyInvalid);
+                flow_ctx.set_var_state(*reference, VarState::Invalidated);
+            }
+        }
     }
 }
 
 /// Walks the expression arena, computes flow contexts at each program point,
 /// and attaches flow-related flaws to expressions.
-pub fn stage_flow(typed: &mut TypedFileAst, conventions: &HashMap<DefId, ConventionInference>) {
+pub fn stage_flow(
+    typed: &mut TypedFileAst,
+    trait_registry: &CompileTimeTraitRegistry,
+    cross_file_signatures: &HashMap<DefId, TypedCallableSignature>,
+) {
     // Collect root expression IDs from all bind bodies.
     let mut def_ids: Vec<_> = typed.defs.keys().copied().collect();
     def_ids.sort_by_key(|def_id| {
@@ -88,6 +134,13 @@ pub fn stage_flow(typed: &mut TypedFileAst, conventions: &HashMap<DefId, Convent
         .collect();
 
     let local_var_types = collect_local_var_types(typed);
+    let mut callable_signatures = cross_file_signatures.clone();
+    callable_signatures.extend(
+        typed
+            .defs
+            .iter()
+            .map(|(def_id, bind)| (*def_id, TypedCallableSignature::from(bind))),
+    );
 
     let mut ref_tracker = RefTracker::new();
 
@@ -95,8 +148,57 @@ pub fn stage_flow(typed: &mut TypedFileAst, conventions: &HashMap<DefId, Convent
     let mut const_bindings: HashMap<Intern<String>, bool> = HashMap::new();
 
     // Process each bind body.
-    for (_def_id, root_ids) in &bind_bodies {
+    for (def_id, root_ids) in &bind_bodies {
+        let owned_params: Vec<Intern<String>> = typed
+            .defs
+            .get(def_id)
+            .map(|bind| {
+                bind.params
+                    .iter()
+                    .zip(&bind.param_conventions)
+                    .filter_map(|((name, ty), convention)| {
+                        (*convention == ParamConvention::Own
+                            && !ty.is_copyable(trait_registry, typed))
+                        .then_some(*name)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let return_ids: Vec<ExprId> = typed
+            .defs
+            .get(def_id)
+            .map(|bind| match &bind.body {
+                crate::typed::BindBody::Expr(id) => vec![*id],
+                crate::typed::BindBody::Body { ret: Some(id), .. } => vec![*id],
+                crate::typed::BindBody::Body { ret: None, .. } | crate::typed::BindBody::Extern => {
+                    vec![]
+                }
+            })
+            .unwrap_or_default();
+        let parameter_constraints: Vec<_> = typed
+            .defs
+            .get(def_id)
+            .map(|bind| {
+                bind.params
+                    .iter()
+                    .zip(&bind.param_refinements)
+                    .filter_map(|((name, _), refinement)| {
+                        refinement
+                            .as_ref()
+                            .map(|refinement| (*name, refinement.clone()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut flow_ctx = FlowContext::new();
+        for (name, refinement) in parameter_constraints {
+            let predicate =
+                predicate_expr_to_predicate(&refinement, ConstExpr::Var(name), &HashMap::new());
+            flow_ctx.constraint_env.assume(&predicate);
+        }
+        for name in &owned_params {
+            flow_ctx.set_var_state(*name, VarState::Alive);
+        }
         let mut local_const_values: HashMap<Intern<String>, ConstValue> = HashMap::new();
         let mut ctx = WalkExprCtx {
             typed,
@@ -104,13 +206,33 @@ pub fn stage_flow(typed: &mut TypedFileAst, conventions: &HashMap<DefId, Convent
             local_var_types: &local_var_types,
             ref_tracker: &mut ref_tracker,
             const_bindings: &mut const_bindings,
-            conventions,
             local_const_values: &mut local_const_values,
+            trait_registry,
+            callable_signatures: &callable_signatures,
         };
         for root_id in root_ids {
             ctx.walk(*root_id);
         }
+        for return_id in return_ids {
+            mark_consumed_if_local_ref(ctx.typed, return_id, ctx.flow_ctx);
+        }
         emit_unassigned_bindings(ctx.typed, ctx.flow_ctx);
+        let unconsumed: Vec<_> = owned_params
+            .iter()
+            .copied()
+            .filter(|name| !matches!(ctx.flow_ctx.get_var_state(name), Some(VarState::Consumed)))
+            .collect();
+        if let Some(bind) = ctx.typed.defs.get_mut(def_id) {
+            for name in unconsumed {
+                bind.flaws.push(
+                    Diagnostic::new(
+                        "type-owned-param-not-consumed",
+                        format!("owned parameter `{}` is not returned or consumed", name),
+                    )
+                    .with_arg("name", name.as_str().to_string()),
+                );
+            }
+        }
     }
 
     // Process top-level expressions.
@@ -123,14 +245,13 @@ pub fn stage_flow(typed: &mut TypedFileAst, conventions: &HashMap<DefId, Convent
         local_var_types: &local_var_types,
         ref_tracker: &mut ref_tracker,
         const_bindings: &mut const_bindings,
-        conventions,
         local_const_values: &mut local_const_values,
+        trait_registry,
+        callable_signatures: &callable_signatures,
     };
     for root_id in &root_ids {
         ctx.walk(*root_id);
     }
-
-    clear_ref_tracker();
 }
 
 fn emit_unassigned_bindings(typed: &mut TypedFileAst, flow_ctx: &FlowContext) {
@@ -165,6 +286,127 @@ fn emit_unassigned_bindings(typed: &mut TypedFileAst, flow_ctx: &FlowContext) {
     }
 }
 
+fn record_field_index(typed: &TypedFileAst, base: ExprId, field: Intern<String>) -> Option<usize> {
+    let mut ty = typed.exprs.ty.get(base.as_usize())?;
+    if let Ty::Ref { inner, .. } = ty {
+        ty = inner;
+    }
+    let Ty::Record { fields, .. } = ty else {
+        return None;
+    };
+    fields.iter().position(|(name, _)| *name == field)
+}
+
+fn referenced_source(typed: &TypedFileAst, expr_id: ExprId) -> Option<Intern<String>> {
+    match typed.exprs.kind.get(expr_id.as_usize())? {
+        TypedExprKind::FnCall { target, args, .. }
+            if args.as_ref().is_none_or(|args| args.is_empty()) =>
+        {
+            Some(target.0)
+        }
+        TypedExprKind::TupleGet { base, .. } | TypedExprKind::BufGet { buf: base, .. } => {
+            referenced_source(typed, *base)
+        }
+        TypedExprKind::Deref(inner) | TypedExprKind::Ref(inner) => referenced_source(typed, *inner),
+        _ => None,
+    }
+}
+
+fn validate_call_refinements(
+    typed: &TypedFileAst,
+    args: &[ExprId],
+    signature: &TypedCallableSignature,
+    constraints: &ConstraintEnv,
+) -> Vec<Diagnostic> {
+    let mut substitutions = HashMap::new();
+    for ((name, formal_ty), arg) in signature.params.iter().zip(args) {
+        if let TargetIndex::Symbolic(actual) = target_index_for_expr(typed, *arg) {
+            substitutions.insert(*name, actual);
+        }
+        if let Some(actual_ty) = typed.exprs.ty.get(arg.as_usize()) {
+            collect_dependent_substitutions(formal_ty, actual_ty, &mut substitutions);
+        }
+    }
+
+    let mut flaws = Vec::new();
+    for (((name, _), refinement), arg) in signature
+        .params
+        .iter()
+        .zip(&signature.param_refinements)
+        .zip(args)
+    {
+        let Some(refinement) = refinement else {
+            continue;
+        };
+        let TargetIndex::Symbolic(actual) = target_index_for_expr(typed, *arg) else {
+            flaws.push(
+                Diagnostic::new(
+                    "type-parameter-refinement-unproven",
+                    format!("cannot prove refinement for argument `{}`", name.as_str()),
+                )
+                .with_arg("name", name.as_str().to_string()),
+            );
+            continue;
+        };
+        let predicate = predicate_expr_to_predicate(refinement, actual, &substitutions);
+        match constraints.prove(&predicate, &HashMap::new()) {
+            ProveResult::Proven => {}
+            ProveResult::Disproven => flaws.push(
+                Diagnostic::new(
+                    "type-parameter-refinement-failed",
+                    format!(
+                        "argument `{}` does not satisfy its refinement",
+                        name.as_str()
+                    ),
+                )
+                .with_arg("name", name.as_str().to_string()),
+            ),
+            ProveResult::Unknown => flaws.push(
+                Diagnostic::new(
+                    "type-parameter-refinement-unproven",
+                    format!("cannot prove refinement for argument `{}`", name.as_str()),
+                )
+                .with_arg("name", name.as_str().to_string()),
+            ),
+        }
+    }
+    flaws
+}
+
+fn collect_dependent_substitutions(
+    formal: &Ty,
+    actual: &Ty,
+    substitutions: &mut HashMap<Intern<String>, ConstExpr>,
+) {
+    match (formal, actual) {
+        (Ty::Ref { inner: formal, .. }, Ty::Ref { inner: actual, .. }) => {
+            collect_dependent_substitutions(formal, actual, substitutions)
+        }
+        (Ty::Ref { inner: formal, .. }, actual) => {
+            collect_dependent_substitutions(formal, actual, substitutions)
+        }
+        (formal, Ty::Ref { inner: actual, .. }) => {
+            collect_dependent_substitutions(formal, actual, substitutions)
+        }
+        (
+            Ty::Array {
+                elem: formal_elem,
+                size: formal_size,
+            },
+            Ty::Array {
+                elem: actual_elem,
+                size: actual_size,
+            },
+        ) => {
+            if let ConstExpr::Var(name) = formal_size {
+                substitutions.insert(*name, actual_size.clone());
+            }
+            collect_dependent_substitutions(formal_elem, actual_elem, substitutions);
+        }
+        _ => {}
+    }
+}
+
 fn mark_consumed_if_local_ref(typed: &TypedFileAst, expr_id: ExprId, flow_ctx: &mut FlowContext) {
     let idx = expr_id.as_usize();
     if idx >= typed.exprs.kind.len() {
@@ -191,8 +433,10 @@ struct WalkExprCtx<'a> {
     local_var_types: &'a HashMap<Intern<String>, Ty>,
     ref_tracker: &'a mut RefTracker,
     const_bindings: &'a mut HashMap<Intern<String>, bool>,
-    conventions: &'a HashMap<DefId, ConventionInference>,
+
     local_const_values: &'a mut HashMap<Intern<String>, ConstValue>,
+    trait_registry: &'a CompileTimeTraitRegistry,
+    callable_signatures: &'a HashMap<DefId, TypedCallableSignature>,
 }
 
 impl<'a> WalkExprCtx<'a> {
@@ -228,6 +472,15 @@ impl<'a> WalkExprCtx<'a> {
                                 .with_arg("name", target.0.as_str().to_string()),
                             );
                         }
+                        Some(VarState::Invalidated) => {
+                            self.typed.exprs.flaws[idx].push(
+                                Diagnostic::new(
+                                    "type-use-of-invalidated-reference",
+                                    format!("use of invalidated reference `{}`", target.0.as_str()),
+                                )
+                                .with_arg("name", target.0.as_str().to_string()),
+                            );
+                        }
                         Some(VarState::Declared) => {
                             self.typed.exprs.flaws[idx].push(
                                 Diagnostic::new(
@@ -241,8 +494,57 @@ impl<'a> WalkExprCtx<'a> {
                     }
                 }
                 if let Some(arg_ids) = args {
-                    for arg_id in &arg_ids {
+                    let signature = self.callable_signatures.get(&target).cloned();
+                    let conventions = signature
+                        .as_ref()
+                        .map(|signature| signature.param_conventions.clone())
+                        .unwrap_or_default();
+                    for (param_idx, arg_id) in arg_ids.iter().enumerate() {
                         self.walk(*arg_id);
+                        let convention = conventions.get(param_idx);
+                        if convention != Some(&ParamConvention::Own) {
+                            continue;
+                        }
+                        let arg_idx = arg_id.as_usize();
+                        if matches!(
+                            self.typed.exprs.kind.get(arg_idx),
+                            Some(TypedExprKind::Ref(_) | TypedExprKind::ConsumeArg(_))
+                        ) {
+                            continue;
+                        }
+                        let is_copyable = self
+                            .typed
+                            .exprs
+                            .ty
+                            .get(arg_idx)
+                            .is_some_and(|ty| ty.is_copyable(self.trait_registry, self.typed));
+                        if !is_copyable {
+                            mark_consumed_if_local_ref(self.typed, *arg_id, self.flow_ctx);
+                            if let Some(source) =
+                                self.typed.exprs.target_group[arg_id.as_usize()].clone()
+                            {
+                                self.ref_tracker
+                                    .permanently_invalidate(&source, self.flow_ctx);
+                            }
+                        }
+                    }
+                    if let Some(signature) = signature {
+                        let refinement_flaws = validate_call_refinements(
+                            self.typed,
+                            &arg_ids,
+                            &signature,
+                            &self.flow_ctx.constraint_env,
+                        );
+                        self.typed.exprs.flaws[idx].extend(refinement_flaws);
+                        for applied in applied_effect_targets(
+                            self.typed,
+                            &arg_ids,
+                            &signature,
+                            &signature.effects.invalidates,
+                        ) {
+                            self.ref_tracker
+                                .permanently_invalidate(&applied.target, self.flow_ctx);
+                        }
                     }
                 }
             }
@@ -290,15 +592,34 @@ impl<'a> WalkExprCtx<'a> {
                     self.flow_ctx.set_var_state(name, VarState::Declared);
                 } else {
                     self.flow_ctx.set_var_state(name, VarState::Alive);
+                    let reference_source = match self.typed.exprs.kind.get(body.as_usize()) {
+                        Some(TypedExprKind::Ref(inner)) => referenced_source(self.typed, *inner),
+                        _ if matches!(self.typed.exprs.ty.get(idx), Some(Ty::Ref { .. })) => {
+                            referenced_source(self.typed, body)
+                        }
+                        _ => None,
+                    };
+                    if reference_source.is_some() {
+                        let target = self.typed.exprs.target_group[body.as_usize()].clone();
+                        self.ref_tracker.register(name, target);
+                    }
                 }
             }
             TypedExprKind::Reassign { name, value } => {
                 self.walk(value);
+                self.ref_tracker.replace(
+                    &ReferenceTargetGroup::Local(name),
+                    &self.flow_ctx.constraint_env,
+                );
                 self.flow_ctx.set_var_state(name, VarState::Alive);
             }
             TypedExprKind::Eat(inner) => {
                 self.walk(inner);
                 mark_consumed_if_local_ref(self.typed, inner, self.flow_ctx);
+                if let Some(source) = self.typed.exprs.target_group[inner.as_usize()].clone() {
+                    self.ref_tracker
+                        .permanently_invalidate(&source, self.flow_ctx);
+                }
             }
             TypedExprKind::TakePtr(inner) | TypedExprKind::Ref(inner) => {
                 self.walk(inner);
@@ -420,10 +741,33 @@ impl<'a> WalkExprCtx<'a> {
             TypedExprKind::Destructure { value, .. } => {
                 self.walk(value);
             }
-            TypedExprKind::RecordSet { base, value, .. }
-            | TypedExprKind::TupleSet { base, value, .. } => {
+            TypedExprKind::RecordSet { base, field, value } => {
                 self.walk(base);
                 self.walk(value);
+                if let Some(base_target) = self.typed.exprs.target_group[base.as_usize()].clone()
+                    && let Some(index) = record_field_index(self.typed, base, field)
+                {
+                    self.ref_tracker.replace(
+                        &ReferenceTargetGroup::Field {
+                            base: Box::new(base_target),
+                            index,
+                        },
+                        &self.flow_ctx.constraint_env,
+                    );
+                }
+            }
+            TypedExprKind::TupleSet { base, index, value } => {
+                self.walk(base);
+                self.walk(value);
+                if let Some(base_target) = self.typed.exprs.target_group[base.as_usize()].clone() {
+                    self.ref_tracker.replace(
+                        &ReferenceTargetGroup::Field {
+                            base: Box::new(base_target),
+                            index,
+                        },
+                        &self.flow_ctx.constraint_env,
+                    );
+                }
             }
             TypedExprKind::Range { start, end } => {
                 self.walk(start);
@@ -447,6 +791,10 @@ impl<'a> WalkExprCtx<'a> {
             TypedExprKind::ConsumeArg(inner) => {
                 self.walk(inner);
                 mark_consumed_if_local_ref(self.typed, inner, self.flow_ctx);
+                if let Some(source) = self.typed.exprs.target_group[inner.as_usize()].clone() {
+                    self.ref_tracker
+                        .permanently_invalidate(&source, self.flow_ctx);
+                }
             }
             TypedExprKind::Deref(inner) | TypedExprKind::Negate(inner) => {
                 self.walk(inner);
@@ -803,4 +1151,49 @@ fn subject_comparison_facts(
         return Vec::new();
     };
     vec![(lhs, rhs, is_lt)]
+}
+
+#[cfg(test)]
+mod reference_validity_tests {
+    use super::*;
+
+    fn local(name: &str) -> ReferenceTargetGroup {
+        ReferenceTargetGroup::Local(Intern::from_ref(name))
+    }
+
+    #[test]
+    fn field_replacement_restores_reference_validity() {
+        let field = ReferenceTargetGroup::Field {
+            base: Box::new(local("record")),
+            index: 0,
+        };
+        let reference = Intern::from_ref("saved");
+        let mut tracker = RefTracker::new();
+        tracker.register(reference, Some(field.clone()));
+
+        tracker.replace(&field, &ConstraintEnv::default());
+
+        assert_eq!(tracker.validity[&reference], ReferenceValidity::Valid);
+    }
+
+    #[test]
+    fn permanent_source_invalidation_reaches_descendant_places() {
+        let source = local("record");
+        let field = ReferenceTargetGroup::Field {
+            base: Box::new(source.clone()),
+            index: 0,
+        };
+        let reference = Intern::from_ref("saved");
+        let mut tracker = RefTracker::new();
+        tracker.register(reference, Some(field));
+        let mut flow = FlowContext::new();
+
+        tracker.permanently_invalidate(&source, &mut flow);
+
+        assert_eq!(
+            tracker.validity[&reference],
+            ReferenceValidity::PermanentlyInvalid
+        );
+        assert_eq!(flow.get_var_state(&reference), Some(VarState::Invalidated));
+    }
 }

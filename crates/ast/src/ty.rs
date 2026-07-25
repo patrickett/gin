@@ -91,6 +91,7 @@ pub enum Ty {
     Record {
         name: Intern<String>,
         fields: Vec<(Intern<String>, Box<Ty>)>,
+        resolved_params: Option<Vec<(Intern<String>, TyArg)>>,
     },
     /// Unresolved / generic type — falls back to `i64` in codegen.
     Opaque(Intern<String>),
@@ -306,7 +307,7 @@ impl Ty {
                 ],
             ),
             Ty::Unit => Self::tag("Tuple", vec![ConstValue::List(vec![].into())]),
-            Ty::Record { name, fields } => {
+            Ty::Record { name, fields, .. } => {
                 if !seen.insert(*name) {
                     return Self::tag(
                         "Opaque",
@@ -502,12 +503,28 @@ impl Ty {
     pub fn substitute(&self, subst: &HashMap<Intern<String>, Ty>) -> Ty {
         match self {
             Ty::Opaque(name) => subst.get(name).cloned().unwrap_or(Ty::Opaque(*name)),
-            Ty::Record { name, fields } => Ty::Record {
+            Ty::Record {
+                name,
+                fields,
+                resolved_params,
+            } => Ty::Record {
                 name: *name,
                 fields: fields
                     .iter()
                     .map(|(n, t)| (*n, Box::new(t.substitute(subst))))
                     .collect(),
+                resolved_params: resolved_params.as_ref().map(|params| {
+                    params
+                        .iter()
+                        .map(|(name, arg)| {
+                            let arg = match arg {
+                                TyArg::Type(ty) => TyArg::Type(Box::new(ty.substitute(subst))),
+                                TyArg::Const(expr) => TyArg::Const(expr.clone()),
+                            };
+                            (*name, arg)
+                        })
+                        .collect()
+                }),
             },
             Ty::Union {
                 name,

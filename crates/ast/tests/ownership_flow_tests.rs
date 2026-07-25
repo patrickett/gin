@@ -172,14 +172,13 @@ return r
 }
 
 #[test]
-fn test_auto_thread_then_consume_copyable() {
-    // Bare call then consume — no diagnostic.
+fn test_observe_then_consume() {
     let src = "\
-read(x Int) Int: x
+read(ref x Int) Int: x
 drop(eat y Int) Int: 0
 main:
     val: 42
-    read(val)
+    read(ref val)
     drop(eat val)
 return 0
 ";
@@ -187,7 +186,7 @@ return 0
     let has_moved = diags
         .iter()
         .any(|d| d.code.slug() == "type-use-of-moved-value");
-    assert!(!has_moved, "thread then consume copyable: {:?}", diags);
+    assert!(!has_moved, "observe then consume: {:?}", diags);
 }
 
 #[test]
@@ -267,6 +266,215 @@ return 0
     );
 }
 
+#[test]
+fn test_mut_call_preserves_existing_reference_without_invalidation_effect() {
+    let src = "\
+replace(mut x Int) Int:
+    x: 0
+return x
+main:
+    value: 42
+    ref reference Int: value
+    replace(mut value)
+    result: reference
+return 0
+";
+    let diags = collect_ownership_diagnostics(src);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.code.slug() == "type-use-of-invalidated-reference"),
+        "unexpected invalidated reference diagnostic: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_fixed_array_item_replacement_preserves_reference() {
+    let src = "\
+main:
+    items: (0; 2)
+    ref saved Int: items.(0)
+    items.(0): 1
+    result: saved
+return 0
+";
+    let diags = collect_ownership_diagnostics(src);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.code.slug() == "type-use-of-invalidated-reference"),
+        "unexpected invalidated reference diagnostic: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_consuming_different_fixed_array_item_preserves_reference() {
+    let src = "\
+drop(eat value Int) Int: 0
+main:
+    items: (0; 2)
+    ref saved Int: items.(0)
+    drop(eat items.(1))
+    result: saved
+return 0
+";
+    let diags = collect_ownership_diagnostics(src);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.code.slug() == "type-use-of-invalidated-reference"),
+        "unexpected invalidated reference diagnostic: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_fixed_array_call_proves_index_refinement_from_length() {
+    let src = "\
+get(ref array Array(x, n), index Int and >= 0 and < n) ref x: array.(index)
+main:
+    items: (0; 4)
+    ref saved Int: get(ref items, 2)
+    result: saved
+return 0
+";
+    let diags = collect_ownership_diagnostics(src);
+    assert!(
+        !diags.iter().any(|d| {
+            matches!(
+                d.code.slug(),
+                "type-parameter-refinement-failed" | "type-parameter-refinement-unproven"
+            )
+        }),
+        "unexpected refinement diagnostic: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_fixed_array_call_rejects_index_at_length() {
+    let src = "\
+get(ref array Array(x, n), index Int and >= 0 and < n) ref x: array.(index)
+main:
+    items: (0; 4)
+    ref saved Int: get(ref items, 4)
+return 0
+";
+    let diags = collect_ownership_diagnostics(src);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code.slug() == "type-parameter-refinement-failed"),
+        "expected failed refinement diagnostic, got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_fixed_array_call_requires_proof_for_symbolic_index() {
+    let src = "\
+get(ref array Array(x, n), index Int and >= 0 and < n) ref x: array.(index)
+visit(ref items Array(Int, 4), index Int) Int:
+    ref saved Int: get(ref items, index)
+return 0
+main: 0
+";
+    let diags = collect_ownership_diagnostics(src);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code.slug() == "type-parameter-refinement-unproven"),
+        "expected unproven refinement diagnostic, got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_parameter_refinement_proves_symbolic_array_items_disjoint() {
+    let src = "\
+drop(eat value Int) Int: 0
+visit(ref items x, i Int, j Int and > i) Int:
+    ref saved Int: items.(i)
+    drop(eat items.(j))
+    result: saved
+return 0
+main: 0
+";
+    let diags = collect_ownership_diagnostics(src);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.code.slug() == "type-use-of-invalidated-reference"),
+        "unexpected invalidated reference diagnostic: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_unrelated_symbolic_array_items_conservatively_overlap() {
+    let src = "\
+drop(eat value Int) Int: 0
+visit(ref items x, i Int, j Int) Int:
+    ref saved Int: items.(i)
+    drop(eat items.(j))
+    result: saved
+return 0
+main: 0
+";
+    let diags = collect_ownership_diagnostics(src);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code.slug() == "type-use-of-invalidated-reference"),
+        "expected invalidated reference diagnostic, got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_consuming_same_fixed_array_item_invalidates_reference() {
+    let src = "\
+drop(eat value Int) Int: 0
+main:
+    items: (0; 2)
+    ref saved Int: items.(0)
+    drop(eat items.(0))
+    result: saved
+return 0
+";
+    let diags = collect_ownership_diagnostics(src);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code.slug() == "type-use-of-invalidated-reference"),
+        "expected invalidated reference diagnostic, got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_eat_invalidates_existing_reference_on_later_use() {
+    let src = "\
+drop(eat x Int) Int: 0
+main:
+    value: 42
+    ref reference Int: value
+    drop(eat value)
+    result: reference
+return 0
+";
+    let diags = collect_ownership_diagnostics(src);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code.slug() == "type-use-of-invalidated-reference"),
+        "expected invalidated reference diagnostic, got: {:?}",
+        diags
+    );
+}
+
 mod support;
 use support::{empty_typed, marker_trait_registry};
 
@@ -304,6 +512,7 @@ fn test_copy_inference_ptr_is_not_copyable() {
 fn test_copy_inference_small_record_is_copyable() {
     let small = typecheck::ty::Ty::Record {
         name: Intern::from_ref("Small"),
+        resolved_params: None,
         fields: vec![(
             Intern::from_ref("x"),
             Box::new(typecheck::ty::Ty::Int {
@@ -324,6 +533,7 @@ fn test_copy_inference_small_record_is_copyable() {
 fn test_copy_inference_record_with_copy_fields_is_copyable() {
     let large = typecheck::ty::Ty::Record {
         name: Intern::from_ref("Large"),
+        resolved_params: None,
         fields: (0..5)
             .map(|i| {
                 (

@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use ast::ConstExpr;
+use ast::{BinderId, ConstExpr};
+
 use ast::HashFloat;
-use ast::parameter::{ParameterKind, Parameters};
+use ast::parameter::{ParamConvention, ParameterKind, Parameters};
 use ast::prelude::*;
 use ast::source::SourceExt;
 use ast::span::{SpanId, SpanTable, SubSpan};
@@ -12,6 +13,7 @@ use ast_format::type_expr::TypeExprFormatExt;
 use diagnostic::Diagnostic;
 use internment::Intern;
 
+use crate::solver::{ConstraintEnv, Predicate, ProveResult};
 use crate::ty::Ty;
 
 /// Opaque file identifier assigned during compilation coordination.
@@ -36,6 +38,554 @@ pub struct VariantId {
 /// Index into the expression arena (soa_derive TypedExprVec).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ExprId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GroupId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Overlap {
+    Disjoint,
+    Equal,
+    Partial,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TargetIndex {
+    Symbolic(ConstExpr),
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum EffectTarget {
+    Group(GroupId),
+    Field {
+        base: Box<EffectTarget>,
+        index: usize,
+    },
+    ItemRegion {
+        base: Box<EffectTarget>,
+        index: TargetIndex,
+    },
+    ItemRange {
+        base: Box<EffectTarget>,
+        start: TargetIndex,
+        end: TargetIndex,
+    },
+    Deref(Box<EffectTarget>),
+    Descendants(Box<EffectTarget>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedEffectTarget {
+    pub target: ReferenceTargetGroup,
+    pub descendants: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ReferenceTargetGroup {
+    Param(GroupId),
+    Local(Intern<String>),
+    Field {
+        base: Box<ReferenceTargetGroup>,
+        index: usize,
+    },
+    ItemRegion {
+        base: Box<ReferenceTargetGroup>,
+        index: TargetIndex,
+    },
+    ItemRange {
+        base: Box<ReferenceTargetGroup>,
+        start: TargetIndex,
+        end: TargetIndex,
+    },
+    Deref(Box<ReferenceTargetGroup>),
+}
+
+impl EffectTarget {
+    pub fn from_reference(target: &ReferenceTargetGroup) -> Option<Self> {
+        match target {
+            ReferenceTargetGroup::Param(group) => Some(Self::Group(*group)),
+            ReferenceTargetGroup::Field { base, index } => Some(Self::Field {
+                base: Box::new(Self::from_reference(base)?),
+                index: *index,
+            }),
+            ReferenceTargetGroup::ItemRegion { base, index } => Some(Self::ItemRegion {
+                base: Box::new(Self::from_reference(base)?),
+                index: index.clone(),
+            }),
+            ReferenceTargetGroup::ItemRange { base, start, end } => Some(Self::ItemRange {
+                base: Box::new(Self::from_reference(base)?),
+                start: start.clone(),
+                end: end.clone(),
+            }),
+            ReferenceTargetGroup::Deref(base) => {
+                Some(Self::Deref(Box::new(Self::from_reference(base)?)))
+            }
+            ReferenceTargetGroup::Local(_) => None,
+        }
+    }
+
+    pub fn substitute(
+        &self,
+        group: GroupId,
+        actual: &ReferenceTargetGroup,
+    ) -> Option<AppliedEffectTarget> {
+        let (target, descendants) = self.substitute_inner(group, actual)?;
+        Some(AppliedEffectTarget {
+            target,
+            descendants,
+        })
+    }
+
+    fn substitute_inner(
+        &self,
+        group: GroupId,
+        actual: &ReferenceTargetGroup,
+    ) -> Option<(ReferenceTargetGroup, bool)> {
+        match self {
+            Self::Group(effect_group) => (*effect_group == group).then(|| (actual.clone(), false)),
+            Self::Field { base, index } => {
+                let (base, descendants) = base.substitute_inner(group, actual)?;
+                Some((
+                    ReferenceTargetGroup::Field {
+                        base: Box::new(base),
+                        index: *index,
+                    },
+                    descendants,
+                ))
+            }
+            Self::ItemRegion { base, index } => {
+                let (base, descendants) = base.substitute_inner(group, actual)?;
+                Some((
+                    ReferenceTargetGroup::ItemRegion {
+                        base: Box::new(base),
+                        index: index.clone(),
+                    },
+                    descendants,
+                ))
+            }
+            Self::ItemRange { base, start, end } => {
+                let (base, descendants) = base.substitute_inner(group, actual)?;
+                Some((
+                    ReferenceTargetGroup::ItemRange {
+                        base: Box::new(base),
+                        start: start.clone(),
+                        end: end.clone(),
+                    },
+                    descendants,
+                ))
+            }
+            Self::Deref(base) => {
+                let (base, descendants) = base.substitute_inner(group, actual)?;
+                Some((ReferenceTargetGroup::Deref(Box::new(base)), descendants))
+            }
+            Self::Descendants(base) => {
+                let (target, _) = base.substitute_inner(group, actual)?;
+                Some((target, true))
+            }
+        }
+    }
+}
+
+impl ReferenceTargetGroup {
+    pub fn overlap(&self, other: &Self, constraints: &ConstraintEnv) -> Overlap {
+        match (self, other) {
+            (Self::Param(left), Self::Param(right)) => {
+                if left == right {
+                    Overlap::Equal
+                } else {
+                    Overlap::Disjoint
+                }
+            }
+            (Self::Local(left), Self::Local(right)) => {
+                if left == right {
+                    Overlap::Equal
+                } else {
+                    Overlap::Disjoint
+                }
+            }
+            (
+                Self::Field {
+                    base: left_base,
+                    index: left_index,
+                },
+                Self::Field {
+                    base: right_base,
+                    index: right_index,
+                },
+            ) => match left_base.overlap(right_base, constraints) {
+                Overlap::Disjoint => Overlap::Disjoint,
+                Overlap::Equal if left_index == right_index => Overlap::Equal,
+                Overlap::Equal => Overlap::Disjoint,
+                Overlap::Partial => Overlap::Partial,
+                Overlap::Unknown => Overlap::Unknown,
+            },
+            (
+                Self::ItemRegion {
+                    base: left_base,
+                    index: left_index,
+                },
+                Self::ItemRegion {
+                    base: right_base,
+                    index: right_index,
+                },
+            ) => match left_base.overlap(right_base, constraints) {
+                Overlap::Disjoint => Overlap::Disjoint,
+                Overlap::Equal => index_overlap(left_index, right_index, constraints),
+                Overlap::Partial => Overlap::Partial,
+                Overlap::Unknown => Overlap::Unknown,
+            },
+            (
+                Self::ItemRegion {
+                    base: item_base,
+                    index,
+                },
+                Self::ItemRange {
+                    base: range_base,
+                    start,
+                    end,
+                },
+            ) => match item_base.overlap(range_base, constraints) {
+                Overlap::Disjoint => Overlap::Disjoint,
+                Overlap::Equal => index_range_overlap(index, start, end, constraints),
+                Overlap::Partial => Overlap::Partial,
+                Overlap::Unknown => Overlap::Unknown,
+            },
+            (Self::ItemRange { .. }, Self::ItemRegion { .. }) => other.overlap(self, constraints),
+            (
+                Self::ItemRange {
+                    base: left_base,
+                    start: left_start,
+                    end: left_end,
+                },
+                Self::ItemRange {
+                    base: right_base,
+                    start: right_start,
+                    end: right_end,
+                },
+            ) => match left_base.overlap(right_base, constraints) {
+                Overlap::Disjoint => Overlap::Disjoint,
+                Overlap::Equal => {
+                    range_overlap(left_start, left_end, right_start, right_end, constraints)
+                }
+                Overlap::Partial => Overlap::Partial,
+                Overlap::Unknown => Overlap::Unknown,
+            },
+            (Self::Deref(left), Self::Deref(right)) => left.overlap(right, constraints),
+            _ => {
+                if let Some(parent) = self.parent() {
+                    return descendant_overlap(parent.overlap(other, constraints));
+                }
+                if let Some(parent) = other.parent() {
+                    return descendant_overlap(self.overlap(parent, constraints));
+                }
+                Overlap::Disjoint
+            }
+        }
+    }
+
+    fn parent(&self) -> Option<&Self> {
+        match self {
+            Self::Field { base, .. }
+            | Self::ItemRegion { base, .. }
+            | Self::ItemRange { base, .. }
+            | Self::Deref(base) => Some(base),
+            Self::Param(_) | Self::Local(_) => None,
+        }
+    }
+}
+
+fn descendant_overlap(overlap: Overlap) -> Overlap {
+    match overlap {
+        Overlap::Equal | Overlap::Partial => Overlap::Partial,
+        other => other,
+    }
+}
+
+fn index_overlap(left: &TargetIndex, right: &TargetIndex, constraints: &ConstraintEnv) -> Overlap {
+    let (TargetIndex::Symbolic(left), TargetIndex::Symbolic(right)) = (left, right) else {
+        return Overlap::Unknown;
+    };
+    let values = HashMap::new();
+    let equality = constraints.prove(&Predicate::Eq(left.clone(), right.clone()), &values);
+    let equality = if equality == ProveResult::Unknown {
+        constraints.prove(&Predicate::Eq(right.clone(), left.clone()), &values)
+    } else {
+        equality
+    };
+    match equality {
+        ProveResult::Proven => Overlap::Equal,
+        ProveResult::Disproven => Overlap::Disjoint,
+        ProveResult::Unknown => {
+            let ordered = constraints.prove(&Predicate::Lt(left.clone(), right.clone()), &values)
+                == ProveResult::Proven
+                || constraints.prove(&Predicate::Lt(right.clone(), left.clone()), &values)
+                    == ProveResult::Proven;
+            if ordered {
+                Overlap::Disjoint
+            } else {
+                Overlap::Unknown
+            }
+        }
+    }
+}
+
+fn index_range_overlap(
+    index: &TargetIndex,
+    start: &TargetIndex,
+    end: &TargetIndex,
+    constraints: &ConstraintEnv,
+) -> Overlap {
+    let (TargetIndex::Symbolic(index), TargetIndex::Symbolic(start), TargetIndex::Symbolic(end)) =
+        (index, start, end)
+    else {
+        return Overlap::Unknown;
+    };
+    let values = HashMap::new();
+    if constraints.prove(&Predicate::Lt(index.clone(), start.clone()), &values)
+        == ProveResult::Proven
+        || constraints.prove(&Predicate::Le(end.clone(), index.clone()), &values)
+            == ProveResult::Proven
+    {
+        return Overlap::Disjoint;
+    }
+    if constraints.prove(&Predicate::Le(start.clone(), index.clone()), &values)
+        == ProveResult::Proven
+        && constraints.prove(&Predicate::Lt(index.clone(), end.clone()), &values)
+            == ProveResult::Proven
+    {
+        return Overlap::Partial;
+    }
+    Overlap::Unknown
+}
+
+fn range_overlap(
+    left_start: &TargetIndex,
+    left_end: &TargetIndex,
+    right_start: &TargetIndex,
+    right_end: &TargetIndex,
+    constraints: &ConstraintEnv,
+) -> Overlap {
+    let (
+        TargetIndex::Symbolic(left_start),
+        TargetIndex::Symbolic(left_end),
+        TargetIndex::Symbolic(right_start),
+        TargetIndex::Symbolic(right_end),
+    ) = (left_start, left_end, right_start, right_end)
+    else {
+        return Overlap::Unknown;
+    };
+    let values = HashMap::new();
+    if constraints.prove(
+        &Predicate::Le(left_end.clone(), right_start.clone()),
+        &values,
+    ) == ProveResult::Proven
+        || constraints.prove(
+            &Predicate::Le(right_end.clone(), left_start.clone()),
+            &values,
+        ) == ProveResult::Proven
+    {
+        return Overlap::Disjoint;
+    }
+    let starts_equal = constraints.prove(
+        &Predicate::Eq(left_start.clone(), right_start.clone()),
+        &values,
+    ) == ProveResult::Proven;
+    let ends_equal = constraints
+        .prove(&Predicate::Eq(left_end.clone(), right_end.clone()), &values)
+        == ProveResult::Proven;
+    if starts_equal && ends_equal {
+        return Overlap::Equal;
+    }
+    let intersects = constraints.prove(
+        &Predicate::Lt(left_start.clone(), right_end.clone()),
+        &values,
+    ) == ProveResult::Proven
+        && constraints.prove(
+            &Predicate::Lt(right_start.clone(), left_end.clone()),
+            &values,
+        ) == ProveResult::Proven;
+    if intersects {
+        Overlap::Partial
+    } else {
+        Overlap::Unknown
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedGroup {
+    pub name: Option<Intern<String>>,
+    pub referent_type: Ty,
+}
+
+#[cfg(test)]
+mod target_overlap_tests {
+    use super::*;
+    use ast::ConstValue;
+
+    fn item(index: TargetIndex) -> ReferenceTargetGroup {
+        ReferenceTargetGroup::ItemRegion {
+            base: Box::new(ReferenceTargetGroup::Local(Intern::from_ref("items"))),
+            index,
+        }
+    }
+
+    fn symbolic(expr: ConstExpr) -> TargetIndex {
+        TargetIndex::Symbolic(expr)
+    }
+
+    fn range(start: ConstExpr, end: ConstExpr) -> ReferenceTargetGroup {
+        ReferenceTargetGroup::ItemRange {
+            base: Box::new(ReferenceTargetGroup::Local(Intern::from_ref("items"))),
+            start: symbolic(start),
+            end: symbolic(end),
+        }
+    }
+
+    #[test]
+    fn distinct_constant_indices_are_disjoint() {
+        let left = item(symbolic(ConstExpr::Value(ConstValue::Int(1))));
+        let right = item(symbolic(ConstExpr::Value(ConstValue::Int(2))));
+
+        assert_eq!(
+            left.overlap(&right, &ConstraintEnv::default()),
+            Overlap::Disjoint
+        );
+    }
+
+    #[test]
+    fn same_symbolic_index_is_equal() {
+        let index = symbolic(ConstExpr::Var(Intern::from_ref("i")));
+
+        assert_eq!(
+            item(index.clone()).overlap(&item(index), &ConstraintEnv::default()),
+            Overlap::Equal
+        );
+    }
+
+    #[test]
+    fn constrained_unequal_indices_are_disjoint() {
+        let i = ConstExpr::Var(Intern::from_ref("i"));
+        let j = ConstExpr::Var(Intern::from_ref("j"));
+        let constraints = ConstraintEnv {
+            known_lt: vec![(i.clone(), j.clone())],
+            ..ConstraintEnv::default()
+        };
+
+        assert_eq!(
+            item(symbolic(i)).overlap(&item(symbolic(j)), &constraints),
+            Overlap::Disjoint
+        );
+    }
+
+    #[test]
+    fn constrained_equal_indices_are_equal() {
+        let i = ConstExpr::Var(Intern::from_ref("i"));
+        let j = ConstExpr::Var(Intern::from_ref("j"));
+        let constraints = ConstraintEnv {
+            known_eq: vec![(i.clone(), j.clone())],
+            ..ConstraintEnv::default()
+        };
+
+        assert_eq!(
+            item(symbolic(i)).overlap(&item(symbolic(j)), &constraints),
+            Overlap::Equal
+        );
+    }
+
+    #[test]
+    fn unrelated_symbolic_indices_have_unknown_overlap() {
+        let left = symbolic(ConstExpr::Var(Intern::from_ref("i")));
+        let right = symbolic(ConstExpr::Var(Intern::from_ref("j")));
+
+        assert_eq!(
+            item(left).overlap(&item(right), &ConstraintEnv::default()),
+            Overlap::Unknown
+        );
+    }
+
+    #[test]
+    fn item_before_range_is_disjoint() {
+        let index = ConstExpr::Value(ConstValue::Int(1));
+        let start = ConstExpr::Value(ConstValue::Int(2));
+        let end = ConstExpr::Value(ConstValue::Int(5));
+
+        assert_eq!(
+            item(symbolic(index)).overlap(&range(start, end), &ConstraintEnv::default()),
+            Overlap::Disjoint
+        );
+    }
+
+    #[test]
+    fn item_inside_range_partially_overlaps() {
+        let index = ConstExpr::Value(ConstValue::Int(3));
+        let start = ConstExpr::Value(ConstValue::Int(2));
+        let end = ConstExpr::Value(ConstValue::Int(5));
+
+        assert_eq!(
+            item(symbolic(index)).overlap(&range(start, end), &ConstraintEnv::default()),
+            Overlap::Partial
+        );
+    }
+
+    #[test]
+    fn adjacent_ranges_are_disjoint() {
+        let left = range(
+            ConstExpr::Value(ConstValue::Int(0)),
+            ConstExpr::Value(ConstValue::Int(2)),
+        );
+        let right = range(
+            ConstExpr::Value(ConstValue::Int(2)),
+            ConstExpr::Value(ConstValue::Int(4)),
+        );
+
+        assert_eq!(
+            left.overlap(&right, &ConstraintEnv::default()),
+            Overlap::Disjoint
+        );
+    }
+
+    #[test]
+    fn equal_ranges_are_equal() {
+        let left = range(
+            ConstExpr::Value(ConstValue::Int(1)),
+            ConstExpr::Value(ConstValue::Int(4)),
+        );
+        let right = left.clone();
+
+        assert_eq!(
+            left.overlap(&right, &ConstraintEnv::default()),
+            Overlap::Equal
+        );
+    }
+
+    #[test]
+    fn intersecting_ranges_partially_overlap() {
+        let left = range(
+            ConstExpr::Value(ConstValue::Int(1)),
+            ConstExpr::Value(ConstValue::Int(4)),
+        );
+        let right = range(
+            ConstExpr::Value(ConstValue::Int(3)),
+            ConstExpr::Value(ConstValue::Int(6)),
+        );
+
+        assert_eq!(
+            left.overlap(&right, &ConstraintEnv::default()),
+            Overlap::Partial
+        );
+    }
+
+    #[test]
+    fn unavailable_indices_have_unknown_overlap() {
+        assert_eq!(
+            item(TargetIndex::Unknown)
+                .overlap(&item(TargetIndex::Unknown), &ConstraintEnv::default()),
+            Overlap::Unknown
+        );
+    }
+}
 
 impl ExprId {
     pub fn as_usize(self) -> usize {
@@ -91,6 +641,7 @@ pub struct TypedExpr {
     pub span: SpanId,
     /// Compile-time constant value, if this expression can be folded.
     pub const_value: Option<ast::ConstValue>,
+    pub target_group: Option<ReferenceTargetGroup>,
     /// Type/flow/flaw diagnostics attached to this expression.
     pub flaws: Vec<Diagnostic>,
 }
@@ -302,21 +853,68 @@ pub struct TypedTag {
     pub provided_traits: Vec<ProvidedTrait>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FunctionEffects {
+    pub reads: HashSet<EffectTarget>,
+    pub writes: HashSet<EffectTarget>,
+    pub invalidates: HashSet<EffectTarget>,
+    pub consumes: HashSet<EffectTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedCallableSignature {
+    pub dependent_binder: BinderId,
+    pub return_type: Ty,
+    pub params: Vec<(Intern<String>, Ty)>,
+    pub param_kinds: Vec<ParamKind>,
+    pub param_conventions: Vec<ParamConvention>,
+    pub param_groups: Vec<Option<GroupId>>,
+    pub param_refinements: Vec<Option<PredicateExpr>>,
+    pub groups: Vec<TypedGroup>,
+    pub return_group: Option<GroupId>,
+    pub effects: FunctionEffects,
+}
+
+impl From<&TypedBind> for TypedCallableSignature {
+    fn from(bind: &TypedBind) -> Self {
+        Self {
+            dependent_binder: bind.dependent_binder,
+            return_type: bind.return_type.clone(),
+            params: bind.params.clone(),
+            param_kinds: bind.param_kinds.clone(),
+            param_conventions: bind.param_conventions.clone(),
+            param_groups: bind.param_groups.clone(),
+            param_refinements: bind.param_refinements.clone(),
+            groups: bind.groups.clone(),
+            return_group: bind.return_group,
+            effects: bind.effects.clone(),
+        }
+    }
+}
+
 /// A fully-resolved bind (function or value definition).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedBind {
     pub name: Intern<String>,
+    pub dependent_binder: BinderId,
     /// Span of the name in source.
     pub name_span: SpanId,
     pub body: BindBody,
-    /// The resolved return type (may include threaded params after desugaring).
+    /// The resolved return type.
     pub return_type: Ty,
-    /// User-written return type before linear threading desugar.
+    /// User-written return type before later lowering.
     pub declared_return_type: Ty,
     /// Resolved parameter types (name, resolved Ty).
     pub params: Vec<(Intern<String>, Ty)>,
     /// Whether each parameter is a type or value parameter.
     pub param_kinds: Vec<ParamKind>,
+    /// Ownership contract for each parameter, in declaration order.
+    pub param_conventions: Vec<ParamConvention>,
+    pub param_groups: Vec<Option<GroupId>>,
+    pub param_refinements: Vec<Option<PredicateExpr>>,
+    pub groups: Vec<TypedGroup>,
+    pub return_group: Option<GroupId>,
+    pub effects: FunctionEffects,
     /// Receiver type for methods, if any.
     pub receiver_type: Option<Ty>,
     /// Bind attributes (e.g., `#[inline]`, visibility).
@@ -537,10 +1135,10 @@ impl TypedFileAst {
                     continue;
                 }
                 let modifier = match function.conventions.get(&self_name) {
-                    Some(ast::ParamConvention::Ref(false)) => "ref self",
-                    Some(ast::ParamConvention::Ref(true)) => "mut self",
-                    Some(ast::ParamConvention::Eat) => "eat self",
-                    Some(ast::ParamConvention::Inferred) | None => "self",
+                    Some(ast::ParamConvention::Observe) => "ref self",
+                    Some(ast::ParamConvention::Mutate) => "mut self",
+                    Some(ast::ParamConvention::Consume) => "eat self",
+                    Some(ast::ParamConvention::Own) | None => "self",
                 };
                 return Some((declare.name, Intern::<String>::from_ref(modifier)));
             }
@@ -1530,16 +2128,16 @@ impl TypedFileAst {
                                         first = false;
                                         if let Some(conv) = f.conventions.get(k) {
                                             match conv {
-                                                ast::ParamConvention::Ref(false) => {
+                                                ast::ParamConvention::Observe => {
                                                     signature.push_str("ref ")
                                                 }
-                                                ast::ParamConvention::Ref(true) => {
+                                                ast::ParamConvention::Mutate => {
                                                     signature.push_str("mut ")
                                                 }
-                                                ast::ParamConvention::Eat => {
+                                                ast::ParamConvention::Consume => {
                                                     signature.push_str("eat ")
                                                 }
-                                                ast::ParamConvention::Inferred => {}
+                                                ast::ParamConvention::Own => {}
                                             }
                                         }
                                         signature.push_str(k.as_str());
@@ -1551,6 +2149,11 @@ impl TypedFileAst {
                                             ast::ParameterKind::ValueParam { ty } => {
                                                 signature.push(' ');
                                                 signature.push_str(&ty.value.format_surface());
+                                            }
+                                            ast::ParameterKind::Inferred { ty } => {
+                                                signature.push(' ');
+                                                signature.push_str(&ty.value.format_surface());
+                                                signature.push_str(": ?");
                                             }
                                             ast::ParameterKind::Default(expr) => {
                                                 use std::fmt::Write as _;
@@ -2032,6 +2635,9 @@ fn param_kind_surface_for_hover(kind: &ParameterKind) -> String {
     match kind {
         ParameterKind::Tagged(sp) => type_expr_surface_for_hover(&sp.value),
         ParameterKind::ValueParam { ty } => type_expr_surface_for_hover(&ty.value),
+        ParameterKind::Inferred { ty } => {
+            format!("{}: ?", type_expr_surface_for_hover(&ty.value))
+        }
         ParameterKind::Generic => String::new(),
         ParameterKind::Default(expr) => format!(": {:?}", expr.value),
     }
@@ -2046,6 +2652,11 @@ fn type_expr_surface_for_hover(expr: &TypeExpr) -> String {
                 .map(|(key, kind)| match kind {
                     ParameterKind::Tagged(sp) => type_expr_surface_for_hover(&sp.value),
                     ParameterKind::ValueParam { ty } => type_expr_surface_for_hover(&ty.value),
+                    ParameterKind::Inferred { ty } => format!(
+                        "{} {}: ?",
+                        key.as_str(),
+                        type_expr_surface_for_hover(&ty.value)
+                    ),
                     ParameterKind::Generic => key.as_str().to_string(),
                     ParameterKind::Default(expr) => format!("{}: {:?}", key.as_str(), expr.value),
                 })
@@ -2300,7 +2911,7 @@ pub(crate) fn type_annotation_surface_for_hover(
             name.as_str().to_string()
         }
         Ty::Opaque(name) => name.as_str().to_string(),
-        Ty::Record { name, fields } => {
+        Ty::Record { name, fields, .. } => {
             if let Some(surface) = generic_record_surface(name, fields, tag_types, tag_params) {
                 return surface;
             }
@@ -2395,6 +3006,7 @@ fn list_element_ty_from_record_fields(fields: &[(Intern<String>, Box<Ty>)]) -> O
         Ty::Record {
             name,
             fields: pfields,
+            ..
         } if name.as_str() == "Pointer" => pfields.iter().find_map(|(n, t)| {
             if n.as_str() == "addr" {
                 return None;

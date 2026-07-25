@@ -17,7 +17,7 @@ pub trait Normalize: Sized {
 impl Normalize for ConstExpr {
     fn normalize(&self) -> ConstExpr {
         match self {
-            ConstExpr::Value(_) | ConstExpr::Var(_) => self.clone(),
+            ConstExpr::Value(_) | ConstExpr::Var(_) | ConstExpr::Inferred(_) => self.clone(),
             ConstExpr::Add(l, r) => {
                 let l = l.normalize();
                 let r = r.normalize();
@@ -96,8 +96,7 @@ impl Normalize for ConstExpr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ast::ConstExpr;
-    use ast::ConstValue;
+    use ast::{BinderId, BinderOwner, ConstExpr, ConstValue, DependentArgId};
     use internment::Intern;
 
     #[test]
@@ -110,6 +109,16 @@ mod tests {
     fn var_stays_as_is() {
         let expr = ConstExpr::Var(Intern::from_ref("n"));
         assert_eq!(expr.normalize(), expr);
+    }
+
+    #[test]
+    fn inferred_stays_as_is() {
+        let expr = ConstExpr::Inferred(DependentArgId::new(
+            BinderId::new(5, BinderOwner::Expression(12)),
+            2,
+        ));
+        assert_eq!(expr.normalize(), expr);
+        assert_eq!(expr.normalize_to_value(), None);
     }
 
     #[test]

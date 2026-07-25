@@ -7,12 +7,43 @@ use crate::ConstValue;
 use internment::Intern;
 use std::fmt;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BinderOwner {
+    Definition(Intern<String>),
+    Expression(u32),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BinderId {
+    pub file: u32,
+    pub owner: BinderOwner,
+}
+
+impl BinderId {
+    pub fn new(file: u32, owner: BinderOwner) -> Self {
+        Self { file, owner }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DependentArgId {
+    pub binder: BinderId,
+    pub slot: u32,
+}
+
+impl DependentArgId {
+    pub fn new(binder: BinderId, slot: u32) -> Self {
+        Self { binder, slot }
+    }
+}
+
 /// A symbolic compile-time constant expression — unevaluated, in contrast with
 /// [`ConstValue`]. Evaluation/normalization is handled by a separate pass.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ConstExpr {
     Value(ConstValue),
     Var(Intern<String>),
+    Inferred(DependentArgId),
     Add(Box<ConstExpr>, Box<ConstExpr>),
     Sub(Box<ConstExpr>, Box<ConstExpr>),
     Mul(Box<ConstExpr>, Box<ConstExpr>),
@@ -108,6 +139,7 @@ impl fmt::Display for ConstExpr {
                 }
             },
             ConstExpr::Var(name) => write!(f, "{}", name.as_str()),
+            ConstExpr::Inferred(_) => write!(f, "?"),
             ConstExpr::Add(l, r) => write!(f, "({l} + {r})"),
             ConstExpr::Sub(l, r) => write!(f, "({l} - {r})"),
             ConstExpr::Mul(l, r) => write!(f, "({l} * {r})"),
@@ -192,6 +224,36 @@ mod tests {
         assert_eq!(set.len(), 1);
         set.insert(c);
         assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn inferred_identity_controls_equality_and_hash() {
+        use std::collections::HashSet;
+
+        let binder = BinderId::new(7, BinderOwner::Definition(Intern::from_ref("Vector")));
+        let a = ConstExpr::Inferred(DependentArgId::new(binder, 0));
+        let same = ConstExpr::Inferred(DependentArgId::new(binder, 0));
+        let other_slot = ConstExpr::Inferred(DependentArgId::new(binder, 1));
+        let other_owner = ConstExpr::Inferred(DependentArgId::new(
+            BinderId::new(7, BinderOwner::Expression(3)),
+            0,
+        ));
+
+        assert_eq!(a, same);
+        assert_ne!(a, other_slot);
+        assert_ne!(a, other_owner);
+
+        let set = HashSet::from([a, same, other_slot, other_owner]);
+        assert_eq!(set.len(), 3);
+    }
+
+    #[test]
+    fn inferred_display_hides_identity() {
+        let expr = ConstExpr::Inferred(DependentArgId::new(
+            BinderId::new(19, BinderOwner::Expression(42)),
+            3,
+        ));
+        assert_eq!(expr.to_string(), "?");
     }
 
     #[test]

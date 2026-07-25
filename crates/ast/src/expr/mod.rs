@@ -327,7 +327,7 @@ impl From<crate::TypeExpr> for Expr {
             crate::TypeExpr::Nominal(name, _span) => Expr::TypeNominal(name),
             crate::TypeExpr::Qualified(path) => Expr::TypeQualified(path),
             crate::TypeExpr::Generic { name, params, .. } => Expr::TypeGeneric { name, params },
-            crate::TypeExpr::Ref { inner, mutable } => Expr::TypeRef {
+            crate::TypeExpr::Ref { inner, mutable, .. } => Expr::TypeRef {
                 inner: Box::new(Expr::TypeNominal(Intern::<String>::from_ref(
                     inner.value.surface_mangle_name(),
                 ))),
@@ -369,6 +369,7 @@ impl Expr {
                             span_id: SpanId::INVALID,
                         }),
                         mutable: *mutable,
+                        group: None,
                     })
                 } else {
                     None

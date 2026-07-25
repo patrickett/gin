@@ -4,7 +4,7 @@ use lexer::Token;
 
 use ast::{
     AttributeItem, Bind, BindAttributes, BindValue, DocComment, Expr, GroupParam, ModPath,
-    ParamConvention, ParameterKind, Parameters, Return, Spanned, TypeExpr, Typed,
+    ParamConvention, ParameterKind, Parameters, PredicateExpr, Return, Spanned, TypeExpr, Typed,
 };
 
 use super::ExprFn;
@@ -21,6 +21,7 @@ pub(crate) type ParsedParams = (
     Option<Parameters>,
     IndexMap<Intern<String>, ParamConvention>,
     IndexMap<Intern<String>, Intern<String>>,
+    IndexMap<Intern<String>, PredicateExpr>,
 );
 
 pub(crate) type ParsedOneParam = (
@@ -28,6 +29,7 @@ pub(crate) type ParsedOneParam = (
     ParameterKind,
     ParamConvention,
     Option<Intern<String>>,
+    Option<PredicateExpr>,
 );
 
 impl<'src, 't> TokenCursor<'src, 't> {
@@ -42,6 +44,14 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
         self.eat(&Token::Indent);
 
+        let binding_ref_mutability = if self.eat(&Token::Ref) {
+            Some(false)
+        } else if self.eat(&Token::Mut) {
+            Some(true)
+        } else {
+            None
+        };
+
         let (name, name_span) = match self.peek() {
             Some(Token::Id(n)) => {
                 let name = self.intern(n);
@@ -52,11 +62,50 @@ impl<'src, 't> TokenCursor<'src, 't> {
             _ => return None,
         };
 
-        let group_params = self.parse_group_params();
-        let (params, conventions, param_groups) = self.parse_params(expr_parser);
+        let (params, conventions, param_groups, param_refinements) = self.parse_params(expr_parser);
 
-        let (return_type_name, return_tag, type_annotation, type_annotation_qual) =
+        let (return_type_name, mut return_tag, type_annotation, type_annotation_qual) =
             self.parse_return_type_part(expr_parser);
+        if let Some(mutable) = binding_ref_mutability
+            && let Some(inner) = return_tag.take()
+        {
+            let span_id = inner.span_id;
+            return_tag = Some(Box::new(Spanned {
+                value: TypeExpr::Ref {
+                    inner,
+                    mutable,
+                    group: None,
+                },
+                span_id,
+            }));
+        }
+        let group_params = params
+            .iter()
+            .flat_map(|params| params.values())
+            .filter_map(|kind| match kind {
+                ParameterKind::Tagged(sp) => match &sp.value {
+                    TypeExpr::Ref {
+                        inner,
+                        mutable,
+                        group: Some(name),
+                    } => Some(GroupParam {
+                        name: *name,
+                        ty_name: Intern::from_ref(inner.value.surface_mangle_name()),
+                        mutable: *mutable,
+                    }),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .fold(Vec::new(), |mut groups, group| {
+                if !groups
+                    .iter()
+                    .any(|existing: &GroupParam| existing.name == group.name)
+                {
+                    groups.push(group);
+                }
+                groups
+            });
 
         // Handle `extern` binds: `name(params) extern` without `:` or `:=`
         let (value, postfix_doc) = if self.eat(&Token::Extern) {
@@ -91,6 +140,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             bind.param_conventions = conventions;
             bind.group_params = group_params;
             bind.param_groups = param_groups;
+            bind.param_refinements = param_refinements;
             bind.return_tag = return_tag;
             bind.type_annotation = type_annotation;
             bind.type_annotation_qual = type_annotation_qual;
@@ -110,6 +160,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
         bind.param_conventions = conventions;
         bind.group_params = group_params;
         bind.param_groups = param_groups;
+        bind.param_refinements = param_refinements;
         bind.return_tag = return_tag;
         bind.type_annotation = type_annotation;
         bind.type_annotation_qual = type_annotation_qual;
@@ -240,30 +291,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
             return (Some(name), None, None, None);
         }
 
-        // `ref T` / `mut T` return type (e.g. `r ref Entity:` in a body bind)
         if matches!(self.peek(), Some(Token::Ref) | Some(Token::Mut)) {
-            let mutable = self.eat(&Token::Mut);
-            if !mutable {
-                self.eat(&Token::Ref);
-            }
-            if let Some(sp) = self.parse_type_expr(expr_parser) {
-                return (
-                    None,
-                    Some(Box::new(Spanned {
-                        value: TypeExpr::Ref {
-                            inner: Box::new(Spanned {
-                                value: sp.value,
-                                span_id: sp.span_id,
-                            }),
-                            mutable,
-                        },
-                        span_id: sp.span_id,
-                    })),
-                    None,
-                    None,
-                );
-            }
-            return (None, None, None, None);
+            return match self.parse_type_expr(expr_parser) {
+                Some(sp) => (None, Some(Box::new(sp)), None, None),
+                None => (None, None, None, None),
+            };
         }
 
         // Tag-based type annotations
@@ -494,55 +526,15 @@ impl<'src, 't> TokenCursor<'src, 't> {
         (BindValue::Expr(Box::new(expr)), doc)
     }
 
-    fn parse_group_params(&mut self) -> Vec<GroupParam> {
-        if !self.is_at(&Token::BracketOpen) {
-            return Vec::new();
-        }
-        self.advance();
-
-        let mut groups = Vec::new();
-        if !self.is_at(&Token::BracketClose) {
-            loop {
-                let mutable = self.eat(&Token::Mut);
-                let Some(name) = self.parse_id() else {
-                    break;
-                };
-                let ty_name = match self.peek() {
-                    Some(Token::Tag(t)) => {
-                        let ty = self.intern(t);
-                        self.advance();
-                        ty
-                    }
-                    Some(Token::Id(t)) => {
-                        let ty = self.intern(t);
-                        self.advance();
-                        ty
-                    }
-                    _ => break,
-                };
-                groups.push(GroupParam {
-                    name,
-                    ty_name,
-                    mutable,
-                });
-                if !self.eat(&Token::Comma) {
-                    break;
-                }
-            }
-        }
-
-        self.expect(&Token::BracketClose);
-        groups
-    }
-
     pub(crate) fn parse_params(&mut self, expr_parser: ExprFn) -> ParsedParams {
         if !self.is_at(&Token::ParenOpen) {
-            return (None, IndexMap::new(), IndexMap::new());
+            return (None, IndexMap::new(), IndexMap::new(), IndexMap::new());
         }
 
         let mut params = Parameters::new();
         let mut conventions = IndexMap::new();
         let mut param_groups = IndexMap::new();
+        let mut param_refinements = IndexMap::new();
         let mut seen_default = false;
         self.advance();
 
@@ -551,24 +543,28 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
         if self.is_at(&Token::ParenClose) {
             self.advance();
-            return (Some(params), conventions, param_groups);
+            return (Some(params), conventions, param_groups, param_refinements);
         }
 
         let mut ingest = |key: Intern<String>,
                           kind: ParameterKind,
                           conv: ParamConvention,
-                          group: Option<Intern<String>>| {
+                          group: Option<Intern<String>>,
+                          refinement: Option<PredicateExpr>| {
             params.insert(key, kind);
-            if conv != ParamConvention::Inferred {
+            if conv != ParamConvention::Own {
                 conventions.insert(key, conv);
             }
             if let Some(gn) = group {
                 param_groups.insert(key, gn);
             }
+            if let Some(refinement) = refinement {
+                param_refinements.insert(key, refinement);
+            }
         };
 
         loop {
-            if let Some((key, kind, conv, group)) = self.parse_one_param(expr_parser) {
+            if let Some((key, kind, conv, group, refinement)) = self.parse_one_param(expr_parser) {
                 if seen_default && !matches!(kind, ParameterKind::Default(_)) {
                     self.error(
                         "parse-parameter-after-default",
@@ -582,7 +578,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 if matches!(kind, ParameterKind::Default(_)) {
                     seen_default = true;
                 }
-                ingest(key, kind, conv, group);
+                ingest(key, kind, conv, group, refinement);
             }
 
             if self.is_at(&Token::ParenClose) {
@@ -604,18 +600,18 @@ impl<'src, 't> TokenCursor<'src, 't> {
         // Skip trailing layout (Dedent before `)`) before consuming the close.
         self.skip_layout();
         self.expect(&Token::ParenClose);
-        (Some(params), conventions, param_groups)
+        (Some(params), conventions, param_groups, param_refinements)
     }
 
     pub(crate) fn parse_param_convention_prefix(&mut self) -> ParamConvention {
         if self.eat(&Token::Tilde) || self.eat(&Token::Eat) {
-            ParamConvention::Eat
+            ParamConvention::Consume
         } else if self.eat(&Token::Ref) {
-            ParamConvention::Ref(false)
+            ParamConvention::Observe
         } else if self.eat(&Token::Mut) {
-            ParamConvention::Ref(true)
+            ParamConvention::Mutate
         } else {
-            ParamConvention::Inferred
+            ParamConvention::Own
         }
     }
 
@@ -630,18 +626,22 @@ impl<'src, 't> TokenCursor<'src, 't> {
                     value: sp.value,
                     span_id: sp.span_id,
                 })),
-                ParamConvention::Inferred,
+                ParamConvention::Own,
+                None,
                 None,
             ));
         }
 
         let convention = self.parse_param_convention_prefix();
 
-        let group_name = if self.is_at(&Token::BracketOpen) {
-            self.advance();
-            let gn = self.parse_id()?;
-            self.expect(&Token::BracketClose)?;
-            Some(gn)
+        let group_name = if matches!(
+            convention,
+            ParamConvention::Observe | ParamConvention::Mutate
+        ) && self.eat(&Token::CurlyOpen)
+        {
+            let group = self.parse_id()?;
+            self.expect(&Token::CurlyClose)?;
+            Some(group)
         } else {
             None
         };
@@ -661,7 +661,34 @@ impl<'src, 't> TokenCursor<'src, 't> {
         };
 
         let (name, kind) = self.parse_param_after_name(expr_parser, name, false)?;
-        Some((name, kind, convention, group_name))
+        let kind = match (convention, kind) {
+            (ParamConvention::Observe | ParamConvention::Mutate, ParameterKind::Tagged(inner)) => {
+                let span_id = inner.span_id;
+                ParameterKind::Tagged(Box::new(Spanned {
+                    value: TypeExpr::Ref {
+                        inner,
+                        mutable: convention == ParamConvention::Mutate,
+                        group: group_name,
+                    },
+                    span_id,
+                }))
+            }
+            (_, kind) => kind,
+        };
+        let refinement = if self.eat(&Token::And) {
+            let mut predicates = vec![self.parse_one_predicate()];
+            while self.eat(&Token::And) {
+                predicates.push(self.parse_one_predicate());
+            }
+            Some(if predicates.len() == 1 {
+                predicates.pop().expect("one predicate")
+            } else {
+                PredicateExpr::And(predicates)
+            })
+        } else {
+            None
+        };
+        Some((name, kind, convention, group_name, refinement))
     }
 
     pub(crate) fn parse_doc_comment(&mut self) -> Option<DocComment> {

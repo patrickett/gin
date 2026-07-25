@@ -37,10 +37,11 @@ pub enum TypeExpr {
     Literal(Literal, SpanId),
     /// Pointer to another type (e.g. `@x` — raw pointer to `x`).
     Pointer(Box<Spanned<TypeExpr>>),
-    /// Reference type: `ref T` or `mut T`.
+    /// Reference type with an optional alias group.
     Ref {
         inner: Box<Spanned<TypeExpr>>,
         mutable: bool,
+        group: Option<Intern<String>>,
     },
     /// The unit type `()`.
     Unit,
@@ -155,7 +156,8 @@ impl TypeExpr {
                         {
                             match kind {
                                 ParameterKind::Tagged(sp) => sp.value.resolve_type(tag_types),
-                                ParameterKind::ValueParam { ty } => {
+                                ParameterKind::ValueParam { ty }
+                                | ParameterKind::Inferred { ty } => {
                                     ty.value.resolve_type(tag_types)
                                 }
                                 ParameterKind::Generic => Ty::Opaque(*param_name),

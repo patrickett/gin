@@ -84,18 +84,44 @@ impl BindFormatExt for Bind {
                     sig.push_str(", ");
                 }
                 first = false;
-                sig.push_str(name.as_str());
                 match kind {
                     ParameterKind::Tagged(sp) => {
-                        sig.push(' ');
-                        sig.push_str(&sp.value.format_surface());
+                        if let ast::TypeExpr::Ref {
+                            inner,
+                            mutable,
+                            group,
+                        } = &sp.value
+                        {
+                            if *mutable {
+                                sig.push_str("mut");
+                            } else {
+                                sig.push_str("ref");
+                            }
+                            if let Some(group) = group {
+                                let _ = write!(&mut sig, "{{{}}}", group.as_str());
+                            }
+                            let _ = write!(&mut sig, " {} ", name.as_str());
+                            sig.push_str(&inner.value.format_surface());
+                        } else {
+                            sig.push_str(name.as_str());
+                            sig.push(' ');
+                            sig.push_str(&sp.value.format_surface());
+                        }
                     }
                     ParameterKind::ValueParam { ty } => {
+                        sig.push_str(name.as_str());
                         sig.push(' ');
                         sig.push_str(&ty.value.format_surface());
                     }
-                    ParameterKind::Generic => {}
+                    ParameterKind::Inferred { ty } => {
+                        sig.push_str(name.as_str());
+                        sig.push(' ');
+                        sig.push_str(&ty.value.format_surface());
+                        sig.push_str(": ?");
+                    }
+                    ParameterKind::Generic => sig.push_str(name.as_str()),
                     ParameterKind::Default(expr) => {
+                        sig.push_str(name.as_str());
                         sig.push_str(&format!(": {:?}", expr.value));
                     }
                 }
@@ -222,10 +248,10 @@ fn format_declare_value(value: &DeclareValue, continuation_indent: usize) -> Str
                                 first = false;
                                 if let Some(conv) = f.conventions.get(k) {
                                     match conv {
-                                        ast::ParamConvention::Ref(false) => out.push_str("ref "),
-                                        ast::ParamConvention::Ref(true) => out.push_str("mut "),
-                                        ast::ParamConvention::Eat => out.push_str("eat "),
-                                        ast::ParamConvention::Inferred => {}
+                                        ast::ParamConvention::Observe => out.push_str("ref "),
+                                        ast::ParamConvention::Mutate => out.push_str("mut "),
+                                        ast::ParamConvention::Consume => out.push_str("eat "),
+                                        ast::ParamConvention::Own => {}
                                     }
                                 }
                                 out.push_str(k.as_str());

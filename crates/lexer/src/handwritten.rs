@@ -563,6 +563,7 @@ impl<'src> Lexer<'src> {
             b'~' => Token::Tilde,
             b'@' => Token::At,
             b'#' => Token::Pound,
+            b'?' => Token::Question,
             b';' => Token::ColonSemi,
             b'(' => Token::ParenOpen,
             b')' => Token::ParenClose,

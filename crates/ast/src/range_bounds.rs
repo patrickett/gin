@@ -100,6 +100,7 @@ impl Ty {
         let elem = Ty::bounded_int(min, max);
         Ty::Record {
             name,
+            resolved_params: None,
             fields: vec![
                 (Intern::new("start".to_string()), Box::new(elem.clone())),
                 (Intern::new("end".to_string()), Box::new(elem)),

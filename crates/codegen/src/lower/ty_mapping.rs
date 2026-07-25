@@ -130,7 +130,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
             }
             Ty::Opaque(_) => mlir_ctx.i64(),
             Ty::Array { .. } | Ty::Ptr { .. } => mlir_ctx.llvm_ptr(),
-            Ty::Ref { inner, .. } => self.ty_to_mlir(inner),
+            Ty::Ref { .. } => mlir_ctx.llvm_ptr(),
             Ty::Tuple(fields) => {
                 let field_types: Vec<Type<'c>> =
                     fields.iter().map(|f| self.ty_to_mlir(f)).collect();

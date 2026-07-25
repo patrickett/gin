@@ -7,8 +7,8 @@
 use crate::subst::DepSubst;
 use crate::ty::Ty;
 use ast::{
-    ConstExpr, DeclareValue, FnCall, InRangeBounds, Literal, ParamKind, ParameterKind, Parameters,
-    TyArg, TypeExpr,
+    BinderId, ConstExpr, DeclareValue, DependentArgId, FnCall, InRangeBounds, Literal, ParamKind,
+    ParameterKind, Parameters, TyArg, TypeExpr,
 };
 use internment::Intern;
 use std::collections::HashMap;
@@ -23,6 +23,7 @@ pub struct TypeEnv<'a> {
     pub subst: Option<&'a HashMap<Intern<String>, Ty>>,
     pub tag_params: Option<&'a HashMap<Intern<String>, Parameters>>,
     pub tag_decls: Option<&'a ast::TagMap>,
+    pub dependent_binder: Option<BinderId>,
 }
 
 impl<'a> TypeEnv<'a> {
@@ -32,6 +33,7 @@ impl<'a> TypeEnv<'a> {
             subst: None,
             tag_params: None,
             tag_decls: None,
+            dependent_binder: None,
         }
     }
 
@@ -41,6 +43,7 @@ impl<'a> TypeEnv<'a> {
             subst: Some(subst),
             tag_params: self.tag_params,
             tag_decls: self.tag_decls,
+            dependent_binder: self.dependent_binder,
         }
     }
 
@@ -50,6 +53,7 @@ impl<'a> TypeEnv<'a> {
             subst: self.subst,
             tag_params: Some(tag_params),
             tag_decls: self.tag_decls,
+            dependent_binder: self.dependent_binder,
         }
     }
 
@@ -64,6 +68,7 @@ impl<'a> TypeEnv<'a> {
                 subst: self.subst,
                 tag_params: None,
                 tag_decls: self.tag_decls,
+                dependent_binder: self.dependent_binder,
             },
         }
     }
@@ -74,6 +79,17 @@ impl<'a> TypeEnv<'a> {
             subst: self.subst,
             tag_params: self.tag_params,
             tag_decls: Some(tag_decls),
+            dependent_binder: self.dependent_binder,
+        }
+    }
+
+    pub fn with_dependent_binder(&self, dependent_binder: BinderId) -> Self {
+        TypeEnv {
+            tag_types: self.tag_types,
+            subst: self.subst,
+            tag_params: self.tag_params,
+            tag_decls: self.tag_decls,
+            dependent_binder: Some(dependent_binder),
         }
     }
 
@@ -96,6 +112,43 @@ impl<'a> TypeEnv<'a> {
                     .get(name)
                     .cloned()
                     .unwrap_or(Ty::Opaque(*name))
+            }
+            TypeExpr::Generic { name, params, .. }
+                if name.as_str() == "Array" && params.len() == 2 =>
+            {
+                let (element_name, element_kind) = &params[0];
+                let element = match element_kind {
+                    ParameterKind::Tagged(ty)
+                    | ParameterKind::ValueParam { ty }
+                    | ParameterKind::Inferred { ty } => self.resolve(&ty.value),
+                    ParameterKind::Generic => self
+                        .subst
+                        .and_then(|subst| subst.get(element_name))
+                        .cloned()
+                        .unwrap_or(Ty::Opaque(*element_name)),
+                    ParameterKind::Default(expr) => expr
+                        .value
+                        .as_type_expr()
+                        .map(|ty| self.resolve(&ty))
+                        .unwrap_or(Ty::Opaque(*element_name)),
+                };
+                let (size_name, size_kind) = &params[1];
+                let size = match size_kind {
+                    ParameterKind::Default(expr) => expr
+                        .value
+                        .as_size_const_expr()
+                        .unwrap_or_else(|| ConstExpr::Var(*size_name)),
+                    ParameterKind::Tagged(ty)
+                    | ParameterKind::ValueParam { ty }
+                    | ParameterKind::Inferred { ty } => {
+                        literal_as_const(&ty.value).unwrap_or_else(|| ConstExpr::Var(*size_name))
+                    }
+                    ParameterKind::Generic => ConstExpr::Var(*size_name),
+                };
+                Ty::Array {
+                    elem: Box::new(element),
+                    size,
+                }
             }
             TypeExpr::Generic { name, params, .. } => {
                 if let Some(subst) = self.subst
@@ -135,6 +188,7 @@ impl<'a> TypeEnv<'a> {
                     return Ty::Record {
                         name: *name,
                         fields,
+                        resolved_params: self.resolved_params(name, params, &local_dep),
                     };
                 }
                 if params.is_empty()
@@ -154,26 +208,19 @@ impl<'a> TypeEnv<'a> {
                 } else {
                     let subst = DepSubst::from_maps(merged_types, local_dep.consts);
                     let mut resolved = subst.apply_to_ty(&base);
-                    // Store the resolved params on union types for pattern matching.
                     if let Ty::Union {
                         ref mut resolved_params,
                         ..
                     } = resolved
                     {
-                        let params: Vec<(Intern<String>, TyArg)> = subst
-                            .types
-                            .iter()
-                            .map(|(k, v)| (*k, TyArg::Type(Box::new(v.clone()))))
-                            .chain(
-                                subst
-                                    .consts
-                                    .iter()
-                                    .map(|(k, v)| (*k, TyArg::Const(v.clone()))),
-                            )
-                            .collect();
-                        if !params.is_empty() {
-                            *resolved_params = Some(params);
-                        }
+                        *resolved_params = self.resolved_params(name, params, &subst);
+                    }
+                    if let Ty::Record {
+                        ref mut resolved_params,
+                        ..
+                    } = resolved
+                    {
+                        *resolved_params = self.resolved_params(name, params, &subst);
                     }
                     resolved
                 }
@@ -187,7 +234,7 @@ impl<'a> TypeEnv<'a> {
             TypeExpr::Pointer(inner) => Ty::Ptr {
                 inner: Box::new(self.resolve(&inner.value)),
             },
-            TypeExpr::Ref { inner, mutable } => Ty::Ref {
+            TypeExpr::Ref { inner, mutable, .. } => Ty::Ref {
                 inner: Box::new(self.resolve(&inner.value)),
                 mutable: *mutable,
             },
@@ -222,7 +269,7 @@ impl<'a> TypeEnv<'a> {
                 if let Some((decl_name, _)) = decl_entries.get(i) {
                     match kind {
                         ParameterKind::Tagged(sp) | ParameterKind::ValueParam { ty: sp }
-                            if sp.value.is_type_surface() && is_literal_type(&sp.value) =>
+                            if is_literal_type(&sp.value) =>
                         {
                             if let Some(cv) = literal_as_const(&sp.value) {
                                 consts.insert(**decl_name, cv);
@@ -237,24 +284,50 @@ impl<'a> TypeEnv<'a> {
                         ParameterKind::Generic => {
                             types.insert(**decl_name, Ty::Opaque(*name));
                         }
-                        _ => continue,
+                        ParameterKind::Default(expr) => {
+                            if let Some(te) = expr.value.as_type_expr()
+                                && te.is_type_surface()
+                            {
+                                types.insert(**decl_name, self.resolve(&te));
+                            } else if let Some(value) = expr.value.as_size_const_expr() {
+                                consts.insert(**decl_name, value);
+                            }
+                        }
+                        ParameterKind::Inferred { .. }
+                        | ParameterKind::Tagged(_)
+                        | ParameterKind::ValueParam { .. } => continue,
                     }
                 }
             }
-            for (decl_name, decl_kind) in decl_entries.iter().skip(use_site_params.len()) {
-                if let ParameterKind::Default(expr) = decl_kind
-                    && let Some(te) = expr.value.as_type_expr()
-                    && te.is_type_surface()
-                {
-                    let default_ty = self.resolve(&te);
-                    types.insert(**decl_name, default_ty);
+            for (ordinal, (decl_name, decl_kind)) in
+                decl_entries.iter().enumerate().skip(use_site_params.len())
+            {
+                match decl_kind {
+                    ParameterKind::Default(expr) => {
+                        if let Some(te) = expr.value.as_type_expr()
+                            && te.is_type_surface()
+                        {
+                            types.insert(**decl_name, self.resolve(&te));
+                        } else if let Some(value) = expr.value.as_size_const_expr() {
+                            consts.insert(**decl_name, value);
+                        }
+                    }
+                    ParameterKind::Inferred { .. } => {
+                        if let Some(binder) = self.dependent_binder {
+                            consts.insert(
+                                **decl_name,
+                                ConstExpr::Inferred(DependentArgId::new(binder, ordinal as u32)),
+                            );
+                        }
+                    }
+                    _ => {}
                 }
             }
         } else {
             for (name, kind) in use_site_params {
                 match kind {
                     ParameterKind::Tagged(sp) | ParameterKind::ValueParam { ty: sp }
-                        if sp.value.is_type_surface() && is_literal_type(&sp.value) =>
+                        if is_literal_type(&sp.value) =>
                     {
                         if let Some(cv) = literal_as_const(&sp.value) {
                             consts.insert(*name, cv);
@@ -269,11 +342,51 @@ impl<'a> TypeEnv<'a> {
                     ParameterKind::Generic => {
                         types.insert(*name, Ty::Opaque(*name));
                     }
-                    _ => continue,
+                    ParameterKind::Default(expr) => {
+                        if let Some(te) = expr.value.as_type_expr()
+                            && te.is_type_surface()
+                        {
+                            types.insert(*name, self.resolve(&te));
+                        } else if let Some(value) = expr.value.as_size_const_expr() {
+                            consts.insert(*name, value);
+                        }
+                    }
+                    ParameterKind::Inferred { .. }
+                    | ParameterKind::Tagged(_)
+                    | ParameterKind::ValueParam { .. } => continue,
                 }
             }
         }
         DepSubst::from_maps(types, consts)
+    }
+
+    fn resolved_params(
+        &self,
+        tag_name: &Intern<String>,
+        use_site_params: &[(Intern<String>, ParameterKind)],
+        subst: &DepSubst,
+    ) -> Option<Vec<(Intern<String>, TyArg)>> {
+        let names: Vec<Intern<String>> = self
+            .tag_params
+            .and_then(|tag_params| tag_params.get(tag_name))
+            .map(|params| params.iter().map(|(name, _)| *name).collect())
+            .unwrap_or_else(|| use_site_params.iter().map(|(name, _)| *name).collect());
+        let params: Vec<_> = names
+            .into_iter()
+            .filter_map(|name| {
+                subst
+                    .types
+                    .get(&name)
+                    .map(|ty| (name, TyArg::Type(Box::new(ty.clone()))))
+                    .or_else(|| {
+                        subst
+                            .consts
+                            .get(&name)
+                            .map(|expr| (name, TyArg::Const(expr.clone())))
+                    })
+            })
+            .collect();
+        (!params.is_empty()).then_some(params)
     }
 }
 
@@ -376,7 +489,11 @@ pub fn resolve_name_from_files(
                         ast::HasMember::Function(_) => None,
                     })
                     .collect();
-                return Ty::Record { name, fields };
+                return Ty::Record {
+                    name,
+                    fields,
+                    resolved_params: None,
+                };
             }
             DeclareValue::Union { .. } => {
                 return Ty::Union {
@@ -414,7 +531,8 @@ pub fn check_type_application(
             (ParamKind::Type, ParameterKind::Tagged(_))
             | (ParamKind::Type, ParameterKind::Generic)
             | (ParamKind::Type, ParameterKind::Default(_)) => {}
-            (ParamKind::Type, ParameterKind::ValueParam { .. }) => {
+            (ParamKind::Type, ParameterKind::ValueParam { .. })
+            | (ParamKind::Type, ParameterKind::Inferred { .. }) => {
                 return Err(format!(
                     "expected type argument for `{}`, found const value",
                     declared_params[i].0.as_str()
@@ -422,7 +540,8 @@ pub fn check_type_application(
             }
             (ParamKind::Value(_), ParameterKind::Tagged(_))
             | (ParamKind::Value(_), ParameterKind::Generic)
-            | (ParamKind::Value(_), ParameterKind::ValueParam { .. }) => {}
+            | (ParamKind::Value(_), ParameterKind::ValueParam { .. })
+            | (ParamKind::Value(_), ParameterKind::Inferred { .. }) => {}
             (ParamKind::Value(_), _) => {
                 return Err(format!(
                     "expected const argument for `{}`, found type",
@@ -442,7 +561,9 @@ fn param_kind_from_decl_parameter_kind(kind: &ParameterKind) -> ParamKind {
         ParameterKind::Generic | ParameterKind::Tagged(_) | ParameterKind::Default(_) => {
             ParamKind::Type
         }
-        ParameterKind::ValueParam { ty: _ } => ParamKind::Value(Box::new(crate::ty::Ty::i64())),
+        ParameterKind::ValueParam { ty: _ } | ParameterKind::Inferred { ty: _ } => {
+            ParamKind::Value(Box::new(crate::ty::Ty::i64()))
+        }
     }
 }
 

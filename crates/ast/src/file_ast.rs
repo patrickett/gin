@@ -450,7 +450,8 @@ impl FileAst {
                     crate::ParameterKind::Tagged(sp) => {
                         Self::collect_refs_type_surface(&sp.value, name, span_table, out);
                     }
-                    crate::ParameterKind::ValueParam { ty } => {
+                    crate::ParameterKind::ValueParam { ty }
+                    | crate::ParameterKind::Inferred { ty } => {
                         Self::collect_refs_type_surface(&ty.value, name, span_table, out);
                     }
                     crate::ParameterKind::Generic => {}

@@ -257,7 +257,7 @@ fn test_record_tag() {
     let typed = transform_source("Range(x) has start Int, end Int");
     let range_id = TagId(Intern::new("Range".to_string()));
     let tag = typed.tags.get(&range_id).expect("Range tag exists");
-    if let Ty::Record { name, fields } = &tag.resolved_ty {
+    if let Ty::Record { name, fields, .. } = &tag.resolved_ty {
         assert_eq!(name.as_str(), "Range");
         assert_eq!(fields.len(), 2, "two fields");
     } else {

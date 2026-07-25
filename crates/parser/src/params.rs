@@ -36,6 +36,9 @@ impl<'src, 't> TokenCursor<'src, 't> {
             && matches!(self.peek(), Some(Token::Tag(_)))
             && let Some(sp) = self.parse_type_annotation(expr_parser)
         {
+            if self.eat(&Token::Colon) && self.eat(&Token::Question) {
+                return Some((name, ParameterKind::Inferred { ty: Box::new(sp) }));
+            }
             return Some((name, ParameterKind::ValueParam { ty: Box::new(sp) }));
         }
 

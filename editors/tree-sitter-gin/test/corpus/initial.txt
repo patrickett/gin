@@ -566,3 +566,76 @@ get(i Int) Byte: buf.(i)
       (identifier)
       (argument_list
         (identifier)))))
+
+================================================================================
+grouped references and prefix local bindings
+================================================================================
+
+borrow(ref{r} value Entity) ref{r} Entity: value
+mut current Entity: place
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (bind_statement
+    (identifier)
+    (parameters
+      (parameter
+        (reference_group
+          (identifier))
+        (identifier)
+        (tag
+          (type_identifier))))
+    (tag
+      (reference_type
+        (reference_group
+          (identifier))
+        (tag
+          (type_identifier))))
+    (identifier))
+  (bind_statement
+    (identifier)
+    (tag
+      (type_identifier))
+    (identifier)))
+
+================================================================================
+typed hidden state parameters
+================================================================================
+
+List(x, length PointerSize: ?, capacity PointerSize: ?, storage StorageIdentity: ?) has pointer Pointer(x), length PointerSize, capacity PointerSize
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declare_statement
+    name: (type_identifier)
+    (declaration_parameters
+      (type_variable)
+      (declaration_parameter
+        name: (identifier)
+        type: (tag
+          (type_identifier)))
+      (declaration_parameter
+        name: (identifier)
+        type: (tag
+          (type_identifier)))
+      (declaration_parameter
+        name: (identifier)
+        type: (tag
+          (type_identifier))))
+    (decl_member_list
+      (record_field
+        name: (identifier)
+        type: (tag
+          (type_application
+            (type_identifier)
+            (type_variable))))
+      (record_field
+        name: (identifier)
+        type: (tag
+          (type_identifier)))
+      (record_field
+        name: (identifier)
+        type: (tag
+          (type_identifier))))))

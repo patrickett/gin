@@ -32,6 +32,8 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 | Token::At
                 | Token::Caret
                 | Token::Star
+                | Token::Ref
+                | Token::Mut
                 | Token::ParenOpen
                 | Token::If
                 | Token::When
@@ -82,9 +84,13 @@ impl<'src, 't> TokenCursor<'src, 't> {
                     // This bypasses the speculative looks_like_bind + checkpoint/rewind in
                     // parse_atom, eliminating ~100 speculative parse_bind calls for large
                     // files with many functions.
-                    if matches!(t, Token::Id(_)) {
+                    let is_prefix_reference_bind = matches!(t, Token::Ref | Token::Mut)
+                        && matches!(self.peek_at(1), Some(Token::Id(_)))
+                        && matches!(self.peek_at(2), Some(Token::Tag(_)));
+                    if matches!(t, Token::Id(_)) || is_prefix_reference_bind {
                         self.skip_newlines();
-                        if matches!(self.peek_at(1), Some(Token::Colon) | Some(Token::ColonEq))
+                        if is_prefix_reference_bind
+                            || matches!(self.peek_at(1), Some(Token::Colon) | Some(Token::ColonEq))
                             || self.looks_like_bind()
                         {
                             let start_pos = self.pos();

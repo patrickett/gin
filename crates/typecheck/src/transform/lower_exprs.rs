@@ -16,7 +16,8 @@ use ast_format::type_expr::TypeExprFormatExt;
 
 use crate::ty::Ty;
 use crate::typed::{
-    BindBody, DefId, ExprId, TagId, TypedExprKind, TypedFileAst, TypedWhenArm, VariantMap,
+    BindBody, DefId, ExprId, ReferenceTargetGroup, TagId, TargetIndex, TypedCallableSignature,
+    TypedExprKind, TypedFileAst, TypedWhenArm, VariantMap,
 };
 use ast::ConstValue;
 use diagnostic::Diagnostic;
@@ -43,6 +44,7 @@ pub(crate) struct LocalEnv {
     pub(crate) constants: HashSet<Intern<String>>,
     /// Compile-time-known local values available while lowering this scope.
     pub(crate) const_values: HashMap<Intern<String>, ast::ConstValue>,
+    pub(crate) target_groups: HashMap<Intern<String>, ReferenceTargetGroup>,
 }
 
 /// Lexical context while lowering expressions.
@@ -55,27 +57,12 @@ pub(crate) struct ExprLowerScope<'a> {
     pub(crate) locals: &'a HashSet<Intern<String>>,
     /// Current definition being lowered (for SelfRef resolution).
     pub(crate) current_def_id: Option<DefId>,
+    pub(crate) callable_signatures: &'a HashMap<DefId, TypedCallableSignature>,
+    pub(crate) tag_params: &'a HashMap<Intern<String>, Parameters>,
+    pub(crate) tag_decls: &'a ast::TagMap,
 }
 
-impl<'a> ExprLowerScope<'a> {
-    fn new(
-        tag_types: &'a HashMap<Intern<String>, Ty>,
-        variant_map: &'a VariantMap,
-        receiver_type: Option<&'a Ty>,
-        expected_ty: Option<&'a Ty>,
-        locals: &'a HashSet<Intern<String>>,
-        current_def_id: Option<DefId>,
-    ) -> Self {
-        Self {
-            tag_types,
-            variant_map,
-            receiver_type,
-            expected_ty,
-            locals,
-            current_def_id,
-        }
-    }
-
+impl ExprLowerScope<'_> {
     /// Call args, binary operands, and nested `when` subjects do not inherit the outer expected return type.
     pub(crate) fn child(&self) -> Self {
         Self {
@@ -85,6 +72,9 @@ impl<'a> ExprLowerScope<'a> {
             expected_ty: None,
             locals: self.locals,
             current_def_id: self.current_def_id,
+            callable_signatures: self.callable_signatures,
+            tag_params: self.tag_params,
+            tag_decls: self.tag_decls,
         }
     }
 }
@@ -155,6 +145,13 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
         })
         .collect();
 
+    let mut tag_params = ctx.cross_file_tag_params.clone();
+    tag_params.extend(
+        typed
+            .tags
+            .iter()
+            .filter_map(|(id, tag)| tag.params.clone().map(|params| (id.0, params))),
+    );
     let mut assignments: Vec<DefBodyAssign> = Vec::new();
 
     for def_id in &def_ids {
@@ -168,20 +165,27 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
 
         let mut env = LocalEnv::default();
         if let Some(typed_bind) = typed.defs.get(def_id) {
-            for (name, ty) in &typed_bind.params {
+            for ((name, ty), group) in typed_bind.params.iter().zip(&typed_bind.param_groups) {
                 env.types.insert(*name, ty.clone());
+                let target = group
+                    .map(ReferenceTargetGroup::Param)
+                    .unwrap_or(ReferenceTargetGroup::Local(*name));
+                env.target_groups.insert(*name, target);
             }
         }
 
         let return_ty = typed.defs.get(def_id).map(|b| b.return_type.clone());
-        let scope = ExprLowerScope::new(
-            &tag_types,
-            &variant_map,
+        let scope = ExprLowerScope {
+            tag_types: &tag_types,
+            variant_map: &variant_map,
             receiver_type,
-            return_ty.as_ref(),
+            expected_ty: return_ty.as_ref(),
             locals,
-            Some(*def_id),
-        );
+            current_def_id: Some(*def_id),
+            callable_signatures: &ctx.cross_file_callable_signatures,
+            tag_params: &tag_params,
+            tag_decls: &file_ast.tags,
+        };
 
         let body = match &bind.value {
             BindValue::Expr(typed_expr) => {
@@ -224,7 +228,17 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
     // Lower top-level expressions.
     let empty_locals = HashSet::new();
     let mut env = LocalEnv::default();
-    let scope = ExprLowerScope::new(&tag_types, &variant_map, None, None, &empty_locals, None);
+    let scope = ExprLowerScope {
+        tag_types: &tag_types,
+        variant_map: &variant_map,
+        receiver_type: None,
+        expected_ty: None,
+        locals: &empty_locals,
+        current_def_id: None,
+        callable_signatures: &ctx.cross_file_callable_signatures,
+        tag_params: &tag_params,
+        tag_decls: &file_ast.tags,
+    };
     for (expr, span_id) in &file_ast.exprs {
         let wrapped = Typed::infer(expr.clone(), *span_id);
         let expr_id = lower_typed_expr(typed, &wrapped, &scope, &mut env);
@@ -358,7 +372,20 @@ pub(crate) fn lower_typed_expr(
         _ => None,
     };
 
-    let kind = lower_expr_kind(typed, expr, scope, env);
+    let reserved_expr_id = matches!(expr.value, Expr::FnCall(_) | Expr::Bind(_)).then(|| {
+        let expr_id = ExprId(typed.exprs.kind.len() as u32);
+        typed
+            .exprs
+            .kind
+            .push(TypedExprKind::Lit(Literal::Number(0)));
+        typed.exprs.ty.push(Ty::Unit);
+        typed.exprs.span.push(expr.span_id);
+        typed.exprs.const_value.push(None);
+        typed.exprs.target_group.push(None);
+        typed.exprs.flaws.push(Vec::new());
+        expr_id
+    });
+    let kind = lower_expr_kind(typed, expr, scope, env, reserved_expr_id);
 
     // For compile-time resolved when expressions, propagate the body's const_value.
     let const_val = if let TypedExprKind::When(ref when_expr) = kind {
@@ -377,7 +404,7 @@ pub(crate) fn lower_typed_expr(
         const_val
     };
 
-    let expr_id = ExprId(typed.exprs.kind.len() as u32);
+    let expr_id = reserved_expr_id.unwrap_or(ExprId(typed.exprs.kind.len() as u32));
 
     let mut flaws: Vec<Diagnostic> = Vec::new();
     if let TypedExprKind::Reassign { name, .. } = &kind
@@ -408,13 +435,26 @@ pub(crate) fn lower_typed_expr(
             substituted_ty: Some(ty),
             ..
         } => ty.clone(),
+        TypedExprKind::Bind { name, .. } => env.types.get(name).cloned().unwrap_or(resolved_ty),
         _ => resolved_ty,
     };
-    typed.exprs.kind.push(kind);
-    typed.exprs.ty.push(final_ty);
-    typed.exprs.span.push(expr.span_id);
-    typed.exprs.const_value.push(const_val);
-    typed.exprs.flaws.push(flaws);
+    let target_group = target_group_for_kind(&kind, typed, scope, env, &mut flaws);
+    if reserved_expr_id.is_some() {
+        let index = expr_id.as_usize();
+        typed.exprs.kind[index] = kind;
+        typed.exprs.ty[index] = final_ty;
+        typed.exprs.span[index] = expr.span_id;
+        typed.exprs.const_value[index] = const_val;
+        typed.exprs.target_group[index] = target_group;
+        typed.exprs.flaws[index] = flaws;
+    } else {
+        typed.exprs.kind.push(kind);
+        typed.exprs.ty.push(final_ty);
+        typed.exprs.span.push(expr.span_id);
+        typed.exprs.const_value.push(const_val);
+        typed.exprs.target_group.push(target_group);
+        typed.exprs.flaws.push(flaws);
+    }
 
     if expr.span_id.is_valid() {
         let span = typed.span_table.get(expr.span_id);
@@ -425,6 +465,121 @@ pub(crate) fn lower_typed_expr(
     }
 
     expr_id
+}
+
+fn target_group_for_kind(
+    kind: &TypedExprKind,
+    typed: &TypedFileAst,
+    scope: &ExprLowerScope<'_>,
+    env: &LocalEnv,
+    flaws: &mut Vec<Diagnostic>,
+) -> Option<ReferenceTargetGroup> {
+    let child_group = |id: ExprId| {
+        typed
+            .exprs
+            .target_group
+            .get(id.as_usize())
+            .cloned()
+            .flatten()
+    };
+
+    match kind {
+        TypedExprKind::FnCall { target, args, .. } if args.as_ref().is_none_or(Vec::is_empty) => {
+            env.target_groups.get(&target.0).cloned()
+        }
+        TypedExprKind::FnCall {
+            target,
+            args: Some(args),
+            ..
+        } => {
+            let local_signature = typed.defs.get(target).map(TypedCallableSignature::from);
+            let signature = local_signature
+                .as_ref()
+                .or_else(|| scope.callable_signatures.get(target))?;
+            let return_group = signature.return_group?;
+            let mut actual_groups =
+                signature
+                    .param_groups
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, group)| {
+                        (*group == Some(return_group))
+                            .then(|| args.get(index).and_then(|arg| child_group(*arg)))
+                            .flatten()
+                    });
+            let result = actual_groups.next();
+            if result.is_some() && actual_groups.any(|group| Some(group) != result) {
+                flaws.push(Diagnostic::new(
+                    "type-conflicting-target-group-arguments",
+                    "arguments for a shared target group refer to different targets",
+                ));
+                None
+            } else {
+                result
+            }
+        }
+        TypedExprKind::Ref(inner)
+        | TypedExprKind::TakePtr(inner)
+        | TypedExprKind::ConsumeArg(inner)
+        | TypedExprKind::Eat(inner) => child_group(*inner),
+        TypedExprKind::Deref(inner) => {
+            child_group(*inner).map(|target| ReferenceTargetGroup::Deref(Box::new(target)))
+        }
+        TypedExprKind::TupleGet { base, index } => {
+            child_group(*base).map(|target| ReferenceTargetGroup::Field {
+                base: Box::new(target),
+                index: *index,
+            })
+        }
+        TypedExprKind::BufGet { buf, index } => {
+            child_group(*buf).map(|target| ReferenceTargetGroup::ItemRegion {
+                base: Box::new(target),
+                index: target_index_for_expr(typed, *index),
+            })
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn target_index_for_expr(typed: &TypedFileAst, expr_id: ExprId) -> TargetIndex {
+    let idx = expr_id.as_usize();
+    if let Some(value) = typed.exprs.const_value.get(idx).and_then(Clone::clone) {
+        return TargetIndex::Symbolic(ast::ConstExpr::Value(value));
+    }
+    let Some(kind) = typed.exprs.kind.get(idx) else {
+        return TargetIndex::Unknown;
+    };
+    let expr = match kind {
+        TypedExprKind::Lit(Literal::Int(value)) => {
+            ast::ConstExpr::Value(ast::ConstValue::Int(*value as i128))
+        }
+        TypedExprKind::Lit(Literal::Number(value)) => {
+            ast::ConstExpr::Value(ast::ConstValue::Int(*value as i128))
+        }
+        TypedExprKind::FnCall { target, args, .. } if args.as_ref().is_none_or(Vec::is_empty) => {
+            ast::ConstExpr::Var(target.0)
+        }
+        TypedExprKind::FnCall {
+            target,
+            args: Some(args),
+            ..
+        } if args.len() == 2 => {
+            let TargetIndex::Symbolic(left) = target_index_for_expr(typed, args[0]) else {
+                return TargetIndex::Unknown;
+            };
+            let TargetIndex::Symbolic(right) = target_index_for_expr(typed, args[1]) else {
+                return TargetIndex::Unknown;
+            };
+            match target.0.as_str() {
+                "add" => ast::ConstExpr::Add(Box::new(left), Box::new(right)),
+                "sub" => ast::ConstExpr::Sub(Box::new(left), Box::new(right)),
+                "mul" => ast::ConstExpr::Mul(Box::new(left), Box::new(right)),
+                _ => return TargetIndex::Unknown,
+            }
+        }
+        _ => return TargetIndex::Unknown,
+    };
+    TargetIndex::Symbolic(expr)
 }
 
 fn when_pattern_key(pattern: &ast::TypeExpr) -> String {
@@ -505,7 +660,9 @@ fn const_for_def_id(def_id: DefId, typed: &TypedFileAst) -> Option<ast::ConstVal
 /// Try to extract a [`ConstValue`] from a pattern parameter's [`ParameterKind`].
 fn param_kind_const(kind: &ParameterKind) -> Option<ast::ConstValue> {
     match kind {
-        ParameterKind::Tagged(sp) | ParameterKind::ValueParam { ty: sp } => match &sp.value {
+        ParameterKind::Tagged(sp)
+        | ParameterKind::ValueParam { ty: sp }
+        | ParameterKind::Inferred { ty: sp } => match &sp.value {
             ast::TypeExpr::Literal(lit, _) => match lit {
                 ast::Literal::Int(n) => Some(ast::ConstValue::Int(*n as i128)),
                 ast::Literal::Number(n) => Some(ast::ConstValue::Int(*n as i128)),

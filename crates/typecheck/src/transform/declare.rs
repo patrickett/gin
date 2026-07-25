@@ -19,13 +19,15 @@ use crate::analysis::TypeEnv;
 use crate::compile_time_trait::{RESERVED_TRAITS, synthesize_reflectable_trait};
 use crate::ty::{Ty, UnionVariant};
 use crate::typed::{
-    DefId, ExprId, FileId, ResolvedImport, TagId, TypedBind, TypedFileAst, TypedTag, VariantMap,
+    DefId, ExprId, FileId, GroupId, ResolvedImport, TagId, TypedBind, TypedFileAst, TypedGroup,
+    TypedTag, VariantMap,
 };
 use ast::parameter::Parameters;
 use ast::prelude::*;
 use ast::type_decl::TypeNameExt;
 use ast::{
-    BindValue, ConstValue, DeclareValue, HashFloat, ImportSource, Literal, ParamKind, TypeExpr,
+    BindValue, BinderId, BinderOwner, ConstValue, DeclareValue, HashFloat, ImportSource, Literal,
+    ParamKind, TypeExpr,
 };
 
 use ast_format::declare::{BindFormatExt, DeclareFormatExt};
@@ -49,7 +51,7 @@ impl TypedTag {
                         let ty = TypeEnv::new(tag_types).resolve(&sp.value);
                         ParamKind::Value(Box::new(ty))
                     }
-                    ParameterKind::ValueParam { ty } => {
+                    ParameterKind::ValueParam { ty } | ParameterKind::Inferred { ty } => {
                         let ty = TypeEnv::new(tag_types).resolve(&ty.value);
                         ParamKind::Value(Box::new(ty))
                     }
@@ -89,10 +91,10 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                 ast::HasMemberBody::Overrideable(value) | ast::HasMemberBody::Final(value) => value,
             };
             let modifier = match function.conventions.get(&self_name) {
-                Some(ast::ParamConvention::Ref(false)) => "ref self",
-                Some(ast::ParamConvention::Ref(true)) => "mut self",
-                Some(ast::ParamConvention::Eat) => "eat self",
-                Some(ast::ParamConvention::Inferred) | None => "self",
+                Some(ast::ParamConvention::Observe) => "ref self",
+                Some(ast::ParamConvention::Mutate) => "mut self",
+                Some(ast::ParamConvention::Consume) => "eat self",
+                Some(ast::ParamConvention::Own) | None => "self",
             };
             let mut spans = Vec::new();
             collect_bind_value_self_ref_spans(value, &mut spans);
@@ -250,16 +252,16 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                                     first = false;
                                     if let Some(conv) = f.conventions.get(param_name) {
                                         match conv {
-                                            ast::ParamConvention::Ref(false) => {
+                                            ast::ParamConvention::Observe => {
                                                 ty_surface.push_str("ref ")
                                             }
-                                            ast::ParamConvention::Ref(true) => {
+                                            ast::ParamConvention::Mutate => {
                                                 ty_surface.push_str("mut ")
                                             }
-                                            ast::ParamConvention::Eat => {
+                                            ast::ParamConvention::Consume => {
                                                 ty_surface.push_str("eat ")
                                             }
-                                            ast::ParamConvention::Inferred => {}
+                                            ast::ParamConvention::Own => {}
                                         }
                                     }
                                     let _ = write!(&mut ty_surface, "{}", param_name.as_str());
@@ -271,6 +273,11 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                                         ast::ParameterKind::ValueParam { ty } => {
                                             ty_surface.push(' ');
                                             ty_surface.push_str(&ty.value.format_surface());
+                                        }
+                                        ast::ParameterKind::Inferred { ty } => {
+                                            ty_surface.push(' ');
+                                            ty_surface.push_str(&ty.value.format_surface());
+                                            ty_surface.push_str(": ?");
                                         }
                                         ast::ParameterKind::Default(expr) => {
                                             let _ = write!(&mut ty_surface, ": {:?}", expr);
@@ -381,14 +388,19 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
             continue;
         }
         let def_id = DefId(*name);
+        let dependent_binder = BinderId::new(typed.file_id.0, BinderOwner::Definition(def_id.0));
         let tag_types_by_name: HashMap<Intern<String>, Ty> = typed
             .tag_types
             .iter()
             .map(|(id, ty)| (id.0, ty.clone()))
             .collect();
-        let receiver_type = declare
-            .receiver_type_surface()
-            .map(|receiver| TypeEnv::new(&tag_types_by_name).resolve(&receiver.value));
+        let receiver_type = declare.receiver_type_surface().map(|receiver| {
+            TypeEnv::new(&tag_types_by_name)
+                .with_tag_params(&tag_params)
+                .with_tag_decls(&file_ast.tags)
+                .with_dependent_binder(dependent_binder)
+                .resolve(&receiver.value)
+        });
         let mut method_tag_types = tag_types_by_name.clone();
         if let Some(receiver_type) = &receiver_type {
             method_tag_types.insert(Intern::<String>::from_ref("Self"), receiver_type.clone());
@@ -397,13 +409,15 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
             declare,
             &method_tag_types,
             &tag_params,
-            &ctx.cross_file_tag_types,
+            &file_ast.tags,
+            dependent_binder,
         );
         let param_types = resolve_param_types(
             declare,
             &method_tag_types,
             &tag_params,
-            &ctx.cross_file_tag_types,
+            &file_ast.tags,
+            dependent_binder,
         );
 
         let param_kinds = declare
@@ -416,15 +430,54 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                     .collect()
             })
             .unwrap_or_default();
+        let param_conventions: Vec<ParamConvention> = declare
+            .params
+            .as_ref()
+            .map(|params| {
+                params
+                    .keys()
+                    .map(|name| {
+                        declare
+                            .param_conventions
+                            .get(name)
+                            .copied()
+                            .unwrap_or_default()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let param_refinements = declare
+            .params
+            .as_ref()
+            .map(|params| {
+                params
+                    .keys()
+                    .map(|name| declare.param_refinements.get(name).cloned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (param_groups, groups, return_group) = resolve_target_groups(
+            declare,
+            &param_types,
+            &param_conventions,
+            &mut typed.declaration_flaws,
+        );
 
         let typed_bind = TypedBind {
             name: *name,
+            dependent_binder,
             name_span: declare.name_span,
             is_compile_time: declare.is_compile_time,
             return_type: return_ty.clone(),
             declared_return_type: return_ty.clone(),
             params: param_types,
             param_kinds,
+            param_conventions,
+            param_groups,
+            param_refinements,
+            groups,
+            return_group,
+            effects: Default::default(),
             receiver_type,
             unassigned_decl: matches!(declare.value, BindValue::Unassigned),
             is_constant: declare.is_constant,
@@ -980,7 +1033,8 @@ fn resolve_declare_value(
                                 .map(|(name, kind)| {
                                     let ty = match kind {
                                         ParameterKind::Tagged(sp) => env.resolve(&sp.value),
-                                        ParameterKind::ValueParam { ty } => env.resolve(&ty.value),
+                                        ParameterKind::ValueParam { ty }
+                                        | ParameterKind::Inferred { ty } => env.resolve(&ty.value),
                                         ParameterKind::Generic => Ty::Opaque(*name),
                                         ParameterKind::Default(expr) => {
                                             if let Some(te) = expr.value.as_type_expr() {
@@ -1041,6 +1095,7 @@ fn resolve_declare_value(
             Ty::Record {
                 name: *declaring_name,
                 fields: resolved_fields,
+                resolved_params: None,
             }
         }
         DeclareValue::When(when) => {
@@ -1089,14 +1144,120 @@ fn resolve_type_from_typed_expr(expr: &Typed<Expr>, tag_types: &HashMap<Intern<S
     }
 }
 
+fn resolve_target_groups(
+    bind: &Bind,
+    param_types: &[(Intern<String>, Ty)],
+    param_conventions: &[ParamConvention],
+    flaws: &mut Vec<(SpanId, Diagnostic)>,
+) -> (Vec<Option<GroupId>>, Vec<TypedGroup>, Option<GroupId>) {
+    let mut named: HashMap<Intern<String>, GroupId> = HashMap::new();
+    let mut groups: Vec<TypedGroup> = Vec::new();
+    let param_groups = param_types
+        .iter()
+        .zip(param_conventions)
+        .map(|((param_name, referent_type), convention)| {
+            if !matches!(
+                convention,
+                ParamConvention::Observe | ParamConvention::Mutate
+            ) {
+                return None;
+            }
+
+            let group_name = bind.param_groups.get(param_name).copied();
+            if let Some(group_name) = group_name
+                && let Some(group_id) = named.get(&group_name).copied()
+            {
+                if groups[group_id.0 as usize].referent_type != *referent_type {
+                    flaws.push((
+                        bind.name_span,
+                        Diagnostic::new(
+                            "type-incompatible-target-group",
+                            format!(
+                                "target group `{}` is used with incompatible referent types",
+                                group_name.as_str()
+                            ),
+                        )
+                        .with_arg("group", group_name.as_str().to_string()),
+                    ));
+                }
+                return Some(group_id);
+            }
+
+            let group_id = GroupId(groups.len() as u32);
+            groups.push(TypedGroup {
+                name: group_name,
+                referent_type: referent_type.clone(),
+            });
+            if let Some(group_name) = group_name {
+                named.insert(group_name, group_id);
+            }
+            Some(group_id)
+        })
+        .collect();
+
+    let return_group = match bind.return_tag.as_deref() {
+        Some(spanned) => match &spanned.value {
+            TypeExpr::Ref {
+                group: Some(name), ..
+            } => match named.get(name).copied() {
+                Some(group_id) => Some(group_id),
+                None => {
+                    flaws.push((
+                        spanned.span_id,
+                        Diagnostic::new(
+                            "type-unknown-target-group",
+                            format!("unknown target group `{}`", name.as_str()),
+                        )
+                        .with_arg("group", name.as_str().to_string()),
+                    ));
+                    None
+                }
+            },
+            TypeExpr::Ref { group: None, .. } => match groups.len() {
+                1 => Some(GroupId(0)),
+                0 => {
+                    flaws.push((
+                        spanned.span_id,
+                        Diagnostic::new(
+                            "type-reference-return-without-target-group",
+                            "reference return has no eligible reference input group",
+                        ),
+                    ));
+                    None
+                }
+                count => {
+                    flaws.push((
+                        spanned.span_id,
+                        Diagnostic::new(
+                            "type-ambiguous-reference-return-target-group",
+                            "reference return has multiple eligible reference input groups",
+                        )
+                        .with_arg("group_count", count.to_string()),
+                    ));
+                    None
+                }
+            },
+            _ => None,
+        },
+        None => None,
+    };
+
+    (param_groups, groups, return_group)
+}
+
 fn resolve_return_type(
     bind: &Bind,
     tag_types: &HashMap<Intern<String>, Ty>,
-    _tag_params: &HashMap<Intern<String>, Parameters>,
-    _cross_file: &HashMap<TagId, Ty>,
+    tag_params: &HashMap<Intern<String>, Parameters>,
+    tag_decls: &ast::TagMap,
+    dependent_binder: BinderId,
 ) -> Ty {
     if let Some(sp) = &bind.return_tag {
-        let ty = TypeEnv::new(tag_types).resolve(&sp.value);
+        let ty = TypeEnv::new(tag_types)
+            .with_tag_params(tag_params)
+            .with_tag_decls(tag_decls)
+            .with_dependent_binder(dependent_binder)
+            .resolve(&sp.value);
         return nominalize_explicit_ty_surface(&sp.value, ty);
     }
     if let Some(name) = &bind.return_type_name {
@@ -1118,8 +1279,9 @@ fn resolve_return_type(
 fn resolve_param_types(
     bind: &Bind,
     tag_types: &HashMap<Intern<String>, Ty>,
-    _tag_params: &HashMap<Intern<String>, Parameters>,
-    _cross_file: &HashMap<TagId, Ty>,
+    tag_params: &HashMap<Intern<String>, Parameters>,
+    tag_decls: &ast::TagMap,
+    dependent_binder: BinderId,
 ) -> Vec<(Intern<String>, Ty)> {
     let Some(params) = &bind.params else {
         return Vec::new();
@@ -1128,12 +1290,26 @@ fn resolve_param_types(
         .iter()
         .map(|(name, kind)| {
             let ty = match kind {
-                ParameterKind::Tagged(sp) => TypeEnv::new(tag_types).resolve(&sp.value),
-                ParameterKind::ValueParam { ty } => TypeEnv::new(tag_types).resolve(&ty.value),
+                ParameterKind::Tagged(sp) => TypeEnv::new(tag_types)
+                    .with_tag_params(tag_params)
+                    .with_tag_decls(tag_decls)
+                    .with_dependent_binder(dependent_binder)
+                    .resolve(&sp.value),
+                ParameterKind::ValueParam { ty } | ParameterKind::Inferred { ty } => {
+                    TypeEnv::new(tag_types)
+                        .with_tag_params(tag_params)
+                        .with_tag_decls(tag_decls)
+                        .with_dependent_binder(dependent_binder)
+                        .resolve(&ty.value)
+                }
                 ParameterKind::Generic => Ty::Opaque(*name),
                 ParameterKind::Default(expr) => {
                     if let Some(te) = expr.value.as_type_expr() {
-                        TypeEnv::new(tag_types).resolve(&te)
+                        TypeEnv::new(tag_types)
+                            .with_tag_params(tag_params)
+                            .with_tag_decls(tag_decls)
+                            .with_dependent_binder(dependent_binder)
+                            .resolve(&te)
                     } else {
                         Ty::i64()
                     }
@@ -1159,7 +1335,7 @@ fn param_kind_from_parameter_kind(
             let ty = TypeEnv::new(tag_types).resolve(&sp.value);
             ParamKind::Value(Box::new(ty))
         }
-        ParameterKind::ValueParam { ty } => {
+        ParameterKind::ValueParam { ty } | ParameterKind::Inferred { ty } => {
             let ty = TypeEnv::new(tag_types).resolve(&ty.value);
             ParamKind::Value(Box::new(ty))
         }
@@ -1181,4 +1357,145 @@ fn populate_resolved_imports(
     _ctx: &TransformCtx,
 ) -> HashMap<Intern<String>, ResolvedImport> {
     HashMap::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use parser::cursor::TokenCursor;
+
+    fn resolved_args(ty: &Ty) -> &[(Intern<String>, ast::TyArg)] {
+        match ty {
+            Ty::Record {
+                resolved_params: Some(params),
+                ..
+            } => params,
+            other => panic!("expected resolved record parameters, found {other:?}"),
+        }
+    }
+
+    fn inferred_arg(ty: &Ty, index: usize) -> ast::DependentArgId {
+        match &resolved_args(ty)[index].1 {
+            ast::TyArg::Const(ast::ConstExpr::Inferred(id)) => *id,
+            other => panic!("expected inferred argument, found {other:?}"),
+        }
+    }
+
+    #[test]
+    fn infers_ungrouped_reference_return_from_sole_reference_input() {
+        let ast = TokenCursor::parse_source("first(ref values List(x)) ref x: values\n");
+        let typed = stage_declare(&ast, FileId(0), &TransformCtx::new());
+        let bind = typed.defs.get(&DefId(Intern::from_ref("first"))).unwrap();
+
+        assert_eq!(bind.param_groups, vec![Some(GroupId(0))]);
+        assert_eq!(bind.groups.len(), 1);
+        assert_eq!(bind.groups[0].name, None);
+        assert_eq!(bind.return_group, Some(GroupId(0)));
+        assert!(typed.declaration_flaws.is_empty());
+    }
+
+    #[test]
+    fn reuses_named_reference_group_for_params_and_return() {
+        let ast =
+            TokenCursor::parse_source("choose(ref{r} left x, ref{r} right x) ref{r} x: left\n");
+        let typed = stage_declare(&ast, FileId(0), &TransformCtx::new());
+        let bind = typed.defs.get(&DefId(Intern::from_ref("choose"))).unwrap();
+
+        assert_eq!(bind.param_groups, vec![Some(GroupId(0)), Some(GroupId(0))]);
+        assert_eq!(bind.groups.len(), 1);
+        assert_eq!(bind.groups[0].name, Some(Intern::from_ref("r")));
+        assert_eq!(bind.return_group, Some(GroupId(0)));
+        assert!(typed.declaration_flaws.is_empty());
+    }
+
+    #[test]
+    fn omitted_hidden_record_args_complete_definition_signature() {
+        let ast = TokenCursor::parse_source(
+            "List(x, length Int: ?, state Int: ?) has value x\nkeep(value List(Int)) List(Int): value\n",
+        );
+        let typed = stage_declare(&ast, FileId(4), &TransformCtx::new());
+        let bind = typed.defs.get(&DefId(Intern::from_ref("keep"))).unwrap();
+        let param_ty = &bind.params[0].1;
+
+        assert_eq!(resolved_args(param_ty).len(), 3);
+        assert!(matches!(resolved_args(param_ty)[0].1, ast::TyArg::Type(_)));
+        assert_eq!(inferred_arg(param_ty, 1).slot, 1);
+        assert_eq!(inferred_arg(param_ty, 2).slot, 2);
+        assert_eq!(inferred_arg(param_ty, 1).binder, bind.dependent_binder);
+        assert_eq!(
+            inferred_arg(param_ty, 1),
+            inferred_arg(&bind.return_type, 1)
+        );
+        assert_eq!(
+            inferred_arg(param_ty, 2),
+            inferred_arg(&bind.return_type, 2)
+        );
+    }
+
+    #[test]
+    fn explicit_hidden_record_args_remain_concrete() {
+        let ast = TokenCursor::parse_source(
+            "List(x, length Int: ?, state Int: ?) has value x\nkeep(value List(Int, 3, 9)): value\n",
+        );
+        let typed = stage_declare(&ast, FileId(0), &TransformCtx::new());
+        let bind = typed.defs.get(&DefId(Intern::from_ref("keep"))).unwrap();
+        let args = resolved_args(&bind.params[0].1);
+
+        assert_eq!(args.len(), 3);
+        assert_eq!(
+            args[1].1,
+            ast::TyArg::Const(ast::ConstExpr::Value(ConstValue::Int(3)))
+        );
+        assert_eq!(
+            args[2].1,
+            ast::TyArg::Const(ast::ConstExpr::Value(ConstValue::Int(9)))
+        );
+    }
+
+    #[test]
+    fn hidden_args_are_scoped_by_definition_and_file() {
+        let source = "List(x, state Int: ?) has value x\nfirst(value List(Int)): value\nsecond(value List(Int)): value\n";
+        let ast = TokenCursor::parse_source(source);
+        let typed = stage_declare(&ast, FileId(7), &TransformCtx::new());
+        let first = typed.defs.get(&DefId(Intern::from_ref("first"))).unwrap();
+        let second = typed.defs.get(&DefId(Intern::from_ref("second"))).unwrap();
+        assert_ne!(
+            inferred_arg(&first.params[0].1, 1),
+            inferred_arg(&second.params[0].1, 1)
+        );
+
+        let other_ast = TokenCursor::parse_source(
+            "List(x, state Int: ?) has value x\nfirst(value List(Int)): value\n",
+        );
+        let other = stage_declare(&other_ast, FileId(8), &TransformCtx::new());
+        let other_first = other.defs.get(&DefId(Intern::from_ref("first"))).unwrap();
+        assert_ne!(
+            inferred_arg(&first.params[0].1, 1),
+            inferred_arg(&other_first.params[0].1, 1)
+        );
+    }
+
+    #[test]
+    fn callable_signature_transports_dependent_binder() {
+        let ast = TokenCursor::parse_source(
+            "List(x, state Int: ?) has value x\nkeep(value List(Int)) List(Int): value\n",
+        );
+        let typed = stage_declare(&ast, FileId(12), &TransformCtx::new());
+        let bind = typed.defs.get(&DefId(Intern::from_ref("keep"))).unwrap();
+        let ctx = TransformCtx::from_typed_asts(&[&typed]);
+        let signature = ctx
+            .cross_file_callable_signatures
+            .get(&DefId(Intern::from_ref("keep")))
+            .unwrap();
+
+        assert_eq!(signature.dependent_binder, bind.dependent_binder);
+        assert_eq!(
+            inferred_arg(&signature.params[0].1, 1).binder,
+            signature.dependent_binder
+        );
+        assert_eq!(
+            inferred_arg(&signature.return_type, 1).binder,
+            signature.dependent_binder
+        );
+    }
 }

@@ -165,6 +165,10 @@ fn hash_param_kind(hasher: &mut Sha256, kind: &ParameterKind) {
             let _ = write!(hasher, "VALUE:");
             hash_type_expr(hasher, &ty.value);
         }
+        ParameterKind::Inferred { ty } => {
+            let _ = write!(hasher, "INFERRED:");
+            hash_type_expr(hasher, &ty.value);
+        }
         ParameterKind::Default(_) => {
             let _ = write!(hasher, "DEFAULT");
         }
@@ -208,12 +212,21 @@ fn hash_type_expr(hasher: &mut Sha256, e: &TypeExpr) {
         TypeExpr::Pointer(_) => {
             let _ = write!(hasher, "PTR");
         }
-        TypeExpr::Ref { mutable, .. } => {
+        TypeExpr::Ref {
+            inner,
+            mutable,
+            group,
+        } => {
             if *mutable {
                 let _ = write!(hasher, "MUT");
             } else {
                 let _ = write!(hasher, "REF");
             }
+            if let Some(group) = group {
+                let _ = write!(hasher, "{{{group}}}");
+            }
+            let _ = write!(hasher, ":");
+            hash_type_expr(hasher, &inner.value);
         }
         TypeExpr::Unit => {
             let _ = write!(hasher, "UNIT");
@@ -327,6 +340,7 @@ pub struct TagSignature {
 pub enum ParamKindSig {
     Generic,
     Tagged(TagSig),
+    Inferred(TagSig),
     Default,
 }
 
@@ -418,6 +432,10 @@ fn extract_param_kind(kind: &ParameterKind) -> ParamKindSig {
         ParameterKind::ValueParam { ty } => {
             let sig = extract_type_expr_sig(&ty.value);
             ParamKindSig::Tagged(sig)
+        }
+        ParameterKind::Inferred { ty } => {
+            let sig = extract_type_expr_sig(&ty.value);
+            ParamKindSig::Inferred(sig)
         }
         ParameterKind::Default(_) => ParamKindSig::Default,
     }

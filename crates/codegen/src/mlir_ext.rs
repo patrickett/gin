@@ -316,6 +316,15 @@ pub trait BlockExt<'c> {
         return_type: Type<'c>,
         loc: Location<'c>,
     ) -> Value<'c, 'c>;
+    fn gep_typed(
+        &self,
+        cctx: &CodegenContext<'_, 'c>,
+        base: Value<'c, 'c>,
+        elem_ty: Type<'c>,
+        indices: &[Value<'c, 'c>],
+        raw_indices: &[i32],
+        loc: Location<'c>,
+    ) -> Option<Value<'c, 'c>>;
     /// `llvm.getelementptr` with a dynamic byte offset into a `!llvm.ptr`.
     fn gep_i8(
         &self,
@@ -448,6 +457,38 @@ impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
                 .build()
                 .expect("func.call build should succeed"),
         )
+    }
+
+    fn gep_typed(
+        &self,
+        cctx: &CodegenContext<'_, 'c>,
+        base: Value<'c, 'c>,
+        elem_ty: Type<'c>,
+        indices: &[Value<'c, 'c>],
+        raw_indices: &[i32],
+        loc: Location<'c>,
+    ) -> Option<Value<'c, 'c>> {
+        let ctx = cctx.mlir;
+        let mut operands = Vec::with_capacity(indices.len() + 1);
+        operands.push(base);
+        operands.extend_from_slice(indices);
+        let op = OperationBuilder::new("llvm.getelementptr", loc)
+            .add_attributes(&[
+                (
+                    Identifier::new(ctx, "rawConstantIndices"),
+                    DenseI32ArrayAttribute::new(ctx, raw_indices).into(),
+                ),
+                (
+                    Identifier::new(ctx, "elem_type"),
+                    TypeAttribute::new(elem_ty).into(),
+                ),
+            ])
+            .add_operands(&operands)
+            .add_results(&[ctx.llvm_ptr()])
+            .build()
+            .map_err(|e| cctx.emit_internal(format!("GEP: {e}")))
+            .ok()?;
+        Some(self.append_op(op))
     }
 
     fn gep_i8(

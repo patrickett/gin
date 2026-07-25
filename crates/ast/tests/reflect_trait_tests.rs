@@ -73,6 +73,7 @@ fn reflect_opaque_is_dynamic_size() {
 fn reflect_record_fields_in_shape() {
     let ty = Ty::Record {
         name: Intern::new("Pair".to_string()),
+        resolved_params: None,
         fields: vec![(
             Intern::new("a".to_string()),
             Box::new(Ty::Int {
@@ -453,10 +454,12 @@ fn list_pattern_matches_empty_and_cons() {
 fn gin_sized_nested_record_matches_rust_layout() {
     let ty = Ty::Record {
         name: Intern::new("Nested".to_string()),
+        resolved_params: None,
         fields: vec![(
             Intern::new("inner".to_string()),
             Box::new(Ty::Record {
                 name: Intern::new("Inner".to_string()),
+                resolved_params: None,
                 fields: vec![(
                     Intern::new("x".to_string()),
                     Box::new(Ty::Int {
@@ -516,6 +519,7 @@ fn bool_reflects_as_union() {
 fn record_pattern_matches_record_reflect_shape() {
     let ty = Ty::Record {
         name: intern("R"),
+        resolved_params: None,
         fields: vec![(
             intern("a"),
             Box::new(Ty::Int {

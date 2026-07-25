@@ -142,16 +142,17 @@ impl std::fmt::Display for HasFunction {
                 first = false;
                 if let Some(conv) = self.conventions.get(k) {
                     match conv {
-                        ParamConvention::Ref(false) => write!(f, "ref ")?,
-                        ParamConvention::Ref(true) => write!(f, "mut ")?,
-                        ParamConvention::Eat => write!(f, "eat ")?,
-                        ParamConvention::Inferred => {}
+                        ParamConvention::Observe => write!(f, "ref ")?,
+                        ParamConvention::Mutate => write!(f, "mut ")?,
+                        ParamConvention::Consume => write!(f, "eat ")?,
+                        ParamConvention::Own => {}
                     }
                 }
                 write!(f, "{}", k.as_str())?;
                 match v {
                     ParameterKind::Tagged(sp) => write!(f, " {:?}", sp.value)?,
                     ParameterKind::ValueParam { ty } => write!(f, " {:?} (value)", ty.value)?,
+                    ParameterKind::Inferred { ty } => write!(f, " {:?}: ?", ty.value)?,
                     ParameterKind::Default(expr) => write!(f, ": {:?}", expr)?,
                     ParameterKind::Generic => {}
                 }

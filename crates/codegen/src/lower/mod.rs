@@ -55,11 +55,14 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
             ctx.current_span.set(bind.name_span);
             let loc = ctx.location();
 
-            // Resolve parameter MLIR types and create block arguments.
             let param_types_mlir: Vec<melior::ir::Type<'c>> = bind
                 .params
                 .iter()
-                .map(|(_, ty)| ctx.ty_to_mlir(ty))
+                .enumerate()
+                .map(|(i, (_, ty))| match bind.param_conventions.get(i) {
+                    Some(ParamConvention::Observe | ParamConvention::Mutate) => context.llvm_ptr(),
+                    _ => ctx.ty_to_mlir(ty),
+                })
                 .collect();
             let param_loc_pairs: Vec<(melior::ir::Type<'c>, Location<'c>)> =
                 param_types_mlir.iter().map(|t| (*t, loc)).collect();
@@ -70,10 +73,19 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
             region.append_block(block);
             let blk = region.first_block().unwrap();
 
-            // Insert parameter names into the symbol table.
             for (i, (name, param_ty)) in bind.params.iter().enumerate() {
                 let val: melior::ir::Value<'c, 'c> = blk.argument(i).unwrap().into();
-                symtab.insert(*name, val, param_ty.clone(), false);
+                let borrowed = matches!(
+                    bind.param_conventions.get(i),
+                    Some(ParamConvention::Observe | ParamConvention::Mutate)
+                );
+                if borrowed {
+                    symtab.insert(*name, val, param_ty.clone(), true);
+                } else {
+                    let slot = blk.alloca_typed(context, ctx.ty_to_mlir(param_ty), loc);
+                    blk.store_typed(&ctx, slot, val, loc);
+                    symtab.insert(*name, slot, param_ty.clone(), true);
+                }
             }
 
             // Lower the body expression.
@@ -146,6 +158,12 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
 
         match expr_ref.kind {
             typecheck::TypedExprKind::Lit(lit) => match lit {
+                ast::Literal::Number(0) => {
+                    if let Some(value) = self.lower_synthetic_record_field(expr_id, block, symtab) {
+                        return Some(value);
+                    }
+                    Some(block.const_i64(self.mlir, 0, self.location()))
+                }
                 ast::Literal::Number(n) => {
                     // usize always fits in i64 on all supported platforms.
                     Some(block.const_i64(self.mlir, *n as i64, self.location()))
@@ -192,24 +210,40 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 }
             },
             typecheck::TypedExprKind::FnCall { target, args, .. } => {
-                // Lower arguments first.
-                let lowered_args: Vec<Value<'c, 'c>> = args
-                    .as_ref()
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|arg_id| self.lower_typed_expr(*arg_id, block, symtab))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                let mut lowered_args = Vec::new();
+                if let Some(args) = args {
+                    let conventions = typed_ast
+                        .defs
+                        .get(target)
+                        .map(|bind| bind.param_conventions.as_slice())
+                        .unwrap_or_default();
+                    for (i, arg_id) in args.iter().enumerate() {
+                        let arg = match conventions.get(i) {
+                            Some(ParamConvention::Observe | ParamConvention::Mutate) => {
+                                self.lower_typed_place(*arg_id, block, symtab)
+                            }
+                            _ => self.lower_typed_expr(*arg_id, block, symtab),
+                        }?;
+                        lowered_args.push(arg);
+                    }
+                }
 
                 let fn_name = target.0.as_str();
                 let loc = self.location();
 
-                // Look up the var in the symtab if no args (variable reference).
                 if (args.is_none() || args.as_ref().is_none_or(|a| a.is_empty()))
-                    && let Some(val) = symtab.get_value(&target.0)
+                    && let Some(slot) = symtab.get(&target.0)
                 {
-                    return Some(val);
+                    return if slot.is_slot {
+                        block.load_typed(
+                            self,
+                            slot.value,
+                            self.ty_to_mlir(&slot.ty),
+                            self.location(),
+                        )
+                    } else {
+                        Some(slot.value)
+                    };
                 }
 
                 let return_ty = self.ty_to_mlir(expr_ref.ty);
@@ -236,22 +270,18 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     Some(slot)
                 } else {
                     let val = self.lower_typed_expr(*body, block, symtab)?;
-                    if symtab.is_slot(name) {
-                        // Rebind — store new value to existing slot.
-                        if let Some(ptr) = symtab.get_value(name) {
-                            block.store_typed(self, ptr, val, self.location())?;
-                            Some(val)
-                        } else {
-                            self.emit_internal(format!(
-                                "mutable slot '{}' not found in symtab",
-                                name.as_str()
-                            ));
-                            None
-                        }
+                    if let Some(ptr) = symtab.get_value(name) {
+                        block.store_typed(self, ptr, val, self.location())?;
                     } else {
-                        symtab.insert(*name, val, expr_ref.ty.clone(), true);
-                        Some(val)
+                        let slot = block.alloca_typed(
+                            self.mlir,
+                            self.ty_to_mlir(expr_ref.ty),
+                            self.location(),
+                        );
+                        block.store_typed(self, slot, val, self.location())?;
+                        symtab.insert(*name, slot, expr_ref.ty.clone(), true);
                     }
+                    Some(val)
                 }
             }
             typecheck::TypedExprKind::Reassign { name, value } => {
@@ -332,8 +362,12 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 Some(result)
             }
             typecheck::TypedExprKind::SelfRef { target } => {
-                // Look up `self` in the symbol table.
-                symtab.get_value(&target.0)
+                let slot = symtab.get(&target.0)?;
+                if slot.is_slot {
+                    block.load_typed(self, slot.value, self.ty_to_mlir(&slot.ty), self.location())
+                } else {
+                    Some(slot.value)
+                }
             }
             typecheck::TypedExprKind::Range { start, end } => {
                 let _s = self.lower_typed_expr(*start, block, symtab)?;
@@ -348,7 +382,19 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 vals.first().copied()
             }
             typecheck::TypedExprKind::Cast { expr, .. } => {
-                self.lower_typed_expr(*expr, block, symtab)
+                let value = self.lower_typed_expr(*expr, block, symtab)?;
+                let result_ty = self.ty_to_mlir(expr_ref.ty);
+                if value.r#type() == self.mlir.llvm_ptr() && result_ty != value.r#type() {
+                    let op = OperationBuilder::new("llvm.ptrtoint", self.location())
+                        .add_operands(&[value])
+                        .add_results(&[result_ty])
+                        .build()
+                        .map_err(|error| self.emit_internal(format!("ptrtoint: {error}")))
+                        .ok()?;
+                    Some(block.append_op(op))
+                } else {
+                    Some(value)
+                }
             }
             typecheck::TypedExprKind::Negate(init) => {
                 let val = self.lower_typed_expr(*init, block, symtab)?;
@@ -363,10 +409,11 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 Some(block.append_op(op))
             }
             typecheck::TypedExprKind::TupleAlloc { init, .. }
-            | typecheck::TypedExprKind::TakePtr(init)
-            | typecheck::TypedExprKind::Ref(init)
             | typecheck::TypedExprKind::ConsumeArg(init)
             | typecheck::TypedExprKind::Eat(init) => self.lower_typed_expr(*init, block, symtab),
+            typecheck::TypedExprKind::TakePtr(init) | typecheck::TypedExprKind::Ref(init) => {
+                self.lower_typed_place(*init, block, symtab)
+            }
             typecheck::TypedExprKind::TupleGet { base, index } => {
                 let base_val = self.lower_typed_expr(*base, block, symtab)?;
                 // Extract the field at the given index from the struct/tuple.
@@ -379,7 +426,10 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     self.location(),
                 )))
             }
-            typecheck::TypedExprKind::Deref(base) => self.lower_typed_expr(*base, block, symtab),
+            typecheck::TypedExprKind::Deref(base) => {
+                let ptr = self.lower_typed_expr(*base, block, symtab)?;
+                block.load_typed(self, ptr, self.ty_to_mlir(expr_ref.ty), self.location())
+            }
             typecheck::TypedExprKind::TupleSet { base, value, .. } => {
                 self.lower_typed_expr(*base, block, symtab)?;
                 self.lower_typed_expr(*value, block, symtab)
@@ -416,6 +466,123 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
             }
             typecheck::TypedExprKind::Destructure { .. }
             | typecheck::TypedExprKind::RecordSet { .. } => None,
+        }
+    }
+
+    fn lower_synthetic_record_field(
+        &self,
+        expr_id: typecheck::ExprId,
+        block: &BlockRef<'c, 'c>,
+        symtab: &ScopedSymbolTable<'c>,
+    ) -> Option<Value<'c, 'c>> {
+        let typed_ast = self.typed_ast?;
+        let index = expr_id.as_usize().checked_sub(1)?;
+
+        let typecheck::TypedExprKind::FnCall { target, args, .. } =
+            typed_ast.exprs.kind.get(index)?
+        else {
+            return None;
+        };
+        if !args.as_ref().is_none_or(Vec::is_empty) {
+            return None;
+        }
+
+        let slot = symtab.get(&target.0)?;
+        let field_ty = typed_ast.expr(expr_id)?.ty;
+        let field_index = match (&slot.ty, field_ty) {
+            (Ty::Opaque(name), Ty::Opaque(field))
+                if (name.as_str() == "Str" || name.as_str() == "String")
+                    && field.as_str() == "pointer" =>
+            {
+                0
+            }
+            (Ty::Opaque(name), Ty::Opaque(field))
+                if (name.as_str() == "Str" || name.as_str() == "String")
+                    && field.as_str() == "len" =>
+            {
+                1
+            }
+            (Ty::Record { fields, .. }, field_ty) => {
+                let mut matches = fields
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (_, ty))| ty.as_ref() == field_ty);
+                let (index, _) = matches.next()?;
+                if matches.next().is_some() {
+                    return None;
+                }
+                index
+            }
+            _ => return None,
+        };
+        let aggregate = if slot.is_slot {
+            block.load_typed(self, slot.value, self.ty_to_mlir(&slot.ty), self.location())?
+        } else {
+            slot.value
+        };
+        let result_ty = match field_ty {
+            Ty::Opaque(name) if name.as_str() == "pointer" => self.mlir.llvm_ptr(),
+            Ty::Opaque(name) if name.as_str() == "len" => self.mlir.i64(),
+            ty => self.ty_to_mlir(ty),
+        };
+        Some(block.append_op(self.mlir.llvm_extractvalue(
+            aggregate,
+            field_index as i64,
+            result_ty,
+            self.location(),
+        )))
+    }
+
+    fn lower_typed_place(
+        &self,
+        expr_id: typecheck::ExprId,
+        block: &BlockRef<'c, 'c>,
+        symtab: &mut ScopedSymbolTable<'c>,
+    ) -> Option<Value<'c, 'c>> {
+        let typed_ast = self.typed_ast?;
+        let expr_ref = typed_ast.expr(expr_id)?;
+        self.current_span.set(*expr_ref.span);
+
+        match &expr_ref.kind {
+            typecheck::TypedExprKind::FnCall { target, args, .. }
+                if args.as_ref().is_none_or(Vec::is_empty) =>
+            {
+                symtab.get_value(&target.0)
+            }
+            typecheck::TypedExprKind::SelfRef { target } => symtab.get_value(&target.0),
+            typecheck::TypedExprKind::Ref(inner) | typecheck::TypedExprKind::TakePtr(inner) => {
+                self.lower_typed_place(*inner, block, symtab)
+            }
+            typecheck::TypedExprKind::Deref(inner) => self.lower_typed_expr(*inner, block, symtab),
+            typecheck::TypedExprKind::TupleGet { base, index } => {
+                let base_ptr = self.lower_typed_place(*base, block, symtab)?;
+                let base_ty = typed_ast.expr(*base)?.ty;
+                block.gep_typed(
+                    self,
+                    base_ptr,
+                    self.ty_to_mlir(base_ty),
+                    &[],
+                    &[0, *index as i32],
+                    self.location(),
+                )
+            }
+            typecheck::TypedExprKind::BufGet { buf, index } => {
+                let base_ptr = self.lower_typed_place(*buf, block, symtab)?;
+                let index = self.lower_typed_expr(*index, block, symtab)?;
+                let base_ty = typed_ast.expr(*buf)?.ty;
+                block.gep_typed(
+                    self,
+                    base_ptr,
+                    self.ty_to_mlir(base_ty),
+                    &[index],
+                    &[i32::MIN],
+                    self.location(),
+                )
+            }
+            _ => {
+                self.emit_internal("expression is not an addressable place");
+                None
+            }
         }
     }
 }

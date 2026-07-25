@@ -24,7 +24,7 @@ fn simple_shape_with_fields() {
     let tag = typed.tags.get(&coord_id).expect("Coord tag exists");
 
     match &tag.resolved_ty {
-        Ty::Record { name, fields } => {
+        Ty::Record { name, fields, .. } => {
             assert_eq!(name.as_str(), "Coord", "record name");
             assert_eq!(fields.len(), 3, "three fields");
 
@@ -61,7 +61,7 @@ fn has_method_does_not_become_record_field() {
     let tag = typed.tags.get(&range_id).expect("Range tag exists");
 
     match &tag.resolved_ty {
-        Ty::Record { name, fields } => {
+        Ty::Record { name, fields, .. } => {
             assert_eq!(name.as_str(), "Range", "record name");
             assert_eq!(fields.len(), 2, "only 2 fields (not contains)");
 
@@ -109,7 +109,7 @@ fn generic_shape_with_type_params() {
     }
 
     match &tag.resolved_ty {
-        Ty::Record { name, fields } => {
+        Ty::Record { name, fields, .. } => {
             assert_eq!(name.as_str(), "Pair");
             assert_eq!(fields.len(), 2);
 

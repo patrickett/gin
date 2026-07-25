@@ -432,7 +432,9 @@ pub fn resolve_parameter_kind_with_subst(
     tag_params: Option<&HashMap<Intern<String>, Parameters>>,
 ) -> Ty {
     match kind {
-        ParameterKind::Tagged(sp) | ParameterKind::ValueParam { ty: sp } => {
+        ParameterKind::Tagged(sp)
+        | ParameterKind::ValueParam { ty: sp }
+        | ParameterKind::Inferred { ty: sp } => {
             if sp.value.is_type_surface() {
                 TypeEnv::new(tag_types)
                     .with_subst(subst)
