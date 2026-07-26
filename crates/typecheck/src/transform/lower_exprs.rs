@@ -8,7 +8,7 @@ use internment::Intern;
 use std::collections::{HashMap, HashSet};
 
 use crate::analysis::when_is_exhaustive;
-use crate::analysis::{eval_compile_time_expr_public, pattern_matches_public};
+use crate::analysis::{eval_compile_time_expr, pattern_matches_public};
 use crate::prepare_target::const_binds_from_prepared_ast;
 use ast::HashFloat;
 use ast::prelude::*;
@@ -16,8 +16,8 @@ use ast_format::type_expr::TypeExprFormatExt;
 
 use crate::ty::Ty;
 use crate::typed::{
-    BindBody, DefId, ExprId, ReferenceTargetGroup, TagId, TargetIndex, TypedCallableSignature,
-    TypedExprKind, TypedFileAst, TypedWhenArm, VariantMap,
+    BindBody, DefId, ExprId, ReferenceTargetGroup, ReferenceTargetSet, TagId, TargetIndex,
+    TypedCallableSignature, TypedExprKind, TypedFileAst, TypedWhenArm, VariantMap,
 };
 use ast::ConstValue;
 use diagnostic::Diagnostic;
@@ -44,7 +44,7 @@ pub(crate) struct LocalEnv {
     pub(crate) constants: HashSet<Intern<String>>,
     /// Compile-time-known local values available while lowering this scope.
     pub(crate) const_values: HashMap<Intern<String>, ast::ConstValue>,
-    pub(crate) target_groups: HashMap<Intern<String>, ReferenceTargetGroup>,
+    pub(crate) target_groups: HashMap<Intern<String>, ReferenceTargetSet>,
 }
 
 /// Lexical context while lowering expressions.
@@ -170,7 +170,8 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
                 let target = group
                     .map(ReferenceTargetGroup::Param)
                     .unwrap_or(ReferenceTargetGroup::Local(*name));
-                env.target_groups.insert(*name, target);
+                env.target_groups
+                    .insert(*name, ReferenceTargetSet::singleton(target));
             }
         }
 
@@ -472,8 +473,8 @@ fn target_group_for_kind(
     typed: &TypedFileAst,
     scope: &ExprLowerScope<'_>,
     env: &LocalEnv,
-    flaws: &mut Vec<Diagnostic>,
-) -> Option<ReferenceTargetGroup> {
+    _flaws: &mut Vec<Diagnostic>,
+) -> Option<ReferenceTargetSet> {
     let child_group = |id: ExprId| {
         typed
             .exprs
@@ -497,44 +498,31 @@ fn target_group_for_kind(
                 .as_ref()
                 .or_else(|| scope.callable_signatures.get(target))?;
             let return_group = signature.return_group?;
-            let mut actual_groups =
-                signature
-                    .param_groups
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, group)| {
-                        (*group == Some(return_group))
-                            .then(|| args.get(index).and_then(|arg| child_group(*arg)))
-                            .flatten()
-                    });
-            let result = actual_groups.next();
-            if result.is_some() && actual_groups.any(|group| Some(group) != result) {
-                flaws.push(Diagnostic::new(
-                    "type-conflicting-target-group-arguments",
-                    "arguments for a shared target group refer to different targets",
-                ));
-                None
-            } else {
-                result
-            }
+            typed
+                .apply_target_groups(args, signature)
+                .targets(return_group)
+                .cloned()
         }
         TypedExprKind::Ref(inner)
         | TypedExprKind::TakePtr(inner)
         | TypedExprKind::ConsumeArg(inner)
         | TypedExprKind::Eat(inner) => child_group(*inner),
-        TypedExprKind::Deref(inner) => {
-            child_group(*inner).map(|target| ReferenceTargetGroup::Deref(Box::new(target)))
-        }
-        TypedExprKind::TupleGet { base, index } => {
-            child_group(*base).map(|target| ReferenceTargetGroup::Field {
-                base: Box::new(target),
+        TypedExprKind::Deref(inner) => child_group(*inner).map(|targets| {
+            targets.projected(|target| ReferenceTargetGroup::Deref(Box::new(target.clone())))
+        }),
+        TypedExprKind::TupleGet { base, index } => child_group(*base).map(|targets| {
+            targets.projected(|target| ReferenceTargetGroup::Field {
+                base: Box::new(target.clone()),
                 index: *index,
             })
-        }
+        }),
         TypedExprKind::BufGet { buf, index } => {
-            child_group(*buf).map(|target| ReferenceTargetGroup::ItemRegion {
-                base: Box::new(target),
-                index: target_index_for_expr(typed, *index),
+            let index = target_index_for_expr(typed, *index);
+            child_group(*buf).map(|targets| {
+                targets.projected(|target| ReferenceTargetGroup::ItemRegion {
+                    base: Box::new(target.clone()),
+                    index: index.clone(),
+                })
             })
         }
         _ => None,
@@ -621,7 +609,7 @@ fn const_for_def_id(def_id: DefId, typed: &TypedFileAst) -> Option<ast::ConstVal
         return expr
             .const_value
             .clone()
-            .or_else(|| eval_compile_time_expr_public(&expr.value, &const_binds, eval_ast));
+            .or_else(|| eval_compile_time_expr(&expr.value, &const_binds, eval_ast));
     };
     let BindBody::Expr(body) = bind.body else {
         return None;
@@ -986,6 +974,13 @@ fn types_are_incompatible(arg_ty: &Ty, field_ty: &Ty) -> bool {
     }
 }
 
+fn reference_referent(ty: &Ty) -> &Ty {
+    match ty {
+        Ty::Ref { inner, .. } => reference_referent(inner),
+        ty => ty,
+    }
+}
+
 fn check_type_flaws(
     kind: &TypedExprKind,
     _ty: &Ty,
@@ -1164,19 +1159,37 @@ fn check_type_flaws(
             }
         }
         TypedExprKind::Destructure {
+            tag_name,
             value,
             field_bindings,
-            ..
         } => {
-            // Validate that each field name exists on the base record type
-            let base_ty = typed.exprs.ty.get(value.as_usize());
-            if let Some(Ty::Record { fields, .. }) = base_ty {
-                for (field_name, _bind_name) in field_bindings {
-                    if !fields.iter().any(|(n, _)| n == field_name) {
+            let base_ty = typed.exprs.ty.get(value.as_usize()).map(reference_referent);
+            let fields = match base_ty {
+                Some(Ty::Record { fields, .. }) => Some(fields.as_slice()),
+                Some(Ty::Union { variants, .. }) => {
+                    match variants.iter().find(|variant| variant.name == *tag_name) {
+                        Some(variant) => Some(variant.fields.as_slice()),
+                        None => {
+                            flaws.push(
+                                Diagnostic::new(
+                                    "type-unknown-variant",
+                                    format!("union has no variant `{}`", tag_name.as_str()),
+                                )
+                                .with_arg("name", tag_name.as_str().to_string()),
+                            );
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            };
+            if let Some(fields) = fields {
+                for (field_name, _) in field_bindings {
+                    if !fields.iter().any(|(name, _)| name == field_name) {
                         flaws.push(
                             Diagnostic::new(
                                 "type-unknown-field",
-                                format!("record has no field `{}`", field_name.as_str()),
+                                format!("variant has no field `{}`", field_name.as_str()),
                             )
                             .with_arg("name", field_name.as_str().to_string()),
                         );

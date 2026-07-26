@@ -3,7 +3,7 @@ use diagnostic::Diagnostic;
 use internment::Intern;
 
 use crate::ty::Ty;
-use crate::typed::{BindBody, ExprId, ReferenceTargetGroup, TypedExprKind, TypedFileAst};
+use crate::typed::{BindBody, ExprId, TypedExprKind, TypedFileAst};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ArgumentMode {
@@ -130,20 +130,20 @@ fn validate_reference_returns(typed: &mut TypedFileAst) {
             .cloned()
             .flatten();
         let (code, message) = match actual {
-            Some(ReferenceTargetGroup::Param(group)) if group == expected => continue,
-            Some(ReferenceTargetGroup::Param(_)) => (
-                "type-reference-return-wrong-target-group",
-                "returned reference comes from the wrong target group",
-            ),
-            Some(
-                ReferenceTargetGroup::Local(_)
-                | ReferenceTargetGroup::Field { .. }
-                | ReferenceTargetGroup::ItemRegion { .. }
-                | ReferenceTargetGroup::ItemRange { .. }
-                | ReferenceTargetGroup::Deref(_),
-            ) => (
+            Some(targets)
+                if targets
+                    .iter()
+                    .all(|target| target.root_param() == Some(expected)) =>
+            {
+                continue;
+            }
+            Some(targets) if targets.iter().any(|target| target.root_param().is_none()) => (
                 "type-reference-return-local-target",
                 "cannot return a reference to local storage",
+            ),
+            Some(_) => (
+                "type-reference-return-wrong-target-group",
+                "returned reference comes from the wrong target group",
             ),
             None => (
                 "type-reference-return-unknown-target",

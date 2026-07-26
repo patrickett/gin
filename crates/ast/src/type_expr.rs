@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::ConstExpr;
 use crate::expr::Literal;
 use crate::parameter::ParameterKind;
 use crate::path::ModPath;
 use crate::pattern::PatternNameExt;
 use crate::span::{SpanId, Spanned};
 use crate::ty::{Ty, VariantMap};
+use crate::{ConstExpr, GroupPath};
 use i256::I256;
 use internment::Intern;
 
@@ -41,7 +41,7 @@ pub enum TypeExpr {
     Ref {
         inner: Box<Spanned<TypeExpr>>,
         mutable: bool,
-        group: Option<Intern<String>>,
+        group: Option<GroupPath>,
     },
     /// The unit type `()`.
     Unit,

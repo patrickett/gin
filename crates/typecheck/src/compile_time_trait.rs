@@ -218,11 +218,7 @@ fn provided_trait_field(
         for (name, expr) in &pt.fields {
             if name.as_str() == field_name {
                 return expr.const_value.clone().or_else(|| {
-                    crate::analysis::eval_compile_time_expr_public(
-                        &expr.value,
-                        &HashMap::new(),
-                        eval_ast,
-                    )
+                    crate::analysis::eval_compile_time_expr(&expr.value, &HashMap::new(), eval_ast)
                 });
             }
         }

@@ -104,7 +104,6 @@ pub enum Token<'src> {
     // String-bearing variants
     Tag(&'src str),
     Then,
-    Tilde,
     UnterminatedFormatString,
     UnterminatedString(&'src str),
     Use,

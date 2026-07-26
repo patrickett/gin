@@ -585,7 +585,17 @@ impl TokenCursor<'_, '_> {
                         value.clone()
                     }
                 };
-                let mut bind = Bind::new(function.name, function.name_span, value)
+                let bind_name = function
+                    .qualifier
+                    .as_ref()
+                    .map_or(function.name, |qualifier| {
+                        Intern::new(format!(
+                            "{}.{}",
+                            qualifier.name.as_str(),
+                            function.name.as_str()
+                        ))
+                    });
+                let mut bind = Bind::new(bind_name, function.name_span, value)
                     .with_params(Some(function.params.clone()))
                     .with_receiver_type(Some(Box::new(receiver.clone())))
                     .with_doc(function.doc_comment.clone());

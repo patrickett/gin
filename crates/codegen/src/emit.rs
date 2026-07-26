@@ -51,6 +51,14 @@ pub struct NativeCompiler {
     context: Context,
 }
 
+/// Backend timings for the MLIR->object pipeline.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct NativeCodegenTimings {
+    pub optimization: std::time::Duration,
+    pub lowering: std::time::Duration,
+    pub object_emission: std::time::Duration,
+}
+
 impl Default for NativeCompiler {
     fn default() -> Self {
         Self {
@@ -69,8 +77,23 @@ impl NativeCompiler {
         mlir_text: &str,
         obj_path: &Path,
         profile: Profile,
+        fast: bool,
     ) -> (bool, Vec<Diagnostic>) {
+        let (ok, symptoms, _) =
+            self.native_from_mlir_with_timings(mlir_text, obj_path, profile, fast);
+        (ok, symptoms)
+    }
+
+    /// Compile pre-generated MLIR text to a native object file and return phase timings.
+    pub fn native_from_mlir_with_timings(
+        &self,
+        mlir_text: &str,
+        obj_path: &Path,
+        profile: Profile,
+        fast: bool,
+    ) -> (bool, Vec<Diagnostic>, NativeCodegenTimings) {
         let mut symptoms = Vec::new();
+        let mut timings = NativeCodegenTimings::default();
 
         let fixed_text = Self::fix_llvm_call_segments(mlir_text);
         let mut module = match Module::parse(&self.context, &fixed_text) {
@@ -84,23 +107,36 @@ impl NativeCompiler {
                     .with_help("an internal compiler error occurred")
                     .at_span(diagnostic::Span::new(0, 0)),
                 );
-                return (false, symptoms);
+                return (false, symptoms, timings);
             }
         };
 
-        if !self.optimize(&mut module, profile, &mut symptoms) {
-            return (false, symptoms);
+        let start = std::time::Instant::now();
+        if !self.optimize(&mut module, profile, fast, &mut symptoms) {
+            timings.optimization = start.elapsed();
+            return (false, symptoms, timings);
         }
-        if !self.lower_to_llvm(&mut module, &mut symptoms) {
-            return (false, symptoms);
-        }
+        timings.optimization = start.elapsed();
 
+        let start = std::time::Instant::now();
+        if !self.lower_to_llvm(&mut module, &mut symptoms) {
+            timings.lowering = start.elapsed();
+            return (false, symptoms, timings);
+        }
+        timings.lowering = start.elapsed();
+
+        let start = std::time::Instant::now();
         let lowered_mlir = module.as_operation().to_string();
         let Some(llvm_ir) = Self::mlir_to_llvm_ir(&lowered_mlir, &mut symptoms) else {
-            return (false, symptoms);
+            timings.lowering += start.elapsed();
+            return (false, symptoms, timings);
         };
-        let ok = Self::compile_llvm_ir_to_object(&llvm_ir, obj_path, profile, &mut symptoms);
-        (ok, symptoms)
+        timings.lowering += start.elapsed();
+
+        let start = std::time::Instant::now();
+        let ok = Self::compile_llvm_ir_to_object(&llvm_ir, obj_path, profile, fast, &mut symptoms);
+        timings.object_emission = start.elapsed();
+        (ok, symptoms, timings)
     }
 
     /// Compile a pre-built MLIR `Module` to a native object file.
@@ -119,8 +155,23 @@ impl NativeCompiler {
         module: &Module,
         obj_path: &Path,
         profile: Profile,
+        fast: bool,
     ) -> (bool, Vec<Diagnostic>) {
+        let (ok, symptoms, _) =
+            self.native_from_module_with_timings(module, obj_path, profile, fast);
+        (ok, symptoms)
+    }
+
+    /// Compile a pre-built MLIR `Module` to a native object file and return phase timings.
+    pub fn native_from_module_with_timings(
+        &self,
+        module: &Module,
+        obj_path: &Path,
+        profile: Profile,
+        fast: bool,
+    ) -> (bool, Vec<Diagnostic>, NativeCodegenTimings) {
         let mut symptoms = Vec::new();
+        let mut timings = NativeCodegenTimings::default();
         let mlir_text = module.as_operation().to_string();
 
         let fixed_text = Self::fix_llvm_call_segments(&mlir_text);
@@ -136,23 +187,36 @@ impl NativeCompiler {
                     .with_help("an internal compiler error occurred")
                     .at_span(diagnostic::Span::new(0, 0)),
                 );
-                return (false, symptoms);
+                return (false, symptoms, timings);
             }
         };
 
-        if !self.optimize(&mut fixed_module, profile, &mut symptoms) {
-            return (false, symptoms);
+        let start = std::time::Instant::now();
+        if !self.optimize(&mut fixed_module, profile, fast, &mut symptoms) {
+            timings.optimization = start.elapsed();
+            return (false, symptoms, timings);
         }
-        if !self.lower_to_llvm(&mut fixed_module, &mut symptoms) {
-            return (false, symptoms);
-        }
+        timings.optimization = start.elapsed();
 
+        let start = std::time::Instant::now();
+        if !self.lower_to_llvm(&mut fixed_module, &mut symptoms) {
+            timings.lowering = start.elapsed();
+            return (false, symptoms, timings);
+        }
+        timings.lowering = start.elapsed();
+
+        let start = std::time::Instant::now();
         let lowered_mlir = fixed_module.as_operation().to_string();
         let Some(llvm_ir) = Self::mlir_to_llvm_ir(&lowered_mlir, &mut symptoms) else {
-            return (false, symptoms);
+            timings.lowering += start.elapsed();
+            return (false, symptoms, timings);
         };
-        let ok = Self::compile_llvm_ir_to_object(&llvm_ir, obj_path, profile, &mut symptoms);
-        (ok, symptoms)
+        timings.lowering += start.elapsed();
+
+        let start = std::time::Instant::now();
+        let ok = Self::compile_llvm_ir_to_object(&llvm_ir, obj_path, profile, fast, &mut symptoms);
+        timings.object_emission = start.elapsed();
+        (ok, symptoms, timings)
     }
 
     /// Run MLIR optimization passes appropriate for the build profile.
@@ -163,9 +227,10 @@ impl NativeCompiler {
         &self,
         module: &mut Module,
         profile: Profile,
+        fast: bool,
         symptoms: &mut Vec<Diagnostic>,
     ) -> bool {
-        if !matches!(profile, Profile::Release) {
+        if !matches!(profile, Profile::Release) || fast {
             return true;
         }
 
@@ -475,6 +540,7 @@ impl NativeCompiler {
         llvm_ir: &str,
         obj_path: &Path,
         profile: Profile,
+        fast: bool,
         symptoms: &mut Vec<Diagnostic>,
     ) -> bool {
         let ll_path = obj_path.with_extension("ll");
@@ -493,9 +559,13 @@ impl NativeCompiler {
             return false;
         };
 
-        let opt_flag = match profile {
-            Profile::Release => "-O2",
-            Profile::Debug => "-O0",
+        let opt_flag = if fast {
+            "-O0"
+        } else {
+            match profile {
+                Profile::Release => "-O2",
+                Profile::Debug => "-O0",
+            }
         };
 
         let result = match Command::new(&cc)

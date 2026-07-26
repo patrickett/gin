@@ -153,6 +153,36 @@ fn resolve_imports_excludes_unreferenced_dependency_files() {
 }
 
 #[test]
+fn resolve_imports_loads_transitive_modules_without_unrelated_siblings() {
+    let pkg = TempPackage::new("lazy_transitive_import");
+    pkg.write_flask_with_deps("app", r#"{"core":{"path":"core"}}"#);
+    pkg.write(
+        "core/flask.jsonc",
+        r#"{"name":"core","version":"0.0.0","authors":[]}"#,
+    );
+    let root_path = pkg.write("core/root.gin", "use core.primitive.Bool\nRoot is Bool\n");
+    let bool_path = pkg.write("core/primitive/bool.gin", "Bool is True or False\n");
+    let unrelated_path = pkg.write("core/target/arch.gin", "Architecture is 'x86_64'\n");
+    let main_path = pkg.write("main.gin", "use core.Root\n\nmain:\nreturn\n");
+
+    let source = std::fs::read_to_string(&main_path).unwrap();
+    let entry = ParsedFile {
+        path: main_path,
+        output: source.parse_source_full(),
+        source,
+    };
+    let mut deps = HashMap::new();
+    deps.insert("core".to_string(), pkg.join("core"));
+
+    let resolved = resolve_imports(vec![entry], &deps);
+    let paths: Vec<_> = resolved.iter().map(|file| &file.path).collect();
+
+    assert!(paths.contains(&&root_path));
+    assert!(paths.contains(&&bool_path));
+    assert!(!paths.contains(&&unrelated_path));
+}
+
+#[test]
 fn parse_warns_single_member_bundle() {
     let pkg = TempPackage::new("warn");
     const MAIN: &str = "use core.(Int)\n";

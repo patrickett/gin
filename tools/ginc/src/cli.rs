@@ -41,6 +41,17 @@ pub struct Args {
     #[arg(long)]
     pub no_cache: bool,
 
+    /// Print per-phase compilation timings.
+    ///
+    /// Also enabled when `GINC_TIMINGS` is set to `1`, `true`, or `on`.
+    #[arg(long)]
+    pub timings: bool,
+
+    /// Use a faster LLVM/MLIR path for development builds (disable MLIR optimize pipeline,
+    /// compile LLVM IR with `-O0`).
+    #[arg(long)]
+    pub fast_llvm: bool,
+
     #[arg(short, long)]
     pub verbose: Option<bool>,
 

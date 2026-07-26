@@ -90,6 +90,7 @@
 [
   "ref"
   "mut"
+  "eat"
 ] @keyword.modifier
 "or" @keyword.operator
 "and" @keyword.operator

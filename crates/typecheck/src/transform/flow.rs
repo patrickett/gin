@@ -17,8 +17,8 @@ use diagnostic::Diagnostic;
 
 use crate::ty::Ty;
 use crate::typed::{
-    DefId, ExprId, Overlap, ReferenceTargetGroup, TargetIndex, TypedCallableSignature,
-    TypedExprKind, TypedFileAst, TypedLoopKind, TypedWhenArm, VariantId,
+    DefId, ExprId, GroupId, Overlap, ReferenceTargetGroup, ReferenceTargetSet, TargetIndex,
+    TypedCallableSignature, TypedExprKind, TypedFileAst, TypedLoopKind, TypedWhenArm, VariantId,
 };
 use internment::Intern;
 
@@ -47,11 +47,10 @@ fn collect_local_var_types(typed: &TypedFileAst) -> HashMap<Intern<String>, Ty> 
 pub enum ReferenceValidity {
     Valid,
     PermanentlyInvalid,
-    MaybeInvalid,
 }
 
 pub struct RefTracker {
-    targets: HashMap<Intern<String>, ReferenceTargetGroup>,
+    targets: HashMap<Intern<String>, ReferenceTargetSet>,
     validity: HashMap<Intern<String>, ReferenceValidity>,
 }
 
@@ -63,37 +62,47 @@ impl RefTracker {
         }
     }
 
-    fn register(&mut self, reference: Intern<String>, target: Option<ReferenceTargetGroup>) {
+    fn register(&mut self, reference: Intern<String>, target: Option<ReferenceTargetSet>) {
         if let Some(target) = target {
             self.targets.insert(reference, target);
             self.validity.insert(reference, ReferenceValidity::Valid);
         }
     }
 
-    fn replace(&mut self, place: &ReferenceTargetGroup, constraints: &ConstraintEnv) {
-        let affected: Vec<_> = self
-            .targets
-            .iter()
-            .filter_map(|(reference, target)| {
-                (target.overlap(place, constraints) != Overlap::Disjoint).then_some(*reference)
-            })
-            .collect();
-        for reference in &affected {
-            self.validity
-                .insert(*reference, ReferenceValidity::MaybeInvalid);
-        }
-        for reference in affected {
-            self.validity.insert(reference, ReferenceValidity::Valid);
+    fn replace(&mut self, place: &ReferenceTargetGroup, flow_ctx: &mut FlowContext) {
+        self.invalidate_descendants(&ReferenceTargetSet::singleton(place.clone()), flow_ctx);
+    }
+
+    fn invalidate_descendants(&mut self, sources: &ReferenceTargetSet, flow_ctx: &mut FlowContext) {
+        for (reference, targets) in &self.targets {
+            if targets.iter().any(|target| {
+                sources.iter().any(|source| {
+                    if target.is_strict_descendant_of(source, &flow_ctx.constraint_env) {
+                        return true;
+                    }
+                    if source.is_strict_descendant_of(target, &flow_ctx.constraint_env) {
+                        return false;
+                    }
+                    matches!(
+                        target.overlap(source, &flow_ctx.constraint_env),
+                        Overlap::Partial | Overlap::Unknown
+                    )
+                })
+            }) {
+                self.validity
+                    .insert(*reference, ReferenceValidity::PermanentlyInvalid);
+                flow_ctx.set_var_state(*reference, VarState::Invalidated);
+            }
         }
     }
 
-    fn permanently_invalidate(
-        &mut self,
-        source: &ReferenceTargetGroup,
-        flow_ctx: &mut FlowContext,
-    ) {
-        for (reference, target) in &self.targets {
-            if target.overlap(source, &flow_ctx.constraint_env) != Overlap::Disjoint {
+    fn permanently_invalidate(&mut self, sources: &ReferenceTargetSet, flow_ctx: &mut FlowContext) {
+        for (reference, targets) in &self.targets {
+            if targets.iter().any(|target| {
+                sources.iter().any(|source| {
+                    target.overlap(source, &flow_ctx.constraint_env) != Overlap::Disjoint
+                })
+            }) {
                 self.validity
                     .insert(*reference, ReferenceValidity::PermanentlyInvalid);
                 flow_ctx.set_var_state(*reference, VarState::Invalidated);
@@ -141,8 +150,6 @@ pub fn stage_flow(
             .iter()
             .map(|(def_id, bind)| (*def_id, TypedCallableSignature::from(bind))),
     );
-
-    let mut ref_tracker = RefTracker::new();
 
     // Track constants detected at compile time.
     let mut const_bindings: HashMap<Intern<String>, bool> = HashMap::new();
@@ -200,6 +207,7 @@ pub fn stage_flow(
             flow_ctx.set_var_state(*name, VarState::Alive);
         }
         let mut local_const_values: HashMap<Intern<String>, ConstValue> = HashMap::new();
+        let mut ref_tracker = RefTracker::new();
         let mut ctx = WalkExprCtx {
             typed,
             flow_ctx: &mut flow_ctx,
@@ -238,6 +246,7 @@ pub fn stage_flow(
     // Process top-level expressions.
     let mut flow_ctx = FlowContext::new();
     let mut local_const_values: HashMap<Intern<String>, ConstValue> = HashMap::new();
+    let mut ref_tracker = RefTracker::new();
     let root_ids = typed.root_exprs.clone();
     let mut ctx = WalkExprCtx {
         typed,
@@ -295,21 +304,6 @@ fn record_field_index(typed: &TypedFileAst, base: ExprId, field: Intern<String>)
         return None;
     };
     fields.iter().position(|(name, _)| *name == field)
-}
-
-fn referenced_source(typed: &TypedFileAst, expr_id: ExprId) -> Option<Intern<String>> {
-    match typed.exprs.kind.get(expr_id.as_usize())? {
-        TypedExprKind::FnCall { target, args, .. }
-            if args.as_ref().is_none_or(|args| args.is_empty()) =>
-        {
-            Some(target.0)
-        }
-        TypedExprKind::TupleGet { base, .. } | TypedExprKind::BufGet { buf: base, .. } => {
-            referenced_source(typed, *base)
-        }
-        TypedExprKind::Deref(inner) | TypedExprKind::Ref(inner) => referenced_source(typed, *inner),
-        _ => None,
-    }
 }
 
 fn validate_call_refinements(
@@ -536,14 +530,80 @@ impl<'a> WalkExprCtx<'a> {
                             &self.flow_ctx.constraint_env,
                         );
                         self.typed.exprs.flaws[idx].extend(refinement_flaws);
+                        let application = self.typed.apply_target_groups(&arg_ids, &signature);
+                        for (group, ancestor) in application
+                            .invalid_derived_groups(&signature, &self.flow_ctx.constraint_env)
+                        {
+                            let group_path = signature.groups[group.0 as usize]
+                                .path
+                                .as_ref()
+                                .map(ToString::to_string)
+                                .unwrap_or_else(|| format!("group{}", group.0));
+                            let ancestor_path = signature.groups[ancestor.0 as usize]
+                                .path
+                                .as_ref()
+                                .map(ToString::to_string)
+                                .unwrap_or_else(|| format!("group{}", ancestor.0));
+                            self.typed.exprs.flaws[idx].push(
+                                Diagnostic::new(
+                                    "type-invalid-derived-target-group-argument",
+                                    format!(
+                                        "argument for target group `{group_path}` is not within `{ancestor_path}`"
+                                    ),
+                                )
+                                .with_arg("group", group_path)
+                                .with_arg("ancestor", ancestor_path),
+                            );
+                        }
+                        for (left, right) in application
+                            .overlapping_mutated_pairs(&signature, &self.flow_ctx.constraint_env)
+                        {
+                            let group_name = |group: GroupId| {
+                                signature
+                                    .groups
+                                    .get(group.0 as usize)
+                                    .and_then(|group| group.path.as_ref())
+                                    .map(ToString::to_string)
+                                    .unwrap_or_else(|| format!("group{}", group.0))
+                            };
+                            let left_name = group_name(left);
+                            let right_name = group_name(right);
+                            self.typed.exprs.flaws[idx].push(
+                                Diagnostic::new(
+                                    "type-overlapping-target-group-arguments",
+                                    format!(
+                                        "arguments for target groups `{left_name}` and `{right_name}` may overlap, but one of the groups is mutated"
+                                    ),
+                                )
+                                .with_arg("left_group", left_name)
+                                .with_arg("right_group", right_name),
+                            );
+                        }
+                        for applied in applied_effect_targets(
+                            self.typed,
+                            &arg_ids,
+                            &signature,
+                            &signature.effects.consumes,
+                        ) {
+                            self.ref_tracker.permanently_invalidate(
+                                &ReferenceTargetSet::singleton(applied.target),
+                                self.flow_ctx,
+                            );
+                        }
                         for applied in applied_effect_targets(
                             self.typed,
                             &arg_ids,
                             &signature,
                             &signature.effects.invalidates,
                         ) {
-                            self.ref_tracker
-                                .permanently_invalidate(&applied.target, self.flow_ctx);
+                            let targets = ReferenceTargetSet::singleton(applied.target);
+                            if applied.descendants {
+                                self.ref_tracker
+                                    .invalidate_descendants(&targets, self.flow_ctx);
+                            } else {
+                                self.ref_tracker
+                                    .permanently_invalidate(&targets, self.flow_ctx);
+                            }
                         }
                     }
                 }
@@ -592,25 +652,21 @@ impl<'a> WalkExprCtx<'a> {
                     self.flow_ctx.set_var_state(name, VarState::Declared);
                 } else {
                     self.flow_ctx.set_var_state(name, VarState::Alive);
-                    let reference_source = match self.typed.exprs.kind.get(body.as_usize()) {
-                        Some(TypedExprKind::Ref(inner)) => referenced_source(self.typed, *inner),
-                        _ if matches!(self.typed.exprs.ty.get(idx), Some(Ty::Ref { .. })) => {
-                            referenced_source(self.typed, body)
-                        }
-                        _ => None,
-                    };
-                    if reference_source.is_some() {
-                        let target = self.typed.exprs.target_group[body.as_usize()].clone();
-                        self.ref_tracker.register(name, target);
+                    let is_reference =
+                        matches!(
+                            self.typed.exprs.kind.get(body.as_usize()),
+                            Some(TypedExprKind::Ref(_))
+                        ) || matches!(self.typed.exprs.ty.get(idx), Some(Ty::Ref { .. }));
+                    if is_reference {
+                        let targets = self.typed.exprs.target_group[body.as_usize()].clone();
+                        self.ref_tracker.register(name, targets);
                     }
                 }
             }
             TypedExprKind::Reassign { name, value } => {
                 self.walk(value);
-                self.ref_tracker.replace(
-                    &ReferenceTargetGroup::Local(name),
-                    &self.flow_ctx.constraint_env,
-                );
+                self.ref_tracker
+                    .replace(&ReferenceTargetGroup::Local(name), self.flow_ctx);
                 self.flow_ctx.set_var_state(name, VarState::Alive);
             }
             TypedExprKind::Eat(inner) => {
@@ -744,29 +800,33 @@ impl<'a> WalkExprCtx<'a> {
             TypedExprKind::RecordSet { base, field, value } => {
                 self.walk(base);
                 self.walk(value);
-                if let Some(base_target) = self.typed.exprs.target_group[base.as_usize()].clone()
+                if let Some(base_targets) = self.typed.exprs.target_group[base.as_usize()].clone()
                     && let Some(index) = record_field_index(self.typed, base, field)
                 {
-                    self.ref_tracker.replace(
-                        &ReferenceTargetGroup::Field {
-                            base: Box::new(base_target),
-                            index,
-                        },
-                        &self.flow_ctx.constraint_env,
-                    );
+                    for base_target in base_targets.iter() {
+                        self.ref_tracker.replace(
+                            &ReferenceTargetGroup::Field {
+                                base: Box::new(base_target.clone()),
+                                index,
+                            },
+                            self.flow_ctx,
+                        );
+                    }
                 }
             }
             TypedExprKind::TupleSet { base, index, value } => {
                 self.walk(base);
                 self.walk(value);
-                if let Some(base_target) = self.typed.exprs.target_group[base.as_usize()].clone() {
-                    self.ref_tracker.replace(
-                        &ReferenceTargetGroup::Field {
-                            base: Box::new(base_target),
-                            index,
-                        },
-                        &self.flow_ctx.constraint_env,
-                    );
+                if let Some(base_targets) = self.typed.exprs.target_group[base.as_usize()].clone() {
+                    for base_target in base_targets.iter() {
+                        self.ref_tracker.replace(
+                            &ReferenceTargetGroup::Field {
+                                base: Box::new(base_target.clone()),
+                                index,
+                            },
+                            self.flow_ctx,
+                        );
+                    }
                 }
             }
             TypedExprKind::Range { start, end } => {
@@ -781,9 +841,26 @@ impl<'a> WalkExprCtx<'a> {
                     self.walk(item_id);
                 }
             }
-            TypedExprKind::BufGet { buf, index } | TypedExprKind::BufSet { buf, index, .. } => {
+            TypedExprKind::BufGet { buf, index } => {
                 self.walk(buf);
                 self.walk(index);
+            }
+            TypedExprKind::BufSet { buf, index, value } => {
+                self.walk(buf);
+                self.walk(index);
+                self.walk(value);
+                let target_index = super::lower_exprs::target_index_for_expr(self.typed, index);
+                if let Some(base_targets) = self.typed.exprs.target_group[buf.as_usize()].clone() {
+                    for base_target in base_targets.iter() {
+                        self.ref_tracker.replace(
+                            &ReferenceTargetGroup::ItemRegion {
+                                base: Box::new(base_target.clone()),
+                                index: target_index.clone(),
+                            },
+                            self.flow_ctx,
+                        );
+                    }
+                }
             }
             TypedExprKind::Cast { expr: inner, .. } => {
                 self.walk(inner);
@@ -1169,9 +1246,12 @@ mod reference_validity_tests {
         };
         let reference = Intern::from_ref("saved");
         let mut tracker = RefTracker::new();
-        tracker.register(reference, Some(field.clone()));
+        tracker.register(
+            reference,
+            Some(ReferenceTargetSet::singleton(field.clone())),
+        );
 
-        tracker.replace(&field, &ConstraintEnv::default());
+        tracker.replace(&field, &mut FlowContext::new());
 
         assert_eq!(tracker.validity[&reference], ReferenceValidity::Valid);
     }
@@ -1185,10 +1265,10 @@ mod reference_validity_tests {
         };
         let reference = Intern::from_ref("saved");
         let mut tracker = RefTracker::new();
-        tracker.register(reference, Some(field));
+        tracker.register(reference, Some(ReferenceTargetSet::singleton(field)));
         let mut flow = FlowContext::new();
 
-        tracker.permanently_invalidate(&source, &mut flow);
+        tracker.permanently_invalidate(&ReferenceTargetSet::singleton(source), &mut flow);
 
         assert_eq!(
             tracker.validity[&reference],

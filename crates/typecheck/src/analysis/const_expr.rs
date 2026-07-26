@@ -14,19 +14,10 @@ use crate::prepare_target::eval_type_static_member;
 use ast::declare::DeclareValue;
 use ast::expr::{Expr, FnCall, FormatPart, Literal, Typed};
 use ast::span::{HasSpanId, SpanId};
-use ast::{Bind, BindValue, ConstExpr, FileAst, LoopEnum, Parameters, Return, WhenArm};
+use ast::{Bind, BindValue, ConstExpr, FileAst, LoopEnum, ModPath, Parameters, Return, WhenArm};
 use ast::{ConstValue, HashFloat};
 
 const MAX_COMPILE_TIME_DEPTH: usize = 512;
-
-/// Public entry for compile-time expression evaluation.
-pub fn eval_compile_time_expr_public(
-    expr: &Expr,
-    const_binds: &HashMap<Intern<String>, Option<ConstValue>>,
-    ast: &FileAst,
-) -> Option<ConstValue> {
-    eval_compile_time_expr(expr, const_binds, ast)
-}
 
 /// Evaluate with an explicit environment (type-variable substitutions, etc.).
 pub fn eval_compile_time_expr_with_env(
@@ -221,6 +212,29 @@ pub fn check_construction_refinements(ast: &FileAst) -> Vec<Diagnostic> {
     diagnostics
 }
 
+fn check_refinement(
+    refinement: &ast::PredicateExpr,
+    value: ConstValue,
+    span_id: SpanId,
+    ast: &FileAst,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let predicate =
+        predicate_expr_to_predicate(refinement, ConstExpr::Value(value), &HashMap::new());
+    let diagnostic = match ConstraintEnv::default().prove(&predicate, &HashMap::new()) {
+        ProveResult::Proven => return,
+        ProveResult::Disproven => Diagnostic::new(
+            "dep-refinement-failed",
+            format!("refinement `{:?}` is false", refinement),
+        ),
+        ProveResult::Unknown => Diagnostic::new(
+            "dep-refinement-unproven",
+            format!("cannot prove `{:?}` in this context", refinement),
+        ),
+    };
+    diagnostics.push(diagnostic.at_span_id(span_id, &ast.span_table));
+}
+
 fn walk_tag_refinements(
     expr: &Expr,
     const_binds: &HashMap<Intern<String>, Option<ConstValue>>,
@@ -235,7 +249,6 @@ fn walk_tag_refinements(
             let DeclareValue::Has(members) = &decl.value else {
                 return;
             };
-            let span_table = &ast.span_table;
 
             for (i, property) in members
                 .iter()
@@ -254,30 +267,7 @@ fn walk_tag_refinements(
                 let Some(cv) = eval_compile_time_expr(&arg.value, const_binds, ast) else {
                     continue;
                 };
-                let field_value = ConstExpr::Value(cv);
-                let predicate =
-                    predicate_expr_to_predicate(refinement, field_value, &HashMap::new());
-                match ConstraintEnv::default().prove(&predicate, &HashMap::new()) {
-                    ProveResult::Proven => {}
-                    ProveResult::Disproven => {
-                        diagnostics.push(
-                            Diagnostic::new(
-                                "dep-refinement-failed",
-                                format!("refinement `{:?}` is false", refinement),
-                            )
-                            .at_span_id(arg.span_id(), span_table),
-                        );
-                    }
-                    ProveResult::Unknown => {
-                        diagnostics.push(
-                            Diagnostic::new(
-                                "dep-refinement-unproven",
-                                format!("cannot prove `{:?}` in this context", refinement),
-                            )
-                            .at_span_id(arg.span_id(), span_table),
-                        );
-                    }
-                }
+                check_refinement(refinement, cv, arg.span_id(), ast, diagnostics);
             }
         }
         Expr::Binary(bin) => {
@@ -285,7 +275,6 @@ fn walk_tag_refinements(
             walk_tag_refinements(&bin.rhs.value, const_binds, ast, diagnostics);
         }
         Expr::Bind(b) => {
-            let span_table = &ast.span_table;
             if let Some(Some(cv)) = const_binds.get(&b.name)
                 && let ConstValue::Tag { name, args, .. } = cv
                 && let Some(decl) = ast.tags.get(name)
@@ -303,30 +292,7 @@ fn walk_tag_refinements(
                         continue;
                     };
                     let Some(arg_cv) = args.get(i) else { continue };
-                    let field_value = ConstExpr::Value(arg_cv.clone());
-                    let predicate =
-                        predicate_expr_to_predicate(refinement, field_value, &HashMap::new());
-                    match ConstraintEnv::default().prove(&predicate, &HashMap::new()) {
-                        ProveResult::Proven => {}
-                        ProveResult::Disproven => {
-                            diagnostics.push(
-                                Diagnostic::new(
-                                    "dep-refinement-failed",
-                                    format!("refinement `{:?}` is false", refinement),
-                                )
-                                .at_span_id(b.name_span, span_table),
-                            );
-                        }
-                        ProveResult::Unknown => {
-                            diagnostics.push(
-                                Diagnostic::new(
-                                    "dep-refinement-unproven",
-                                    format!("cannot prove `{:?}` in this context", refinement),
-                                )
-                                .at_span_id(b.name_span, span_table),
-                            );
-                        }
-                    }
+                    check_refinement(refinement, arg_cv.clone(), b.name_span, ast, diagnostics);
                 }
             }
         }
@@ -339,12 +305,264 @@ fn walk_tag_refinements(
 /// Handles literals, pure tag constructors, binary ops, bind references,
 /// and the `AsmBuilder` method chain (
 /// `AsmBuilder::new → .input/.inout/.output → .clobber/.clobber_memory → .build`).
-fn eval_compile_time_expr(
+pub fn eval_compile_time_expr(
     expr: &Expr,
     const_binds: &HashMap<Intern<String>, Option<ConstValue>>,
     ast: &FileAst,
 ) -> Option<ConstValue> {
     eval_compile_time_expr_depth(expr, const_binds, ast, 0, &mut HashSet::new())
+}
+
+fn eval_compile_time_args(
+    args: Option<&[Typed<Expr>]>,
+    const_binds: &HashMap<Intern<String>, Option<ConstValue>>,
+    ast: &FileAst,
+    depth: usize,
+    call_stack: &mut HashSet<String>,
+) -> Option<Vec<ConstValue>> {
+    args.map_or_else(
+        || Some(Vec::new()),
+        |args| {
+            args.iter()
+                .map(|arg| {
+                    eval_compile_time_expr_depth(&arg.value, const_binds, ast, depth, call_stack)
+                })
+                .collect()
+        },
+    )
+}
+
+fn qualified_name(path: &ModPath) -> Intern<String> {
+    let mut parts = vec![path.root.as_str()];
+    parts.extend(path.segments.iter().map(|segment| segment.as_str()));
+    Intern::new(parts.join("."))
+}
+
+struct ConstEvaluator<'a> {
+    const_binds: &'a HashMap<Intern<String>, Option<ConstValue>>,
+    ast: &'a FileAst,
+    depth: usize,
+    call_stack: &'a mut HashSet<String>,
+}
+
+impl<'a> ConstEvaluator<'a> {
+    fn eval(&mut self, expr: &Expr) -> Option<ConstValue> {
+        if self.depth > MAX_COMPILE_TIME_DEPTH {
+            return None;
+        }
+        match expr {
+            Expr::Lit(lit) => match lit {
+                Literal::Int(n) => Some(ConstValue::Int(*n as i128)),
+                Literal::Float(HashFloat(f)) => Some(ConstValue::Float(HashFloat(*f))),
+                Literal::String(s) => Some(ConstValue::String(s.clone())),
+                Literal::Number(n) => Some(ConstValue::Int(*n as i128)),
+            },
+            Expr::AnonymousTag(name) => self
+                .const_binds
+                .get(name)
+                .and_then(|cv| cv.clone())
+                .or_else(|| {
+                    Some(ConstValue::Tag {
+                        name: *name,
+                        qual_path: None,
+                        args: Vec::new().into(),
+                    })
+                }),
+            Expr::RecordLit(fields) => {
+                // Record literal: `(arch: 'x86_64', vendor: 'unknown')` → ConstValue::Record
+                let pairs: Vec<(Intern<String>, ConstValue)> = fields
+                    .iter()
+                    .filter_map(|(name, expr)| {
+                        let cv = self.eval(&expr.value)?;
+                        Some((*name, cv))
+                    })
+                    .collect();
+                if pairs.len() == fields.len() {
+                    Some(ConstValue::Record {
+                        fields: pairs.into(),
+                    })
+                } else {
+                    None
+                }
+            }
+            Expr::TagCall(call) => {
+                let args = eval_compile_time_args(
+                    Some(&call.args),
+                    self.const_binds,
+                    self.ast,
+                    self.depth,
+                    self.call_stack,
+                )?;
+                // `qual_path` is the prefix of the path, NOT including the last
+                // segment which is already captured in `name`. Skipping the last
+                // segment prevents double-appending in `to_hover_string`.
+                let qual_path = call.qual_path.as_ref().map(|p| {
+                    let use_segments =
+                        if p.segments.last().map(|s| s.as_str()) == Some(call.name.as_str()) {
+                            &p.segments[..p.segments.len().saturating_sub(1)]
+                        } else {
+                            &p.segments[..]
+                        };
+                    let mut s = p.root.as_str().to_string();
+                    for seg in use_segments {
+                        s.push('.');
+                        s.push_str(seg.as_str());
+                    }
+                    s
+                });
+                Some(ConstValue::Tag {
+                    name: call.name,
+                    qual_path,
+                    args: args.into(),
+                })
+            }
+            Expr::RecordSet { .. } | Expr::Destructure { .. } => None,
+            Expr::RecordGet { base, field } => {
+                let base_cv = if let Expr::FnCall(call) = &base.value {
+                    if call.args.is_none() && call.path.value.segments.is_empty() {
+                        self.const_binds
+                            .get(&call.path.value.root)
+                            .and_then(|cv| cv.clone())?
+                    } else if call.args.is_none() && !call.path.value.segments.is_empty() {
+                        let fq_name = qualified_name(&call.path.value);
+                        self.const_binds
+                            .get(&fq_name)
+                            .and_then(|cv| cv.clone())
+                            .or_else(|| self.eval(&base.value))?
+                    } else {
+                        self.eval(&base.value)?
+                    }
+                } else {
+                    self.eval(&base.value)?
+                };
+                match base_cv {
+                    ConstValue::Record { fields } => fields
+                        .iter()
+                        .find(|(n, _)| n == field)
+                        .map(|(_, v)| v.clone()),
+                    ConstValue::Tag { name, args, .. } => {
+                        let idx = self
+                            .ast
+                            .tags
+                            .get(&name)
+                            .and_then(|decl| decl.params.as_ref())
+                            .and_then(|params| {
+                                params.keys().position(|param_name| param_name == field)
+                            })
+                            .or_else(|| match name.as_str() {
+                                "Target" => ["arch", "vendor", "os"]
+                                    .iter()
+                                    .position(|field_name| *field_name == field.as_str()),
+                                _ => None,
+                            })?;
+                        args.get(idx).cloned()
+                    }
+                    _ => None,
+                }
+            }
+            Expr::Bind(b) if b.params.is_none() => {
+                if let Some(Some(cv)) = self.const_binds.get(&b.name) {
+                    return Some(cv.clone());
+                }
+                if let BindValue::Expr(expr) = &b.value
+                    && let Some(cv) = self.eval(&expr.value)
+                {
+                    return Some(cv);
+                }
+                None
+            }
+
+            Expr::TupleLit(elems) | Expr::List(elems) => {
+                let items: Vec<ConstValue> =
+                    elems.iter().filter_map(|e| self.eval(&e.value)).collect();
+                if items.len() == elems.len() {
+                    Some(ConstValue::List(items.into()))
+                } else {
+                    None
+                }
+            }
+            Expr::Binary(bin) => {
+                let lhs = self.eval(&bin.lhs.value)?;
+                let rhs = self.eval(&bin.rhs.value)?;
+                lhs.eval_binop(&bin.op, &rhs)
+            }
+            Expr::When(when) => {
+                let subject = when.subject.as_ref().and_then(|s| self.eval(&s.value))?;
+                eval_matching_when_arm(
+                    &when.arms,
+                    &subject,
+                    self.const_binds,
+                    self.ast,
+                    self.depth,
+                    self.call_stack,
+                )
+            }
+            Expr::FnCall(call) if call.args.is_none() && call.path.value.segments.is_empty() => {
+                self.const_binds
+                    .get(&call.path.value.root)
+                    .and_then(|cv| cv.clone())
+            }
+            Expr::FnCall(call) if call.args.is_none() && !call.path.value.segments.is_empty() => {
+                let fq_name = qualified_name(&call.path.value);
+                if let Some(cv) = self.const_binds.get(&fq_name).and_then(|cv| cv.clone()) {
+                    return Some(cv);
+                }
+                if call.path.value.segments.len() != 1 {
+                    return None;
+                }
+                let base = call.path.value.root;
+                let field = call.path.value.segments[0];
+                if let Some(cv) = eval_type_static_member(base, field, self.ast, self.const_binds) {
+                    return Some(cv);
+                }
+                if let Some(Some(cv)) = self.const_binds.get(&base)
+                    && let ConstValue::Record { fields } = cv
+                {
+                    return fields
+                        .iter()
+                        .find(|(n, _)| n == &field)
+                        .map(|(_, v)| v.clone());
+                }
+                None
+            }
+            Expr::FnCall(call) if call.path.value.segments.is_empty() => {
+                let name = call.path.value.root;
+                let args = eval_compile_time_args(
+                    call.args.as_deref(),
+                    self.const_binds,
+                    self.ast,
+                    self.depth,
+                    self.call_stack,
+                )?;
+                if let Some(Some(cv)) = self.const_binds.get(&name) {
+                    return Some(cv.clone());
+                }
+                if let Some(cv) = eval_compile_time_helper(name.as_str(), &args) {
+                    return Some(cv);
+                }
+                let bind = self.ast.defs.get(&name)?;
+                if !bind.is_compile_time {
+                    return None;
+                }
+                eval_compile_time_bind_call(
+                    bind,
+                    &args,
+                    self.const_binds,
+                    self.ast,
+                    self.depth + 1,
+                    self.call_stack,
+                )
+            }
+            Expr::FnCall(call) => eval_compile_time_fn_call_asm(
+                call,
+                self.const_binds,
+                self.ast,
+                self.depth,
+                self.call_stack,
+            ),
+            _ => None,
+        }
+    }
 }
 
 fn eval_compile_time_expr_depth(
@@ -354,231 +572,13 @@ fn eval_compile_time_expr_depth(
     depth: usize,
     call_stack: &mut HashSet<String>,
 ) -> Option<ConstValue> {
-    if depth > MAX_COMPILE_TIME_DEPTH {
-        return None;
+    ConstEvaluator {
+        const_binds,
+        ast,
+        depth,
+        call_stack,
     }
-    match expr {
-        Expr::Lit(lit) => match lit {
-            Literal::Int(n) => Some(ConstValue::Int(*n as i128)),
-            Literal::Float(HashFloat(f)) => Some(ConstValue::Float(HashFloat(*f))),
-            Literal::String(s) => Some(ConstValue::String(s.clone())),
-            Literal::Number(n) => Some(ConstValue::Int(*n as i128)),
-        },
-        Expr::AnonymousTag(name) => const_binds.get(name).and_then(|cv| cv.clone()).or_else(|| {
-            Some(ConstValue::Tag {
-                name: *name,
-                qual_path: None,
-                args: Vec::new().into(),
-            })
-        }),
-        Expr::RecordLit(fields) => {
-            // Record literal: `(arch: 'x86_64', vendor: 'unknown')` → ConstValue::Record
-            let pairs: Vec<(Intern<String>, ConstValue)> = fields
-                .iter()
-                .filter_map(|(name, expr)| {
-                    let cv = eval_compile_time_expr_depth(
-                        &expr.value,
-                        const_binds,
-                        ast,
-                        depth,
-                        call_stack,
-                    )?;
-                    Some((*name, cv))
-                })
-                .collect();
-            if pairs.len() == fields.len() {
-                Some(ConstValue::Record {
-                    fields: pairs.into(),
-                })
-            } else {
-                None
-            }
-        }
-        Expr::TagCall(call) => {
-            let args: Vec<ConstValue> = call
-                .args
-                .iter()
-                .filter_map(|a| {
-                    eval_compile_time_expr_depth(&a.value, const_binds, ast, depth, call_stack)
-                })
-                .collect();
-            if args.len() != call.args.len() {
-                return None;
-            }
-            // `qual_path` is the prefix of the path, NOT including the last
-            // segment which is already captured in `name`. Skipping the last
-            // segment prevents double-appending in `to_hover_string`.
-            let qual_path = call.qual_path.as_ref().map(|p| {
-                let use_segments =
-                    if p.segments.last().map(|s| s.as_str()) == Some(call.name.as_str()) {
-                        &p.segments[..p.segments.len().saturating_sub(1)]
-                    } else {
-                        &p.segments[..]
-                    };
-                let mut s = p.root.as_str().to_string();
-                for seg in use_segments {
-                    s.push('.');
-                    s.push_str(seg.as_str());
-                }
-                s
-            });
-            Some(ConstValue::Tag {
-                name: call.name,
-                qual_path,
-                args: args.into(),
-            })
-        }
-        Expr::RecordSet { .. } | Expr::Destructure { .. } => None,
-        Expr::RecordGet { base, field } => {
-            let base_cv = if let Expr::FnCall(call) = &base.value {
-                if call.args.is_none() && call.path.value.segments.is_empty() {
-                    const_binds
-                        .get(&call.path.value.root)
-                        .and_then(|cv| cv.clone())?
-                } else if call.args.is_none() && !call.path.value.segments.is_empty() {
-                    let mut parts = vec![call.path.value.root.as_str()];
-                    parts.extend(call.path.value.segments.iter().map(|s| s.as_str()));
-                    let fq_name = Intern::new(parts.join("."));
-                    const_binds
-                        .get(&fq_name)
-                        .and_then(|cv| cv.clone())
-                        .or_else(|| {
-                            eval_compile_time_expr_depth(
-                                &base.value,
-                                const_binds,
-                                ast,
-                                depth,
-                                call_stack,
-                            )
-                        })?
-                } else {
-                    eval_compile_time_expr_depth(&base.value, const_binds, ast, depth, call_stack)?
-                }
-            } else {
-                eval_compile_time_expr_depth(&base.value, const_binds, ast, depth, call_stack)?
-            };
-            match base_cv {
-                ConstValue::Record { fields } => fields
-                    .iter()
-                    .find(|(n, _)| n == field)
-                    .map(|(_, v)| v.clone()),
-                ConstValue::Tag { name, args, .. } => {
-                    let idx = ast
-                        .tags
-                        .get(&name)
-                        .and_then(|decl| decl.params.as_ref())
-                        .and_then(|params| params.keys().position(|param_name| param_name == field))
-                        .or_else(|| match name.as_str() {
-                            "Target" => ["arch", "vendor", "os"]
-                                .iter()
-                                .position(|field_name| *field_name == field.as_str()),
-                            _ => None,
-                        })?;
-                    args.get(idx).cloned()
-                }
-                _ => None,
-            }
-        }
-        Expr::Bind(b) if b.params.is_none() => {
-            if let Some(Some(cv)) = const_binds.get(&b.name) {
-                return Some(cv.clone());
-            }
-            if let BindValue::Expr(expr) = &b.value
-                && let Some(cv) =
-                    eval_compile_time_expr_depth(&expr.value, const_binds, ast, depth, call_stack)
-            {
-                return Some(cv);
-            }
-            None
-        }
-
-        Expr::TupleLit(elems) | Expr::List(elems) => {
-            let items: Vec<ConstValue> = elems
-                .iter()
-                .filter_map(|e| {
-                    eval_compile_time_expr_depth(&e.value, const_binds, ast, depth, call_stack)
-                })
-                .collect();
-            if items.len() == elems.len() {
-                Some(ConstValue::List(items.into()))
-            } else {
-                None
-            }
-        }
-        Expr::Binary(bin) => {
-            let lhs =
-                eval_compile_time_expr_depth(&bin.lhs.value, const_binds, ast, depth, call_stack)?;
-            let rhs =
-                eval_compile_time_expr_depth(&bin.rhs.value, const_binds, ast, depth, call_stack)?;
-            lhs.eval_binop(&bin.op, &rhs)
-        }
-        Expr::When(when) => {
-            let subject = when.subject.as_ref().and_then(|s| {
-                eval_compile_time_expr_depth(&s.value, const_binds, ast, depth, call_stack)
-            })?;
-            eval_matching_when_arm(&when.arms, &subject, const_binds, ast, depth, call_stack)
-        }
-        Expr::FnCall(call) if call.args.is_none() && call.path.value.segments.is_empty() => {
-            const_binds
-                .get(&call.path.value.root)
-                .and_then(|cv| cv.clone())
-        }
-        Expr::FnCall(call) if call.args.is_none() && !call.path.value.segments.is_empty() => {
-            let mut parts = vec![call.path.value.root.as_str()];
-            parts.extend(call.path.value.segments.iter().map(|s| s.as_str()));
-            let fq_name = Intern::new(parts.join("."));
-            if let Some(cv) = const_binds.get(&fq_name).and_then(|cv| cv.clone()) {
-                return Some(cv);
-            }
-            if call.path.value.segments.len() != 1 {
-                return None;
-            }
-            let base = call.path.value.root;
-            let field = call.path.value.segments[0];
-            if let Some(cv) = eval_type_static_member(base, field, ast, const_binds) {
-                return Some(cv);
-            }
-            if let Some(Some(cv)) = const_binds.get(&base)
-                && let ConstValue::Record { fields } = cv
-            {
-                return fields
-                    .iter()
-                    .find(|(n, _)| n == &field)
-                    .map(|(_, v)| v.clone());
-            }
-            None
-        }
-        Expr::FnCall(call) if call.path.value.segments.is_empty() => {
-            let name = call.path.value.root;
-            let args: Vec<ConstValue> = match &call.args {
-                Some(a) => a
-                    .iter()
-                    .filter_map(|a| {
-                        eval_compile_time_expr_depth(&a.value, const_binds, ast, depth, call_stack)
-                    })
-                    .collect(),
-                None => Vec::new(),
-            };
-            if call.args.is_some() && args.len() != call.args.as_ref().unwrap().len() {
-                return None;
-            }
-            if let Some(Some(cv)) = const_binds.get(&name) {
-                return Some(cv.clone());
-            }
-            if let Some(cv) = eval_compile_time_helper(name.as_str(), &args) {
-                return Some(cv);
-            }
-            let bind = ast.defs.get(&name)?;
-            if !bind.is_compile_time {
-                return None;
-            }
-            eval_compile_time_bind_call(bind, &args, const_binds, ast, depth + 1, call_stack)
-        }
-        Expr::FnCall(call) => {
-            eval_compile_time_fn_call_asm(call, const_binds, ast, depth, call_stack)
-        }
-        _ => None,
-    }
+    .eval(expr)
 }
 
 /// Evaluate named helpers (`add`, `max_size`, `gt`, `lt`, `ge`, `le`) at compile time.
@@ -626,18 +626,7 @@ fn eval_compile_time_fn_call_asm(
     depth: usize,
     call_stack: &mut HashSet<String>,
 ) -> Option<ConstValue> {
-    let args: Vec<ConstValue> = match &call.args {
-        Some(a) => a
-            .iter()
-            .filter_map(|a| {
-                eval_compile_time_expr_depth(&a.value, const_binds, ast, depth, call_stack)
-            })
-            .collect(),
-        None => Vec::new(),
-    };
-    if call.args.is_some() && args.len() != call.args.as_ref().unwrap().len() {
-        return None;
-    }
+    let args = eval_compile_time_args(call.args.as_deref(), const_binds, ast, depth, call_stack)?;
 
     let path = &call.path.value;
     let (method_name, is_qualified) = if !path.segments.is_empty() {

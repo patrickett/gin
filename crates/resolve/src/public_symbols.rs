@@ -2,18 +2,14 @@
 
 use std::path::{Path, PathBuf};
 
-use flask::{FlaskPathExt, PACKAGE_CONFIG_NAME};
 use internment::Intern;
-use parser::gin_walk::GinPathExt;
 use parser::query::SourceParseExt;
+
+use crate::GinPackageExt;
 
 /// Collect `.gin` paths to scan for public symbols under `root`.
 pub fn gin_paths_for_symbol_lookup(root: &Path) -> Vec<PathBuf> {
-    if root.join(PACKAGE_CONFIG_NAME).is_file() {
-        root.collect_gin_files_under()
-    } else {
-        root.list_package_gin_files()
-    }
+    root.gin_paths_for_symbol_lookup()
 }
 
 /// Find a public definition; uses source-text fallback when `text_fallback` is true (package scope).

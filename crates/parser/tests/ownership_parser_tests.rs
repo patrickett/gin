@@ -124,6 +124,23 @@ return
 }
 
 #[test]
+fn test_tilde_consume_syntax_is_rejected() {
+    let output = "consume(~value Entity): 0\n".parse_source_full();
+
+    assert!(
+        output
+            .symptoms
+            .iter()
+            .any(|diagnostic| diagnostic.code.slug() == "lex-unexpected-character")
+    );
+    let consume = output.ast.defs.get(&Intern::from_ref("consume")).unwrap();
+    assert_ne!(
+        consume.param_conventions.get(&Intern::from_ref("value")),
+        Some(&ParamConvention::Consume)
+    );
+}
+
+#[test]
 fn test_parse_ref_param() {
     let src = "read(ref e Entity) Int:
     return e.hp
@@ -307,7 +324,7 @@ return
     let ast = src.parse_source_full().ast;
     let bind = ast.defs.get(&Intern::from_ref("process")).unwrap();
     assert_eq!(bind.group_params.len(), 1);
-    assert_eq!(bind.group_params[0].name.as_str(), "r");
+    assert_eq!(bind.group_params[0].path.to_string(), "r");
     assert_eq!(bind.group_params[0].ty_name.as_str(), "Entity");
     assert!(!bind.group_params[0].mutable);
 }
@@ -322,9 +339,46 @@ return
     let ast = src.parse_source_full().ast;
     let bind = ast.defs.get(&Intern::from_ref("attack")).unwrap();
     assert_eq!(bind.group_params.len(), 1);
-    assert_eq!(bind.group_params[0].name.as_str(), "r");
+    assert_eq!(bind.group_params[0].path.to_string(), "r");
     assert_eq!(bind.group_params[0].ty_name.as_str(), "Entity");
     assert!(bind.group_params[0].mutable);
+}
+
+#[test]
+fn test_parse_semantic_group_path() {
+    let output = "power_up(ref{entities} entity Entity, mut{entities.rings.items} ring Ring): 0\n"
+        .parse_source_full();
+    assert!(output.symptoms.is_empty(), "{:?}", output.symptoms);
+    let bind = output.ast.defs.get(&Intern::from_ref("power_up")).unwrap();
+    let parameter = bind
+        .params
+        .as_ref()
+        .unwrap()
+        .get(&Intern::from_ref("ring"))
+        .unwrap();
+    let ast::ParameterKind::Tagged(parameter) = parameter else {
+        panic!("expected tagged parameter");
+    };
+    let TypeExpr::Ref {
+        group: Some(group), ..
+    } = &parameter.value
+    else {
+        panic!("expected grouped reference");
+    };
+
+    assert_eq!(group.root.as_str(), "entities");
+    assert_eq!(
+        group
+            .segments
+            .iter()
+            .map(|segment| segment.as_str())
+            .collect::<Vec<_>>(),
+        vec!["rings", "items"]
+    );
+    assert_eq!(
+        bind.param_groups.get(&Intern::from_ref("ring")),
+        Some(group)
+    );
 }
 
 #[test]
@@ -337,18 +391,24 @@ return
     let ast = src.parse_source_full().ast;
     let bind = ast.defs.get(&Intern::from_ref("process")).unwrap();
     assert_eq!(bind.group_params.len(), 2);
-    assert_eq!(bind.group_params[0].name.as_str(), "e");
+    assert_eq!(bind.group_params[0].path.to_string(), "e");
     assert!(!bind.group_params[0].mutable);
-    assert_eq!(bind.group_params[1].name.as_str(), "rr");
+    assert_eq!(bind.group_params[1].path.to_string(), "rr");
     assert!(bind.group_params[1].mutable);
     // Check param_groups:
     assert_eq!(
-        bind.param_groups.get(&Intern::from_ref("entity")),
-        Some(&Intern::from_ref("e"))
+        bind.param_groups
+            .get(&Intern::from_ref("entity"))
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("e")
     );
     assert_eq!(
-        bind.param_groups.get(&Intern::from_ref("ring")),
-        Some(&Intern::from_ref("rr"))
+        bind.param_groups
+            .get(&Intern::from_ref("ring"))
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("rr")
     );
 }
 
@@ -380,7 +440,10 @@ borrow(ref{r} value Entity) ref{r} Entity: value
                 group,
             } => {
                 assert!(!mutable);
-                assert_eq!(group.as_ref().map(|name| name.as_str()), Some("r"));
+                assert_eq!(
+                    group.as_ref().map(ToString::to_string).as_deref(),
+                    Some("r")
+                );
                 assert!(
                     matches!(&inner.value, TypeExpr::Nominal(name, _) if name.as_str() == "Entity")
                 );
@@ -429,14 +492,20 @@ return
 
     // entity is ref in immutable group e
     assert_eq!(
-        bind.param_groups.get(&Intern::from_ref("entity")),
-        Some(&Intern::from_ref("e"))
+        bind.param_groups
+            .get(&Intern::from_ref("entity"))
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("e")
     );
 
     // ring is ref in mutable group rr
     assert_eq!(
-        bind.param_groups.get(&Intern::from_ref("ring")),
-        Some(&Intern::from_ref("rr"))
+        bind.param_groups
+            .get(&Intern::from_ref("ring"))
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("rr")
     );
 
     // Verify conventions: ref entity → Ref(false), mut{rr} ring → Ref(true)

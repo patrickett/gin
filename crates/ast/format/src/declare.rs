@@ -98,7 +98,7 @@ impl BindFormatExt for Bind {
                                 sig.push_str("ref");
                             }
                             if let Some(group) = group {
-                                let _ = write!(&mut sig, "{{{}}}", group.as_str());
+                                let _ = write!(&mut sig, "{{{group}}}");
                             }
                             let _ = write!(&mut sig, " {} ", name.as_str());
                             sig.push_str(&inner.value.format_surface());
@@ -400,6 +400,7 @@ mod tests {
             SpanId::INVALID,
             DeclareValue::Has(vec![
                 HasMember::Function(HasFunction {
+                    qualifier: None,
                     name: intern("reserve"),
                     name_span: SpanId::INVALID,
                     params: vec![(intern("l"), tagged(nominal("Layout")))]
@@ -417,6 +418,7 @@ mod tests {
                     kind: HasFunctionKind::Instance,
                 }),
                 HasMember::Function(HasFunction {
+                    qualifier: None,
                     name: intern("new"),
                     name_span: SpanId::INVALID,
                     params: vec![(intern("size"), tagged(nominal("PointerSize")))]

@@ -25,11 +25,13 @@ mod lower_tag;
 mod lower_ty;
 mod lower_util;
 mod lower_when;
+mod package_transform;
 
 pub(crate) use declare::collect_bind_value_self_ref_spans;
 pub use declare::stage_declare;
 pub use flow::{RefTracker, stage_flow};
 pub use lower_exprs::stage_lower;
+pub use package_transform::{PackageTransformArtifacts, transform_package_with_shared_context};
 
 /// Cross-file type environment for the transformation pipeline.
 ///
@@ -111,12 +113,7 @@ impl TransformCtx {
     }
 }
 
-/// Stage 1 only: resolve declarations and build the file-level index.
-pub fn transform_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) -> TypedFileAst {
-    stage_declare(file_ast, file_id, ctx)
-}
-
-/// Stages 2–3 on an AST produced by [`transform_declare`].
+/// Stages 2–3 on an AST produced by [`stage_declare`].
 ///
 /// Merges cross-file defs from `ctx` into `typed.fn_return_types` before lowering so
 /// forward references across files resolve regardless of compilation order.
@@ -222,7 +219,7 @@ pub fn transform_package(
     let mut declared: Vec<TypedFileAst> = Vec::with_capacity(file_asts.len());
     for (file_ast, file_id) in file_asts {
         enrich_ctx_from_symbol_aliases(file_ast, &mut accumulated_ctx);
-        let typed = transform_declare(file_ast, *file_id, &accumulated_ctx);
+        let typed = stage_declare(file_ast, *file_id, &accumulated_ctx);
         merge_declared_file_into_ctx(&mut accumulated_ctx, &typed, file_ast);
         declared.push(typed);
     }
@@ -293,18 +290,8 @@ pub fn transform_file(file_ast: FileAst, file_id: FileId) -> TypedFileAst {
     transform(&file_ast, file_id, &ctx)
 }
 
-/// Use this when transforming files that may reference symbols from other files.
-/// The `ctx` should be built from already-transformed files via `TransformCtx::from_typed_asts`.
-pub fn transform_file_with_ctx(
-    file_ast: &FileAst,
-    file_id: FileId,
-    ctx: &TransformCtx,
-) -> TypedFileAst {
-    transform(file_ast, file_id, ctx)
-}
-
 pub fn transform(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) -> TypedFileAst {
-    let mut typed = transform_declare(file_ast, file_id, ctx);
+    let mut typed = stage_declare(file_ast, file_id, ctx);
     // Propagate parse-level diagnostics from the AST.
     typed.parse_warnings = file_ast.parse_warnings.clone();
     transform_finish(&mut typed, file_ast, ctx);
@@ -440,7 +427,8 @@ mod dependent_local_tests {
 mod target_group_tests {
     use super::*;
     use crate::typed::{
-        BindBody, EffectTarget, ExprId, GroupId, ReferenceTargetGroup, TypedExprKind,
+        BindBody, EffectTarget, ExprId, GroupId, ReferenceTargetGroup, ReferenceTargetSet,
+        TypedExprKind,
     };
     use internment::Intern;
     use parser::cursor::TokenCursor;
@@ -474,8 +462,52 @@ mod target_group_tests {
         ));
         assert_eq!(
             typed.exprs.target_group[call.as_usize()],
-            Some(ReferenceTargetGroup::Param(GroupId(0)))
+            Some(ReferenceTargetSet::singleton(ReferenceTargetGroup::Param(
+                GroupId(0)
+            )))
         );
+    }
+
+    #[test]
+    fn cross_file_derived_return_substitutes_projected_target_group() {
+        let callee_ast = TokenCursor::parse_source(
+            "Ring has power Int\nEntity has rings Array(Ring, 2)\nget_ring(ref{entities} entity Entity, ref{entities.rings.items} ring Ring) ref{entities.rings.items} Ring: ring\n",
+        );
+        let callee = transform(&callee_ast, FileId(0), &TransformCtx::new());
+        let callee_bind = callee
+            .defs
+            .get(&DefId(Intern::from_ref("get_ring")))
+            .unwrap();
+        assert_eq!(callee_bind.return_group, Some(GroupId(1)));
+        assert!(callee.all_flaws().is_empty(), "{:?}", callee.all_flaws());
+        let ctx = TransformCtx::from_typed_asts(&[&callee]);
+        assert_eq!(
+            ctx.cross_file_callable_signatures
+                .get(&DefId(Intern::from_ref("get_ring")))
+                .and_then(|signature| signature.return_group),
+            Some(GroupId(1))
+        );
+        let caller_ast = TokenCursor::parse_source(
+            "caller(ref entity Entity) ref Ring: get_ring(ref entity, ref entity.rings.(0))\n",
+        );
+        let caller = transform(&caller_ast, FileId(1), &ctx);
+        let call = return_expr(&caller, "caller");
+
+        assert_eq!(
+            caller.exprs.target_group[call.as_usize()],
+            Some(ReferenceTargetSet::singleton(
+                ReferenceTargetGroup::ItemRegion {
+                    base: Box::new(ReferenceTargetGroup::Field {
+                        base: Box::new(ReferenceTargetGroup::Param(GroupId(0))),
+                        index: 0,
+                    }),
+                    index: crate::typed::TargetIndex::Symbolic(ast::ConstExpr::Value(
+                        ast::ConstValue::Int(0),
+                    )),
+                }
+            ))
+        );
+        assert!(caller.all_flaws().is_empty(), "{:?}", caller.all_flaws());
     }
 
     #[test]
@@ -490,7 +522,9 @@ mod target_group_tests {
 
         assert_eq!(
             caller.exprs.target_group[call.as_usize()],
-            Some(ReferenceTargetGroup::Param(GroupId(0)))
+            Some(ReferenceTargetSet::singleton(ReferenceTargetGroup::Param(
+                GroupId(0)
+            )))
         );
         assert!(
             !caller
@@ -501,9 +535,252 @@ mod target_group_tests {
     }
 
     #[test]
-    fn shared_callee_group_rejects_conflicting_actual_targets() {
+    fn shared_callee_group_combines_distinct_actual_targets() {
         let ast = TokenCursor::parse_source(
-            "choose(ref{r} left x, ref{r} right x) ref{r} x: left\ncaller(ref{a} left x, ref{b} right x) ref{a} x: choose(ref left, ref right)\n",
+            "choose(ref{r} left x, ref{r} right x) ref{r} x: left\ncaller(ref{a} left x, ref{b} right x) Int:\n    ref selected x: choose(ref left, ref right)\nreturn 0\n",
+        );
+        let typed = transform(&ast, FileId(0), &TransformCtx::new());
+        let call = typed
+            .exprs
+            .kind
+            .iter()
+            .position(|kind| {
+                matches!(kind, TypedExprKind::FnCall { target, args: Some(_), .. } if target.0.as_str() == "choose")
+            })
+            .map(|index| ExprId(index as u32))
+            .expect("choose call");
+
+        assert_eq!(
+            typed.exprs.target_group[call.as_usize()],
+            Some(ReferenceTargetSet::from([
+                ReferenceTargetGroup::Param(GroupId(0)),
+                ReferenceTargetGroup::Param(GroupId(1)),
+            ]))
+        );
+        assert!(
+            !typed
+                .all_flaws()
+                .iter()
+                .any(|(_, flaw)| { flaw.code.slug() == "type-conflicting-target-group-arguments" })
+        );
+    }
+
+    #[test]
+    fn shared_mutated_group_allows_aliased_actual_targets() {
+        let ast = TokenCursor::parse_source(
+            "touch(mut{shared} left x, mut{shared} right x): 0\ncaller(mut value x): touch(mut value, mut value)\n",
+        );
+        let typed = transform(&ast, FileId(0), &TransformCtx::new());
+
+        assert!(
+            !typed
+                .all_flaws()
+                .iter()
+                .any(|(_, flaw)| { flaw.code.slug() == "type-overlapping-target-group-arguments" })
+        );
+    }
+
+    #[test]
+    fn distinct_observe_groups_allow_alias() {
+        let ast = TokenCursor::parse_source(
+            "inspect(ref{left_group} left x, ref{right_group} right x): 0\ncaller(ref value x): inspect(ref value, ref value)\n",
+        );
+        let typed = transform(&ast, FileId(0), &TransformCtx::new());
+
+        assert!(
+            !typed
+                .all_flaws()
+                .iter()
+                .any(|(_, flaw)| { flaw.code.slug() == "type-overlapping-target-group-arguments" })
+        );
+    }
+
+    #[test]
+    fn when_variant_payload_binding_has_projected_target_group() {
+        let ast = TokenCursor::parse_source(
+            "Ring has power Int\nMaybe(x) is Some(x) or None\ninspect(ref{choices} choice Maybe(Ring), ref{choices.Some.x} ring Ring): 0\nfrom_when(ref{choices} choice Maybe(Ring)) Int:\n    when choice is\n        Some(ring) then inspect(ref choice, ref ring)\n        else 0\n",
+        );
+        let typed = transform(&ast, FileId(0), &TransformCtx::new());
+        let args = typed
+            .exprs
+            .kind
+            .iter()
+            .find_map(|kind| match kind {
+                TypedExprKind::FnCall {
+                    target,
+                    args: Some(args),
+                    ..
+                } if target.0.as_str() == "inspect" => Some(args),
+                _ => None,
+            })
+            .expect("inspect call");
+
+        assert_eq!(
+            typed.exprs.target_group[args[1].as_usize()],
+            Some(ReferenceTargetSet::singleton(ReferenceTargetGroup::Field {
+                base: Box::new(ReferenceTargetGroup::Variant {
+                    base: Box::new(ReferenceTargetGroup::Param(GroupId(0))),
+                    name: Intern::from_ref("Some"),
+                }),
+                index: 0,
+            }))
+        );
+        assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
+    }
+
+    #[test]
+    fn destructure_variant_payload_binding_has_projected_target_group() {
+        let ast = TokenCursor::parse_source(
+            "Ring has power Int\nMaybe(x) is Some(x) or None\ninspect(ref{choices} choice Maybe(Ring), ref{choices.Some.x} ring Ring): 0\nfrom_destructure(ref{choices} choice Maybe(Ring)) Int:\n    Some(x: ring) := choice\n    inspect(ref choice, ref ring)\n",
+        );
+        let typed = transform(&ast, FileId(0), &TransformCtx::new());
+        let args = typed
+            .exprs
+            .kind
+            .iter()
+            .find_map(|kind| match kind {
+                TypedExprKind::FnCall {
+                    target,
+                    args: Some(args),
+                    ..
+                } if target.0.as_str() == "inspect" => Some(args),
+                _ => None,
+            })
+            .expect("inspect call");
+
+        assert_eq!(
+            typed.exprs.target_group[args[1].as_usize()],
+            Some(ReferenceTargetSet::singleton(ReferenceTargetGroup::Field {
+                base: Box::new(ReferenceTargetGroup::Variant {
+                    base: Box::new(ReferenceTargetGroup::Param(GroupId(0))),
+                    name: Intern::from_ref("Some"),
+                }),
+                index: 0,
+            }))
+        );
+        assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
+    }
+
+    #[test]
+    fn variant_payload_mutation_substitutes_into_caller_effects() {
+        let ast = TokenCursor::parse_source(
+            "Ring has power Int\nMaybe(x) is Some(x) or None\nboost(ref{choices} choice Maybe(Ring), mut{choices.Some.x} ring Ring): ring.power: ring.power + 1\ncaller(mut{choices} choice Maybe(Ring)) Int:\n    when choice is\n        Some(ring) then boost(ref choice, mut ring)\n        else 0\n",
+        );
+        let typed = transform(&ast, FileId(0), &TransformCtx::new());
+        let caller = typed
+            .defs
+            .get(&DefId(Intern::from_ref("caller")))
+            .expect("caller");
+
+        assert_eq!(
+            caller.effects.writes,
+            HashSet::from([
+                EffectTarget::Field {
+                    base: Box::new(EffectTarget::Variant {
+                        base: Box::new(EffectTarget::Group(GroupId(0))),
+                        name: Intern::from_ref("Some"),
+                    }),
+                    index: 0,
+                },
+                EffectTarget::Field {
+                    base: Box::new(EffectTarget::Field {
+                        base: Box::new(EffectTarget::Variant {
+                            base: Box::new(EffectTarget::Group(GroupId(0))),
+                            name: Intern::from_ref("Some"),
+                        }),
+                        index: 0,
+                    }),
+                    index: 0,
+                },
+            ])
+        );
+        assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
+    }
+
+    #[test]
+    fn derived_child_group_allows_mutation_beneath_observed_parent() {
+        let ast = TokenCursor::parse_source(
+            "Ring has power Int\nEntity has rings Array(Ring, 2)\npower_up(ref{entities} entity Entity, mut{entities.rings.items} ring Ring): ring.power: ring.power + 1\ncaller(mut entity Entity): power_up(ref entity, mut entity.rings.(0))\n",
+        );
+        let typed = transform(&ast, FileId(0), &TransformCtx::new());
+        let args = typed
+            .exprs
+            .kind
+            .iter()
+            .find_map(|kind| match kind {
+                TypedExprKind::FnCall {
+                    target,
+                    args: Some(args),
+                    ..
+                } if target.0.as_str() == "power_up" => Some(args),
+                _ => None,
+            })
+            .expect("power_up call");
+        let parent = typed.exprs.target_group[args[0].as_usize()]
+            .as_ref()
+            .expect("parent target");
+        let child = typed.exprs.target_group[args[1].as_usize()]
+            .as_ref()
+            .expect("child target");
+        assert!(!parent.is_disjoint(child, &crate::solver::ConstraintEnv::default()));
+        assert!(
+            !typed
+                .all_flaws()
+                .iter()
+                .any(|(_, flaw)| { flaw.code.slug() == "type-overlapping-target-group-arguments" }),
+            "{:?}",
+            typed.all_flaws()
+        );
+    }
+
+    #[test]
+    fn derived_item_group_rejects_parent_field_without_item_projection() {
+        let ast = TokenCursor::parse_source(
+            "Ring has power Int\nEntity has rings Array(Ring, 2)\npower_up(ref{entities} entity Entity, mut{entities.rings.items} ring Ring): 0\ncaller(mut entity Entity): power_up(ref entity, mut entity.rings)\n",
+        );
+        let typed = transform(&ast, FileId(0), &TransformCtx::new());
+
+        assert!(
+            typed.all_flaws().iter().any(|(_, flaw)| {
+                flaw.code.slug() == "type-invalid-derived-target-group-argument"
+            })
+        );
+    }
+
+    #[test]
+    fn derived_item_group_rejects_same_shaped_sibling_field() {
+        let ast = TokenCursor::parse_source(
+            "Ring has power Int\nEntity has rings Array(Ring, 2), armor Array(Ring, 2)\npower_up(ref{entities} entity Entity, mut{entities.rings.items} ring Ring): 0\ncaller(mut entity Entity): power_up(ref entity, mut entity.armor.(0))\n",
+        );
+        let typed = transform(&ast, FileId(0), &TransformCtx::new());
+
+        assert!(
+            typed.all_flaws().iter().any(|(_, flaw)| {
+                flaw.code.slug() == "type-invalid-derived-target-group-argument"
+            }),
+            "{:?}",
+            typed.all_flaws()
+        );
+    }
+
+    #[test]
+    fn derived_child_group_rejects_unrelated_actual_target() {
+        let ast = TokenCursor::parse_source(
+            "Ring has power Int\nEntity has rings Array(Ring, 2)\npower_up(ref{entities} entity Entity, mut{entities.rings.items} ring Ring): ring.power: ring.power + 1\ncaller(mut entity Entity, mut ring Ring): power_up(ref entity, mut ring)\n",
+        );
+        let typed = transform(&ast, FileId(0), &TransformCtx::new());
+
+        assert!(
+            typed.all_flaws().iter().any(|(_, flaw)| {
+                flaw.code.slug() == "type-invalid-derived-target-group-argument"
+            })
+        );
+    }
+
+    #[test]
+    fn derived_child_group_rejects_overlap_beneath_mutated_parent() {
+        let ast = TokenCursor::parse_source(
+            "Ring has power Int\nEntity has rings Array(Ring, 2)\nreplace(mut{entities} entity Entity, ref{entities.rings.items} ring Ring): 0\ncaller(mut entity Entity): replace(mut entity, ref entity.rings.(0))\n",
         );
         let typed = transform(&ast, FileId(0), &TransformCtx::new());
 
@@ -511,7 +788,69 @@ mod target_group_tests {
             typed
                 .all_flaws()
                 .iter()
-                .any(|(_, flaw)| { flaw.code.slug() == "type-conflicting-target-group-arguments" })
+                .any(|(_, flaw)| { flaw.code.slug() == "type-overlapping-target-group-arguments" })
+        );
+    }
+
+    #[test]
+    fn distinct_groups_reject_alias_when_one_is_mutated() {
+        let ast = TokenCursor::parse_source(
+            "touch(ref{read} source x, mut{write} destination x): 0\ncaller(mut value x): touch(ref value, mut value)\n",
+        );
+        let typed = transform(&ast, FileId(0), &TransformCtx::new());
+
+        assert!(
+            typed
+                .all_flaws()
+                .iter()
+                .any(|(_, flaw)| { flaw.code.slug() == "type-overlapping-target-group-arguments" })
+        );
+    }
+
+    #[test]
+    fn union_reference_is_invalidated_when_any_possible_target_is_consumed() {
+        let ast = TokenCursor::parse_source(
+            "choose(ref{r} left Int, ref{r} right Int) ref{r} Int: left\ndrop(eat value Int): 0\nmain:\n    left: 1\n    right: 2\n    ref selected Int: choose(ref left, ref right)\n    drop(eat left)\n    result: selected\nreturn 0\n",
+        );
+        let typed = transform(&ast, FileId(0), &TransformCtx::new());
+
+        assert!(
+            typed
+                .all_flaws()
+                .iter()
+                .any(|(_, flaw)| { flaw.code.slug() == "type-use-of-invalidated-reference" }),
+            "flaws={:?}",
+            typed.all_flaws(),
+        );
+    }
+
+    #[test]
+    fn distinct_groups_allow_disjoint_items_when_one_is_mutated() {
+        let ast = TokenCursor::parse_source(
+            "touch(ref{read} source Int, mut{write} destination Int): 0\ncaller(mut items x): touch(ref items.(0), mut items.(1))\n",
+        );
+        let typed = transform(&ast, FileId(0), &TransformCtx::new());
+
+        assert!(
+            !typed
+                .all_flaws()
+                .iter()
+                .any(|(_, flaw)| { flaw.code.slug() == "type-overlapping-target-group-arguments" })
+        );
+    }
+
+    #[test]
+    fn distinct_groups_reject_unknown_item_overlap_when_one_is_mutated() {
+        let ast = TokenCursor::parse_source(
+            "touch(ref{read} source Int, mut{write} destination Int): 0\ncaller(mut items x, i Int, j Int): touch(ref items.(i), mut items.(j))\n",
+        );
+        let typed = transform(&ast, FileId(0), &TransformCtx::new());
+
+        assert!(
+            typed
+                .all_flaws()
+                .iter()
+                .any(|(_, flaw)| { flaw.code.slug() == "type-overlapping-target-group-arguments" })
         );
     }
 
@@ -529,7 +868,150 @@ mod target_group_tests {
     }
 
     #[test]
-    fn field_write_effect_is_precise_and_does_not_invalidate_group() {
+    fn pointee_group_accepts_dereferenced_field_actual() {
+        let ast = TokenCursor::parse_source(
+            "Armor has defense Int\nEntity has armor @Armor\ninspect(ref{entities} entity Entity, ref{entities.armor.pointee} armor Armor) Int: armor.defense\ncaller(ref entity Entity) Int: inspect(ref entity, ref deref entity.armor)\n",
+        );
+        let typed = transform(&ast, FileId(0), &TransformCtx::new());
+        let args = typed
+            .exprs
+            .kind
+            .iter()
+            .find_map(|kind| match kind {
+                TypedExprKind::FnCall {
+                    target,
+                    args: Some(args),
+                    ..
+                } if target.0.as_str() == "inspect" => Some(args),
+                _ => None,
+            })
+            .expect("inspect call");
+
+        assert_eq!(
+            typed.exprs.target_group[args[1].as_usize()],
+            Some(ReferenceTargetSet::singleton(ReferenceTargetGroup::Deref(
+                Box::new(ReferenceTargetGroup::Field {
+                    base: Box::new(ReferenceTargetGroup::Param(GroupId(0))),
+                    index: 0,
+                })
+            )))
+        );
+        assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
+    }
+
+    #[test]
+    fn mutating_ring_item_preserves_reference_to_sibling_armor_pointee() {
+        let ast = TokenCursor::parse_source(
+            "Ring has power Int\nArmor has defense Int\nEntity has rings Array(Ring, 2), armor @Armor\nboost(ref{entities} entity Entity, mut{entities.rings.items} ring Ring): ring.power: ring.power + 1\ncaller(mut entity Entity) Int:\n    ref saved Armor: deref entity.armor\n    boost(ref entity, mut entity.rings.(0))\nreturn saved.defense\n",
+        );
+        let typed = transform(&ast, FileId(0), &TransformCtx::new());
+
+        assert!(
+            !typed
+                .all_flaws()
+                .iter()
+                .any(|(_, flaw)| flaw.code.slug() == "type-use-of-invalidated-reference"),
+            "{:?}",
+            typed.all_flaws()
+        );
+    }
+
+    #[test]
+    fn replacing_parent_field_invalidates_reference_to_existing_item() {
+        let ast = TokenCursor::parse_source(
+            "Ring has power Int\nEntity has rings Array(Ring, 2)\nreplace_rings(mut{entities} entity Entity): entity.rings: entity.rings\ncaller(mut entity Entity) Int:\n    ref saved Ring: entity.rings.(0)\n    replace_rings(mut entity)\nreturn saved.power\n",
+        );
+        let typed = transform(&ast, FileId(0), &TransformCtx::new());
+        let replace = typed
+            .defs
+            .get(&DefId(Intern::from_ref("replace_rings")))
+            .expect("replace_rings");
+
+        assert_eq!(
+            replace.effects.writes,
+            HashSet::from([EffectTarget::Field {
+                base: Box::new(EffectTarget::Group(GroupId(0))),
+                index: 0,
+            }])
+        );
+        assert!(
+            typed
+                .all_flaws()
+                .iter()
+                .any(|(_, flaw)| flaw.code.slug() == "type-use-of-invalidated-reference"),
+            "{:?}",
+            typed.all_flaws()
+        );
+    }
+
+    #[test]
+    fn mutating_distinct_fixed_item_preserves_reference() {
+        let ast = TokenCursor::parse_source(
+            "Ring has power Int\nEntity has rings Array(Ring, 2)\nboost(ref{entities} entity Entity, mut{entities.rings.items} ring Ring): ring.power: ring.power + 1\ncaller(mut entity Entity) Int:\n    ref saved Ring: entity.rings.(0)\n    boost(ref entity, mut entity.rings.(1))\nreturn saved.power\n",
+        );
+        let typed = transform(&ast, FileId(0), &TransformCtx::new());
+        let boost = typed
+            .defs
+            .get(&DefId(Intern::from_ref("boost")))
+            .expect("boost");
+        assert!(boost.effects.consumes.is_empty(), "{:?}", boost.effects);
+        assert_eq!(
+            boost.effects.invalidates,
+            HashSet::from([EffectTarget::Descendants(Box::new(EffectTarget::Field {
+                base: Box::new(EffectTarget::Group(GroupId(1))),
+                index: 0,
+            }))])
+        );
+        let args = typed
+            .exprs
+            .kind
+            .iter()
+            .find_map(|kind| match kind {
+                TypedExprKind::FnCall {
+                    target,
+                    args: Some(args),
+                    ..
+                } if target.0.as_str() == "boost" => Some(args),
+                _ => None,
+            })
+            .expect("boost call");
+        let signature = TypedCallableSignature::from(boost);
+        let applied = super::effects::applied_effect_targets(
+            &typed,
+            args,
+            &signature,
+            &boost.effects.invalidates,
+        );
+        assert_eq!(applied.len(), 1, "{applied:?}");
+        assert!(applied[0].descendants, "{applied:?}");
+        assert_eq!(
+            applied[0].target,
+            ReferenceTargetGroup::Field {
+                base: Box::new(ReferenceTargetGroup::ItemRegion {
+                    base: Box::new(ReferenceTargetGroup::Field {
+                        base: Box::new(ReferenceTargetGroup::Param(GroupId(0))),
+                        index: 0,
+                    }),
+                    index: crate::typed::TargetIndex::Symbolic(ast::ConstExpr::Value(
+                        ast::ConstValue::Int(1),
+                    )),
+                }),
+                index: 0,
+            }
+        );
+
+        assert!(
+            !typed
+                .all_flaws()
+                .iter()
+                .any(|(_, flaw)| flaw.code.slug() == "type-use-of-invalidated-reference"),
+            "{:?}",
+            typed.all_flaws()
+        );
+    }
+
+    #[test]
+    fn field_write_invalidates_only_descendants() {
         let ast =
             TokenCursor::parse_source("Cell has value Int\nset(mut cell Cell): cell.value: 1\n");
         let typed = transform(&ast, FileId(0), &TransformCtx::new());
@@ -545,7 +1027,13 @@ mod target_group_tests {
                 index: 0,
             }])
         );
-        assert!(bind.effects.invalidates.is_empty());
+        assert_eq!(
+            bind.effects.invalidates,
+            HashSet::from([EffectTarget::Descendants(Box::new(EffectTarget::Field {
+                base: Box::new(EffectTarget::Group(GroupId(0))),
+                index: 0,
+            }))])
+        );
     }
 
     #[test]
@@ -580,7 +1068,7 @@ mod target_group_tests {
     }
 
     #[test]
-    fn fixed_array_set_writes_exact_item_without_invalidation() {
+    fn fixed_array_set_invalidates_only_item_descendants() {
         let ast = TokenCursor::parse_source(
             "set(mut array x, index Int, value Int): array.(index): value\n",
         );
@@ -599,7 +1087,17 @@ mod target_group_tests {
                 )),
             }])
         );
-        assert!(bind.effects.invalidates.is_empty());
+        assert_eq!(
+            bind.effects.invalidates,
+            HashSet::from([EffectTarget::Descendants(Box::new(
+                EffectTarget::ItemRegion {
+                    base: Box::new(EffectTarget::Group(GroupId(0))),
+                    index: crate::TargetIndex::Symbolic(ast::ConstExpr::Var(Intern::from_ref(
+                        "index",
+                    ))),
+                }
+            ))])
+        );
     }
 
     #[test]
@@ -628,12 +1126,14 @@ mod target_group_tests {
 
         assert_eq!(
             typed.exprs.target_group[returned.as_usize()],
-            Some(ReferenceTargetGroup::ItemRegion {
-                base: Box::new(ReferenceTargetGroup::Param(GroupId(0))),
-                index: crate::TargetIndex::Symbolic(ast::ConstExpr::Var(
-                    Intern::from_ref("index",)
-                )),
-            })
+            Some(ReferenceTargetSet::singleton(
+                ReferenceTargetGroup::ItemRegion {
+                    base: Box::new(ReferenceTargetGroup::Param(GroupId(0))),
+                    index: crate::TargetIndex::Symbolic(ast::ConstExpr::Var(Intern::from_ref(
+                        "index",
+                    ))),
+                }
+            ))
         );
     }
 
@@ -693,6 +1193,28 @@ mod target_group_tests {
         assert_eq!(a.effects.consumes, HashSet::from([group.clone()]));
         assert_eq!(b.effects.invalidates, HashSet::from([descendants]));
         assert_eq!(b.effects.consumes, HashSet::from([group]));
+    }
+
+    #[test]
+    fn cross_file_replacement_invalidates_projected_descendant_reference() {
+        let callee_ast = TokenCursor::parse_source(
+            "Ring has power Int\nEntity has rings Array(Ring, 2)\nreplace_rings(mut{entities} entity Entity): entity.rings: entity.rings\n",
+        );
+        let callee = transform(&callee_ast, FileId(0), &TransformCtx::new());
+        let ctx = TransformCtx::from_typed_asts(&[&callee]);
+        let caller_ast = TokenCursor::parse_source(
+            "caller(mut entity Entity) Int:\n    ref saved Ring: entity.rings.(0)\n    replace_rings(mut entity)\nreturn saved.power\n",
+        );
+        let caller = transform(&caller_ast, FileId(1), &ctx);
+
+        assert!(
+            caller
+                .all_flaws()
+                .iter()
+                .any(|(_, flaw)| flaw.code.slug() == "type-use-of-invalidated-reference"),
+            "{:?}",
+            caller.all_flaws()
+        );
     }
 
     #[test]

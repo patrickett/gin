@@ -119,7 +119,7 @@ pub(crate) fn write_type_expr_surface(e: &TypeExpr, f: &mut fmt::Formatter<'_>) 
                 write!(f, "ref")?;
             }
             if let Some(group) = group {
-                write!(f, "{{{}}}", group.as_str())?;
+                write!(f, "{{{group}}}")?;
             }
             write!(f, " ")?;
             write_type_expr_surface(&inner.value, f)
@@ -203,7 +203,7 @@ pub(crate) fn write_variant_shape_surface(e: &TypeExpr, f: &mut fmt::Formatter<'
                 write!(f, "ref")?;
             }
             if let Some(group) = group {
-                write!(f, "{{{}}}", group.as_str())?;
+                write!(f, "{{{group}}}")?;
             }
             write!(f, " ")?;
             write_variant_shape_surface(&inner.value, f)

@@ -101,7 +101,7 @@ return 0
 }
 
 #[test]
-fn test_consume_via_tilde_no_false_positive() {
+fn test_consume_via_eat_no_false_positive() {
     // `eat` at call site matched with `eat` param — no diagnostic.
     let src = "\
 drop(eat x Int) Int: 0
@@ -118,7 +118,7 @@ return 0
 }
 
 #[test]
-fn test_use_after_consume_via_tilde_detected() {
+fn test_use_after_consume_via_eat_detected() {
     // Consume via `eat`, then use — should be an error.
     let src = "\
 drop(eat x Int) Int: 0
@@ -204,11 +204,11 @@ return 0
     let has_moved = diags
         .iter()
         .any(|d| d.code.slug() == "type-use-of-moved-value");
-    assert!(!has_moved, "mixed tilde and bare: {:?}", diags);
+    assert!(!has_moved, "mixed eat and bare: {:?}", diags);
 }
 
 #[test]
-fn test_tilde_param_returned_is_error() {
+fn test_eat_param_returned_is_error() {
     // Returning a `eat` param is invalid (it's auto-dropped at scope exit).
     let src = "\
 consume(eat x Int) Int: x
@@ -248,7 +248,7 @@ return 0
 }
 
 #[test]
-fn test_tilde_param_unused_is_valid() {
+fn test_eat_param_unused_is_valid() {
     // `eat` param that is never used in the body — auto-dropped, no diagnostic.
     let src = "\
 leaky(eat x Int) Int: 0

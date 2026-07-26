@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use indexmap::IndexMap;
 use internment::Intern;
 
-use crate::TypeExpr;
 use crate::doc_comment::DocComment;
 use crate::expr::{Expr, Typed};
 use crate::parameter::{GroupParam, ParamConvention, ParamSlot, Parameters};
@@ -12,6 +11,7 @@ use crate::prelude::*;
 use crate::span::{SpanId, Spanned};
 use crate::ty::{PredicateExpr, Ty};
 use crate::ty_state::TyState;
+use crate::{GroupPath, TypeExpr};
 
 /// Lazily-formatted method name (e.g., "Single(a).method")
 pub struct MethodName<'a> {
@@ -35,7 +35,7 @@ pub struct Bind {
     pub param_conventions: IndexMap<Intern<String>, ParamConvention>,
     /// Derived from the first parameter reference carrying each group.
     pub group_params: Vec<GroupParam>,
-    pub param_groups: IndexMap<Intern<String>, Intern<String>>,
+    pub param_groups: IndexMap<Intern<String>, GroupPath>,
     pub param_refinements: IndexMap<Intern<String>, PredicateExpr>,
     pub attributes: BindAttributes,
     pub value: BindValue,

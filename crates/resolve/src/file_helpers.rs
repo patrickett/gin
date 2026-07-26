@@ -5,10 +5,12 @@
 //! use them as `package_dir.collect_gin_files()` instead of passing raw paths.
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
-use flask::{DependencyKind, FlaskConfig, FlaskPathExt, PACKAGE_CONFIG_NAME};
-use parser::gin_walk::GinPathExt;
+use crate::module_inventory::ModuleInventory;
+use crate::module_loader::{ModuleLoader, ParsedModuleCache};
+use flask::{DependencyKind, FlaskConfig};
 
 /// Extension trait adding Gin-package queries to [`Path`].
 ///
@@ -52,18 +54,36 @@ impl GinPackageExt for Path {
     fn collect_gin_files(&self) -> Vec<PathBuf> {
         let root = self;
         if root.is_dir() {
-            if root.join(PACKAGE_CONFIG_NAME).is_file() {
-                root.collect_gin_files_under()
-            } else {
-                self.collect_gin_files_recursive()
-            }
+            self.collect_gin_files_recursive()
         } else {
             vec![root.to_path_buf()]
         }
     }
 
     fn collect_gin_files_recursive(&self) -> Vec<PathBuf> {
-        self.collect_gin_files_under()
+        let inventory = ModuleInventory::discover(&HashMap::new());
+        let mut loader = ModuleLoader::with_cache(inventory, [], ParsedModuleCache::default());
+        let mut files = Vec::new();
+        let mut queue = VecDeque::from([self.to_path_buf()]);
+
+        while let Some(dir) = queue.pop_front() {
+            files.extend(loader.module_files(&dir));
+
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    queue.push_back(path);
+                }
+            }
+        }
+
+        files.sort();
+        files.dedup();
+        files
     }
 
     fn list_public_symbols(&self) -> Vec<String> {
@@ -101,10 +121,6 @@ impl GinPackageExt for Path {
     }
 
     fn gin_paths_for_symbol_lookup(&self) -> Vec<PathBuf> {
-        if self.join(PACKAGE_CONFIG_NAME).is_file() {
-            self.collect_gin_files_under()
-        } else {
-            self.list_package_gin_files()
-        }
+        self.collect_gin_files_recursive()
     }
 }

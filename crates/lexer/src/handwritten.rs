@@ -560,7 +560,6 @@ impl<'src> Lexer<'src> {
             b'\\' => Token::SlashOr,
             b'^' => Token::Caret,
             b'|' => Token::Pipe,
-            b'~' => Token::Tilde,
             b'@' => Token::At,
             b'#' => Token::Pound,
             b'?' => Token::Question,

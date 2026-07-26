@@ -1,6 +1,6 @@
 //! Generation-based cache for parsed files and package-level analysis.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -12,8 +12,10 @@ use notify_debouncer_mini::{
 };
 
 use parser::query::{ParseOutput, SourceParseExt};
-use typecheck::transform::{PackageTransformOptions, TransformCtx, transform_package};
-use typecheck::{FileId, PackageSemanticIndex, TypedFileAst};
+use typecheck::transform::{
+    PackageTransformArtifacts, PackageTransformOptions, transform_package_with_shared_context,
+};
+use typecheck::{PackageSemanticIndex, TypedFileAst};
 
 use crate::HoverDocExt;
 use crate::engine::{DocumentSnapshot, FileSemanticOutput, HoverContent, SharedSource};
@@ -21,8 +23,14 @@ use ast::source::{LineIndex, SourceExt};
 use flask::{CompileTarget, FlaskConfig};
 use resolve::GinPackageExt;
 
-/// Result from the resolve-and-prepare stage: (file_paths, parsed_asts, diagnostics_per_file).
-type Stage1Result = Option<(Vec<PathBuf>, Vec<ast::FileAst>, Vec<Vec<Diagnostic>>)>;
+/// Result from the resolve-and-prepare stage.
+struct Stage1Result {
+    file_paths: Vec<PathBuf>,
+    asts: Vec<ast::FileAst>,
+    prepare_diags: Vec<Vec<Diagnostic>>,
+    import_diags: HashMap<PathBuf, Vec<Diagnostic>>,
+    dependency_dirs: HashMap<String, PathBuf>,
+}
 use diagnostic::Diagnostic;
 use resolve::ParsedFile;
 
@@ -33,6 +41,8 @@ pub struct PackageEntry {
     /// File paths in the same order as `typed_asts` (sorted by path).
     pub file_paths: Vec<PathBuf>,
     pub typecheck_outputs: Vec<Vec<Diagnostic>>,
+    pub import_diags: HashMap<PathBuf, Vec<Diagnostic>>,
+    pub dependency_dirs: HashMap<String, PathBuf>,
     /// Prepend/flaw parse diagnostics + non-flaw prepare diagnostics.
     /// Parse-level diagnostics from `ParseOutput.symptoms` are prepended
     /// to typecheck-prepare diagnostics so they flow through to the LSP.
@@ -48,6 +58,9 @@ impl PackageEntry {
         // `UnexpectedToken`) are not typecheck flaws so they won't be
         // duplicated. Non-flaw typecheck-prepare diagnostics are also included.
         symptoms.extend(self.prepare_diags[file_idx].clone());
+        if let Some(imports) = self.import_diags.get(&self.file_paths[file_idx]) {
+            symptoms.extend(imports.clone());
+        }
         FileSemanticOutput { symptoms }
     }
 
@@ -76,6 +89,10 @@ pub struct PackageCache {
     files: Mutex<HashMap<PathBuf, ParseEntry>>,
     /// Package root → cached package entry
     packages: Mutex<HashMap<PathBuf, Arc<PackageEntry>>>,
+    /// Package root → reusable parsed dependency modules for import resolution
+    module_caches: Mutex<HashMap<PathBuf, resolve::ParsedModuleCache>>,
+    /// Package root → import graph from the last import resolution.
+    import_graphs: Mutex<HashMap<PathBuf, resolve::ImportDependencyGraph>>,
     /// Package root → generation at which an unconfigured package was computed
     package_gens: Mutex<HashMap<PathBuf, u64>>,
     /// File path → package root (reverse lookup)
@@ -91,6 +108,8 @@ impl PackageCache {
         Self {
             files: Mutex::new(HashMap::new()),
             packages: Mutex::new(HashMap::new()),
+            module_caches: Mutex::new(HashMap::new()),
+            import_graphs: Mutex::new(HashMap::new()),
             package_gens: Mutex::new(HashMap::new()),
             file_pkg: Mutex::new(HashMap::new()),
             next_gen: AtomicU64::new(1),
@@ -130,8 +149,11 @@ impl PackageCache {
             },
         );
         if let Some(pkg_root) = resolve::find_package_root(&path) {
-            self.file_pkg.lock().unwrap().insert(path, pkg_root.clone());
-            self.packages.lock().unwrap().remove(&pkg_root);
+            self.file_pkg
+                .lock()
+                .unwrap()
+                .insert(path.clone(), pkg_root.clone());
+            self.invalidate_cached_packages_for(pkg_root.clone());
             self.package_gens.lock().unwrap().remove(&pkg_root);
         }
         Ok(())
@@ -150,17 +172,56 @@ impl PackageCache {
             },
         );
         self.next_gen.fetch_add(1, Ordering::SeqCst);
-        // Re-discover package root mapping (in case it changed), then drop the
-        // stale typed package immediately instead of retaining it until the next
-        // package computation finishes.
         if let Some(pkg_root) = resolve::find_package_root(path) {
             self.file_pkg
                 .lock()
                 .unwrap()
-                .insert(path.to_path_buf(), pkg_root.clone());
-            self.packages.lock().unwrap().remove(&pkg_root);
-        } else if let Some(pkg_root) = self.file_pkg.lock().unwrap().get(path).cloned() {
-            self.packages.lock().unwrap().remove(&pkg_root);
+                .insert(path.to_path_buf(), pkg_root);
+        }
+        self.invalidate_cached_packages_for_path(path);
+    }
+
+    fn impacted_package_roots(&self, path: &Path) -> HashSet<PathBuf> {
+        let mut affected = HashSet::new();
+
+        if let Some(pkg_root) = self.file_pkg.lock().unwrap().get(path).cloned() {
+            affected.insert(pkg_root);
+        }
+
+        {
+            let import_graphs = self.import_graphs.lock().unwrap();
+            for (pkg_root, graph) in import_graphs.iter() {
+                if !graph.impacted_modules(path).is_empty() {
+                    affected.insert(pkg_root.clone());
+                }
+            }
+        }
+
+        if affected.is_empty()
+            && let Some(pkg_root) = self.resolve_package_root(path)
+        {
+            affected.insert(pkg_root);
+        }
+
+        affected
+    }
+
+    /// Remove resolver/module caches and package entry for a package root.
+    fn invalidate_cached_packages_for(&self, pkg_root: PathBuf) {
+        self.packages.lock().unwrap().remove(&pkg_root);
+        self.import_graphs.lock().unwrap().remove(&pkg_root);
+        self.module_caches.lock().unwrap().remove(&pkg_root);
+    }
+
+    /// Remove cached output for every package that transitively depends on `path`, plus
+    /// the package containing `path` itself when it is known.
+    ///
+    /// This intentionally preserves parse cache entries: only package-level
+    /// typed/diagnostic products are invalidated here because transform/typecheck
+    /// remains package-wide.
+    fn invalidate_cached_packages_for_path(&self, path: &Path) {
+        for pkg_root in self.impacted_package_roots(path) {
+            self.invalidate_cached_packages_for(pkg_root);
         }
     }
 
@@ -265,9 +326,15 @@ impl PackageCache {
 
     /// Run the full pipeline: parse → resolve imports → prepare → transform → diagnostics.
     fn compute_package(&self, pkg_root: &Path, all_files: &[PathBuf]) -> Option<PackageEntry> {
-        let (file_paths, asts, prepare_diags) =
-            self.stage_resolve_and_prepare(pkg_root, all_files)?;
-        let typed_asts = self.stage_transform(&asts, &file_paths);
+        let Stage1Result {
+            file_paths,
+            asts,
+            prepare_diags,
+            import_diags,
+            dependency_dirs,
+        } = self.stage_resolve_and_prepare(pkg_root, all_files)?;
+        let artifacts = self.stage_transform(&asts);
+        let typed_asts = artifacts.typed_asts;
         let package_index = self.stage_build_index(&file_paths, &typed_asts);
         let (typecheck_outputs, prepare_diags) =
             self.stage_derive_diagnostics(&typed_asts, &prepare_diags);
@@ -276,12 +343,18 @@ impl PackageCache {
             package_index,
             file_paths,
             typecheck_outputs,
+            import_diags,
+            dependency_dirs,
             prepare_diags,
         })
     }
 
     /// Stage 1: Collect parse results, resolve imports, and run prepare passes.
-    fn stage_resolve_and_prepare(&self, pkg_root: &Path, all_files: &[PathBuf]) -> Stage1Result {
+    fn stage_resolve_and_prepare(
+        &self,
+        pkg_root: &Path,
+        all_files: &[PathBuf],
+    ) -> Option<Stage1Result> {
         let files = self.files.lock().unwrap();
 
         let mut sorted: Vec<(PathBuf, &ParseEntry)> = all_files
@@ -304,6 +377,8 @@ impl PackageCache {
                 output: (*entry.parse).clone(),
             })
             .collect();
+        let parse_symptoms: Vec<Vec<Diagnostic>> =
+            parsed.iter().map(|f| f.output.symptoms.clone()).collect();
 
         let compile_target = FlaskConfig::find_package_config(pkg_root)
             .and_then(|(config, _)| CompileTarget::resolve(&config, None).ok())
@@ -317,7 +392,26 @@ impl PackageCache {
         let resolved = if parsed.len() <= 1 && deps.is_empty() {
             parsed
         } else {
-            resolve::resolve_imports(parsed, &deps)
+            let cache = self
+                .module_caches
+                .lock()
+                .unwrap()
+                .remove(pkg_root)
+                .unwrap_or_default();
+            let resolve::ResolveImportsWithGraph {
+                files: resolved,
+                cache,
+                import_graph,
+            } = resolve::resolve_imports_with_graph(parsed, &deps, cache);
+            self.module_caches
+                .lock()
+                .unwrap()
+                .insert(pkg_root.to_path_buf(), cache);
+            self.import_graphs
+                .lock()
+                .unwrap()
+                .insert(pkg_root.to_path_buf(), import_graph);
+            resolved
         };
 
         let mut by_path: HashMap<PathBuf, resolve::ParsedFile> =
@@ -328,40 +422,46 @@ impl PackageCache {
             .filter_map(|p| by_path.remove(p))
             .collect();
 
-        // Extract parse-level symptoms from each file before the AST is taken.
-        // These include lex errors and cursor-emitted parse symptoms (e.g. `UnexpectedToken`).
-        // They must be prepended to the typecheck prepare diags so they flow through
-        // to `semantic_output` → `all_diagnostics` → LSP.
-        let mut parse_symptoms: Vec<Vec<Diagnostic>> =
-            ordered.iter().map(|f| f.output.symptoms.clone()).collect();
-
         let mut asts: Vec<ast::FileAst> = ordered
             .iter_mut()
             .map(|f| std::mem::take(&mut f.output.ast))
             .collect();
         let mut prepare_diags = typecheck::prepare_package_asts(&mut asts, &compile_target);
 
-        // Prepend parse symptoms to prepare diags (same file order)
-        for (parse_syms, prep_diags) in parse_symptoms.iter_mut().zip(prepare_diags.iter_mut()) {
-            parse_syms.append(prep_diags);
-            *prep_diags = std::mem::take(parse_syms);
+        let mut import_diags = HashMap::new();
+        for (path, (original_syms, resolved_file)) in
+            file_paths.iter().zip(parse_symptoms.iter().zip(ordered.iter()))
+        {
+            let mut file_import_diags = resolved_file.output.symptoms.clone();
+            if file_import_diags.len() >= original_syms.len() {
+                file_import_diags.drain(0..original_syms.len());
+            } else {
+                file_import_diags.clear();
+            }
+            if !file_import_diags.is_empty() {
+                import_diags.insert(path.clone(), file_import_diags);
+            }
         }
 
-        Some((file_paths, asts, prepare_diags))
+        // Prepend parse symptoms to prepare diags (same file order)
+        for (parse_syms, prep_diags) in parse_symptoms.iter().zip(prepare_diags.iter_mut()) {
+            let mut parse_syms = parse_syms.clone();
+            parse_syms.append(prep_diags);
+            *prep_diags = parse_syms;
+        }
+
+        Some(Stage1Result {
+            file_paths,
+            asts,
+            prepare_diags,
+            import_diags,
+            dependency_dirs: deps,
+        })
     }
 
     /// Stage 2: Run the typed AST transform on prepared ASTs.
-    fn stage_transform(&self, asts: &[ast::FileAst], _file_paths: &[PathBuf]) -> Vec<TypedFileAst> {
-        let compile_time_eval_ast = Arc::new(ast::FileAst::default());
-        let package_ctx = TransformCtx::with_package_compile_time_arc(compile_time_eval_ast);
-
-        let file_asts: Vec<(ast::FileAst, FileId)> = asts
-            .iter()
-            .enumerate()
-            .map(|(i, ast)| (ast.clone(), FileId(i as u32)))
-            .collect();
-
-        transform_package(&file_asts, &package_ctx, PackageTransformOptions::IDE)
+    fn stage_transform(&self, asts: &[ast::FileAst]) -> PackageTransformArtifacts {
+        transform_package_with_shared_context(asts.to_vec(), PackageTransformOptions::IDE)
     }
 
     /// Stage 3: Build cross-file package index from typed ASTs.
@@ -593,9 +693,7 @@ impl PackageCache {
     /// Note: the file itself stays in the `files` map — this only evicts
     /// the expensive package-level typed ASTs and diagnostics.
     pub fn invalidate_package_cache_for(&self, path: &Path) {
-        if let Some(pkg_root) = self.file_pkg.lock().unwrap().get(path).cloned() {
-            self.packages.lock().unwrap().remove(&pkg_root);
-        }
+        self.invalidate_cached_packages_for_path(path);
     }
 
     pub fn contains(&self, path: &Path) -> bool {
@@ -629,6 +727,7 @@ impl PackageCache {
     ) -> std::collections::HashMap<PathBuf, Vec<Diagnostic>> {
         let mut by_path: std::collections::HashMap<PathBuf, Vec<Diagnostic>> =
             std::collections::HashMap::new();
+        let _ = dependency_dirs;
 
         let entry = match self.get_or_compute_package(paths) {
             Some(e) => e,
@@ -640,59 +739,7 @@ impl PackageCache {
             by_path.entry(path.clone()).or_default().extend(symptoms);
         }
 
-        if !dependency_dirs.is_empty() {
-            let entry_files: Vec<resolve::ParsedFile> = entry
-                .file_paths
-                .iter()
-                .filter_map(|path| {
-                    let (source, parse) = self.source_and_parse(path)?;
-                    Some(resolve::ParsedFile {
-                        path: path.clone(),
-                        source: (*source).clone(),
-                        output: (*parse).clone(),
-                    })
-                })
-                .collect();
-            let import_symptoms = resolve::resolve_import_symptoms(entry_files, dependency_dirs);
-            for (path, diags) in import_symptoms {
-                by_path.entry(path).or_default().extend(diags);
-            }
-        }
-
         by_path
-    }
-}
-
-/// Extension trait adding [`resolve_and_prepare`] to `Vec<ParsedFile>`.
-///
-/// Resolves imports for all files, then runs prepare on each AST.
-/// This is a driver-level convenience — it combines resolve and typecheck prepare
-/// so that callers (ginc, etc.) don't need to orchestrate the two steps manually.
-pub trait ResolveAndPrepareExt {
-    fn resolve_and_prepare(
-        self,
-        dependencies: &HashMap<String, PathBuf>,
-        entry: &flask::CompileTarget,
-    ) -> Vec<ParsedFile>;
-}
-
-impl ResolveAndPrepareExt for Vec<ParsedFile> {
-    fn resolve_and_prepare(
-        self,
-        dependencies: &HashMap<String, PathBuf>,
-        entry: &flask::CompileTarget,
-    ) -> Vec<ParsedFile> {
-        let mut files = resolve::resolve_imports(self, dependencies);
-        let mut asts: Vec<ast::FileAst> = files
-            .iter_mut()
-            .map(|f| std::mem::take(&mut f.output.ast))
-            .collect();
-        let prepare_diags = typecheck::prepare_package_asts(&mut asts, entry);
-        for (file, (ast, mut diags)) in files.iter_mut().zip(asts.into_iter().zip(prepare_diags)) {
-            file.output.ast = ast;
-            file.output.symptoms.append(&mut diags);
-        }
-        files
     }
 }
 
@@ -773,6 +820,544 @@ mod tests {
 
         assert!(!parent_entry.file_paths.contains(&nested_path));
         assert_eq!(nested_entry.file_paths, vec![nested_path]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn package_cache_all_diagnostics_uses_cached_dependency_dirs_and_is_not_duplicated() {
+        let root = std::env::temp_dir().join(format!(
+            "gin_package_cache_import_diag_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let dep_root = root.join("dep");
+        let app_root = root.join("app");
+        fs::create_dir_all(&dep_root).unwrap();
+        fs::create_dir_all(&app_root).unwrap();
+
+        fs::write(
+            dep_root.join("flask.jsonc"),
+            r#"{"name":"dep","version":"0.0.0","authors":[]}"#,
+        )
+        .unwrap();
+        fs::write(dep_root.join("exports.gin"), "Exported := 1\n").unwrap();
+
+        fs::write(
+            app_root.join("flask.jsonc"),
+            format!(
+                "{{\"name\":\"app\",\"version\":\"0.0.0\",\"authors\":[],\"dependencies\":{{\"dep\":{{\"path\":\"{}\"}}}}}}",
+                dep_root.display()
+            ),
+        )
+        .unwrap();
+        let app_main = app_root.join("main.gin");
+        fs::write(&app_main, "use dep.Missing\nvalue := 1\n").unwrap();
+
+        let expected_deps = resolve::GinPackageExt::flask_path_dependencies(app_main.as_path());
+        assert!(
+            !expected_deps.is_empty(),
+            "app package should have dependency map"
+        );
+
+        let (tx, _rx) = unbounded();
+        let cache = PackageCache::new(tx);
+        cache.add_file(app_main.clone()).unwrap();
+
+        let entry = cache.get_or_compute_package(std::slice::from_ref(&app_main)).unwrap();
+        assert_eq!(entry.dependency_dirs, expected_deps);
+
+        let all_diags =
+            cache.all_diagnostics(std::slice::from_ref(&app_main), &std::collections::HashMap::new());
+        let no_diags = Vec::new();
+        let file_diags = all_diags.get(&app_main).unwrap_or(&no_diags);
+        let use_not_exported_count = file_diags
+            .iter()
+            .filter(|diag| diag.code.slug() == "use-not-exported")
+            .count();
+        assert_eq!(
+            use_not_exported_count,
+            1,
+            "invalid import diagnostic should be emitted exactly once: {file_diags:?}"
+        );
+    }
+
+    #[test]
+    fn package_cache_reuses_dependency_modules_and_is_evicted_on_app_edit() {
+        let root = std::env::temp_dir().join(format!(
+            "gin_package_cache_dependency_reuse_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let app_root = root.join("app");
+        let dep_root = root.join("dep");
+        fs::create_dir_all(&app_root).unwrap();
+        fs::create_dir_all(&dep_root).unwrap();
+
+        fs::write(
+            app_root.join("flask.jsonc"),
+            format!(
+                "{{\"name\":\"app\",\"version\":\"0.0.0\",\"authors\":[],\"dependencies\":{{\"dep\":{{\"path\":\"{}\"}}}}}}",
+                dep_root.display()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            dep_root.join("flask.jsonc"),
+            r#"{"name":"dep","version":"0.0.0","authors":[]}"#,
+        )
+        .unwrap();
+        fs::write(dep_root.join("used.gin"), "Used is 1\n").unwrap();
+        fs::write(dep_root.join("unused.gin"), "Unused := 1\n").unwrap();
+
+        let app_gin = app_root.join("app_main.gin");
+        fs::write(&app_gin, "use dep.Used\nvalue := 1\n").unwrap();
+
+        let unused_dep_path = dep_root.join("unused.gin");
+        let used_dep_path = dep_root.join("used.gin");
+
+        let app_deps = resolve::GinPackageExt::flask_path_dependencies(app_gin.as_path());
+        assert!(
+            !app_deps.is_empty(),
+            "app root flask dependencies are not configured"
+        );
+
+        let (tx, _rx) = unbounded();
+        let cache = PackageCache::new(tx);
+        cache.add_file(app_gin.clone()).unwrap();
+
+        let _first_entry = cache
+            .get_or_compute_package(std::slice::from_ref(&app_gin))
+            .unwrap();
+        let first_used_source = {
+            let caches = cache.module_caches.lock().unwrap();
+            let cache_entry = caches
+                .values()
+                .find(|entry| entry.has_file(&used_dep_path))
+                .expect("app dependency cache exists after initial analysis");
+            cache_entry
+                .get_file(&used_dep_path)
+                .expect("used dependency module parsed")
+                .source
+                .clone()
+        };
+
+        fs::write(&unused_dep_path, "Unused := if\n").unwrap();
+        let _second_entry = cache
+            .get_or_compute_package(std::slice::from_ref(&app_gin))
+            .unwrap();
+
+        let second_used_source = {
+            let caches = cache.module_caches.lock().unwrap();
+            let cache_entry = caches
+                .values()
+                .find(|entry| entry.has_file(&used_dep_path))
+                .expect("app dependency cache still exists after unchanged app inputs");
+            cache_entry
+                .get_file(&used_dep_path)
+                .expect("used dependency module still in cache")
+                .source
+                .clone()
+        };
+
+        let first_import_graph_imports_dep = {
+            let graphs = cache.import_graphs.lock().unwrap();
+            let graph = graphs
+                .get(&app_root)
+                .expect("dependency graph is available after resolve");
+            !graph.impacted_modules(&used_dep_path).is_empty()
+        };
+
+        let first_entry_symptoms = cache
+            .package_semantics(std::slice::from_ref(&app_gin))
+            .unwrap();
+        let second_entry_symptoms = cache
+            .package_semantics(std::slice::from_ref(&app_gin))
+            .unwrap();
+
+        assert_eq!(first_used_source, second_used_source);
+        assert!(first_import_graph_imports_dep);
+        assert_eq!(first_entry_symptoms, second_entry_symptoms);
+
+        cache.set_contents(&app_gin, "use dep.Used\nvalue := 2\n".to_string());
+        assert!(cache.module_caches.lock().unwrap().is_empty());
+
+        let after_app_edit = cache
+            .get_or_compute_package(std::slice::from_ref(&app_gin))
+            .unwrap();
+        assert!(!cache.module_caches.lock().unwrap().is_empty());
+
+        fs::write(&used_dep_path, "Used is 99\n").unwrap();
+        cache.set_contents(&used_dep_path, "Used is 99\n".to_string());
+
+        let after_dependency_edit = cache
+            .get_or_compute_package(std::slice::from_ref(&app_gin))
+            .unwrap();
+        assert!(!Arc::ptr_eq(&after_app_edit, &after_dependency_edit));
+
+        let dep_parse_after_edit = {
+            let caches = cache.module_caches.lock().unwrap();
+            let cache_entry = caches
+                .values()
+                .find(|entry| entry.has_file(&used_dep_path))
+                .expect("app dependency cache exists after dependency edit");
+            cache_entry
+                .get_file(&used_dep_path)
+                .expect("dependency module still reparsed after dependency edit")
+                .source
+                .clone()
+        };
+
+        assert!(dep_parse_after_edit.contains("99"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn package_cache_invalidation_follows_import_edges() {
+        let root = std::env::temp_dir().join(format!(
+            "gin_package_cache_import_edges_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let dep_root = root.join("dep");
+        let app_a_root = root.join("app_a");
+        let app_b_root = root.join("app_b");
+        fs::create_dir_all(&dep_root).unwrap();
+        fs::create_dir_all(&app_a_root).unwrap();
+        fs::create_dir_all(&app_b_root).unwrap();
+
+        fs::write(
+            dep_root.join("flask.jsonc"),
+            r#"{"name":"dep","version":"0.0.0","authors":[]}"#,
+        )
+        .unwrap();
+        fs::write(dep_root.join("used.gin"), "Used is 1\n").unwrap();
+        fs::write(dep_root.join("unused.gin"), "Unused is 1\n").unwrap();
+
+        fs::write(
+            app_a_root.join("flask.jsonc"),
+            format!(
+                "{{\"name\":\"app_a\",\"version\":\"0.0.0\",\"authors\":[],\"dependencies\":{{\"dep\":{{\"path\":\"{}\"}}}}}}",
+                dep_root.display()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            app_b_root.join("flask.jsonc"),
+            format!(
+                "{{\"name\":\"app_b\",\"version\":\"0.0.0\",\"authors\":[],\"dependencies\":{{\"dep\":{{\"path\":\"{}\"}}}}}}",
+                dep_root.display()
+            ),
+        )
+        .unwrap();
+        fs::write(app_a_root.join("main.gin"), "use dep.Used\nvalue := 1\n").unwrap();
+        fs::write(app_b_root.join("main.gin"), "use dep.Unused\nvalue := 1\n").unwrap();
+
+        let dep_used = dep_root.join("used.gin");
+        let dep_unused = dep_root.join("unused.gin");
+        let app_a_main = app_a_root.join("main.gin");
+        let app_b_main = app_b_root.join("main.gin");
+
+        let (tx, _rx) = unbounded();
+        let cache = PackageCache::new(tx);
+        cache.add_file(app_a_main.clone()).unwrap();
+        cache.add_file(app_b_main.clone()).unwrap();
+        cache.add_file(dep_used.clone()).unwrap();
+        cache.add_file(dep_unused.clone()).unwrap();
+
+        let app_a_entry_before = {
+            cache
+                .get_or_compute_package(std::slice::from_ref(&app_a_main))
+                .unwrap();
+            let packages = cache.packages.lock().unwrap();
+            Arc::clone(&packages[&app_a_root])
+        };
+        let app_b_entry_before = {
+            cache
+                .get_or_compute_package(std::slice::from_ref(&app_b_main))
+                .unwrap();
+            let packages = cache.packages.lock().unwrap();
+            Arc::clone(&packages[&app_b_root])
+        };
+
+        cache.set_contents(&dep_unused, "Unused is 2\n".to_string());
+
+        let app_a_entry_after_unused = {
+            cache
+                .get_or_compute_package(std::slice::from_ref(&app_a_main))
+                .unwrap();
+            let packages = cache.packages.lock().unwrap();
+            Arc::clone(&packages[&app_a_root])
+        };
+        let app_b_entry_after_unused = {
+            cache
+                .get_or_compute_package(std::slice::from_ref(&app_b_main))
+                .unwrap();
+            let packages = cache.packages.lock().unwrap();
+            Arc::clone(&packages[&app_b_root])
+        };
+
+        assert!(Arc::ptr_eq(&app_a_entry_before, &app_a_entry_after_unused));
+        assert!(!Arc::ptr_eq(&app_b_entry_before, &app_b_entry_after_unused));
+
+        cache.set_contents(&dep_used, "Used is 3\n".to_string());
+
+        let app_a_entry_after_used = {
+            cache
+                .get_or_compute_package(std::slice::from_ref(&app_a_main))
+                .unwrap();
+            let packages = cache.packages.lock().unwrap();
+            Arc::clone(&packages[&app_a_root])
+        };
+        let app_b_entry_after_used = {
+            cache
+                .get_or_compute_package(std::slice::from_ref(&app_b_main))
+                .unwrap();
+            let packages = cache.packages.lock().unwrap();
+            Arc::clone(&packages[&app_b_root])
+        };
+
+        assert!(!Arc::ptr_eq(
+            &app_a_entry_after_unused,
+            &app_a_entry_after_used
+        ));
+        assert!(Arc::ptr_eq(
+            &app_b_entry_after_unused,
+            &app_b_entry_after_used
+        ));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn package_cache_invalidate_package_cache_for_follows_import_edges() {
+        let root = std::env::temp_dir().join(format!(
+            "gin_package_cache_invalidate_api_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let dep_root = root.join("dep");
+        let app_root = root.join("app");
+        let other_root = root.join("other");
+        fs::create_dir_all(&dep_root).unwrap();
+        fs::create_dir_all(&app_root).unwrap();
+        fs::create_dir_all(&other_root).unwrap();
+
+        fs::write(
+            dep_root.join("flask.jsonc"),
+            r#"{"name":"dep","version":"0.0.0","authors":[]}"#,
+        )
+        .unwrap();
+        fs::write(dep_root.join("used.gin"), "Used is 1\n").unwrap();
+        fs::write(dep_root.join("unused.gin"), "Unused is 1\n").unwrap();
+
+        fs::write(
+            app_root.join("flask.jsonc"),
+            format!(
+                "{{\"name\":\"app\",\"version\":\"0.0.0\",\"authors\":[],\"dependencies\":{{\"dep\":{{\"path\":\"{}\"}}}}}}",
+                dep_root.display()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            other_root.join("flask.jsonc"),
+            "{\"name\":\"other\",\"version\":\"0.0.0\",\"authors\":[]}",
+        )
+        .unwrap();
+        fs::write(app_root.join("main.gin"), "use dep.Used\nvalue := 1\n").unwrap();
+        fs::write(other_root.join("main.gin"), "value := 1\n").unwrap();
+
+        let dep_used = dep_root.join("used.gin");
+        let app_main = app_root.join("main.gin");
+        let other_main = other_root.join("main.gin");
+
+        let (tx, _rx) = unbounded();
+        let cache = PackageCache::new(tx);
+        cache.add_file(app_main.clone()).unwrap();
+        cache.add_file(other_main.clone()).unwrap();
+        cache.add_file(dep_used.clone()).unwrap();
+
+        let app_entry_before = {
+            cache
+                .get_or_compute_package(std::slice::from_ref(&app_main))
+                .unwrap();
+            let packages = cache.packages.lock().unwrap();
+            Arc::clone(&packages[&app_root])
+        };
+        let other_entry_before = {
+            cache
+                .get_or_compute_package(std::slice::from_ref(&other_main))
+                .unwrap();
+            let packages = cache.packages.lock().unwrap();
+            Arc::clone(&packages[&other_root])
+        };
+
+        cache.invalidate_package_cache_for(&dep_used);
+
+        let app_entry_after = {
+            cache
+                .get_or_compute_package(std::slice::from_ref(&app_main))
+                .unwrap();
+            let packages = cache.packages.lock().unwrap();
+            Arc::clone(&packages[&app_root])
+        };
+        let other_entry_after = {
+            cache
+                .get_or_compute_package(std::slice::from_ref(&other_main))
+                .unwrap();
+            let packages = cache.packages.lock().unwrap();
+            Arc::clone(&packages[&other_root])
+        };
+
+        assert!(!Arc::ptr_eq(&app_entry_before, &app_entry_after));
+        assert!(Arc::ptr_eq(&other_entry_before, &other_entry_after));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn package_cache_preserves_parse_cache_across_package_invalidation() {
+        let root = std::env::temp_dir().join(format!(
+            "gin_package_cache_parse_preserved_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let dep_root = root.join("dep");
+        let app_root = root.join("app");
+        fs::create_dir_all(&dep_root).unwrap();
+        fs::create_dir_all(&app_root).unwrap();
+
+        fs::write(
+            dep_root.join("flask.jsonc"),
+            r#"{"name":"dep","version":"0.0.0","authors":[]}"#,
+        )
+        .unwrap();
+        fs::write(dep_root.join("used.gin"), "Used is 1\n").unwrap();
+
+        fs::write(
+            app_root.join("flask.jsonc"),
+            format!(
+                "{{\"name\":\"app\",\"version\":\"0.0.0\",\"authors\":[],\"dependencies\":{{\"dep\":{{\"path\":\"{}\"}}}}}}",
+                dep_root.display()
+            ),
+        )
+        .unwrap();
+        fs::write(app_root.join("main.gin"), "use dep.Used\nvalue := 1\n").unwrap();
+
+        let dep_used = dep_root.join("used.gin");
+        let app_main = app_root.join("main.gin");
+        let unused = app_root.join("unused.gin");
+        fs::write(&unused, "unused := 1\n").unwrap();
+
+        let (tx, _rx) = unbounded();
+        let cache = PackageCache::new(tx);
+        cache.add_file(app_main.clone()).unwrap();
+        cache.add_file(unused.clone()).unwrap();
+        cache.add_file(dep_used.clone()).unwrap();
+
+        let _ = cache
+            .get_or_compute_package(std::slice::from_ref(&app_main))
+            .unwrap();
+
+        let dep_parse_before = cache.parse_output(&dep_used).unwrap();
+        let app_parse_before = cache.parse_output(&app_main).unwrap();
+
+        cache.set_contents(&app_main, "use dep.Used\nvalue := 2\n".to_string());
+        let _ = cache
+            .get_or_compute_package(std::slice::from_ref(&app_main))
+            .unwrap();
+
+        let dep_parse_after = cache.parse_output(&dep_used).unwrap();
+        let app_parse_after = cache.parse_output(&app_main).unwrap();
+
+        assert!(Arc::ptr_eq(&dep_parse_before, &dep_parse_after));
+        assert!(!Arc::ptr_eq(&app_parse_before, &app_parse_after));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn package_cache_invalidation_contract_reuses_parse_but_rebuilds_package_phase() {
+        let root = std::env::temp_dir().join(format!(
+            "gin_package_cache_invalidation_contract_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let dep_root = root.join("dep");
+        let app_root = root.join("app");
+        fs::create_dir_all(&dep_root).unwrap();
+        fs::create_dir_all(&app_root).unwrap();
+
+        fs::write(
+            dep_root.join("flask.jsonc"),
+            r#"{"name":"dep","version":"0.0.0","authors":[]}"#,
+        )
+        .unwrap();
+        fs::write(dep_root.join("used.gin"), "Used is 1\n").unwrap();
+
+        fs::write(
+            app_root.join("flask.jsonc"),
+            format!(
+                "{{\"name\":\"app\",\"version\":\"0.0.0\",\"authors\":[],\"dependencies\":{{\"dep\":{{\"path\":\"{}\"}}}}}}",
+                dep_root.display()
+            ),
+        )
+        .unwrap();
+        fs::write(app_root.join("main.gin"), "use dep.Used\nvalue := 1\n").unwrap();
+
+        let dep_used = dep_root.join("used.gin");
+        let app_main = app_root.join("main.gin");
+
+        let (tx, _rx) = unbounded();
+        let cache = PackageCache::new(tx);
+        cache.add_file(app_main.clone()).unwrap();
+        cache.add_file(dep_used.clone()).unwrap();
+
+        let _ = cache
+            .get_or_compute_package(std::slice::from_ref(&app_main))
+            .unwrap();
+
+        let parsed_dep_before = cache.parse_output(&dep_used).unwrap();
+        let module_cache_before = cache
+            .module_caches
+            .lock()
+            .unwrap()
+            .get(&app_root)
+            .and_then(|c| c.get_file(&dep_used).map(|f| Arc::new(f.source.clone())));
+        assert!(module_cache_before.is_some());
+
+        cache.set_contents(&app_main, "use dep.Used\nvalue := 2\n".to_string());
+
+        assert!(!cache.module_caches.lock().unwrap().contains_key(&app_root));
+        assert!(!cache.import_graphs.lock().unwrap().contains_key(&app_root));
+
+        let _ = cache
+            .get_or_compute_package(std::slice::from_ref(&app_main))
+            .unwrap();
+
+        let parsed_dep_after = cache.parse_output(&dep_used).unwrap();
+        let module_cache_after = cache
+            .module_caches
+            .lock()
+            .unwrap()
+            .get(&app_root)
+            .and_then(|c| c.get_file(&dep_used).map(|f| Arc::new(f.source.clone())));
+
+        assert!(cache.module_caches.lock().unwrap().contains_key(&app_root));
+        assert!(cache.import_graphs.lock().unwrap().contains_key(&app_root));
+        assert!(Arc::ptr_eq(&parsed_dep_before, &parsed_dep_after));
+        assert!(
+            module_cache_after.is_some(),
+            "dependency module cache is rebuilt after package invalidation"
+        );
+        assert!(module_cache_before.is_some());
+        assert!(!Arc::ptr_eq(
+            &module_cache_before.unwrap(),
+            &module_cache_after.unwrap()
+        ));
+
         let _ = fs::remove_dir_all(root);
     }
 }

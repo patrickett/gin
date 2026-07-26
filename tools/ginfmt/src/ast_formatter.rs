@@ -30,10 +30,10 @@
 //! - Tracking indentation depth across multiline delimiter pairs
 //!
 //! TODO(ginfmt): Order members in `has` bodies:
-//!   1. Required/computed zero-input properties (no params, stored/computed fields)
-//!   2. `Self.` associated members (static methods)
-//!   3. Argument-taking instance methods (methods with params)
-//!   Within each group, members should be sorted for stable output.
+//! 1. Required/computed zero-input properties (no params, stored/computed fields)
+//! 2. `Self.` associated members (static methods)
+//! 3. Argument-taking instance methods (methods with params)
+//! Within each group, members should be sorted for stable output.
 
 use std::collections::HashMap;
 
@@ -129,6 +129,7 @@ impl<'a> AstFormatter<'a> {
         let mut def_order: Vec<(usize, &Intern<String>, &ast::Bind)> = ast
             .defs
             .iter()
+            .filter(|(_, bind)| !ast.method_binds.contains(bind))
             .map(|(n, b)| {
                 let span = self.span_table.get(b.name_span);
                 (span.start(), n, b)
@@ -180,13 +181,30 @@ impl<'a> AstFormatter<'a> {
             }
             DeclareValue::Has(members) => {
                 self.buffer.push_str(" has");
-                for (index, member) in members.iter().enumerate() {
+                let composed_traits: Vec<_> = declare
+                    .provided_traits
+                    .iter()
+                    .filter(|provided| provided.fields.is_empty())
+                    .collect();
+                for (index, provided) in composed_traits.iter().enumerate() {
                     if index > 0 {
-                        self.buffer.push(',');
+                        self.buffer.push_str(" and");
+                    }
+                    self.buffer.push(' ');
+                    self.buffer.push_str(provided.trait_name.as_str());
+                }
+                for (index, member) in members.iter().enumerate() {
+                    if composed_traits.is_empty() {
+                        if index > 0 {
+                            self.buffer.push(',');
+                        }
+                        self.buffer.push(' ');
+                    } else {
+                        self.buffer.push('\n');
+                        self.buffer.push_str("    ");
                     }
                     match member {
                         HasMember::Property(p) => {
-                            self.buffer.push(' ');
                             self.buffer.push_str(p.name.as_str());
                             if let Some(ty) = &p.ty {
                                 self.buffer.push(' ');
@@ -201,7 +219,10 @@ impl<'a> AstFormatter<'a> {
                             }
                         }
                         HasMember::Function(f) => {
-                            self.buffer.push(' ');
+                            if let Some(qualifier) = &f.qualifier {
+                                self.buffer.push_str(qualifier.name.as_str());
+                                self.buffer.push('.');
+                            }
                             self.buffer.push_str(f.name.as_str());
                             self.format_params(&f.params);
                             if let Some(rt) = &f.return_ty {
@@ -756,6 +777,22 @@ mod tests {
         let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
         let r = f.format_file(&out.ast);
         assert_eq!(r, "Range(x) has start x, contains(self, value x) Bool\n");
+    }
+
+    #[test]
+    fn composed_interface_preserves_qualified_methods() {
+        let source = "TraitA has run(ref self) Int\nTraitB has run(ref self) Int\nCombined has TraitA and TraitB\n    TraitA.run(ref self) Int := 1\n    TraitB.run(ref self) Int := 2\n";
+        let out = source.parse_source_full();
+        let cfg = Config::default();
+        let mut formatter = AstFormatter::new(source, &cfg, &out.ast.span_table);
+        let formatted = formatter.format_file(&out.ast);
+
+        assert!(
+            formatted.contains("Combined has TraitA and TraitB\n    TraitA.run(self) Int:= ...\n    TraitB.run(self) Int:= ..."),
+            "formatted output: {formatted:?}",
+        );
+        assert_eq!(formatted.matches("TraitA.run").count(), 1);
+        assert_eq!(formatted.matches("TraitB.run").count(), 1);
     }
 
     #[test]

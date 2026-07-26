@@ -14,4 +14,4 @@ pub use cursor::ReferencesInFile;
 pub use engine::{
     DocumentSnapshot, FileSemanticOutput, FileTypedOutput, HoverContent, QueryEngine,
 };
-pub use package_cache::{PackageCache, ResolveAndPrepareExt};
+pub use package_cache::PackageCache;

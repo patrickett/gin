@@ -5,7 +5,7 @@ use ast::{ConstValue, HashFloat};
 use flask::CompileTarget;
 use internment::Intern;
 use std::collections::HashMap;
-use typecheck::analysis::{TyInfer, TyInferEnv, eval_compile_time_expr_public};
+use typecheck::analysis::{TyInfer, TyInferEnv, eval_compile_time_expr};
 use typecheck::prepare_file_ast;
 use typecheck::ty::Ty;
 use typecheck::{DefId, ExprId, TypedExprKind};
@@ -124,7 +124,7 @@ fn eval_compile_time_expr_folds_addition() {
     let ast::BindValue::Expr(e) = &bind.value else {
         panic!("expected expr bind");
     };
-    let cv = eval_compile_time_expr_public(&e.value, &const_binds, &main).expect("fold 1+2");
+    let cv = eval_compile_time_expr(&e.value, &const_binds, &main).expect("fold 1+2");
     assert_const_int(Some(&cv), 3);
 }
 

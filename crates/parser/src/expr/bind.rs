@@ -3,8 +3,9 @@ use internment::Intern;
 use lexer::Token;
 
 use ast::{
-    AttributeItem, Bind, BindAttributes, BindValue, DocComment, Expr, GroupParam, ModPath,
-    ParamConvention, ParameterKind, Parameters, PredicateExpr, Return, Spanned, TypeExpr, Typed,
+    AttributeItem, Bind, BindAttributes, BindValue, DocComment, Expr, GroupParam, GroupPath,
+    ModPath, ParamConvention, ParameterKind, Parameters, PredicateExpr, Return, Spanned, TypeExpr,
+    Typed,
 };
 
 use super::ExprFn;
@@ -20,7 +21,7 @@ type ReturnTypePart = (
 pub(crate) type ParsedParams = (
     Option<Parameters>,
     IndexMap<Intern<String>, ParamConvention>,
-    IndexMap<Intern<String>, Intern<String>>,
+    IndexMap<Intern<String>, GroupPath>,
     IndexMap<Intern<String>, PredicateExpr>,
 );
 
@@ -28,7 +29,7 @@ pub(crate) type ParsedOneParam = (
     Intern<String>,
     ParameterKind,
     ParamConvention,
-    Option<Intern<String>>,
+    Option<GroupPath>,
     Option<PredicateExpr>,
 );
 
@@ -89,7 +90,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                         mutable,
                         group: Some(name),
                     } => Some(GroupParam {
-                        name: *name,
+                        path: name.clone(),
                         ty_name: Intern::from_ref(inner.value.surface_mangle_name()),
                         mutable: *mutable,
                     }),
@@ -100,7 +101,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             .fold(Vec::new(), |mut groups, group| {
                 if !groups
                     .iter()
-                    .any(|existing: &GroupParam| existing.name == group.name)
+                    .any(|existing: &GroupParam| existing.path == group.path)
                 {
                     groups.push(group);
                 }
@@ -549,7 +550,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
         let mut ingest = |key: Intern<String>,
                           kind: ParameterKind,
                           conv: ParamConvention,
-                          group: Option<Intern<String>>,
+                          group: Option<GroupPath>,
                           refinement: Option<PredicateExpr>| {
             params.insert(key, kind);
             if conv != ParamConvention::Own {
@@ -604,7 +605,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
     }
 
     pub(crate) fn parse_param_convention_prefix(&mut self) -> ParamConvention {
-        if self.eat(&Token::Tilde) || self.eat(&Token::Eat) {
+        if self.eat(&Token::Eat) {
             ParamConvention::Consume
         } else if self.eat(&Token::Ref) {
             ParamConvention::Observe
@@ -639,7 +640,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             ParamConvention::Observe | ParamConvention::Mutate
         ) && self.eat(&Token::CurlyOpen)
         {
-            let group = self.parse_id()?;
+            let group = self.parse_group_path()?;
             self.expect(&Token::CurlyClose)?;
             Some(group)
         } else {
@@ -668,7 +669,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                     value: TypeExpr::Ref {
                         inner,
                         mutable: convention == ParamConvention::Mutate,
-                        group: group_name,
+                        group: group_name.clone(),
                     },
                     span_id,
                 }))

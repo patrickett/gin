@@ -65,9 +65,16 @@ impl Hash for HasProperty {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct HasMemberQualifier {
+    pub name: Intern<String>,
+    pub span: SpanId,
+}
+
 /// A function member (instance or associated method) in a `has` body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HasFunction {
+    pub qualifier: Option<HasMemberQualifier>,
     pub name: Intern<String>,
     pub name_span: SpanId,
     pub params: Parameters,
@@ -82,6 +89,7 @@ pub struct HasFunction {
 
 impl Hash for HasFunction {
     fn hash<H: Hasher>(&self, state: &mut H) {
+        self.qualifier.hash(state);
         self.name.hash(state);
         self.name_span.hash(state);
         for (k, v) in &self.params {
@@ -130,6 +138,9 @@ impl std::fmt::Display for HasProperty {
 
 impl std::fmt::Display for HasFunction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(qualifier) = &self.qualifier {
+            write!(f, "{}.", qualifier.name.as_str())?;
+        }
         if self.params.is_empty() {
             write!(f, "{}", self.name.as_str())?;
         } else {

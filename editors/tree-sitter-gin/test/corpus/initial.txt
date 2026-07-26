@@ -108,6 +108,50 @@ Allocator has
               (type_identifier))))))))
 
 ================================================================================
+composed interface with qualified methods
+================================================================================
+
+Combined has TraitA and TraitB
+    TraitA.run(ref self) Int := 1
+    TraitB.run(ref self) Int := 2
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (declare_statement
+    name: (type_identifier)
+    (trait_composition
+      trait: (tag
+        (type_identifier))
+      trait: (tag
+        (type_identifier)))
+    (decl_member_list
+      (record_signature
+        (qualified_member_name
+          trait: (type_identifier)
+          name: (identifier))
+        (parameters
+          (parameter
+            name: (self_parameter)))
+        return_type: (tag
+          (type_identifier))
+        (member_default
+          value: (literal
+            (number))))
+      (record_signature
+        (qualified_member_name
+          trait: (type_identifier)
+          name: (identifier))
+        (parameters
+          (parameter
+            name: (self_parameter)))
+        return_type: (tag
+          (type_identifier))
+        (member_default
+          value: (literal
+            (number)))))))
+
+================================================================================
 declare union
 ================================================================================
 
@@ -639,3 +683,78 @@ List(x, length PointerSize: ?, capacity PointerSize: ?, storage StorageIdentity:
         name: (identifier)
         type: (tag
           (type_identifier))))))
+
+================================================================================
+ownership modifiers and expressions
+================================================================================
+
+drop(eat value Entity): eat value
+inspect(ref value Entity, mut output Entity): update(ref value, mut output)
+main: drop(eat value)
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (bind_statement
+    name: (identifier)
+    (parameters
+      (parameter
+        name: (identifier)
+        type: (tag
+          (type_identifier))))
+    value: (unary_expression
+      operand: (identifier)))
+  (bind_statement
+    name: (identifier)
+    (parameters
+      (parameter
+        name: (identifier)
+        type: (tag
+          (type_identifier)))
+      (parameter
+        name: (identifier)
+        type: (tag
+          (type_identifier))))
+    value: (call_expression
+      function: (identifier)
+      arguments: (argument_list
+        (unary_expression
+          operand: (identifier))
+        (unary_expression
+          operand: (identifier)))))
+  (bind_statement
+    name: (identifier)
+    value: (call_expression
+      function: (identifier)
+      arguments: (argument_list
+        (unary_expression
+          operand: (identifier))))))
+
+================================================================================
+semantic group paths
+================================================================================
+
+power_up(ref{entities} entity Entity, mut{entities.rings.items} ring Ring): 0
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (bind_statement
+    name: (identifier)
+    (parameters
+      (parameter
+        (reference_group
+          root: (identifier))
+        name: (identifier)
+        type: (tag
+          (type_identifier)))
+      (parameter
+        (reference_group
+          root: (identifier)
+          segment: (identifier)
+          segment: (identifier))
+        name: (identifier)
+        type: (tag
+          (type_identifier))))
+    value: (literal
+      (number))))

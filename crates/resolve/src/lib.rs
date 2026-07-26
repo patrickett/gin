@@ -9,11 +9,16 @@ pub(crate) mod public_symbols;
 pub(crate) mod symbol_location;
 
 mod module_graph;
+mod module_inventory;
+mod module_loader;
 
 // Re-export batch pipeline
 pub use graph::{ResolveGraph, ResolveNode};
+pub use module_loader::ParsedModuleCache;
 pub use package_resolver::{
-    ResolveImportsMode, resolve_import_symptoms, resolve_imports, resolve_package_imports,
+    ImportDependencyGraph, ResolveImportsMode, ResolveImportsWithGraph, resolve_import_symptoms,
+    resolve_imports, resolve_imports_with_cache, resolve_imports_with_graph,
+    resolve_package_imports,
 };
 pub use public_symbols::find_public_def;
 // Re-export per-request queries

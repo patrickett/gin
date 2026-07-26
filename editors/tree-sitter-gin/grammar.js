@@ -90,7 +90,16 @@ module.exports = grammar({
           field("name", $.type_identifier),
           optional($.declaration_parameters),
           choice(
-            seq("has", $.decl_member_list),
+            seq(
+              "has",
+              choice(
+                $.decl_member_list,
+                seq(
+                  $.trait_composition,
+                  optional(seq($._newline, $.decl_member_list)),
+                ),
+              ),
+            ),
             seq("is", $._declare_type_value),
           ),
         ),
@@ -115,7 +124,13 @@ module.exports = grammar({
         optional(seq(":", field("default", choice("?", $._expression)))),
       ),
 
+    trait_composition: ($) =>
+      seq(field("trait", $.tag), repeat(seq("and", field("trait", $.tag)))),
+
     decl_member_list: ($) => prec.right(nlist($, $._decl_member)),
+
+    qualified_member_name: ($) =>
+      seq(field("trait", $.type_identifier), ".", field("name", $.identifier)),
 
     _decl_member: ($) =>
       choice($.record_signature, $.record_field, $.record_property),
@@ -123,7 +138,7 @@ module.exports = grammar({
     record_signature: ($) =>
       prec.right(
         seq(
-          field("name", $.identifier),
+          choice(field("name", $.identifier), $.qualified_member_name),
           $.parameters,
           optional(field("return_type", $._type_hint)),
           optional($.member_default),
@@ -218,7 +233,15 @@ module.exports = grammar({
         ),
       ),
 
-    reference_group: ($) => seq("{", field("name", $.identifier), "}"),
+    reference_group: ($) =>
+      seq(
+        "{",
+        field("root", $.identifier),
+        repeat(
+          seq(".", field("segment", choice($.identifier, $.type_identifier))),
+        ),
+        "}",
+      ),
 
     provided_impl: ($) =>
       prec(
@@ -278,8 +301,15 @@ module.exports = grammar({
     parameter: ($) =>
       choice(
         seq(
-          optional(field("modifier", choice("ref", "mut"))),
-          optional($.reference_group),
+          optional(
+            choice(
+              seq(
+                field("modifier", choice("ref", "mut")),
+                optional($.reference_group),
+              ),
+              field("modifier", "eat"),
+            ),
+          ),
           field("name", choice($.identifier, $.self_parameter)),
           optional(
             choice(
@@ -493,7 +523,10 @@ module.exports = grammar({
       prec.right(
         6,
         seq(
-          field("operator", choice("-", "@", "^", "*", "not")),
+          field(
+            "operator",
+            choice("-", "@", "^", "*", "not", "ref", "mut", "eat"),
+          ),
           field("operand", $._expression),
         ),
       ),

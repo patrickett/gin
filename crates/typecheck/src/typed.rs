@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use ast::{BinderId, ConstExpr};
+use ast::{BinderId, ConstExpr, GroupPath};
 
 use ast::HashFloat;
 use ast::parameter::{ParamConvention, ParameterKind, Parameters};
@@ -63,6 +63,10 @@ pub enum EffectTarget {
         base: Box<EffectTarget>,
         index: usize,
     },
+    Variant {
+        base: Box<EffectTarget>,
+        name: Intern<String>,
+    },
     ItemRegion {
         base: Box<EffectTarget>,
         index: TargetIndex,
@@ -90,6 +94,10 @@ pub enum ReferenceTargetGroup {
         base: Box<ReferenceTargetGroup>,
         index: usize,
     },
+    Variant {
+        base: Box<ReferenceTargetGroup>,
+        name: Intern<String>,
+    },
     ItemRegion {
         base: Box<ReferenceTargetGroup>,
         index: TargetIndex,
@@ -102,6 +110,146 @@ pub enum ReferenceTargetGroup {
     Deref(Box<ReferenceTargetGroup>),
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReferenceTargetSet {
+    targets: HashSet<ReferenceTargetGroup>,
+}
+
+impl ReferenceTargetSet {
+    pub fn singleton(target: ReferenceTargetGroup) -> Self {
+        Self {
+            targets: HashSet::from([target]),
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &ReferenceTargetGroup> {
+        self.targets.iter()
+    }
+
+    pub fn extend(&mut self, other: &Self) {
+        self.targets.extend(other.targets.iter().cloned());
+    }
+
+    pub fn projected(
+        &self,
+        mut project: impl FnMut(&ReferenceTargetGroup) -> ReferenceTargetGroup,
+    ) -> Self {
+        Self {
+            targets: self.targets.iter().map(&mut project).collect(),
+        }
+    }
+
+    pub fn is_disjoint(&self, other: &Self, constraints: &ConstraintEnv) -> bool {
+        self.targets.iter().all(|left| {
+            other
+                .targets
+                .iter()
+                .all(|right| left.overlap(right, constraints) == Overlap::Disjoint)
+        })
+    }
+
+    pub fn is_derived_from(
+        &self,
+        parent: &Self,
+        projections: &[GroupProjection],
+        constraints: &ConstraintEnv,
+    ) -> bool {
+        self.targets.iter().all(|target| {
+            parent
+                .targets
+                .iter()
+                .any(|parent| target.matches_projection_from(parent, projections, constraints))
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TargetGroupApplication {
+    actuals: HashMap<GroupId, ReferenceTargetSet>,
+}
+
+impl TargetGroupApplication {
+    pub fn targets(&self, group: GroupId) -> Option<&ReferenceTargetSet> {
+        self.actuals.get(&group)
+    }
+
+    pub fn invalid_derived_groups(
+        &self,
+        signature: &TypedCallableSignature,
+        constraints: &ConstraintEnv,
+    ) -> Vec<(GroupId, GroupId)> {
+        let mut invalid = Vec::new();
+        for (group, actuals) in &self.actuals {
+            let Some(derived_group) = signature.groups.get(group.0 as usize) else {
+                continue;
+            };
+            let (Some(path), Some(projections)) = (
+                derived_group.path.as_ref(),
+                derived_group.projections.as_ref(),
+            ) else {
+                continue;
+            };
+            let ancestor = signature
+                .groups
+                .iter()
+                .enumerate()
+                .filter_map(|(index, candidate)| {
+                    let candidate = candidate.path.as_ref()?;
+                    candidate
+                        .is_ancestor_of(path)
+                        .then_some((GroupId(index as u32), candidate.segments.len()))
+                })
+                .max_by_key(|(_, depth)| *depth);
+            let Some((ancestor, ancestor_depth)) = ancestor else {
+                continue;
+            };
+            let Some(parent_actuals) = self.actuals.get(&ancestor) else {
+                continue;
+            };
+            if !actuals.is_derived_from(parent_actuals, &projections[ancestor_depth..], constraints)
+            {
+                invalid.push((*group, ancestor));
+            }
+        }
+        invalid.sort_by_key(|(group, ancestor)| (group.0, ancestor.0));
+        invalid
+    }
+
+    pub fn overlapping_mutated_pairs(
+        &self,
+        signature: &TypedCallableSignature,
+        constraints: &ConstraintEnv,
+    ) -> Vec<(GroupId, GroupId)> {
+        let mut groups: Vec<_> = self.actuals.keys().copied().collect();
+        groups.sort_by_key(|group| group.0);
+        let mut conflicts = Vec::new();
+        for (index, left) in groups.iter().enumerate() {
+            for right in &groups[index + 1..] {
+                if !(signature.group_is_mutated(*left) || signature.group_is_mutated(*right)) {
+                    continue;
+                }
+                if signature.allows_parent_child_overlap(*left, *right) {
+                    continue;
+                }
+                let left_targets = &self.actuals[left];
+                let right_targets = &self.actuals[right];
+                if !left_targets.is_disjoint(right_targets, constraints) {
+                    conflicts.push((*left, *right));
+                }
+            }
+        }
+        conflicts
+    }
+}
+
+impl<const N: usize> From<[ReferenceTargetGroup; N]> for ReferenceTargetSet {
+    fn from(targets: [ReferenceTargetGroup; N]) -> Self {
+        Self {
+            targets: HashSet::from(targets),
+        }
+    }
+}
+
 impl EffectTarget {
     pub fn from_reference(target: &ReferenceTargetGroup) -> Option<Self> {
         match target {
@@ -109,6 +257,10 @@ impl EffectTarget {
             ReferenceTargetGroup::Field { base, index } => Some(Self::Field {
                 base: Box::new(Self::from_reference(base)?),
                 index: *index,
+            }),
+            ReferenceTargetGroup::Variant { base, name } => Some(Self::Variant {
+                base: Box::new(Self::from_reference(base)?),
+                name: *name,
             }),
             ReferenceTargetGroup::ItemRegion { base, index } => Some(Self::ItemRegion {
                 base: Box::new(Self::from_reference(base)?),
@@ -155,6 +307,16 @@ impl EffectTarget {
                     descendants,
                 ))
             }
+            Self::Variant { base, name } => {
+                let (base, descendants) = base.substitute_inner(group, actual)?;
+                Some((
+                    ReferenceTargetGroup::Variant {
+                        base: Box::new(base),
+                        name: *name,
+                    },
+                    descendants,
+                ))
+            }
             Self::ItemRegion { base, index } => {
                 let (base, descendants) = base.substitute_inner(group, actual)?;
                 Some((
@@ -189,6 +351,70 @@ impl EffectTarget {
 }
 
 impl ReferenceTargetGroup {
+    pub fn root_param(&self) -> Option<GroupId> {
+        match self {
+            Self::Param(group) => Some(*group),
+            Self::Local(_) => None,
+            Self::Field { base, .. }
+            | Self::Variant { base, .. }
+            | Self::ItemRegion { base, .. }
+            | Self::ItemRange { base, .. }
+            | Self::Deref(base) => base.root_param(),
+        }
+    }
+
+    pub fn matches_projection_from(
+        &self,
+        ancestor: &Self,
+        projections: &[GroupProjection],
+        constraints: &ConstraintEnv,
+    ) -> bool {
+        let Some((projection, prefix)) = projections.split_last() else {
+            return self.overlap(ancestor, constraints) == Overlap::Equal;
+        };
+        match projection {
+            GroupProjection::Field { index, .. } => match self {
+                Self::Field {
+                    base,
+                    index: actual_index,
+                } if actual_index == index => {
+                    base.matches_projection_from(ancestor, prefix, constraints)
+                }
+                _ => false,
+            },
+            GroupProjection::Items => match self {
+                Self::ItemRegion { base, .. } | Self::ItemRange { base, .. } => {
+                    base.matches_projection_from(ancestor, prefix, constraints)
+                }
+                _ => false,
+            },
+            GroupProjection::Pointee => match self {
+                Self::Deref(base) => base.matches_projection_from(ancestor, prefix, constraints),
+                _ => false,
+            },
+            GroupProjection::Variant { name } => match self {
+                Self::Variant {
+                    base,
+                    name: actual_name,
+                } if actual_name == name => {
+                    base.matches_projection_from(ancestor, prefix, constraints)
+                }
+                _ => false,
+            },
+        }
+    }
+
+    pub fn is_strict_descendant_of(&self, ancestor: &Self, constraints: &ConstraintEnv) -> bool {
+        let mut current = self.parent();
+        while let Some(target) = current {
+            if target.overlap(ancestor, constraints) == Overlap::Equal {
+                return true;
+            }
+            current = target.parent();
+        }
+        false
+    }
+
     pub fn overlap(&self, other: &Self, constraints: &ConstraintEnv) -> Overlap {
         match (self, other) {
             (Self::Param(left), Self::Param(right)) => {
@@ -217,6 +443,22 @@ impl ReferenceTargetGroup {
             ) => match left_base.overlap(right_base, constraints) {
                 Overlap::Disjoint => Overlap::Disjoint,
                 Overlap::Equal if left_index == right_index => Overlap::Equal,
+                Overlap::Equal => Overlap::Disjoint,
+                Overlap::Partial => Overlap::Partial,
+                Overlap::Unknown => Overlap::Unknown,
+            },
+            (
+                Self::Variant {
+                    base: left_base,
+                    name: left_name,
+                },
+                Self::Variant {
+                    base: right_base,
+                    name: right_name,
+                },
+            ) => match left_base.overlap(right_base, constraints) {
+                Overlap::Disjoint => Overlap::Disjoint,
+                Overlap::Equal if left_name == right_name => Overlap::Equal,
                 Overlap::Equal => Overlap::Disjoint,
                 Overlap::Partial => Overlap::Partial,
                 Overlap::Unknown => Overlap::Unknown,
@@ -273,21 +515,33 @@ impl ReferenceTargetGroup {
                 Overlap::Unknown => Overlap::Unknown,
             },
             (Self::Deref(left), Self::Deref(right)) => left.overlap(right, constraints),
-            _ => {
-                if let Some(parent) = self.parent() {
-                    return descendant_overlap(parent.overlap(other, constraints));
-                }
-                if let Some(parent) = other.parent() {
-                    return descendant_overlap(self.overlap(parent, constraints));
-                }
-                Overlap::Disjoint
-            }
+            _ => match self.depth().cmp(&other.depth()) {
+                std::cmp::Ordering::Greater => self
+                    .parent()
+                    .map(|parent| descendant_overlap(parent.overlap(other, constraints)))
+                    .unwrap_or(Overlap::Disjoint),
+                std::cmp::Ordering::Less => other
+                    .parent()
+                    .map(|parent| descendant_overlap(self.overlap(parent, constraints)))
+                    .unwrap_or(Overlap::Disjoint),
+                std::cmp::Ordering::Equal => match (self.parent(), other.parent()) {
+                    (Some(left), Some(right)) => {
+                        descendant_overlap(left.overlap(right, constraints))
+                    }
+                    _ => Overlap::Disjoint,
+                },
+            },
         }
+    }
+
+    fn depth(&self) -> usize {
+        self.parent().map_or(0, |parent| parent.depth() + 1)
     }
 
     fn parent(&self) -> Option<&Self> {
         match self {
             Self::Field { base, .. }
+            | Self::Variant { base, .. }
             | Self::ItemRegion { base, .. }
             | Self::ItemRange { base, .. }
             | Self::Deref(base) => Some(base),
@@ -413,9 +667,18 @@ fn range_overlap(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum GroupProjection {
+    Field { name: Intern<String>, index: usize },
+    Items,
+    Pointee,
+    Variant { name: Intern<String> },
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedGroup {
-    pub name: Option<Intern<String>>,
+    pub path: Option<GroupPath>,
+    pub projections: Option<Vec<GroupProjection>>,
     pub referent_type: Ty,
 }
 
@@ -443,6 +706,70 @@ mod target_overlap_tests {
         }
     }
 
+    fn variant(name: &str) -> ReferenceTargetGroup {
+        ReferenceTargetGroup::Variant {
+            base: Box::new(ReferenceTargetGroup::Param(GroupId(0))),
+            name: Intern::from_ref(name),
+        }
+    }
+
+    #[test]
+    fn variant_projection_matches_parent() {
+        assert!(variant("Some").matches_projection_from(
+            &ReferenceTargetGroup::Param(GroupId(0)),
+            &[GroupProjection::Variant {
+                name: Intern::from_ref("Some"),
+            }],
+            &ConstraintEnv::default(),
+        ));
+    }
+
+    #[test]
+    fn variant_field_projection_matches_parent() {
+        let target = ReferenceTargetGroup::Field {
+            base: Box::new(variant("Some")),
+            index: 0,
+        };
+
+        assert!(target.matches_projection_from(
+            &ReferenceTargetGroup::Param(GroupId(0)),
+            &[
+                GroupProjection::Variant {
+                    name: Intern::from_ref("Some"),
+                },
+                GroupProjection::Field {
+                    name: Intern::from_ref("value"),
+                    index: 0,
+                },
+            ],
+            &ConstraintEnv::default(),
+        ));
+    }
+
+    #[test]
+    fn different_variants_of_same_union_are_disjoint() {
+        assert_eq!(
+            variant("Some").overlap(&variant("None"), &ConstraintEnv::default()),
+            Overlap::Disjoint
+        );
+    }
+
+    #[test]
+    fn variant_partially_overlaps_union_parent() {
+        assert_eq!(
+            variant("Some").overlap(
+                &ReferenceTargetGroup::Param(GroupId(0)),
+                &ConstraintEnv::default()
+            ),
+            Overlap::Partial
+        );
+    }
+
+    #[test]
+    fn variant_preserves_root_parameter() {
+        assert_eq!(variant("Some").root_param(), Some(GroupId(0)));
+    }
+
     #[test]
     fn distinct_constant_indices_are_disjoint() {
         let left = item(symbolic(ConstExpr::Value(ConstValue::Int(1))));
@@ -450,6 +777,19 @@ mod target_overlap_tests {
 
         assert_eq!(
             left.overlap(&right, &ConstraintEnv::default()),
+            Overlap::Disjoint
+        );
+    }
+
+    #[test]
+    fn fields_beneath_distinct_items_are_disjoint() {
+        let field = |index| ReferenceTargetGroup::Field {
+            base: Box::new(item(symbolic(ConstExpr::Value(ConstValue::Int(index))))),
+            index: 0,
+        };
+
+        assert_eq!(
+            field(0).overlap(&field(1), &ConstraintEnv::default()),
             Overlap::Disjoint
         );
     }
@@ -641,7 +981,7 @@ pub struct TypedExpr {
     pub span: SpanId,
     /// Compile-time constant value, if this expression can be folded.
     pub const_value: Option<ast::ConstValue>,
-    pub target_group: Option<ReferenceTargetGroup>,
+    pub target_group: Option<ReferenceTargetSet>,
     /// Type/flow/flaw diagnostics attached to this expression.
     pub flaws: Vec<Diagnostic>,
 }
@@ -789,6 +1129,7 @@ pub enum TypedExprKind {
     },
     /// Destructure bind: `Tag(field: bind, …) := expr`
     Destructure {
+        tag_name: Intern<String>,
         value: ExprId,
         field_bindings: Vec<(Intern<String>, Intern<String>)>,
     },
@@ -875,6 +1216,37 @@ pub struct TypedCallableSignature {
     pub effects: FunctionEffects,
 }
 
+impl TypedCallableSignature {
+    pub fn group_is_mutated(&self, group: GroupId) -> bool {
+        self.param_groups
+            .iter()
+            .zip(&self.param_conventions)
+            .any(|(param_group, convention)| {
+                *param_group == Some(group) && *convention == ParamConvention::Mutate
+            })
+    }
+
+    pub fn allows_parent_child_overlap(&self, left: GroupId, right: GroupId) -> bool {
+        let Some(left_path) = self
+            .groups
+            .get(left.0 as usize)
+            .and_then(|group| group.path.as_ref())
+        else {
+            return false;
+        };
+        let Some(right_path) = self
+            .groups
+            .get(right.0 as usize)
+            .and_then(|group| group.path.as_ref())
+        else {
+            return false;
+        };
+
+        (left_path.is_ancestor_of(right_path) && !self.group_is_mutated(left))
+            || (right_path.is_ancestor_of(left_path) && !self.group_is_mutated(right))
+    }
+}
+
 impl From<&TypedBind> for TypedCallableSignature {
     fn from(bind: &TypedBind) -> Self {
         Self {
@@ -944,19 +1316,6 @@ pub enum BindBody {
     Extern,
 }
 
-/// A fully-resolved import target.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ResolvedImport {
-    /// Resolved to a local definition.
-    Local(DefId),
-    /// Resolved to a local tag.
-    LocalTag(TagId),
-    /// Resolved to an external file's definition.
-    External { file_id: FileId, def_id: DefId },
-    /// Resolved to an external file's tag.
-    ExternalTag { file_id: FileId, tag_id: TagId },
-}
-
 /// The typed AST for one `.gin` file — all types resolved, all flaws attached.
 ///
 /// This is the source of truth for LSP queries, codegen, and further analysis.
@@ -981,9 +1340,6 @@ pub struct TypedFileAst {
 
     /// Top-level expression IDs (e.g., standalone expressions in the file).
     pub root_exprs: Vec<ExprId>,
-
-    /// Resolved imports: symbol name → resolved target.
-    pub resolved_imports: HashMap<Intern<String>, ResolvedImport>,
 
     /// span.start byte offset → ExprId for O(log n) position-based lookup.
     pub span_to_expr: BTreeMap<u32, ExprId>,
@@ -1023,7 +1379,6 @@ impl std::fmt::Debug for TypedFileAst {
             .field("private_defs", &self.private_defs)
             .field("exprs", &self.exprs)
             .field("root_exprs", &self.root_exprs)
-            .field("resolved_imports", &self.resolved_imports)
             .field("span_to_expr", &self.span_to_expr)
             .field("tag_types", &self.tag_types)
             .field("fn_return_types", &self.fn_return_types)
@@ -1041,7 +1396,6 @@ impl PartialEq for TypedFileAst {
             && self.private_defs == other.private_defs
             && self.exprs == other.exprs
             && self.root_exprs == other.root_exprs
-            && self.resolved_imports == other.resolved_imports
             && self.span_to_expr == other.span_to_expr
             && self.tag_types == other.tag_types
             && self.fn_return_types == other.fn_return_types
@@ -1094,6 +1448,32 @@ pub enum HoverTarget {
 }
 
 impl TypedFileAst {
+    pub fn apply_target_groups(
+        &self,
+        args: &[ExprId],
+        signature: &TypedCallableSignature,
+    ) -> TargetGroupApplication {
+        let mut application = TargetGroupApplication::default();
+        for (index, group) in signature.param_groups.iter().enumerate() {
+            let Some(group) = group else {
+                continue;
+            };
+            let Some(actual) = args
+                .get(index)
+                .and_then(|arg| self.exprs.target_group.get(arg.as_usize()))
+                .and_then(|targets| targets.as_ref())
+            else {
+                continue;
+            };
+            application
+                .actuals
+                .entry(*group)
+                .or_default()
+                .extend(actual);
+        }
+        application
+    }
+
     fn has_self_context_at_byte(
         &self,
         byte_offset: usize,
@@ -1223,7 +1603,7 @@ impl TypedFileAst {
             private_defs: HashSet::new(),
             exprs: TypedExprVec::new(),
             root_exprs: Vec::new(),
-            resolved_imports: HashMap::new(),
+
             span_to_expr: BTreeMap::new(),
             tag_types: HashMap::new(),
             fn_return_types: HashMap::new(),
@@ -1572,11 +1952,7 @@ impl TypedFileAst {
                                 ctx.tag_types,
                             )
                             .map(|t| {
-                                pattern_binding_type_surface_for_hover(
-                                    &t,
-                                    ctx.tag_types,
-                                    ctx.tag_params,
-                                )
+                                type_annotation_surface_for_hover(&t, ctx.tag_types, ctx.tag_params)
                             })
                             .unwrap_or_else(|| "infer".to_string());
                         let summary = if pname.is_pattern_wildcard() {
@@ -1622,7 +1998,7 @@ impl TypedFileAst {
                     let ty_str = ctx
                         .subject_ty
                         .map(|t| {
-                            pattern_binding_type_surface_for_hover(t, ctx.tag_types, ctx.tag_params)
+                            type_annotation_surface_for_hover(t, ctx.tag_types, ctx.tag_params)
                         })
                         .unwrap_or_else(|| "infer".to_string());
                     let summary = format!("{} {}", ctx.word, ty_str);
@@ -2943,14 +3319,6 @@ pub(crate) fn type_annotation_surface_for_hover(
             format_ty_for_hover(other)
         }
     }
-}
-
-fn pattern_binding_type_surface_for_hover(
-    ty: &Ty,
-    tag_types: &HashMap<Intern<String>, Ty>,
-    tag_params: Option<&HashMap<Intern<String>, Parameters>>,
-) -> String {
-    type_annotation_surface_for_hover(ty, tag_types, tag_params)
 }
 
 fn tag_has_generic_params(

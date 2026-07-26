@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
 use ast::{
@@ -13,7 +13,8 @@ use crate::folder_module::{
     NormalizePathError, normalize_local_import_path, resolve_logical_module_dir,
     split_dep_path_segments,
 };
-use crate::graph::{ResolveGraph, build_import_closure};
+use crate::graph::{ResolveGraph, build_import_closure, build_import_closure_with_cache};
+use crate::module_loader::{ModuleLoader, ParsedModuleCache};
 use flask::FlaskPathExt;
 
 /// Whether to qualify ASTs or collect import symptoms only.
@@ -47,6 +48,70 @@ pub enum ResolveImportsResult {
     Symptoms(HashMap<PathBuf, Vec<Diagnostic>>),
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ImportDependencyGraph {
+    /// Module or file path → paths that import it (including direct and transitive).
+    import_edges: HashMap<PathBuf, Vec<PathBuf>>,
+}
+
+impl ImportDependencyGraph {
+    fn from_resolve_graph(graph: &ResolveGraph) -> Self {
+        let mut import_edges: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+
+        for node in &graph.nodes {
+            import_edges.entry(node.path.clone()).or_default();
+        }
+
+        for (from_idx, targets) in graph.adj.iter().enumerate() {
+            let Some(from_node) = graph.nodes.get(from_idx) else {
+                continue;
+            };
+            let from_path = from_node.path.clone();
+
+            for edge in targets {
+                let Some(to_node) = graph.nodes.get(edge.to) else {
+                    continue;
+                };
+                import_edges
+                    .entry(to_node.path.clone())
+                    .or_default()
+                    .push(from_path.clone());
+            }
+        }
+
+        Self { import_edges }
+    }
+
+    pub fn impacted_modules(&self, path: &Path) -> Vec<PathBuf> {
+        if !self.import_edges.contains_key(path) {
+            return Vec::new();
+        }
+
+        let mut seen: HashMap<PathBuf, bool> = HashMap::new();
+        let mut queue = VecDeque::new();
+        let mut impacted = Vec::new();
+
+        queue.push_back(path.to_path_buf());
+        while let Some(current) = queue.pop_front() {
+            if seen.insert(current.clone(), true).is_some() {
+                continue;
+            }
+            impacted.push(current.clone());
+            for importer in self.import_edges.get(&current).into_iter().flatten() {
+                queue.push_back(importer.clone());
+            }
+        }
+
+        impacted
+    }
+}
+
+pub struct ResolveImportsWithGraph {
+    pub files: Vec<ParsedFile>,
+    pub cache: ParsedModuleCache,
+    pub import_graph: ImportDependencyGraph,
+}
+
 /// Full import resolution for binary compilation.
 ///
 /// Collects all `.gin` files from entry + dependency directories, parses any
@@ -58,8 +123,37 @@ pub fn resolve_imports(
     entry_files: Vec<ParsedFile>,
     dependencies: &HashMap<String, PathBuf>,
 ) -> Vec<ParsedFile> {
-    let (graph, available) = build_import_closure(entry_files, dependencies);
-    resolve(graph, &mut |path| available.get(path).cloned())
+    let ResolveImportsWithGraph {
+        files,
+        cache: _,
+        import_graph: _,
+    } = resolve_imports_with_graph(entry_files, dependencies, ParsedModuleCache::default());
+    files
+}
+
+pub fn resolve_imports_with_cache(
+    entry_files: Vec<ParsedFile>,
+    dependencies: &HashMap<String, PathBuf>,
+    cache: ParsedModuleCache,
+) -> (Vec<ParsedFile>, ParsedModuleCache) {
+    let ResolveImportsWithGraph { files, cache, .. } =
+        resolve_imports_with_graph(entry_files, dependencies, cache);
+    (files, cache)
+}
+
+pub fn resolve_imports_with_graph(
+    entry_files: Vec<ParsedFile>,
+    dependencies: &HashMap<String, PathBuf>,
+    cache: ParsedModuleCache,
+) -> ResolveImportsWithGraph {
+    let (graph, cache) = build_import_closure_with_cache(entry_files, dependencies, cache);
+    let import_graph = ImportDependencyGraph::from_resolve_graph(&graph);
+    let files = resolve(graph, &mut |path| cache.files.get(path).cloned());
+    ResolveImportsWithGraph {
+        files,
+        cache,
+        import_graph,
+    }
 }
 
 /// Import graph discovery for diagnostic collection.
@@ -141,20 +235,20 @@ struct ResolveImportEnv<'a> {
     spans: &'a SpanTable,
     span_id: SpanId,
     symptoms: &'a mut Vec<Diagnostic>,
-    find_public_def: &'a dyn Fn(&Path, &str) -> Option<PathBuf>,
 }
 
 pub(crate) fn resolve_module_import(
     module_import: &ModuleImport,
     base_dir: &Path,
+    module_loader: &mut ModuleLoader,
     dependencies: &HashMap<String, PathBuf>,
     spans: &SpanTable,
     span_id: SpanId,
     symptoms: &mut Vec<Diagnostic>,
-    find_public_def: &dyn Fn(&Path, &str) -> Option<PathBuf>,
 ) -> ResolvedModule {
     match &module_import.source {
         ImportSource::Local(path, _) => resolve_local_path_import(
+            module_loader,
             module_import,
             base_dir,
             path,
@@ -168,39 +262,39 @@ pub(crate) fn resolve_module_import(
                 resolve_local_bundle_import(
                     module_import,
                     b,
+                    module_loader,
                     base_dir,
                     spans,
                     span_id,
                     symptoms,
-                    find_public_def,
                 )
             } else {
                 resolve_dependency_bundle_import(
                     b,
+                    module_loader,
                     dependencies,
                     spans,
                     span_id,
                     symptoms,
-                    find_public_def,
                 )
             }
         }
         ImportSource::Package(mp) => resolve_package_like_import(
             module_import,
             mp,
+            module_loader,
             ResolveImportEnv {
                 dependencies,
                 spans,
                 span_id,
                 symptoms,
-                find_public_def,
             },
         ),
         ImportSource::CurrentModule { member } => {
-            resolve_current_module_import(member, base_dir, spans, symptoms, find_public_def)
+            resolve_current_module_import(member, base_dir, module_loader, spans, symptoms)
         }
         ImportSource::LocalMember(m) => {
-            resolve_local_member_import(m, base_dir, spans, symptoms, find_public_def)
+            resolve_local_member_import(m, base_dir, module_loader, spans, symptoms)
         }
     }
 }
@@ -208,12 +302,12 @@ pub(crate) fn resolve_module_import(
 fn resolve_current_module_import(
     member: &BundleExportImport,
     file_dir: &Path,
+    module_loader: &mut ModuleLoader,
     spans: &SpanTable,
     symptoms: &mut Vec<Diagnostic>,
-    find_public_def: &dyn Fn(&Path, &str) -> Option<PathBuf>,
 ) -> ResolvedModule {
     let symbol = member.export.as_str();
-    if find_public_def(file_dir, symbol).is_none() {
+    if module_loader.find_public_def(file_dir, symbol).is_none() {
         symptoms.push(
             Diagnostic::new(
                 "use-not-exported",
@@ -289,12 +383,12 @@ fn flat_member_symbol_alias(qual_prefix: &str, member: &BundleExportImport) -> S
 
 /// Resolve one `use dep.(folder.Symbol, …)` entry against `module_dir`.
 fn resolve_bundle_member_at(
+    module_loader: &mut ModuleLoader,
     module_dir: &Path,
     qual_prefix: &str,
     member: &BundleExportImport,
     spans: &SpanTable,
     symptoms: &mut Vec<Diagnostic>,
-    find_public_def: &dyn Fn(&Path, &str) -> Option<PathBuf>,
 ) -> (Vec<(PathBuf, String)>, Option<SymbolAlias>) {
     let export = member.export.as_str();
     let segments: Vec<&str> = export.split('.').filter(|s| !s.is_empty()).collect();
@@ -311,12 +405,19 @@ fn resolve_bundle_member_at(
                 .as_ref()
                 .map(|a| a.to_string())
                 .unwrap_or_else(|| name.to_string());
-            let files = resolve_folder_module_files(&subdir, &qual, spans, member.span, symptoms);
+            let files = resolve_folder_module_files(
+                module_loader,
+                &subdir,
+                &qual,
+                spans,
+                member.span,
+                symptoms,
+            );
             return (files, None);
         }
-        if find_public_def(module_dir, name).is_some() {
+        if let Some(file_path) = module_loader.find_public_def(module_dir, name) {
             return (
-                Vec::new(),
+                vec![(file_path, qual_prefix.to_string())],
                 Some(flat_member_symbol_alias(qual_prefix, member)),
             );
         }
@@ -344,9 +445,9 @@ fn resolve_bundle_member_at(
                     }
                 }
             };
-            if find_public_def(&folder, &sym).is_some() {
+            if let Some(file_path) = module_loader.find_public_def(&folder, &sym) {
                 return (
-                    Vec::new(),
+                    vec![(file_path, qual_prefix.to_string())],
                     Some(flat_member_symbol_alias(qual_prefix, member)),
                 );
             }
@@ -358,8 +459,14 @@ fn resolve_bundle_member_at(
                     .as_ref()
                     .map(|a| a.to_string())
                     .unwrap_or_else(|| export.to_string());
-                let files =
-                    resolve_folder_module_files(&subdir, &qual, spans, member.span, symptoms);
+                let files = resolve_folder_module_files(
+                    module_loader,
+                    &subdir,
+                    &qual,
+                    spans,
+                    member.span,
+                    symptoms,
+                );
                 return (files, None);
             }
         }
@@ -437,9 +544,9 @@ fn resolve_local_folder_module(
 fn resolve_local_member_import(
     m: &LocalMemberImport,
     base_dir: &Path,
+    module_loader: &mut ModuleLoader,
     spans: &SpanTable,
     symptoms: &mut Vec<Diagnostic>,
-    find_public_def: &dyn Fn(&Path, &str) -> Option<PathBuf>,
 ) -> ResolvedModule {
     let local_path = match &m.local_path {
         Some(p) => p,
@@ -461,7 +568,7 @@ fn resolve_local_member_import(
     };
 
     let symbol = m.member.export.as_str();
-    if find_public_def(&module_dir, symbol).is_none() {
+    let Some(member_file) = module_loader.find_public_def(&module_dir, symbol) else {
         symptoms.push(
             Diagnostic::new(
                 "use-not-exported",
@@ -483,16 +590,17 @@ fn resolve_local_member_import(
             files: vec![],
             symbol_aliases: vec![],
         };
-    }
+    };
 
     let qual = path_to_qual_prefix(local_path);
     ResolvedModule {
-        files: vec![],
+        files: vec![(member_file, qual.clone())],
         symbol_aliases: vec![flat_member_symbol_alias(&qual, &m.member)],
     }
 }
 
 fn resolve_local_path_import(
+    module_loader: &mut ModuleLoader,
     module_import: &ModuleImport,
     base_dir: &Path,
     path: &Path,
@@ -589,11 +697,8 @@ fn resolve_local_path_import(
     }
 
     let qual = alias.to_string();
-    let gin_files: Vec<(PathBuf, String)> = full
-        .list_package_gin_files()
-        .into_iter()
-        .map(|p| (p, qual.clone()))
-        .collect();
+    let gin_files =
+        resolve_folder_module_files(module_loader, &full, &qual, spans, span_id, symptoms);
     if gin_files.is_empty() {
         symptoms.push(
             Diagnostic::new(
@@ -647,11 +752,11 @@ fn check_dep_local_collision(
 fn resolve_local_bundle_import(
     _module_import: &ModuleImport,
     b: &LocalBundleImport,
+    module_loader: &mut ModuleLoader,
     base_dir: &Path,
     spans: &SpanTable,
     span_id: SpanId,
     symptoms: &mut Vec<Diagnostic>,
-    find_public_def: &dyn Fn(&Path, &str) -> Option<PathBuf>,
 ) -> ResolvedModule {
     let local_path = match &b.local_path {
         Some(p) => p,
@@ -673,29 +778,30 @@ fn resolve_local_bundle_import(
     };
 
     let qual = path_to_qual_prefix(local_path);
+    let mut files = Vec::new();
     let mut symbol_aliases = Vec::new();
     for member in &b.members {
-        let (files, alias) =
-            resolve_bundle_member_at(&module_dir, &qual, member, spans, symptoms, find_public_def);
+        let (mut member_files, alias) =
+            resolve_bundle_member_at(module_loader, &module_dir, &qual, member, spans, symptoms);
+        files.append(&mut member_files);
         if let Some(a) = alias {
             symbol_aliases.push(a);
         }
-        let _ = files;
     }
 
     ResolvedModule {
-        files: vec![],
+        files,
         symbol_aliases,
     }
 }
 
 fn resolve_dependency_bundle_import(
     b: &LocalBundleImport,
+    module_loader: &mut ModuleLoader,
     dependencies: &HashMap<String, PathBuf>,
     spans: &SpanTable,
     span_id: SpanId,
     symptoms: &mut Vec<Diagnostic>,
-    find_public_def: &dyn Fn(&Path, &str) -> Option<PathBuf>,
 ) -> ResolvedModule {
     let root_name = b.root.as_str();
     let Some(dep_dir) = dependencies.get(root_name) else {
@@ -778,14 +884,8 @@ fn resolve_dependency_bundle_import(
     let mut symbol_aliases = Vec::new();
     let mut files = Vec::new();
     for m in &b.members {
-        let (mut member_files, alias) = resolve_bundle_member_at(
-            &module_dir,
-            &qual_prefix,
-            m,
-            spans,
-            symptoms,
-            find_public_def,
-        );
+        let (mut member_files, alias) =
+            resolve_bundle_member_at(module_loader, &module_dir, &qual_prefix, m, spans, symptoms);
         files.append(&mut member_files);
         if let Some(a) = alias {
             symbol_aliases.push(a);
@@ -801,6 +901,7 @@ fn resolve_dependency_bundle_import(
 fn resolve_package_like_import(
     module_import: &ModuleImport,
     mp: &Spanned<ModPath>,
+    module_loader: &mut ModuleLoader,
     env: ResolveImportEnv<'_>,
 ) -> ResolvedModule {
     let root_name = mp.root.as_str();
@@ -852,6 +953,7 @@ fn resolve_package_like_import(
             .unwrap_or_else(|| root_name.to_string());
         return ResolvedModule {
             files: resolve_folder_module_files(
+                module_loader,
                 dep_dir,
                 &eff_root,
                 env.spans,
@@ -903,7 +1005,7 @@ fn resolve_package_like_import(
             span: mp.span_id(),
         };
 
-        if (env.find_public_def)(&module_dir, &member_name).is_none() {
+        let Some(member_file) = module_loader.find_public_def(&module_dir, &member_name) else {
             env.symptoms.push(
                 Diagnostic::new(
                     "use-not-exported",
@@ -925,13 +1027,13 @@ fn resolve_package_like_import(
                 files: Vec::new(),
                 symbol_aliases: Vec::new(),
             };
-        }
+        };
 
         let mut qual_parts = vec![root_name.to_string()];
         qual_parts.extend(module_segs);
         let qual = qual_parts.join(".");
         return ResolvedModule {
-            files: vec![],
+            files: vec![(member_file, qual.clone())],
             symbol_aliases: vec![flat_member_symbol_alias(&qual, &member)],
         };
     }
@@ -989,6 +1091,7 @@ fn resolve_package_like_import(
 
     ResolvedModule {
         files: resolve_folder_module_files(
+            module_loader,
             &module_dir,
             &qual,
             env.spans,
@@ -1001,13 +1104,14 @@ fn resolve_package_like_import(
 
 /// All `.gin` files for a logical folder module (non-recursive), same qualifier.
 fn resolve_folder_module_files(
+    module_loader: &mut ModuleLoader,
     module_dir: &Path,
     qual_prefix: &str,
     spans: &SpanTable,
     span_id: SpanId,
     symptoms: &mut Vec<Diagnostic>,
 ) -> Vec<(PathBuf, String)> {
-    let paths = module_dir.list_package_gin_files();
+    let paths = module_loader.load_module(module_dir);
     if paths.is_empty() {
         symptoms.push(
             Diagnostic::new(
@@ -1033,6 +1137,8 @@ mod tests {
     use super::*;
     use crate::file_helpers::GinPackageExt;
     use crate::graph::{ResolveGraph, ResolveNode, discovery};
+    use crate::module_inventory::ModuleInventory;
+    use crate::module_loader::ModuleLoader;
     use diagnostic::Span;
     use internment::Intern;
     use parser::query::SourceParseExt;
@@ -1052,12 +1158,9 @@ mod tests {
         let mut available = HashMap::new();
         available.insert(PathBuf::from("main.gin"), pf);
 
-        let graph = discovery(
-            &available,
-            &[PathBuf::from("main.gin")],
-            &HashMap::new(),
-            &|_, _| None,
-        );
+        let inventory = ModuleInventory::discover(&HashMap::new());
+        let mut loader = ModuleLoader::new(inventory, available.into_values());
+        let graph = discovery(&mut loader, &[PathBuf::from("main.gin")], &HashMap::new());
 
         assert_eq!(graph.nodes.len(), 1);
         assert_eq!(graph.nodes[0].path, PathBuf::from("main.gin"));
@@ -1156,12 +1259,9 @@ mod tests {
         let mut available = HashMap::new();
         available.insert(PathBuf::from("main.gin"), pf);
 
-        let graph = discovery(
-            &available,
-            &[PathBuf::from("main.gin")],
-            &HashMap::new(),
-            &|_, _| None,
-        );
+        let inventory = ModuleInventory::discover(&HashMap::new());
+        let mut loader = ModuleLoader::new(inventory, available.into_values());
+        let graph = discovery(&mut loader, &[PathBuf::from("main.gin")], &HashMap::new());
 
         assert_eq!(graph.nodes.len(), 1);
     }

@@ -145,7 +145,7 @@ fn bool_when_arm_bare_true_false_not_unknown() {
 #[test]
 fn bool_when_arm_bare_true_false_with_cross_file_bool() {
     use typecheck::FileId;
-    use typecheck::transform::{TransformCtx, transform_file_with_ctx};
+    use typecheck::transform::{TransformCtx, transform};
 
     let bool_file = parser::cursor::TokenCursor::parse_source("Bool is True or False");
     let typed_bool = typecheck::transform::transform_file(bool_file, FileId(0));
@@ -153,7 +153,7 @@ fn bool_when_arm_bare_true_false_with_cross_file_bool() {
 
     let source = "is_copy(x Int) Bool := when x < 1 then True else False\n";
     let file = parser::cursor::TokenCursor::parse_source(source);
-    let typed = transform_file_with_ctx(&file, FileId(1), &ctx);
+    let typed = transform(&file, FileId(1), &ctx);
     let flaws: Vec<_> = typed
         .all_flaws()
         .into_iter()
@@ -595,7 +595,7 @@ fn test_dot_type() {
 fn test_cross_file_transform() {
     // Test 5.1: Transform two files where the second references types from the first.
     use typecheck::FileId;
-    use typecheck::transform::{TransformCtx, transform_file_with_ctx};
+    use typecheck::transform::{TransformCtx, transform};
 
     // File 1: defines a type.
     let file1 = parser::cursor::TokenCursor::parse_source("Maybe(x) is Some(x) or None");
@@ -606,7 +606,7 @@ fn test_cross_file_transform() {
 
     // File 2: uses the type from file 1.
     let file2 = parser::cursor::TokenCursor::parse_source("val Maybe(Int): Some(5)");
-    let typed2 = transform_file_with_ctx(&file2, FileId(1), &ctx);
+    let typed2 = transform(&file2, FileId(1), &ctx);
 
     // The typed AST should resolve correctly.
     assert!(!typed2.defs.is_empty(), "second file should have defs");

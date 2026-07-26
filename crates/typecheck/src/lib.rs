@@ -9,8 +9,8 @@ pub use completions::{
 };
 pub use typed::{
     AppliedEffectTarget, BindBody, DefId, EffectTarget, ExprId, FileId, FunctionEffects, GroupId,
-    HoverResult, HoverTarget, Overlap, PackageSemanticIndex, ReferenceTargetGroup, ResolvedImport,
-    TagId, TargetIndex, TypedBind, TypedCallableSignature, TypedExpr, TypedExprKind, TypedFileAst,
+    HoverResult, HoverTarget, Overlap, PackageSemanticIndex, ReferenceTargetGroup, TagId,
+    TargetIndex, TypedBind, TypedCallableSignature, TypedExpr, TypedExprKind, TypedFileAst,
     TypedGroup, TypedIfExpr, TypedLoop, TypedLoopKind, TypedTag, TypedWhenArm, TypedWhenExpr,
     VariantId, VariantLookupResult, VariantMap, VariantMapEntry, collect_package_variant_map,
     format_ty_for_hover,

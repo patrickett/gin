@@ -1,5 +1,4 @@
 {
-  "$schema": "https://tree-sitter.github.io/tree-sitter/assets/schemas/grammar.schema.json",
   "name": "gin",
   "word": "identifier",
   "rules": {
@@ -399,8 +398,43 @@
                     "value": "has"
                   },
                   {
-                    "type": "SYMBOL",
-                    "name": "decl_member_list"
+                    "type": "CHOICE",
+                    "members": [
+                      {
+                        "type": "SYMBOL",
+                        "name": "decl_member_list"
+                      },
+                      {
+                        "type": "SEQ",
+                        "members": [
+                          {
+                            "type": "SYMBOL",
+                            "name": "trait_composition"
+                          },
+                          {
+                            "type": "CHOICE",
+                            "members": [
+                              {
+                                "type": "SEQ",
+                                "members": [
+                                  {
+                                    "type": "SYMBOL",
+                                    "name": "_newline"
+                                  },
+                                  {
+                                    "type": "SYMBOL",
+                                    "name": "decl_member_list"
+                                  }
+                                ]
+                              },
+                              {
+                                "type": "BLANK"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
                   }
                 ]
               },
@@ -649,6 +683,39 @@
         }
       ]
     },
+    "trait_composition": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "FIELD",
+          "name": "trait",
+          "content": {
+            "type": "SYMBOL",
+            "name": "tag"
+          }
+        },
+        {
+          "type": "REPEAT",
+          "content": {
+            "type": "SEQ",
+            "members": [
+              {
+                "type": "STRING",
+                "value": "and"
+              },
+              {
+                "type": "FIELD",
+                "name": "trait",
+                "content": {
+                  "type": "SYMBOL",
+                  "name": "tag"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
     "decl_member_list": {
       "type": "PREC_RIGHT",
       "value": 0,
@@ -708,6 +775,31 @@
         ]
       }
     },
+    "qualified_member_name": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "FIELD",
+          "name": "trait",
+          "content": {
+            "type": "SYMBOL",
+            "name": "type_identifier"
+          }
+        },
+        {
+          "type": "STRING",
+          "value": "."
+        },
+        {
+          "type": "FIELD",
+          "name": "name",
+          "content": {
+            "type": "SYMBOL",
+            "name": "identifier"
+          }
+        }
+      ]
+    },
     "_decl_member": {
       "type": "CHOICE",
       "members": [
@@ -732,12 +824,21 @@
         "type": "SEQ",
         "members": [
           {
-            "type": "FIELD",
-            "name": "name",
-            "content": {
-              "type": "SYMBOL",
-              "name": "identifier"
-            }
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "FIELD",
+                "name": "name",
+                "content": {
+                  "type": "SYMBOL",
+                  "name": "identifier"
+                }
+              },
+              {
+                "type": "SYMBOL",
+                "name": "qualified_member_name"
+              }
+            ]
           },
           {
             "type": "SYMBOL",
@@ -1467,10 +1568,39 @@
         },
         {
           "type": "FIELD",
-          "name": "name",
+          "name": "root",
           "content": {
             "type": "SYMBOL",
             "name": "identifier"
+          }
+        },
+        {
+          "type": "REPEAT",
+          "content": {
+            "type": "SEQ",
+            "members": [
+              {
+                "type": "STRING",
+                "value": "."
+              },
+              {
+                "type": "FIELD",
+                "name": "segment",
+                "content": {
+                  "type": "CHOICE",
+                  "members": [
+                    {
+                      "type": "SYMBOL",
+                      "name": "identifier"
+                    },
+                    {
+                      "type": "SYMBOL",
+                      "name": "type_identifier"
+                    }
+                  ]
+                }
+              }
+            ]
           }
         },
         {
@@ -1996,33 +2126,51 @@
               "type": "CHOICE",
               "members": [
                 {
-                  "type": "FIELD",
-                  "name": "modifier",
-                  "content": {
-                    "type": "CHOICE",
-                    "members": [
-                      {
+                  "type": "CHOICE",
+                  "members": [
+                    {
+                      "type": "SEQ",
+                      "members": [
+                        {
+                          "type": "FIELD",
+                          "name": "modifier",
+                          "content": {
+                            "type": "CHOICE",
+                            "members": [
+                              {
+                                "type": "STRING",
+                                "value": "ref"
+                              },
+                              {
+                                "type": "STRING",
+                                "value": "mut"
+                              }
+                            ]
+                          }
+                        },
+                        {
+                          "type": "CHOICE",
+                          "members": [
+                            {
+                              "type": "SYMBOL",
+                              "name": "reference_group"
+                            },
+                            {
+                              "type": "BLANK"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "FIELD",
+                      "name": "modifier",
+                      "content": {
                         "type": "STRING",
-                        "value": "ref"
-                      },
-                      {
-                        "type": "STRING",
-                        "value": "mut"
+                        "value": "eat"
                       }
-                    ]
-                  }
-                },
-                {
-                  "type": "BLANK"
-                }
-              ]
-            },
-            {
-              "type": "CHOICE",
-              "members": [
-                {
-                  "type": "SYMBOL",
-                  "name": "reference_group"
+                    }
+                  ]
                 },
                 {
                   "type": "BLANK"
@@ -3588,6 +3736,18 @@
                 {
                   "type": "STRING",
                   "value": "not"
+                },
+                {
+                  "type": "STRING",
+                  "value": "ref"
+                },
+                {
+                  "type": "STRING",
+                  "value": "mut"
+                },
+                {
+                  "type": "STRING",
+                  "value": "eat"
                 }
               ]
             }
@@ -4131,6 +4291,5 @@
     }
   ],
   "inline": [],
-  "supertypes": [],
-  "reserved": {}
+  "supertypes": []
 }

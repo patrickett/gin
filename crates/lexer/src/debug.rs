@@ -71,7 +71,6 @@ impl<'src> fmt::Display for Token<'src> {
             Token::Pipe => write!(f, "[|]"),
             Token::ShiftLeft => write!(f, "[<<]"),
             Token::ShiftRight => write!(f, "[>>]"),
-            Token::Tilde => write!(f, "[~]"),
             Token::Dot => write!(f, "[.]"),
             Token::At => write!(f, "[@]"),
             Token::Pound => write!(f, "[#]"),

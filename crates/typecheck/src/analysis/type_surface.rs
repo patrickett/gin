@@ -137,11 +137,11 @@ impl<'a> TypeEnv<'a> {
                     ParameterKind::Default(expr) => expr
                         .value
                         .as_size_const_expr()
-                        .unwrap_or_else(|| ConstExpr::Var(*size_name)),
+                        .unwrap_or(ConstExpr::Var(*size_name)),
                     ParameterKind::Tagged(ty)
                     | ParameterKind::ValueParam { ty }
                     | ParameterKind::Inferred { ty } => {
-                        literal_as_const(&ty.value).unwrap_or_else(|| ConstExpr::Var(*size_name))
+                        literal_as_const(&ty.value).unwrap_or(ConstExpr::Var(*size_name))
                     }
                     ParameterKind::Generic => ConstExpr::Var(*size_name),
                 };

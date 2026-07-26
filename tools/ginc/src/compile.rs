@@ -1,18 +1,87 @@
 //! Compilation orchestration.
 
 use crate::cli::Args;
-use analysis::ResolveAndPrepareExt;
-use ast::FileAst;
 use codegen::CodegenContext;
 use diagnostic::{Category, Diagnostic, DiagnosticPathExt};
 use flask::{CompileTarget, FlaskConfig};
 use parser::query::SourceParseExt;
 use resolve::{GinPackageExt, ParsedFile};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use typecheck::compile_time_trait::CompileTimeTraitRegistry;
-use typecheck::transform::{TransformCtx, transform_package};
-use typecheck::{FileId, TypedFileAst};
+use typecheck::transform::{
+    transform_package_with_shared_context, PackageTransformOptions, PackageTransformArtifacts,
+};
+use typecheck::TypedFileAst;
+
+struct CompilationTimings {
+    enabled: bool,
+    total_start: std::time::Instant,
+    phases: Vec<(&'static str, std::time::Duration)>,
+}
+
+impl CompilationTimings {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            total_start: std::time::Instant::now(),
+            phases: Vec::new(),
+        }
+    }
+
+    fn enabled() -> bool {
+        if std::env::var("GINC_TIMINGS").is_err() {
+            return false;
+        }
+
+        matches!(
+            std::env::var("GINC_TIMINGS")
+                .map(|v| v.to_lowercase())
+                .as_deref(),
+            Ok("1") | Ok("true") | Ok("on") | Ok("yes")
+        )
+    }
+
+    fn run<T>(&mut self, name: &'static str, action: impl FnOnce() -> T) -> T {
+        let start = std::time::Instant::now();
+        let value = action();
+        if self.enabled {
+            self.phases.push((name, start.elapsed()));
+        }
+        value
+    }
+
+    fn report(&self) {
+        if !self.enabled {
+            return;
+        }
+
+        let mut total = std::time::Duration::ZERO;
+        let mut phase_parts = Vec::with_capacity(self.phases.len());
+        for (name, duration) in &self.phases {
+            total += *duration;
+            phase_parts.push(format!("{name}:{duration:?}"));
+        }
+
+        eprintln!(
+            "[ginc-timings] total:{:?} {}",
+            self.total_start.elapsed(),
+            phase_parts.join(" ")
+        );
+        if total != self.total_start.elapsed() {
+            eprintln!(
+                "[ginc-timings] measured_sum:{:?} total:{:?}",
+                total,
+                self.total_start.elapsed()
+            );
+        }
+    }
+
+    fn record(&mut self, name: &'static str, duration: std::time::Duration) {
+        if self.enabled {
+            self.phases.push((name, duration));
+        }
+    }
+}
 
 /// Analogous to the `ginc` command
 pub struct GinCompiler;
@@ -29,21 +98,22 @@ impl GinCompiler {
     /// shared type environment, compiled into one object file.
     pub fn compile(args: &'_ mut Args) {
         let path = args.input.to_owned();
+        let mut timings = CompilationTimings::new(args.timings || CompilationTimings::enabled());
 
-        let file_paths = path.collect_gin_files();
+        let file_paths = timings.run("collect", || path.collect_gin_files());
         if file_paths.is_empty() {
             eprintln!("No .gin files found in {}", path.display());
             return;
         }
 
         let is_library = path.is_dir();
-        let sources = read_sources(&file_paths);
-
-        let files = parse(&sources);
+        let files = timings.run("parse", || parse(&read_sources(&file_paths)));
 
         if print_diagnostics(&files) {
             return;
         }
+
+        let fast_llvm = args.fast_llvm || Self::fast_llvm_enabled();
 
         let entry_dir = if is_library {
             path.clone()
@@ -80,15 +150,30 @@ impl GinCompiler {
         let mut files = if args.dependencies.is_empty() && !is_library {
             files
         } else {
-            files.resolve_and_prepare(&args.dependencies, &compile_target)
+            timings.record("inventory", std::time::Duration::from_nanos(0));
+            timings.run("resolve", || {
+                resolve::resolve_imports(files, &args.dependencies)
+            })
         };
 
         if args.dependencies.is_empty() && !is_library {
-            for file in &mut files {
-                file.output.symptoms.extend(typecheck::prepare_file_ast(
-                    &mut file.output.ast,
-                    &compile_target,
-                ));
+            timings.run("prepare", || {
+                for file in &mut files {
+                    file.output.symptoms.extend(typecheck::prepare_file_ast(
+                        &mut file.output.ast,
+                        &compile_target,
+                    ));
+                }
+            });
+        } else {
+            let mut file_asts: Vec<ast::FileAst> = files.iter().map(|f| f.output.ast.clone()).collect();
+            let prepare_diags = timings.run("prepare", || {
+                typecheck::prepare_package_asts(&mut file_asts, &compile_target)
+            });
+            for (file, (ast, mut diags)) in files.iter_mut().zip(file_asts.into_iter().zip(prepare_diags))
+            {
+                file.output.ast = ast;
+                file.output.symptoms.extend(diags.drain(..));
             }
         }
 
@@ -98,34 +183,16 @@ impl GinCompiler {
 
         // Two-pass transform: declare all files, then lower/flow with full-package ctx
         // so defs are visible regardless of file order.
-        let typed_asts: Vec<TypedFileAst>;
-        let trait_registry: Option<CompileTimeTraitRegistry>;
-        {
-            let mut compile_time_eval_ast = FileAst::default();
-            for f in &files {
-                compile_time_eval_ast.merge_from(f.output.ast.clone());
-            }
+        let (typed_asts, trait_registry) = timings.run("transform/typecheck", || {
+            let file_asts: Vec<ast::FileAst> = files.iter().map(|f| f.output.ast.clone()).collect();
+            let PackageTransformArtifacts {
+                typed_asts,
+                trait_registry,
+                ..
+            } = transform_package_with_shared_context(file_asts, PackageTransformOptions::FULL);
 
-            let compile_time_eval_ast_arc = Arc::new(compile_time_eval_ast);
-            trait_registry = Some(CompileTimeTraitRegistry::from_parse_ast(
-                &compile_time_eval_ast_arc,
-                compile_time_eval_ast_arc.clone(),
-            ));
-            let package_ctx =
-                TransformCtx::with_package_compile_time_arc(compile_time_eval_ast_arc);
-
-            let file_asts: Vec<(ast::FileAst, FileId)> = files
-                .iter()
-                .enumerate()
-                .map(|(i, f)| (f.output.ast.clone(), FileId(i as u32)))
-                .collect();
-
-            typed_asts = transform_package(
-                &file_asts,
-                &package_ctx,
-                typecheck::transform::PackageTransformOptions::FULL,
-            );
-        }
+            (typed_asts, trait_registry)
+        });
 
         // Print type-check flaws from the typed AST (uses the diagnostic crate for proper
         // messages, help text, and ariadne rendering).
@@ -133,10 +200,15 @@ impl GinCompiler {
         // Type flaws are printed but do NOT gate compilation — type checking is
         // best-effort diagnostics; codegen may still succeed for code the checker
         // doesn't fully understand yet (e.g. template unions).
-        print_type_diagnostics(&files, &typed_asts);
+        timings.run("typecheck", || print_type_diagnostics(&files, &typed_asts));
 
         match args.emit {
-            crate::cli::Emit::Mlir => emit_mlir_typed(&files, &typed_asts, trait_registry.as_ref()),
+            crate::cli::Emit::Mlir => emit_mlir_typed(
+                &files,
+                &typed_asts,
+                trait_registry.as_ref(),
+                Some(&mut timings),
+            ),
             crate::cli::Emit::Obj | crate::cli::Emit::Exe => emit_native_typed(
                 &files,
                 &typed_asts,
@@ -144,8 +216,24 @@ impl GinCompiler {
                 &path,
                 is_library,
                 trait_registry.as_ref(),
+                fast_llvm,
+                Some(&mut timings),
             ),
+        };
+        timings.report();
+    }
+
+    fn fast_llvm_enabled() -> bool {
+        if std::env::var("GINC_FAST_LLVM").is_err() {
+            return false;
         }
+
+        matches!(
+            std::env::var("GINC_FAST_LLVM")
+                .map(|v| v.to_lowercase())
+                .as_deref(),
+            Ok("1") | Ok("true") | Ok("on") | Ok("yes")
+        )
     }
 }
 
@@ -233,6 +321,7 @@ fn emit_mlir_typed(
     files: &[ParsedFile],
     typed_asts: &[TypedFileAst],
     trait_registry: Option<&CompileTimeTraitRegistry>,
+    mut timings: Option<&mut CompilationTimings>,
 ) {
     let Some(typed) = typed_asts.first() else {
         return;
@@ -242,13 +331,19 @@ fn emit_mlir_typed(
         None => ("", "<stdin>".to_string()),
     };
     let context = codegen::emit::NativeCompiler::create_context();
-    let (module, symptoms) = CodegenContext::build_module_from_typed_ast(
-        &context,
-        typed,
-        source,
-        &label,
-        trait_registry,
-    );
+    let (module, symptoms) = if let Some(timings) = timings.as_mut() {
+        timings.run("mlir-lowering", || {
+            CodegenContext::build_module_from_typed_ast(
+                &context,
+                typed,
+                source,
+                &label,
+                trait_registry,
+            )
+        })
+    } else {
+        CodegenContext::build_module_from_typed_ast(&context, typed, source, &label, trait_registry)
+    };
     let result = module.map(|m| m.as_operation().to_string());
     match result {
         Some(mlir_text) => {
@@ -269,6 +364,8 @@ fn emit_native_typed(
     path: &Path,
     is_library: bool,
     trait_registry: Option<&CompileTimeTraitRegistry>,
+    fast_llvm: bool,
+    mut timings: Option<&mut CompilationTimings>,
 ) {
     let (Some(typed), Some(file)) = (typed_asts.first(), files.first()) else {
         return;
@@ -307,18 +404,30 @@ fn emit_native_typed(
 
     let compiler = codegen::emit::NativeCompiler::default();
     let context = codegen::emit::NativeCompiler::create_context();
-    let (module, symptoms) = CodegenContext::build_module_from_typed_ast(
-        &context,
-        typed,
-        source,
-        &label,
-        trait_registry,
-    );
+    let (module, symptoms) = if let Some(timings) = timings.as_mut() {
+        timings.run("mlir-lowering", || {
+            CodegenContext::build_module_from_typed_ast(
+                &context,
+                typed,
+                source,
+                &label,
+                trait_registry,
+            )
+        })
+    } else {
+        CodegenContext::build_module_from_typed_ast(&context, typed, source, &label, trait_registry)
+    };
     let Some(module) = module else {
         eprintln!("Codegen failed: {:?}", symptoms);
         return;
     };
-    let (ok, more) = compiler.native_from_module(&module, &obj_path, profile);
+    let (ok, more, native_timings) =
+        compiler.native_from_module_with_timings(&module, &obj_path, profile, fast_llvm);
+    if let Some(timings) = timings.as_mut() {
+        timings.record("mlir-optimization", native_timings.optimization);
+        timings.record("llvm-lowering", native_timings.lowering);
+        timings.record("object-emission", native_timings.object_emission);
+    }
     let mut symptoms = symptoms;
     symptoms.extend(more);
     if !ok {
@@ -331,11 +440,21 @@ fn emit_native_typed(
             .output
             .clone()
             .unwrap_or_else(|| path.with_extension(""));
-        let (linked, link_symptoms) = codegen::emit::NativeCompiler::link_executable(
-            &obj_path,
-            &exe_path,
-            args.target.as_deref(),
-        );
+        let (linked, link_symptoms) = if let Some(timings) = timings.as_mut() {
+            timings.run("linking", || {
+                codegen::emit::NativeCompiler::link_executable(
+                    &obj_path,
+                    &exe_path,
+                    args.target.as_deref(),
+                )
+            })
+        } else {
+            codegen::emit::NativeCompiler::link_executable(
+                &obj_path,
+                &exe_path,
+                args.target.as_deref(),
+            )
+        };
         if !linked {
             for s in &link_symptoms {
                 eprintln!("Link error: {}", s.message);

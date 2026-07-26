@@ -24,6 +24,9 @@ mod module_qualify;
 pub mod ty_state;
 pub use ty_state::TyState;
 
+pub mod group_path;
+pub use group_path::GroupPath;
+
 pub mod parameter;
 pub use parameter::{GroupParam, ParamConvention, ParamInfo, ParamSlot, ParameterKind, Parameters};
 

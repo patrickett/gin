@@ -13,7 +13,7 @@ use ast::FileAst;
 use internment::Intern;
 use parser::cursor::TokenCursor;
 use typecheck::CompileTimeTraitRegistry;
-use typecheck::transform::{TransformCtx, transform, transform_declare};
+use typecheck::transform::{TransformCtx, stage_declare, transform};
 use typecheck::{FileId, TypedFileAst};
 
 pub fn typed_file(source: &str) -> TypedFileAst {
@@ -50,7 +50,7 @@ fn marker_fixtures() -> &'static MarkerPackageFixtures {
         // surface plus a handful of primitive tags for hover/pattern binding.
         let eval_ast = Arc::new(load_marker_eval_ast_light());
         // Declare-only: types + variant_map for hover/patterns; skip comptime fold on copy.gin.
-        let eval_typed = transform_declare(eval_ast.as_ref(), FileId(1), &TransformCtx::new());
+        let eval_typed = stage_declare(eval_ast.as_ref(), FileId(1), &TransformCtx::new());
         let mut transform_ctx = TransformCtx::from_typed_asts(&[&eval_typed]);
         transform_ctx.compile_time_eval_ast = Arc::clone(&eval_ast);
         transform_ctx.ide_package = true;

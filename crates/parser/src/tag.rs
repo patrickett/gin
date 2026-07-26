@@ -2,7 +2,7 @@ use internment::Intern;
 use lexer::Token;
 
 use ast::span::SpanId;
-use ast::{ParameterKind, Parameters, Spanned, TypeExpr};
+use ast::{GroupPath, ParameterKind, Parameters, Spanned, TypeExpr};
 
 use crate::cursor::TokenCursor;
 use crate::expr::ExprFn;
@@ -17,6 +17,23 @@ impl<'src, 't> TokenCursor<'src, 't> {
     /// Parse a capitalized type path (`Str`, `Maybe(T)`, `Mod.Item`) into structural type [`TypeExpr`].
     pub fn parse_type_expr(&mut self, expr_parser: ExprFn) -> Option<Spanned<TypeExpr>> {
         self.parse_type_expr_with(expr_parser)
+    }
+
+    pub(crate) fn parse_group_path(&mut self) -> Option<GroupPath> {
+        let root = self.parse_id()?;
+        let mut segments = Vec::new();
+        while self.eat(&Token::Dot) {
+            let segment = match self.peek() {
+                Some(Token::Id(name) | Token::Tag(name)) => {
+                    let segment = self.intern(name);
+                    self.advance();
+                    segment
+                }
+                _ => return None,
+            };
+            segments.push(segment);
+        }
+        Some(GroupPath::new(root, segments))
     }
 
     /// Parse a type-shaped variant/pattern surface.
@@ -161,7 +178,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 self.advance();
             }
             let group = if self.eat(&Token::CurlyOpen) {
-                let group = self.parse_id()?;
+                let group = self.parse_group_path()?;
                 self.expect(&Token::CurlyClose)?;
                 Some(group)
             } else {

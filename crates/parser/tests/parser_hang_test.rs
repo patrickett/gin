@@ -481,6 +481,58 @@ fn interface_composition_uses_is_and() {
 }
 
 #[test]
+fn composed_interface_accepts_qualified_method_body() {
+    let source = "TraitA has run(ref self) Int\nTraitB has stop(ref self) Int\nCombined has TraitA and TraitB\n    ordinary(ref self) Int: 0\n    TraitA.run(ref self) Int: 1\n";
+    let ast = assert_handwritten_parses(source);
+    let decl = ast
+        .tags
+        .get(&internment::Intern::<String>::from_ref("Combined"))
+        .expect("Combined tag should exist");
+
+    let ast::DeclareValue::Has(members) = &decl.value else {
+        panic!("Combined should be an interface");
+    };
+    let ast::HasMember::Function(ordinary) = &members[0] else {
+        panic!("ordinary member should be a function");
+    };
+    assert!(ordinary.qualifier.is_none());
+    assert_eq!(ordinary.name.as_str(), "ordinary");
+
+    let ast::HasMember::Function(qualified) = &members[1] else {
+        panic!("qualified member should be a function");
+    };
+    assert_eq!(
+        qualified.qualifier.as_ref().map(|q| q.name.as_str()),
+        Some("TraitA")
+    );
+    assert_eq!(qualified.name.as_str(), "run");
+    assert!(
+        ast.defs
+            .contains_key(&internment::Intern::from_ref("Combined.ordinary"))
+    );
+    assert!(
+        ast.defs
+            .contains_key(&internment::Intern::from_ref("Combined.TraitA.run"))
+    );
+}
+
+#[test]
+fn qualified_conflicting_methods_have_distinct_canonical_names() {
+    let source = "TraitA has run(ref self) Int\nTraitB has run(ref self) Int\nCombined has TraitA and TraitB\n    TraitA.run(ref self) Int: 1\n    TraitB.run(ref self) Int: 2\n";
+    let ast = assert_handwritten_parses(source);
+
+    assert!(
+        ast.defs
+            .contains_key(&internment::Intern::from_ref("Combined.TraitA.run"))
+    );
+    assert!(
+        ast.defs
+            .contains_key(&internment::Intern::from_ref("Combined.TraitB.run"))
+    );
+    assert_eq!(ast.method_binds.len(), 2);
+}
+
+#[test]
 fn dot_provided_trait_attaches_to_declaration() {
     let source = "Capacity has count PointerSize\nCapacity.IsEmpty has is_empty: self.count > 0\n";
     let ast = assert_handwritten_parses(source);

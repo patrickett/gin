@@ -149,7 +149,7 @@ fn hover_record_pattern_fields_and_variant_head() {
     let typed = support::transform_with_full_marker_eval(src);
     let eval_typed = {
         let eval = support::load_marker_eval_ast_for_tests();
-        typecheck::transform::transform_declare(
+        typecheck::transform::stage_declare(
             &eval,
             typecheck::FileId(99),
             &typecheck::transform::TransformCtx::new(),

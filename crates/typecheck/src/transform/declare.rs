@@ -19,7 +19,7 @@ use crate::analysis::TypeEnv;
 use crate::compile_time_trait::{RESERVED_TRAITS, synthesize_reflectable_trait};
 use crate::ty::{Ty, UnionVariant};
 use crate::typed::{
-    DefId, ExprId, FileId, GroupId, ResolvedImport, TagId, TypedBind, TypedFileAst, TypedGroup,
+    DefId, ExprId, FileId, GroupId, GroupProjection, TagId, TypedBind, TypedFileAst, TypedGroup,
     TypedTag, VariantMap,
 };
 use ast::parameter::Parameters;
@@ -105,7 +105,7 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
             );
         }
     }
-    typed.resolved_imports = populate_resolved_imports(file_ast, ctx);
+
     // Collect raw ModPaths from imports for module path hover detection.
     for import in &file_ast.uses {
         for mi in &import.0 {
@@ -145,6 +145,17 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                 &resolved_tags,
             )
         });
+
+        check_qualified_has_members(
+            declare,
+            file_ast,
+            ctx.compile_time_eval_ast.as_ref(),
+            &mut |span, diagnostic| {
+                typed
+                    .declaration_flaws
+                    .push((span, diagnostic.at_span_id(span, &typed.span_table)));
+            },
+        );
 
         for pt in &declare.provided_traits {
             if RESERVED_TRAITS.contains(&pt.trait_name.as_str()) {
@@ -199,6 +210,7 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                     typed.exprs.ty.push(expr_ty);
                     typed.exprs.span.push(expr.span_id);
                     typed.exprs.const_value.push(None);
+                    typed.exprs.target_group.push(None);
                     typed.exprs.flaws.push(Vec::new());
                     let span = typed.span_table.get(expr.span_id);
                     typed
@@ -389,11 +401,12 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
         }
         let def_id = DefId(*name);
         let dependent_binder = BinderId::new(typed.file_id.0, BinderOwner::Definition(def_id.0));
-        let tag_types_by_name: HashMap<Intern<String>, Ty> = typed
+        let own_tag_types: HashMap<Intern<String>, Ty> = typed
             .tag_types
             .iter()
             .map(|(id, ty)| (id.0, ty.clone()))
             .collect();
+        let tag_types_by_name = resolved_types(&own_tag_types, &ctx.cross_file_tag_types);
         let receiver_type = declare.receiver_type_surface().map(|receiver| {
             TypeEnv::new(&tag_types_by_name)
                 .with_tag_params(&tag_params)
@@ -633,6 +646,129 @@ fn check_union_variant_shape_type_scope(
             }
         }
         _ => {}
+    }
+}
+
+fn check_qualified_has_members(
+    declare: &ast::Declare,
+    file_ast: &FileAst,
+    eval_ast: &FileAst,
+    push_flaw: &mut dyn FnMut(SpanId, Diagnostic),
+) {
+    let DeclareValue::Has(members) = &declare.value else {
+        return;
+    };
+
+    for member in members {
+        let ast::HasMember::Function(function) = member else {
+            continue;
+        };
+        let Some(qualifier) = &function.qualifier else {
+            continue;
+        };
+        if !declare
+            .provided_traits
+            .iter()
+            .any(|provided| provided.trait_name == qualifier.name)
+        {
+            push_flaw(
+                qualifier.span,
+                Diagnostic::new(
+                    "type-uninherited-trait-qualifier",
+                    format!(
+                        "`{}` does not inherit trait `{}`",
+                        declare.name.as_str(),
+                        qualifier.name.as_str()
+                    ),
+                )
+                .with_arg("type_name", declare.name.as_str().to_string())
+                .with_arg("trait_name", qualifier.name.as_str().to_string()),
+            );
+            continue;
+        }
+
+        let mut visited = HashSet::new();
+        match trait_method_lookup(
+            qualifier.name,
+            function.name,
+            file_ast,
+            eval_ast,
+            &mut visited,
+        ) {
+            TraitMethodLookup::Found => {}
+            TraitMethodLookup::Missing => push_flaw(
+                function.name_span,
+                Diagnostic::new(
+                    "type-unknown-trait-method",
+                    format!(
+                        "trait `{}` has no method `{}`",
+                        qualifier.name.as_str(),
+                        function.name.as_str()
+                    ),
+                )
+                .with_arg("trait_name", qualifier.name.as_str().to_string())
+                .with_arg("method_name", function.name.as_str().to_string()),
+            ),
+            TraitMethodLookup::UnknownTrait(name) => push_flaw(
+                qualifier.span,
+                Diagnostic::new(
+                    "type-unknown-trait",
+                    format!("unknown trait `{}`", name.as_str()),
+                )
+                .with_arg("trait_name", name.as_str().to_string()),
+            ),
+        }
+    }
+}
+
+enum TraitMethodLookup {
+    Found,
+    Missing,
+    UnknownTrait(Intern<String>),
+}
+
+fn trait_method_lookup(
+    trait_name: Intern<String>,
+    method_name: Intern<String>,
+    file_ast: &FileAst,
+    eval_ast: &FileAst,
+    visited: &mut HashSet<Intern<String>>,
+) -> TraitMethodLookup {
+    if !visited.insert(trait_name) {
+        return TraitMethodLookup::Missing;
+    }
+    let Some(declaration) = file_ast
+        .tags
+        .get(&trait_name)
+        .or_else(|| eval_ast.tags.get(&trait_name))
+    else {
+        return TraitMethodLookup::UnknownTrait(trait_name);
+    };
+    if let DeclareValue::Has(members) = &declaration.value
+        && members.iter().any(|member| {
+            matches!(member, ast::HasMember::Function(function) if function.name == method_name)
+        })
+    {
+        return TraitMethodLookup::Found;
+    }
+    let mut unknown_trait = None;
+    for provided in &declaration.provided_traits {
+        match trait_method_lookup(
+            provided.trait_name,
+            method_name,
+            file_ast,
+            eval_ast,
+            visited,
+        ) {
+            TraitMethodLookup::Found => return TraitMethodLookup::Found,
+            TraitMethodLookup::Missing => {}
+            TraitMethodLookup::UnknownTrait(name) => unknown_trait = Some(name),
+        }
+    }
+    if let Some(name) = unknown_trait {
+        TraitMethodLookup::UnknownTrait(name)
+    } else {
+        TraitMethodLookup::Missing
     }
 }
 
@@ -1150,12 +1286,12 @@ fn resolve_target_groups(
     param_conventions: &[ParamConvention],
     flaws: &mut Vec<(SpanId, Diagnostic)>,
 ) -> (Vec<Option<GroupId>>, Vec<TypedGroup>, Option<GroupId>) {
-    let mut named: HashMap<Intern<String>, GroupId> = HashMap::new();
+    let mut named: HashMap<ast::GroupPath, GroupId> = HashMap::new();
     let mut groups: Vec<TypedGroup> = Vec::new();
     let param_groups = param_types
         .iter()
         .zip(param_conventions)
-        .map(|((param_name, referent_type), convention)| {
+        .map(|((param_name, param_type), convention)| {
             if !matches!(
                 convention,
                 ParamConvention::Observe | ParamConvention::Mutate
@@ -1163,9 +1299,10 @@ fn resolve_target_groups(
                 return None;
             }
 
-            let group_name = bind.param_groups.get(param_name).copied();
-            if let Some(group_name) = group_name
-                && let Some(group_id) = named.get(&group_name).copied()
+            let referent_type = reference_referent_type(param_type);
+            let group_name = bind.param_groups.get(param_name).cloned();
+            if let Some(group_name) = group_name.as_ref()
+                && let Some(group_id) = named.get(group_name).copied()
             {
                 if groups[group_id.0 as usize].referent_type != *referent_type {
                     flaws.push((
@@ -1174,10 +1311,10 @@ fn resolve_target_groups(
                             "type-incompatible-target-group",
                             format!(
                                 "target group `{}` is used with incompatible referent types",
-                                group_name.as_str()
+                                group_name
                             ),
                         )
-                        .with_arg("group", group_name.as_str().to_string()),
+                        .with_arg("group", group_name.to_string()),
                     ));
                 }
                 return Some(group_id);
@@ -1185,7 +1322,11 @@ fn resolve_target_groups(
 
             let group_id = GroupId(groups.len() as u32);
             groups.push(TypedGroup {
-                name: group_name,
+                projections: group_name
+                    .as_ref()
+                    .filter(|path| path.segments.is_empty())
+                    .map(|_| Vec::new()),
+                path: group_name.clone(),
                 referent_type: referent_type.clone(),
             });
             if let Some(group_name) = group_name {
@@ -1194,6 +1335,65 @@ fn resolve_target_groups(
             Some(group_id)
         })
         .collect();
+
+    let mut missing_roots = HashSet::new();
+    for group in &groups {
+        let Some(path) = group.path.as_ref().filter(|path| !path.segments.is_empty()) else {
+            continue;
+        };
+        let root = ast::GroupPath::root(path.root);
+        if !named.contains_key(&root) && missing_roots.insert(root.clone()) {
+            flaws.push((
+                bind.name_span,
+                Diagnostic::new(
+                    "type-unknown-target-group",
+                    format!("derived target group `{path}` has no root group `{root}`"),
+                )
+                .with_arg("group", path.to_string())
+                .with_arg("root", root.to_string()),
+            ));
+        }
+    }
+
+    let root_types: HashMap<_, _> = groups
+        .iter()
+        .filter_map(|group| {
+            let path = group.path.as_ref()?;
+            path.segments
+                .is_empty()
+                .then_some((path.root, group.referent_type.clone()))
+        })
+        .collect();
+    for group in &mut groups {
+        let Some(path) = group.path.as_ref().filter(|path| !path.segments.is_empty()) else {
+            continue;
+        };
+        let Some(root_type) = root_types.get(&path.root) else {
+            continue;
+        };
+        match resolve_group_path(root_type, path) {
+            Ok((projections, resolved_type)) => {
+                group.projections = Some(projections);
+                if resolved_type != group.referent_type {
+                    flaws.push((
+                        bind.name_span,
+                        Diagnostic::new(
+                            "type-incompatible-target-group",
+                            format!(
+                                "target group `{path}` resolves to `{}`, but is used with `{}`",
+                                resolved_type.format_for_hover(),
+                                group.referent_type.format_for_hover()
+                            ),
+                        )
+                        .with_arg("group", path.to_string())
+                        .with_arg("resolved_type", resolved_type.format_for_hover())
+                        .with_arg("referent_type", group.referent_type.format_for_hover()),
+                    ));
+                }
+            }
+            Err(error) => flaws.push((bind.name_span, error.diagnostic(path))),
+        }
+    }
 
     let return_group = match bind.return_tag.as_deref() {
         Some(spanned) => match &spanned.value {
@@ -1206,9 +1406,9 @@ fn resolve_target_groups(
                         spanned.span_id,
                         Diagnostic::new(
                             "type-unknown-target-group",
-                            format!("unknown target group `{}`", name.as_str()),
+                            format!("unknown target group `{name}`"),
                         )
-                        .with_arg("group", name.as_str().to_string()),
+                        .with_arg("group", name.to_string()),
                     ));
                     None
                 }
@@ -1243,6 +1443,156 @@ fn resolve_target_groups(
     };
 
     (param_groups, groups, return_group)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum GroupPathError {
+    UnknownField(Intern<String>),
+    UnknownVariant(Intern<String>),
+    InvalidProjection { segment: Intern<String>, ty: Ty },
+}
+
+impl GroupPathError {
+    fn diagnostic(&self, path: &ast::GroupPath) -> Diagnostic {
+        match self {
+            Self::UnknownField(field) => Diagnostic::new(
+                "type-unknown-target-group-field",
+                format!("target group `{path}` refers to unknown field `{field}`"),
+            )
+            .with_arg("group", path.to_string())
+            .with_arg("field", field.to_string()),
+            Self::UnknownVariant(variant) => Diagnostic::new(
+                "type-unknown-target-group-variant",
+                format!("target group `{path}` refers to unknown variant `{variant}`"),
+            )
+            .with_arg("group", path.to_string())
+            .with_arg("variant", variant.to_string()),
+            Self::InvalidProjection { segment, ty } => Diagnostic::new(
+                "type-invalid-target-group-projection",
+                format!(
+                    "target group segment `{segment}` cannot project from `{}`",
+                    ty.format_for_hover()
+                ),
+            )
+            .with_arg("group", path.to_string())
+            .with_arg("segment", segment.to_string())
+            .with_arg("type", ty.format_for_hover()),
+        }
+    }
+}
+
+enum GroupPathCursor {
+    Type(Ty),
+    Variant(Vec<(Intern<String>, Box<Ty>)>),
+}
+
+impl GroupPathCursor {
+    fn into_type(self) -> Ty {
+        match self {
+            Self::Type(ty) => ty,
+            Self::Variant(fields) => Ty::Tuple(fields.into_iter().map(|(_, ty)| *ty).collect()),
+        }
+    }
+
+    fn unwrapped(self) -> Self {
+        match self {
+            Self::Type(Ty::Ref { inner, .. }) => Self::Type(*inner).unwrapped(),
+            cursor => cursor,
+        }
+    }
+}
+
+fn reference_referent_type(ty: &Ty) -> &Ty {
+    match ty {
+        Ty::Ref { inner, .. } => reference_referent_type(inner),
+        ty => ty,
+    }
+}
+
+fn resolve_group_path(
+    root_type: &Ty,
+    path: &ast::GroupPath,
+) -> Result<(Vec<GroupProjection>, Ty), GroupPathError> {
+    let mut cursor = GroupPathCursor::Type(root_type.clone());
+    let mut projections = Vec::with_capacity(path.segments.len());
+    for segment in &path.segments {
+        cursor = cursor.unwrapped();
+        match segment.as_str() {
+            "items" => match cursor {
+                GroupPathCursor::Type(Ty::Array { elem, .. }) => {
+                    projections.push(GroupProjection::Items);
+                    cursor = GroupPathCursor::Type(*elem);
+                }
+                cursor => {
+                    return Err(GroupPathError::InvalidProjection {
+                        segment: *segment,
+                        ty: cursor.into_type(),
+                    });
+                }
+            },
+            "pointee" => match cursor {
+                GroupPathCursor::Type(Ty::Ptr { inner }) => {
+                    projections.push(GroupProjection::Pointee);
+                    cursor = GroupPathCursor::Type(*inner);
+                }
+                cursor => {
+                    return Err(GroupPathError::InvalidProjection {
+                        segment: *segment,
+                        ty: cursor.into_type(),
+                    });
+                }
+            },
+            _ if segment
+                .as_str()
+                .chars()
+                .next()
+                .is_some_and(char::is_uppercase) =>
+            {
+                match cursor {
+                    GroupPathCursor::Type(Ty::Union { variants, .. }) => {
+                        let Some(variant) = variants
+                            .into_iter()
+                            .find(|variant| variant.name == *segment)
+                        else {
+                            return Err(GroupPathError::UnknownVariant(*segment));
+                        };
+                        projections.push(GroupProjection::Variant { name: *segment });
+                        cursor = GroupPathCursor::Variant(variant.fields);
+                    }
+                    cursor => {
+                        return Err(GroupPathError::InvalidProjection {
+                            segment: *segment,
+                            ty: cursor.into_type(),
+                        });
+                    }
+                }
+            }
+            _ => match cursor {
+                GroupPathCursor::Type(Ty::Record { fields, .. })
+                | GroupPathCursor::Variant(fields) => {
+                    let Some((index, (_, field_type))) = fields
+                        .into_iter()
+                        .enumerate()
+                        .find(|(_, (name, _))| name == segment)
+                    else {
+                        return Err(GroupPathError::UnknownField(*segment));
+                    };
+                    projections.push(GroupProjection::Field {
+                        name: *segment,
+                        index,
+                    });
+                    cursor = GroupPathCursor::Type(*field_type);
+                }
+                cursor => {
+                    return Err(GroupPathError::InvalidProjection {
+                        segment: *segment,
+                        ty: cursor.into_type(),
+                    });
+                }
+            },
+        }
+    }
+    Ok((projections, cursor.unwrapped().into_type()))
 }
 
 fn resolve_return_type(
@@ -1352,13 +1702,6 @@ fn param_kind_from_parameter_kind(
     }
 }
 
-fn populate_resolved_imports(
-    _file_ast: &FileAst,
-    _ctx: &TransformCtx,
-) -> HashMap<Intern<String>, ResolvedImport> {
-    HashMap::new()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1382,6 +1725,193 @@ mod tests {
     }
 
     #[test]
+    fn qualified_method_requires_inherited_trait() {
+        let ast = TokenCursor::parse_source(
+            "TraitA has run(ref self) Int\nCombined has TraitA\n    TraitB.run(ref self) Int: 1\n",
+        );
+        let typed = stage_declare(&ast, FileId(0), &TransformCtx::new());
+
+        assert!(typed.declaration_flaws.iter().any(|(_, diagnostic)| {
+            diagnostic.code.slug() == "type-uninherited-trait-qualifier"
+        }));
+    }
+
+    #[test]
+    fn qualified_method_must_exist_on_inherited_trait() {
+        let ast = TokenCursor::parse_source(
+            "TraitA has stop(ref self) Int\nCombined has TraitA\n    TraitA.run(ref self) Int: 1\n",
+        );
+        let typed = stage_declare(&ast, FileId(0), &TransformCtx::new());
+
+        assert!(
+            typed
+                .declaration_flaws
+                .iter()
+                .any(|(_, diagnostic)| { diagnostic.code.slug() == "type-unknown-trait-method" })
+        );
+    }
+
+    #[test]
+    fn qualified_method_requires_resolvable_trait() {
+        let ast =
+            TokenCursor::parse_source("Combined has Missing\n    Missing.run(ref self) Int: 1\n");
+        let typed = stage_declare(&ast, FileId(0), &TransformCtx::new());
+
+        assert!(
+            typed
+                .declaration_flaws
+                .iter()
+                .any(|(_, diagnostic)| { diagnostic.code.slug() == "type-unknown-trait" })
+        );
+    }
+
+    #[test]
+    fn qualified_method_accepts_transitively_inherited_trait_method() {
+        let ast = TokenCursor::parse_source(
+            "Base has run(ref self) Int\nMid has Base\nCombined has Mid\n    Base.run(ref self) Int: 1\n",
+        );
+        let typed = stage_declare(&ast, FileId(0), &TransformCtx::new());
+
+        assert!(!typed.declaration_flaws.iter().any(|(_, diagnostic)| {
+            matches!(
+                diagnostic.code.slug(),
+                "type-uninherited-trait-qualifier" | "type-unknown-trait-method"
+            )
+        }));
+    }
+
+    #[test]
+    fn derived_group_requires_declared_root_group() {
+        let ast = TokenCursor::parse_source("bad(mut{missing.items} item x): 0\n");
+        let typed = stage_declare(&ast, FileId(0), &TransformCtx::new());
+
+        assert!(
+            typed
+                .declaration_flaws
+                .iter()
+                .any(|(_, diagnostic)| { diagnostic.code.slug() == "type-unknown-target-group" })
+        );
+    }
+
+    #[test]
+    fn resolves_named_field_and_item_group_projections() {
+        let ast = TokenCursor::parse_source(
+            "Ring has power Int\nEntity has rings Array(Ring, 2)\ninspect(ref{entities} entity Entity, ref{entities.rings.items} ring Ring): 0\n",
+        );
+        let typed = stage_declare(&ast, FileId(0), &TransformCtx::new());
+        let bind = typed.defs.get(&DefId(Intern::from_ref("inspect"))).unwrap();
+
+        assert_eq!(
+            bind.groups[1].projections,
+            Some(vec![
+                GroupProjection::Field {
+                    name: Intern::from_ref("rings"),
+                    index: 0,
+                },
+                GroupProjection::Items,
+            ])
+        );
+        assert!(
+            typed.declaration_flaws.is_empty(),
+            "{:?}",
+            typed.declaration_flaws
+        );
+    }
+
+    #[test]
+    fn target_group_path_rejects_unknown_field() {
+        let ast = TokenCursor::parse_source(
+            "Ring has power Int\nEntity has rings Array(Ring, 2)\nbad(ref{entities} entity Entity, ref{entities.armor.items} ring Ring): 0\n",
+        );
+        let typed = stage_declare(&ast, FileId(0), &TransformCtx::new());
+
+        assert!(typed.declaration_flaws.iter().any(|(_, diagnostic)| {
+            diagnostic.code.slug() == "type-unknown-target-group-field"
+        }));
+    }
+
+    #[test]
+    fn target_group_path_rejects_items_on_non_collection() {
+        let ast = TokenCursor::parse_source(
+            "Ring has power Int\nEntity has ring Ring\nbad(ref{entities} entity Entity, ref{entities.ring.items} ring Ring): 0\n",
+        );
+        let typed = stage_declare(&ast, FileId(0), &TransformCtx::new());
+
+        assert!(typed.declaration_flaws.iter().any(|(_, diagnostic)| {
+            diagnostic.code.slug() == "type-invalid-target-group-projection"
+        }));
+    }
+
+    #[test]
+    fn target_group_path_rejects_pointee_on_non_pointer() {
+        let ast = TokenCursor::parse_source(
+            "Ring has power Int\nEntity has ring Ring\nbad(ref{entities} entity Entity, ref{entities.ring.pointee} ring Ring): 0\n",
+        );
+        let typed = stage_declare(&ast, FileId(0), &TransformCtx::new());
+
+        assert!(typed.declaration_flaws.iter().any(|(_, diagnostic)| {
+            diagnostic.code.slug() == "type-invalid-target-group-projection"
+        }));
+    }
+
+    #[test]
+    fn target_group_path_rejects_referent_type_mismatch() {
+        let ast = TokenCursor::parse_source(
+            "Ring has power Int\nEntity has rings Array(Ring, 2)\nbad(ref{entities} entity Entity, ref{entities.rings.items} value Int): 0\n",
+        );
+        let typed = stage_declare(&ast, FileId(0), &TransformCtx::new());
+
+        assert!(
+            typed.declaration_flaws.iter().any(|(_, diagnostic)| {
+                diagnostic.code.slug() == "type-incompatible-target-group"
+            })
+        );
+    }
+
+    #[test]
+    fn resolves_nested_target_group_path() {
+        let ast = TokenCursor::parse_source(
+            "Ring has power Int\nEntity has rings Array(Ring, 2)\nWorld has entity Entity\ninspect(ref{world} world World, ref{world.entity.rings.items} ring Ring): 0\n",
+        );
+        let typed = stage_declare(&ast, FileId(0), &TransformCtx::new());
+        let bind = typed.defs.get(&DefId(Intern::from_ref("inspect"))).unwrap();
+
+        assert_eq!(bind.groups[1].projections.as_ref().unwrap().len(), 3);
+        assert!(
+            typed.declaration_flaws.is_empty(),
+            "{:?}",
+            typed.declaration_flaws
+        );
+    }
+
+    #[test]
+    fn resolves_variant_payload_target_group_path() {
+        let ast = TokenCursor::parse_source(
+            "Ring has power Int\nChoice is Some(value Ring) or None\ninspect(ref{choices} choice Choice, ref{choices.Some.value} ring Ring): 0\n",
+        );
+        let typed = stage_declare(&ast, FileId(0), &TransformCtx::new());
+        let bind = typed.defs.get(&DefId(Intern::from_ref("inspect"))).unwrap();
+
+        assert_eq!(
+            bind.groups[1].projections,
+            Some(vec![
+                GroupProjection::Variant {
+                    name: Intern::from_ref("Some"),
+                },
+                GroupProjection::Field {
+                    name: Intern::from_ref("value"),
+                    index: 0,
+                },
+            ])
+        );
+        assert!(
+            typed.declaration_flaws.is_empty(),
+            "{:?}",
+            typed.declaration_flaws
+        );
+    }
+
+    #[test]
     fn infers_ungrouped_reference_return_from_sole_reference_input() {
         let ast = TokenCursor::parse_source("first(ref values List(x)) ref x: values\n");
         let typed = stage_declare(&ast, FileId(0), &TransformCtx::new());
@@ -1389,7 +1919,7 @@ mod tests {
 
         assert_eq!(bind.param_groups, vec![Some(GroupId(0))]);
         assert_eq!(bind.groups.len(), 1);
-        assert_eq!(bind.groups[0].name, None);
+        assert_eq!(bind.groups[0].path, None);
         assert_eq!(bind.return_group, Some(GroupId(0)));
         assert!(typed.declaration_flaws.is_empty());
     }
@@ -1403,7 +1933,10 @@ mod tests {
 
         assert_eq!(bind.param_groups, vec![Some(GroupId(0)), Some(GroupId(0))]);
         assert_eq!(bind.groups.len(), 1);
-        assert_eq!(bind.groups[0].name, Some(Intern::from_ref("r")));
+        assert_eq!(
+            bind.groups[0].path,
+            Some(ast::GroupPath::root(Intern::from_ref("r")))
+        );
         assert_eq!(bind.return_group, Some(GroupId(0)));
         assert!(typed.declaration_flaws.is_empty());
     }

@@ -185,7 +185,7 @@ fn test_underscore_float() {
 
 #[test]
 fn test_operators() {
-    let src = "== /= <= >= = < > + - * / ^ ~ \\";
+    let src = "== /= <= >= = < > + - * / ^ \\";
 
     let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
@@ -202,8 +202,19 @@ fn test_operators() {
     assert!(matches!(tokens[9], Token::Star));
     assert!(matches!(tokens[10], Token::Slash));
     assert!(matches!(tokens[11], Token::Caret));
-    assert!(matches!(tokens[12], Token::Tilde));
-    assert!(matches!(tokens[13], Token::SlashOr));
+    assert!(matches!(tokens[12], Token::SlashOr));
+}
+
+#[test]
+fn tilde_is_rejected() {
+    let mut lexer = Lexer::new("~");
+    assert!(lexer.next().is_none());
+    assert!(
+        lexer
+            .errors
+            .iter()
+            .any(|diagnostic| diagnostic.code.slug() == "lex-unexpected-character")
+    );
 }
 
 #[test]

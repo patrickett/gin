@@ -6,7 +6,7 @@ use diagnostic::Diagnostic;
 use flask::CompileTarget;
 use internment::Intern;
 
-use crate::analysis::eval_compile_time_expr_public;
+use crate::analysis::eval_compile_time_expr;
 use crate::analysis::when_declare_is_exhaustive;
 use crate::ty::Ty;
 use ast::declare::{Declare, DeclareValue};
@@ -38,10 +38,11 @@ pub fn materialize_default_binds(ast: &mut FileAst) -> Vec<Diagnostic> {
         let Some(decl) = ast.tags.get(&type_name) else {
             continue;
         };
-        let Some(default_expr) = default_expr_from_decl(decl) else {
+        let Some(default_expr) = provided_trait_field_expr(decl, Intern::from_ref("default"))
+        else {
             continue;
         };
-        let Some(cv) = eval_compile_time_expr_public(&default_expr.value, &const_binds, ast) else {
+        let Some(cv) = eval_compile_time_expr(&default_expr.value, &const_binds, ast) else {
             let name_span = bind.name_span;
             diags.push(
                 Diagnostic::new(
@@ -152,10 +153,6 @@ fn bind_return_type_name(bind: &Bind) -> Option<Intern<String>> {
     }
 }
 
-fn default_expr_from_decl(decl: &Declare) -> Option<Typed<Expr>> {
-    provided_trait_field_expr(decl, Intern::from_ref("default"))
-}
-
 fn provided_trait_field_expr(decl: &Declare, field: Intern<String>) -> Option<Typed<Expr>> {
     decl.provided_traits.iter().find_map(|pt| {
         pt.fields
@@ -179,7 +176,7 @@ fn build_type_static_expansions(
         }
         for pt in &decl.provided_traits {
             for (field, expr) in &pt.fields {
-                if let Some(cv) = eval_compile_time_expr_public(&expr.value, const_binds, ast) {
+                if let Some(cv) = eval_compile_time_expr(&expr.value, const_binds, ast) {
                     out.insert((*type_name, *field), cv);
                 }
             }
@@ -453,7 +450,7 @@ pub fn const_binds_from_prepared_ast(ast: &FileAst) -> HashMap<Intern<String>, O
                 BindValue::Expr(e) => e
                     .const_value
                     .clone()
-                    .or_else(|| eval_compile_time_expr_public(&e.value, &const_binds, ast)),
+                    .or_else(|| eval_compile_time_expr(&e.value, &const_binds, ast)),
                 _ => None,
             };
             if let Some(cv) = cv {
@@ -570,8 +567,7 @@ pub fn materialize_when_declare_subjects_from_package(ast: &mut FileAst, package
             && let Some(subject) = &mut w.subject
         {
             if subject.const_value.is_none()
-                && let Some(cv) =
-                    eval_compile_time_expr_public(&subject.value, &const_binds, package)
+                && let Some(cv) = eval_compile_time_expr(&subject.value, &const_binds, package)
             {
                 subject.const_value = Some(cv);
             }

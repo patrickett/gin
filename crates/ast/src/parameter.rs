@@ -1,10 +1,10 @@
 use indexmap::IndexMap;
 use internment::Intern;
 
-use crate::TypeExpr;
 use crate::expr::{Expr, Typed};
 use crate::span::Spanned;
 use crate::ty_state::TyState;
+use crate::{GroupPath, TypeExpr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ParamConvention {
@@ -18,7 +18,7 @@ pub enum ParamConvention {
 /// Compatibility view derived from grouped parameter reference types.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GroupParam {
-    pub name: Intern<String>,
+    pub path: GroupPath,
     pub ty_name: Intern<String>,
     pub mutable: bool,
 }

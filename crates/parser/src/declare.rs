@@ -2,6 +2,7 @@ use indexmap::IndexMap;
 
 use crate::cursor::TokenCursor;
 use crate::expr::ExprFn;
+use ast::declare::HasMemberQualifier;
 use ast::span::SpanId;
 use ast::{
     ConstExpr, Declare, DeclareValue, DocComment, Expr, HasFunction, HasFunctionKind, HasMember,
@@ -79,10 +80,16 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 self.recover_removed_parenthesized_has_rhs();
                 (DeclareValue::Has(Vec::new()), Vec::new())
             } else if matches!(self.peek(), Some(Token::Tag(_))) {
-                (
-                    DeclareValue::Has(Vec::new()),
-                    self.parse_trait_chain_after_has(expr_parser),
-                )
+                let provided_traits = self.parse_trait_chain_after_has(expr_parser);
+                let checkpoint = self.checkpoint();
+                self.skip_newlines();
+                let value = if self.eat(&Token::Indent) {
+                    self.parse_has_rhs(expr_parser, true)
+                } else {
+                    self.rewind(checkpoint);
+                    DeclareValue::Has(Vec::new())
+                };
+                (value, provided_traits)
             } else {
                 (self.parse_has_rhs(expr_parser, has_block_body), Vec::new())
             };
@@ -143,15 +150,34 @@ impl<'src, 't> TokenCursor<'src, 't> {
             self.skip_newlines();
             let member_doc = self.parse_doc_comment();
 
-            // Member name (must be a lowercase id)
-            let member_name = match self.peek() {
+            let (qualifier, member_name) = match self.peek() {
                 Some(Token::Id(n)) => {
                     let name = self.intern(n);
                     let name_span = self
                         .peek_span()
                         .expect("peek confirmed Id token, peek_span should succeed");
                     self.advance();
-                    (name, name_span)
+                    (None, (name, name_span))
+                }
+                Some(Token::Tag(n)) if self.peek_at(1) == Some(&Token::Dot) => {
+                    let qualifier = HasMemberQualifier {
+                        name: self.intern(n),
+                        span: self.peek_span().unwrap_or(self.current_span()),
+                    };
+                    self.advance();
+                    self.advance();
+                    let Some(Token::Id(n)) = self.peek() else {
+                        self.error(
+                            "parse-expected-method-name",
+                            "expected method name after trait qualifier",
+                            self.current_span(),
+                        );
+                        break;
+                    };
+                    let name = self.intern(n);
+                    let name_span = self.peek_span().unwrap_or(self.current_span());
+                    self.advance();
+                    (Some(qualifier), (name, name_span))
                 }
                 Some(_) => {
                     self.error(
@@ -212,6 +238,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                     HasFunctionKind::Associated
                 };
                 HasMember::Function(HasFunction {
+                    qualifier,
                     name: member_name.0,
                     name_span: member_name.1,
                     params,
@@ -808,9 +835,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 fields: parsed.fields,
             });
 
-            self.skip_indents();
             let checkpoint = self.checkpoint();
+            self.skip_indents();
             if !self.eat(&Token::And) {
+                self.rewind(checkpoint);
                 break;
             }
             self.skip_indents();

@@ -133,6 +133,12 @@ fn infer_expr_effects(
                         index,
                     }
                 });
+                add_projected_effect(typed, *base, &mut effects.invalidates, |base| {
+                    EffectTarget::Descendants(Box::new(EffectTarget::Field {
+                        base: Box::new(base),
+                        index,
+                    }))
+                });
             }
         }
         TypedExprKind::TupleSet { base, index, .. } => {
@@ -142,14 +148,26 @@ fn infer_expr_effects(
                     index: *index,
                 }
             });
+            add_projected_effect(typed, *base, &mut effects.invalidates, |base| {
+                EffectTarget::Descendants(Box::new(EffectTarget::Field {
+                    base: Box::new(base),
+                    index: *index,
+                }))
+            });
         }
         TypedExprKind::BufSet { buf, index, .. } => {
             let index = target_index_for_expr(typed, *index);
             add_projected_effect(typed, *buf, &mut effects.writes, |base| {
                 EffectTarget::ItemRegion {
                     base: Box::new(base),
-                    index,
+                    index: index.clone(),
                 }
+            });
+            add_projected_effect(typed, *buf, &mut effects.invalidates, |base| {
+                EffectTarget::Descendants(Box::new(EffectTarget::ItemRegion {
+                    base: Box::new(base),
+                    index: index.clone(),
+                }))
             });
         }
         TypedExprKind::Eat(inner) | TypedExprKind::ConsumeArg(inner) => {
@@ -257,13 +275,20 @@ pub(crate) fn applied_effect_targets(
             let Some(arg) = args.get(index) else {
                 continue;
             };
-            let Some(actual) = typed.exprs.target_group[arg.as_usize()].as_ref() else {
+            let Some(actual) = typed
+                .exprs
+                .target_group
+                .get(arg.as_usize())
+                .and_then(|target| target.as_ref())
+            else {
                 continue;
             };
-            if let Some(target) = effect.substitute(*group, actual)
-                && !applied.contains(&target)
-            {
-                applied.push(target);
+            for actual in actual.iter() {
+                if let Some(target) = effect.substitute(*group, actual)
+                    && !applied.contains(&target)
+                {
+                    applied.push(target);
+                }
             }
         }
     }
@@ -275,11 +300,18 @@ fn add_exact_effect(
     expr_id: crate::typed::ExprId,
     effects: &mut HashSet<EffectTarget>,
 ) {
-    let Some(target) = typed.exprs.target_group[expr_id.as_usize()].as_ref() else {
+    let Some(target) = typed
+        .exprs
+        .target_group
+        .get(expr_id.as_usize())
+        .and_then(|target| target.as_ref())
+    else {
         return;
     };
-    if let Some(target) = EffectTarget::from_reference(target) {
-        effects.insert(target);
+    for target in target.iter() {
+        if let Some(target) = EffectTarget::from_reference(target) {
+            effects.insert(target);
+        }
     }
 }
 
@@ -288,11 +320,18 @@ fn add_descendant_effect(
     expr_id: crate::typed::ExprId,
     effects: &mut HashSet<EffectTarget>,
 ) {
-    let Some(target) = typed.exprs.target_group[expr_id.as_usize()].as_ref() else {
+    let Some(target) = typed
+        .exprs
+        .target_group
+        .get(expr_id.as_usize())
+        .and_then(|target| target.as_ref())
+    else {
         return;
     };
-    if let Some(target) = EffectTarget::from_reference(target) {
-        effects.insert(EffectTarget::Descendants(Box::new(target)));
+    for target in target.iter() {
+        if let Some(target) = EffectTarget::from_reference(target) {
+            effects.insert(EffectTarget::Descendants(Box::new(target)));
+        }
     }
 }
 
@@ -300,13 +339,20 @@ fn add_projected_effect(
     typed: &TypedFileAst,
     expr_id: crate::typed::ExprId,
     effects: &mut HashSet<EffectTarget>,
-    project: impl FnOnce(EffectTarget) -> EffectTarget,
+    mut project: impl FnMut(EffectTarget) -> EffectTarget,
 ) {
-    let Some(target) = typed.exprs.target_group[expr_id.as_usize()].as_ref() else {
+    let Some(target) = typed
+        .exprs
+        .target_group
+        .get(expr_id.as_usize())
+        .and_then(|target| target.as_ref())
+    else {
         return;
     };
-    if let Some(target) = EffectTarget::from_reference(target) {
-        effects.insert(project(target));
+    for target in target.iter() {
+        if let Some(target) = EffectTarget::from_reference(target) {
+            effects.insert(project(target));
+        }
     }
 }
 

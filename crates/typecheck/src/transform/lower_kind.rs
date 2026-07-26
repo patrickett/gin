@@ -12,11 +12,11 @@ use internment::Intern;
 
 use crate::analysis::{TypeEnv, unify_type_args};
 use crate::compile_time_trait::{COMPARABLE_TRAIT, CompileTimeTraitRegistry, trait_field_for_ty};
-use crate::subst::DependentInstantiation;
+use crate::subst::{DepSubst, DependentInstantiation};
 use crate::ty::Ty;
 use crate::typed::{
-    BindBody, DefId, ExprId, ReferenceTargetGroup, TypedCallableSignature, TypedExprKind,
-    TypedFileAst, TypedIfExpr, TypedLoop, TypedLoopKind, TypedWhenExpr,
+    BindBody, DefId, ExprId, ReferenceTargetGroup, ReferenceTargetSet, TypedCallableSignature,
+    TypedExprKind, TypedFileAst, TypedIfExpr, TypedLoop, TypedLoopKind, TypedWhenExpr,
 };
 use ast::ty::{ParamKind, TyArg};
 
@@ -205,6 +205,83 @@ fn type_arg_key(arg: &Typed<Expr>) -> Option<Intern<String>> {
 
 /// Convert a parse-tree [`Expr`] to a [`TypedExprKind`] by recursively
 /// lowering sub-expressions and resolving types.
+fn add_destructure_bindings(
+    typed: &TypedFileAst,
+    value: ExprId,
+    tag_name: Intern<String>,
+    field_bindings: &[(Intern<String>, Intern<String>)],
+    env: &mut LocalEnv,
+) {
+    let Some(value_ty) = typed.exprs.ty.get(value.as_usize()) else {
+        return;
+    };
+    let value_ty = reference_referent(value_ty);
+    let value_targets = typed
+        .exprs
+        .target_group
+        .get(value.as_usize())
+        .and_then(|targets| targets.as_ref());
+    let (fields, variant_name, subst) = match value_ty {
+        Ty::Record { fields, .. } => (fields, None, None),
+        Ty::Union {
+            variants,
+            resolved_params,
+            ..
+        } => {
+            let Some(variant) = variants.iter().find(|variant| variant.name == tag_name) else {
+                return;
+            };
+            (
+                &variant.fields,
+                Some(variant.name),
+                resolved_params
+                    .as_ref()
+                    .map(|args| DepSubst::from_ty_args(args)),
+            )
+        }
+        _ => return,
+    };
+    let projected_base = variant_name.zip(value_targets).map(|(name, targets)| {
+        targets.projected(|target| ReferenceTargetGroup::Variant {
+            base: Box::new(target.clone()),
+            name,
+        })
+    });
+    for (field_name, binding_name) in field_bindings {
+        let Some((index, (_, field_type))) = fields
+            .iter()
+            .enumerate()
+            .find(|(_, (name, _))| name == field_name)
+        else {
+            continue;
+        };
+        let field_type = subst
+            .as_ref()
+            .map(|subst| subst.apply_to_ty(field_type))
+            .unwrap_or_else(|| (**field_type).clone());
+        env.types.insert(*binding_name, field_type);
+        env.locals.insert(*binding_name);
+        env.constants.insert(*binding_name);
+        let base_targets = projected_base.as_ref().or(value_targets);
+        if let Some(base_targets) = base_targets {
+            env.target_groups.insert(
+                *binding_name,
+                base_targets.projected(|target| ReferenceTargetGroup::Field {
+                    base: Box::new(target.clone()),
+                    index,
+                }),
+            );
+        }
+    }
+}
+
+fn reference_referent(ty: &Ty) -> &Ty {
+    match ty {
+        Ty::Ref { inner, .. } => reference_referent(inner),
+        ty => ty,
+    }
+}
+
 pub(crate) fn lower_expr_kind(
     typed: &mut TypedFileAst,
     expr: &Typed<Expr>,
@@ -465,7 +542,9 @@ pub(crate) fn lower_expr_kind(
                         .cloned()
                         .flatten()
                 } else {
-                    Some(ReferenceTargetGroup::Local(bind.name))
+                    Some(ReferenceTargetSet::singleton(ReferenceTargetGroup::Local(
+                        bind.name,
+                    )))
                 };
                 if let Some(target_group) = target_group {
                     env.target_groups.insert(bind.name, target_group);
@@ -499,8 +578,23 @@ pub(crate) fn lower_expr_kind(
                 .map(|s| lower_typed_expr(typed, s, &scope.child(), env));
 
             let subject_ty = subject_id.and_then(|id| typed.exprs.ty.get(id.as_usize()).cloned());
+            let subject_targets = subject_id.and_then(|id| {
+                typed
+                    .exprs
+                    .target_group
+                    .get(id.as_usize())
+                    .cloned()
+                    .flatten()
+            });
 
-            let arms = lower_all_when_arms(typed, &when_expr.arms, scope, env, subject_ty.as_ref());
+            let arms = lower_all_when_arms(
+                typed,
+                &when_expr.arms,
+                scope,
+                env,
+                subject_ty.as_ref(),
+                subject_targets.as_ref(),
+            );
 
             TypedExprKind::When(TypedWhenExpr {
                 subject: subject_id,
@@ -641,12 +735,14 @@ pub(crate) fn lower_expr_kind(
         }
 
         Expr::Destructure {
+            tag_name,
             field_bindings,
             value,
-            ..
         } => {
             let value_id = lower_typed_expr(typed, value, &scope.child(), env);
+            add_destructure_bindings(typed, value_id, *tag_name, field_bindings, env);
             TypedExprKind::Destructure {
+                tag_name: *tag_name,
                 value: value_id,
                 field_bindings: field_bindings.clone(),
             }
@@ -665,7 +761,10 @@ pub(crate) fn lower_expr_kind(
         Expr::RecordGet { base, field } => {
             let base_id = lower_typed_expr(typed, base, &scope.child(), env);
             // Resolve the field index from the base expression's record type.
-            let base_ty = &typed.exprs.ty[base_id.as_usize()];
+            let base_ty = match &typed.exprs.ty[base_id.as_usize()] {
+                Ty::Ref { inner, .. } => inner.as_ref(),
+                ty => ty,
+            };
             let field_idx = if let Ty::Record { fields, .. } = base_ty {
                 fields.iter().position(|(name, _)| name == field)
             } else {
