@@ -28,13 +28,15 @@ pub mod group_path;
 pub use group_path::GroupPath;
 
 pub mod parameter;
-pub use parameter::{GroupParam, ParamConvention, ParamInfo, ParamSlot, ParameterKind, Parameters};
+pub use parameter::{
+    GroupParam, ParamConvention, ParamInfo, ParamSlot, Parameter, ParameterKind, Parameters,
+};
 
 pub mod type_decl;
 pub use type_decl::TypeNameExt;
 
-pub mod const_expr;
-pub use const_expr::{BinderId, BinderOwner, ConstExpr, DependentArgId};
+pub mod normal_expr;
+pub use normal_expr::{BinderId, BinderOwner, DependentArgId, NormalExpr};
 
 pub mod const_value;
 pub use const_value::{ConstValue, TypeConstraint};
@@ -66,7 +68,7 @@ pub use declare::{
 };
 
 pub mod pattern;
-pub use pattern::PatternNameExt;
+pub use pattern::{Pattern, PatternNameExt};
 
 pub mod span;
 pub use span::{HasSpanId, Span, SpanId, SpanTable, Spanned, SubSpan};

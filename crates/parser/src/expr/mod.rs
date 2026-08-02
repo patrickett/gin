@@ -147,6 +147,24 @@ impl<'src, 't> TokenCursor<'src, 't> {
             let inner = self.parse_expression();
             let span_id = inner.span_id;
             Typed::infer(Expr::ConsumeArg(Box::new(inner)), span_id)
+        } else if matches!(self.peek(), Some(Token::Id(_)))
+            && self.peek_at(1) == Some(&Token::Eq)
+        {
+            let (name, name_span) = match self.advance() {
+                Some((Token::Id(name), span)) => (self.intern(name), span),
+                _ => unreachable!(),
+            };
+            self.advance();
+            let rhs = self.parse_expression();
+            let end_span = self.last_consumed_span();
+            Typed::infer(
+                Expr::Bind(Box::new(Bind::new(
+                    name,
+                    name_span,
+                    BindValue::Expr(Box::new(rhs)),
+                ))),
+                self.merge_span(name_span, end_span),
+            )
         } else {
             self.parse_expression()
         }
@@ -1047,6 +1065,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             Expr::Ref {
                 inner: Box::new(inner),
                 mutable: false,
+                group: None,
             },
             self.merge_span(start_span, end_span),
         )
@@ -1062,6 +1081,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             Expr::Ref {
                 inner: Box::new(inner),
                 mutable: true,
+                group: None,
             },
             self.merge_span(start_span, end_span),
         )

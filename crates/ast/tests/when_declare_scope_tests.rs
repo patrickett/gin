@@ -8,7 +8,7 @@ use typecheck::transform::{TransformCtx, transform};
 fn transform_parsed(source: &str, prepare: bool) -> typecheck::TypedFileAst {
     let mut file_ast = TokenCursor::parse_source(source);
     if prepare {
-        let _ = typecheck::prepare_file_ast(&mut file_ast, &CompileTarget::Library);
+        let _ = typecheck::prepare_parse_ast(&mut file_ast, &CompileTarget::Library);
     }
     transform(&file_ast, FileId(0), &TransformCtx::new())
 }
@@ -63,8 +63,11 @@ fn when_subject_resolves_when_target_imported() {
 Architecture is 'x86_64' or 'wasm32'
 Vendor is 'unknown'
 OperatingSystem is 'unknown'
-Target has arch Architecture, vendor Vendor, os OperatingSystem
-Target.Default has default: ( arch: 'x86_64', vendor: 'unknown', os: 'unknown', )
+Target has Default
+    arch Architecture
+    vendor Vendor
+    os OperatingSystem
+    Default.default: ( arch: 'x86_64', vendor: 'unknown', os: 'unknown', )
 
 target Target
 

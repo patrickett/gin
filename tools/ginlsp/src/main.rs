@@ -475,8 +475,8 @@ impl Backend {
                     // Only register new dep files in the engine; the salsa file
                     // watcher invalidates already-tracked files on disk changes,
                     // so we should not eagerly re-read them on every keystroke.
-                    if !host.engine.contains(&p) {
-                        let _ = host.engine.add_file(p.clone());
+                    if !host.cache.contains(&p) {
+                        let _ = host.cache.add_file(p.clone());
                     }
                     if !paths.contains(&p) {
                         paths.push(p);
@@ -496,9 +496,7 @@ impl Backend {
             return Vec::new();
         }
 
-        let all_diags = snapshot
-            .engine
-            .all_diagnostics(&all_file_paths, &dependency_dirs);
+        let all_diags = snapshot.cache.all_diagnostics(&all_file_paths);
 
         let mut results = Vec::with_capacity(all_file_paths.len());
         for pkg_path in &all_file_paths {
@@ -508,7 +506,7 @@ impl Backend {
                 Err(_) => continue,
             };
 
-            let Some(doc) = snapshot.engine.document_snapshot(&normalized_pkg_path) else {
+            let Some(doc) = snapshot.cache.document_snapshot(&normalized_pkg_path) else {
                 results.push((pkg_uri, Vec::new()));
                 continue;
             };

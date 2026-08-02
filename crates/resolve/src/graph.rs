@@ -7,7 +7,7 @@
 //! Import resolution (matching import statements to files) is delegated to
 //! [`super::resolve_module_import`] and related functions in `package_resolver.rs`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use ast::{HasSpanId, SymbolAlias};
@@ -73,6 +73,7 @@ pub(crate) fn discovery(
     let mut adj: Vec<Vec<ImportEdge>> = Vec::new();
     let mut node_aliases: Vec<Vec<SymbolAlias>> = Vec::new();
     let mut symptoms: Vec<(usize, Diagnostic)> = Vec::new();
+    let entry_path_set: HashSet<&Path> = entry_paths.iter().map(PathBuf::as_path).collect();
     let mut seen: HashMap<PathBuf, String> = HashMap::new();
     let mut node_by_path: HashMap<PathBuf, usize> = HashMap::new();
     let mut processed: Vec<bool> = Vec::new();
@@ -148,6 +149,7 @@ pub(crate) fn discovery(
 
                     if let Some(prev) = seen.get(&file_path)
                         && prev != &qual
+                        && !entry_path_set.contains(file_path.as_path())
                     {
                         symptoms.push((
                             from_idx,
@@ -274,6 +276,42 @@ mod tests {
         let graph = discovery(&mut loader, &[main_path], &dependencies);
 
         assert!(graph.symptoms.is_empty(), "{:#?}", graph.symptoms);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn self_import_of_package_entry_does_not_conflict_with_its_entry_qualifier() {
+        let root = temp_dir("self_import_entry");
+        let core_dir = root.join("core");
+        let primitive_dir = core_dir.join("primitive");
+        fs::create_dir_all(&primitive_dir).unwrap();
+        fs::write(core_dir.join("flask.jsonc"), "{}").unwrap();
+
+        let marker_path = core_dir.join("marker.gin");
+        let bool_path = primitive_dir.join("bool.gin");
+        fs::write(&marker_path, "use core.primitive.Bool\n").unwrap();
+        fs::write(&bool_path, "Bool is True or False\n").unwrap();
+
+        let mut dependencies = HashMap::new();
+        dependencies.insert("core".to_string(), core_dir.clone());
+        let inventory = ModuleInventory::discover(&dependencies);
+        let mut loader = ModuleLoader::new(
+            inventory,
+            [parsed_file(&marker_path), parsed_file(&bool_path)],
+        );
+        let graph = discovery(
+            &mut loader,
+            &[marker_path, bool_path.clone()],
+            &dependencies,
+        );
+
+        assert!(graph.symptoms.is_empty(), "{:#?}", graph.symptoms);
+        let bool_node = graph
+            .nodes
+            .iter()
+            .find(|node| node.path == bool_path)
+            .unwrap();
+        assert!(bool_node.qualifier.is_empty());
         let _ = fs::remove_dir_all(root);
     }
 

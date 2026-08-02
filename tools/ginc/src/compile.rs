@@ -3,15 +3,17 @@
 use crate::cli::Args;
 use codegen::CodegenContext;
 use diagnostic::{Category, Diagnostic, DiagnosticPathExt};
+use flask::TargetTriple;
 use flask::{CompileTarget, FlaskConfig};
 use parser::query::SourceParseExt;
 use resolve::{GinPackageExt, ParsedFile};
+use std::fmt;
 use std::path::{Path, PathBuf};
+use typecheck::TypedFileAst;
 use typecheck::compile_time_trait::CompileTimeTraitRegistry;
 use typecheck::transform::{
-    transform_package_with_shared_context, PackageTransformOptions, PackageTransformArtifacts,
+    PackageTransformArtifacts, PackageTransformOptions, transform_package_with_shared_context,
 };
-use typecheck::TypedFileAst;
 
 struct CompilationTimings {
     enabled: bool,
@@ -86,6 +88,87 @@ impl CompilationTimings {
 /// Analogous to the `ginc` command
 pub struct GinCompiler;
 
+/// Final compiler outcome.
+#[derive(Debug)]
+pub enum CompileResult {
+    /// Compilation succeeded with no non-fatal diagnostics.
+    Success { output: Option<PathBuf> },
+    /// Compilation succeeded with non-fatal type-check diagnostics.
+    SuccessWithTypecheckDiagnostics { output: Option<PathBuf> },
+    /// Compilation failed.
+    Failed(CompileFailure),
+}
+
+/// Structured fatal failure surfaced by the compiler driver.
+#[derive(Debug)]
+pub enum CompileFailure {
+    /// No `.gin` files were discovered.
+    NoInputFiles { path: PathBuf },
+    /// A source file was unreadable.
+    UnreadableSource { path: PathBuf, error: String },
+    /// Parse stage produced a fatal flaw.
+    ParseFailed,
+    /// Target resolution failed.
+    InvalidTarget {
+        source: Option<String>,
+        error: flask::TargetError,
+    },
+    /// Entry package did not define a concrete target.
+    MissingEntryTarget,
+    /// Emission or linking failed.
+    EmissionFailed {
+        stage: CompileEmitStage,
+        diagnostics: Vec<Diagnostic>,
+    },
+}
+
+/// Codegen phase names for emission failures.
+#[derive(Debug)]
+pub enum CompileEmitStage {
+    /// Typed-AST lowering to MLIR failed.
+    Codegen,
+    /// MLIR → object emission failed.
+    ObjectEmission,
+    /// Executable linking failed.
+    Linking,
+}
+
+impl fmt::Display for CompileFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoInputFiles { path } => {
+                write!(f, "no .gin files found in {}", path.display())
+            }
+            Self::UnreadableSource { path, error } => {
+                write!(f, "failed to read {}: {error}", path.display())
+            }
+            Self::ParseFailed => write!(f, "parse failed"),
+            Self::InvalidTarget { source, error } => {
+                if let Some(source) = source {
+                    write!(f, "invalid target `{source}`: {error}")
+                } else {
+                    write!(f, "{error}")
+                }
+            }
+            Self::MissingEntryTarget => {
+                write!(f, "entry package must set `target` to a full target triple")
+            }
+            Self::EmissionFailed { stage, .. } => write!(f, "{stage} failed"),
+        }
+    }
+}
+
+impl fmt::Display for CompileEmitStage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            Self::Codegen => "codegen",
+            Self::ObjectEmission => "object emission",
+            Self::Linking => "linking",
+        };
+        write!(f, "{label}")
+    }
+}
+
 impl GinCompiler {
     /// Compile a Gin project through a staged pipeline.
     ///
@@ -96,21 +179,25 @@ impl GinCompiler {
     /// **Library mode** (input is a directory):
     /// All `.gin` files are treated as a single compilation unit with a
     /// shared type environment, compiled into one object file.
-    pub fn compile(args: &'_ mut Args) {
+    pub fn compile(args: &'_ mut Args) -> CompileResult {
         let path = args.input.to_owned();
         let mut timings = CompilationTimings::new(args.timings || CompilationTimings::enabled());
 
         let file_paths = timings.run("collect", || path.collect_gin_files());
         if file_paths.is_empty() {
-            eprintln!("No .gin files found in {}", path.display());
-            return;
+            return CompileResult::Failed(CompileFailure::NoInputFiles { path });
         }
 
         let is_library = path.is_dir();
-        let files = timings.run("parse", || parse(&read_sources(&file_paths)));
+        let sources = match timings.run("collect", || read_sources(&file_paths)) {
+            Ok(sources) => sources,
+            Err(error) => return CompileResult::Failed(error),
+        };
+
+        let files = timings.run("parse", || parse(&sources));
 
         if print_diagnostics(&files) {
-            return;
+            return CompileResult::Failed(CompileFailure::ParseFailed);
         }
 
         let fast_llvm = args.fast_llvm || Self::fast_llvm_enabled();
@@ -130,10 +217,27 @@ impl GinCompiler {
         }
 
         let cli_triple = args.target.as_deref();
-        let compile_target = flask_config
-            .as_ref()
-            .and_then(|c| CompileTarget::resolve(c, cli_triple).ok())
-            .unwrap_or(CompileTarget::Library);
+        let compile_target = match (flask_config.as_ref(), cli_triple) {
+            (Some(config), target) => match CompileTarget::resolve(config, target) {
+                Ok(compile_target) => compile_target,
+                Err(error) => {
+                    return CompileResult::Failed(CompileFailure::InvalidTarget {
+                        source: target.map(ToString::to_string),
+                        error,
+                    });
+                }
+            },
+            (None, Some(target)) => match TargetTriple::parse(target) {
+                Ok(compile_target) => CompileTarget::Concrete(compile_target),
+                Err(error) => {
+                    return CompileResult::Failed(CompileFailure::InvalidTarget {
+                        source: Some(target.to_string()),
+                        error,
+                    });
+                }
+            },
+            (None, None) => CompileTarget::Library,
+        };
 
         let is_lib_package = flask_config
             .as_ref()
@@ -143,8 +247,13 @@ impl GinCompiler {
             && let Some(ref config) = flask_config
             && let Err(e) = config.require_entry_triple()
         {
-            eprintln!("error: {e}");
-            return;
+            return CompileResult::Failed(match e {
+                flask::TargetError::MissingTarget => CompileFailure::MissingEntryTarget,
+                error => CompileFailure::InvalidTarget {
+                    source: None,
+                    error,
+                },
+            });
         }
 
         let mut files = if args.dependencies.is_empty() && !is_library {
@@ -159,26 +268,32 @@ impl GinCompiler {
         if args.dependencies.is_empty() && !is_library {
             timings.run("prepare", || {
                 for file in &mut files {
-                    file.output.symptoms.extend(typecheck::prepare_file_ast(
+                    file.output.symptoms.extend(typecheck::prepare_parse_ast(
                         &mut file.output.ast,
                         &compile_target,
                     ));
                 }
             });
         } else {
-            let mut file_asts: Vec<ast::FileAst> = files.iter().map(|f| f.output.ast.clone()).collect();
-            let prepare_diags = timings.run("prepare", || {
-                typecheck::prepare_package_asts(&mut file_asts, &compile_target)
+            let mut file_asts: Vec<ast::FileAst> =
+                files.iter().map(|f| f.output.ast.clone()).collect();
+            let prepare_diags: Vec<Vec<Diagnostic>> = timings.run("prepare", || {
+                file_asts
+                    .iter_mut()
+                    .map(|ast| typecheck::prepare_parse_ast(ast, &compile_target))
+                    .collect()
             });
-            for (file, (ast, mut diags)) in files.iter_mut().zip(file_asts.into_iter().zip(prepare_diags))
+            for (file, (ast, mut diags)) in files
+                .iter_mut()
+                .zip(file_asts.into_iter().zip(prepare_diags))
             {
                 file.output.ast = ast;
-                file.output.symptoms.extend(diags.drain(..));
+                file.output.symptoms.append(&mut diags);
             }
         }
 
         if print_diagnostics(&files) {
-            return;
+            return CompileResult::Failed(CompileFailure::ParseFailed);
         }
 
         // Two-pass transform: declare all files, then lower/flow with full-package ctx
@@ -200,9 +315,10 @@ impl GinCompiler {
         // Type flaws are printed but do NOT gate compilation — type checking is
         // best-effort diagnostics; codegen may still succeed for code the checker
         // doesn't fully understand yet (e.g. template unions).
-        timings.run("typecheck", || print_type_diagnostics(&files, &typed_asts));
+        let has_typecheck_flaws =
+            timings.run("typecheck", || print_type_diagnostics(&files, &typed_asts));
 
-        match args.emit {
+        let emit_result = match args.emit {
             crate::cli::Emit::Mlir => emit_mlir_typed(
                 &files,
                 &typed_asts,
@@ -212,15 +328,28 @@ impl GinCompiler {
             crate::cli::Emit::Obj | crate::cli::Emit::Exe => emit_native_typed(
                 &files,
                 &typed_asts,
-                args,
-                &path,
-                is_library,
-                trait_registry.as_ref(),
-                fast_llvm,
-                Some(&mut timings),
+                NativeEmitOptions {
+                    args,
+                    path: &path,
+                    is_library,
+                    trait_registry: trait_registry.as_ref(),
+                    fast_llvm,
+                    timings: Some(&mut timings),
+                },
             ),
         };
         timings.report();
+
+        let output = match emit_result {
+            Ok(output) => output,
+            Err(failure) => return CompileResult::Failed(failure),
+        };
+
+        if has_typecheck_flaws {
+            return CompileResult::SuccessWithTypecheckDiagnostics { output };
+        }
+
+        CompileResult::Success { output }
     }
 
     fn fast_llvm_enabled() -> bool {
@@ -233,6 +362,28 @@ impl GinCompiler {
                 .map(|v| v.to_lowercase())
                 .as_deref(),
             Ok("1") | Ok("true") | Ok("on") | Ok("yes")
+        )
+    }
+}
+
+impl CompileResult {
+    pub fn emitted_path(&self) -> Option<&Path> {
+        match self {
+            Self::Success { output } | Self::SuccessWithTypecheckDiagnostics { output } => {
+                output.as_deref()
+            }
+            Self::Failed(_) => None,
+        }
+    }
+
+    pub fn has_typecheck_diagnostics(&self) -> bool {
+        matches!(self, Self::SuccessWithTypecheckDiagnostics { .. })
+    }
+
+    pub fn is_success(&self) -> bool {
+        matches!(
+            self,
+            Self::Success { .. } | Self::SuccessWithTypecheckDiagnostics { .. }
         )
     }
 }
@@ -251,15 +402,20 @@ fn parse(sources: &[(PathBuf, String)]) -> Vec<ParsedFile> {
         .collect()
 }
 
-fn read_sources(paths: &[PathBuf]) -> Vec<(PathBuf, String)> {
+fn read_sources(paths: &[PathBuf]) -> Result<Vec<(PathBuf, String)>, CompileFailure> {
     let mut sources = Vec::with_capacity(paths.len());
     for fp in paths {
         match std::fs::read_to_string(fp) {
             Ok(s) => sources.push((fp.clone(), s)),
-            Err(err) => eprintln!("Error reading {}: {}", fp.display(), err),
+            Err(error) => {
+                return Err(CompileFailure::UnreadableSource {
+                    path: fp.clone(),
+                    error: error.to_string(),
+                });
+            }
         }
     }
-    sources
+    Ok(sources)
 }
 
 /// Print all diagnostics for a slice of parsed files.
@@ -281,13 +437,16 @@ fn print_diagnostics(files: &[ParsedFile]) -> bool {
 }
 
 /// Print type-check flaws from the typed AST for every file.
-fn print_type_diagnostics(files: &[ParsedFile], typed_asts: &[TypedFileAst]) {
+fn print_type_diagnostics(files: &[ParsedFile], typed_asts: &[TypedFileAst]) -> bool {
+    let mut has_flaws = false;
     for (file, typed) in files.iter().zip(typed_asts) {
         let filename = file.path.diagnostic_report_path_from_cwd();
         for (_, flaw) in typed.all_flaws() {
             flaw.clone().print(&file.source, &filename);
+            has_flaws = true;
         }
     }
+    has_flaws
 }
 
 /// Print codegen / link diagnostics with the same ariadne layout as parse and type errors.
@@ -322,9 +481,9 @@ fn emit_mlir_typed(
     typed_asts: &[TypedFileAst],
     trait_registry: Option<&CompileTimeTraitRegistry>,
     mut timings: Option<&mut CompilationTimings>,
-) {
+) -> Result<Option<PathBuf>, CompileFailure> {
     let Some(typed) = typed_asts.first() else {
-        return;
+        return Ok(None);
     };
     let (source, label) = match files.first() {
         Some(f) => (f.source.as_str(), f.path.diagnostic_report_path_from_cwd()),
@@ -349,26 +508,43 @@ fn emit_mlir_typed(
         Some(mlir_text) => {
             print_codegen_diagnostics(files, &symptoms);
             println!("\n```mlir\n{mlir_text}```\n");
+            Ok(None)
         }
         None => {
             print_codegen_diagnostics(files, &symptoms);
+            Err(CompileFailure::EmissionFailed {
+                stage: CompileEmitStage::Codegen,
+                diagnostics: symptoms,
+            })
         }
     }
 }
 
 /// Compile to object file / executable using the typed AST (no merge step).
+struct NativeEmitOptions<'a> {
+    args: &'a Args,
+    path: &'a Path,
+    is_library: bool,
+    trait_registry: Option<&'a CompileTimeTraitRegistry>,
+    fast_llvm: bool,
+    timings: Option<&'a mut CompilationTimings>,
+}
+
 fn emit_native_typed(
     files: &[ParsedFile],
     typed_asts: &[TypedFileAst],
-    args: &Args,
-    path: &Path,
-    is_library: bool,
-    trait_registry: Option<&CompileTimeTraitRegistry>,
-    fast_llvm: bool,
-    mut timings: Option<&mut CompilationTimings>,
-) {
+    options: NativeEmitOptions<'_>,
+) -> Result<Option<PathBuf>, CompileFailure> {
+    let NativeEmitOptions {
+        args,
+        path,
+        is_library,
+        trait_registry,
+        fast_llvm,
+        mut timings,
+    } = options;
     let (Some(typed), Some(file)) = (typed_asts.first(), files.first()) else {
-        return;
+        return Ok(None);
     };
     let obj_path = if is_library {
         // Folder packages reuse `args.output` only for `-o exe`/`link` destinations.
@@ -418,8 +594,11 @@ fn emit_native_typed(
         CodegenContext::build_module_from_typed_ast(&context, typed, source, &label, trait_registry)
     };
     let Some(module) = module else {
-        eprintln!("Codegen failed: {:?}", symptoms);
-        return;
+        print_codegen_diagnostics(files, &symptoms);
+        return Err(CompileFailure::EmissionFailed {
+            stage: CompileEmitStage::Codegen,
+            diagnostics: symptoms,
+        });
     };
     let (ok, more, native_timings) =
         compiler.native_from_module_with_timings(&module, &obj_path, profile, fast_llvm);
@@ -431,8 +610,11 @@ fn emit_native_typed(
     let mut symptoms = symptoms;
     symptoms.extend(more);
     if !ok {
-        eprintln!("Codegen failed: {:?}", symptoms);
-        return;
+        print_codegen_diagnostics(files, &symptoms);
+        return Err(CompileFailure::EmissionFailed {
+            stage: CompileEmitStage::ObjectEmission,
+            diagnostics: symptoms,
+        });
     }
 
     if matches!(args.emit, crate::cli::Emit::Exe) {
@@ -456,12 +638,16 @@ fn emit_native_typed(
             )
         };
         if !linked {
-            for s in &link_symptoms {
-                eprintln!("Link error: {}", s.message);
-            }
+            print_codegen_diagnostics(files, &link_symptoms);
+            return Err(CompileFailure::EmissionFailed {
+                stage: CompileEmitStage::Linking,
+                diagnostics: link_symptoms,
+            });
         }
         let _ = std::fs::remove_file(&obj_path);
+        Ok(Some(exe_path))
     } else {
         println!("Compiled to {}", obj_path.display());
+        Ok(Some(obj_path))
     }
 }

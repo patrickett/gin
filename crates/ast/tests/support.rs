@@ -170,13 +170,14 @@ NamedTy has name String, ty Type
 VariantShape has name String, fields List(NamedTy)
 
 Reflectable has shape Type
+
+#auto
+Copy has can_copy Bool: True
 ";
 
 fn load_marker_eval_ast_light() -> FileAst {
     let mut eval = FileAst::default();
     eval.merge_from(TokenCursor::parse_source(LIGHT_MARKER_SRC));
-    use typecheck::comptime_classify::FileAstComptimeExt;
-    eval.apply_comptime_classification();
     eval
 }
 
@@ -285,8 +286,6 @@ all_variants_copy(variants List(VariantShape)) Bool := when variants is
 fn load_marker_eval_ast_full() -> FileAst {
     let mut eval = FileAst::default();
     eval.merge_from(TokenCursor::parse_source(FULL_MARKER_SRC));
-    use typecheck::comptime_classify::FileAstComptimeExt;
-    eval.apply_comptime_classification();
     eval
 }
 

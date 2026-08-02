@@ -108,36 +108,3 @@ Coord.make(x Int, y Int) Coord: Coord(x, y)";
     let flaws = typed.all_flaws();
     let _ = flaws;
 }
-
-#[test]
-fn bool_style_and_has_trait() {
-    let src = "\
-Bool is True or False
-Bool.Copy has can_copy: True";
-    let typed = transform_source(src);
-
-    let bool_id = TagId(Intern::new("Bool".to_string()));
-    let tag = typed.tags.get(&bool_id).expect("Bool tag exists");
-
-    // The union should have two variants.
-    match &tag.resolved_ty {
-        Ty::Union { name, variants, .. } => {
-            assert_eq!(name.as_str(), "Bool", "union name");
-            assert_eq!(variants.len(), 2, "two variants");
-        }
-        other => panic!("Expected Union, got {other:?}"),
-    }
-
-    let has_copy = tag
-        .provided_traits
-        .iter()
-        .any(|pt| pt.trait_name.as_str() == "Copy");
-    assert!(
-        has_copy,
-        "Bool should have a Copy provided trait, got: {:?}",
-        tag.provided_traits
-    );
-
-    let flaws = typed.all_flaws();
-    let _ = flaws;
-}

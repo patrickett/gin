@@ -15,7 +15,9 @@ use parser::query::{ParseOutput, SourceParseExt};
 use typecheck::transform::{
     PackageTransformArtifacts, PackageTransformOptions, transform_package_with_shared_context,
 };
-use typecheck::{PackageSemanticIndex, TypedFileAst};
+use typecheck::{
+    CompletionCandidate, PackageSemanticIndex, TypedFileAst, completions::FileAstCompletionExt,
+};
 
 use crate::HoverDocExt;
 use crate::engine::{DocumentSnapshot, FileSemanticOutput, HoverContent, SharedSource};
@@ -32,7 +34,18 @@ struct Stage1Result {
     dependency_dirs: HashMap<String, PathBuf>,
 }
 use diagnostic::Diagnostic;
-use resolve::ParsedFile;
+use resolve::{CursorDefinition, ParsedFile};
+
+use crate::cursor::ReferencesInFile;
+
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
+enum PackageIdentity {
+    Configured { root: PathBuf },
+    AdHoc(AdHocPackageId),
+}
+
+#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq)]
+pub struct AdHocPackageId(u64);
 
 /// Cached output for a fully analyzed package.
 pub struct PackageEntry {
@@ -77,47 +90,105 @@ struct ParseEntry {
     parse: Arc<ParseOutput>,
     /// Pre-computed line-start offsets for fast LSP position conversion.
     line_index: Arc<LineIndex>,
+    package: PackageIdentity,
 }
 
 /// Cache for parsed files and package analysis.
-///
-/// Packages with `flask.jsonc` are invalidated independently. Files without a
-/// package configuration fall back to their parent directory and retain global
-/// invalidation so independently registered files cannot reuse a stale entry.
 pub struct PackageCache {
     /// File path → (source text, parse output)
     files: Mutex<HashMap<PathBuf, ParseEntry>>,
-    /// Package root → cached package entry
-    packages: Mutex<HashMap<PathBuf, Arc<PackageEntry>>>,
-    /// Package root → reusable parsed dependency modules for import resolution
-    module_caches: Mutex<HashMap<PathBuf, resolve::ParsedModuleCache>>,
-    /// Package root → import graph from the last import resolution.
-    import_graphs: Mutex<HashMap<PathBuf, resolve::ImportDependencyGraph>>,
-    /// Package root → generation at which an unconfigured package was computed
-    package_gens: Mutex<HashMap<PathBuf, u64>>,
-    /// File path → package root (reverse lookup)
-    file_pkg: Mutex<HashMap<PathBuf, PathBuf>>,
-    /// Generation for unconfigured package fallbacks
-    next_gen: AtomicU64,
+    /// Package identity → cached package entry.
+    packages: Mutex<HashMap<PackageIdentity, Arc<PackageEntry>>>,
+    /// Package identity → reusable parsed dependency modules for import resolution.
+    module_caches: Mutex<HashMap<PackageIdentity, resolve::ParsedModuleCache>>,
+    /// Package identity → import graph from the last import resolution.
+    import_graphs: Mutex<HashMap<PackageIdentity, resolve::ImportDependencyGraph>>,
+    next_package_id: AtomicU64,
     /// File watcher for disk changes (kept alive for the lifetime of the cache)
     _watcher: Arc<Mutex<Debouncer<RecommendedWatcher>>>,
 }
 
 impl PackageCache {
+    pub fn new_adhoc_package(&self) -> AdHocPackageId {
+        let id = self.next_package_id.fetch_add(1, Ordering::SeqCst);
+        if id == 0 {
+            AdHocPackageId(self.next_package_id.fetch_add(1, Ordering::SeqCst))
+        } else {
+            AdHocPackageId(id)
+        }
+    }
+
+    fn identity_for_path(path: &Path) -> PackageIdentity {
+        match resolve::find_package_root(path) {
+            Some(root) => PackageIdentity::Configured { root },
+            None => PackageIdentity::AdHoc(AdHocPackageId(0)),
+        }
+    }
+
+    fn package_files_for_identity(&self, package: &PackageIdentity) -> Vec<PathBuf> {
+        let files = self.files.lock().unwrap();
+        let mut package_files: Vec<PathBuf> = files
+            .iter()
+            .filter_map(|(path, entry)| (entry.package == *package).then_some(path.clone()))
+            .collect();
+
+        package_files.sort();
+        package_files
+    }
+
+    fn file_identity(&self, path: &Path) -> Option<PackageIdentity> {
+        self.files
+            .lock()
+            .unwrap()
+            .get(path)
+            .map(|entry| entry.package.clone())
+    }
+
+    fn set_parsed_file(&self, path: PathBuf, contents: String, package: PackageIdentity) {
+        let parse = Arc::new(contents.parse_source_full());
+        let line_index = Arc::new(LineIndex::new(&contents));
+
+        let old_package = {
+            let mut files = self.files.lock().unwrap();
+            let previous = files.insert(
+                path,
+                ParseEntry {
+                    source: SharedSource::new(contents),
+                    parse,
+                    line_index,
+                    package: package.clone(),
+                },
+            );
+            previous.map(|entry| entry.package)
+        };
+
+        if let Some(old_package) = old_package
+            && old_package != package
+        {
+            self.invalidate_cached_packages_for(old_package);
+        }
+        self.invalidate_cached_packages_for(package);
+    }
+
     pub fn new(tx: Sender<DebounceEventResult>) -> Self {
         Self {
             files: Mutex::new(HashMap::new()),
             packages: Mutex::new(HashMap::new()),
             module_caches: Mutex::new(HashMap::new()),
             import_graphs: Mutex::new(HashMap::new()),
-            package_gens: Mutex::new(HashMap::new()),
-            file_pkg: Mutex::new(HashMap::new()),
-            next_gen: AtomicU64::new(1),
+            next_package_id: AtomicU64::new(1),
             _watcher: Arc::new(Mutex::new(
                 new_debouncer(Duration::from_secs(1), tx)
                     .expect("failed to create file watcher debouncer"),
             )),
         }
+    }
+
+    /// Test-friendly constructor: wires an unbounded channel whose receiver is
+    /// dropped, so debounced watcher events are discarded.
+    pub fn for_test() -> Self {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        Self::new(tx)
     }
 
     /// Register a file by reading it from disk and parsing it.
@@ -126,103 +197,78 @@ impl PackageCache {
     /// receiving its contents), an empty placeholder is used. Call
     /// [`set_contents`](Self::set_contents) to provide the real contents.
     pub fn add_file(&self, path: PathBuf) -> Result<(), String> {
-        let (source, parse, line_index) = match std::fs::read_to_string(&path) {
-            Ok(src) => {
-                let parse = Arc::new(src.parse_source_full());
-                let line_index = Arc::new(LineIndex::new(&src));
-                (SharedSource::new(src), parse, line_index)
-            }
-            Err(_) => {
-                // File doesn't exist on disk yet — use empty placeholder.
-                let src = String::new();
-                let parse = Arc::new(src.parse_source_full());
-                let line_index = Arc::new(LineIndex::new(&src));
-                (SharedSource::new(src), parse, line_index)
+        let source = std::fs::read_to_string(&path).unwrap_or_default();
+
+        let package = match self.file_identity(&path) {
+            Some(known) => known,
+            None => {
+                let mut identity = Self::identity_for_path(&path);
+                if matches!(identity, PackageIdentity::AdHoc(_)) {
+                    identity = PackageIdentity::AdHoc(self.new_adhoc_package());
+                }
+                identity
             }
         };
-        self.files.lock().unwrap().insert(
-            path.clone(),
-            ParseEntry {
-                source,
-                parse,
-                line_index,
-            },
-        );
-        if let Some(pkg_root) = resolve::find_package_root(&path) {
-            self.file_pkg
-                .lock()
-                .unwrap()
-                .insert(path.clone(), pkg_root.clone());
-            self.invalidate_cached_packages_for(pkg_root.clone());
-            self.package_gens.lock().unwrap().remove(&pkg_root);
+
+        self.set_parsed_file(path, source, package);
+        Ok(())
+    }
+
+    pub fn add_file_to_package(
+        &self,
+        path: PathBuf,
+        adhoc_package: AdHocPackageId,
+    ) -> Result<(), String> {
+        if self.file_identity(&path).is_some() {
+            return Err("file already registered".to_string());
         }
+
+        let source = std::fs::read_to_string(&path).unwrap_or_default();
+        self.set_parsed_file(path, source, PackageIdentity::AdHoc(adhoc_package));
         Ok(())
     }
 
     /// Update a file's contents, re-parse it, and evict its package analysis.
     pub fn set_contents(&self, path: &Path, contents: String) {
-        let parse = Arc::new(contents.parse_source_full());
-        let line_index = Arc::new(LineIndex::new(&contents));
-        self.files.lock().unwrap().insert(
-            path.to_path_buf(),
-            ParseEntry {
-                source: SharedSource::new(contents),
-                parse,
-                line_index,
-            },
-        );
-        self.next_gen.fetch_add(1, Ordering::SeqCst);
-        if let Some(pkg_root) = resolve::find_package_root(path) {
-            self.file_pkg
-                .lock()
-                .unwrap()
-                .insert(path.to_path_buf(), pkg_root);
-        }
-        self.invalidate_cached_packages_for_path(path);
+        let package = match self.file_identity(path) {
+            Some(identity) => identity,
+            None => {
+                let mut identity = Self::identity_for_path(path);
+                if matches!(identity, PackageIdentity::AdHoc(_)) {
+                    identity = PackageIdentity::AdHoc(self.new_adhoc_package());
+                }
+                identity
+            }
+        };
+
+        self.set_parsed_file(path.to_path_buf(), contents, package);
+        self.invalidate_package_cache_for(path);
     }
 
-    fn impacted_package_roots(&self, path: &Path) -> HashSet<PathBuf> {
+    fn impacted_package_roots(&self, path: &Path) -> HashSet<PackageIdentity> {
         let mut affected = HashSet::new();
 
-        if let Some(pkg_root) = self.file_pkg.lock().unwrap().get(path).cloned() {
-            affected.insert(pkg_root);
+        if let Some(identity) = self.file_identity(path) {
+            affected.insert(identity);
         }
 
         {
             let import_graphs = self.import_graphs.lock().unwrap();
-            for (pkg_root, graph) in import_graphs.iter() {
+            for (package, graph) in import_graphs.iter() {
                 if !graph.impacted_modules(path).is_empty() {
-                    affected.insert(pkg_root.clone());
+                    affected.insert(package.clone());
                 }
             }
-        }
-
-        if affected.is_empty()
-            && let Some(pkg_root) = self.resolve_package_root(path)
-        {
-            affected.insert(pkg_root);
         }
 
         affected
     }
 
     /// Remove resolver/module caches and package entry for a package root.
-    fn invalidate_cached_packages_for(&self, pkg_root: PathBuf) {
-        self.packages.lock().unwrap().remove(&pkg_root);
-        self.import_graphs.lock().unwrap().remove(&pkg_root);
-        self.module_caches.lock().unwrap().remove(&pkg_root);
-    }
-
-    /// Remove cached output for every package that transitively depends on `path`, plus
-    /// the package containing `path` itself when it is known.
-    ///
-    /// This intentionally preserves parse cache entries: only package-level
-    /// typed/diagnostic products are invalidated here because transform/typecheck
-    /// remains package-wide.
-    fn invalidate_cached_packages_for_path(&self, path: &Path) {
-        for pkg_root in self.impacted_package_roots(path) {
-            self.invalidate_cached_packages_for(pkg_root);
-        }
+    fn invalidate_cached_packages_for(&self, package: PackageIdentity) {
+        self.packages.lock().unwrap().remove(&package);
+        self.import_graphs.lock().unwrap().remove(&package);
+        self.module_caches.lock().unwrap().remove(&package);
     }
 
     /// Get source text and parse output for a file.
@@ -239,100 +285,53 @@ impl PackageCache {
         files.get(path).map(|e| e.parse.clone())
     }
 
-    /// Resolve the package root for a file, caching the result.
-    ///
-    /// Falls back to the file's parent directory when no `flask.jsonc` is found.
-    fn resolve_package_root(&self, path: &Path) -> Option<PathBuf> {
-        if let Some(root) = self.file_pkg.lock().unwrap().get(path).cloned() {
-            return Some(root);
-        }
-        let root =
-            resolve::find_package_root(path).or_else(|| path.parent().map(|p| p.to_path_buf()));
-        if let Some(ref r) = root {
-            self.file_pkg
-                .lock()
-                .unwrap()
-                .insert(path.to_path_buf(), r.clone());
-        }
-        root
-    }
-
     /// Collect all registered files belonging to the same package as `path`.
     fn package_file_paths(&self, path: &Path) -> Option<Vec<PathBuf>> {
-        let pkg_root = self.resolve_package_root(path)?;
-        let files = self.files.lock().unwrap();
-        let file_pkg = self.file_pkg.lock().unwrap();
-        let mut pkg_files: Vec<PathBuf> = files
-            .keys()
-            .filter(|file| file_pkg.get(*file) == Some(&pkg_root))
-            .cloned()
-            .collect();
+        let package = self.file_identity(path)?;
+        let pkg_files = self.package_files_for_identity(&package);
         if pkg_files.is_empty() {
             return None;
         }
-        pkg_files.sort();
         Some(pkg_files)
     }
 
     /// Get or compute the package entry for a set of files.
-    ///
-    /// The package is keyed by its root directory (discovered from the first file
-    /// in `paths`). All registered files in that package are included in the
-    /// computation, not just the ones in `paths`.
-    ///
-    /// When no `flask.jsonc` exists (single-file / test mode), the parent
-    /// directory of the first file is used as the package root.
     pub fn get_or_compute_package(&self, paths: &[PathBuf]) -> Option<Arc<PackageEntry>> {
         if paths.is_empty() {
             return None;
         }
 
-        let pkg_root = resolve::find_package_root(&paths[0])
-            .or_else(|| paths[0].parent().map(|p| p.to_path_buf()))
-            // Parent always exists for valid file paths; `paths[0]` is valid.
-            .expect("every valid file path has a parent directory");
+        let package = self.file_identity(&paths[0])?;
 
-        let configured = pkg_root.join(flask::PACKAGE_CONFIG_NAME).is_file();
-        if configured {
-            if let Some(entry) = self.packages.lock().unwrap().get(&pkg_root) {
-                return Some(Arc::clone(entry));
-            }
-        } else {
-            let current_gen = self.next_gen.load(Ordering::SeqCst);
-            if self.package_gens.lock().unwrap().get(&pkg_root) == Some(&current_gen)
-                && let Some(entry) = self.packages.lock().unwrap().get(&pkg_root)
-            {
-                return Some(Arc::clone(entry));
-            }
+        if let Some(entry) = self.packages.lock().unwrap().get(&package) {
+            return Some(Arc::clone(entry));
         }
 
         // Slow path: compute using all registered files in the package.
         let all_files = self.package_file_paths(&paths[0])?;
-        let entry = self.compute_package(&pkg_root, &all_files)?;
+        let entry = self.compute_package(&package, &all_files)?;
 
         let entry = Arc::new(entry);
         self.packages
             .lock()
             .unwrap()
-            .insert(pkg_root.clone(), Arc::clone(&entry));
-        if !configured {
-            self.package_gens
-                .lock()
-                .unwrap()
-                .insert(pkg_root, self.next_gen.load(Ordering::SeqCst));
-        }
+            .insert(package, Arc::clone(&entry));
         Some(entry)
     }
 
     /// Run the full pipeline: parse → resolve imports → prepare → transform → diagnostics.
-    fn compute_package(&self, pkg_root: &Path, all_files: &[PathBuf]) -> Option<PackageEntry> {
+    fn compute_package(
+        &self,
+        package: &PackageIdentity,
+        all_files: &[PathBuf],
+    ) -> Option<PackageEntry> {
         let Stage1Result {
             file_paths,
             asts,
             prepare_diags,
             import_diags,
             dependency_dirs,
-        } = self.stage_resolve_and_prepare(pkg_root, all_files)?;
+        } = self.stage_resolve_and_prepare(package, all_files)?;
         let artifacts = self.stage_transform(&asts);
         let typed_asts = artifacts.typed_asts;
         let package_index = self.stage_build_index(&file_paths, &typed_asts);
@@ -352,7 +351,7 @@ impl PackageCache {
     /// Stage 1: Collect parse results, resolve imports, and run prepare passes.
     fn stage_resolve_and_prepare(
         &self,
-        pkg_root: &Path,
+        package: &PackageIdentity,
         all_files: &[PathBuf],
     ) -> Option<Stage1Result> {
         let files = self.files.lock().unwrap();
@@ -380,9 +379,12 @@ impl PackageCache {
         let parse_symptoms: Vec<Vec<Diagnostic>> =
             parsed.iter().map(|f| f.output.symptoms.clone()).collect();
 
-        let compile_target = FlaskConfig::find_package_config(pkg_root)
-            .and_then(|(config, _)| CompileTarget::resolve(&config, None).ok())
-            .unwrap_or(flask::CompileTarget::Library);
+        let compile_target = match package {
+            PackageIdentity::Configured { root } => FlaskConfig::find_package_config(root)
+                .and_then(|(config, _)| CompileTarget::resolve(&config, None).ok())
+                .unwrap_or(flask::CompileTarget::Library),
+            PackageIdentity::AdHoc(_) => flask::CompileTarget::Library,
+        };
 
         let deps = parsed
             .first()
@@ -396,7 +398,7 @@ impl PackageCache {
                 .module_caches
                 .lock()
                 .unwrap()
-                .remove(pkg_root)
+                .remove(package)
                 .unwrap_or_default();
             let resolve::ResolveImportsWithGraph {
                 files: resolved,
@@ -406,11 +408,11 @@ impl PackageCache {
             self.module_caches
                 .lock()
                 .unwrap()
-                .insert(pkg_root.to_path_buf(), cache);
+                .insert(package.clone(), cache);
             self.import_graphs
                 .lock()
                 .unwrap()
-                .insert(pkg_root.to_path_buf(), import_graph);
+                .insert(package.clone(), import_graph);
             resolved
         };
 
@@ -426,11 +428,15 @@ impl PackageCache {
             .iter_mut()
             .map(|f| std::mem::take(&mut f.output.ast))
             .collect();
-        let mut prepare_diags = typecheck::prepare_package_asts(&mut asts, &compile_target);
+        let mut prepare_diags: Vec<Vec<Diagnostic>> = asts
+            .iter_mut()
+            .map(|ast| typecheck::prepare_parse_ast(ast, &compile_target))
+            .collect();
 
         let mut import_diags = HashMap::new();
-        for (path, (original_syms, resolved_file)) in
-            file_paths.iter().zip(parse_symptoms.iter().zip(ordered.iter()))
+        for (path, (original_syms, resolved_file)) in file_paths
+            .iter()
+            .zip(parse_symptoms.iter().zip(ordered.iter()))
         {
             let mut file_import_diags = resolved_file.output.symptoms.clone();
             if file_import_diags.len() >= original_syms.len() {
@@ -568,14 +574,61 @@ impl PackageCache {
         (typecheck_outputs, collected_prepare)
     }
 
-    /// Get semantic outputs. Results are in sorted-path order.
-    pub fn package_semantics(&self, paths: &[PathBuf]) -> Option<Vec<FileSemanticOutput>> {
-        let entry = self.get_or_compute_package(paths)?;
-        Some(
-            (0..entry.file_paths.len())
-                .map(|i| entry.semantic_output(i))
-                .collect(),
-        )
+    /// Get semantic outputs in caller-requested path order.
+    pub fn package_semantics(&self, paths: &[PathBuf]) -> Vec<FileSemanticOutput> {
+        let Some(entry) = self.get_or_compute_package(paths) else {
+            return vec![FileSemanticOutput::default(); paths.len()];
+        };
+        if paths.is_empty() {
+            return Vec::new();
+        }
+        let mut by_path = HashMap::with_capacity(entry.file_paths.len());
+        for (fp, out) in entry
+            .file_paths
+            .iter()
+            .zip((0..entry.file_paths.len()).map(|i| entry.semantic_output(i)))
+        {
+            by_path.insert(fp.clone(), out);
+        }
+        paths
+            .iter()
+            .map(|path| by_path.get(path).cloned().unwrap_or_default())
+            .collect()
+    }
+
+    /// Get completions at a byte position in a source file.
+    pub fn completions_at(&self, path: &Path, byte_pos: u32) -> Vec<CompletionCandidate> {
+        let Some((source, output)) = self.source_and_parse(path) else {
+            return Vec::new();
+        };
+        let byte_pos = byte_pos as usize;
+        let tag_types = self.tag_types_for_file(path);
+        output
+            .ast
+            .completions_for_context(&source, byte_pos, tag_types.as_ref())
+    }
+
+    /// Find references to the symbol at `byte_pos` in a source file.
+    pub fn references_at(&self, path: &Path, byte_pos: u32) -> Option<ReferencesInFile> {
+        let (source, output) = self.source_and_parse(path)?;
+        let byte_pos = byte_pos as usize;
+        let word = output
+            .ast
+            .word_at_byte(byte_pos, &source)
+            .or_else(|| source.word_at_byte_offset(byte_pos))?;
+        let spans = output.ast.find_references(&word);
+        if spans.is_empty() {
+            return None;
+        }
+        Some(ReferencesInFile { spans })
+    }
+
+    /// Resolve definition location for symbol at a byte position in a file.
+    pub fn goto_definition(&self, path: &Path, byte_pos: u32) -> Option<CursorDefinition> {
+        let (source, parse) = self.source_and_parse(path)?;
+        resolve::cursor_definition(path, &parse.ast, &source, byte_pos as usize, &|p| {
+            resolve::ParsedFile::read(p)
+        })
     }
 
     /// Get merged tag types for all files in the package containing `path`.
@@ -685,15 +738,17 @@ impl PackageCache {
         None
     }
 
-    /// Drop the cached [`PackageEntry`] for the package containing `path`.
+    /// Drop the cached [`PackageEntry`] for every package that transitively depends on `path`,
+    /// plus the package containing `path` itself when it is known.
     ///
-    /// The next request for any file in this package will recompute it.
-    /// This is safe to call even if no package entry exists for this path.
-    ///
-    /// Note: the file itself stays in the `files` map — this only evicts
-    /// the expensive package-level typed ASTs and diagnostics.
+    /// Parse cache entries are preserved — only package-level typed ASTs and
+    /// diagnostics are evicted because transform/typecheck remains package-wide.
+    /// The next request for any file in this package recomputes the entry; safe
+    /// to call even if no package entry exists for this path.
     pub fn invalidate_package_cache_for(&self, path: &Path) {
-        self.invalidate_cached_packages_for_path(path);
+        for package in self.impacted_package_roots(path) {
+            self.invalidate_cached_packages_for(package);
+        }
     }
 
     pub fn contains(&self, path: &Path) -> bool {
@@ -723,11 +778,9 @@ impl PackageCache {
     pub fn all_diagnostics(
         &self,
         paths: &[PathBuf],
-        dependency_dirs: &std::collections::HashMap<String, PathBuf>,
     ) -> std::collections::HashMap<PathBuf, Vec<Diagnostic>> {
         let mut by_path: std::collections::HashMap<PathBuf, Vec<Diagnostic>> =
             std::collections::HashMap::new();
-        let _ = dependency_dirs;
 
         let entry = match self.get_or_compute_package(paths) {
             Some(e) => e,
@@ -746,10 +799,17 @@ impl PackageCache {
 #[cfg(test)]
 mod tests {
     use super::PackageCache;
-    use crossbeam_channel::unbounded;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::Arc;
+
+    fn temp_root(suffix: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("gin_package_cache_{suffix}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
 
     fn package_file(root: &std::path::Path, package: &str) -> PathBuf {
         let package_dir = root.join(package);
@@ -764,19 +824,229 @@ mod tests {
         source
     }
 
+    fn package_identity(cache: &PackageCache, path: &std::path::Path) -> super::PackageIdentity {
+        cache
+            .file_identity(path)
+            .expect("registered file must have a package identity")
+    }
+
+    #[test]
+    fn package_cache_semantics_preserve_requested_path_order() {
+        let root = temp_root("order");
+
+        let pkg_root = root.join("pkg");
+        fs::create_dir_all(&pkg_root).unwrap();
+        fs::write(
+            pkg_root.join("flask.jsonc"),
+            r#"{"name":"pkg","version":"0.0.0","authors":[]}"#,
+        )
+        .unwrap();
+
+        let first = pkg_root.join("first.gin");
+        let second = pkg_root.join("second.gin");
+        fs::write(&first, "foo() Int := unknown_one\n").unwrap();
+        fs::write(&second, "bar() Int := unknown_two\n").unwrap();
+
+        let cache = PackageCache::for_test();
+        cache.add_file(first.clone()).unwrap();
+        cache.add_file(second.clone()).unwrap();
+        cache.set_contents(&first, fs::read_to_string(&first).unwrap());
+        cache.set_contents(&second, fs::read_to_string(&second).unwrap());
+
+        let ordered = cache.package_semantics(&[second.clone(), first.clone()]);
+        let first_msgs: Vec<_> = ordered[1]
+            .symptoms
+            .iter()
+            .map(|d| d.message.clone())
+            .collect();
+        let second_msgs: Vec<_> = ordered[0]
+            .symptoms
+            .iter()
+            .map(|d| d.message.clone())
+            .collect();
+        assert!(
+            first_msgs.iter().any(|m| m.contains("unknown_one")),
+            "second request entry should map to first path diagnostics"
+        );
+        assert!(
+            second_msgs.iter().any(|m| m.contains("unknown_two")),
+            "first request entry should map to second path diagnostics"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn package_cache_file_paths_contains_exact_registered_files() {
+        let root = temp_root("registry");
+
+        let path = root.join("main.gin");
+        let updated = root.join("main_updated.gin");
+        fs::write(&path, "value := 1\n").unwrap();
+
+        let cache = PackageCache::for_test();
+
+        cache.add_file(path.clone()).unwrap();
+        assert!(cache.contains(&path));
+        assert!(cache.file_paths().contains(&path));
+
+        cache.set_contents(&path, "value := 2\n".to_string());
+        assert!(cache.contains(&path));
+        assert!(cache.file_paths().contains(&path));
+
+        assert!(cache.file_paths().iter().all(|p| cache.contains(p)));
+
+        assert!(!cache.contains(&updated));
+        assert!(!cache.file_paths().contains(&updated));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn package_cache_semantics_omit_unregistered_requested_files() {
+        let root = temp_root("unknown");
+
+        let path = root.join("present.gin");
+        let missing = root.join("missing.gin");
+        fs::write(&path, "value := 1\n").unwrap();
+
+        let cache = PackageCache::for_test();
+        cache.add_file(path.clone()).unwrap();
+        cache.set_contents(&path, fs::read_to_string(&path).unwrap());
+
+        let present_only = cache.package_semantics(std::slice::from_ref(&path));
+        let outputs = cache.package_semantics(&[path.clone(), missing.clone()]);
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0], present_only[0]);
+        assert!(
+            outputs[1].symptoms.is_empty(),
+            "unknown requested path should return default output"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn package_cache_unconfigured_files_require_explicit_grouping() {
+        let root = temp_root("unconfigured");
+
+        let first = root.join("first.gin");
+        let second = root.join("second.gin");
+        fs::write(&first, "value := 1\n").unwrap();
+        fs::write(&second, "value := 2\n").unwrap();
+
+        let cache = PackageCache::for_test();
+
+        cache.add_file(first.clone()).unwrap();
+        cache.add_file(second.clone()).unwrap();
+
+        let first_entry = cache
+            .get_or_compute_package(std::slice::from_ref(&first))
+            .unwrap();
+        let second_entry = cache
+            .get_or_compute_package(std::slice::from_ref(&second))
+            .unwrap();
+
+        assert_eq!(first_entry.file_paths, vec![first.clone()]);
+        assert_eq!(second_entry.file_paths, vec![second.clone()]);
+
+        let grouped = cache.new_adhoc_package();
+        let group_root = root.join("group.gin");
+        let other = root.join("group_other.gin");
+        fs::write(&group_root, "value := 3\n").unwrap();
+        fs::write(&other, "value := 4\n").unwrap();
+        cache
+            .add_file_to_package(group_root.clone(), grouped)
+            .unwrap();
+        cache.add_file_to_package(other.clone(), grouped).unwrap();
+
+        let grouped_entry = cache
+            .get_or_compute_package(std::slice::from_ref(&group_root))
+            .unwrap();
+        assert!(grouped_entry.file_paths.contains(&group_root));
+        assert!(grouped_entry.file_paths.contains(&other));
+
+        let reverse = cache
+            .package_file_paths(&group_root)
+            .expect("grouped paths should be discoverable");
+        let mut reverse_expected = vec![group_root.clone(), other.clone()];
+        reverse_expected.sort();
+        assert_eq!(reverse, reverse_expected);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn package_cache_unconfigured_query_order_does_not_change_membership() {
+        let root = temp_root("unconfigured_order");
+
+        let first = root.join("first.gin");
+        let second = root.join("second.gin");
+        fs::write(&first, "value := 1\n").unwrap();
+        fs::write(&second, "value := 2\n").unwrap();
+
+        let cache = PackageCache::for_test();
+        let pkg = cache.new_adhoc_package();
+        cache.add_file_to_package(first.clone(), pkg).unwrap();
+        cache.add_file_to_package(second.clone(), pkg).unwrap();
+
+        let first_entry = cache
+            .get_or_compute_package(std::slice::from_ref(&first))
+            .unwrap();
+        let second_entry = cache
+            .get_or_compute_package(std::slice::from_ref(&second))
+            .unwrap();
+
+        let mut expected = vec![first.clone(), second.clone()];
+        expected.sort();
+        assert_eq!(first_entry.file_paths, expected);
+        assert_eq!(second_entry.file_paths, expected);
+
+        let entry_from_grouped_paths = cache
+            .get_or_compute_package(&[second.clone(), first.clone()])
+            .unwrap();
+        assert_eq!(entry_from_grouped_paths.file_paths, expected);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn package_cache_shared_handle_sees_updates_across_clones() {
+        let root = temp_root("handle_share");
+
+        let path = root.join("shared.gin");
+        fs::write(&path, "value := 1\n").unwrap();
+
+        let cache = std::sync::Arc::new(PackageCache::for_test());
+        let other = std::sync::Arc::clone(&cache);
+
+        cache.add_file(path.clone()).unwrap();
+
+        cache.set_contents(&path, "value := 10\n".to_string());
+        let doc = other.document_snapshot(&path).unwrap();
+        assert_eq!(doc.source.as_str(), "value := 10\n");
+
+        other.set_contents(&path, "value := 20\n".to_string());
+        let doc = cache.document_snapshot(&path).unwrap();
+        assert_eq!(doc.source.as_str(), "value := 20\n");
+
+        assert_eq!(
+            cache.package_semantics(std::slice::from_ref(&path)).len(),
+            1
+        );
+        let docs = other.document_snapshot(&path).unwrap();
+        assert_eq!(doc.path, docs.path);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn editing_one_package_preserves_other_package_cache_entry() {
-        let root = std::env::temp_dir().join(format!(
-            "gin_package_cache_isolation_{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
+        let root = temp_root("isolation");
         let first_path = package_file(&root, "first");
         let second_path = package_file(&root, "second");
 
-        let (tx, _rx) = unbounded();
-        let cache = PackageCache::new(tx);
+        let cache = PackageCache::for_test();
         cache.add_file(first_path.clone()).unwrap();
         cache.add_file(second_path.clone()).unwrap();
 
@@ -824,13 +1094,42 @@ mod tests {
     }
 
     #[test]
+    fn package_cache_unconfigured_siblings_do_not_merge_by_parent() {
+        let root = temp_root("unconfigured_isolation");
+
+        let first = root.join("first.gin");
+        let second = root.join("second.gin");
+        fs::write(&first, "value := 1\n").unwrap();
+        fs::write(&second, "value := 2\n").unwrap();
+
+        let cache = PackageCache::for_test();
+        let group = cache.new_adhoc_package();
+
+        cache.add_file_to_package(first.clone(), group).unwrap();
+        cache
+            .add_file_to_package(second.clone(), cache.new_adhoc_package())
+            .unwrap();
+
+        let first_entry = cache
+            .get_or_compute_package(std::slice::from_ref(&first))
+            .unwrap();
+        let second_entry = cache
+            .get_or_compute_package(std::slice::from_ref(&second))
+            .unwrap();
+
+        assert_eq!(first_entry.file_paths, vec![first.clone()]);
+        assert_eq!(second_entry.file_paths, vec![second.clone()]);
+        assert_ne!(
+            first_entry.file_paths, second_entry.file_paths,
+            "unrelated ad-hoc packages should remain isolated"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn package_cache_all_diagnostics_uses_cached_dependency_dirs_and_is_not_duplicated() {
-        let root = std::env::temp_dir().join(format!(
-            "gin_package_cache_import_diag_{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
+        let root = temp_root("import_diag");
 
         let dep_root = root.join("dep");
         let app_root = root.join("app");
@@ -861,15 +1160,15 @@ mod tests {
             "app package should have dependency map"
         );
 
-        let (tx, _rx) = unbounded();
-        let cache = PackageCache::new(tx);
+        let cache = PackageCache::for_test();
         cache.add_file(app_main.clone()).unwrap();
 
-        let entry = cache.get_or_compute_package(std::slice::from_ref(&app_main)).unwrap();
+        let entry = cache
+            .get_or_compute_package(std::slice::from_ref(&app_main))
+            .unwrap();
         assert_eq!(entry.dependency_dirs, expected_deps);
 
-        let all_diags =
-            cache.all_diagnostics(std::slice::from_ref(&app_main), &std::collections::HashMap::new());
+        let all_diags = cache.all_diagnostics(std::slice::from_ref(&app_main));
         let no_diags = Vec::new();
         let file_diags = all_diags.get(&app_main).unwrap_or(&no_diags);
         let use_not_exported_count = file_diags
@@ -877,8 +1176,7 @@ mod tests {
             .filter(|diag| diag.code.slug() == "use-not-exported")
             .count();
         assert_eq!(
-            use_not_exported_count,
-            1,
+            use_not_exported_count, 1,
             "invalid import diagnostic should be emitted exactly once: {file_diags:?}"
         );
     }
@@ -923,8 +1221,7 @@ mod tests {
             "app root flask dependencies are not configured"
         );
 
-        let (tx, _rx) = unbounded();
-        let cache = PackageCache::new(tx);
+        let cache = PackageCache::for_test();
         cache.add_file(app_gin.clone()).unwrap();
 
         let _first_entry = cache
@@ -964,17 +1261,17 @@ mod tests {
         let first_import_graph_imports_dep = {
             let graphs = cache.import_graphs.lock().unwrap();
             let graph = graphs
-                .get(&app_root)
+                .get(&package_identity(&cache, &app_gin))
                 .expect("dependency graph is available after resolve");
             !graph.impacted_modules(&used_dep_path).is_empty()
         };
 
-        let first_entry_symptoms = cache
-            .package_semantics(std::slice::from_ref(&app_gin))
-            .unwrap();
-        let second_entry_symptoms = cache
-            .package_semantics(std::slice::from_ref(&app_gin))
-            .unwrap();
+        let first_entry_symptoms = cache.package_semantics(std::slice::from_ref(&app_gin))[0]
+            .symptoms
+            .clone();
+        let second_entry_symptoms = cache.package_semantics(std::slice::from_ref(&app_gin))[0]
+            .symptoms
+            .clone();
 
         assert_eq!(first_used_source, second_used_source);
         assert!(first_import_graph_imports_dep);
@@ -1060,8 +1357,7 @@ mod tests {
         let app_a_main = app_a_root.join("main.gin");
         let app_b_main = app_b_root.join("main.gin");
 
-        let (tx, _rx) = unbounded();
-        let cache = PackageCache::new(tx);
+        let cache = PackageCache::for_test();
         cache.add_file(app_a_main.clone()).unwrap();
         cache.add_file(app_b_main.clone()).unwrap();
         cache.add_file(dep_used.clone()).unwrap();
@@ -1071,15 +1367,17 @@ mod tests {
             cache
                 .get_or_compute_package(std::slice::from_ref(&app_a_main))
                 .unwrap();
+            let app_a_identity = package_identity(&cache, &app_a_main);
             let packages = cache.packages.lock().unwrap();
-            Arc::clone(&packages[&app_a_root])
+            Arc::clone(&packages[&app_a_identity])
         };
         let app_b_entry_before = {
             cache
                 .get_or_compute_package(std::slice::from_ref(&app_b_main))
                 .unwrap();
+            let app_b_identity = package_identity(&cache, &app_b_main);
             let packages = cache.packages.lock().unwrap();
-            Arc::clone(&packages[&app_b_root])
+            Arc::clone(&packages[&app_b_identity])
         };
 
         cache.set_contents(&dep_unused, "Unused is 2\n".to_string());
@@ -1088,15 +1386,17 @@ mod tests {
             cache
                 .get_or_compute_package(std::slice::from_ref(&app_a_main))
                 .unwrap();
+            let app_a_identity = package_identity(&cache, &app_a_main);
             let packages = cache.packages.lock().unwrap();
-            Arc::clone(&packages[&app_a_root])
+            Arc::clone(&packages[&app_a_identity])
         };
         let app_b_entry_after_unused = {
             cache
                 .get_or_compute_package(std::slice::from_ref(&app_b_main))
                 .unwrap();
+            let app_b_identity = package_identity(&cache, &app_b_main);
             let packages = cache.packages.lock().unwrap();
-            Arc::clone(&packages[&app_b_root])
+            Arc::clone(&packages[&app_b_identity])
         };
 
         assert!(Arc::ptr_eq(&app_a_entry_before, &app_a_entry_after_unused));
@@ -1108,15 +1408,17 @@ mod tests {
             cache
                 .get_or_compute_package(std::slice::from_ref(&app_a_main))
                 .unwrap();
+            let app_a_identity = package_identity(&cache, &app_a_main);
             let packages = cache.packages.lock().unwrap();
-            Arc::clone(&packages[&app_a_root])
+            Arc::clone(&packages[&app_a_identity])
         };
         let app_b_entry_after_used = {
             cache
                 .get_or_compute_package(std::slice::from_ref(&app_b_main))
                 .unwrap();
+            let app_b_identity = package_identity(&cache, &app_b_main);
             let packages = cache.packages.lock().unwrap();
-            Arc::clone(&packages[&app_b_root])
+            Arc::clone(&packages[&app_b_identity])
         };
 
         assert!(!Arc::ptr_eq(
@@ -1173,8 +1475,7 @@ mod tests {
         let app_main = app_root.join("main.gin");
         let other_main = other_root.join("main.gin");
 
-        let (tx, _rx) = unbounded();
-        let cache = PackageCache::new(tx);
+        let cache = PackageCache::for_test();
         cache.add_file(app_main.clone()).unwrap();
         cache.add_file(other_main.clone()).unwrap();
         cache.add_file(dep_used.clone()).unwrap();
@@ -1183,15 +1484,17 @@ mod tests {
             cache
                 .get_or_compute_package(std::slice::from_ref(&app_main))
                 .unwrap();
+            let app_identity = package_identity(&cache, &app_main);
             let packages = cache.packages.lock().unwrap();
-            Arc::clone(&packages[&app_root])
+            Arc::clone(&packages[&app_identity])
         };
         let other_entry_before = {
             cache
                 .get_or_compute_package(std::slice::from_ref(&other_main))
                 .unwrap();
+            let other_identity = package_identity(&cache, &other_main);
             let packages = cache.packages.lock().unwrap();
-            Arc::clone(&packages[&other_root])
+            Arc::clone(&packages[&other_identity])
         };
 
         cache.invalidate_package_cache_for(&dep_used);
@@ -1200,15 +1503,17 @@ mod tests {
             cache
                 .get_or_compute_package(std::slice::from_ref(&app_main))
                 .unwrap();
+            let app_identity = package_identity(&cache, &app_main);
             let packages = cache.packages.lock().unwrap();
-            Arc::clone(&packages[&app_root])
+            Arc::clone(&packages[&app_identity])
         };
         let other_entry_after = {
             cache
                 .get_or_compute_package(std::slice::from_ref(&other_main))
                 .unwrap();
+            let other_identity = package_identity(&cache, &other_main);
             let packages = cache.packages.lock().unwrap();
-            Arc::clone(&packages[&other_root])
+            Arc::clone(&packages[&other_identity])
         };
 
         assert!(!Arc::ptr_eq(&app_entry_before, &app_entry_after));
@@ -1251,8 +1556,7 @@ mod tests {
         let unused = app_root.join("unused.gin");
         fs::write(&unused, "unused := 1\n").unwrap();
 
-        let (tx, _rx) = unbounded();
-        let cache = PackageCache::new(tx);
+        let cache = PackageCache::for_test();
         cache.add_file(app_main.clone()).unwrap();
         cache.add_file(unused.clone()).unwrap();
         cache.add_file(dep_used.clone()).unwrap();
@@ -1310,8 +1614,7 @@ mod tests {
         let dep_used = dep_root.join("used.gin");
         let app_main = app_root.join("main.gin");
 
-        let (tx, _rx) = unbounded();
-        let cache = PackageCache::new(tx);
+        let cache = PackageCache::for_test();
         cache.add_file(app_main.clone()).unwrap();
         cache.add_file(dep_used.clone()).unwrap();
 
@@ -1324,14 +1627,27 @@ mod tests {
             .module_caches
             .lock()
             .unwrap()
-            .get(&app_root)
+            .get(&package_identity(&cache, &app_main))
             .and_then(|c| c.get_file(&dep_used).map(|f| Arc::new(f.source.clone())));
         assert!(module_cache_before.is_some());
 
         cache.set_contents(&app_main, "use dep.Used\nvalue := 2\n".to_string());
 
-        assert!(!cache.module_caches.lock().unwrap().contains_key(&app_root));
-        assert!(!cache.import_graphs.lock().unwrap().contains_key(&app_root));
+        let app_identity = package_identity(&cache, &app_main);
+        assert!(
+            !cache
+                .module_caches
+                .lock()
+                .unwrap()
+                .contains_key(&app_identity)
+        );
+        assert!(
+            !cache
+                .import_graphs
+                .lock()
+                .unwrap()
+                .contains_key(&app_identity)
+        );
 
         let _ = cache
             .get_or_compute_package(std::slice::from_ref(&app_main))
@@ -1342,11 +1658,23 @@ mod tests {
             .module_caches
             .lock()
             .unwrap()
-            .get(&app_root)
+            .get(&package_identity(&cache, &app_main))
             .and_then(|c| c.get_file(&dep_used).map(|f| Arc::new(f.source.clone())));
 
-        assert!(cache.module_caches.lock().unwrap().contains_key(&app_root));
-        assert!(cache.import_graphs.lock().unwrap().contains_key(&app_root));
+        assert!(
+            cache
+                .module_caches
+                .lock()
+                .unwrap()
+                .contains_key(&package_identity(&cache, &app_main))
+        );
+        assert!(
+            cache
+                .import_graphs
+                .lock()
+                .unwrap()
+                .contains_key(&package_identity(&cache, &app_main))
+        );
         assert!(Arc::ptr_eq(&parsed_dep_before, &parsed_dep_after));
         assert!(
             module_cache_after.is_some(),

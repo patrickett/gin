@@ -18,8 +18,9 @@ fn source_with_copy_override() -> String {
         "{INT_TAG}\
 Coord has x Int, y Int
 
-UniqueId has id Int
-UniqueId.Copy has can_copy: False
+UniqueId has Copy
+    id Int
+    Copy.can_copy: False
 "
     )
 }
@@ -86,8 +87,9 @@ fn hover_shows_not_copy_for_override() {
 fn non_copy_override_use_after_move() {
     let src = format!(
         "{INT_TAG}\
-UniqueId has id Int
-UniqueId.Copy has can_copy: False
+UniqueId has Copy
+    id Int
+    Copy.can_copy: False
 
 drop(eat x Int) Int: 0
 

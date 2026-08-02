@@ -4,7 +4,7 @@ use std::ops::ControlFlow;
 use internment::Intern;
 
 use crate::{
-    Expr, FileAst, FnCall, TagCall, TypeExpr, WhenArm,
+    Expr, FileAst, FnCall, Pattern, TagCall, WhenArm,
     folder::*,
     path::ModPath,
     span::{SpanId, Spanned},
@@ -43,6 +43,41 @@ impl FileAst {
 struct ImportAliasFolder {
     alias_map: AliasMap,
     alias_spans: Vec<SpanId>,
+}
+
+impl Expr {
+    fn apply_alias(&mut self, alias_map: &AliasMap) {
+        match self {
+            Expr::FnCall(call) => {
+                call.path.apply_alias(alias_map);
+                if let Some(args) = &mut call.args {
+                    for arg in args {
+                        arg.value.apply_alias(alias_map);
+                    }
+                }
+            }
+            Expr::TagCall(call) => {
+                if let Some(path) = &mut call.qual_path {
+                    path.value.apply_alias(alias_map);
+                }
+                for arg in &mut call.args {
+                    arg.value.apply_alias(alias_map);
+                }
+            }
+            Expr::Ref { inner, .. }
+            | Expr::TakePtr(inner)
+            | Expr::Deref(inner)
+            | Expr::Negate(inner)
+            | Expr::ConsumeArg(inner)
+            | Expr::Eat(inner) => inner.value.apply_alias(alias_map),
+            Expr::TupleLit(values) | Expr::List(values) => {
+                for value in values {
+                    value.value.apply_alias(alias_map);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 impl Folder for ImportAliasFolder {
@@ -107,43 +142,42 @@ impl Folder for ImportAliasFolder {
     }
 }
 
-impl TypeExpr {
-    /// Apply symbol alias to this type expression (rewrite bare nominal to qualified path).
+impl Pattern {
     fn apply_alias(&mut self, alias_map: &AliasMap) {
         match self {
-            TypeExpr::Nominal(name, span) => {
+            Pattern::Nominal(name, span) => {
                 if let Some(target) = alias_map.get(name) {
-                    *self = TypeExpr::Qualified(Spanned::new(target.value.clone(), *span));
+                    *self = Pattern::Qualified(Spanned::new(target.value.clone(), *span));
                 }
             }
-            TypeExpr::Qualified(path) => {
+            Pattern::Qualified(path) => {
                 path.value.apply_alias(alias_map);
             }
-            TypeExpr::Generic { params, .. } => {
+            Pattern::Generic { params, .. } => {
                 for (_, kind) in params {
                     match kind {
                         crate::ParameterKind::Tagged(sp) => sp.value.apply_alias(alias_map),
-                        crate::ParameterKind::ValueParam { ty } => ty.value.apply_alias(alias_map),
+                        crate::ParameterKind::ValueParam { ty }
+                        | crate::ParameterKind::Inferred { ty } => {
+                            ty.value.apply_alias(alias_map)
+                        }
                         _ => {}
                     }
                 }
             }
-            TypeExpr::Pointer(inner) | TypeExpr::Ref { inner, .. } => {
+            Pattern::Pointer(inner) | Pattern::Ref { inner, .. } => {
                 inner.value.apply_alias(alias_map);
             }
-            TypeExpr::ListCons { head, tail } => {
+            Pattern::ListCons { head, tail } => {
                 head.value.apply_alias(alias_map);
                 tail.value.apply_alias(alias_map);
             }
-            TypeExpr::Tuple(elems) => {
+            Pattern::Tuple(elems) => {
                 for elem in elems {
                     elem.value.apply_alias(alias_map);
                 }
             }
-            TypeExpr::Literal(..)
-            | TypeExpr::Unit
-            | TypeExpr::ListEmpty
-            | TypeExpr::InRange { .. } => {}
+            Pattern::Literal(..) | Pattern::Unit | Pattern::ListEmpty | Pattern::InRange { .. } => {}
         }
     }
 }

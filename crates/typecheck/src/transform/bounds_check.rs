@@ -3,6 +3,7 @@
 use crate::ty::Ty;
 use crate::typed::{ExprId, TypedFileAst};
 use diagnostic::Diagnostic;
+use crate::ty::ParamKind;
 
 pub fn check_fn_call_bounds(
     typed: &TypedFileAst,
@@ -16,7 +17,10 @@ pub fn check_fn_call_bounds(
     let Some(arg_ids) = args else {
         return;
     };
-    for ((_, param_ty), arg_id) in bind.params.iter().zip(arg_ids.iter()) {
+    for (((_, param_ty), param_kind), arg_id) in bind.params.iter().zip(bind.param_kinds.iter()).zip(arg_ids.iter()) {
+        if !matches!(param_kind, ParamKind::Value(_)) {
+            continue;
+        }
         let Some(arg_ty) = typed.exprs.ty.get(arg_id.as_usize()) else {
             continue;
         };

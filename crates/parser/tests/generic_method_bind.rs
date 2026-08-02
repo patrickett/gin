@@ -1,15 +1,13 @@
 //! Parser tests for method binds with parameterized-type receivers,
 //! e.g. `Range(x).new(start x, end x) Range(x): (start, end)`.
 
-use ast::{DeclareValue, Expr, HasFunctionKind, HasMember, ParameterKind, TypeExpr};
-use internment::Intern;
+use ast::{DeclareValue, Expr, HasFunctionKind, HasMember, ParameterKind};
 
 use parser::cursor::TokenCursor;
 use parser::query::SourceParseExt;
 
-fn intern(s: &str) -> Intern<String> {
-    Intern::new(s.to_owned())
-}
+mod support;
+use support::*;
 
 #[test]
 fn parses_generic_method_bind_with_typevar_params_and_return() {
@@ -30,16 +28,15 @@ fn parses_generic_method_bind_with_typevar_params_and_return() {
         .get(&intern("Range.new"))
         .expect("expected Range.new bind");
 
-    // Receiver is TypeGeneric { name: Range, params: { x: Generic } }
+    // Receiver is an ordinary TagCall with a lowercase type-variable argument.
     let recv = bind
         .receiver_type_surface()
         .expect("Range.new must have a receiver_type");
     match &recv.value {
-        TypeExpr::Generic { name, params, .. } => {
-            assert_eq!(name.as_str(), "Range");
-            assert_eq!(params.len(), 1);
-            assert_eq!(params[0].0.as_str(), "x");
-            assert!(matches!(params[0].1, ParameterKind::Generic));
+        Expr::TagCall(call) => {
+            assert_eq!(call.name.as_str(), "Range");
+            assert_eq!(call.args.len(), 1);
+            assert!(matches!(call.args[0].value, Expr::FnCall(ref f) if f.path.value.root.as_str() == "x" && f.args.is_none()));
         }
         other => panic!("receiver should be TypeGeneric, got {:?}", other),
     }
@@ -53,9 +50,9 @@ fn parses_generic_method_bind_with_typevar_params_and_return() {
     assert_eq!(k0.as_str(), "start");
     assert_eq!(k1.as_str(), "end");
     for (k, v) in [(*k0, v0), (*k1, v1)] {
-        match v {
+        match &v.kind {
             ParameterKind::Tagged(sp) => match &sp.value {
-                TypeExpr::Nominal(n, _) => {
+                Expr::AnonymousTag(n) => {
                     assert_eq!(n.as_str(), "x", "{} param type-var should be x", k.as_str());
                 }
                 other => panic!("{} param should be TypeNominal(x), got {:?}", k, other),
@@ -64,16 +61,16 @@ fn parses_generic_method_bind_with_typevar_params_and_return() {
         }
     }
 
-    // Return type is TypeGeneric Range(x), stored on bind.return_tag
+    // Return type is an ordinary TagCall Range(x), stored on bind.return_tag.
     let ret = bind
         .return_tag
         .as_ref()
         .expect("Range.new must have return_tag");
     match &ret.value {
-        TypeExpr::Generic { name, params, .. } => {
-            assert_eq!(name.as_str(), "Range");
-            assert_eq!(params.len(), 1);
-            assert_eq!(params[0].0.as_str(), "x");
+        Expr::TagCall(call) => {
+            assert_eq!(call.name.as_str(), "Range");
+            assert_eq!(call.args.len(), 1);
+            assert!(matches!(call.args[0].value, Expr::FnCall(ref f) if f.path.value.root.as_str() == "x" && f.args.is_none()));
         }
         other => panic!("return_tag should be TypeGeneric Range(x), got {:?}", other),
     }
@@ -93,7 +90,7 @@ fn parses_method_bind_with_nontypevar_params() {
 
     let recv = bind.receiver_type_surface().expect("receiver must exist");
     match &recv.value {
-        TypeExpr::Nominal(n, _) => assert_eq!(n.as_str(), "Bool"),
+        Expr::AnonymousTag(n) => assert_eq!(n.as_str(), "Bool"),
         other => panic!("receiver should be TypeNominal(Bool), got {:?}", other),
     }
 }
@@ -119,12 +116,12 @@ fn parses_custom_range_no_type_param_for_contrast() {
     assert_eq!(params.len(), 2);
     let collected: Vec<_> = params.iter().collect();
     // No shared type variable: each param is `Generic` (no annotation).
-    for (name, kind) in &collected {
+    for (name, param) in &collected {
         assert!(
-            matches!(kind, ParameterKind::Generic),
+            matches!(param.kind, ParameterKind::Generic),
             "{} should be Generic, got {:?}",
             name,
-            kind
+            param
         );
     }
 }
@@ -198,7 +195,8 @@ return\n";
     assert!(bind.is_method(), "expected receiver_type");
     let has_typed_self = bind.params.as_ref().is_some_and(|p| {
         matches!(
-            p.get(&internment::Intern::from_ref("self")),
+            p.get(&internment::Intern::from_ref("self"))
+                .map(|param| &param.kind),
             Some(ast::ParameterKind::Tagged(_))
         )
     });
@@ -314,7 +312,7 @@ fn nested_has_method_registers_only_qualified_name() {
         .as_ref()
         .expect("method return type");
     assert!(
-        matches!(&return_ty.value, TypeExpr::Nominal(name, _) if name.as_str() == "Self"),
+        matches!(&return_ty.value, Expr::AnonymousTag(name) if name.as_str() == "Self"),
         "expected Self return type, got {:?}",
         return_ty.value
     );
@@ -336,10 +334,11 @@ fn range_gin_method_form_parses() {
 use '../'.Bounded
 
 --- Range utilities.
-Range(x) has start x, end x
-Range(x).Bounded has
-    min: self.start
-    max: self.end
+Range(x) has Bounded
+    start x
+    end x
+    Bounded.min: self.start
+    Bounded.max: self.end
 
 --- create a new range
 Range(x).new(start x, end x): Range(start, end)
@@ -376,13 +375,9 @@ fn parenthesized_has_members_emit_removed_syntax_error() {
 }
 
 #[test]
-fn paren_provision_syntax_emits_error() {
-    let out = "Range.Bounded(min: self.start, max: self.end)\n".parse_source_full();
-    assert!(
-        out.symptoms
-            .iter()
-            .any(|d| d.code.slug() == "parse-removed-provision-parens"),
-        "expected parse-removed-provision-parens, got symptoms: {:?}",
-        out.symptoms,
-    );
+fn standalone_dot_trait_provision_is_not_attached_to_the_type() {
+    let out =
+        "Range has start Int, end Int\nRange.Bounded has min: self.start\n".parse_source_full();
+    let range = out.ast.tags.get(&intern("Range")).expect("Range");
+    assert!(range.provided_traits.is_empty());
 }

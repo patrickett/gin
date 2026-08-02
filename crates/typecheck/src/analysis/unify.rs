@@ -1,4 +1,4 @@
-use ast::{ConstExpr, Ty, TyArg};
+use ast::{NormalExpr, Ty, TyArg};
 use std::fmt::Write;
 
 use crate::subst::DepSubst;
@@ -86,12 +86,12 @@ fn unify_ty(expected: &Ty, actual: &Ty, subst: &mut DepSubst) -> Result<(), Stri
 }
 
 fn unify_const(
-    expected: &ConstExpr,
-    actual: &ConstExpr,
+    expected: &NormalExpr,
+    actual: &NormalExpr,
     subst: &mut DepSubst,
 ) -> Result<(), String> {
     match (expected, actual) {
-        (ConstExpr::Var(name), _) => {
+        (NormalExpr::Var(name), _) => {
             if let Some(existing) = subst.consts.get(name) {
                 if existing != actual {
                     return Err(format!(
@@ -106,11 +106,11 @@ fn unify_const(
             }
             Ok(())
         }
-        (ConstExpr::Value(a), ConstExpr::Value(b)) if a == b => Ok(()),
-        (ConstExpr::Inferred(a), ConstExpr::Inferred(b)) if a == b => Ok(()),
-        (ConstExpr::Add(l1, r1), ConstExpr::Add(l2, r2))
-        | (ConstExpr::Sub(l1, r1), ConstExpr::Sub(l2, r2))
-        | (ConstExpr::Mul(l1, r1), ConstExpr::Mul(l2, r2)) => {
+        (NormalExpr::Value(a), NormalExpr::Value(b)) if a == b => Ok(()),
+        (NormalExpr::Inferred(a), NormalExpr::Inferred(b)) if a == b => Ok(()),
+        (NormalExpr::Add(l1, r1), NormalExpr::Add(l2, r2))
+        | (NormalExpr::Sub(l1, r1), NormalExpr::Sub(l2, r2))
+        | (NormalExpr::Mul(l1, r1), NormalExpr::Mul(l2, r2)) => {
             unify_const(l1, l2, subst)?;
             unify_const(r1, r2, subst)
         }
@@ -124,7 +124,7 @@ fn unify_const(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ast::{ConstExpr, ConstValue, Ty, TyArg};
+    use ast::{NormalExpr, ConstValue, Ty, TyArg};
     use internment::Intern;
 
     #[test]
@@ -147,25 +147,25 @@ mod tests {
     #[test]
     fn type_kind_mismatch() {
         let expected = vec![TyArg::Type(Box::new(Ty::Opaque(Intern::from_ref("T"))))];
-        let actual = vec![TyArg::Const(ConstExpr::Value(ConstValue::Int(3)))];
+        let actual = vec![TyArg::Const(NormalExpr::Value(ConstValue::Int(3)))];
         assert!(unify_type_args(&expected, &actual).is_err());
     }
 
     #[test]
     fn const_kind_mismatch() {
-        let expected = vec![TyArg::Const(ConstExpr::Var(Intern::from_ref("n")))];
+        let expected = vec![TyArg::Const(NormalExpr::Var(Intern::from_ref("n")))];
         let actual = vec![TyArg::Type(Box::new(Ty::i64()))];
         assert!(unify_type_args(&expected, &actual).is_err());
     }
 
     #[test]
     fn assigns_const_var() {
-        let expected = vec![TyArg::Const(ConstExpr::Var(Intern::from_ref("n")))];
-        let actual = vec![TyArg::Const(ConstExpr::Value(ConstValue::Int(8)))];
+        let expected = vec![TyArg::Const(NormalExpr::Var(Intern::from_ref("n")))];
+        let actual = vec![TyArg::Const(NormalExpr::Value(ConstValue::Int(8)))];
         let subst = unify_type_args(&expected, &actual).unwrap();
         assert_eq!(
             subst.consts.get(&Intern::from_ref("n")),
-            Some(&ConstExpr::Value(ConstValue::Int(8)))
+            Some(&NormalExpr::Value(ConstValue::Int(8)))
         );
     }
 
@@ -193,12 +193,12 @@ mod tests {
 
     #[test]
     fn inconsistent_const_var() {
-        let n = TyArg::Const(ConstExpr::Var(Intern::from_ref("n")));
+        let n = TyArg::Const(NormalExpr::Var(Intern::from_ref("n")));
         let subst = unify_type_args(
             &[n.clone(), n],
             &[
-                TyArg::Const(ConstExpr::Value(ConstValue::Int(2))),
-                TyArg::Const(ConstExpr::Value(ConstValue::Int(3))),
+                TyArg::Const(NormalExpr::Value(ConstValue::Int(2))),
+                TyArg::Const(NormalExpr::Value(ConstValue::Int(3))),
             ],
         );
         assert!(subst.is_err());
@@ -215,17 +215,17 @@ mod tests {
     fn mixed_type_and_const() {
         let expected = vec![
             TyArg::Type(Box::new(Ty::Opaque(Intern::from_ref("T")))),
-            TyArg::Const(ConstExpr::Var(Intern::from_ref("n"))),
+            TyArg::Const(NormalExpr::Var(Intern::from_ref("n"))),
         ];
         let actual = vec![
             TyArg::Type(Box::new(Ty::i64())),
-            TyArg::Const(ConstExpr::Value(ConstValue::Int(16))),
+            TyArg::Const(NormalExpr::Value(ConstValue::Int(16))),
         ];
         let subst = unify_type_args(&expected, &actual).unwrap();
         assert_eq!(subst.types.get(&Intern::from_ref("T")), Some(&Ty::i64()));
         assert_eq!(
             subst.consts.get(&Intern::from_ref("n")),
-            Some(&ConstExpr::Value(ConstValue::Int(16)))
+            Some(&NormalExpr::Value(ConstValue::Int(16)))
         );
     }
 }

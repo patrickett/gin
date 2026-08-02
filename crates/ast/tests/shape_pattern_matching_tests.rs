@@ -10,7 +10,7 @@
 //! - **Destructuring binds** (`Coord(x: px, y: py, z: pz) := p`) are now
 //!   parsed in body expressions into `Expr::Destructure` nodes.
 //!
-//! Refer to `parser/src/tag.rs` (`parse_pattern_type_expr`) and
+//! Refer to `parser/src/tag.rs` (`parse_is_pattern_tag`) and
 //! `parser/src/expr/control.rs` (`parse_when_is_arms`) for implementation
 //! details.
 

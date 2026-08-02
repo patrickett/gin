@@ -17,7 +17,7 @@ use super::lower_exprs::{ExprLowerScope, LocalEnv};
 /// subject type.
 fn with_pattern_locals(
     env: &LocalEnv,
-    pattern: &TypeExpr,
+    pattern: &Pattern,
     subject_ty: Option<&Ty>,
     subject_targets: Option<&ReferenceTargetSet>,
     scope: &ExprLowerScope<'_>,
@@ -53,11 +53,11 @@ fn reference_referent(ty: Option<&Ty>) -> Option<&Ty> {
 
 fn add_pattern_target_groups(
     env: &mut LocalEnv,
-    pattern: &TypeExpr,
+    pattern: &Pattern,
     subject_ty: Option<&Ty>,
     subject_targets: Option<&ReferenceTargetSet>,
 ) {
-    let TypeExpr::Generic {
+    let Pattern::Generic {
         name, param_spans, ..
     } = pattern
     else {
@@ -97,7 +97,7 @@ pub(crate) fn lower_when_arm_body(
     body: &Typed<Expr>,
     scope: &ExprLowerScope<'_>,
     env: &LocalEnv,
-    pattern: Option<&TypeExpr>,
+    pattern: Option<&Pattern>,
     subject_ty: Option<&Ty>,
     subject_targets: Option<&ReferenceTargetSet>,
 ) -> ExprId {

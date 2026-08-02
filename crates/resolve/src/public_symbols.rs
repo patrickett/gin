@@ -7,15 +7,33 @@ use parser::query::SourceParseExt;
 
 use crate::GinPackageExt;
 
-/// Collect `.gin` paths to scan for public symbols under `root`.
-pub fn gin_paths_for_symbol_lookup(root: &Path) -> Vec<PathBuf> {
-    root.gin_paths_for_symbol_lookup()
-}
-
 /// Find a public definition; uses source-text fallback when `text_fallback` is true (package scope).
 pub fn find_public_def(root: &Path, symbol_name: &str, text_fallback: bool) -> Option<PathBuf> {
+    find_public_def_in_paths(
+        root.gin_paths_for_symbol_lookup(),
+        symbol_name,
+        text_fallback,
+    )
+}
+
+pub fn find_public_def_in_module(root: &Path, symbol_name: &str) -> Option<PathBuf> {
+    let mut paths: Vec<_> = std::fs::read_dir(root)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "gin"))
+        .collect();
+    paths.sort();
+    find_public_def_in_paths(paths, symbol_name, false)
+}
+
+fn find_public_def_in_paths(
+    paths: Vec<PathBuf>,
+    symbol_name: &str,
+    text_fallback: bool,
+) -> Option<PathBuf> {
     let target = Intern::<String>::from_ref(symbol_name);
-    for path in gin_paths_for_symbol_lookup(root) {
+    for path in paths {
         let Ok(source) = std::fs::read_to_string(&path) else {
             continue;
         };
@@ -36,7 +54,7 @@ pub fn find_public_def(root: &Path, symbol_name: &str, text_fallback: bool) -> O
 /// List public symbol names under `root`.
 pub fn list_public_symbols(root: &Path) -> Vec<String> {
     let mut symbols = Vec::new();
-    for path in gin_paths_for_symbol_lookup(root) {
+    for path in root.gin_paths_for_symbol_lookup() {
         let Ok(source) = std::fs::read_to_string(&path) else {
             continue;
         };

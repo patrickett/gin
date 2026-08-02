@@ -1,9 +1,10 @@
 //! Compile-time trait dispatch: `Reflectable`, auto trait defaults, and provided trait overrides.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use internment::Intern;
 
+use crate::analysis::ConstEnv;
 use crate::reflect::{const_value_for_provided_trait_field, reflect_ty_to_const_value};
 use crate::ty::Ty;
 use crate::typed::{TagId, TypedFileAst, TypedTag};
@@ -49,6 +50,11 @@ impl CompileTimeTraitRegistry {
         self.imported_traits
             .iter()
             .any(|t| t.as_str() == trait_name)
+            || self
+                .eval_ast
+                .tags
+                .get(&Intern::from_ref(trait_name))
+                .is_some_and(|decl| decl.attributes.auto)
     }
 
     pub fn auto_trait_decl(&self, trait_name: &str) -> Option<&ast::Declare> {
@@ -218,7 +224,9 @@ fn provided_trait_field(
         for (name, expr) in &pt.fields {
             if name.as_str() == field_name {
                 return expr.const_value.clone().or_else(|| {
-                    crate::analysis::eval_compile_time_expr(&expr.value, &HashMap::new(), eval_ast)
+                    let empty_env = ConstEnv::default();
+                    let evaluator = crate::analysis::CompTimeEvaluator::new(&empty_env, eval_ast);
+                    evaluator.eval(&expr.value)
                 });
             }
         }
@@ -233,9 +241,10 @@ fn evaluate_auto_trait_field(
     eval_ast: &FileAst,
 ) -> Option<ConstValue> {
     let expr = auto_trait_field_expr(trait_decl, field_name)?;
-    let mut env = HashMap::new();
+    let mut env = ConstEnv::default();
     env.insert(Intern::from_ref("Self"), Some(shape));
-    crate::analysis::eval_compile_time_expr_with_env(&expr.value, &env, eval_ast)
+    let evaluator = crate::analysis::CompTimeEvaluator::new(&env, eval_ast);
+    evaluator.eval(&expr.value)
 }
 
 fn auto_trait_field_expr<'a>(
@@ -259,7 +268,7 @@ fn auto_trait_field_expr<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::prepare_file_ast;
+    use crate::prepare_parse_ast;
     use crate::transform::{TransformCtx, transform};
     use crate::typed::FileId;
     use flask::CompileTarget;
@@ -279,7 +288,7 @@ is_copy(x Type) Bool := when x is
     Ptr(_)          then False
 ";
         let mut ast = TokenCursor::parse_source(source);
-        let diags = prepare_file_ast(&mut ast, &CompileTarget::Library);
+        let diags = prepare_parse_ast(&mut ast, &CompileTarget::Library);
         assert!(diags.is_empty(), "diags: {diags:?}");
 
         let typed = transform(&ast, FileId(0), &TransformCtx::new());

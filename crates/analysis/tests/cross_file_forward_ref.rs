@@ -1,10 +1,9 @@
 //! Package semantics: forward references across files must not be `UnknownSymbol`.
 
-use analysis::{CacheEngine, QueryEngine};
-use crossbeam_channel::unbounded;
+use analysis::PackageCache;
 use std::path::PathBuf;
 
-fn unknown_foo_in_package(engine: &CacheEngine, paths: &[PathBuf]) -> bool {
+fn unknown_foo_in_package(engine: &PackageCache, paths: &[PathBuf]) -> bool {
     let outputs = engine.package_semantics(paths);
     outputs.iter().any(|out| {
         out.symptoms
@@ -20,10 +19,10 @@ fn package_semantics_forward_ref_caller_first() {
     let caller_src = "bar() Int := foo() + 1\n";
     let callee_src = "foo() Int := 42\n";
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
-    let _ = engine.add_file(caller_path.clone());
-    let _ = engine.add_file(callee_path.clone());
+    let engine = PackageCache::for_test();
+    let package = engine.new_adhoc_package();
+    let _ = engine.add_file_to_package(caller_path.clone(), package);
+    let _ = engine.add_file_to_package(callee_path.clone(), package);
     engine.set_contents(&caller_path, caller_src.to_string());
     engine.set_contents(&callee_path, callee_src.to_string());
 
@@ -40,10 +39,10 @@ fn package_semantics_forward_ref_callee_first() {
     let caller_src = "bar() Int := foo() + 1\n";
     let callee_src = "foo() Int := 42\n";
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
-    let _ = engine.add_file(caller_path.clone());
-    let _ = engine.add_file(callee_path.clone());
+    let engine = PackageCache::for_test();
+    let package = engine.new_adhoc_package();
+    let _ = engine.add_file_to_package(caller_path.clone(), package);
+    let _ = engine.add_file_to_package(callee_path.clone(), package);
     engine.set_contents(&caller_path, caller_src.to_string());
     engine.set_contents(&callee_path, callee_src.to_string());
 

@@ -58,5 +58,5 @@ pub fn begin_build(config: FlaskConfig, input: Option<PathBuf>) {
         ..Default::default()
     };
 
-    GinCompiler::compile(&mut args)
+    let _ = GinCompiler::compile(&mut args);
 }

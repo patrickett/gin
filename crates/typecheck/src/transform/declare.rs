@@ -15,23 +15,24 @@ use diagnostic::Diagnostic;
 
 use super::TransformCtx;
 use super::lower_ty::nominalize_explicit_ty_surface;
-use crate::analysis::TypeEnv;
+use crate::analysis::{TyInfer, TyInferEnv, TypeEnv};
+use crate::analysis::expr_is_type_surface;
 use crate::compile_time_trait::{RESERVED_TRAITS, synthesize_reflectable_trait};
 use crate::ty::{Ty, UnionVariant};
 use crate::typed::{
-    DefId, ExprId, FileId, GroupId, GroupProjection, TagId, TypedBind, TypedFileAst, TypedGroup,
-    TypedTag, VariantMap,
+    Availability, AvailabilityRequirement, CallCapability, DefId, ExprId, FileId, GroupId,
+    GroupProjection, TagId, TypedBind, TypedFileAst, TypedGroup, TypedTag, VariantMap,
 };
 use ast::parameter::Parameters;
 use ast::prelude::*;
 use ast::type_decl::TypeNameExt;
 use ast::{
     BindValue, BinderId, BinderOwner, ConstValue, DeclareValue, HashFloat, ImportSource, Literal,
-    ParamKind, TypeExpr,
+    ParamKind, Pattern,
 };
 
 use ast_format::declare::{BindFormatExt, DeclareFormatExt};
-use ast_format::type_expr::TypeExprFormatExt;
+use ast_format::type_expr::{ExprFormatExt, PatternFormatExt};
 
 impl TypedTag {
     pub fn resolve_param_kinds(
@@ -43,25 +44,29 @@ impl TypedTag {
         };
         params
             .iter()
-            .filter_map(|(name, kind)| {
-                let kind = match kind {
+            .map(|(name, kind)| {
+                let kind = match &kind.kind {
                     ParameterKind::Generic => ParamKind::Type,
                     ParameterKind::Tagged(sp) if is_type_param_marker(&sp.value) => ParamKind::Type,
                     ParameterKind::Tagged(sp) => {
-                        let ty = TypeEnv::new(tag_types).resolve(&sp.value);
+                        let ty = TypeEnv::new(tag_types).resolve_expr(&sp.value);
                         ParamKind::Value(Box::new(ty))
                     }
                     ParameterKind::ValueParam { ty } | ParameterKind::Inferred { ty } => {
-                        let ty = TypeEnv::new(tag_types).resolve(&ty.value);
+                        let ty = TypeEnv::new(tag_types).resolve_expr(&ty.value);
                         ParamKind::Value(Box::new(ty))
                     }
                     ParameterKind::Default(expr) => {
-                        let te = expr.value.as_type_expr()?;
-                        let ty = TypeEnv::new(tag_types).resolve(&te);
-                        ParamKind::Value(Box::new(ty))
+                        let env = TyInferEnv {
+                            tag_types,
+                            fn_return_types: &HashMap::new(),
+                            locals: &HashMap::new(),
+                            tag_params: None,
+                        };
+                        ParamKind::Value(Box::new(expr.infer_ty(&env)))
                     }
                 };
-                Some((*name, kind))
+                (*name, kind)
             })
             .collect()
     }
@@ -176,8 +181,8 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
         let mut provided_traits = declare.provided_traits.clone();
         provided_traits.retain(|pt| !RESERVED_TRAITS.contains(&pt.trait_name.as_str()));
 
-        // Register provision field expression spans in the typed expression index
-        // so `self` in `Type.Trait has field: self.member` can be found by hover/go-to-def.
+        // Register provision expressions so references inside qualified trait members
+        // remain available to hover and go-to-definition.
         let record_fields = if let Ty::Record { ref fields, .. } = resolved_ty {
             Some(fields)
         } else {
@@ -210,6 +215,7 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                     typed.exprs.ty.push(expr_ty);
                     typed.exprs.span.push(expr.span_id);
                     typed.exprs.const_value.push(None);
+                    typed.exprs.availability.push(Availability::Unknown);
                     typed.exprs.target_group.push(None);
                     typed.exprs.flaws.push(Vec::new());
                     let span = typed.span_table.get(expr.span_id);
@@ -238,7 +244,12 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                     let mut ty_surface = String::new();
                     match m {
                         ast::HasMember::Property(p) => {
-                            // Property: `name Type`
+                            if p.qualifier
+                                .as_ref()
+                                .is_some_and(|qualifier| qualifier.name != declare.name)
+                            {
+                                continue;
+                            }
                             if let Some(ty) = &p.ty {
                                 let _ = write!(&mut ty_surface, "{}", ty.value.format_surface());
                             }
@@ -277,7 +288,7 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                                         }
                                     }
                                     let _ = write!(&mut ty_surface, "{}", param_name.as_str());
-                                    match kind {
+                                    match &kind.kind {
                                         ast::ParameterKind::Tagged(sp) => {
                                             ty_surface.push(' ');
                                             ty_surface.push_str(&sp.value.format_surface());
@@ -368,9 +379,9 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
         if let DeclareValue::Union { variants } = &declare.value {
             for variant in variants {
                 let vname = match &variant.shape().value {
-                    TypeExpr::Nominal(name, _) => name.as_str(),
-                    TypeExpr::Generic { name, .. } => name.as_str(),
-                    TypeExpr::Qualified(path) => path
+                    Pattern::Nominal(name, _) => name.as_str(),
+                    Pattern::Generic { name, .. } => name.as_str(),
+                    Pattern::Qualified(path) => path
                         .segments
                         .last()
                         .map(|s| s.as_str())
@@ -412,7 +423,7 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                 .with_tag_params(&tag_params)
                 .with_tag_decls(&file_ast.tags)
                 .with_dependent_binder(dependent_binder)
-                .resolve(&receiver.value)
+                .resolve_expr(&receiver.value)
         });
         let mut method_tag_types = tag_types_by_name.clone();
         if let Some(receiver_type) = &receiver_type {
@@ -439,7 +450,7 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
             .map(|params| {
                 params
                     .iter()
-                    .map(|(_, k)| param_kind_from_parameter_kind(k, &tag_types_by_name))
+                    .map(|(_, k)| param_kind_from_parameter_kind(&k.kind, &tag_types_by_name))
                     .collect()
             })
             .unwrap_or_default();
@@ -475,12 +486,12 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
             &param_conventions,
             &mut typed.declaration_flaws,
         );
+        let param_count = param_types.len();
 
         let typed_bind = TypedBind {
             name: *name,
             dependent_binder,
             name_span: declare.name_span,
-            is_compile_time: declare.is_compile_time,
             return_type: return_ty.clone(),
             declared_return_type: return_ty.clone(),
             params: param_types,
@@ -496,6 +507,8 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
             is_constant: declare.is_constant,
             body: crate::typed::BindBody::Extern,
             flaws: Vec::new(),
+            param_requirements: vec![AvailabilityRequirement::Any; param_count],
+            call_capability: CallCapability::StagePolymorphic,
             signature_surface: declare.signature_surface(),
             doc_comment: declare.doc_comment.clone(),
             attributes: declare.attributes.clone(),
@@ -512,6 +525,19 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
 
     // 6. Check type annotations in declarations.
     for declare in file_ast.tags.values() {
+        for provided in &declare.provided_traits {
+            if !type_scope.contains(&provided.trait_name) {
+                let diagnostic = Diagnostic::new(
+                    "type-unknown-symbol",
+                    format!("unknown symbol `{}`", provided.trait_name.as_str()),
+                )
+                .with_arg("name", provided.trait_name.as_str().to_string())
+                .at_span_id(provided.trait_name_span, &typed.span_table);
+                typed
+                    .declaration_flaws
+                    .push((provided.trait_name_span, diagnostic));
+            }
+        }
         check_declare_value_type_scope(&declare.value, &type_scope, &mut |span, symptom| {
             let symptom = symptom.at_span_id(span, &typed.span_table);
             typed.declaration_flaws.push((span, symptom))
@@ -521,11 +547,10 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
     typed
 }
 
-fn build_type_scope(file_ast: &FileAst, ctx: &TransformCtx) -> HashSet<Intern<String>> {
+fn build_type_scope(file_ast: &FileAst, _ctx: &TransformCtx) -> HashSet<Intern<String>> {
     let mut names: HashSet<Intern<String>> = HashSet::new();
     names.extend(file_ast.tags.keys().copied());
     names.extend(file_ast.defs.keys().copied());
-    names.extend(ctx.cross_file_tag_types.keys().map(|t| t.0));
     for import in &file_ast.uses {
         collect_import_scope_names(import, &mut names);
     }
@@ -594,18 +619,18 @@ fn check_union_variant_shape_type_scope(
             for variant in variants {
                 let shape = variant.shape();
                 let params = match &shape.value {
-                    TypeExpr::Generic { params, .. } => Some(params),
+                    Pattern::Generic { params, .. } => Some(params),
                     _ => None,
                 };
                 if let Some(params) = params {
                     for (_, kind) in params {
                         if let ast::parameter::ParameterKind::Tagged(sp) = kind
-                            && let TypeExpr::Nominal(name, span) = &sp.value
+                            && let Expr::AnonymousTag(name) = &sp.value
                             && name.as_str().is_capitalized_type_name()
                             && !type_scope.contains(name)
                         {
                             push_flaw(
-                                *span,
+                                sp.span_id,
                                 Diagnostic::new(
                                     "type-unknown-symbol",
                                     format!("unknown symbol `{}`", name.as_str()),
@@ -627,12 +652,12 @@ fn check_union_variant_shape_type_scope(
                     WhenArm::Cond { .. } => {}
                     // `is <TypeExpr> then <body>` — check pattern for unknown symbols
                     WhenArm::Is { pattern, .. } => {
-                        if let TypeExpr::Nominal(name, span) = &pattern.value
+                        if let Some((name, span)) = pattern.value.nominal_with_span()
                             && name.as_str().is_capitalized_type_name()
                             && !type_scope.contains(name)
                         {
                             push_flaw(
-                                *span,
+                                span,
                                 Diagnostic::new(
                                     "type-unknown-symbol",
                                     format!("unknown symbol `{}`", name.as_str()),
@@ -660,10 +685,14 @@ fn check_qualified_has_members(
     };
 
     for member in members {
-        let ast::HasMember::Function(function) = member else {
+        let qualifier = match member {
+            ast::HasMember::Property(property) => property.qualifier.as_ref(),
+            ast::HasMember::Function(function) => function.qualifier.as_ref(),
+        };
+        let Some(qualifier) = qualifier else {
             continue;
         };
-        let Some(qualifier) = &function.qualifier else {
+        if qualifier.name == declare.name {
             continue;
         };
         if !declare
@@ -688,6 +717,9 @@ fn check_qualified_has_members(
         }
 
         let mut visited = HashSet::new();
+        let ast::HasMember::Function(function) = member else {
+            continue;
+        };
         match trait_method_lookup(
             qualifier.name,
             function.name,
@@ -833,135 +865,16 @@ pub(crate) fn collect_bind_value_self_ref_spans(value: &BindValue, spans: &mut V
 }
 
 pub(crate) fn collect_self_ref_spans(expr: &Typed<Expr>, spans: &mut Vec<SpanId>) {
-    match &expr.value {
-        Expr::SelfRef => spans.push(expr.span_id),
-        Expr::Loop(loop_expr) => match loop_expr {
-            ast::Loop::While(while_loop) => {
-                collect_self_ref_spans(&while_loop.cond, spans);
-                for expr in &while_loop.exprs {
-                    collect_self_ref_spans(expr, spans);
-                }
-            }
-            ast::Loop::ForIn(for_in) => {
-                collect_self_ref_spans(&for_in.iter, spans);
-                for expr in &for_in.exprs {
-                    collect_self_ref_spans(expr, spans);
-                }
-            }
-        },
-        Expr::Binary(binary) => {
-            collect_self_ref_spans(&binary.lhs, spans);
-            collect_self_ref_spans(&binary.rhs, spans);
+    fn collect(expr: &Expr, span_id: SpanId, spans: &mut Vec<SpanId>) {
+        if matches!(expr, Expr::SelfRef) {
+            spans.push(span_id);
         }
-        Expr::FnCall(call) => {
-            if let Some(args) = &call.args {
-                for arg in args {
-                    collect_self_ref_spans(arg, spans);
-                }
-            }
-        }
-        Expr::FormatString(format_string) => {
-            for part in &format_string.parts {
-                if let ast::FormatPart::Expr(expr, _) = part {
-                    collect_self_ref_spans(expr, spans);
-                }
-            }
-        }
-        Expr::Range(range) => {
-            collect_self_ref_spans(&range.start, spans);
-            collect_self_ref_spans(&range.end, spans);
-        }
-        Expr::Bind(bind) => match &bind.value {
-            BindValue::Expr(expr) => collect_self_ref_spans(expr, spans),
-            BindValue::Body { exprs, ret } => {
-                for expr in exprs {
-                    collect_self_ref_spans(expr, spans);
-                }
-                if let Some(expr) = &ret.value {
-                    collect_self_ref_spans(expr, spans);
-                }
-            }
-            BindValue::Extern | BindValue::Unassigned => {}
-        },
-        Expr::When(when) => {
-            if let Some(subject) = &when.subject {
-                collect_self_ref_spans(subject, spans);
-            }
-            for arm in &when.arms {
-                match arm {
-                    ast::WhenArm::Cond {
-                        condition, body, ..
-                    } => {
-                        collect_self_ref_spans(condition, spans);
-                        collect_self_ref_spans(body, spans);
-                    }
-                    ast::WhenArm::Is { body, .. } | ast::WhenArm::Else(body, _) => {
-                        collect_self_ref_spans(body, spans);
-                    }
-                }
-            }
-        }
-        Expr::If(if_expr) => {
-            collect_self_ref_spans(&if_expr.subject, spans);
-            for expr in &if_expr.body {
-                collect_self_ref_spans(expr, spans);
-            }
-            if let Some(expr) = &if_expr.ret.value {
-                collect_self_ref_spans(expr, spans);
-            }
-        }
-        Expr::TagCall(call) => {
-            for arg in &call.args {
-                collect_self_ref_spans(arg, spans);
-            }
-        }
-        Expr::TupleAlloc { init, size } => {
-            collect_self_ref_spans(init, spans);
-            collect_self_ref_spans(size, spans);
-        }
-        Expr::TupleGet { base, .. } | Expr::RecordGet { base, .. } => {
-            collect_self_ref_spans(base, spans);
-        }
-        Expr::TupleSet { base, value, .. } | Expr::RecordSet { base, value, .. } => {
-            collect_self_ref_spans(base, spans);
-            collect_self_ref_spans(value, spans);
-        }
-        Expr::Cast { expr, .. }
-        | Expr::TakePtr(expr)
-        | Expr::Ref { inner: expr, .. }
-        | Expr::ConsumeArg(expr)
-        | Expr::Eat(expr)
-        | Expr::Deref(expr)
-        | Expr::Negate(expr) => collect_self_ref_spans(expr, spans),
-        Expr::BufGet { buf, index } => {
-            collect_self_ref_spans(buf, spans);
-            collect_self_ref_spans(index, spans);
-        }
-        Expr::BufSet { buf, index, value } => {
-            collect_self_ref_spans(buf, spans);
-            collect_self_ref_spans(index, spans);
-            collect_self_ref_spans(value, spans);
-        }
-        Expr::RecordLit(fields) => {
-            for (_, expr) in fields {
-                collect_self_ref_spans(expr, spans);
-            }
-        }
-        Expr::TupleLit(exprs) | Expr::List(exprs) => {
-            for expr in exprs {
-                collect_self_ref_spans(expr, spans);
-            }
-        }
-        Expr::Destructure { value, .. } => collect_self_ref_spans(value, spans),
-        Expr::Lit(_)
-        | Expr::AnonymousTag(_)
-        | Expr::TypeNominal(_)
-        | Expr::TypeInRange(_)
-        | Expr::TypeQualified(_)
-        | Expr::TypeGeneric { .. }
-        | Expr::TypeRef { .. }
-        | Expr::Asm(_) => {}
+        let _ = ast::folder::walk_expr_children(expr, &mut |span_id, child| {
+            collect(child, span_id, spans);
+            std::ops::ControlFlow::Continue(())
+        });
     }
+    collect(&expr.value, expr.span_id, spans);
 }
 
 fn check_params_for_in_range_on_bounded_tag(
@@ -973,22 +886,27 @@ fn check_params_for_in_range_on_bounded_tag(
         return;
     };
     for (_, kind) in params {
-        let ParameterKind::Tagged(sp) = kind else {
+        let ParameterKind::Tagged(sp) = &kind.kind else {
             continue;
         };
-        let TypeExpr::InRange {
-            bounds: ast::InRangeBounds::Tag(tag),
-            span,
-        } = &sp.value
-        else {
+        let Expr::Range(range) = &sp.value else {
             continue;
         };
+        let Expr::AnonymousTag(tag) = &range.start.value else {
+            continue;
+        };
+        let Expr::AnonymousTag(end) = &range.end.value else {
+            continue;
+        };
+        if tag != end {
+            continue;
+        }
         if tag_types
             .get(&TagId(*tag))
             .is_some_and(|ty| ty.is_bounded_int())
         {
             flaws.push((
-                *span,
+                range.start.span_id,
                 Diagnostic::new(
                     "type-in-range-on-bounded-int-tag",
                     format!(
@@ -1013,6 +931,59 @@ fn tag_params_map(tags: &ast::TagMap) -> HashMap<Intern<String>, Parameters> {
     map
 }
 
+fn references_nominal_type(ty: &Ty, target: Intern<String>) -> bool {
+    match ty {
+        Ty::Record {
+            name,
+            fields,
+            resolved_params,
+        } => {
+            *name == target
+                || fields
+                    .iter()
+                    .any(|(_, field_ty)| references_nominal_type(field_ty, target))
+                || resolved_params.as_ref().is_some_and(|params| {
+                    params.iter().any(|(_, arg)| match arg {
+                        ast::TyArg::Type(ty) => references_nominal_type(ty, target),
+                        ast::TyArg::Const(_) => false,
+                    })
+                })
+        }
+        Ty::Union {
+            name,
+            variants,
+            resolved_params,
+            ..
+        } => {
+            *name == target
+                || variants.iter().any(|variant| {
+                    variant
+                        .fields
+                        .iter()
+                        .any(|(_, field_ty)| references_nominal_type(field_ty, target))
+                        || variant
+                            .result_ty
+                            .as_ref()
+                            .is_some_and(|ty| references_nominal_type(ty, target))
+                })
+                || resolved_params.as_ref().is_some_and(|params| {
+                    params.iter().any(|(_, arg)| match arg {
+                        ast::TyArg::Type(ty) => references_nominal_type(ty, target),
+                        ast::TyArg::Const(_) => false,
+                    })
+                })
+        }
+        Ty::Opaque(name) => *name == target,
+        Ty::Array { elem, .. } | Ty::Ptr { inner: elem } | Ty::Ref { inner: elem, .. } => {
+            references_nominal_type(elem, target)
+        }
+        Ty::Tuple(elements) => elements
+            .iter()
+            .any(|element| references_nominal_type(element, target)),
+        Ty::Int { .. } | Ty::Float { .. } | Ty::Unit | Ty::Literal(_) => false,
+    }
+}
+
 fn resolve_tag_pass(
     tag_name: &Intern<String>,
     declare: &ast::declare::Declare,
@@ -1021,13 +992,11 @@ fn resolve_tag_pass(
     cross_file_tag_types: &HashMap<TagId, Ty>,
     resolved: &HashMap<Intern<String>, Ty>,
 ) -> Ty {
-    // Do not feed a tag's previous-pass type back into its own resolution.
-    // Recursive declarations such as `Type is ... Tuple(List(Type)) ...` would
-    // otherwise expand one full copy of `Type` per fixpoint pass, ballooning
-    // memory before the pass cap is reached. Self references should remain
-    // nominal/opaque at this stage; consumers can still identify them by name.
-    let mut resolved_without_self = resolved.clone();
-    resolved_without_self.remove(tag_name);
+    let acyclic_resolved = resolved
+        .iter()
+        .filter(|(name, ty)| **name != *tag_name && !references_nominal_type(ty, *tag_name))
+        .map(|(name, ty)| (*name, ty.clone()))
+        .collect();
     resolve_declare_value(
         tag_name,
         &declare.value,
@@ -1035,7 +1004,7 @@ fn resolve_tag_pass(
         all_tags,
         tag_params,
         cross_file_tag_types,
-        &resolved_without_self,
+        &acyclic_resolved,
     )
 }
 
@@ -1047,27 +1016,26 @@ pub(crate) fn resolve_tags_fixpoint(
 ) -> HashMap<Intern<String>, Ty> {
     let mut resolved: HashMap<Intern<String>, Ty> = HashMap::new();
     for _pass in 0..max_passes {
-        let mut changed = false;
-        for (name, declare) in tags {
-            let new_ty = resolve_tag_pass(
-                name,
-                declare,
-                tags,
-                tag_params,
-                cross_file_tag_types,
-                &resolved,
-            );
-            match resolved.get(name) {
-                Some(existing) if existing == &new_ty => {}
-                _ => {
-                    resolved.insert(*name, new_ty);
-                    changed = true;
-                }
-            }
-        }
-        if !changed {
+        let next: HashMap<_, _> = tags
+            .iter()
+            .map(|(name, declare)| {
+                (
+                    *name,
+                    resolve_tag_pass(
+                        name,
+                        declare,
+                        tags,
+                        tag_params,
+                        cross_file_tag_types,
+                        &resolved,
+                    ),
+                )
+            })
+            .collect();
+        if next == resolved {
             break;
         }
+        resolved = next;
     }
     resolved
 }
@@ -1121,12 +1089,12 @@ fn push_union_variants_to_map(
     }
 }
 
-fn literal_const_from_type_expr(expr: &TypeExpr) -> Option<ConstValue> {
+fn literal_const_from_type_expr(expr: &Pattern) -> Option<ConstValue> {
     match expr {
-        TypeExpr::Literal(Literal::String(s), _) => Some(ConstValue::String(s.clone())),
-        TypeExpr::Literal(Literal::Int(n), _) => Some(ConstValue::Int(*n as i128)),
-        TypeExpr::Literal(Literal::Number(n), _) => Some(ConstValue::Int(*n as i128)),
-        TypeExpr::Literal(Literal::Float(HashFloat(f)), _) => {
+        Pattern::Literal(Literal::String(s), _) => Some(ConstValue::String(s.clone())),
+        Pattern::Literal(Literal::Int(n), _) => Some(ConstValue::Int(*n as i128)),
+        Pattern::Literal(Literal::Number(n), _) => Some(ConstValue::Int(*n as i128)),
+        Pattern::Literal(Literal::Float(HashFloat(f)), _) => {
             Some(ConstValue::Float(HashFloat(*f)))
         }
         _ => None,
@@ -1148,7 +1116,7 @@ fn resolve_declare_value(
         .with_tag_decls(all_tags);
 
     match value {
-        DeclareValue::Alias(sp) => env.resolve(&sp.value),
+        DeclareValue::Alias(sp) => env.resolve_expr(&sp.value),
         DeclareValue::Union { variants } => {
             let literal_values: Option<Vec<ConstValue>> = variants
                 .iter()
@@ -1163,21 +1131,23 @@ fn resolve_declare_value(
                 .map(|v| {
                     let shape = v.shape();
                     let (name, fields) = match &shape.value {
-                        TypeExpr::Generic { name, params, .. } => {
+                        Pattern::Generic { name, params, .. } => {
                             let fields: Vec<(Intern<String>, Box<Ty>)> = params
                                 .iter()
                                 .map(|(name, kind)| {
                                     let ty = match kind {
-                                        ParameterKind::Tagged(sp) => env.resolve(&sp.value),
+                                        ParameterKind::Tagged(sp) => env.resolve_expr(&sp.value),
                                         ParameterKind::ValueParam { ty }
-                                        | ParameterKind::Inferred { ty } => env.resolve(&ty.value),
+                                        | ParameterKind::Inferred { ty } => env.resolve_expr(&ty.value),
                                         ParameterKind::Generic => Ty::Opaque(*name),
                                         ParameterKind::Default(expr) => {
-                                            if let Some(te) = expr.value.as_type_expr() {
-                                                env.resolve(&te)
-                                            } else {
-                                                Ty::i64()
-                                            }
+                                            let infer_env = TyInferEnv {
+                                                tag_types: env.tag_types,
+                                                fn_return_types: &HashMap::new(),
+                                                locals: &HashMap::new(),
+                                                tag_params: env.tag_params,
+                                            };
+                                            expr.infer_ty(&infer_env)
                                         }
                                     };
                                     (*name, Box::new(ty))
@@ -1185,7 +1155,7 @@ fn resolve_declare_value(
                                 .collect();
                             (*name, fields)
                         }
-                        TypeExpr::Nominal(name, _) => {
+                        Pattern::Nominal(name, _) => {
                             (*name, Vec::<(Intern<String>, Box<Ty>)>::new())
                         }
                         _ => (
@@ -1193,7 +1163,7 @@ fn resolve_declare_value(
                             Vec::<(Intern<String>, Box<Ty>)>::new(),
                         ),
                     };
-                    let result_ty = v.result_ty().map(|rt| env.resolve(&rt.value));
+                    let result_ty = v.result_ty().map(|rt| env.resolve_expr(&rt.value));
                     UnionVariant {
                         name,
                         fields,
@@ -1218,14 +1188,19 @@ fn resolve_declare_value(
             let resolved_fields: Vec<(Intern<String>, Box<Ty>)> = members
                 .iter()
                 .filter_map(|m| match m {
-                    HasMember::Property(p) => {
-                        let field_ty =
-                            p.ty.as_ref()
-                                .map(|ty| env.resolve(&ty.value))
-                                .unwrap_or(Ty::Unit);
+                    HasMember::Property(p)
+                        if p.qualifier
+                            .as_ref()
+                            .is_none_or(|qualifier| qualifier.name == *declaring_name) =>
+                    {
+                        let field_ty = p
+                            .ty
+                            .as_ref()
+                            .map(|ty| env.resolve_expr(&ty.value))
+                            .unwrap_or(Ty::Unit);
                         Some((p.name, Box::new(field_ty)))
                     }
-                    HasMember::Function(_) => None,
+                    HasMember::Property(_) | HasMember::Function(_) => None,
                 })
                 .collect();
             Ty::Record {
@@ -1236,21 +1211,31 @@ fn resolve_declare_value(
         }
         DeclareValue::When(when) => {
             if let Some(subject) = &when.subject {
-                if let Some(subject_te) = subject.value.as_type_expr() {
-                    let subject_ty = env.resolve(&subject_te);
-                    // Try to simplify via compile-time constant folding
-                    for arm in &when.arms {
-                        if let WhenArm::Is { body, .. } = arm
-                            && let Some(body_te) = body.value.as_type_expr()
-                        {
-                            let body_ty = env.resolve(&body_te);
+                let infer_env = TyInferEnv {
+                    tag_types: env.tag_types,
+                    fn_return_types: &HashMap::new(),
+                    locals: &HashMap::new(),
+                    tag_params: env.tag_params,
+                };
+                let subject_ty = if expr_is_type_surface(&subject.value) {
+                    env.resolve(&subject.value)
+                } else {
+                    subject.infer_ty(&infer_env)
+                };
+                // Try to simplify via compile-time constant folding
+                for arm in &when.arms {
+                    if let WhenArm::Is { body, .. } = arm {
+                        let body_ty = if expr_is_type_surface(&body.value) {
+                            env.resolve(&body.value)
+                        } else {
+                            body.infer_ty(&infer_env)
+                        };
+                        if body_ty != Ty::Unit {
                             return body_ty;
                         }
                     }
-                    subject_ty
-                } else {
-                    Ty::Unit
                 }
+                subject_ty
             } else {
                 Ty::Unit
             }
@@ -1397,7 +1382,7 @@ fn resolve_target_groups(
 
     let return_group = match bind.return_tag.as_deref() {
         Some(spanned) => match &spanned.value {
-            TypeExpr::Ref {
+            Expr::Ref {
                 group: Some(name), ..
             } => match named.get(name).copied() {
                 Some(group_id) => Some(group_id),
@@ -1413,7 +1398,7 @@ fn resolve_target_groups(
                     None
                 }
             },
-            TypeExpr::Ref { group: None, .. } => match groups.len() {
+            Expr::Ref { group: None, .. } => match groups.len() {
                 1 => Some(GroupId(0)),
                 0 => {
                     flaws.push((
@@ -1602,7 +1587,9 @@ fn resolve_return_type(
     tag_decls: &ast::TagMap,
     dependent_binder: BinderId,
 ) -> Ty {
-    if let Some(sp) = &bind.return_tag {
+    if let Some(sp) = &bind.return_tag
+        && expr_is_type_surface(&sp.value)
+    {
         let ty = TypeEnv::new(tag_types)
             .with_tag_params(tag_params)
             .with_tag_decls(tag_decls)
@@ -1612,7 +1599,7 @@ fn resolve_return_type(
     }
     if let Some(name) = &bind.return_type_name {
         let ty = tag_types.get(name).cloned().unwrap_or(Ty::Opaque(*name));
-        return nominalize_explicit_ty_surface(&TypeExpr::Nominal(*name, SpanId::INVALID), ty);
+        return nominalize_explicit_ty_surface(&ast::Expr::AnonymousTag(*name), ty);
     }
     // Try to infer from body
     match &bind.value {
@@ -1639,30 +1626,28 @@ fn resolve_param_types(
     params
         .iter()
         .map(|(name, kind)| {
-            let ty = match kind {
+            let ty = match &kind.kind {
                 ParameterKind::Tagged(sp) => TypeEnv::new(tag_types)
                     .with_tag_params(tag_params)
                     .with_tag_decls(tag_decls)
                     .with_dependent_binder(dependent_binder)
-                    .resolve(&sp.value),
+                    .resolve_expr(&sp.value),
                 ParameterKind::ValueParam { ty } | ParameterKind::Inferred { ty } => {
                     TypeEnv::new(tag_types)
                         .with_tag_params(tag_params)
                         .with_tag_decls(tag_decls)
                         .with_dependent_binder(dependent_binder)
-                        .resolve(&ty.value)
+                        .resolve_expr(&ty.value)
                 }
                 ParameterKind::Generic => Ty::Opaque(*name),
                 ParameterKind::Default(expr) => {
-                    if let Some(te) = expr.value.as_type_expr() {
-                        TypeEnv::new(tag_types)
-                            .with_tag_params(tag_params)
-                            .with_tag_decls(tag_decls)
-                            .with_dependent_binder(dependent_binder)
-                            .resolve(&te)
-                    } else {
-                        Ty::i64()
-                    }
+                    let env = TyInferEnv {
+                        tag_types,
+                        fn_return_types: &HashMap::new(),
+                        locals: &HashMap::new(),
+                        tag_params: Some(tag_params),
+                    };
+                    expr.infer_ty(&env)
                 }
             };
             (*name, ty)
@@ -1670,8 +1655,8 @@ fn resolve_param_types(
         .collect()
 }
 
-fn is_type_param_marker(ty: &TypeExpr) -> bool {
-    matches!(ty, TypeExpr::Nominal(name, _) if name.as_str() == "Type")
+fn is_type_param_marker(ty: &Expr) -> bool {
+    matches!(ty, Expr::AnonymousTag(name) if name.as_str() == "Type")
 }
 
 fn param_kind_from_parameter_kind(
@@ -1682,22 +1667,21 @@ fn param_kind_from_parameter_kind(
         ParameterKind::Generic => ParamKind::Type,
         ParameterKind::Tagged(sp) if is_type_param_marker(&sp.value) => ParamKind::Type,
         ParameterKind::Tagged(sp) => {
-            let ty = TypeEnv::new(tag_types).resolve(&sp.value);
+            let ty = TypeEnv::new(tag_types).resolve_expr(&sp.value);
             ParamKind::Value(Box::new(ty))
         }
         ParameterKind::ValueParam { ty } | ParameterKind::Inferred { ty } => {
-            let ty = TypeEnv::new(tag_types).resolve(&ty.value);
+            let ty = TypeEnv::new(tag_types).resolve_expr(&ty.value);
             ParamKind::Value(Box::new(ty))
         }
         ParameterKind::Default(expr) => {
-            if let Some(te) = expr.value.as_type_expr()
-                && te.is_type_surface()
-            {
-                let ty = TypeEnv::new(tag_types).resolve(&te);
-                ParamKind::Value(Box::new(ty))
-            } else {
-                ParamKind::Type
-            }
+            let env = TyInferEnv {
+                tag_types,
+                fn_return_types: &HashMap::new(),
+                locals: &HashMap::new(),
+                tag_params: None,
+            };
+            ParamKind::Value(Box::new(expr.infer_ty(&env)))
         }
     }
 }
@@ -1719,9 +1703,55 @@ mod tests {
 
     fn inferred_arg(ty: &Ty, index: usize) -> ast::DependentArgId {
         match &resolved_args(ty)[index].1 {
-            ast::TyArg::Const(ast::ConstExpr::Inferred(id)) => *id,
+            ast::TyArg::Const(ast::NormalExpr::Inferred(id)) => *id,
             other => panic!("expected inferred argument, found {other:?}"),
         }
+    }
+
+    #[test]
+    fn mutually_recursive_tags_keep_recursive_edges_nominal() {
+        let ast = TokenCursor::parse_source(
+            "String has byte Int\nList(x) has item x\nType is Record(fields List(NamedTy)) or Opaque(name String)\nNamedTy has ty Type\n",
+        );
+        let params = tag_params_map(&ast.tags);
+        let resolved = resolve_tags_fixpoint(&ast.tags, &params, &HashMap::new(), 8);
+
+        let Ty::Record { fields, .. } = resolved.get(&Intern::from_ref("NamedTy")).unwrap() else {
+            panic!("expected NamedTy record");
+        };
+        assert!(
+            matches!(fields[0].1.as_ref(), Ty::Opaque(name) if name.as_str() == "Type"),
+            "{:?}",
+            fields[0].1
+        );
+
+        let Ty::Union { variants, .. } = resolved.get(&Intern::from_ref("Type")).unwrap() else {
+            panic!("expected Type union");
+        };
+        let list = variants[0].fields[0].1.as_ref();
+        assert!(references_nominal_type(list, Intern::from_ref("NamedTy")));
+    }
+
+    #[test]
+    fn provided_trait_must_be_in_file_scope() {
+        let ast = TokenCursor::parse_source("Bool is True or False\nBool has Happy\n");
+        let typed = stage_declare(&ast, FileId(0), &TransformCtx::new());
+
+        assert!(typed.declaration_flaws.iter().any(|(_, diagnostic)| {
+            diagnostic.code.slug() == "type-unknown-symbol"
+                && diagnostic.arg("name") == Some("Happy")
+        }));
+    }
+
+    #[test]
+    fn imported_provided_trait_is_in_file_scope() {
+        let ast = TokenCursor::parse_source("use Happy\nBool is True or False\nBool has Happy\n");
+        let typed = stage_declare(&ast, FileId(0), &TransformCtx::new());
+
+        assert!(!typed.declaration_flaws.iter().any(|(_, diagnostic)| {
+            diagnostic.code.slug() == "type-unknown-symbol"
+                && diagnostic.arg("name") == Some("Happy")
+        }));
     }
 
     #[test]
@@ -1977,11 +2007,11 @@ mod tests {
         assert_eq!(args.len(), 3);
         assert_eq!(
             args[1].1,
-            ast::TyArg::Const(ast::ConstExpr::Value(ConstValue::Int(3)))
+            ast::TyArg::Const(ast::NormalExpr::Value(ConstValue::Int(3)))
         );
         assert_eq!(
             args[2].1,
-            ast::TyArg::Const(ast::ConstExpr::Value(ConstValue::Int(9)))
+            ast::TyArg::Const(ast::NormalExpr::Value(ConstValue::Int(9)))
         );
     }
 

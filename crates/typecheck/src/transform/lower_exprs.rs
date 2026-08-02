@@ -8,16 +8,15 @@ use internment::Intern;
 use std::collections::{HashMap, HashSet};
 
 use crate::analysis::when_is_exhaustive;
-use crate::analysis::{eval_compile_time_expr, pattern_matches_public};
-use crate::prepare_target::const_binds_from_prepared_ast;
+use crate::prepare_target::const_env_from_prepared_ast;
 use ast::HashFloat;
 use ast::prelude::*;
-use ast_format::type_expr::TypeExprFormatExt;
+use ast_format::type_expr::ExprFormatExt;
 
 use crate::ty::Ty;
 use crate::typed::{
     BindBody, DefId, ExprId, ReferenceTargetGroup, ReferenceTargetSet, TagId, TargetIndex,
-    TypedCallableSignature, TypedExprKind, TypedFileAst, TypedWhenArm, VariantMap,
+    Availability, TypedCallableSignature, TypedExprKind, TypedFileAst, TypedWhenArm, VariantMap,
 };
 use ast::ConstValue;
 use diagnostic::Diagnostic;
@@ -256,7 +255,7 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
         }
         if let Some(params) = &bind.params
             && params.iter().any(|(name, kind)| {
-                name.as_str() == "self" && matches!(kind, ParameterKind::Tagged(_))
+                name.as_str() == "self" && matches!(&kind.kind, ParameterKind::Tagged(_))
             })
             && let Some(typed_bind) = typed.defs.get_mut(def_id)
         {
@@ -291,7 +290,7 @@ pub(crate) fn lower_typed_expr(
         &typed.fn_return_types,
     );
     // Infer const_value from literals and known value refs at parse time (before const-folding runs).
-    let const_val = expr.const_value.clone().or_else(|| match &expr.value {
+    let mut const_val = expr.const_value.clone().or_else(|| match &expr.value {
         Expr::FnCall(call) if call.args.is_none() => {
             if call.path.value.segments.is_empty()
                 && let Some(cv) = env.const_values.get(&call.path.value.root)
@@ -308,9 +307,23 @@ pub(crate) fn lower_typed_expr(
                 const_for_def_id(target, typed).or_else(|| {
                     scope.variant_map.get(&target.0).and_then(|entries| {
                         if entries.len() == 1 {
+                            let qual_path = (!call.path.value.segments.is_empty()).then(|| {
+                                let mut path = call.path.value.root.as_str().to_string();
+                                for segment in call
+                                    .path
+                                    .value
+                                    .segments
+                                    .iter()
+                                    .take(call.path.value.segments.len().saturating_sub(1))
+                                {
+                                    path.push('.');
+                                    path.push_str(segment.as_str());
+                                }
+                                path
+                            });
                             Some(ast::ConstValue::Tag {
                                 name: target.0,
-                                qual_path: None,
+                                qual_path,
                                 args: vec![].into(),
                             })
                         } else {
@@ -352,6 +365,12 @@ pub(crate) fn lower_typed_expr(
         },
         _ => None,
     });
+    if let Some(qual_path) = source_const_qualifier(&expr.value)
+        && let Some(ast::ConstValue::Tag { qual_path: stored, .. }) = const_val.as_mut()
+        && stored.is_none()
+    {
+        *stored = Some(qual_path);
+    }
 
     // Extract the span of the symbol name from the AST before lowering,
     // so diagnostics on unknown symbols point at the exact name in source.
@@ -382,6 +401,7 @@ pub(crate) fn lower_typed_expr(
         typed.exprs.ty.push(Ty::Unit);
         typed.exprs.span.push(expr.span_id);
         typed.exprs.const_value.push(None);
+        typed.exprs.availability.push(Availability::Unknown);
         typed.exprs.target_group.push(None);
         typed.exprs.flaws.push(Vec::new());
         expr_id
@@ -446,6 +466,7 @@ pub(crate) fn lower_typed_expr(
         typed.exprs.ty[index] = final_ty;
         typed.exprs.span[index] = expr.span_id;
         typed.exprs.const_value[index] = const_val;
+        typed.exprs.availability[index] = Availability::Unknown;
         typed.exprs.target_group[index] = target_group;
         typed.exprs.flaws[index] = flaws;
     } else {
@@ -453,6 +474,7 @@ pub(crate) fn lower_typed_expr(
         typed.exprs.ty.push(final_ty);
         typed.exprs.span.push(expr.span_id);
         typed.exprs.const_value.push(const_val);
+        typed.exprs.availability.push(Availability::Unknown);
         typed.exprs.target_group.push(target_group);
         typed.exprs.flaws.push(flaws);
     }
@@ -466,6 +488,33 @@ pub(crate) fn lower_typed_expr(
     }
 
     expr_id
+}
+
+fn source_const_qualifier(expr: &ast::Expr) -> Option<String> {
+    let (root, segments) = match expr {
+        ast::Expr::FnCall(call) => (&call.path.value.root, &call.path.value.segments),
+        ast::Expr::TagCall(call) => {
+            let path = call.qual_path.as_ref()?.value.clone();
+            return source_const_qualifier_from_path(&path.root, &path.segments);
+        }
+        _ => return None,
+    };
+    source_const_qualifier_from_path(root, segments)
+}
+
+fn source_const_qualifier_from_path(
+    root: &Intern<String>,
+    segments: &[Intern<String>],
+) -> Option<String> {
+    if segments.is_empty() {
+        return None;
+    }
+    let mut path = root.as_str().to_string();
+    for segment in segments.iter().take(segments.len().saturating_sub(1)) {
+        path.push('.');
+        path.push_str(segment.as_str());
+    }
+    Some(path)
 }
 
 fn target_group_for_kind(
@@ -532,20 +581,27 @@ fn target_group_for_kind(
 pub(crate) fn target_index_for_expr(typed: &TypedFileAst, expr_id: ExprId) -> TargetIndex {
     let idx = expr_id.as_usize();
     if let Some(value) = typed.exprs.const_value.get(idx).and_then(Clone::clone) {
-        return TargetIndex::Symbolic(ast::ConstExpr::Value(value));
+        return TargetIndex::Symbolic(ast::NormalExpr::Value(value));
     }
     let Some(kind) = typed.exprs.kind.get(idx) else {
         return TargetIndex::Unknown;
     };
     let expr = match kind {
         TypedExprKind::Lit(Literal::Int(value)) => {
-            ast::ConstExpr::Value(ast::ConstValue::Int(*value as i128))
+            ast::NormalExpr::Value(ast::ConstValue::Int(*value as i128))
         }
         TypedExprKind::Lit(Literal::Number(value)) => {
-            ast::ConstExpr::Value(ast::ConstValue::Int(*value as i128))
+            ast::NormalExpr::Value(ast::ConstValue::Int(*value as i128))
+        }
+        TypedExprKind::Ref(inner)
+        | TypedExprKind::TakePtr(inner)
+        | TypedExprKind::ConsumeArg(inner)
+        | TypedExprKind::Eat(inner)
+        | TypedExprKind::Deref(inner) => {
+            return target_index_for_expr(typed, *inner);
         }
         TypedExprKind::FnCall { target, args, .. } if args.as_ref().is_none_or(Vec::is_empty) => {
-            ast::ConstExpr::Var(target.0)
+            ast::NormalExpr::Var(target.0)
         }
         TypedExprKind::FnCall {
             target,
@@ -559,9 +615,9 @@ pub(crate) fn target_index_for_expr(typed: &TypedFileAst, expr_id: ExprId) -> Ta
                 return TargetIndex::Unknown;
             };
             match target.0.as_str() {
-                "add" => ast::ConstExpr::Add(Box::new(left), Box::new(right)),
-                "sub" => ast::ConstExpr::Sub(Box::new(left), Box::new(right)),
-                "mul" => ast::ConstExpr::Mul(Box::new(left), Box::new(right)),
+                "add" => ast::NormalExpr::Add(Box::new(left), Box::new(right)),
+                "sub" => ast::NormalExpr::Sub(Box::new(left), Box::new(right)),
+                "mul" => ast::NormalExpr::Mul(Box::new(left), Box::new(right)),
                 _ => return TargetIndex::Unknown,
             }
         }
@@ -570,12 +626,78 @@ pub(crate) fn target_index_for_expr(typed: &TypedFileAst, expr_id: ExprId) -> Ta
     TargetIndex::Symbolic(expr)
 }
 
-fn when_pattern_key(pattern: &ast::TypeExpr) -> String {
-    pattern.format_surface()
+fn when_pattern_key(pattern: &ast::Pattern) -> String {
+    pattern_surface(pattern)
 }
 
-fn when_pattern_is_wildcard(pattern: &ast::TypeExpr) -> bool {
-    matches!(pattern, ast::TypeExpr::Nominal(name, _) if name.as_str() == "_")
+fn pattern_surface(pattern: &ast::Pattern) -> String {
+    match pattern {
+        ast::Pattern::Nominal(name, _) => name.as_str().to_string(),
+        ast::Pattern::Qualified(path) => {
+            let mut out = path.value.root.as_str().to_string();
+            for segment in &path.value.segments {
+                out.push('.');
+                out.push_str(segment.as_str());
+            }
+            out
+        }
+        ast::Pattern::Generic { name, params, .. } => {
+            let params = params
+                .iter()
+                .map(|(param_name, kind)| match kind {
+                    ast::ParameterKind::Generic => param_name.as_str().to_string(),
+                    ast::ParameterKind::Tagged(sp) => {
+                        let surface = sp.value.format_surface();
+                        if surface == param_name.as_str() {
+                            surface
+                        } else {
+                            format!("{} {}", param_name.as_str(), surface)
+                        }
+                    }
+                    ast::ParameterKind::ValueParam { ty } => {
+                        format!("{} {}", param_name.as_str(), ty.value.format_surface())
+                    }
+                    ast::ParameterKind::Inferred { ty } => format!(
+                        "{} {}: ?",
+                        param_name.as_str(),
+                        ty.value.format_surface()
+                    ),
+                    ast::ParameterKind::Default(expr) => {
+                        format!("{}: {:?}", param_name.as_str(), expr.value)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{}({})", name.as_str(), params)
+        }
+        ast::Pattern::Literal(lit, _) => lit.to_string(),
+        ast::Pattern::Pointer(inner) => format!("@{}", pattern_surface(&inner.value)),
+        ast::Pattern::Ref {
+            inner, mutable, ..
+        } => format!(
+            "{}{}",
+            if *mutable { "mut " } else { "ref " },
+            pattern_surface(&inner.value)
+        ),
+        ast::Pattern::Unit => "()".to_string(),
+        ast::Pattern::ListEmpty => "[]".to_string(),
+        ast::Pattern::ListCons { head, tail } => {
+            format!("[{}, ...{}]", pattern_surface(&head.value), pattern_surface(&tail.value))
+        }
+        ast::Pattern::Tuple(elems) => format!(
+            "({})",
+            elems
+                .iter()
+                .map(|elem| pattern_surface(&elem.value))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        ast::Pattern::InRange { bounds, .. } => format!("in {bounds}"),
+    }
+}
+
+fn when_pattern_is_wildcard(pattern: &ast::Pattern) -> bool {
+    matches!(pattern, ast::Pattern::Nominal(name, _) if name.as_str() == "_")
 }
 
 fn is_lowercase_name(name: &Intern<String>) -> bool {
@@ -585,12 +707,12 @@ fn is_lowercase_name(name: &Intern<String>) -> bool {
         .is_some_and(|c| c.is_ascii_lowercase())
 }
 
-fn pattern_value_def_id(pattern: &ast::TypeExpr) -> Option<DefId> {
+fn pattern_value_def_id(pattern: &ast::Pattern) -> Option<DefId> {
     match pattern {
-        ast::TypeExpr::Nominal(name, _) if is_lowercase_name(name) && name.as_str() != "_" => {
+        ast::Pattern::Nominal(name, _) if is_lowercase_name(name) && name.as_str() != "_" => {
             Some(DefId(*name))
         }
-        ast::TypeExpr::Qualified(path) => Some(super::lower_ty::resolve_fn_call_target(
+        ast::Pattern::Qualified(path) => Some(super::lower_ty::resolve_fn_call_target(
             &path.value,
             &HashMap::new(),
         )),
@@ -605,11 +727,12 @@ fn const_for_def_id(def_id: DefId, typed: &TypedFileAst) -> Option<ast::ConstVal
         let ast::BindValue::Expr(expr) = &source_bind.value else {
             return None;
         };
-        let const_binds = const_binds_from_prepared_ast(eval_ast);
+        let const_binds = const_env_from_prepared_ast(eval_ast);
+        let evaluator = crate::analysis::CompTimeEvaluator::new(&const_binds, eval_ast);
         return expr
             .const_value
             .clone()
-            .or_else(|| eval_compile_time_expr(&expr.value, &const_binds, eval_ast));
+            .or_else(|| evaluator.eval(&expr.value));
     };
     let BindBody::Expr(body) = bind.body else {
         return None;
@@ -651,7 +774,7 @@ fn param_kind_const(kind: &ParameterKind) -> Option<ast::ConstValue> {
         ParameterKind::Tagged(sp)
         | ParameterKind::ValueParam { ty: sp }
         | ParameterKind::Inferred { ty: sp } => match &sp.value {
-            ast::TypeExpr::Literal(lit, _) => match lit {
+            ast::Expr::Lit(lit) => match lit {
                 ast::Literal::Int(n) => Some(ast::ConstValue::Int(*n as i128)),
                 ast::Literal::Number(n) => Some(ast::ConstValue::Int(*n as i128)),
                 ast::Literal::String(s) => Some(ast::ConstValue::String(s.clone())),
@@ -664,13 +787,13 @@ fn param_kind_const(kind: &ParameterKind) -> Option<ast::ConstValue> {
 }
 
 pub(crate) fn pattern_value_const(
-    pattern: &ast::TypeExpr,
+    pattern: &ast::Pattern,
     typed: &TypedFileAst,
 ) -> Option<ast::ConstValue> {
     // Variant-based resolution for uppercase nominal and qualified patterns
     match pattern {
         // Uppercase nominal: likely a variant tag name (e.g., `True`, `False`)
-        ast::TypeExpr::Nominal(name, _) if !is_lowercase_name(name) && name.as_str() != "_" => {
+        ast::Pattern::Nominal(name, _) if !is_lowercase_name(name) && name.as_str() != "_" => {
             if typed.variant_map.contains_key(name) {
                 return Some(ast::ConstValue::Tag {
                     name: *name,
@@ -680,7 +803,7 @@ pub(crate) fn pattern_value_const(
             }
         }
         // Qualified path: e.g., `Bool.True` → variant "True" of union "Bool"
-        ast::TypeExpr::Qualified(path) => {
+        ast::Pattern::Qualified(path) => {
             if let Some(variant_name) = path.segments.last()
                 && typed.variant_map.contains_key(variant_name)
             {
@@ -692,7 +815,7 @@ pub(crate) fn pattern_value_const(
             }
         }
         // Generic variant: e.g. `Some(x)` or `Some(5)` — resolve args if all are concrete
-        ast::TypeExpr::Generic { name, params, .. } if typed.variant_map.contains_key(name) => {
+        ast::Pattern::Generic { name, params, .. } if typed.variant_map.contains_key(name) => {
             let args: Vec<ast::ConstValue> = params
                 .iter()
                 .filter_map(|(_, kind)| param_kind_const(kind))
@@ -715,7 +838,7 @@ pub(crate) fn pattern_value_const(
 }
 
 fn pattern_matches_variant_with_values(
-    pattern: &ast::TypeExpr,
+    pattern: &ast::Pattern,
     variant_name: Intern<String>,
     typed: &TypedFileAst,
 ) -> bool {
@@ -729,11 +852,11 @@ fn pattern_matches_variant_with_values(
 }
 
 fn pattern_matches_const_with_values(
-    pattern: &ast::TypeExpr,
+    pattern: &ast::Pattern,
     value: &ast::ConstValue,
     typed: &TypedFileAst,
 ) -> bool {
-    pattern_matches_public(pattern, value)
+    crate::analysis::pattern::pattern_matches_public(pattern, value)
         || pattern_value_const(pattern, typed)
             .as_ref()
             .is_some_and(|pattern_value| pattern_value == value)

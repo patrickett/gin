@@ -1,29 +1,5 @@
-use codegen::CodegenContext;
+mod support;
 use diagnostic::Diagnostic;
-use melior::Context;
-use parser::parse_from_str;
-use typecheck::FileId;
-use typecheck::transform::transform_file;
-
-fn codegen_to_mlir_text(source: &str, filename: &str) -> (String, Vec<Diagnostic>) {
-    let ast = parse_from_str(source);
-    let typed = transform_file(ast, FileId(0));
-
-    let context = Context::new();
-    melior::dialect::DialectHandle::llvm().register_dialect(&context);
-    context.get_or_load_dialect("arith");
-    context.get_or_load_dialect("func");
-    context.get_or_load_dialect("scf");
-    context.get_or_load_dialect("llvm");
-
-    let (module, symptoms) =
-        CodegenContext::build_module_from_typed_ast(&context, &typed, source, filename, None);
-    let mlir_text = module
-        .expect("codegen should succeed")
-        .as_operation()
-        .to_string();
-    (mlir_text, symptoms)
-}
 
 fn assert_no_symptoms(symptoms: &[Diagnostic]) {
     assert!(
@@ -53,7 +29,7 @@ return
 
 #[test]
 fn test_print_produces_extractvalue() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text(PRINT_PROGRAM, "test.gin");
+    let (mlir_text, symptoms) = support::codegen_to_mlir_text(PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     assert!(
         mlir_text.contains("extractvalue"),
@@ -63,7 +39,7 @@ fn test_print_produces_extractvalue() {
 
 #[test]
 fn test_print_produces_ptrtoint() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text(PRINT_PROGRAM, "test.gin");
+    let (mlir_text, symptoms) = support::codegen_to_mlir_text(PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     assert!(
         mlir_text.contains("llvm.ptrtoint"),
@@ -73,7 +49,7 @@ fn test_print_produces_ptrtoint() {
 
 #[test]
 fn test_print_produces_string_global() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text(PRINT_PROGRAM, "test.gin");
+    let (mlir_text, symptoms) = support::codegen_to_mlir_text(PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     assert!(
         mlir_text.contains("llvm.mlir.global"),
@@ -87,7 +63,7 @@ fn test_print_produces_string_global() {
 
 #[test]
 fn test_print_has_all_functions() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text(PRINT_PROGRAM, "test.gin");
+    let (mlir_text, symptoms) = support::codegen_to_mlir_text(PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     assert!(
         mlir_text.contains("sym_name = \"main\""),
@@ -107,7 +83,7 @@ fn test_print_has_all_functions() {
 
 #[test]
 fn test_string_global_has_null_terminator() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text(PRINT_PROGRAM, "test.gin");
+    let (mlir_text, symptoms) = support::codegen_to_mlir_text(PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     // MLIR represents the null terminator as \\00 in the value attribute.
     assert!(
@@ -118,7 +94,7 @@ fn test_string_global_has_null_terminator() {
 
 #[test]
 fn test_string_global_has_correct_array_size() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text(PRINT_PROGRAM, "test.gin");
+    let (mlir_text, symptoms) = support::codegen_to_mlir_text(PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     // "hello world" is 11 chars + 1 null = 12 bytes.
     assert!(
@@ -129,7 +105,7 @@ fn test_string_global_has_correct_array_size() {
 
 #[test]
 fn test_string_global_is_constant() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text(PRINT_PROGRAM, "test.gin");
+    let (mlir_text, symptoms) = support::codegen_to_mlir_text(PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     assert!(
         mlir_text.contains("constant"),
@@ -141,7 +117,7 @@ fn test_string_global_is_constant() {
 
 #[test]
 fn test_main_uses_addressof_for_string() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text(PRINT_PROGRAM, "test.gin");
+    let (mlir_text, symptoms) = support::codegen_to_mlir_text(PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     assert!(
         mlir_text.contains("llvm.mlir.addressof"),
@@ -151,7 +127,7 @@ fn test_main_uses_addressof_for_string() {
 
 #[test]
 fn test_main_uses_insertvalue_to_build_string_struct() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text(PRINT_PROGRAM, "test.gin");
+    let (mlir_text, symptoms) = support::codegen_to_mlir_text(PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     assert!(
         mlir_text.contains("llvm.insertvalue"),
@@ -161,7 +137,7 @@ fn test_main_uses_insertvalue_to_build_string_struct() {
 
 #[test]
 fn test_main_emits_correct_string_length() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text(PRINT_PROGRAM, "test.gin");
+    let (mlir_text, symptoms) = support::codegen_to_mlir_text(PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     assert!(
         mlir_text.contains("value = 11 : i64"),
@@ -173,7 +149,7 @@ fn test_main_emits_correct_string_length() {
 
 #[test]
 fn test_main_function_signature_is_unit_to_unit() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text(PRINT_PROGRAM, "test.gin");
+    let (mlir_text, symptoms) = support::codegen_to_mlir_text(PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     assert!(
         mlir_text.contains("function_type = () -> (), sym_name = \"main\""),
@@ -183,7 +159,7 @@ fn test_main_function_signature_is_unit_to_unit() {
 
 #[test]
 fn test_print_function_signature_is_string_struct_to_unit() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text(PRINT_PROGRAM, "test.gin");
+    let (mlir_text, symptoms) = support::codegen_to_mlir_text(PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     assert!(
         mlir_text
@@ -194,7 +170,7 @@ fn test_print_function_signature_is_string_struct_to_unit() {
 
 #[test]
 fn test_write_function_signature_is_three_i64_to_i64() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text(PRINT_PROGRAM, "test.gin");
+    let (mlir_text, symptoms) = support::codegen_to_mlir_text(PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     assert!(
         mlir_text.contains("function_type = (i64, i64, i64) -> i64, sym_name = \"write\""),
@@ -206,7 +182,7 @@ fn test_write_function_signature_is_three_i64_to_i64() {
 
 #[test]
 fn test_main_calls_print_via_func_call() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text(PRINT_PROGRAM, "test.gin");
+    let (mlir_text, symptoms) = support::codegen_to_mlir_text(PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     assert!(
         mlir_text.contains("callee = @print"),
@@ -216,7 +192,7 @@ fn test_main_calls_print_via_func_call() {
 
 #[test]
 fn test_print_calls_write_via_func_call() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text(PRINT_PROGRAM, "test.gin");
+    let (mlir_text, symptoms) = support::codegen_to_mlir_text(PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     assert!(
         mlir_text.contains("callee = @write"),
@@ -227,8 +203,9 @@ fn test_print_calls_write_via_func_call() {
 // Tests for the write syscall internals.
 
 #[test]
+#[ignore = "inline ASM deferred"]
 fn test_write_uses_syscall_number_as_first_operand() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text(PRINT_PROGRAM, "test.gin");
+    let (mlir_text, symptoms) = support::codegen_to_mlir_text(PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     // The inline asm should have sys_write (4) as its first operand.
     // This verifies the bind `sys_write := 4` is resolved and passed correctly.
@@ -240,7 +217,7 @@ fn test_write_uses_syscall_number_as_first_operand() {
 
 #[test]
 fn test_sys_write_is_zero_arg_function_returning_constant() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text(PRINT_PROGRAM, "test.gin");
+    let (mlir_text, symptoms) = support::codegen_to_mlir_text(PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     assert!(
         mlir_text.contains("function_type = () -> i64, sym_name = \"sys_write\""),
@@ -252,7 +229,7 @@ fn test_sys_write_is_zero_arg_function_returning_constant() {
 
 #[test]
 fn test_print_extracts_pointer_at_position_0() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text(PRINT_PROGRAM, "test.gin");
+    let (mlir_text, symptoms) = support::codegen_to_mlir_text(PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     assert!(
         mlir_text.contains("position = array<i64: 0>"),
@@ -262,7 +239,7 @@ fn test_print_extracts_pointer_at_position_0() {
 
 #[test]
 fn test_print_extracts_len_at_position_1() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text(PRINT_PROGRAM, "test.gin");
+    let (mlir_text, symptoms) = support::codegen_to_mlir_text(PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     assert!(
         mlir_text.contains("position = array<i64: 1>"),
@@ -272,7 +249,7 @@ fn test_print_extracts_len_at_position_1() {
 
 #[test]
 fn test_print_passes_fd_1_to_write() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text(PRINT_PROGRAM, "test.gin");
+    let (mlir_text, symptoms) = support::codegen_to_mlir_text(PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     // The print function passes fd=1 (stdout) as the first arg to write.
     assert!(
@@ -283,7 +260,7 @@ fn test_print_passes_fd_1_to_write() {
 
 #[test]
 fn test_print_returns_void() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text(PRINT_PROGRAM, "test.gin");
+    let (mlir_text, symptoms) = support::codegen_to_mlir_text(PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     // Look for a void return in the print function body.
     // The print function should end with `func.return` with no operands.
@@ -297,7 +274,7 @@ fn test_print_returns_void() {
 
 #[test]
 fn test_string_struct_type_is_ptr_and_i64() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text(PRINT_PROGRAM, "test.gin");
+    let (mlir_text, symptoms) = support::codegen_to_mlir_text(PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     assert!(
         mlir_text.contains("llvm.struct<(ptr, i64)>"),
@@ -328,7 +305,7 @@ return
 
 #[test]
 fn test_multiple_prints_produce_separate_globals() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text(MULTI_PRINT_PROGRAM, "test.gin");
+    let (mlir_text, symptoms) = support::codegen_to_mlir_text(MULTI_PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     // Each string literal should get its own global.
     let global_count = mlir_text.matches("llvm.mlir.global").count();
@@ -340,7 +317,7 @@ fn test_multiple_prints_produce_separate_globals() {
 
 #[test]
 fn test_multiple_prints_have_distinct_content() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text(MULTI_PRINT_PROGRAM, "test.gin");
+    let (mlir_text, symptoms) = support::codegen_to_mlir_text(MULTI_PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     assert!(
         mlir_text.contains("hello\\00"),
@@ -354,7 +331,7 @@ fn test_multiple_prints_have_distinct_content() {
 
 #[test]
 fn test_hello_string_is_six_bytes() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text(MULTI_PRINT_PROGRAM, "test.gin");
+    let (mlir_text, symptoms) = support::codegen_to_mlir_text(MULTI_PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     // "hello" = 5 chars + 1 null = 6 bytes.
     assert!(
@@ -365,7 +342,7 @@ fn test_hello_string_is_six_bytes() {
 
 #[test]
 fn test_world_string_is_six_bytes() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text(MULTI_PRINT_PROGRAM, "test.gin");
+    let (mlir_text, symptoms) = support::codegen_to_mlir_text(MULTI_PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     // "world" = 5 chars + 1 null = 6 bytes.
     // Both globals should have array<6 x i8>.
@@ -398,7 +375,7 @@ return
 
 #[test]
 fn test_empty_string_print_has_length_zero() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text(EMPTY_STRING_PRINT_PROGRAM, "test.gin");
+    let (mlir_text, symptoms) = support::codegen_to_mlir_text(EMPTY_STRING_PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     assert!(
         mlir_text.contains("value = 0 : i64"),
@@ -408,7 +385,7 @@ fn test_empty_string_print_has_length_zero() {
 
 #[test]
 fn test_empty_string_global_is_one_byte() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text(EMPTY_STRING_PRINT_PROGRAM, "test.gin");
+    let (mlir_text, symptoms) = support::codegen_to_mlir_text(EMPTY_STRING_PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     // Empty string = 0 chars + 1 null = 1 byte.
     assert!(

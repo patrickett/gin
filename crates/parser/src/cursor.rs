@@ -238,11 +238,6 @@ impl<'src, 't> TokenCursor<'src, 't> {
         self.span_table
     }
 
-    #[inline(always)]
-    pub fn span_table_mut(&mut self) -> &mut SpanTable {
-        self.span_table
-    }
-
     /// Merge two span IDs into a new span ID that covers both.
     /// The merged span is automatically added to the span table.
     pub fn merge_span(&mut self, a: SpanId, b: SpanId) -> SpanId {
@@ -502,21 +497,6 @@ impl<'src, 't> TokenCursor<'src, 't> {
     ) {
         self.errors
             .push(ParseError::unexpected_token(message, span));
-    }
-
-    pub fn invalid_import_target(&mut self, message: impl Into<String>, span: SpanId) {
-        self.errors
-            .push(ParseError::invalid_import_target(message, span));
-    }
-
-    pub fn expected_import_source(&mut self, message: impl Into<String>, span: SpanId) {
-        self.errors
-            .push(ParseError::expected_import_source(message, span));
-    }
-
-    pub fn empty_import_bundle(&mut self, message: impl Into<String>, span: SpanId) {
-        self.errors
-            .push(ParseError::empty_import_bundle(message, span));
     }
 
     pub fn checkpoint(&self) -> usize {

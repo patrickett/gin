@@ -76,6 +76,16 @@ pub fn resolve_import_at(ast: &FileAst, source: &str, byte_pos: usize) -> Option
                 }
 
                 let symbol = mp.segments[seg_idx].as_str().to_string();
+                if seg_idx + 1 == mp.segments.len() {
+                    return Some(ImportTarget::DepBundleMember {
+                        dep_name: mp.root.as_str().to_string(),
+                        path_segments: mp.segments[..seg_idx]
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect(),
+                        symbol,
+                    });
+                }
                 return Some(ImportTarget::DepSymbol {
                     dep_name: mp.root.as_str().to_string(),
                     symbol,
@@ -373,11 +383,31 @@ pub fn resolve_dep_bundle_symbol_hover(
     symbol: &str,
     file_reader: &dyn Fn(&Path) -> Option<ParsedFile>,
 ) -> Option<String> {
-    // TODO: re-implement hover for dep bundle symbols using
-    //   typed = typecheck::transform_file(parsed.output.ast.clone(), typecheck::FileId(0));
-    //   and typed.hover_at(...); `definition_span` was moved to resolve.
-    let _ = (file_path, dep_name, path_segments, symbol, file_reader);
-    None
+    use ast::LocalBundleImport;
+    use ast::span::SpanId;
+    use internment::Intern;
+
+    let import = LocalBundleImport {
+        root: Intern::new(dep_name.to_string()),
+        path_segments: path_segments
+            .iter()
+            .map(|segment| Intern::new(segment.clone()))
+            .collect(),
+        members: Vec::new(),
+        span: SpanId::INVALID,
+        local_path: None,
+    };
+    let def_loc = crate::symbol_location::dep_bundle_member_def_location(
+        file_path,
+        &import,
+        symbol,
+        file_reader,
+    )?;
+    let parsed = file_reader(&def_loc.file)?;
+    let typed = typecheck::transform::transform_file(parsed.output.ast, typecheck::FileId(0));
+    let source = &parsed.source;
+    let (line, character) = source.byte_offset_to_position(def_loc.byte_range.start);
+    typed.hover_at(source, line, character)
 }
 
 pub fn resolve_dep_bundle_symbol_def_span(

@@ -173,7 +173,7 @@ fn hover_record_pattern_fields_and_variant_head() {
         .markdown;
     assert_eq!(
         record_hover,
-        "```gin\nRecord(name bytes: pointer: in 0...18446744073709551615, length: in 0...18446744073709551615, fields List)\n```"
+        "```gin\nRecord(name bytes: pointer: *in 0...18446744073709551615, length: in 0...18446744073709551615, fields List)\n```"
     );
 
     let sum_named_pos = arm_start + arm.find("sum_named").expect("sum_named");

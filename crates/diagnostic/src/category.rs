@@ -34,14 +34,4 @@ impl Category {
             Info => "info",
         }
     }
-
-    /// Get the display name for this severity.
-    pub fn as_char(&self) -> char {
-        use Category::*;
-        match self {
-            Flaw => 'F',
-            Help => 'H',
-            Info => 'I',
-        }
-    }
 }

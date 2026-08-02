@@ -6,47 +6,42 @@ use crate::analysis::pattern::pattern_matches_public;
 use crate::ty::Ty;
 use crate::typed::TypedWhenArm;
 use ast::ConstValue;
-use ast::TypeExpr;
+use ast::Pattern;
 use ast::WhenArm;
 
-fn is_patterns_from_arms(arms: &[TypedWhenArm]) -> impl Iterator<Item = &TypeExpr> {
+fn is_patterns_from_arms(arms: &[TypedWhenArm]) -> impl Iterator<Item = &Pattern> {
     arms.iter().filter_map(|arm| match arm {
         TypedWhenArm::Is { pattern, .. } => Some(&pattern.value),
         _ => None,
     })
 }
 
-fn is_list_tail_catch_all(pattern: &TypeExpr) -> bool {
-    match pattern {
-        TypeExpr::Nominal(name, _) => name
+fn is_list_tail_catch_all(pattern: &Pattern) -> bool {
+    match pattern.nominal_name() {
+        Some(name) => name
             .as_str()
             .chars()
             .next()
             .is_some_and(|ch| ch == '_' || ch.is_ascii_lowercase()),
-        _ => pattern.is_catch_all_pattern(),
+        None => pattern.is_catch_all_pattern(),
     }
 }
 
 /// Returns (fixed_prefix_length, tail_is_catch_all) for a cons-chain pattern.
 /// `[x, y]` → (2, false),  `[x, ...tail]` → (1, true),  `[x, y, ...tail]` → (2, true).
-fn list_cons_depth(pattern: &TypeExpr) -> (usize, bool) {
-    match pattern {
-        TypeExpr::ListEmpty => (0, false),
-        TypeExpr::ListCons { tail, .. } => {
-            let (depth, catch_all) = list_cons_depth(&tail.value);
-            (depth + 1, catch_all)
-        }
-        other => (0, is_list_tail_catch_all(other)),
-    }
+fn list_cons_depth(pattern: &Pattern) -> (usize, bool) {
+    pattern
+        .list_cons_shape()
+        .unwrap_or((0, is_list_tail_catch_all(pattern)))
 }
 
-fn list_patterns_exhaustive(patterns: &[&TypeExpr]) -> bool {
-    let has_empty = patterns.iter().any(|p| matches!(p, TypeExpr::ListEmpty));
+fn list_patterns_exhaustive(patterns: &[&Pattern]) -> bool {
+    let has_empty = patterns.iter().any(|p| p.is_list_empty());
     let mut catch_all_cons_min_len = usize::MAX;
     let mut fixed_lengths: HashSet<usize> = HashSet::new();
 
     for pattern in patterns {
-        if let TypeExpr::ListCons { .. } = pattern {
+        if pattern.is_list_cons() {
             let (depth, catch_all) = list_cons_depth(pattern);
             if catch_all {
                 catch_all_cons_min_len = catch_all_cons_min_len.min(depth);
@@ -76,7 +71,7 @@ fn list_patterns_exhaustive(patterns: &[&TypeExpr]) -> bool {
     true
 }
 
-fn union_variants_covered(ty: &Ty, patterns: &[&TypeExpr]) -> bool {
+fn union_variants_covered(ty: &Ty, patterns: &[&Pattern]) -> bool {
     let Ty::Union { variants, .. } = ty else {
         return false;
     };
@@ -90,14 +85,14 @@ fn union_variants_covered(ty: &Ty, patterns: &[&TypeExpr]) -> bool {
 /// Check whether all integer values in `[min, max]` are covered by the given patterns.
 /// Only literal and in-range patterns are considered — lowercase nominal patterns
 /// (value bindings) are not catch-alls for exhaustiveness.
-fn integer_range_covered(min: i128, max: i128, patterns: &[&TypeExpr]) -> bool {
+fn integer_range_covered(min: i128, max: i128, patterns: &[&Pattern]) -> bool {
     (min..=max).all(|v| {
         let cv = ConstValue::Int(v);
         patterns.iter().any(|p| pattern_matches_public(p, &cv))
     })
 }
 
-fn literal_union_values_covered(ty: &Ty, patterns: &[&TypeExpr]) -> bool {
+fn literal_union_values_covered(ty: &Ty, patterns: &[&Pattern]) -> bool {
     let Some(values) = ty.union_literal_values() else {
         return false;
     };
@@ -140,7 +135,7 @@ impl TyWhenExt for Ty {
     }
 }
 
-fn is_patterns_from_declare_arms(arms: &[WhenArm]) -> impl Iterator<Item = &TypeExpr> {
+fn is_patterns_from_declare_arms(arms: &[WhenArm]) -> impl Iterator<Item = &Pattern> {
     arms.iter().filter_map(|arm| match arm {
         WhenArm::Is { pattern, .. } => Some(&pattern.value),
         _ => None,
@@ -198,6 +193,7 @@ mod tests {
     use crate::typed::TypedWhenArm;
     use ast::ConstValue;
     use ast::Literal;
+    use ast::Pattern;
     use ast::span::{SpanId, Spanned};
     use internment::Intern;
 
@@ -205,9 +201,9 @@ mod tests {
         Intern::new(s.to_string())
     }
 
-    fn nominal_pat(name: &str) -> Spanned<TypeExpr> {
+    fn nominal_pat(name: &str) -> Spanned<ast::Pattern> {
         Spanned::new(
-            TypeExpr::Nominal(intern(name), SpanId::new(0)),
+            ast::Pattern::Nominal(intern(name), SpanId::new(0)),
             SpanId::new(0),
         )
     }
@@ -220,21 +216,24 @@ mod tests {
         }
     }
 
-    fn list_empty_pat() -> Spanned<TypeExpr> {
-        Spanned::new(TypeExpr::ListEmpty, SpanId::new(0))
+    fn list_empty_pat() -> Spanned<ast::Pattern> {
+        Spanned::new(ast::Pattern::ListEmpty, SpanId::new(0))
     }
 
-    fn list_cons_pat(head: TypeExpr, tail: TypeExpr) -> Spanned<TypeExpr> {
+    fn list_cons_pat(
+        head: impl Into<ast::Pattern>,
+        tail: impl Into<ast::Pattern>,
+    ) -> Spanned<ast::Pattern> {
         Spanned::new(
-            TypeExpr::ListCons {
-                head: Box::new(Spanned::new(head, SpanId::new(0))),
-                tail: Box::new(Spanned::new(tail, SpanId::new(0))),
+            ast::Pattern::ListCons {
+                head: Box::new(Spanned::new(head.into(), SpanId::new(0))),
+                tail: Box::new(Spanned::new(tail.into(), SpanId::new(0))),
             },
             SpanId::new(0),
         )
     }
 
-    fn list_is_arm(pattern: Spanned<TypeExpr>) -> TypedWhenArm {
+    fn list_is_arm(pattern: Spanned<ast::Pattern>) -> TypedWhenArm {
         TypedWhenArm::Is {
             pattern: Box::new(pattern),
             body: crate::typed::ExprId(0),
@@ -242,7 +241,7 @@ mod tests {
         }
     }
 
-    fn pat_ref(arm: &TypedWhenArm) -> &TypeExpr {
+    fn pat_ref(arm: &TypedWhenArm) -> &ast::Pattern {
         match arm {
             TypedWhenArm::Is { pattern, .. } => &pattern.value,
             _ => unreachable!(),
@@ -260,11 +259,11 @@ mod tests {
         let arms = [
             list_is_arm(list_empty_pat()),
             list_is_arm(list_cons_pat(
-                TypeExpr::Nominal(intern("h"), SpanId::new(0)),
-                TypeExpr::Nominal(intern("_"), SpanId::new(0)),
+                Pattern::Nominal(intern("h"), SpanId::new(0)),
+                Pattern::Nominal(intern("_"), SpanId::new(0)),
             )),
         ];
-        let patterns: Vec<&TypeExpr> = arms.iter().map(pat_ref).collect();
+        let patterns: Vec<&ast::Pattern> = arms.iter().map(pat_ref).collect();
         assert!(list_patterns_exhaustive(&patterns));
     }
 
@@ -273,11 +272,11 @@ mod tests {
         let arms = [
             list_is_arm(list_empty_pat()),
             list_is_arm(list_cons_pat(
-                TypeExpr::Nominal(intern("h"), SpanId::new(0)),
-                TypeExpr::Nominal(intern("rest"), SpanId::new(0)),
+                Pattern::Nominal(intern("h"), SpanId::new(0)),
+                Pattern::Nominal(intern("rest"), SpanId::new(0)),
             )),
         ];
-        let patterns: Vec<&TypeExpr> = arms.iter().map(pat_ref).collect();
+        let patterns: Vec<&ast::Pattern> = arms.iter().map(pat_ref).collect();
         assert!(list_patterns_exhaustive(&patterns));
     }
 
@@ -286,14 +285,14 @@ mod tests {
         // [] + [h] + [h, t, .._] covers lengths 0, 1, >=2
         let empty = list_empty_pat();
         let fixed_len_1 = list_cons_pat(
-            TypeExpr::Nominal(intern("h"), SpanId::new(0)),
-            TypeExpr::ListEmpty,
+            Pattern::Nominal(intern("h"), SpanId::new(0)),
+            Pattern::ListEmpty,
         );
         let cons_catch_all = list_cons_pat(
-            TypeExpr::Nominal(intern("h"), SpanId::new(0)),
+            Pattern::Nominal(intern("h"), SpanId::new(0)),
             list_cons_pat(
-                TypeExpr::Nominal(intern("t"), SpanId::new(0)),
-                TypeExpr::Nominal(intern("_"), SpanId::new(0)),
+                Pattern::Nominal(intern("t"), SpanId::new(0)),
+                Pattern::Nominal(intern("_"), SpanId::new(0)),
             )
             .value,
         );
@@ -305,14 +304,14 @@ mod tests {
     fn list_missing_empty_not_exhaustive() {
         // [h] + [h, t, .._] missing empty
         let fixed_len_1 = list_cons_pat(
-            TypeExpr::Nominal(intern("h"), SpanId::new(0)),
-            TypeExpr::ListEmpty,
+            Pattern::Nominal(intern("h"), SpanId::new(0)),
+            Pattern::ListEmpty,
         );
         let cons_catch_all = list_cons_pat(
-            TypeExpr::Nominal(intern("h"), SpanId::new(0)),
+            Pattern::Nominal(intern("h"), SpanId::new(0)),
             list_cons_pat(
-                TypeExpr::Nominal(intern("t"), SpanId::new(0)),
-                TypeExpr::Nominal(intern("_"), SpanId::new(0)),
+                Pattern::Nominal(intern("t"), SpanId::new(0)),
+                Pattern::Nominal(intern("_"), SpanId::new(0)),
             )
             .value,
         );
@@ -325,20 +324,20 @@ mod tests {
         // [] + [h, t] + [h, t, z, .._] missing length 1
         let empty = list_empty_pat();
         let fixed_len_2 = list_cons_pat(
-            TypeExpr::Nominal(intern("h"), SpanId::new(0)),
+            Pattern::Nominal(intern("h"), SpanId::new(0)),
             list_cons_pat(
-                TypeExpr::Nominal(intern("t"), SpanId::new(0)),
-                TypeExpr::ListEmpty,
+                Pattern::Nominal(intern("t"), SpanId::new(0)),
+                Pattern::ListEmpty,
             )
             .value,
         );
         let cons_catch_all = list_cons_pat(
-            TypeExpr::Nominal(intern("h"), SpanId::new(0)),
+            Pattern::Nominal(intern("h"), SpanId::new(0)),
             list_cons_pat(
-                TypeExpr::Nominal(intern("t"), SpanId::new(0)),
+                Pattern::Nominal(intern("t"), SpanId::new(0)),
                 list_cons_pat(
-                    TypeExpr::Nominal(intern("z"), SpanId::new(0)),
-                    TypeExpr::Nominal(intern("_"), SpanId::new(0)),
+                    Pattern::Nominal(intern("z"), SpanId::new(0)),
+                    Pattern::Nominal(intern("_"), SpanId::new(0)),
                 )
                 .value,
             )
@@ -400,7 +399,7 @@ mod tests {
         let arms = vec![
             TypedWhenArm::Is {
                 pattern: Box::new(Spanned::new(
-                    TypeExpr::Literal(Literal::String("x86_64".to_string()), SpanId::new(0)),
+                    Pattern::Literal(Literal::String("x86_64".to_string()), SpanId::new(0)),
                     SpanId::new(0),
                 )),
                 body: crate::typed::ExprId(0),
@@ -408,7 +407,7 @@ mod tests {
             },
             TypedWhenArm::Is {
                 pattern: Box::new(Spanned::new(
-                    TypeExpr::Literal(Literal::String("wasm32".to_string()), SpanId::new(0)),
+                    Pattern::Literal(Literal::String("wasm32".to_string()), SpanId::new(0)),
                     SpanId::new(0),
                 )),
                 body: crate::typed::ExprId(0),

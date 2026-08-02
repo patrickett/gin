@@ -1,17 +1,13 @@
-pub mod cache_engine;
 pub mod cursor;
 pub mod engine;
 pub mod hover;
 pub mod package_cache;
 
-// Internal modules used by PackageCache and CacheEngine.
+// Internal modules used by PackageCache.
 mod semantic_queries;
 pub use semantic_queries::HoverDocExt;
 
-// Public IDE / compiler query seam.
-pub use cache_engine::CacheEngine;
+// Public IDE / compiler analysis API.
 pub use cursor::ReferencesInFile;
-pub use engine::{
-    DocumentSnapshot, FileSemanticOutput, FileTypedOutput, HoverContent, QueryEngine,
-};
+pub use engine::{DocumentSnapshot, FileSemanticOutput, HoverContent};
 pub use package_cache::PackageCache;

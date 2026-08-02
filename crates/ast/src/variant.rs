@@ -2,27 +2,27 @@
 
 use std::hash::{Hash, Hasher};
 
-use crate::TypeExpr;
+use crate::{Expr, Pattern};
 use crate::doc_comment::DocComment;
 use crate::span::Spanned;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Variant {
     External {
-        shape: Box<Spanned<TypeExpr>>,
+        shape: Box<Spanned<Pattern>>,
         /// Optional `-> result_type` (e.g. `Nil -> Vec(x, 0)`).
-        result_ty: Option<Box<Spanned<TypeExpr>>>,
+        result_ty: Option<Box<Spanned<Expr>>>,
     },
     Local {
         doc_comment: Option<DocComment>,
-        shape: Box<Spanned<TypeExpr>>,
+        shape: Box<Spanned<Pattern>>,
         /// Optional `-> result_type` (e.g. `Cons -> Vec(x, n + 1)`).
-        result_ty: Option<Box<Spanned<TypeExpr>>>,
+        result_ty: Option<Box<Spanned<Expr>>>,
     },
 }
 
 impl Variant {
-    pub fn shape(&self) -> &Spanned<TypeExpr> {
+    pub fn shape(&self) -> &Spanned<Pattern> {
         match self {
             Variant::External { shape, .. } | Variant::Local { shape, .. } => shape,
         }
@@ -35,7 +35,7 @@ impl Variant {
         }
     }
 
-    pub fn result_ty(&self) -> Option<&Spanned<TypeExpr>> {
+    pub fn result_ty(&self) -> Option<&Spanned<Expr>> {
         match self {
             Variant::External { result_ty, .. } | Variant::Local { result_ty, .. } => {
                 result_ty.as_ref().map(|b| b.as_ref())

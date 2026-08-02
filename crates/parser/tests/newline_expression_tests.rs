@@ -5,34 +5,10 @@
 //! comparing Gin's behavior against the approaches used by
 //! Python, Go, Kotlin, Swift, JavaScript, Gleam, Lua, Ruby, R, Julia, and Odin.
 
-use internment::Intern;
 use parser::query::SourceParseExt;
 
-fn intern(s: &str) -> Intern<String> {
-    Intern::new(s.to_owned())
-}
-
-fn count_unused(out: &parser::query::ParseOutput) -> usize {
-    out.symptoms
-        .iter()
-        .filter(|d| d.message.contains("unused"))
-        .count()
-}
-
-fn count_errors(out: &parser::query::ParseOutput) -> usize {
-    out.symptoms
-        .iter()
-        .filter(|d| d.message.contains("error") || d.message.contains("expected"))
-        .count()
-}
-
-fn has_def(out: &parser::query::ParseOutput, name: &str) -> bool {
-    out.ast.defs.contains_key(&intern(name))
-}
-
-fn count_exprs(out: &parser::query::ParseOutput) -> usize {
-    out.ast.exprs.len()
-}
+mod support;
+use support::*;
 
 // ── SAME-INDENT CONTINUATION (No Indent token emitted) ─────────────────
 //

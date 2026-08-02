@@ -1,22 +1,22 @@
-use analysis::CacheEngine;
-use analysis::QueryEngine;
+use analysis::PackageCache;
 use crossbeam_channel::unbounded;
 use diagnostic::DiagnosticPathExt;
 use resolve::GinPackageExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub struct JsonDocumentState {
     pub source: String,
 }
 
 pub struct GinSnapshot {
-    pub engine: Box<dyn QueryEngine>,
+    pub cache: Arc<PackageCache>,
 }
 
 impl Clone for GinSnapshot {
     fn clone(&self) -> Self {
         Self {
-            engine: self.engine.snapshot(),
+            cache: Arc::clone(&self.cache),
         }
     }
 }
@@ -28,20 +28,20 @@ pub struct PackageInfo {
 }
 
 pub struct GinHost {
-    pub engine: Box<dyn QueryEngine>,
+    pub cache: Arc<PackageCache>,
 }
 
 impl GinHost {
     pub fn new() -> Self {
         let (tx, _rx) = unbounded();
         Self {
-            engine: Box::new(CacheEngine::new(tx)),
+            cache: Arc::new(PackageCache::new(tx)),
         }
     }
 
     pub fn snapshot(&self) -> GinSnapshot {
         GinSnapshot {
-            engine: self.engine.snapshot(),
+            cache: Arc::clone(&self.cache),
         }
     }
 
@@ -49,16 +49,16 @@ impl GinHost {
     /// Called when a file tab is closed to free typed AST memory.
     pub fn evict_package_for(&self, path: &Path) {
         let path = path.normalize_diagnostic_path();
-        self.engine.invalidate_package_cache_for(&path);
+        self.cache.invalidate_package_cache_for(&path);
     }
 
     /// Upsert a file into the database.
     pub fn upsert_file(&mut self, path: PathBuf, contents: String) {
         let path = path.normalize_diagnostic_path();
-        if !self.engine.contains(&path) {
-            let _ = self.engine.add_file(path.clone());
+        if !self.cache.contains(&path) {
+            let _ = self.cache.add_file(path.clone());
         }
-        self.engine.set_contents(&path, contents);
+        self.cache.set_contents(&path, contents);
     }
 
     /// Discover all `.gin` files under `dir`, load them into the database,
@@ -73,8 +73,8 @@ impl GinHost {
             .map(|path| path.normalize_diagnostic_path())
             .collect();
         for p in &file_paths {
-            if !self.engine.contains(p) {
-                let _ = self.engine.add_file(p.clone());
+            if !self.cache.contains(p) {
+                let _ = self.cache.add_file(p.clone());
             }
         }
         PackageInfo { file_paths }

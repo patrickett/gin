@@ -1,26 +1,11 @@
 //! Tests for combined pre+postfix doc comments on declares and union variants.
 
-use ast::{DeclareValue, HasMember, Variant};
+use ast::{DeclareValue, HasMember};
 use diagnostic::Category;
-use internment::Intern;
 use parser::query::SourceParseExt;
 
-fn intern(s: &str) -> Intern<String> {
-    Intern::new(s.to_owned())
-}
-
-fn variant_doc(v: &Variant) -> Option<&str> {
-    match v {
-        Variant::Local {
-            doc_comment: Some(d),
-            ..
-        } => Some(d.value.as_str()),
-        Variant::Local {
-            doc_comment: None, ..
-        }
-        | Variant::External { .. } => None,
-    }
-}
+mod support;
+use support::*;
 
 #[test]
 fn doc_combine_prefix_and_suffix_on_variant() {

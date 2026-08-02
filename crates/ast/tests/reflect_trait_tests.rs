@@ -1,9 +1,9 @@
 //! `Reflectable` synthesis and compile-time trait helpers.
 
 use ast::span::SpanId;
-use ast::{ConstValue, ParameterKind, TypeExpr, UnionVariant};
+use ast::{ConstValue, ParameterKind, Pattern, TypeExpr, UnionVariant};
 use internment::Intern;
-use typecheck::analysis::{TyCopyExt, eval_compile_time_expr_with_env, pattern_matches_public};
+use typecheck::analysis::{CompTimeEvaluator, ConstEnv, TyCopyExt, pattern_matches_public};
 use typecheck::ty::Ty;
 use typecheck::{reflect_ty_to_const_value, trait_field_for_ty};
 
@@ -53,7 +53,7 @@ fn reflect_opaque_is_dynamic_size() {
         param_spans: vec![(Intern::new("_".to_string()), ast::span::SpanId::INVALID)],
         span: ast::span::SpanId::INVALID,
     };
-    assert!(pattern_matches_public(&opaque_pat, &cv));
+    assert!(pattern_matches_public(&Pattern::from(opaque_pat), &cv));
     let registry = marker_trait_registry();
     assert!(registry.trait_in_scope("Sized"));
     assert!(
@@ -121,8 +121,9 @@ Point has x Int, y Int
 #[test]
 fn user_reflectable_impl_is_rejected() {
     let source = "\
-Bad has x Int
-Bad.Reflectable has shape: Opaque('hidden')
+Bad has Reflectable
+    x Int
+    Reflectable.shape: Opaque('hidden')
 ";
     let typed = transform_source(source);
     assert!(typed.declaration_flaws.iter().any(|(_, flaw)| {
@@ -309,10 +310,6 @@ fn bool_is_copy_via_auto_default() {
         bind.is_constant,
         "is_copy should be a constant fn def (`:=`)"
     );
-    assert!(
-        bind.is_compile_time,
-        "is_copy should be comptime-classified after prepare/classify"
-    );
     match &bind.value {
         ast::BindValue::Expr(e) => match &e.value {
             ast::Expr::When(w) => {
@@ -376,10 +373,10 @@ all_variants_copy(variants List(VariantShape)) Bool := when variants is
     if let ast::BindValue::Expr(e) = &bind.value
         && let ast::Expr::When(w) = &e.value
     {
-        let env = std::collections::HashMap::from([(param, Some(shape.clone()))]);
+        let env: ConstEnv = [(param, Some(shape.clone()))].into_iter().collect();
         let sub = w.subject.as_ref().expect("subject");
-        let sub_cv =
-            eval_compile_time_expr_with_env(&sub.value, &env, &copy_only).expect("is_copy subject");
+        let evaluator = CompTimeEvaluator::new(&env, &copy_only);
+        let sub_cv = evaluator.eval(&sub.value).expect("is_copy subject");
         let matched = w.arms.iter().any(|arm| {
             matches!(arm, WhenArm::Is { pattern, .. } if pattern_matches_public(&pattern.value, &sub_cv))
         });
@@ -402,8 +399,10 @@ fn copy_override_contradicts_structure() {
     let source = "\
 Int is in 1...400
 
-AllInts has x Int, y Int
-AllInts.Copy has can_copy: False
+AllInts has Copy
+    x Int
+    y Int
+    Copy.can_copy: False
 ";
     let typed = transform_with_marker_package(source);
     let registry = marker_trait_registry();
@@ -421,21 +420,19 @@ AllInts.Copy has can_copy: False
 
 #[test]
 fn list_pattern_matches_empty_and_cons() {
-    use ast::TypeExpr;
-
-    let empty_pat = TypeExpr::ListEmpty;
+    let empty_pat = Pattern::ListEmpty;
     assert!(pattern_matches_public(
         &empty_pat,
         &ConstValue::List(vec![].into())
     ));
 
-    let cons_pat = TypeExpr::ListCons {
+    let cons_pat = Pattern::ListCons {
         head: Box::new(ast::Spanned {
-            value: TypeExpr::Nominal(Intern::new("Const".to_string()), ast::span::SpanId::INVALID),
+            value: Pattern::Nominal(Intern::new("Const".to_string()), ast::span::SpanId::INVALID),
             span_id: ast::span::SpanId::INVALID,
         }),
         tail: Box::new(ast::Spanned {
-            value: TypeExpr::ListEmpty,
+            value: Pattern::ListEmpty,
             span_id: ast::span::SpanId::INVALID,
         }),
     };
@@ -512,7 +509,7 @@ fn bool_reflects_as_union() {
         ],
         span: SpanId::INVALID,
     };
-    assert!(pattern_matches_public(&pat, &cv));
+    assert!(pattern_matches_public(&Pattern::from(pat), &cv));
 }
 
 #[test]
@@ -545,7 +542,7 @@ fn record_pattern_matches_record_reflect_shape() {
         span: SpanId::INVALID,
     };
     assert!(
-        pattern_matches_public(&pat, &cv),
+        pattern_matches_public(&Pattern::from(pat), &cv),
         "Record(_, fields) should match reflect Record shape: {cv:?}"
     );
 }

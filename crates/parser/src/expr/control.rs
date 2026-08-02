@@ -1,7 +1,7 @@
 use lexer::Token;
 
 use ast::{
-    Expr, FnCall, ForInLoop, IfExpr, Loop, ModPath, Return, SpanId, Spanned, SubSpan, TypeExpr,
+    Expr, FnCall, ForInLoop, IfExpr, Loop, ModPath, Pattern, Return, SpanId, Spanned, SubSpan,
     Typed, WhenArm, WhenExpr, WhileLoop,
 };
 
@@ -84,7 +84,7 @@ impl TokenCursor<'_, '_> {
         let cond_span = subject.span_id;
 
         let pattern = if self.eat(&Token::Is) {
-            Some(Box::new(self.parse_pattern_type_expr(expr_parser)?))
+            Some(Box::new(self.parse_is_pattern_tag(expr_parser)?))
         } else {
             None
         };
@@ -281,7 +281,7 @@ impl TokenCursor<'_, '_> {
     }
 
     /// One `is` pattern (literal or type expression).
-    fn parse_when_is_pattern(&mut self, expr_parser: ExprFn) -> Option<Spanned<TypeExpr>> {
+    fn parse_when_is_pattern(&mut self, expr_parser: ExprFn) -> Option<Spanned<Pattern>> {
         if matches!(
             self.peek(),
             Some(Token::String(_)) | Some(Token::Int(_)) | Some(Token::Float(_))
@@ -291,15 +291,15 @@ impl TokenCursor<'_, '_> {
         }) = self.parse_literal()
         {
             return Some(Spanned {
-                value: TypeExpr::Literal(lit, span),
+                value: Pattern::Literal(lit, span),
                 span_id: span,
             });
         }
-        self.parse_pattern_type_expr(expr_parser)
+        self.parse_is_pattern_tag(expr_parser)
     }
 
     /// `is 'a' or 'b' or 'c'` — multiple literal patterns before `then` (one arm body).
-    fn parse_when_is_patterns(&mut self, expr_parser: ExprFn) -> Option<Vec<Spanned<TypeExpr>>> {
+    fn parse_when_is_patterns(&mut self, expr_parser: ExprFn) -> Option<Vec<Spanned<Pattern>>> {
         let first = self.parse_when_is_pattern(expr_parser)?;
         let mut patterns = vec![first];
 
@@ -333,7 +333,7 @@ impl TokenCursor<'_, '_> {
                 break;
             };
             patterns.push(Spanned {
-                value: TypeExpr::Literal(lit, span),
+                value: Pattern::Literal(lit, span),
                 span_id: span,
             });
         }
@@ -359,10 +359,10 @@ impl TokenCursor<'_, '_> {
                     Box::new(body),
                     SubSpan::new(self.merge_span(else_start, self.last_consumed_span())),
                 ));
-                // After `else`, check for any remaining arms (which should be an error).
+                // After `else`, only `is`/`else` indicate another arm in this `when`.
                 self.skip_newlines();
                 self.skip_indents();
-                if !self.is_at(&Token::Dedent) && !self.is_eof() {
+                if self.is_at(&Token::Is) || self.is_at(&Token::Else) {
                     self.error(
                         "parse-misplaced-else",
                         "`else` must be the last `when` arm",

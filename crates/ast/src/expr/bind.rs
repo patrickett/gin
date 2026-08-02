@@ -11,19 +11,7 @@ use crate::prelude::*;
 use crate::span::{SpanId, Spanned};
 use crate::ty::{PredicateExpr, Ty};
 use crate::ty_state::TyState;
-use crate::{GroupPath, TypeExpr};
-
-/// Lazily-formatted method name (e.g., "Single(a).method")
-pub struct MethodName<'a> {
-    receiver: &'a TypeExpr,
-    name: Intern<String>,
-}
-
-impl std::fmt::Display for MethodName<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}.{}", self.receiver, self.name.as_str())
-    }
-}
+use crate::GroupPath;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bind {
@@ -39,21 +27,16 @@ pub struct Bind {
     pub param_refinements: IndexMap<Intern<String>, PredicateExpr>,
     pub attributes: BindAttributes,
     pub value: BindValue,
-    /// Method receiver — structural [`TypeExpr`].
-    pub receiver_type: Option<Box<Spanned<TypeExpr>>>,
+    /// Method receiver annotation stored as an ordinary expression.
+    pub receiver_type: Option<Box<Spanned<Expr>>>,
     /// Resolved type variables from the receiver, e.g. `Range[x]` → `{x: Int{...}}`.
     /// Populated during type resolution. Empty for non-method binds.
     pub receiver_typevars: HashMap<Intern<String>, TyState>,
     pub return_type_name: Option<Intern<String>>,
-    /// Explicit capitalized return type annotation, e.g. `Str` in `foo() Str: expr`.
-    /// Structural [`TypeExpr`].
-    pub return_tag: Option<Box<Spanned<TypeExpr>>>,
+    /// Explicit return type annotation stored as an ordinary expression.
+    pub return_tag: Option<Box<Spanned<Expr>>>,
     /// Bound with `:=` instead of `:`. Immutable after evaluation in this scope.
     pub is_constant: bool,
-    /// Participates in prepare-time comptime fold/validate (comptime fn or foldable value).
-    /// Set by [`comptime_classify::apply_comptime_classification`], not by the parser.
-    pub is_compile_time: bool,
-
     /// Resolved/progressive return type. Populated during analysis.
     /// Replaces `return_type_name` + `return_tag` + the `fn_return_types` side-table.
     pub return_type: TyState,
@@ -83,7 +66,6 @@ impl Bind {
             return_type_name: None,
             return_tag: None,
             is_constant: false,
-            is_compile_time: false,
             return_type: TyState::Infer,
             type_annotation: None,
             type_annotation_qual: None,
@@ -99,7 +81,7 @@ impl Bind {
         self.return_type_name.as_ref()
     }
 
-    pub fn with_receiver_type(mut self, receiver_type: Option<Box<Spanned<TypeExpr>>>) -> Self {
+    pub fn with_receiver_type(mut self, receiver_type: Option<Box<Spanned<Expr>>>) -> Self {
         self.receiver_type = receiver_type;
         self
     }
@@ -158,16 +140,8 @@ impl Bind {
             .collect()
     }
 
-    pub fn receiver_type_surface(&self) -> Option<&Spanned<TypeExpr>> {
+    pub fn receiver_type_surface(&self) -> Option<&Spanned<Expr>> {
         self.receiver_type.as_deref()
-    }
-
-    pub fn method_name(&self) -> Option<MethodName<'_>> {
-        let sp = self.receiver_type.as_deref()?;
-        Some(MethodName {
-            receiver: &sp.value,
-            name: self.name,
-        })
     }
 }
 

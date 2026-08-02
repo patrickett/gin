@@ -3,10 +3,10 @@
 use crate::ty::Ty;
 use ast::{
     Bind, BindValue, Expr, FileAst, LoopEnum, ModPath, ParameterKind, Parameters, SpanId,
-    SpanTable, TypeExpr, WhenArm,
+    SpanTable, WhenArm,
 };
 use ast::{ConstValue, HashFloat};
-use ast_format::type_expr::TypeExprFormatExt;
+use ast_format::type_expr::ExprFormatExt;
 use internment::Intern;
 use std::collections::HashMap;
 
@@ -925,15 +925,15 @@ pub fn format_params(params: &Parameters) -> String {
     }
     let parts: Vec<String> = params
         .iter()
-        .map(|(name, kind)| {
-            if let ParameterKind::Tagged(sp) = kind
-                && let TypeExpr::Nominal(type_name, _) = &sp.value
+        .map(|(name, parameter)| {
+            if let ParameterKind::Tagged(sp) = &parameter.kind
+                && let Expr::AnonymousTag(type_name) = &sp.value
                 && name.eq_ignore_ascii_case(type_name.as_str())
             {
                 let short = name.chars().next().unwrap_or('p');
                 return format!("{short} {}", sp.value.format_surface());
             }
-            match kind {
+            match &parameter.kind {
                 ParameterKind::Generic => name.to_string(),
                 ParameterKind::Tagged(ty) => {
                     format!("{name} {}", ty.value.format_surface())
@@ -959,7 +959,7 @@ mod tests {
     use super::*;
     use crate::ty::UnionVariant;
     use ast::span::SpanId;
-    use ast::{Literal, Spanned, Typed};
+    use ast::{Literal, Parameter, Spanned, Typed};
     use indexmap::IndexMap;
     use internment::Intern;
     use std::collections::HashMap;
@@ -971,7 +971,7 @@ mod tests {
     fn make_params(items: Vec<(Intern<String>, ParameterKind)>) -> Parameters {
         let mut map = IndexMap::new();
         for (name, kind) in items {
-            map.insert(name, kind);
+            map.insert(name, Parameter::new(SpanId::new(0), kind));
         }
         map
     }
@@ -980,7 +980,7 @@ mod tests {
         (
             intern(name),
             ParameterKind::Tagged(Box::new(Spanned {
-                value: TypeExpr::Nominal(intern(type_name), SpanId::new(0)),
+                value: Expr::AnonymousTag(intern(type_name)),
                 span_id: SpanId::new(0),
             })),
         )

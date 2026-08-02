@@ -1,9 +1,9 @@
 //! `package_semantics` merges type flaws with non-fatal parse symptoms on the typed span table.
 
-use analysis::{CacheEngine, FileSemanticOutput, QueryEngine};
-use crossbeam_channel::unbounded;
+use analysis::{FileSemanticOutput, PackageCache};
 use diagnostic::{Category, Diagnostic};
 use std::path::PathBuf;
+use test_fixtures::gin_core::STRING_GIN_SOURCE;
 
 fn is_unexpected_equals_token(diag: &Diagnostic) -> bool {
     diag.code.slug() == "parse-unexpected-token"
@@ -11,19 +11,12 @@ fn is_unexpected_equals_token(diag: &Diagnostic) -> bool {
         && diag.message.contains("`=`")
 }
 
-const STRING_GIN_SOURCE: &str = "\
-String has bytes List(Byte)\n\
-\n\
-ToString has to_string String\n\
-";
-
 #[test]
 fn package_semantics_spans_match_unknown_symbols() {
     let path = PathBuf::from("/tmp/test_package_semantics.gin");
     let source = STRING_GIN_SOURCE;
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     let _ = engine.add_file(path.clone());
     engine.set_contents(&path, source.to_string());
 
@@ -48,8 +41,7 @@ fn package_semantics_includes_non_flaw_parse_symptoms() {
     let path = PathBuf::from("/tmp/test_parse_merge.gin");
     let source = "x := 1\n";
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     let _ = engine.add_file(path.clone());
     engine.set_contents(&path, source.to_string());
 
@@ -81,8 +73,7 @@ fn package_semantics_includes_deprecated_token_flaw() {
     // A standalone `=` should produce a ParseSymptom::UnexpectedToken flaw.
     let source = "=\n";
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     let _ = engine.add_file(path.clone());
     engine.set_contents(&path, source.to_string());
 
@@ -116,10 +107,7 @@ fn package_semantics_includes_deprecated_token_flaw() {
     );
 
     // Verify all_diagnostics has it (the API the LSP calls)
-    let all_diags = engine.all_diagnostics(
-        std::slice::from_ref(&path),
-        &std::collections::HashMap::new(),
-    );
+    let all_diags = engine.all_diagnostics(std::slice::from_ref(&path));
     let file_diags = all_diags.get(&path);
     assert!(
         file_diags.is_some(),

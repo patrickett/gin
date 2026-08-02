@@ -1,4 +1,4 @@
-use crate::TypeExpr;
+use crate::Pattern;
 use crate::expr::Expr;
 use crate::expr::Typed;
 use crate::span::{Spanned, SubSpan};
@@ -36,9 +36,9 @@ pub enum WhenArm {
         body: Box<Typed<Expr>>,
         arm_span: SubSpan,
     },
-    /// Pattern match: `is <type> then <body>` — structural type [`TypeExpr`] on the pattern field.
+/// Pattern match: `is <pattern> then <body>` — a dedicated [`Pattern`] node.
     Is {
-        pattern: Box<Spanned<TypeExpr>>,
+        pattern: Box<Spanned<Pattern>>,
         body: Box<Typed<Expr>>,
         arm_span: SubSpan,
     },

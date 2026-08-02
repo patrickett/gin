@@ -21,10 +21,6 @@ impl DocComment {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.value.is_empty()
-    }
-
     /// Combine two doc comments, joining with a blank line.
     /// Returns `Some(a)` when only `a` is present,
     /// `Some(b)` when only `b` is present,

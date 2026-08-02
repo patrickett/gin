@@ -1,7 +1,7 @@
 //! Tests for shape declarations, trait implementations, unions, and methods.
 //!
 //! Layer 7: shape declarations (`has` bodies)
-//! Layer 8: trait provisions (`Type.Trait has ...`
+//! Layer 8: traits provided by unified declarations
 //! Layer 9: union declarations with payload variants
 //! Layer 10: namespaced and receiver methods
 //!
@@ -183,12 +183,14 @@ Allocator has
 }
 
 #[test]
-fn separate_trait_impl() {
+fn unified_trait_impl_does_not_crash() {
     let src = "\
 Int is in 1...400
-Coord has x Int, y Int
 Default has default Self
-Coord.Default has default: Coord(x: 0, y: 0)";
+Coord has Default
+    x Int
+    y Int
+    Default.default: Coord(x: 0, y: 0)";
     let typed = transform_source(src);
 
     let flaws = typed.all_flaws();
@@ -204,22 +206,21 @@ Coord.Default has default: Coord(x: 0, y: 0)";
     let _ = flaws;
 }
 
-/// 8.2 — Trait impl using dot syntax.
-///
-/// The dot implementation declaration adds a `ProvidedTrait`; the compiler also
-/// synthesises `Reflectable` for every user-declared tag.
+/// The compiler synthesises `Reflectable` in addition to explicitly provided traits.
 #[test]
-fn trait_impl_with_dot_syntax() {
+fn trait_impl_in_unified_declaration() {
     let src = "\
 Int is in 1...400
-Coord has x Int, y Int
-Coord.Default has default: Coord(x: 0, y: 0)";
+Coord has Default
+    x Int
+    y Int
+    Default.default: Coord(x: 0, y: 0)";
     let typed = transform_source(src);
 
     let coord_id = TagId(Intern::new("Coord".to_string()));
     let tag = typed.tags.get(&coord_id).expect("Coord tag exists");
 
-    // The dot implementation declaration should produce a ProvidedTrait entry.
+    // The explicit implementation should produce a ProvidedTrait entry.
     let has_default = tag
         .provided_traits
         .iter()
@@ -246,8 +247,9 @@ fn explicit_copy_provision() {
     let src = "\
 Int is in 1...400
 Copy has can_copy Bool
-UniqueId has id Int
-UniqueId.Copy has can_copy: False";
+UniqueId has Copy
+    id Int
+    Copy.can_copy: False";
     let typed = transform_source(src);
 
     let uid_id = TagId(Intern::new("UniqueId".to_string()));

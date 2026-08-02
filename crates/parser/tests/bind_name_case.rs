@@ -1,11 +1,9 @@
 use diagnostic::Category;
-use internment::Intern;
 use lexer::{Lexer, Token};
 use parser::query::SourceParseExt;
 
-fn intern(s: &str) -> Intern<String> {
-    Intern::new(s.to_owned())
-}
+mod support;
+use support::*;
 
 #[test]
 fn lower_start_camel_case_lexes_as_one_identifier() {

@@ -6,22 +6,21 @@ use diagnostic::Diagnostic;
 use flask::CompileTarget;
 use internment::Intern;
 
-use crate::analysis::eval_compile_time_expr;
 use crate::analysis::when_declare_is_exhaustive;
+use crate::analysis::{CompTimeEvaluator, ConstEnv};
 use crate::ty::Ty;
 use ast::declare::{Declare, DeclareValue};
 use ast::expr::{Expr, Literal, Typed};
 use ast::span::SpanId;
 use ast::ty_state::TyState;
 use ast::type_decl::TypeNameExt;
-use ast::{Bind, BindValue, FileAst, TypeExpr, WhenArm};
+use ast::{Bind, BindValue, FileAst, WhenArm};
 use ast::{ConstValue, HashFloat};
 
 /// Fill unassigned binds whose type declares `has Default(default: …)`.
 pub fn materialize_default_binds(ast: &mut FileAst) -> Vec<Diagnostic> {
     let names: Vec<_> = ast.defs.keys().copied().collect();
-    let mut const_binds: HashMap<Intern<String>, Option<ConstValue>> =
-        names.iter().map(|n| (*n, None)).collect();
+    let mut const_binds: ConstEnv = names.iter().map(|n| (*n, None)).collect();
     let mut diags = Vec::new();
     let mut updates: Vec<(Intern<String>, ConstValue, Expr)> = Vec::new();
 
@@ -42,7 +41,8 @@ pub fn materialize_default_binds(ast: &mut FileAst) -> Vec<Diagnostic> {
         else {
             continue;
         };
-        let Some(cv) = eval_compile_time_expr(&default_expr.value, &const_binds, ast) else {
+        let evaluator = CompTimeEvaluator::new(&const_binds, ast);
+        let Some(cv) = evaluator.eval(&default_expr.value) else {
             let name_span = bind.name_span;
             diags.push(
                 Diagnostic::new(
@@ -148,7 +148,7 @@ fn propagate_when_subjects_in_tags(ast: &mut FileAst) {
 fn bind_return_type_name(bind: &Bind) -> Option<Intern<String>> {
     let sp = bind.return_tag.as_ref()?;
     match &sp.value {
-        TypeExpr::Nominal(name, _) => Some(*name),
+        Expr::AnonymousTag(name) => Some(*name),
         _ => None,
     }
 }
@@ -165,10 +165,7 @@ fn provided_trait_field_expr(decl: &Declare, field: Intern<String>) -> Option<Ty
 type TypeStaticKey = (Intern<String>, Intern<String>);
 type TypeStaticExpansions = HashMap<TypeStaticKey, ConstValue>;
 
-fn build_type_static_expansions(
-    ast: &FileAst,
-    const_binds: &HashMap<Intern<String>, Option<ConstValue>>,
-) -> TypeStaticExpansions {
+fn build_type_static_expansions(ast: &FileAst, const_binds: &ConstEnv) -> TypeStaticExpansions {
     let mut out = TypeStaticExpansions::new();
     for (type_name, decl) in &ast.tags {
         if !type_name.as_str().is_capitalized_type_name() {
@@ -176,7 +173,8 @@ fn build_type_static_expansions(
         }
         for pt in &decl.provided_traits {
             for (field, expr) in &pt.fields {
-                if let Some(cv) = eval_compile_time_expr(&expr.value, const_binds, ast) {
+                let evaluator = CompTimeEvaluator::new(const_binds, ast);
+                if let Some(cv) = evaluator.eval(&expr.value) {
                     out.insert((*type_name, *field), cv);
                 }
             }
@@ -196,12 +194,12 @@ fn lookup_type_static_expansion(
     expansions.get(&(type_name, field)).cloned()
 }
 
-/// Evaluate `TypeName.field` when `field` is provided on the tag's `and has Trait(…)` clause.
+/// Evaluate a static member supplied by one of the type's nominal traits.
 pub(crate) fn eval_type_static_member(
     type_name: Intern<String>,
     field: Intern<String>,
     ast: &FileAst,
-    const_binds: &HashMap<Intern<String>, Option<ConstValue>>,
+    const_binds: &ConstEnv,
 ) -> Option<ConstValue> {
     let expansions = build_type_static_expansions(ast, const_binds);
     lookup_type_static_expansion(&expansions, type_name, field)
@@ -209,8 +207,7 @@ pub(crate) fn eval_type_static_member(
 
 /// Expand `Target.default`-style paths to concrete compile-time expressions.
 pub fn materialize_type_static_access(ast: &mut FileAst) {
-    let const_binds: HashMap<Intern<String>, Option<ConstValue>> =
-        ast.defs.keys().map(|n| (*n, None)).collect();
+    let const_binds: ConstEnv = ast.defs.keys().map(|n| (*n, None)).collect();
     let expansions = build_type_static_expansions(ast, &const_binds);
     let bind_names: Vec<_> = ast.defs.keys().copied().collect();
     for name in bind_names {
@@ -374,8 +371,7 @@ fn default_expr_value_expr(cv: &ConstValue, span_id: SpanId) -> Expr {
     match cv {
         ConstValue::String(s) => Expr::Lit(Literal::String(s.clone())),
         ConstValue::Int(n) => {
-            let n = u128::try_from(*n).unwrap_or(0);
-            Expr::Lit(Literal::Int(n))
+            Expr::Lit(Literal::Int(*n as u128))
         }
         ConstValue::Float(HashFloat(f)) => Expr::Lit(Literal::Float(HashFloat(*f))),
         ConstValue::Tag { name, args, .. } if args.is_empty() => Expr::AnonymousTag(*name),
@@ -434,9 +430,8 @@ fn propagate_target_fields_in_ast(ast: &mut FileAst) {
 }
 
 /// Compile-time bind values from a prepared package AST (for cross-file `when` subjects).
-pub fn const_binds_from_prepared_ast(ast: &FileAst) -> HashMap<Intern<String>, Option<ConstValue>> {
-    let mut const_binds: HashMap<Intern<String>, Option<ConstValue>> =
-        ast.defs.keys().map(|n| (*n, None)).collect();
+pub(crate) fn const_env_from_prepared_ast(ast: &FileAst) -> ConstEnv {
+    let mut const_binds: ConstEnv = ast.defs.keys().map(|n| (*n, None)).collect();
     for _ in 0..ast.defs.len().max(1) {
         let names: Vec<_> = ast.defs.keys().copied().collect();
         for name in names {
@@ -447,10 +442,10 @@ pub fn const_binds_from_prepared_ast(ast: &FileAst) -> HashMap<Intern<String>, O
                 continue;
             };
             let cv = match &bind.value {
-                BindValue::Expr(e) => e
-                    .const_value
-                    .clone()
-                    .or_else(|| eval_compile_time_expr(&e.value, &const_binds, ast)),
+                BindValue::Expr(e) => {
+                    let evaluator = CompTimeEvaluator::new(&const_binds, ast);
+                    e.const_value.clone().or_else(|| evaluator.eval(&e.value))
+                }
                 _ => None,
             };
             if let Some(cv) = cv {
@@ -491,12 +486,12 @@ fn literal_union_ty_from_tag(name: Intern<String>, tags: &ast::TagMap) -> Option
     let mut lit_base = None;
     for variant in variants {
         let shape = variant.shape();
-        if let TypeExpr::Literal(Literal::String(s), _) = &shape.value {
+        if let ast::Pattern::Literal(Literal::String(s), _) = &shape.value {
             lit_values.push(ConstValue::String(s.clone()));
             if lit_base.is_none() {
                 lit_base = Some(Ty::Opaque(Intern::<String>::from_ref("Str")));
             }
-        } else if let TypeExpr::Literal(lit, _) = &shape.value {
+        } else if let ast::Pattern::Literal(lit, _) = &shape.value {
             if let Some(cv) = const_value_from_literal(lit) {
                 lit_values.push(cv);
             }
@@ -561,13 +556,16 @@ pub fn validate_when_declare_exhaustiveness(
 
 /// Fold `when` declare subjects (e.g. `target.arch`) using defs from the whole prepared package.
 pub fn materialize_when_declare_subjects_from_package(ast: &mut FileAst, package: &FileAst) {
-    let const_binds = const_binds_from_prepared_ast(package);
+    let const_binds = const_env_from_prepared_ast(package);
     for decl in ast.tags.values_mut() {
         if let DeclareValue::When(w) = &mut decl.value
             && let Some(subject) = &mut w.subject
         {
             if subject.const_value.is_none()
-                && let Some(cv) = eval_compile_time_expr(&subject.value, &const_binds, package)
+                && let Some(cv) = {
+                    let evaluator = CompTimeEvaluator::new(&const_binds, package);
+                    evaluator.eval(&subject.value)
+                }
             {
                 subject.const_value = Some(cv);
             }

@@ -1,29 +1,29 @@
 use std::collections::HashMap;
 
-use ast::{ConstExpr, PredicateExpr};
+use ast::{NormalExpr, PredicateExpr};
 use internment::Intern;
 
-use crate::const_expr::Normalize;
+use crate::normal_expr::Normalize;
 use crate::subst::DepSubst;
 
 /// A fully-resolved predicate with both sides explicit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Predicate {
-    Lt(ConstExpr, ConstExpr),
-    Gt(ConstExpr, ConstExpr),
-    Le(ConstExpr, ConstExpr),
-    Ge(ConstExpr, ConstExpr),
-    Eq(ConstExpr, ConstExpr),
-    Ne(ConstExpr, ConstExpr),
+    Lt(NormalExpr, NormalExpr),
+    Gt(NormalExpr, NormalExpr),
+    Le(NormalExpr, NormalExpr),
+    Ge(NormalExpr, NormalExpr),
+    Eq(NormalExpr, NormalExpr),
+    Ne(NormalExpr, NormalExpr),
     And(Vec<Predicate>),
 }
 
 /// Known constraints on const variables, used to resolve predicate checks.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConstraintEnv {
-    pub known_eq: Vec<(ConstExpr, ConstExpr)>,
-    pub known_lt: Vec<(ConstExpr, ConstExpr)>,
-    pub known_le: Vec<(ConstExpr, ConstExpr)>,
+    pub known_eq: Vec<(NormalExpr, NormalExpr)>,
+    pub known_lt: Vec<(NormalExpr, NormalExpr)>,
+    pub known_le: Vec<(NormalExpr, NormalExpr)>,
 }
 
 impl ConstraintEnv {
@@ -51,7 +51,7 @@ impl ConstraintEnv {
     pub fn prove(
         &self,
         pred: &Predicate,
-        var_values: &HashMap<Intern<String>, ConstExpr>,
+        var_values: &HashMap<Intern<String>, NormalExpr>,
     ) -> ProveResult {
         let subst = DepSubst {
             types: HashMap::new(),
@@ -84,12 +84,12 @@ impl ConstraintEnv {
         }
     }
 
-    fn prove_lt(&self, l: &ConstExpr, r: &ConstExpr, subst: &DepSubst) -> ProveResult {
-        let l = subst.apply_to_const(l).normalize();
-        let r = subst.apply_to_const(r).normalize();
+    fn prove_lt(&self, l: &NormalExpr, r: &NormalExpr, subst: &DepSubst) -> ProveResult {
+        let l = subst.apply_to_normal(l).normalize();
+        let r = subst.apply_to_normal(r).normalize();
 
         // Check literal comparison
-        if let (ConstExpr::Value(a), ConstExpr::Value(b)) = (&l, &r) {
+        if let (NormalExpr::Value(a), NormalExpr::Value(b)) = (&l, &r) {
             if a.as_const_size_int()
                 .zip(b.as_const_size_int())
                 .is_some_and(|(a, b)| a < b)
@@ -107,15 +107,15 @@ impl ConstraintEnv {
         ProveResult::Unknown
     }
 
-    fn prove_eq(&self, l: &ConstExpr, r: &ConstExpr, subst: &DepSubst) -> ProveResult {
-        let l = subst.apply_to_const(l).normalize();
-        let r = subst.apply_to_const(r).normalize();
+    fn prove_eq(&self, l: &NormalExpr, r: &NormalExpr, subst: &DepSubst) -> ProveResult {
+        let l = subst.apply_to_normal(l).normalize();
+        let r = subst.apply_to_normal(r).normalize();
 
         // Check literal comparison
         match (&l, &r) {
-            (ConstExpr::Value(a), ConstExpr::Value(b)) if a == b => return ProveResult::Proven,
-            (ConstExpr::Value(_), ConstExpr::Value(_)) => return ProveResult::Disproven,
-            (ConstExpr::Inferred(a), ConstExpr::Inferred(b)) if a != b => {
+            (NormalExpr::Value(a), NormalExpr::Value(b)) if a == b => return ProveResult::Proven,
+            (NormalExpr::Value(_), NormalExpr::Value(_)) => return ProveResult::Disproven,
+            (NormalExpr::Inferred(a), NormalExpr::Inferred(b)) if a != b => {
                 return ProveResult::Disproven;
             }
             _ if l == r => return ProveResult::Proven,
@@ -154,12 +154,12 @@ impl ProveResult {
 /// `var_values`.
 pub fn predicate_expr_to_predicate(
     expr: &PredicateExpr,
-    field_value: ConstExpr,
-    var_values: &HashMap<Intern<String>, ConstExpr>,
+    field_value: NormalExpr,
+    var_values: &HashMap<Intern<String>, NormalExpr>,
 ) -> Predicate {
-    let resolve = |rhs: &ConstExpr| -> ConstExpr {
+    let resolve = |rhs: &NormalExpr| -> NormalExpr {
         match rhs {
-            ConstExpr::Var(name) => var_values.get(name).cloned().unwrap_or(rhs.clone()),
+            NormalExpr::Var(name) => var_values.get(name).cloned().unwrap_or(rhs.clone()),
             _ => rhs.clone(),
         }
     };
@@ -182,19 +182,19 @@ pub fn predicate_expr_to_predicate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ast::{BinderId, BinderOwner, ConstExpr, ConstValue, DependentArgId};
+    use ast::{BinderId, BinderOwner, NormalExpr, ConstValue, DependentArgId};
     use internment::Intern;
 
     fn env() -> ConstraintEnv {
         ConstraintEnv::default()
     }
 
-    fn vals() -> HashMap<Intern<String>, ConstExpr> {
+    fn vals() -> HashMap<Intern<String>, NormalExpr> {
         HashMap::new()
     }
 
-    fn inferred(slot: u32) -> ConstExpr {
-        ConstExpr::Inferred(DependentArgId::new(
+    fn inferred(slot: u32) -> NormalExpr {
+        NormalExpr::Inferred(DependentArgId::new(
             BinderId::new(4, BinderOwner::Definition(Intern::from_ref("Vector"))),
             slot,
         ))
@@ -203,8 +203,8 @@ mod tests {
     #[test]
     fn literal_lt_true() {
         let p = Predicate::Lt(
-            ConstExpr::Value(ConstValue::Int(3)),
-            ConstExpr::Value(ConstValue::Int(5)),
+            NormalExpr::Value(ConstValue::Int(3)),
+            NormalExpr::Value(ConstValue::Int(5)),
         );
         assert_eq!(env().prove(&p, &vals()), ProveResult::Proven);
     }
@@ -212,8 +212,8 @@ mod tests {
     #[test]
     fn literal_lt_false() {
         let p = Predicate::Lt(
-            ConstExpr::Value(ConstValue::Int(5)),
-            ConstExpr::Value(ConstValue::Int(3)),
+            NormalExpr::Value(ConstValue::Int(5)),
+            NormalExpr::Value(ConstValue::Int(3)),
         );
         assert_eq!(env().prove(&p, &vals()), ProveResult::Disproven);
     }
@@ -221,8 +221,8 @@ mod tests {
     #[test]
     fn literal_eq_true() {
         let p = Predicate::Eq(
-            ConstExpr::Value(ConstValue::Int(42)),
-            ConstExpr::Value(ConstValue::Int(42)),
+            NormalExpr::Value(ConstValue::Int(42)),
+            NormalExpr::Value(ConstValue::Int(42)),
         );
         assert_eq!(env().prove(&p, &vals()), ProveResult::Proven);
     }
@@ -230,8 +230,8 @@ mod tests {
     #[test]
     fn literal_eq_false() {
         let p = Predicate::Eq(
-            ConstExpr::Value(ConstValue::Int(1)),
-            ConstExpr::Value(ConstValue::Int(2)),
+            NormalExpr::Value(ConstValue::Int(1)),
+            NormalExpr::Value(ConstValue::Int(2)),
         );
         assert_eq!(env().prove(&p, &vals()), ProveResult::Disproven);
     }
@@ -239,8 +239,8 @@ mod tests {
     #[test]
     fn var_unknown() {
         let p = Predicate::Lt(
-            ConstExpr::Var(Intern::from_ref("n")),
-            ConstExpr::Var(Intern::from_ref("m")),
+            NormalExpr::Var(Intern::from_ref("n")),
+            NormalExpr::Var(Intern::from_ref("m")),
         );
         assert_eq!(env().prove(&p, &vals()), ProveResult::Unknown);
     }
@@ -248,11 +248,11 @@ mod tests {
     #[test]
     fn var_resolved_from_map() {
         let mut vals = HashMap::new();
-        vals.insert(Intern::from_ref("n"), ConstExpr::Value(ConstValue::Int(3)));
-        vals.insert(Intern::from_ref("m"), ConstExpr::Value(ConstValue::Int(5)));
+        vals.insert(Intern::from_ref("n"), NormalExpr::Value(ConstValue::Int(3)));
+        vals.insert(Intern::from_ref("m"), NormalExpr::Value(ConstValue::Int(5)));
         let p = Predicate::Lt(
-            ConstExpr::Var(Intern::from_ref("n")),
-            ConstExpr::Var(Intern::from_ref("m")),
+            NormalExpr::Var(Intern::from_ref("n")),
+            NormalExpr::Var(Intern::from_ref("m")),
         );
         assert_eq!(env().prove(&p, &vals), ProveResult::Proven);
     }
@@ -261,12 +261,12 @@ mod tests {
     fn and_both_true() {
         let p = Predicate::And(vec![
             Predicate::Lt(
-                ConstExpr::Value(ConstValue::Int(1)),
-                ConstExpr::Value(ConstValue::Int(2)),
+                NormalExpr::Value(ConstValue::Int(1)),
+                NormalExpr::Value(ConstValue::Int(2)),
             ),
             Predicate::Lt(
-                ConstExpr::Value(ConstValue::Int(2)),
-                ConstExpr::Value(ConstValue::Int(3)),
+                NormalExpr::Value(ConstValue::Int(2)),
+                NormalExpr::Value(ConstValue::Int(3)),
             ),
         ]);
         assert_eq!(env().prove(&p, &vals()), ProveResult::Proven);
@@ -276,12 +276,12 @@ mod tests {
     fn and_one_false() {
         let p = Predicate::And(vec![
             Predicate::Lt(
-                ConstExpr::Value(ConstValue::Int(1)),
-                ConstExpr::Value(ConstValue::Int(2)),
+                NormalExpr::Value(ConstValue::Int(1)),
+                NormalExpr::Value(ConstValue::Int(2)),
             ),
             Predicate::Lt(
-                ConstExpr::Value(ConstValue::Int(5)),
-                ConstExpr::Value(ConstValue::Int(3)),
+                NormalExpr::Value(ConstValue::Int(5)),
+                NormalExpr::Value(ConstValue::Int(3)),
             ),
         ]);
         assert_eq!(env().prove(&p, &vals()), ProveResult::Disproven);
@@ -291,12 +291,12 @@ mod tests {
     fn and_mixed_unknown() {
         let p = Predicate::And(vec![
             Predicate::Lt(
-                ConstExpr::Value(ConstValue::Int(1)),
-                ConstExpr::Value(ConstValue::Int(2)),
+                NormalExpr::Value(ConstValue::Int(1)),
+                NormalExpr::Value(ConstValue::Int(2)),
             ),
             Predicate::Lt(
-                ConstExpr::Var(Intern::from_ref("n")),
-                ConstExpr::Var(Intern::from_ref("m")),
+                NormalExpr::Var(Intern::from_ref("n")),
+                NormalExpr::Var(Intern::from_ref("m")),
             ),
         ]);
         assert_eq!(env().prove(&p, &vals()), ProveResult::Unknown);
@@ -305,11 +305,11 @@ mod tests {
     #[test]
     fn normalized_identity() {
         let p = Predicate::Eq(
-            ConstExpr::Add(
-                Box::new(ConstExpr::Var(Intern::from_ref("n"))),
-                Box::new(ConstExpr::Value(ConstValue::Int(0))),
+            NormalExpr::Add(
+                Box::new(NormalExpr::Var(Intern::from_ref("n"))),
+                Box::new(NormalExpr::Value(ConstValue::Int(0))),
             ),
-            ConstExpr::Var(Intern::from_ref("n")),
+            NormalExpr::Var(Intern::from_ref("n")),
         );
         assert_eq!(env().prove(&p, &vals()), ProveResult::Proven);
     }
@@ -328,7 +328,7 @@ mod tests {
 
     #[test]
     fn inferred_witness_and_concrete_value_have_unknown_equality() {
-        let p = Predicate::Eq(inferred(0), ConstExpr::Value(ConstValue::Int(3)));
+        let p = Predicate::Eq(inferred(0), NormalExpr::Value(ConstValue::Int(3)));
         assert_eq!(env().prove(&p, &vals()), ProveResult::Unknown);
     }
 
@@ -347,8 +347,8 @@ mod tests {
     #[test]
     fn ne_true() {
         let p = Predicate::Ne(
-            ConstExpr::Value(ConstValue::Int(1)),
-            ConstExpr::Value(ConstValue::Int(2)),
+            NormalExpr::Value(ConstValue::Int(1)),
+            NormalExpr::Value(ConstValue::Int(2)),
         );
         assert_eq!(env().prove(&p, &vals()), ProveResult::Proven);
     }
@@ -356,8 +356,8 @@ mod tests {
     #[test]
     fn ne_false() {
         let p = Predicate::Ne(
-            ConstExpr::Value(ConstValue::Int(42)),
-            ConstExpr::Value(ConstValue::Int(42)),
+            NormalExpr::Value(ConstValue::Int(42)),
+            NormalExpr::Value(ConstValue::Int(42)),
         );
         assert_eq!(env().prove(&p, &vals()), ProveResult::Disproven);
     }
@@ -365,8 +365,8 @@ mod tests {
     #[test]
     fn le_true() {
         let p = Predicate::Le(
-            ConstExpr::Value(ConstValue::Int(3)),
-            ConstExpr::Value(ConstValue::Int(5)),
+            NormalExpr::Value(ConstValue::Int(3)),
+            NormalExpr::Value(ConstValue::Int(5)),
         );
         assert_eq!(env().prove(&p, &vals()), ProveResult::Proven);
     }
@@ -374,8 +374,8 @@ mod tests {
     #[test]
     fn le_equal_true() {
         let p = Predicate::Le(
-            ConstExpr::Value(ConstValue::Int(5)),
-            ConstExpr::Value(ConstValue::Int(5)),
+            NormalExpr::Value(ConstValue::Int(5)),
+            NormalExpr::Value(ConstValue::Int(5)),
         );
         assert_eq!(env().prove(&p, &vals()), ProveResult::Proven);
     }
@@ -383,8 +383,8 @@ mod tests {
     #[test]
     fn le_false() {
         let p = Predicate::Le(
-            ConstExpr::Value(ConstValue::Int(6)),
-            ConstExpr::Value(ConstValue::Int(3)),
+            NormalExpr::Value(ConstValue::Int(6)),
+            NormalExpr::Value(ConstValue::Int(3)),
         );
         assert_eq!(env().prove(&p, &vals()), ProveResult::Disproven);
     }
@@ -392,8 +392,8 @@ mod tests {
     #[test]
     fn ge_true() {
         let p = Predicate::Ge(
-            ConstExpr::Value(ConstValue::Int(5)),
-            ConstExpr::Value(ConstValue::Int(3)),
+            NormalExpr::Value(ConstValue::Int(5)),
+            NormalExpr::Value(ConstValue::Int(3)),
         );
         assert_eq!(env().prove(&p, &vals()), ProveResult::Proven);
     }

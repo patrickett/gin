@@ -9,10 +9,10 @@
 use internment::Intern;
 use std::collections::HashMap;
 
-use crate::analysis::{TyInfer, TyInferEnv, TypeEnv};
+use crate::analysis::{TyInfer, TyInferEnv, TypeEnv, expr_is_type_surface};
 use ast::path::ModPath;
 use ast::prelude::*;
-use ast::{BinderId, ConstExpr, ConstValue, HashFloat, Parameters};
+use ast::{BinderId, NormalExpr, ConstValue, HashFloat, Parameters};
 
 use crate::ty::Ty;
 use crate::typed::{DefId, ExprId, TypedExprKind, TypedFileAst, VariantMap};
@@ -180,10 +180,8 @@ pub(crate) fn resolve_expr_type(
             );
             Ty::Array {
                 elem: Box::new(elem_ty),
-                size: size
-                    .value
-                    .as_size_const_expr()
-                    .unwrap_or_else(|| ConstExpr::from(0)),
+                size: expr_as_size_normal_expr(&size.value)
+                    .unwrap_or_else(|| fallback_tuple_alloc_size(size)),
             }
         }
         Expr::TupleGet { base, .. } => extract_element_type(&resolve_expr_type(
@@ -271,7 +269,7 @@ pub(crate) fn resolve_expr_type(
                 fn_return_types,
             )),
         },
-        Expr::Ref { inner, mutable } => Ty::Ref {
+        Expr::Ref { inner, mutable, .. } => Ty::Ref {
             inner: Box::new(resolve_expr_type(
                 inner,
                 tag_types,
@@ -372,36 +370,6 @@ pub(crate) fn resolve_expr_type(
             })
             .unwrap_or(Ty::Opaque(Intern::new("List".to_string()))),
         Expr::Asm(_) => Ty::Unit,
-        Expr::TypeInRange(bounds) => TypeEnv::new(tag_types).resolve(&TypeExpr::InRange {
-            bounds: bounds.clone(),
-            span: ast::span::SpanId::INVALID,
-        }),
-        Expr::TypeNominal(name) | Expr::TypeGeneric { name, .. } => {
-            tag_types.get(name).cloned().unwrap_or(Ty::Opaque(*name))
-        }
-        Expr::TypeRef { inner, mutable } => {
-            let inner_ty = match inner.as_ref() {
-                Expr::TypeNominal(name) => {
-                    tag_types.get(name).cloned().unwrap_or(Ty::Opaque(*name))
-                }
-                Expr::TypeQualified(path) => {
-                    let last = path.segments.last().copied().unwrap_or(path.root);
-                    tag_types.get(&last).cloned().unwrap_or(Ty::Opaque(last))
-                }
-                Expr::TypeGeneric { name, .. } => {
-                    tag_types.get(name).cloned().unwrap_or(Ty::Opaque(*name))
-                }
-                _ => Ty::Opaque(Intern::new("unknown".to_string())),
-            };
-            Ty::Ref {
-                inner: Box::new(inner_ty),
-                mutable: *mutable,
-            }
-        }
-        Expr::TypeQualified(path) => {
-            let last = path.segments.last().copied().unwrap_or(path.root);
-            tag_types.get(&last).cloned().unwrap_or(Ty::Opaque(last))
-        }
     }
 }
 
@@ -419,17 +387,19 @@ pub(crate) fn annotate_literal_union_literal(
     let TypedExprKind::Lit(_lit) = &typed.exprs.kind[idx] else {
         return;
     };
-    // TODO: determine discriminant from literal value vs union values
-    // For now, just assign the union type without narrowing
+    // Preserve the literal's actual compile-time value when available; only force
+    // a default when no concrete value is known yet.
     typed.exprs.ty[idx] = union_ty.clone();
-    if let Some(value) = values.first() {
+    if typed.exprs.const_value[idx].is_none()
+        && let Some(value) = values.first()
+    {
         typed.exprs.const_value[idx] = Some(value.clone());
     }
 }
 
 /// Explicit type from `name Ty:` / `name Ty :=` (return tag or return type name).
-pub(crate) fn nominalize_explicit_ty_surface(surface: &TypeExpr, ty: Ty) -> Ty {
-    let TypeExpr::Nominal(name, _) = surface else {
+pub(crate) fn nominalize_explicit_ty_surface(surface: &ast::Expr, ty: Ty) -> Ty {
+    let ast::Expr::AnonymousTag(name) = surface else {
         return ty;
     };
     match ty {
@@ -468,7 +438,8 @@ pub(crate) fn bind_local_explicit_ty(
     let surface = bind
         .return_tag
         .as_ref()
-        .and_then(|sp| sp.value.is_type_surface().then_some(&sp.value));
+        .map(|sp| &sp.value)
+        .filter(|surface| expr_is_type_surface(surface));
     let Some(surface) = surface else {
         return bind_explicit_ty(bind, tag_types);
     };
@@ -510,7 +481,7 @@ pub(crate) fn bind_local_explicit_ty(
 
 pub(crate) fn bind_explicit_ty(bind: &Bind, tag_types: &HashMap<Intern<String>, Ty>) -> Option<Ty> {
     if let Some(sp) = &bind.return_tag
-        && sp.value.is_type_surface()
+        && expr_is_type_surface(&sp.value)
     {
         let ty = TypeEnv::new(tag_types).resolve(&sp.value);
         return Some(nominalize_explicit_ty_surface(&sp.value, ty));
@@ -521,7 +492,7 @@ pub(crate) fn bind_explicit_ty(bind: &Bind, tag_types: &HashMap<Intern<String>, 
             .cloned()
             .map(|ty| {
                 nominalize_explicit_ty_surface(
-                    &TypeExpr::Nominal(*name, ast::span::SpanId::INVALID),
+                    &ast::Expr::AnonymousTag(*name),
                     ty,
                 )
             })
@@ -552,6 +523,32 @@ pub(crate) fn lit_to_ty(lit: &Literal) -> Ty {
         },
         Literal::String(s) => Ty::Literal(ConstValue::String(s.clone())),
     }
+}
+
+fn expr_as_size_normal_expr(expr: &Expr) -> Option<NormalExpr> {
+    match expr {
+        Expr::Lit(Literal::Int(n)) => Some(NormalExpr::from(*n as i128)),
+        Expr::Lit(Literal::Number(n)) => Some(NormalExpr::from(*n as i128)),
+        Expr::Bind(bind) => Some(NormalExpr::Var(bind.name)),
+        Expr::Binary(binary) => {
+            let lhs = expr_as_size_normal_expr(&binary.lhs.value)?;
+            let rhs = expr_as_size_normal_expr(&binary.rhs.value)?;
+            Some(match binary.op {
+                ast::expr::BinOp::Add => NormalExpr::Add(Box::new(lhs), Box::new(rhs)),
+                ast::expr::BinOp::Subtract => NormalExpr::Sub(Box::new(lhs), Box::new(rhs)),
+                ast::expr::BinOp::Multiply => NormalExpr::Mul(Box::new(lhs), Box::new(rhs)),
+                _ => return None,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn fallback_tuple_alloc_size(expr: &Typed<Expr>) -> NormalExpr {
+    NormalExpr::Var(Intern::new(format!(
+        "_unsupported_array_size_{:?}",
+        expr.span_id
+    )))
 }
 
 /// Extract the element type from an array or tuple type.

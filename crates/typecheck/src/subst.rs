@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use ast::{BinderId, ConstExpr, DependentArgId, Ty, TyArg, UnionVariant};
+use ast::{BinderId, NormalExpr, DependentArgId, Ty, TyArg, UnionVariant};
 use internment::Intern;
 
 pub struct DependentInstantiation {
@@ -67,7 +67,7 @@ impl DependentInstantiation {
             Ty::Tuple(types) => Ty::Tuple(types.iter().map(|ty| self.apply_to_ty(ty)).collect()),
             Ty::Array { elem, size } => Ty::Array {
                 elem: Box::new(self.apply_to_ty(elem)),
-                size: self.apply_to_const(size),
+                size: self.apply_to_normal(size),
             },
             Ty::Ptr { inner } => Ty::Ptr {
                 inner: Box::new(self.apply_to_ty(inner)),
@@ -85,32 +85,32 @@ impl DependentInstantiation {
     pub fn apply_to_arg(&mut self, arg: &TyArg) -> TyArg {
         match arg {
             TyArg::Type(ty) => TyArg::Type(Box::new(self.apply_to_ty(ty))),
-            TyArg::Const(expr) => TyArg::Const(self.apply_to_const(expr)),
+            TyArg::Const(expr) => TyArg::Const(self.apply_to_normal(expr)),
         }
     }
 
-    pub fn apply_to_const(&mut self, expr: &ConstExpr) -> ConstExpr {
+    pub fn apply_to_normal(&mut self, expr: &NormalExpr) -> NormalExpr {
         match expr {
-            ConstExpr::Inferred(id) if id.binder == self.source => {
+            NormalExpr::Inferred(id) if id.binder == self.source => {
                 let renamed = *self
                     .renamed
                     .entry(*id)
                     .or_insert_with(|| DependentArgId::new(self.target, id.slot));
-                ConstExpr::Inferred(renamed)
+                NormalExpr::Inferred(renamed)
             }
-            ConstExpr::Add(left, right) => ConstExpr::Add(
-                Box::new(self.apply_to_const(left)),
-                Box::new(self.apply_to_const(right)),
+            NormalExpr::Add(left, right) => NormalExpr::Add(
+                Box::new(self.apply_to_normal(left)),
+                Box::new(self.apply_to_normal(right)),
             ),
-            ConstExpr::Sub(left, right) => ConstExpr::Sub(
-                Box::new(self.apply_to_const(left)),
-                Box::new(self.apply_to_const(right)),
+            NormalExpr::Sub(left, right) => NormalExpr::Sub(
+                Box::new(self.apply_to_normal(left)),
+                Box::new(self.apply_to_normal(right)),
             ),
-            ConstExpr::Mul(left, right) => ConstExpr::Mul(
-                Box::new(self.apply_to_const(left)),
-                Box::new(self.apply_to_const(right)),
+            NormalExpr::Mul(left, right) => NormalExpr::Mul(
+                Box::new(self.apply_to_normal(left)),
+                Box::new(self.apply_to_normal(right)),
             ),
-            ConstExpr::Value(_) | ConstExpr::Var(_) | ConstExpr::Inferred(_) => expr.clone(),
+            NormalExpr::Value(_) | NormalExpr::Var(_) | NormalExpr::Inferred(_) => expr.clone(),
         }
     }
 }
@@ -119,7 +119,7 @@ impl DependentInstantiation {
 #[derive(Default)]
 pub struct DepSubst {
     pub types: HashMap<Intern<String>, Ty>,
-    pub consts: HashMap<Intern<String>, ConstExpr>,
+    pub consts: HashMap<Intern<String>, NormalExpr>,
 }
 
 impl DepSubst {
@@ -148,7 +148,7 @@ impl DepSubst {
 
     pub fn from_maps(
         types: HashMap<Intern<String>, Ty>,
-        consts: HashMap<Intern<String>, ConstExpr>,
+        consts: HashMap<Intern<String>, NormalExpr>,
     ) -> Self {
         DepSubst { types, consts }
     }
@@ -160,7 +160,7 @@ impl DepSubst {
     }
 
     /// Apply this substitution to a [`Ty`], replacing type variables and
-    /// substituting const variables in [`ConstExpr`] positions.
+    /// substituting const variables in [`NormalExpr`] positions.
     pub fn apply_to_ty(&self, ty: &Ty) -> Ty {
         match ty {
             Ty::Opaque(name) => self.types.get(name).cloned().unwrap_or(Ty::Opaque(*name)),
@@ -180,7 +180,7 @@ impl DepSubst {
                         .map(|(name, arg)| {
                             let arg = match arg {
                                 TyArg::Type(ty) => TyArg::Type(Box::new(self.apply_to_ty(ty))),
-                                TyArg::Const(expr) => TyArg::Const(self.apply_to_const(expr)),
+                                TyArg::Const(expr) => TyArg::Const(self.apply_to_normal(expr)),
                             };
                             (*name, arg)
                         })
@@ -212,7 +212,7 @@ impl DepSubst {
                         .map(|(name, arg)| {
                             let arg = match arg {
                                 TyArg::Type(ty) => TyArg::Type(Box::new(self.apply_to_ty(ty))),
-                                TyArg::Const(expr) => TyArg::Const(self.apply_to_const(expr)),
+                                TyArg::Const(expr) => TyArg::Const(self.apply_to_normal(expr)),
                             };
                             (*name, arg)
                         })
@@ -223,7 +223,7 @@ impl DepSubst {
             Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|t| self.apply_to_ty(t)).collect()),
             Ty::Array { elem, size } => Ty::Array {
                 elem: Box::new(self.apply_to_ty(elem)),
-                size: self.apply_to_const(size),
+                size: self.apply_to_normal(size),
             },
             Ty::Ptr { inner } => Ty::Ptr {
                 inner: Box::new(self.apply_to_ty(inner)),
@@ -236,26 +236,26 @@ impl DepSubst {
         }
     }
 
-    /// Apply this substitution to a [`ConstExpr`], replacing variable references.
-    pub fn apply_to_const(&self, expr: &ConstExpr) -> ConstExpr {
+    /// Apply this substitution to a [`NormalExpr`], replacing variable references.
+    pub fn apply_to_normal(&self, expr: &NormalExpr) -> NormalExpr {
         match expr {
-            ConstExpr::Value(_) | ConstExpr::Inferred(_) => expr.clone(),
-            ConstExpr::Var(name) => self
+            NormalExpr::Value(_) | NormalExpr::Inferred(_) => expr.clone(),
+            NormalExpr::Var(name) => self
                 .consts
                 .get(name)
                 .cloned()
-                .unwrap_or(ConstExpr::Var(*name)),
-            ConstExpr::Add(l, r) => ConstExpr::Add(
-                Box::new(self.apply_to_const(l)),
-                Box::new(self.apply_to_const(r)),
+                .unwrap_or(NormalExpr::Var(*name)),
+            NormalExpr::Add(l, r) => NormalExpr::Add(
+                Box::new(self.apply_to_normal(l)),
+                Box::new(self.apply_to_normal(r)),
             ),
-            ConstExpr::Sub(l, r) => ConstExpr::Sub(
-                Box::new(self.apply_to_const(l)),
-                Box::new(self.apply_to_const(r)),
+            NormalExpr::Sub(l, r) => NormalExpr::Sub(
+                Box::new(self.apply_to_normal(l)),
+                Box::new(self.apply_to_normal(r)),
             ),
-            ConstExpr::Mul(l, r) => ConstExpr::Mul(
-                Box::new(self.apply_to_const(l)),
-                Box::new(self.apply_to_const(r)),
+            NormalExpr::Mul(l, r) => NormalExpr::Mul(
+                Box::new(self.apply_to_normal(l)),
+                Box::new(self.apply_to_normal(r)),
             ),
         }
     }
@@ -264,7 +264,7 @@ impl DepSubst {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ast::{BinderId, BinderOwner, ConstExpr, ConstValue, DependentArgId, Ty};
+    use ast::{BinderId, BinderOwner, NormalExpr, ConstValue, DependentArgId, Ty};
     use internment::Intern;
 
     #[test]
@@ -342,14 +342,14 @@ mod tests {
         let mut subst = DepSubst::new();
         subst
             .consts
-            .insert(Intern::from_ref("n"), ConstExpr::Value(ConstValue::Int(8)));
+            .insert(Intern::from_ref("n"), NormalExpr::Value(ConstValue::Int(8)));
         let ty = Ty::Array {
             elem: Box::new(Ty::u8()),
-            size: ConstExpr::Var(Intern::from_ref("n")),
+            size: NormalExpr::Var(Intern::from_ref("n")),
         };
         let result = subst.apply_to_ty(&ty);
         if let Ty::Array { size, .. } = &result {
-            assert_eq!(*size, ConstExpr::Value(ConstValue::Int(8)));
+            assert_eq!(*size, NormalExpr::Value(ConstValue::Int(8)));
         } else {
             panic!("expected Array");
         }
@@ -411,41 +411,41 @@ mod tests {
     }
 
     #[test]
-    fn apply_to_const_replaces_var() {
+    fn apply_to_normal_replaces_var() {
         let mut subst = DepSubst::new();
         subst
             .consts
-            .insert(Intern::from_ref("n"), ConstExpr::Value(ConstValue::Int(42)));
-        let expr = ConstExpr::Var(Intern::from_ref("n"));
+            .insert(Intern::from_ref("n"), NormalExpr::Value(ConstValue::Int(42)));
+        let expr = NormalExpr::Var(Intern::from_ref("n"));
         assert_eq!(
-            subst.apply_to_const(&expr),
-            ConstExpr::Value(ConstValue::Int(42))
+            subst.apply_to_normal(&expr),
+            NormalExpr::Value(ConstValue::Int(42))
         );
     }
 
     #[test]
-    fn apply_to_const_leaves_unmatched_var() {
+    fn apply_to_normal_leaves_unmatched_var() {
         let subst = DepSubst::new();
-        let expr = ConstExpr::Var(Intern::from_ref("n"));
-        assert_eq!(subst.apply_to_const(&expr), expr);
+        let expr = NormalExpr::Var(Intern::from_ref("n"));
+        assert_eq!(subst.apply_to_normal(&expr), expr);
     }
 
     #[test]
-    fn apply_to_const_traverses_add() {
+    fn apply_to_normal_traverses_add() {
         let mut subst = DepSubst::new();
         subst
             .consts
-            .insert(Intern::from_ref("n"), ConstExpr::Value(ConstValue::Int(10)));
-        let expr = ConstExpr::Add(
-            Box::new(ConstExpr::Var(Intern::from_ref("n"))),
-            Box::new(ConstExpr::Value(ConstValue::Int(5))),
+            .insert(Intern::from_ref("n"), NormalExpr::Value(ConstValue::Int(10)));
+        let expr = NormalExpr::Add(
+            Box::new(NormalExpr::Var(Intern::from_ref("n"))),
+            Box::new(NormalExpr::Value(ConstValue::Int(5))),
         );
-        let result = subst.apply_to_const(&expr);
+        let result = subst.apply_to_normal(&expr);
         assert_eq!(
             result,
-            ConstExpr::Add(
-                Box::new(ConstExpr::Value(ConstValue::Int(10))),
-                Box::new(ConstExpr::Value(ConstValue::Int(5))),
+            NormalExpr::Add(
+                Box::new(NormalExpr::Value(ConstValue::Int(10))),
+                Box::new(NormalExpr::Value(ConstValue::Int(5))),
             )
         );
     }
@@ -465,7 +465,7 @@ mod tests {
         );
         let mut b = DepSubst::new();
         b.consts
-            .insert(Intern::from_ref("n"), ConstExpr::Value(ConstValue::Int(0)));
+            .insert(Intern::from_ref("n"), NormalExpr::Value(ConstValue::Int(0)));
         a.extend(b);
         assert_eq!(a.types.len(), 1);
         assert_eq!(a.consts.len(), 1);
@@ -486,10 +486,10 @@ mod tests {
     }
 
     #[test]
-    fn apply_to_const_leaves_value_unchanged() {
+    fn apply_to_normal_leaves_value_unchanged() {
         let subst = DepSubst::new();
-        let expr = ConstExpr::Value(ConstValue::Int(42));
-        assert_eq!(subst.apply_to_const(&expr), expr);
+        let expr = NormalExpr::Value(ConstValue::Int(42));
+        assert_eq!(subst.apply_to_normal(&expr), expr);
     }
 
     #[test]
@@ -497,20 +497,20 @@ mod tests {
         let mut subst = DepSubst::new();
         subst
             .consts
-            .insert(Intern::from_ref("n"), ConstExpr::Value(ConstValue::Int(42)));
-        let expr = ConstExpr::Inferred(DependentArgId::new(
+            .insert(Intern::from_ref("n"), NormalExpr::Value(ConstValue::Int(42)));
+        let expr = NormalExpr::Inferred(DependentArgId::new(
             BinderId::new(2, BinderOwner::Expression(8)),
             1,
         ));
 
-        assert_eq!(subst.apply_to_const(&expr), expr);
+        assert_eq!(subst.apply_to_normal(&expr), expr);
     }
 
     #[test]
     fn dependent_instantiation_shares_a_witness_within_one_call() {
         let callee = BinderId::new(1, BinderOwner::Definition(Intern::from_ref("callee")));
         let caller = BinderId::new(7, BinderOwner::Expression(12));
-        let witness = ConstExpr::Inferred(DependentArgId::new(callee, 0));
+        let witness = NormalExpr::Inferred(DependentArgId::new(callee, 0));
         let input = Ty::Array {
             elem: Box::new(Ty::Unit),
             size: witness.clone(),
@@ -544,25 +544,25 @@ mod tests {
     #[test]
     fn dependent_instantiation_is_distinct_per_call_and_preserves_other_consts() {
         let callee = BinderId::new(1, BinderOwner::Definition(Intern::from_ref("callee")));
-        let witness = ConstExpr::Inferred(DependentArgId::new(callee, 0));
-        let explicit = ConstExpr::Value(ConstValue::Int(4));
-        let symbolic = ConstExpr::Var(Intern::from_ref("n"));
+        let witness = NormalExpr::Inferred(DependentArgId::new(callee, 0));
+        let explicit = NormalExpr::Value(ConstValue::Int(4));
+        let symbolic = NormalExpr::Var(Intern::from_ref("n"));
         let mut first =
             DependentInstantiation::new(callee, BinderId::new(7, BinderOwner::Expression(12)));
         let mut second =
             DependentInstantiation::new(callee, BinderId::new(7, BinderOwner::Expression(19)));
 
         assert_ne!(
-            first.apply_to_const(&witness),
-            second.apply_to_const(&witness)
+            first.apply_to_normal(&witness),
+            second.apply_to_normal(&witness)
         );
-        assert_eq!(first.apply_to_const(&explicit), explicit);
-        assert_eq!(first.apply_to_const(&symbolic), symbolic);
+        assert_eq!(first.apply_to_normal(&explicit), explicit);
+        assert_eq!(first.apply_to_normal(&symbolic), symbolic);
     }
 
     #[test]
     fn type_substitution_preserves_inferred_resolved_param() {
-        let expr = ConstExpr::Inferred(DependentArgId::new(
+        let expr = NormalExpr::Inferred(DependentArgId::new(
             BinderId::new(2, BinderOwner::Definition(Intern::from_ref("Buffer"))),
             0,
         ));

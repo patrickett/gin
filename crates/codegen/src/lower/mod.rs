@@ -7,12 +7,11 @@ mod mlir;
 mod ty_mapping;
 mod when;
 
-pub use context::{CodegenContext, TypeInfo};
+pub use context::CodegenContext;
 
 use crate::prelude::*;
 
 use ast::HashFloat;
-use ast::SymbolTable as CompileTimeSymbolTable;
 use diagnostic::Diagnostic;
 use melior::ir::Location;
 use typecheck::TypedFileAst;
@@ -32,16 +31,10 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
     ) -> (Option<melior::ir::Module<'c>>, Vec<Diagnostic>) {
         use melior::dialect::func;
         use melior::ir::{Block, Region};
-        use std::collections::HashMap;
-
-        let empty: HashMap<_, _> = HashMap::new();
-        let sym_table = CompileTimeSymbolTable::new();
         let ctx = CodegenContext::new(
             context,
             Some(typed),
             trait_registry,
-            &empty,
-            &sym_table,
             source,
             filename,
             &typed.span_table,
@@ -248,6 +241,23 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
 
                 let return_ty = self.ty_to_mlir(expr_ref.ty);
 
+                if args.as_ref().is_some_and(|args| {
+                    args.len() == 2 && matches!(fn_name, "lt" | "le" | "gt" | "ge")
+                }) {
+                    let predicate = match fn_name {
+                        "lt" => Predicates::SLT,
+                        "le" => Predicates::SLE,
+                        "gt" => Predicates::SGT,
+                        "ge" => Predicates::SGE,
+                        _ => unreachable!(),
+                    };
+                    let lhs = lowered_args[0];
+                    let rhs = lowered_args[1];
+                    let comparison =
+                        block.append_op(self.mlir.build_cmpi(predicate, lhs, rhs, loc));
+                    return Some(comparison);
+                }
+
                 Some(block.call(self.mlir, fn_name, &lowered_args, return_ty, loc))
             }
             typecheck::TypedExprKind::Bind {
@@ -320,7 +330,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 Some(block.append_op(op))
             }
             typecheck::TypedExprKind::TagCall {
-                variant_id: _,
+                variant_id,
                 discriminant,
                 args,
                 field_names: _,
@@ -333,29 +343,43 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                             .collect()
                     })
                     .unwrap_or_default();
-                // Emit a struct { disc, payload } for the tag variant.
-                let _loc = self.location();
-                let disc_val = block.const_i64(self.mlir, *discriminant as i64, self.location());
-                let field_types: Vec<Type<'c>> = std::iter::once(self.mlir.i64())
-                    .chain(lowered_args.iter().map(|v| v.r#type()))
-                    .collect();
+                let is_record_tag_call = typed_ast
+                    .tag_types
+                    .get(&variant_id.union)
+                    .is_some_and(|ty| matches!(ty, Ty::Record { .. }));
+
+                // Emit a struct { disc, payload } for union variants.
+                // For record constructors, emit just the payload to match
+                // `Ty::Record` lowering behavior.
+                let field_types: Vec<Type<'c>> = if is_record_tag_call {
+                    lowered_args.iter().map(|v| v.r#type()).collect()
+                } else {
+                    std::iter::once(self.mlir.i64())
+                        .chain(lowered_args.iter().map(|v| v.r#type()))
+                        .collect()
+                };
                 use melior::dialect::llvm::r#type;
                 let struct_ty = r#type::r#struct(self.mlir, &field_types, false);
                 let undef = block.append_op(self.mlir.llvm_undef(struct_ty, self.location()));
-                let with_disc = block.append_op(self.mlir.llvm_insertvalue(
-                    undef,
-                    disc_val,
-                    0,
-                    self.location(),
-                ));
+                let seed = if is_record_tag_call {
+                    undef
+                } else {
+                    let disc_val =
+                        block.const_i64(self.mlir, *discriminant as i64, self.location());
+                    block.append_op(
+                        self.mlir
+                            .llvm_insertvalue(undef, disc_val, 0, self.location()),
+                    )
+                };
                 let result = lowered_args
                     .into_iter()
                     .enumerate()
-                    .fold(with_disc, |acc, (i, v)| {
+                    .fold(seed, |acc, (i, v)| {
+                        let index = if is_record_tag_call { i } else { i + 1 };
                         block.append_op(self.mlir.llvm_insertvalue(
                             acc,
                             v,
-                            (i + 1) as i64,
+                            index as i64,
                             self.location(),
                         ))
                     });

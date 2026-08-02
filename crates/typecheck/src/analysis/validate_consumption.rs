@@ -206,7 +206,7 @@ pub fn stage_validate_consumption(typed: &mut TypedFileAst) {
                 }
                 let code = match (expected, actual) {
                     (ArgumentMode::Consume, _) => "type-consume-required",
-                    (_, ArgumentMode::Consume) => "type-consume-arg-on-bare-param",
+                    (ArgumentMode::Own, ArgumentMode::Consume) => "type-consume-arg-on-owned-param",
                     _ => "type-argument-mode-mismatch",
                 };
                 typed.exprs.flaws[idx].push(

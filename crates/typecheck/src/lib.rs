@@ -8,16 +8,15 @@ pub use completions::{
     CompletionCandidate, CompletionKind, dot_completions_for_ty, fn_call_at, signature_for_fn,
 };
 pub use typed::{
-    AppliedEffectTarget, BindBody, DefId, EffectTarget, ExprId, FileId, FunctionEffects, GroupId,
-    HoverResult, HoverTarget, Overlap, PackageSemanticIndex, ReferenceTargetGroup, TagId,
+    AppliedEffectTarget, Availability, BindBody, DefId, EffectTarget, ExprId, FileId, FunctionEffects,
+    GroupId, HoverResult, HoverTarget, Overlap, PackageSemanticIndex, ReferenceTargetGroup, TagId,
     TargetIndex, TypedBind, TypedCallableSignature, TypedExpr, TypedExprKind, TypedFileAst,
     TypedGroup, TypedIfExpr, TypedLoop, TypedLoopKind, TypedTag, TypedWhenArm, TypedWhenExpr,
     VariantId, VariantLookupResult, VariantMap, VariantMapEntry, collect_package_variant_map,
     format_ty_for_hover,
 };
 
-pub mod comptime_classify;
-pub use comptime_classify::{BindComptimeExt, ComptimeClass, FileAstComptimeExt};
+pub mod staging;
 
 pub mod compile_time_trait;
 pub use compile_time_trait::{
@@ -38,17 +37,17 @@ pub mod intrinsic_fold;
 pub use intrinsic_fold::inject_compiler_intrinsics;
 
 pub mod prepare;
-pub use prepare::{prepare_file_ast, prepare_package_asts};
+pub use prepare::{prepare_package_asts, prepare_parse_ast};
 
 pub mod prepare_target;
 pub use prepare_target::{
-    apply_entry_target_merge, const_binds_from_prepared_ast, infer_when_declare_subject_ty,
-    materialize_default_binds, materialize_type_static_access,
-    materialize_when_declare_subjects_from_package, validate_when_declare_exhaustiveness,
+    apply_entry_target_merge, infer_when_declare_subject_ty, materialize_default_binds,
+    materialize_type_static_access, materialize_when_declare_subjects_from_package,
+    validate_when_declare_exhaustiveness,
 };
 
-pub mod const_expr;
-pub use const_expr::Normalize;
+pub mod normal_expr;
+pub use normal_expr::Normalize;
 
 pub mod subst;
 pub use subst::DepSubst;

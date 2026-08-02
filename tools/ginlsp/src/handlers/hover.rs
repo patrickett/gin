@@ -23,7 +23,7 @@ impl Backend {
 
         // Read source + line index from the engine (single source of truth).
         let snapshot_st = self.snapshot();
-        let doc = match snapshot_st.engine.document_snapshot(&file_path) {
+        let doc = match snapshot_st.cache.document_snapshot(&file_path) {
             Some(d) => d,
             None => return Ok(None),
         };
@@ -52,7 +52,7 @@ impl Backend {
         let content = self
             .run_blocking_request("hover", move |this| {
                 let snapshot = this.snapshot();
-                snapshot.engine.hover(&file_path, byte_pos_u32)
+                snapshot.cache.hover(&file_path, byte_pos_u32)
             })
             .await
             .flatten();

@@ -4,8 +4,8 @@ use std::collections::HashSet;
 
 use ast::warnings::BindWarningsExt;
 use ast::{
-    Bind, BindValue, Declare, DeclareValue, Expr, FileAst, HasSpanId, ParameterKind, Spanned,
-    TypeExpr, Typed, Variant,
+    Bind, BindValue, Declare, DeclareValue, Expr, FileAst, HasSpanId, Spanned,
+    ParameterKind, Typed, Variant,
 };
 use indexmap::IndexMap;
 use internment::Intern;
@@ -16,7 +16,6 @@ use crate::expr::ExprFn;
 enum TopLevelValue {
     Tag(Declare),
     Bind(Box<Bind>),
-    ProvidedImpl(Intern<String>, ast::ProvidedTrait),
     Expr(Typed<Expr>),
 }
 
@@ -64,16 +63,9 @@ impl TokenCursor<'_, '_> {
         let mut private_defs = HashSet::new();
         let mut private_tags = HashSet::new();
         let mut exprs = Vec::new();
-        let mut provided_impls: IndexMap<Intern<String>, Vec<ast::ProvidedTrait>> = IndexMap::new();
 
         for el in public_elements {
-            Self::collect_top_level(
-                el,
-                &mut tags_scratch,
-                &mut defs_scratch,
-                &mut exprs,
-                &mut provided_impls,
-            );
+            Self::collect_top_level(el, &mut tags_scratch, &mut defs_scratch, &mut exprs);
         }
 
         for el in private_elements {
@@ -84,42 +76,45 @@ impl TokenCursor<'_, '_> {
                 TopLevelValue::Bind(bind) => {
                     private_defs.insert(bind.name);
                 }
-                TopLevelValue::ProvidedImpl(..) | TopLevelValue::Expr(..) => {}
+                TopLevelValue::Expr(..) => {}
             }
-            Self::collect_top_level(
-                el,
-                &mut tags_scratch,
-                &mut defs_scratch,
-                &mut exprs,
-                &mut provided_impls,
-            );
+            Self::collect_top_level(el, &mut tags_scratch, &mut defs_scratch, &mut exprs);
         }
 
         let mut tags = ast::TagMap::new();
         for (name, declares) in tags_scratch {
-            if let Some(mut decl) = declares.into_iter().next() {
-                if let Some(mut impls) = provided_impls.swap_remove(&name) {
-                    decl.provided_traits.append(&mut impls);
+            let mut declarations = declares.into_iter();
+            if let Some(mut declaration) = declarations.next() {
+                for mut extension in declarations {
+                    declaration
+                        .provided_traits
+                        .append(&mut extension.provided_traits);
                 }
-                tags.insert(name, decl);
+                tags.insert(name, declaration);
             }
-        }
-        for (name, impls) in provided_impls {
-            tags.insert(
-                name,
-                Declare::new(name, SpanId::INVALID, DeclareValue::Has(Vec::new()))
-                    .with_provided_traits(impls),
-            );
         }
         Self::expand_composed_provided_traits(&mut tags);
         let method_binds = Self::materialize_has_method_binds(&tags);
         for bind in &method_binds {
+            let receiver_name = match &bind
+                .receiver_type_surface()
+                .expect("has method receiver")
+                .value
+            {
+                ast::Expr::AnonymousTag(name) => *name,
+                ast::Expr::TagCall(call) => call.name,
+                ast::Expr::FnCall(call) => call
+                    .path
+                    .value
+                    .segments
+                    .last()
+                    .copied()
+                    .unwrap_or(call.path.value.root),
+                _ => Intern::from_ref("<receiver>"),
+            };
             let name = Intern::<String>::new(format!(
                 "{}.{}",
-                bind.receiver_type_surface()
-                    .expect("has method receiver")
-                    .value
-                    .surface_mangle_name(),
+                receiver_name,
                 bind.name
             ));
             defs_scratch.entry(name).or_default().push(bind.clone());
@@ -146,7 +141,7 @@ impl TokenCursor<'_, '_> {
             tags,
             defs,
             method_binds,
-            provided_impls: Vec::new(),
+
             private_defs,
             private_tags,
             exprs,
@@ -350,17 +345,6 @@ impl TokenCursor<'_, '_> {
     ) -> Option<TopLevelValue> {
         let after_tag = tag_offset + 1;
 
-        // Tag.Tag → provided trait declaration.
-        if matches!(self.peek_at(after_tag), Some(Token::Dot))
-            && matches!(self.peek_at(after_tag + 1), Some(Token::Tag(_)))
-        {
-            let checkpoint = self.checkpoint();
-            if let Some((type_name, provided_trait)) = self.parse_dot_provided_impl(expr_parser) {
-                return Some(TopLevelValue::ProvidedImpl(type_name, provided_trait));
-            }
-            self.rewind(checkpoint);
-        }
-
         // Tag.Id or Tag::Id → method_bind (deterministic: no checkpoint/rewind needed)
         if let Some(past_sep) = self.method_separator_past(after_tag)
             && matches!(
@@ -382,20 +366,10 @@ impl TokenCursor<'_, '_> {
             } else {
                 None
             };
-            if let Some(past_sep) = past_sep {
-                match self.peek_at(past_sep) {
-                    Some(Token::Tag(_)) => {
-                        let checkpoint = self.checkpoint();
-                        if let Some(provided) = self.parse_dot_provided_impl(expr_parser) {
-                            return Some(TopLevelValue::ProvidedImpl(provided.0, provided.1));
-                        }
-                        self.rewind(checkpoint);
-                    }
-                    Some(Token::Id(_)) => {
-                        return self.parse_method_bind(expr_parser);
-                    }
-                    _ => {}
-                }
+            if let Some(past_sep) = past_sep
+                && matches!(self.peek_at(past_sep), Some(Token::Id(_)))
+            {
+                return self.parse_method_bind(expr_parser);
             }
         }
 
@@ -559,19 +533,31 @@ impl TokenCursor<'_, '_> {
                 continue;
             };
             let receiver = if let Some(params) = &declare.params {
-                TypeExpr::Generic {
+                Expr::TagCall(ast::TagCall {
                     name: declare.name,
-                    params: params
+                    qual_path: None,
+                    args: params
                         .iter()
-                        .map(|(name, kind)| (*name, kind.clone()))
+                        .map(|(name, parameter)| match &parameter.kind {
+                            ParameterKind::Generic => {
+                                Typed::infer(Expr::AnonymousTag(*name), parameter.name_span)
+                            }
+                            ParameterKind::Tagged(sp)
+                            | ParameterKind::ValueParam { ty: sp }
+                            | ParameterKind::Inferred { ty: sp } => {
+                                Typed::infer(sp.value.clone(), sp.span_id)
+                            }
+                            ParameterKind::Default(expr) => *expr.clone(),
+                        })
                         .collect(),
-                    param_spans: Vec::new(),
-                    span: declare.name_span,
-                }
+                })
             } else {
-                TypeExpr::Nominal(declare.name, declare.name_span)
+                Expr::AnonymousTag(declare.name)
             };
-            let receiver = Spanned::new(receiver, declare.span);
+            let receiver = Spanned::new(
+                receiver,
+                declare.span,
+            );
 
             for member in members {
                 let ast::HasMember::Function(function) = member else {
@@ -613,24 +599,29 @@ impl TokenCursor<'_, '_> {
         tags: &mut IndexMap<Intern<String>, Vec<Declare>>,
         defs: &mut IndexMap<Intern<String>, Vec<Bind>>,
         exprs: &mut Vec<(Expr, SpanId)>,
-        provided_impls: &mut IndexMap<Intern<String>, Vec<ast::ProvidedTrait>>,
     ) {
         match el {
-            TopLevelValue::ProvidedImpl(type_name, provided_trait) => {
-                provided_impls
-                    .entry(type_name)
-                    .or_default()
-                    .push(provided_trait);
-            }
             TopLevelValue::Tag(decl) => {
                 let name = decl.name;
                 tags.entry(name).or_default().push(decl);
             }
             TopLevelValue::Bind(bind) => {
                 let name = if let Some(sp) = bind.receiver_type_surface() {
+                    let receiver_name = match &sp.value {
+                        ast::Expr::AnonymousTag(name) => *name,
+                        ast::Expr::TagCall(call) => call.name,
+                        ast::Expr::FnCall(call) => call
+                            .path
+                            .value
+                            .segments
+                            .last()
+                            .copied()
+                            .unwrap_or(call.path.value.root),
+                        _ => Intern::from_ref("<receiver>"),
+                    };
                     Intern::<String>::new(format!(
                         "{}.{}",
-                        sp.value.surface_mangle_name(),
+                        receiver_name,
                         bind.name
                     ))
                 } else {
@@ -698,7 +689,7 @@ impl TokenCursor<'_, '_> {
                 .into_iter()
                 .map(|(name, span)| Variant::External {
                     shape: Box::new(Spanned {
-                        value: TypeExpr::Nominal(name, span),
+                        value: ast::Pattern::Nominal(name, span),
                         span_id: span,
                     }),
                     result_ty: None,
@@ -756,65 +747,45 @@ impl TokenCursor<'_, '_> {
             offset = next;
         }
 
-        // Type.Trait has/is: skip the .Tag qualifier for provided impls
-        // e.g. Range(x).Bounded has → offset past Bounded
-        if self.peek_at(offset) == Some(&Token::Dot)
-            && matches!(self.peek_at(offset + 1), Some(Token::Tag(_)))
-        {
-            offset += 2;
-        }
-
         matches!(self.peek_at(offset), Some(Token::Is) | Some(Token::Has))
     }
 
     fn extract_anonymous_tags_from_bind(bind: &Bind, tags: &mut Vec<(Intern<String>, SpanId)>) {
         if let Some(sp) = bind.receiver_type_surface() {
-            Self::collect_type_surface_tags(&sp.value, tags);
+            Self::collect_expr_type_surface_tags(&sp.value, tags);
         }
         if let Some(sp) = &bind.return_tag {
-            Self::collect_type_surface_tags(&sp.value, tags);
+            Self::collect_expr_type_surface_tags(&sp.value, tags);
         }
     }
 
-    fn collect_type_surface_tags(expr: &TypeExpr, tags: &mut Vec<(Intern<String>, SpanId)>) {
+    fn collect_expr_type_surface_tags(
+        expr: &ast::Expr,
+        tags: &mut Vec<(Intern<String>, SpanId)>,
+    ) {
         match expr {
-            TypeExpr::Nominal(name, span) => {
-                tags.push((*name, *span));
+            ast::Expr::AnonymousTag(name) => tags.push((*name, SpanId::INVALID)),
+            ast::Expr::FnCall(call)
+                if call.args.as_ref().is_none_or(Vec::is_empty)
+                    && call.path.value.segments.is_empty() =>
+            {
+                tags.push((call.path.value.root, call.path.span_id));
             }
-            TypeExpr::Qualified(_) => {}
-            TypeExpr::Literal(..) => {}
-            TypeExpr::Pointer(_) | TypeExpr::Unit | TypeExpr::ListEmpty => {}
-            TypeExpr::ListCons { head, tail } => {
-                Self::collect_type_surface_tags(&head.value, tags);
-                Self::collect_type_surface_tags(&tail.value, tags);
-            }
-            TypeExpr::Tuple(elems) => {
-                for e in elems {
-                    Self::collect_type_surface_tags(&e.value, tags);
+            ast::Expr::TagCall(call) => {
+                for arg in &call.args {
+                    Self::collect_expr_type_surface_tags(&arg.value, tags);
                 }
             }
-            TypeExpr::InRange { bounds, span } => {
-                if let ast::InRangeBounds::Tag(name) = bounds {
-                    tags.push((*name, *span));
+            ast::Expr::Ref { inner, .. } | ast::Expr::TakePtr(inner) => {
+                Self::collect_expr_type_surface_tags(&inner.value, tags)
+            }
+            ast::Expr::TupleLit(values) | ast::Expr::List(values) => {
+                for value in values {
+                    Self::collect_expr_type_surface_tags(&value.value, tags);
                 }
             }
-            TypeExpr::Ref { inner, .. } => Self::collect_type_surface_tags(&inner.value, tags),
-            TypeExpr::Generic { params, .. } => {
-                for (_, pk) in params {
-                    match pk {
-                        ParameterKind::Default(_e) => {
-                            // Anonymous tags in default expressions are handled
-                            // by collect_type_surface_tags elsewhere.
-                        }
-                        ParameterKind::Tagged(sp)
-                        | ParameterKind::ValueParam { ty: sp }
-                        | ParameterKind::Inferred { ty: sp } => {
-                            Self::collect_type_surface_tags(&sp.value, tags);
-                        }
-                        ParameterKind::Generic => {}
-                    }
-                }
-            }
+            _ => {}
         }
     }
+
 }

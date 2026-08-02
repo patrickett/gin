@@ -15,7 +15,7 @@ fn lin_not_consumed_names(typed: &typecheck::TypedFileAst) -> Vec<String> {
 
 fn transform_prepared(source: &str) -> typecheck::TypedFileAst {
     let mut file_ast = parser::cursor::TokenCursor::parse_source(source);
-    let _ = typecheck::prepare_file_ast(&mut file_ast, &CompileTarget::Library);
+    let _ = typecheck::prepare_parse_ast(&mut file_ast, &CompileTarget::Library);
     transform(&file_ast, FileId(0), &TransformCtx::new())
 }
 
@@ -24,8 +24,11 @@ Architecture is 'x86_64' or 'arm64' or 'wasm32'
 Vendor is 'unknown'
 OperatingSystem is 'unknown'
 Default(value) has default value
-Target has arch Architecture, vendor Vendor, os OperatingSystem
-Target.Default has default: ( arch: 'x86_64', vendor: 'unknown', os: 'unknown', )
+Target has Default
+    arch Architecture
+    vendor Vendor
+    os OperatingSystem
+    Default.default: ( arch: 'x86_64', vendor: 'unknown', os: 'unknown', )
 target := Target.default
 "#;
 

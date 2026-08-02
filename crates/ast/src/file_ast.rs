@@ -38,8 +38,6 @@ pub struct Symbol {
     pub kind: SymbolKind,
 }
 
-impl Symbol {}
-
 /// Compile-time symbol table.
 ///
 /// This tracks all visible symbols at compile time, enabling:
@@ -70,30 +68,6 @@ impl SymbolTable {
 
     pub fn contains(&self, name: &Intern<String>) -> bool {
         self.symbols.contains_key(name)
-    }
-
-    pub fn function_names(&self) -> Vec<Intern<String>> {
-        self.symbols
-            .values()
-            .filter(|s| matches!(s.kind, SymbolKind::Function(_)))
-            .map(|s| s.name)
-            .collect()
-    }
-
-    pub fn bind_names(&self) -> Vec<Intern<String>> {
-        self.symbols
-            .values()
-            .filter(|s| matches!(s.kind, SymbolKind::Bind(_)))
-            .map(|s| s.name)
-            .collect()
-    }
-
-    pub fn tag_names(&self) -> Vec<Intern<String>> {
-        self.symbols
-            .values()
-            .filter(|s| matches!(s.kind, SymbolKind::Tag(_)))
-            .map(|s| s.name)
-            .collect()
     }
 
     /// Returns conflicting symbols (names that exist in both).
@@ -173,7 +147,6 @@ pub struct FileAst {
     pub tags: TagMap,
     pub defs: DefMap,
     pub method_binds: Vec<Bind>,
-    pub provided_impls: Vec<(Intern<String>, ProvidedTrait)>,
     pub private_defs: HashSet<Intern<String>>,
     pub private_tags: HashSet<Intern<String>>,
     pub exprs: Vec<(Expr, SpanId)>,
@@ -435,28 +408,48 @@ impl FileAst {
         out
     }
 
-    fn collect_refs_type_surface(
-        expr: &crate::TypeExpr,
+    fn collect_refs_pattern(
+        pattern: &crate::Pattern,
         name: &str,
         span_table: &SpanTable,
         out: &mut Vec<std::ops::Range<usize>>,
     ) {
-        if let crate::TypeExpr::Generic { params, .. } = expr {
-            for (_, pk) in params {
-                match pk {
-                    crate::ParameterKind::Default(e) => {
-                        Self::collect_refs_expr(&e.value, name, span_table, out)
+        match pattern {
+            crate::Pattern::Generic { params, .. } => {
+                for (_, pk) in params {
+                    match pk {
+                        crate::ParameterKind::Default(e) => {
+                            Self::collect_refs_expr(&e.value, name, span_table, out)
+                        }
+                        crate::ParameterKind::Tagged(sp) => {
+                            Self::collect_refs_expr(&sp.value, name, span_table, out);
+                        }
+                        crate::ParameterKind::ValueParam { ty }
+                        | crate::ParameterKind::Inferred { ty } => {
+                            Self::collect_refs_expr(&ty.value, name, span_table, out);
+                        }
+                        crate::ParameterKind::Generic => {}
                     }
-                    crate::ParameterKind::Tagged(sp) => {
-                        Self::collect_refs_type_surface(&sp.value, name, span_table, out);
-                    }
-                    crate::ParameterKind::ValueParam { ty }
-                    | crate::ParameterKind::Inferred { ty } => {
-                        Self::collect_refs_type_surface(&ty.value, name, span_table, out);
-                    }
-                    crate::ParameterKind::Generic => {}
                 }
             }
+            crate::Pattern::Pointer(inner) | crate::Pattern::Ref { inner, .. } => {
+                Self::collect_refs_pattern(&inner.value, name, span_table, out)
+            }
+            crate::Pattern::ListCons { head, tail } => {
+                Self::collect_refs_pattern(&head.value, name, span_table, out);
+                Self::collect_refs_pattern(&tail.value, name, span_table, out);
+            }
+            crate::Pattern::Tuple(elems) => {
+                for elem in elems {
+                    Self::collect_refs_pattern(&elem.value, name, span_table, out);
+                }
+            }
+            crate::Pattern::Nominal(..)
+            | crate::Pattern::Qualified(..)
+            | crate::Pattern::Literal(..)
+            | crate::Pattern::Unit
+            | crate::Pattern::ListEmpty
+            | crate::Pattern::InRange { .. } => {}
         }
     }
 
@@ -484,129 +477,20 @@ impl FileAst {
                     let e = call_span.end();
                     out.push(e - name.len()..e);
                 }
-                if let Some(args) = &call.args {
-                    for arg in args {
-                        Self::collect_refs_expr(arg, name, span_table, out);
-                    }
-                }
             }
-            crate::Expr::TagCall(tc) => {
-                for arg in &tc.args {
-                    Self::collect_refs_expr(arg, name, span_table, out);
-                }
-            }
-            Binary(bin) => {
-                Self::collect_refs_expr(&bin.lhs.value, name, span_table, out);
-                Self::collect_refs_expr(&bin.rhs.value, name, span_table, out);
-            }
-            Bind(bind) => Self::collect_refs_bind_value(&bind.value, name, span_table, out),
             When(when_expr) => {
-                if let Some(subject) = &when_expr.subject {
-                    Self::collect_refs_expr(subject, name, span_table, out);
-                }
                 for arm in &when_expr.arms {
-                    match arm {
-                        crate::WhenArm::Cond {
-                            condition, body, ..
-                        } => {
-                            Self::collect_refs_expr(condition, name, span_table, out);
-                            Self::collect_refs_expr(body, name, span_table, out);
-                        }
-                        crate::WhenArm::Is { pattern, body, .. } => {
-                            Self::collect_refs_type_surface(&pattern.value, name, span_table, out);
-                            Self::collect_refs_expr(body, name, span_table, out);
-                        }
-                        crate::WhenArm::Else(body, _) => {
-                            Self::collect_refs_expr(body, name, span_table, out);
-                        }
+                    if let crate::WhenArm::Is { pattern, .. } = arm {
+                        Self::collect_refs_pattern(&pattern.value, name, span_table, out);
                     }
                 }
             }
-            If(if_expr) => {
-                Self::collect_refs_expr(&if_expr.subject.value, name, span_table, out);
-                for e in &if_expr.body {
-                    Self::collect_refs_expr(e, name, span_table, out);
-                }
-            }
-            Loop(loop_expr) => match loop_expr {
-                crate::LoopEnum::ForIn(for_loop) => {
-                    Self::collect_refs_expr(&for_loop.iter, name, span_table, out);
-                    for e in &for_loop.exprs {
-                        Self::collect_refs_expr(e, name, span_table, out);
-                    }
-                }
-                crate::LoopEnum::While(while_loop) => {
-                    Self::collect_refs_expr(&while_loop.cond, name, span_table, out);
-                    for e in &while_loop.exprs {
-                        Self::collect_refs_expr(e, name, span_table, out);
-                    }
-                }
-            },
-            FormatString(fs) => {
-                for part in &fs.parts {
-                    if let crate::FormatPart::Expr(e, _) = part {
-                        Self::collect_refs_expr(e, name, span_table, out);
-                    }
-                }
-            }
-            Range(range) => {
-                Self::collect_refs_expr(&range.start.value, name, span_table, out);
-                Self::collect_refs_expr(&range.end.value, name, span_table, out);
-            }
-            TupleAlloc { init, .. } => Self::collect_refs_expr(init, name, span_table, out),
-            TupleGet { base, .. } => Self::collect_refs_expr(base, name, span_table, out),
-            TupleSet { base, value, .. } => {
-                Self::collect_refs_expr(base, name, span_table, out);
-                Self::collect_refs_expr(value, name, span_table, out);
-            }
-            Cast { expr, .. } => Self::collect_refs_expr(expr, name, span_table, out),
-            BufGet { buf, index, .. } => {
-                Self::collect_refs_expr(buf, name, span_table, out);
-                Self::collect_refs_expr(index, name, span_table, out);
-            }
-            BufSet {
-                buf, index, value, ..
-            } => {
-                Self::collect_refs_expr(buf, name, span_table, out);
-                Self::collect_refs_expr(index, name, span_table, out);
-                Self::collect_refs_expr(value, name, span_table, out);
-            }
-            TakePtr(inner)
-            | Ref { inner, .. }
-            | ConsumeArg(inner)
-            | Eat(inner)
-            | Deref(inner)
-            | Negate(inner) => {
-                Self::collect_refs_expr(inner, name, span_table, out);
-            }
-            RecordLit(fields) => {
-                for (_, e) in fields {
-                    Self::collect_refs_expr(e, name, span_table, out);
-                }
-            }
-            RecordSet { base, value, .. } => {
-                Self::collect_refs_expr(base, name, span_table, out);
-                Self::collect_refs_expr(value, name, span_table, out);
-            }
-            Destructure { value, .. } => {
-                Self::collect_refs_expr(value, name, span_table, out);
-            }
-            TupleLit(elems) | List(elems) => {
-                for e in elems {
-                    Self::collect_refs_expr(e, name, span_table, out);
-                }
-            }
-            Lit(_)
-            | SelfRef
-            | Asm(_)
-            | TypeNominal(..)
-            | TypeQualified(_)
-            | TypeGeneric { .. }
-            | TypeInRange(_)
-            | TypeRef { .. }
-            | RecordGet { .. }
-            | AnonymousTag(_) => {}
+            _ => {}
         }
+        let _ = crate::folder::walk_expr_children(expr, &mut |_, child| {
+            Self::collect_refs_expr(child, name, span_table, out);
+            std::ops::ControlFlow::Continue(())
+        });
     }
 
     fn collect_refs_bind_value(
@@ -660,7 +544,7 @@ impl FileAst {
     /// instead of scanning source bytes.
     ///
     /// Returns the name for:
-    /// - `AnonymousTag` / `TypeNominal` / `TypeQualified` → the tag/variant name
+    /// - `AnonymousTag` → the tag/variant name
     /// - `SelfRef` → `"self"`
     /// - `TagCall` → the variant constructor name
     /// - `FnCall` → the word under the cursor within the path (handles `obj.method`)
@@ -724,221 +608,16 @@ impl FileAst {
         span_id: SpanId,
         byte_pos: usize,
     ) -> Option<(&'a Expr, SpanId)> {
-        let st = &self.span_table;
-        match expr {
-            // Leaf nodes — return self
-            Expr::Lit(_) | Expr::SelfRef | Expr::AnonymousTag(..) => Some((expr, span_id)),
-
-            // Nested: check children, then return self as innermost
-            Expr::Bind(bind) => {
-                let result = self.find_expr_in_bind_value(&bind.value, byte_pos);
-                result.or(Some((expr, span_id)))
+        let mut found = None;
+        let _ = crate::folder::walk_expr_children(expr, &mut |child_span_id, child| {
+            if self.span_table.contains(child_span_id, byte_pos) {
+                found = self.find_expr_at_byte(child, child_span_id, byte_pos);
+                std::ops::ControlFlow::Break(())
+            } else {
+                std::ops::ControlFlow::Continue(())
             }
-            Expr::FnCall(call) => {
-                if let Some(args) = &call.args {
-                    for arg in args {
-                        if st.contains(arg.span_id(), byte_pos) {
-                            return self.find_expr_at_byte(&arg.value, arg.span_id(), byte_pos);
-                        }
-                    }
-                }
-                Some((expr, span_id))
-            }
-            Expr::Binary(bin) => {
-                if st.contains(bin.lhs.span_id(), byte_pos) {
-                    return self.find_expr_at_byte(&bin.lhs.value, bin.lhs.span_id(), byte_pos);
-                }
-                if st.contains(bin.rhs.span_id(), byte_pos) {
-                    return self.find_expr_at_byte(&bin.rhs.value, bin.rhs.span_id(), byte_pos);
-                }
-                Some((expr, span_id))
-            }
-            Expr::When(when) => {
-                if let Some(subject) = &when.subject
-                    && st.contains(subject.span_id(), byte_pos)
-                {
-                    return self.find_expr_at_byte(&subject.value, subject.span_id(), byte_pos);
-                }
-                for arm in &when.arms {
-                    match arm {
-                        WhenArm::Cond {
-                            condition, body, ..
-                        } => {
-                            for child in [condition.as_ref(), body.as_ref()] {
-                                if st.contains(child.span_id(), byte_pos) {
-                                    return self.find_expr_at_byte(
-                                        &child.value,
-                                        child.span_id(),
-                                        byte_pos,
-                                    );
-                                }
-                            }
-                        }
-                        WhenArm::Is { body, .. } => {
-                            if st.contains(body.span_id(), byte_pos) {
-                                return self.find_expr_at_byte(
-                                    &body.value,
-                                    body.span_id(),
-                                    byte_pos,
-                                );
-                            }
-                        }
-                        WhenArm::Else(body, _) => {
-                            if st.contains(body.span_id(), byte_pos) {
-                                return self.find_expr_at_byte(
-                                    &body.value,
-                                    body.span_id(),
-                                    byte_pos,
-                                );
-                            }
-                        }
-                    }
-                }
-                Some((expr, span_id))
-            }
-            Expr::If(ifx) => {
-                if st.contains(ifx.subject.span_id(), byte_pos) {
-                    return self.find_expr_at_byte(
-                        &ifx.subject.value,
-                        ifx.subject.span_id(),
-                        byte_pos,
-                    );
-                }
-                for e in &ifx.body {
-                    if st.contains(e.span_id(), byte_pos) {
-                        return self.find_expr_at_byte(&e.value, e.span_id(), byte_pos);
-                    }
-                }
-                if let Some(ret_expr) = &ifx.ret.value
-                    && st.contains(ret_expr.span_id(), byte_pos)
-                {
-                    return self.find_expr_at_byte(&ret_expr.value, ret_expr.span_id(), byte_pos);
-                }
-                Some((expr, span_id))
-            }
-            Expr::Loop(loop_val) => match loop_val {
-                LoopEnum::While(w) => {
-                    if st.contains(w.cond.span_id(), byte_pos) {
-                        return self.find_expr_at_byte(&w.cond.value, w.cond.span_id(), byte_pos);
-                    }
-                    for e in &w.exprs {
-                        if st.contains(e.span_id(), byte_pos) {
-                            return self.find_expr_at_byte(&e.value, e.span_id(), byte_pos);
-                        }
-                    }
-                    Some((expr, span_id))
-                }
-                LoopEnum::ForIn(f) => {
-                    for child in [&f.pat, &f.iter] {
-                        if st.contains(child.span_id(), byte_pos) {
-                            return self.find_expr_at_byte(&child.value, child.span_id(), byte_pos);
-                        }
-                    }
-                    for e in &f.exprs {
-                        if st.contains(e.span_id(), byte_pos) {
-                            return self.find_expr_at_byte(&e.value, e.span_id(), byte_pos);
-                        }
-                    }
-                    Some((expr, span_id))
-                }
-            },
-            Expr::TagCall(tc) => {
-                for arg in &tc.args {
-                    if st.contains(arg.span_id(), byte_pos) {
-                        return self.find_expr_at_byte(&arg.value, arg.span_id(), byte_pos);
-                    }
-                }
-                Some((expr, span_id))
-            }
-            Expr::FormatString(fs) => {
-                for part in &fs.parts {
-                    if let FormatPart::Expr(e, _) = part
-                        && st.contains(e.span_id(), byte_pos)
-                    {
-                        return self.find_expr_at_byte(&e.value, e.span_id(), byte_pos);
-                    }
-                }
-                Some((expr, span_id))
-            }
-            Expr::Range(r) => {
-                for child in [&r.start, &r.end] {
-                    if st.contains(child.span_id(), byte_pos) {
-                        return self.find_expr_at_byte(&child.value, child.span_id(), byte_pos);
-                    }
-                }
-                Some((expr, span_id))
-            }
-            Expr::Asm(a) => {
-                for op in &a.operand_values {
-                    if st.contains(op.span_id(), byte_pos) {
-                        return self.find_expr_at_byte(&op.value, op.span_id(), byte_pos);
-                    }
-                }
-                Some((expr, span_id))
-            }
-            Expr::TupleLit(elems) | Expr::List(elems) => {
-                for e in elems {
-                    if st.contains(e.span_id(), byte_pos) {
-                        return self.find_expr_at_byte(&e.value, e.span_id(), byte_pos);
-                    }
-                }
-                Some((expr, span_id))
-            }
-            Expr::RecordLit(fields) => {
-                for (_, e) in fields {
-                    if st.contains(e.span_id(), byte_pos) {
-                        return self.find_expr_at_byte(&e.value, e.span_id(), byte_pos);
-                    }
-                }
-                Some((expr, span_id))
-            }
-            Expr::TupleAlloc { init, .. }
-            | Expr::TakePtr(init)
-            | Expr::Ref { inner: init, .. }
-            | Expr::ConsumeArg(init)
-            | Expr::Deref(init)
-            | Expr::Negate(init)
-            | Expr::Eat(init) => {
-                if st.contains(init.span_id(), byte_pos) {
-                    return self.find_expr_at_byte(&init.value, init.span_id(), byte_pos);
-                }
-                Some((expr, span_id))
-            }
-            Expr::TupleGet { base, .. }
-            | Expr::RecordGet { base, .. }
-            | Expr::Cast { expr: base, .. }
-            | Expr::BufGet { buf: base, .. } => {
-                if st.contains(base.span_id(), byte_pos) {
-                    return self.find_expr_at_byte(&base.value, base.span_id(), byte_pos);
-                }
-                Some((expr, span_id))
-            }
-            Expr::TupleSet { base, value, .. }
-            | Expr::RecordSet { base, value, .. }
-            | Expr::BufSet {
-                buf: base,
-                index: value,
-                ..
-            } => {
-                for child in [base.as_ref(), value.as_ref()] {
-                    if st.contains(child.span_id(), byte_pos) {
-                        return self.find_expr_at_byte(&child.value, child.span_id(), byte_pos);
-                    }
-                }
-                Some((expr, span_id))
-            }
-            Expr::Destructure { value, .. } => {
-                if st.contains(value.span_id(), byte_pos) {
-                    return self.find_expr_at_byte(&value.value, value.span_id(), byte_pos);
-                }
-                Some((expr, span_id))
-            }
-            Expr::TypeNominal(..)
-            | Expr::TypeInRange(..)
-            | Expr::TypeQualified(_)
-            | Expr::TypeGeneric { .. }
-            | Expr::TypeRef { .. } => Some((expr, span_id)),
-        }
+        });
+        found.or(Some((expr, span_id)))
     }
 
     /// Recursively find an expression at `byte_pos` inside a `BindValue`.

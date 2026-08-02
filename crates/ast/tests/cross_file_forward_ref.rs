@@ -98,7 +98,7 @@ union_size(variants List(Int)) Size := Const(0)
 fn inline_forward_refs_not_unknown() {
     use flask::CompileTarget;
     use typecheck::FileId;
-    use typecheck::prepare_file_ast;
+    use typecheck::prepare_parse_ast;
     use typecheck::transform::{TransformCtx, transform};
 
     let source = "\
@@ -148,7 +148,7 @@ max_size(a Size, b Size) Size := when (a, b) is
                          else Dynamic
 ";
     let mut file_ast = TokenCursor::parse_source(source);
-    let _ = prepare_file_ast(&mut file_ast, &CompileTarget::Library);
+    let _ = prepare_parse_ast(&mut file_ast, &CompileTarget::Library);
     let typed = transform(&file_ast, FileId(0), &TransformCtx::new());
     let unknown = unknown_symbol_names(&typed);
     for name in ["union_size", "mul_size", "max_size"] {

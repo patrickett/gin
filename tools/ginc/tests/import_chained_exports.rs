@@ -1,31 +1,12 @@
 use std::fs;
-use std::path::PathBuf;
 
 use ginc::cli::{Args, Emit, Profile};
 use ginc::compile::GinCompiler;
-
-fn unique_temp_dir(name: &str) -> PathBuf {
-    let mut dir = std::env::temp_dir();
-    let pid = std::process::id();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .subsec_nanos();
-    dir.push(format!("gin_import_chain_{name}_{pid}_{nanos}"));
-    dir
-}
-
-fn write_file(path: &std::path::Path, contents: &str) {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).unwrap();
-    }
-    fs::write(path, contents).unwrap();
-}
+use test_fixtures::{unique_temp_dir, write_file};
 
 #[test]
 fn chained_nested_dep_a_b_loads_package_at_b() {
     let dir = unique_temp_dir("dep_a_b_nested");
-    let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
 
     write_file(
@@ -82,7 +63,6 @@ fn chained_nested_dep_a_b_loads_package_at_b() {
 #[test]
 fn chained_exports_dep_a_b_imports_folder_module_sources() {
     let dir = unique_temp_dir("dep_a_b_folder");
-    let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
 
     write_file(
@@ -139,7 +119,6 @@ fn chained_exports_dep_a_b_imports_folder_module_sources() {
 #[test]
 fn missing_nested_package_is_a_fatal_import_flaw() {
     let dir = unique_temp_dir("missing_nested");
-    let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
 
     write_file(
@@ -183,7 +162,6 @@ fn missing_nested_package_is_a_fatal_import_flaw() {
 #[test]
 fn chained_dep_utils_a_does_not_conflict_with_use_utils() {
     let dir = unique_temp_dir("utils_chain_qual");
-    let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
 
     write_file(

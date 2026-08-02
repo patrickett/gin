@@ -1,13 +1,6 @@
-use analysis::{CacheEngine, QueryEngine};
-use crossbeam_channel::unbounded;
+use analysis::PackageCache;
 use std::path::PathBuf;
-
-/// Record field types that reference undeclared tags (`List`, `Byte`) without imports.
-const STRING_GIN_SOURCE: &str = "\
-String has bytes List(Byte)\n\
-\n\
-ToString has to_string String\n\
-";
+use test_fixtures::gin_core::STRING_GIN_SOURCE;
 
 /// ginlsp maps typecheck diagnostics through the typed span table, not the parse table.
 #[test]
@@ -15,8 +8,7 @@ fn string_gin_typecheck_spans_match_source() {
     let path = PathBuf::from("/tmp/test_string.gin");
     let source = STRING_GIN_SOURCE;
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     let _ = engine.add_file(path.clone());
     engine.set_contents(&path, source.to_string());
 

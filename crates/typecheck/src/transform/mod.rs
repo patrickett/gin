@@ -6,6 +6,7 @@
 //! 3. **Flow** — Compute flow contexts, attach flow flaws (ownership, bounds).
 
 use crate::analysis::validate_consumption::stage_validate_consumption;
+use crate::staging;
 
 use ast::FileAst;
 use ast::prelude::*;
@@ -139,6 +140,8 @@ fn finish_lowered_file(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Trans
         file_ast,
         Arc::clone(&ctx.compile_time_eval_ast),
     );
+    staging::analyze_availability(typed, &ctx.cross_file_callable_signatures);
+    staging::prepare_resolved_expressions(typed);
     stage_flow(typed, &trait_registry, &ctx.cross_file_callable_signatures);
     if !ctx.ide_package {
         inline_comptime_calls::stage_inline_comptime_calls(typed, file_ast, ctx);
@@ -304,7 +307,7 @@ mod dependent_local_tests {
     use super::*;
     use crate::ty::Ty;
     use crate::typed::{BindBody, ExprId, TypedExprKind};
-    use ast::{BinderOwner, ConstExpr, DependentArgId, TyArg};
+    use ast::{BinderOwner, NormalExpr, DependentArgId, TyArg};
     use internment::Intern;
     use parser::cursor::TokenCursor;
 
@@ -340,7 +343,7 @@ mod dependent_local_tests {
             _ => panic!("dependent nominal type"),
         };
         match &params[index].1 {
-            TyArg::Const(ConstExpr::Inferred(id)) => *id,
+            TyArg::Const(NormalExpr::Inferred(id)) => *id,
             arg => panic!("inferred argument, got {arg:?}"),
         }
     }
@@ -501,7 +504,7 @@ mod target_group_tests {
                         base: Box::new(ReferenceTargetGroup::Param(GroupId(0))),
                         index: 0,
                     }),
-                    index: crate::typed::TargetIndex::Symbolic(ast::ConstExpr::Value(
+                    index: crate::typed::TargetIndex::Symbolic(ast::NormalExpr::Value(
                         ast::ConstValue::Int(0),
                     )),
                 }
@@ -992,7 +995,7 @@ mod target_group_tests {
                         base: Box::new(ReferenceTargetGroup::Param(GroupId(0))),
                         index: 0,
                     }),
-                    index: crate::typed::TargetIndex::Symbolic(ast::ConstExpr::Value(
+                    index: crate::typed::TargetIndex::Symbolic(ast::NormalExpr::Value(
                         ast::ConstValue::Int(1),
                     )),
                 }),
@@ -1037,6 +1040,26 @@ mod target_group_tests {
     }
 
     #[test]
+    fn nested_collection_expression_preserves_field_write_effect() {
+        let ast = TokenCursor::parse_source(
+            "Cell has value Int\nset(mut cell Cell): ([cell.value: 1],)\n",
+        );
+        let typed = transform(&ast, FileId(0), &TransformCtx::new());
+        let bind = typed
+            .defs
+            .get(&DefId(Intern::from_ref("set")))
+            .expect("definition");
+
+        assert_eq!(
+            bind.effects.writes,
+            HashSet::from([EffectTarget::Field {
+                base: Box::new(EffectTarget::Group(GroupId(0))),
+                index: 0,
+            }])
+        );
+    }
+
+    #[test]
     fn distinct_item_writes_keep_exact_indices() {
         let ast = TokenCursor::parse_source(
             "write(mut items x):\n    items.(0): 1\n    items.(1): 2\nreturn\n",
@@ -1053,13 +1076,13 @@ mod target_group_tests {
             HashSet::from([
                 EffectTarget::ItemRegion {
                     base: Box::new(base.clone()),
-                    index: crate::TargetIndex::Symbolic(ast::ConstExpr::Value(
+                    index: crate::TargetIndex::Symbolic(ast::NormalExpr::Value(
                         ast::ConstValue::Int(0),
                     )),
                 },
                 EffectTarget::ItemRegion {
                     base: Box::new(base),
-                    index: crate::TargetIndex::Symbolic(ast::ConstExpr::Value(
+                    index: crate::TargetIndex::Symbolic(ast::NormalExpr::Value(
                         ast::ConstValue::Int(1),
                     )),
                 },
@@ -1082,7 +1105,7 @@ mod target_group_tests {
             bind.effects.writes,
             HashSet::from([EffectTarget::ItemRegion {
                 base: Box::new(EffectTarget::Group(GroupId(0))),
-                index: crate::TargetIndex::Symbolic(ast::ConstExpr::Var(
+                index: crate::TargetIndex::Symbolic(ast::NormalExpr::Var(
                     Intern::from_ref("index",)
                 )),
             }])
@@ -1092,7 +1115,7 @@ mod target_group_tests {
             HashSet::from([EffectTarget::Descendants(Box::new(
                 EffectTarget::ItemRegion {
                     base: Box::new(EffectTarget::Group(GroupId(0))),
-                    index: crate::TargetIndex::Symbolic(ast::ConstExpr::Var(Intern::from_ref(
+                    index: crate::TargetIndex::Symbolic(ast::NormalExpr::Var(Intern::from_ref(
                         "index",
                     ))),
                 }
@@ -1114,7 +1137,7 @@ mod target_group_tests {
         assert!(matches!(
             &bind.params[0].1,
             crate::ty::Ty::Ref { inner, mutable: false }
-                if matches!(inner.as_ref(), crate::ty::Ty::Array { size: ast::ConstExpr::Var(name), .. } if name.as_str() == "n")
+                if matches!(inner.as_ref(), crate::ty::Ty::Array { size: ast::NormalExpr::Var(name), .. } if name.as_str() == "n")
         ));
     }
 
@@ -1129,7 +1152,7 @@ mod target_group_tests {
             Some(ReferenceTargetSet::singleton(
                 ReferenceTargetGroup::ItemRegion {
                     base: Box::new(ReferenceTargetGroup::Param(GroupId(0))),
-                    index: crate::TargetIndex::Symbolic(ast::ConstExpr::Var(Intern::from_ref(
+                    index: crate::TargetIndex::Symbolic(ast::NormalExpr::Var(Intern::from_ref(
                         "index",
                     ))),
                 }

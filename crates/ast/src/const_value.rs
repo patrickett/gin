@@ -248,13 +248,4 @@ impl ConstValue {
             _ => None,
         }
     }
-
-    /// Find the discriminant of a named variant within a literal union value.
-    /// Returns `None` for non-union values.
-    pub fn find_discriminant(&self, _variant_name: &str) -> Option<usize> {
-        // This is a stub; the full implementation uses the union's literal_values.
-        // For compile-time tag values, the discriminant is derived from the union
-        // declaration's literal_values order, not from the value itself.
-        None
-    }
 }

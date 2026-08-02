@@ -7,10 +7,9 @@
 
 use ast::prelude::*;
 use ast::span::{SpanId, Spanned, SubSpan};
-use ast::{BinderId, BinderOwner, ConstExpr};
+use ast::{BinderId, BinderOwner, NormalExpr};
 use internment::Intern;
 
-use crate::analysis::{TypeEnv, unify_type_args};
 use crate::compile_time_trait::{COMPARABLE_TRAIT, CompileTimeTraitRegistry, trait_field_for_ty};
 use crate::subst::{DepSubst, DependentInstantiation};
 use crate::ty::Ty;
@@ -18,7 +17,7 @@ use crate::typed::{
     BindBody, DefId, ExprId, ReferenceTargetGroup, ReferenceTargetSet, TypedCallableSignature,
     TypedExprKind, TypedFileAst, TypedIfExpr, TypedLoop, TypedLoopKind, TypedWhenExpr,
 };
-use ast::ty::{ParamKind, TyArg};
+use crate::staging::instantiate_call;
 
 /// Comparison operator names that `<`, `<=`, `>`, `>=` desugar to.
 const COMPARISON_OPS: [&str; 4] = ["lt", "le", "gt", "ge"];
@@ -50,11 +49,15 @@ fn resolve_comparison_call(
     Some(bool_ty)
 }
 
+fn fallback_tuple_alloc_size(span: SpanId) -> NormalExpr {
+    NormalExpr::Var(Intern::new(format!("_unsupported_tuple_size_{span:?}")))
+}
+
 fn happy_pattern_for_subject(
     typed: &TypedFileAst,
     subject_ty: &Ty,
     span_id: SpanId,
-) -> Option<Box<Spanned<TypeExpr>>> {
+) -> Option<Box<Spanned<ast::Pattern>>> {
     let registry = CompileTimeTraitRegistry {
         imported_traits: typed.imported_trait_names.clone(),
         eval_ast: typed.eval_ast.clone(),
@@ -71,14 +74,17 @@ fn happy_pattern_for_subject(
         let root = Intern::new(parts.next()?.to_string());
         let mut segments: Vec<Intern<String>> = parts.map(|p| Intern::new(p.to_string())).collect();
         segments.push(name);
-        TypeExpr::Qualified(Spanned {
+        ast::Pattern::Qualified(Spanned {
             value: ast::ModPath::new(root, segments),
             span_id,
         })
     } else {
-        TypeExpr::Nominal(name, span_id)
+        ast::Pattern::Nominal(name, span_id)
     };
-    Some(Box::new(Spanned { value, span_id }))
+    Some(Box::new(Spanned {
+        value,
+        span_id,
+    }))
 }
 
 /// Extract field names from TagCall args.
@@ -112,95 +118,6 @@ pub(crate) fn lower_tag_call_arg(
         return lower_typed_expr(typed, inner, &scope.child(), env);
     }
     lower_typed_expr(typed, arg, &scope.child(), env)
-}
-
-fn lower_contextual_call_args(
-    typed: &mut TypedFileAst,
-    args: &[Typed<Expr>],
-    param_kinds: &[ParamKind],
-    scope: &ExprLowerScope<'_>,
-    env: &mut LocalEnv,
-) -> (Option<Vec<ExprId>>, Vec<TyArg>) {
-    if param_kinds.len() != args.len() {
-        return (
-            Some(
-                args.iter()
-                    .map(|arg| lower_typed_expr(typed, arg, &scope.child(), env))
-                    .collect(),
-            ),
-            Vec::new(),
-        );
-    }
-
-    let mut lowered = Vec::new();
-    let mut type_args = Vec::with_capacity(args.len());
-    let type_env = TypeEnv::new(scope.tag_types);
-
-    for (arg, kind) in args.iter().zip(param_kinds.iter()) {
-        match kind {
-            ParamKind::Type => {
-                if let Some(te) = type_arg_expr(arg) {
-                    type_args.push(TyArg::Type(Box::new(type_env.resolve(&te))));
-                } else {
-                    lowered.push(lower_typed_expr(typed, arg, &scope.child(), env));
-                }
-            }
-            ParamKind::Value(_) => {
-                lowered.push(lower_typed_expr(typed, arg, &scope.child(), env));
-                type_args.push(TyArg::Const(
-                    arg.value
-                        .as_size_const_expr()
-                        .unwrap_or_else(|| ConstExpr::from(0)),
-                ));
-            }
-        }
-    }
-
-    (Some(lowered), type_args)
-}
-
-fn type_arg_expr(arg: &Typed<Expr>) -> Option<TypeExpr> {
-    arg.value.as_type_expr().or_else(|| match &arg.value {
-        Expr::AnonymousTag(name) => Some(TypeExpr::Nominal(*name, arg.span_id)),
-        Expr::FnCall(call) if call.path.segments.is_empty() && call.args.is_none() => {
-            Some(TypeExpr::Nominal(call.path.root, arg.span_id))
-        }
-        Expr::TagCall(call) => tag_call_type_arg(call, arg.span_id),
-        Expr::Lit(lit) => Some(TypeExpr::Literal(lit.clone(), arg.span_id)),
-        _ => None,
-    })
-}
-
-fn tag_call_type_arg(call: &TagCall, span_id: SpanId) -> Option<TypeExpr> {
-    let mut params = Vec::with_capacity(call.args.len());
-    for arg in &call.args {
-        let key = type_arg_key(arg)?;
-        let te = type_arg_expr(arg)?;
-        let param = ParameterKind::Tagged(Box::new(Spanned {
-            value: te,
-            span_id: arg.span_id,
-        }));
-        params.push((key, param));
-    }
-    Some(TypeExpr::Generic {
-        name: call.name,
-        params,
-        param_spans: Vec::new(),
-        span: span_id,
-    })
-}
-
-fn type_arg_key(arg: &Typed<Expr>) -> Option<Intern<String>> {
-    match &arg.value {
-        Expr::AnonymousTag(name) => Some(*name),
-        Expr::FnCall(call) if call.path.segments.is_empty() && call.args.is_none() => {
-            Some(call.path.root)
-        }
-        Expr::Lit(Literal::Int(n)) => Some(Intern::from_ref(&n.to_string())),
-        Expr::Lit(Literal::Number(n)) => Some(Intern::from_ref(&n.to_string())),
-        Expr::TagCall(call) => Some(call.name),
-        _ => None,
-    }
 }
 
 /// Convert a parse-tree [`Expr`] to a [`TypedExprKind`] by recursively
@@ -305,6 +222,11 @@ pub(crate) fn lower_expr_kind(
         Expr::FnCall(fn_call) => {
             let target = resolve_fn_call_target(&fn_call.path.value, scope.tag_types);
             let args = fn_call.args.as_deref().unwrap_or(&[]);
+            let lowered_args: Vec<ExprId> = args
+                .iter()
+                .map(|arg| lower_typed_expr(typed, arg, &scope.child(), env))
+                .collect();
+            let has_arg_exprs = fn_call.args.is_some();
             let local_signature = typed.defs.get(&target).map(TypedCallableSignature::from);
             let signature = local_signature
                 .as_ref()
@@ -314,7 +236,7 @@ pub(crate) fn lower_expr_kind(
                 let binder = BinderId::new(typed.file_id.0, BinderOwner::Expression(call_id.0));
                 let mut instantiation =
                     DependentInstantiation::new(signature.dependent_binder, binder);
-                let params: Vec<(Intern<String>, Ty)> = signature
+                    let params: Vec<(Intern<String>, Ty)> = signature
                     .params
                     .iter()
                     .map(|(name, ty)| (*name, instantiation.apply_to_ty(ty)))
@@ -322,65 +244,38 @@ pub(crate) fn lower_expr_kind(
                 let return_type = instantiation.apply_to_ty(&signature.return_type);
                 (signature.param_kinds.clone(), params, return_type)
             });
-            let (lowered, type_args) = if let Some((param_kinds, _, _)) = call_signature.as_ref() {
-                lower_contextual_call_args(typed, args, param_kinds, scope, env)
-            } else {
-                let lowered = fn_call.args.as_ref().map(|args| {
-                    args.iter()
-                        .map(|a| lower_typed_expr(typed, a, &scope.child(), env))
-                        .collect()
-                });
-                (lowered, Vec::new())
-            };
-            if let Some((ref param_kinds, ref params, ref return_type)) = call_signature
-                && !param_kinds.is_empty()
-                && param_kinds.len() == args.len()
-            {
-                let expected: Vec<TyArg> = param_kinds
-                    .iter()
-                    .enumerate()
-                    .map(|(i, k)| match k {
-                        ParamKind::Type => TyArg::Type(Box::new(Ty::Opaque(
-                            params
-                                .get(i)
-                                .map(|(name, _)| *name)
-                                .unwrap_or_else(|| Intern::new(String::new())),
-                        ))),
-                        ParamKind::Value(_) => TyArg::Const(ConstExpr::Var(
-                            params
-                                .get(i)
-                                .map(|(name, _)| *name)
-                                .unwrap_or_else(|| Intern::new(String::new())),
-                        )),
-                    })
-                    .collect();
-                let substituted_ty = unify_type_args(&expected, &type_args)
-                    .ok()
-                    .map(|subst| subst.apply_to_ty(return_type));
-                TypedExprKind::FnCall {
-                    target,
-                    args: lowered,
-                    substituted_ty,
-                }
-            } else {
-                // Check if this is a comparison operator resolving through Comparable trait.
-                let substituted_ty = if let Some((_, _, return_type)) = call_signature {
-                    Some(return_type)
-                } else if COMPARISON_OPS.contains(&target.0.as_str())
-                    && typed
-                        .imported_trait_names
-                        .contains(&Intern::from_ref(COMPARABLE_TRAIT))
+            let call_inst = call_signature.as_ref().map(|(param_kinds, params, return_type)| {
+                let instantiation = instantiate_call(
+                    &lowered_args,
+                    typed,
+                    param_kinds,
+                    params,
+                    return_type,
+                );
+                (instantiation, return_type)
+            });
+            let lowered = call_inst
+                .as_ref()
+                .and_then(|(call_inst, _)| call_inst.args.clone())
+                .or_else(|| if has_arg_exprs { Some(lowered_args.clone()) } else { None });
+            let substituted_ty = if let Some((_, _, return_type)) = call_signature.as_ref() {
+                call_inst
+                    .and_then(|(inst, _)| inst.substituted_ty)
+                    .or_else(|| Some(return_type.clone()))
+            } else if COMPARISON_OPS.contains(&target.0.as_str())
+                && typed
+                    .imported_trait_names
+                    .contains(&Intern::from_ref(COMPARABLE_TRAIT))
                     && let Some(first_arg) = fn_call.args.as_ref().and_then(|a| a.first())
-                {
-                    resolve_comparison_call(&target.0, first_arg, typed, scope)
-                } else {
-                    None
-                };
-                TypedExprKind::FnCall {
-                    target,
-                    args: lowered,
-                    substituted_ty,
-                }
+            {
+                resolve_comparison_call(&target.0, first_arg, typed, scope)
+            } else {
+                None
+            };
+            TypedExprKind::FnCall {
+                target,
+                args: lowered,
+                substituted_ty,
             }
         }
 
@@ -622,7 +517,7 @@ pub(crate) fn lower_expr_kind(
                 .or_else(|| happy_pattern_for_subject(typed, &subject_ty, if_expr.subject.span_id));
             let pattern = pattern.unwrap_or_else(|| {
                 Box::new(Spanned {
-                    value: TypeExpr::Nominal(
+                    value: ast::Pattern::Nominal(
                         Intern::from_ref("__MissingHappyVariant"),
                         if_expr.subject.span_id,
                     ),
@@ -724,10 +619,10 @@ pub(crate) fn lower_expr_kind(
 
         Expr::TupleAlloc { init, size } => {
             let init_id = lower_typed_expr(typed, init, &scope.child(), env);
-            let size = size
-                .value
-                .as_size_const_expr()
-                .unwrap_or(ConstExpr::from(0));
+            let size_expr_id = lower_typed_expr(typed, size, &scope.child(), env);
+            let size = crate::staging::normalize(typed, size_expr_id, &DepSubst::new())
+                .as_dependent_normal_expr()
+                .unwrap_or_else(|| fallback_tuple_alloc_size(size.span_id));
             TypedExprKind::TupleAlloc {
                 init: init_id,
                 size,
@@ -855,7 +750,7 @@ pub(crate) fn lower_expr_kind(
             TypedExprKind::TakePtr(inner_id)
         }
 
-        Expr::Ref { inner, mutable: _ } => {
+        Expr::Ref { inner, .. } => {
             let inner_id = lower_typed_expr(typed, inner, &scope.child(), env);
             TypedExprKind::Ref(inner_id)
         }
@@ -921,39 +816,5 @@ pub(crate) fn lower_expr_kind(
             })
         }
 
-        Expr::TypeInRange(_bounds) => TypedExprKind::Bind {
-            name: Intern::new("_type_in_range".to_string()),
-            stmts: vec![],
-            body: ExprId(0),
-            unassigned: true,
-        },
-
-        Expr::TypeNominal(name) | Expr::TypeGeneric { name, .. } => TypedExprKind::Bind {
-            name: *name,
-            stmts: vec![],
-            body: ExprId(0),
-            unassigned: true,
-        },
-
-        Expr::TypeQualified(path) => {
-            let name = path.segments.last().copied().unwrap_or(path.root);
-            TypedExprKind::Bind {
-                name,
-                stmts: vec![],
-                body: ExprId(0),
-                unassigned: true,
-            }
-        }
-
-        Expr::TypeRef { inner, mutable: _ } => {
-            let _inner_kind = lower_expr_kind(
-                typed,
-                &Typed::infer(*inner.clone(), SpanId::INVALID),
-                scope,
-                env,
-                None,
-            );
-            TypedExprKind::Ref(ExprId(0)) // placeholder
-        }
     }
 }

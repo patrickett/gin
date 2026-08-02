@@ -30,7 +30,7 @@ impl Backend {
         let result = self
             .run_blocking_request("signature_help", move |this| {
                 let snapshot = this.snapshot();
-                let (source, parse) = snapshot.engine.source_and_parse(&file_path)?;
+                let (source, parse) = snapshot.cache.source_and_parse(&file_path)?;
                 Self::build_signature_help(&source, &parse.ast, position)
             })
             .await;

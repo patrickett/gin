@@ -8,11 +8,10 @@ use std::collections::HashMap;
 
 use crate::analysis::{FlowContext, TyCopyExt, VarState};
 use crate::compile_time_trait::CompileTimeTraitRegistry;
-use crate::reflect::reflect_ty_to_const_value;
 use crate::solver::{ConstraintEnv, ProveResult, predicate_expr_to_predicate};
-use ast::const_expr::ConstExpr;
 use ast::expr::Literal;
-use ast::{ConstValue, HashFloat, ParamConvention};
+use ast::normal_expr::NormalExpr;
+use ast::{ConstValue, ParamConvention};
 use diagnostic::Diagnostic;
 
 use crate::ty::Ty;
@@ -47,8 +46,10 @@ fn collect_local_var_types(typed: &TypedFileAst) -> HashMap<Intern<String>, Ty> 
 pub enum ReferenceValidity {
     Valid,
     PermanentlyInvalid,
+    MaybeInvalid,
 }
 
+#[derive(Clone)]
 pub struct RefTracker {
     targets: HashMap<Intern<String>, ReferenceTargetSet>,
     validity: HashMap<Intern<String>, ReferenceValidity>,
@@ -92,6 +93,26 @@ impl RefTracker {
                 self.validity
                     .insert(*reference, ReferenceValidity::PermanentlyInvalid);
                 flow_ctx.set_var_state(*reference, VarState::Invalidated);
+            }
+        }
+    }
+
+    fn merge_branch_validity(&mut self, branches: &[Self]) {
+        for (reference, validity) in &mut self.validity {
+            let states: Vec<_> = branches
+                .iter()
+                .filter_map(|branch| branch.validity.get(reference).copied())
+                .collect();
+            if states
+                .iter()
+                .all(|state| *state == ReferenceValidity::PermanentlyInvalid)
+            {
+                *validity = ReferenceValidity::PermanentlyInvalid;
+            } else if states
+                .iter()
+                .any(|state| *state != ReferenceValidity::Valid)
+            {
+                *validity = ReferenceValidity::MaybeInvalid;
             }
         }
     }
@@ -200,7 +221,7 @@ pub fn stage_flow(
         let mut flow_ctx = FlowContext::new();
         for (name, refinement) in parameter_constraints {
             let predicate =
-                predicate_expr_to_predicate(&refinement, ConstExpr::Var(name), &HashMap::new());
+                predicate_expr_to_predicate(&refinement, NormalExpr::Var(name), &HashMap::new());
             flow_ctx.constraint_env.assume(&predicate);
         }
         for name in &owned_params {
@@ -370,7 +391,7 @@ fn validate_call_refinements(
 fn collect_dependent_substitutions(
     formal: &Ty,
     actual: &Ty,
-    substitutions: &mut HashMap<Intern<String>, ConstExpr>,
+    substitutions: &mut HashMap<Intern<String>, NormalExpr>,
 ) {
     match (formal, actual) {
         (Ty::Ref { inner: formal, .. }, Ty::Ref { inner: actual, .. }) => {
@@ -392,7 +413,7 @@ fn collect_dependent_substitutions(
                 size: actual_size,
             },
         ) => {
-            if let ConstExpr::Var(name) = formal_size {
+            if let NormalExpr::Var(name) = formal_size {
                 substitutions.insert(*name, actual_size.clone());
             }
             collect_dependent_substitutions(formal_elem, actual_elem, substitutions);
@@ -419,6 +440,17 @@ fn mark_consumed_if_local_ref(typed: &TypedFileAst, expr_id: ExprId, flow_ctx: &
     }
 }
 
+fn should_consume_when_subject(
+    typed: &TypedFileAst,
+    trait_registry: &CompileTimeTraitRegistry,
+    expr_id: ExprId,
+) -> bool {
+    let Some(ty) = typed.exprs.ty.get(expr_id.as_usize()) else {
+        return false;
+    };
+    !ty.is_ref() && !ty.is_copyable(trait_registry, typed)
+}
+
 /// Shared context threaded through flow analysis expression walking.
 #[allow(dead_code)]
 struct WalkExprCtx<'a> {
@@ -434,6 +466,63 @@ struct WalkExprCtx<'a> {
 }
 
 impl<'a> WalkExprCtx<'a> {
+    fn walk_isolated_branches(&mut self, branches: &[Vec<ExprId>]) {
+        let incoming_flow = self.flow_ctx.clone();
+        let incoming_refs = self.ref_tracker.clone();
+        let incoming_bindings = self.const_bindings.clone();
+        let incoming_values = self.local_const_values.clone();
+        let mut branch_flows = Vec::with_capacity(branches.len());
+        let mut branch_refs = Vec::with_capacity(branches.len());
+
+        for branch in branches {
+            *self.flow_ctx = incoming_flow.clone();
+            *self.ref_tracker = incoming_refs.clone();
+            *self.const_bindings = incoming_bindings.clone();
+            *self.local_const_values = incoming_values.clone();
+            for expr in branch {
+                self.walk(*expr);
+            }
+            branch_flows.push(self.flow_ctx.clone());
+            branch_refs.push(self.ref_tracker.clone());
+        }
+
+        *self.flow_ctx = incoming_flow;
+        self.flow_ctx.merge_branch_states(&branch_flows);
+        *self.ref_tracker = incoming_refs;
+        self.ref_tracker.merge_branch_validity(&branch_refs);
+        *self.const_bindings = incoming_bindings;
+        *self.local_const_values = incoming_values;
+    }
+
+    fn walk_repeating_body(&mut self, body: &[ExprId], backedge: Option<ExprId>) {
+        let incoming_flow = self.flow_ctx.clone();
+        let incoming_refs = self.ref_tracker.clone();
+        let incoming_bindings = self.const_bindings.clone();
+        let incoming_values = self.local_const_values.clone();
+
+        for expr in body {
+            self.walk(*expr);
+        }
+        let first_flow = self.flow_ctx.clone();
+        let first_refs = self.ref_tracker.clone();
+
+        if let Some(backedge) = backedge {
+            self.walk(backedge);
+        }
+        for expr in body {
+            self.walk(*expr);
+        }
+
+        *self.flow_ctx = incoming_flow.clone();
+        self.flow_ctx
+            .merge_branch_states(&[incoming_flow, first_flow]);
+        *self.ref_tracker = incoming_refs.clone();
+        self.ref_tracker
+            .merge_branch_validity(&[incoming_refs, first_refs]);
+        *self.const_bindings = incoming_bindings;
+        *self.local_const_values = incoming_values;
+    }
+
     fn walk(&mut self, expr_id: ExprId) {
         let idx = expr_id.as_usize();
         if idx >= self.typed.exprs.kind.len() {
@@ -466,11 +555,35 @@ impl<'a> WalkExprCtx<'a> {
                                 .with_arg("name", target.0.as_str().to_string()),
                             );
                         }
+                        Some(VarState::MaybeConsumed) => {
+                            self.typed.exprs.flaws[idx].push(
+                                Diagnostic::new(
+                                    "type-use-of-maybe-moved-value",
+                                    format!(
+                                        "value `{}` may have been moved on another control-flow path",
+                                        target.0.as_str()
+                                    ),
+                                )
+                                .with_arg("name", target.0.as_str().to_string()),
+                            );
+                        }
                         Some(VarState::Invalidated) => {
                             self.typed.exprs.flaws[idx].push(
                                 Diagnostic::new(
                                     "type-use-of-invalidated-reference",
                                     format!("use of invalidated reference `{}`", target.0.as_str()),
+                                )
+                                .with_arg("name", target.0.as_str().to_string()),
+                            );
+                        }
+                        Some(VarState::MaybeInvalidated) => {
+                            self.typed.exprs.flaws[idx].push(
+                                Diagnostic::new(
+                                    "type-use-of-maybe-invalidated-reference",
+                                    format!(
+                                        "reference `{}` may have been invalidated on another control-flow path",
+                                        target.0.as_str()
+                                    ),
                                 )
                                 .with_arg("name", target.0.as_str().to_string()),
                             );
@@ -617,10 +730,11 @@ impl<'a> WalkExprCtx<'a> {
                 if let Some(arg_ids) = &args {
                     for arg_id in arg_ids.iter().copied() {
                         self.walk(arg_id);
+                        mark_consumed_if_local_ref(self.typed, arg_id, self.flow_ctx);
                     }
                 }
                 // Check refinements for this TagCall
-                self.check_tag_refinements(&variant_id, &args, &field_names);
+                self.check_tag_refinements(&variant_id, args.as_deref(), &field_names);
             }
             TypedExprKind::Bind {
                 name,
@@ -683,6 +797,9 @@ impl<'a> WalkExprCtx<'a> {
             TypedExprKind::When(when_expr) => {
                 if let Some(subject_id) = when_expr.subject {
                     self.walk(subject_id);
+                    if should_consume_when_subject(self.typed, self.trait_registry, subject_id) {
+                        mark_consumed_if_local_ref(self.typed, subject_id, self.flow_ctx);
+                    }
                 }
                 let subject_value = when_expr.subject.and_then(|subject_id| {
                     self.typed.exprs.const_value[subject_id.as_usize()].clone()
@@ -725,22 +842,19 @@ impl<'a> WalkExprCtx<'a> {
                     self.typed.exprs.const_value[idx] =
                         self.typed.exprs.const_value[body.as_usize()].clone();
                 } else {
-                    for arm in &when_expr.arms {
-                        match arm {
+                    let branches: Vec<_> = when_expr
+                        .arms
+                        .iter()
+                        .map(|arm| match arm {
                             TypedWhenArm::Cond {
                                 condition, body, ..
-                            } => {
-                                self.walk(*condition);
-                                self.walk(*body);
+                            } => vec![*condition, *body],
+                            TypedWhenArm::Is { body, .. } | TypedWhenArm::Else(body, _) => {
+                                vec![*body]
                             }
-                            TypedWhenArm::Is { body, .. } => {
-                                self.walk(*body);
-                            }
-                            TypedWhenArm::Else(body, _) => {
-                                self.walk(*body);
-                            }
-                        }
-                    }
+                        })
+                        .collect();
+                    self.walk_isolated_branches(&branches);
                 }
             }
             TypedExprKind::If(if_expr) => {
@@ -765,31 +879,28 @@ impl<'a> WalkExprCtx<'a> {
                     }
                 }
                 self.walk(if_expr.subject);
-                for body_id in if_expr.stmts {
-                    self.walk(body_id);
-                }
-                if let Some(ret_id) = if_expr.ret {
-                    self.walk(ret_id);
-                }
+                let mut taken = if_expr.stmts;
+                taken.extend(if_expr.ret);
+                self.walk_isolated_branches(&[taken, Vec::new()]);
                 // Restore constraint_env so facts don't leak past the if-block
                 self.flow_ctx.constraint_env.known_lt.truncate(saved_lt_len);
                 self.flow_ctx.constraint_env.known_le.truncate(saved_le_len);
             }
             TypedExprKind::Loop(typed_loop) => {
-                match typed_loop.kind {
+                let backedge = match typed_loop.kind {
                     TypedLoopKind::While { condition } => {
                         self.walk(condition);
+                        Some(condition)
                     }
                     TypedLoopKind::ForIn {
                         variable: _,
                         iterable,
                     } => {
                         self.walk(iterable);
+                        None
                     }
-                }
-                for body_id in typed_loop.stmts {
-                    self.walk(body_id);
-                }
+                };
+                self.walk_repeating_body(&typed_loop.stmts, backedge);
             }
             TypedExprKind::TupleGet { base, .. } => {
                 self.walk(base);
@@ -895,7 +1006,7 @@ impl<'a> WalkExprCtx<'a> {
     fn check_tag_refinements(
         &mut self,
         variant_id: &VariantId,
-        args: &Option<Vec<ExprId>>,
+        args: Option<&[ExprId]>,
         field_names: &[Intern<String>],
     ) {
         let Some(tag) = self.typed.tags.get(&variant_id.union) else {
@@ -905,7 +1016,7 @@ impl<'a> WalkExprCtx<'a> {
         if refinements.is_empty() {
             return;
         }
-        let Some(arg_ids) = args.as_ref() else {
+        let Some(arg_ids) = args else {
             return;
         };
         let ordered_fields: Vec<Intern<String>> = match &tag.resolved_ty {
@@ -913,7 +1024,7 @@ impl<'a> WalkExprCtx<'a> {
             _ => return,
         };
         // Build a map of all field values so refinements can reference sibling fields.
-        let all_field_values: HashMap<Intern<String>, ConstExpr> = {
+        let all_field_values: HashMap<Intern<String>, NormalExpr> = {
             let mut m = HashMap::new();
             for (j, arg_id) in arg_ids.iter().enumerate() {
                 let fname = field_names
@@ -922,7 +1033,7 @@ impl<'a> WalkExprCtx<'a> {
                     .copied()
                     .or_else(|| ordered_fields.get(j).copied());
                 if let Some(fname) = fname
-                    && let Some(value) = expr_const_expr(
+                    && let Some(value) = expr_to_normal_expr(
                         &self.typed.exprs.kind,
                         &self.typed.exprs.const_value,
                         self.local_const_values,
@@ -947,7 +1058,7 @@ impl<'a> WalkExprCtx<'a> {
             let Some(refinement) = refinements.get(&field_name) else {
                 continue;
             };
-            let Some(field_value) = expr_const_expr(
+            let Some(field_value) = expr_to_normal_expr(
                 &self.typed.exprs.kind,
                 &self.typed.exprs.const_value,
                 self.local_const_values,
@@ -958,10 +1069,10 @@ impl<'a> WalkExprCtx<'a> {
             // Include sibling field values so the refinement can reference them.
             // e.g. for `value Int and < n` on a record field, the refinement
             // references the sibling field `n` — we need both in var_values.
-            let mut var_values: HashMap<Intern<String>, ConstExpr> = self
+            let mut var_values: HashMap<Intern<String>, NormalExpr> = self
                 .local_const_values
                 .iter()
-                .map(|(k, v)| (*k, ConstExpr::Value(v.clone())))
+                .map(|(k, v)| (*k, NormalExpr::Value(v.clone())))
                 .collect();
             var_values.extend(all_field_values.iter().map(|(k, v)| (*k, v.clone())));
             let predicate = predicate_expr_to_predicate(refinement, field_value, &var_values);
@@ -1000,175 +1111,39 @@ impl<'a> WalkExprCtx<'a> {
     }
 }
 
-pub(crate) fn children_of_kind(kind: &TypedExprKind) -> Vec<ExprId> {
-    let mut children = Vec::new();
-    match kind {
-        TypedExprKind::Lit(_) => {}
-        TypedExprKind::Binary { lhs, rhs, .. } => {
-            children.push(*lhs);
-            children.push(*rhs);
-        }
-        TypedExprKind::FnCall { args, .. } => {
-            if let Some(arg_ids) = args {
-                children.extend(arg_ids.iter().copied());
-            }
-        }
-        TypedExprKind::TagCall { args, .. } => {
-            if let Some(arg_ids) = args {
-                children.extend(arg_ids.iter().copied());
-            }
-        }
-        TypedExprKind::When(when_expr) => {
-            if let Some(subject_id) = when_expr.subject {
-                children.push(subject_id);
-            }
-            for arm in &when_expr.arms {
-                match arm {
-                    TypedWhenArm::Cond {
-                        condition, body, ..
-                    } => {
-                        children.push(*condition);
-                        children.push(*body);
-                    }
-                    TypedWhenArm::Is { body, .. } => {
-                        children.push(*body);
-                    }
-                    TypedWhenArm::Else(body, _) => {
-                        children.push(*body);
-                    }
-                }
-            }
-        }
-        TypedExprKind::If(if_expr) => {
-            children.push(if_expr.subject);
-            children.extend(if_expr.stmts.iter().copied());
-            if let Some(ret_id) = if_expr.ret {
-                children.push(ret_id);
-            }
-        }
-        TypedExprKind::Loop(typed_loop) => {
-            match typed_loop.kind {
-                TypedLoopKind::While { condition } => children.push(condition),
-                TypedLoopKind::ForIn {
-                    variable: _,
-                    iterable,
-                } => {
-                    children.push(iterable);
-                }
-            }
-            children.extend(typed_loop.stmts.iter().copied());
-        }
-        TypedExprKind::TakePtr(inner)
-        | TypedExprKind::Ref(inner)
-        | TypedExprKind::Eat(inner)
-        | TypedExprKind::ConsumeArg(inner)
-        | TypedExprKind::Deref(inner)
-        | TypedExprKind::Negate(inner) => {
-            children.push(*inner);
-        }
-        TypedExprKind::TupleGet { base, .. } => {
-            children.push(*base);
-        }
-        TypedExprKind::Destructure { value, .. } => {
-            children.push(*value);
-        }
-        TypedExprKind::RecordSet { base, value, .. }
-        | TypedExprKind::TupleSet { base, value, .. } => {
-            children.push(*base);
-            children.push(*value);
-        }
-        TypedExprKind::Range { start, end } => {
-            children.push(*start);
-            children.push(*end);
-        }
-        TypedExprKind::TupleAlloc { init, .. } => {
-            children.push(*init);
-        }
-        TypedExprKind::TupleLit(items) | TypedExprKind::List(items) => {
-            children.extend(items.iter().copied());
-        }
-        TypedExprKind::BufGet { buf, index } => {
-            children.push(*buf);
-            children.push(*index);
-        }
-        TypedExprKind::BufSet { buf, index, value } => {
-            children.push(*buf);
-            children.push(*index);
-            children.push(*value);
-        }
-        TypedExprKind::Cast { expr: inner, .. } => {
-            children.push(*inner);
-        }
-        TypedExprKind::FormatString(fs) => {
-            for part in &fs.parts {
-                if let ast::FormatPart::Expr(_, _) = part {
-                    // Children not accessible directly from untyped FormatPart
-                }
-            }
-        }
-        TypedExprKind::Asm(_asm_expr) => {
-            // TODO: extract children from asm operand expressions
-        }
-        TypedExprKind::Bind {
-            stmts,
-            body,
-            unassigned,
-            ..
-        } => {
-            children.extend(stmts.iter().copied());
-            if !unassigned {
-                children.push(*body);
-            }
-        }
-        TypedExprKind::Reassign { value, .. } => {
-            children.push(*value);
-        }
-        TypedExprKind::SelfRef { .. } => {}
-    }
-    children
-}
-
-pub(crate) fn eval_const_from_expr(typed: &TypedFileAst, idx: usize) -> Option<ConstValue> {
-    if idx >= typed.exprs.kind.len() {
-        return None;
-    }
-    match &typed.exprs.kind[idx] {
-        TypedExprKind::Lit(lit) => match lit {
-            Literal::Int(n) => Some(ConstValue::Int(*n as i128)),
-            Literal::Number(n) => Some(ConstValue::Int(*n as i128)),
-            Literal::Float(HashFloat(f)) => Some(ConstValue::Float(HashFloat(*f))),
-            Literal::String(s) => Some(ConstValue::String(s.clone())),
-        },
-        TypedExprKind::TagCall { args, .. } if args.as_ref().is_some_and(|a| a.is_empty()) => {
-            // Bare tag call with no args - could be a type constant
-            let ty = &typed.exprs.ty[idx];
-            Some(reflect_ty_to_const_value(ty))
-        }
-        _ => typed.exprs.const_value[idx].clone(),
-    }
-}
-
-fn expr_const_expr(
+fn expr_to_normal_expr(
     kinds: &[TypedExprKind],
     const_values: &[Option<ConstValue>],
     lcv: &HashMap<Intern<String>, ConstValue>,
     expr_id: ExprId,
-) -> Option<ConstExpr> {
+) -> Option<NormalExpr> {
     let idx = expr_id.as_usize();
     if let Some(cv) = const_values.get(idx).and_then(Clone::clone) {
-        return Some(ConstExpr::Value(cv));
+        return Some(NormalExpr::Value(cv));
     }
     match kinds.get(idx)? {
         TypedExprKind::Lit(lit) => match lit {
-            Literal::Int(n) => Some(ConstExpr::Value(ConstValue::Int(*n as i128))),
-            Literal::Number(n) => Some(ConstExpr::Value(ConstValue::Int(*n as i128))),
+            Literal::Int(n) => Some(NormalExpr::Value(ConstValue::Int(*n as i128))),
+            Literal::Number(n) => Some(NormalExpr::Value(ConstValue::Int(*n as i128))),
             _ => None,
         },
+        TypedExprKind::Negate(inner) => expr_to_normal_expr(kinds, const_values, lcv, *inner)
+            .and_then(|value| match value {
+                NormalExpr::Value(ConstValue::Int(value)) => {
+                    Some(NormalExpr::Value(ConstValue::Int(-value)))
+                }
+                _ => None,
+            }),
+        TypedExprKind::Ref(inner)
+        | TypedExprKind::TakePtr(inner)
+        | TypedExprKind::ConsumeArg(inner)
+        | TypedExprKind::Eat(inner)
+        | TypedExprKind::Deref(inner) => expr_to_normal_expr(kinds, const_values, lcv, *inner),
         TypedExprKind::FnCall { target, args, .. } if args.is_none() => lcv
             .get(&target.0)
             .cloned()
-            .map(ConstExpr::Value)
-            .or(Some(ConstExpr::Var(target.0))),
+            .map(NormalExpr::Value)
+            .or(Some(NormalExpr::Var(target.0))),
         _ => None,
     }
 }
@@ -1186,7 +1161,7 @@ fn subject_comparison_facts(
     kinds: &[TypedExprKind],
     subject: ExprId,
     lcv: &HashMap<Intern<String>, ConstValue>,
-) -> Vec<(ConstExpr, ConstExpr, bool)> {
+) -> Vec<(NormalExpr, NormalExpr, bool)> {
     let idx = subject.as_usize();
     let Some(TypedExprKind::FnCall { target, args, .. }) = kinds.get(idx) else {
         return Vec::new();
@@ -1202,32 +1177,42 @@ fn subject_comparison_facts(
     let is_lt = matches!(op_name, "lt" | "gt");
     let lhs_idx = if is_swapped { 1 } else { 0 };
     let rhs_idx = if is_swapped { 0 } else { 1 };
-    let to_expr = |eid: ExprId| -> Option<ConstExpr> {
-        let eidx = eid.as_usize();
+
+    fn to_expr(
+        kinds: &[TypedExprKind],
+        lcv: &HashMap<Intern<String>, ConstValue>,
+        expr_id: ExprId,
+    ) -> Option<NormalExpr> {
+        let eidx = expr_id.as_usize();
         match kinds.get(eidx)? {
             TypedExprKind::Lit(lit) => match lit {
-                Literal::Int(n) => Some(ConstExpr::Value(ConstValue::Int(*n as i128))),
-                Literal::Number(n) => Some(ConstExpr::Value(ConstValue::Int(*n as i128))),
+                Literal::Int(n) => Some(NormalExpr::Value(ConstValue::Int(*n as i128))),
+                Literal::Number(n) => Some(NormalExpr::Value(ConstValue::Int(*n as i128))),
                 _ => None,
             },
+            TypedExprKind::Ref(inner)
+            | TypedExprKind::TakePtr(inner)
+            | TypedExprKind::ConsumeArg(inner)
+            | TypedExprKind::Eat(inner)
+            | TypedExprKind::Deref(inner) => to_expr(kinds, lcv, *inner),
             TypedExprKind::FnCall { target, args, .. } if args.is_none() => {
                 let var = target.0;
                 if let Some(cv) = lcv.get(&var) {
-                    Some(ConstExpr::Value(cv.clone()))
+                    Some(NormalExpr::Value(cv.clone()))
                 } else {
-                    Some(ConstExpr::Var(var))
+                    Some(NormalExpr::Var(var))
                 }
             }
             _ => None,
         }
-    };
-    let Some(lhs) = to_expr(arg_ids[lhs_idx]) else {
-        return Vec::new();
-    };
-    let Some(rhs) = to_expr(arg_ids[rhs_idx]) else {
-        return Vec::new();
-    };
-    vec![(lhs, rhs, is_lt)]
+    }
+
+    let lhs = to_expr(kinds, lcv, arg_ids[lhs_idx]);
+    let rhs = to_expr(kinds, lcv, arg_ids[rhs_idx]);
+    match (lhs, rhs) {
+        (Some(lhs), Some(rhs)) => vec![(lhs, rhs, is_lt)],
+        _ => Vec::new(),
+    }
 }
 
 #[cfg(test)]

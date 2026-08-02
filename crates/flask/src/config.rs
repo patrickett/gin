@@ -46,12 +46,6 @@ pub struct Dependency {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Author(pub String);
 
-impl Author {
-    pub fn new(name: String) -> Self {
-        Self(name)
-    }
-}
-
 impl std::fmt::Display for Author {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
@@ -113,28 +107,8 @@ impl FlaskConfig {
         self.description.as_deref()
     }
 
-    pub fn keywords(&self) -> Option<&[String]> {
-        self.keywords.as_deref()
-    }
-
     pub fn authors(&self) -> &[Author] {
         &self.authors
-    }
-
-    pub fn repository(&self) -> Option<&str> {
-        self.repository.as_deref()
-    }
-
-    pub fn license(&self) -> Option<&[String]> {
-        self.license.as_deref()
-    }
-
-    pub fn bugs(&self) -> Option<&BugInfo> {
-        self.bugs.as_ref()
-    }
-
-    pub fn funding(&self) -> Option<&[String]> {
-        self.funding.as_deref()
     }
 
     pub fn target(&self) -> Option<&str> {

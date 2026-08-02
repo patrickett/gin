@@ -90,7 +90,6 @@ impl<'src> fmt::Display for Token<'src> {
             Token::Newline => write!(f, "[\\n]"),
             Token::Indent => write!(f, "[indent]"),
             Token::Dedent => write!(f, "[dedent]"),
-            Token::Whitespace => write!(f, "[whitespace]"),
         }
     }
 }

@@ -1,7 +1,5 @@
-use crate::ConstExpr;
-use crate::parameter::ParameterKind;
-use crate::path::ModPath;
 use crate::span::SpanId;
+use crate::GroupPath;
 use crate::ty::Ty;
 use crate::ty_state::TyState;
 use internment::Intern;
@@ -26,8 +24,7 @@ pub struct Typed<T> {
     /// The resolved (or inferred) type of this expression.
     ///
     /// * [`TyState::Infer`] — not yet typechecked.
-    /// * [`TyState::Explicit`] — user wrote a type annotation.
-    /// * [`TyState::Resolved`] — concrete type after inference.
+/// * [`TyState::Resolved`] — concrete type after inference.
     /// * [`TyState::Narrowed`] — control-flow-refined type (e.g., inside
     ///   `if x is Some(v)` the type is narrowed to the `Some` variant).
     pub ty: TyState,
@@ -103,7 +100,7 @@ impl<T> Typed<T> {
     ///
     /// For [`TyState::Resolved(ty)`] returns `Some(ty)`.
     /// For [`TyState::Narrowed { original, .. }`] returns `Some(original)`.
-    /// For [`TyState::Infer`] or [`TyState::Explicit`] returns `None`.
+    /// For [`TyState::Infer`] returns `None`.
     pub fn resolved_ty(&self) -> Option<&Ty> {
         self.ty.resolved_ty()
     }
@@ -112,7 +109,7 @@ impl<T> Typed<T> {
     ///
     /// For [`TyState::Resolved(ty)`] returns `Some(ty)`.
     /// For [`TyState::Narrowed { current, .. }`] returns `Some(current)`.
-    /// For [`TyState::Infer`] or [`TyState::Explicit`] returns `None`.
+    /// For [`TyState::Infer`] returns `None`.
     pub fn current_ty(&self) -> Option<&Ty> {
         self.ty.current_ty()
     }
@@ -218,24 +215,6 @@ pub enum Expr {
     TagCall(TagCall),
     /// A bare capitalized tag in expression position, e.g. `None`, `True`.
     AnonymousTag(Intern<String>),
-    /// Type position: bare `Tag` (e.g. `Str` in `(x Str)`).
-    TypeNominal(Intern<String>),
-    /// Type position: `in 0...10` or `in WeekRange`.
-    TypeInRange(crate::InRangeBounds),
-    /// Type position: qualified path `Tag.Tag…`.
-    TypeQualified(Spanned<ModPath>),
-    /// Type position: `Tag(...)` with generic / named parameters.
-    /// Stored as a vector (declaration order) so [`Hash`] can be derived despite the
-    /// `ParameterKind` ↔ `Expr` recursion.
-    TypeGeneric {
-        name: Intern<String>,
-        params: Vec<(Intern<String>, ParameterKind)>,
-    },
-    /// Type position: `ref T` or `mut T`.
-    TypeRef {
-        inner: Box<Expr>,
-        mutable: bool,
-    },
     /// Stack-allocate an array: `(init_expr; size_expr)` — emits
     /// `llvm.alloca N×sizeof(elem)`. `size_expr` must be compile-time-known.
     TupleAlloc {
@@ -277,6 +256,7 @@ pub enum Expr {
     Ref {
         inner: Box<Typed<Expr>>,
         mutable: bool,
+        group: Option<GroupPath>,
     },
     /// Dereference a pointer or reference: `deref expr`.
     Deref(Box<Typed<Expr>>),
@@ -319,78 +299,4 @@ pub enum Expr {
         /// The value being destructured
         value: Box<Typed<Expr>>,
     },
-}
-
-impl From<crate::TypeExpr> for Expr {
-    fn from(te: crate::TypeExpr) -> Self {
-        match te {
-            crate::TypeExpr::Nominal(name, _span) => Expr::TypeNominal(name),
-            crate::TypeExpr::Qualified(path) => Expr::TypeQualified(path),
-            crate::TypeExpr::Generic { name, params, .. } => Expr::TypeGeneric { name, params },
-            crate::TypeExpr::Ref { inner, mutable, .. } => Expr::TypeRef {
-                inner: Box::new(Expr::TypeNominal(Intern::<String>::from_ref(
-                    inner.value.surface_mangle_name(),
-                ))),
-                mutable,
-            },
-            crate::TypeExpr::Literal(..) => Expr::Lit(crate::Literal::Number(0)),
-            crate::TypeExpr::InRange { bounds, .. } => Expr::TypeInRange(bounds),
-            crate::TypeExpr::Pointer(_)
-            | crate::TypeExpr::Unit
-            | crate::TypeExpr::ListEmpty
-            | crate::TypeExpr::ListCons { .. }
-            | crate::TypeExpr::Tuple(_) => Expr::Lit(crate::Literal::Number(0)),
-        }
-    }
-}
-
-impl Expr {
-    /// If this expression is a type-position variant, return the equivalent [`TypeExpr`].
-    ///
-    /// The returned [`TypeExpr`] carries [`SpanId::INVALID`] for leaf variants since the
-    /// span is available from the enclosing [`Spanned`](crate::Spanned) or
-    /// [`Typed`] wrapper. Prefer calling this on the wrapper and using its [`SpanId`]
-    /// when a real span is needed.
-    pub fn as_type_expr(&self) -> Option<crate::TypeExpr> {
-        match self {
-            Expr::TypeNominal(name) => Some(crate::TypeExpr::Nominal(*name, SpanId::INVALID)),
-            Expr::TypeQualified(path) => Some(crate::TypeExpr::Qualified(path.clone())),
-            Expr::TypeGeneric { name, params } => Some(crate::TypeExpr::Generic {
-                name: *name,
-                params: params.clone(),
-                param_spans: Vec::new(),
-                span: SpanId::INVALID,
-            }),
-            Expr::TypeRef { inner, mutable } => {
-                if let Expr::TypeNominal(name) = inner.as_ref() {
-                    Some(crate::TypeExpr::Ref {
-                        inner: Box::new(crate::span::Spanned {
-                            value: crate::TypeExpr::Nominal(*name, SpanId::INVALID),
-                            span_id: SpanId::INVALID,
-                        }),
-                        mutable: *mutable,
-                        group: None,
-                    })
-                } else {
-                    None
-                }
-            }
-            Expr::TypeInRange(bounds) => Some(crate::TypeExpr::InRange {
-                bounds: bounds.clone(),
-                span: SpanId::INVALID,
-            }),
-            _ => None,
-        }
-    }
-
-    /// Extract a `ConstExpr` from an expression used as a `TupleAlloc` size.
-    /// Returns `None` for non-const expressions (runtime values).
-    pub fn as_size_const_expr(&self) -> Option<ConstExpr> {
-        match self {
-            Expr::Lit(Literal::Int(n)) => Some(ConstExpr::from(*n as i128)),
-            Expr::Lit(Literal::Number(n)) => Some(ConstExpr::from(*n as i128)),
-            Expr::Bind(b) => Some(ConstExpr::Var(b.name)),
-            _ => None,
-        }
-    }
 }

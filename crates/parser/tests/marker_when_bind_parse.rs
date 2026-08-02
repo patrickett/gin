@@ -1,8 +1,6 @@
 //! `:=` binds with multiline `when subject is` type-pattern arms must parse as one expr.
 
 use parser::query::SourceParseExt;
-use typecheck::ComptimeClass;
-use typecheck::comptime_classify::{BindComptimeExt, FileAstComptimeExt};
 
 #[test]
 fn is_copy_multiline_when_parses_as_single_expr() {
@@ -17,17 +15,6 @@ is_copy(x Type) Bool := when x is
         .get(&internment::Intern::new("is_copy".to_string()))
         .expect("is_copy def");
     assert!(bind.is_constant, "fn def with `:=` should be constant");
-    let mut file = file;
-    file.apply_comptime_classification();
-    let bind = file
-        .defs
-        .get(&internment::Intern::new("is_copy".to_string()))
-        .unwrap();
-    assert!(
-        bind.is_compile_time,
-        "Type-param when body is comptime-classified"
-    );
-    assert_eq!(bind.classify(&file), ComptimeClass::ComptimeFn);
     match &bind.value {
         ast::BindValue::Expr(e) => match &e.value {
             ast::Expr::When(w) => {

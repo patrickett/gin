@@ -6,7 +6,7 @@
 //! `Range[x] has start x, end x`. This module centralises the
 //! "after-name" classification so both parsers stay in sync.
 
-use ast::ParameterKind;
+use ast::{Parameter, ParameterKind};
 use internment::Intern;
 use lexer::Token;
 
@@ -29,28 +29,41 @@ impl<'src, 't> TokenCursor<'src, 't> {
         &mut self,
         expr_parser: ExprFn,
         name: Intern<String>,
+        name_span: ast::SpanId,
         for_declare: bool,
-    ) -> Option<(Intern<String>, ParameterKind)> {
+    ) -> Option<(Intern<String>, Parameter)> {
         // In type declarations, `id Tag` with a capitalized tag is a value parameter.
         if for_declare
             && matches!(self.peek(), Some(Token::Tag(_)))
             && let Some(sp) = self.parse_type_annotation(expr_parser)
         {
             if self.eat(&Token::Colon) && self.eat(&Token::Question) {
-                return Some((name, ParameterKind::Inferred { ty: Box::new(sp) }));
+                return Some((
+                    name,
+                    Parameter::new(name_span, ParameterKind::Inferred { ty: Box::new(sp) }),
+                ));
             }
-            return Some((name, ParameterKind::ValueParam { ty: Box::new(sp) }));
+            return Some((
+                name,
+                Parameter::new(name_span, ParameterKind::ValueParam { ty: Box::new(sp) }),
+            ));
         }
 
         if let Some(sp) = self.parse_type_annotation(expr_parser) {
-            return Some((name, ParameterKind::Tagged(Box::new(sp))));
+            return Some((
+                name,
+                Parameter::new(name_span, ParameterKind::Tagged(Box::new(sp))),
+            ));
         }
 
         if self.eat(&Token::Colon) {
             let expr = expr_parser(self);
-            return Some((name, ParameterKind::Default(Box::new(expr))));
+            return Some((
+                name,
+                Parameter::new(name_span, ParameterKind::Default(Box::new(expr))),
+            ));
         }
 
-        Some((name, ParameterKind::Generic))
+        Some((name, Parameter::new(name_span, ParameterKind::Generic)))
     }
 }

@@ -2,7 +2,7 @@ use internment::Intern;
 use lexer::Token;
 
 use ast::span::SpanId;
-use ast::{GroupPath, ParameterKind, Parameters, Spanned, TypeExpr};
+use ast::{Expr, GroupPath, Parameter, ParameterKind, Parameters, Pattern, Spanned, TypeExpr, Typed};
 
 use crate::cursor::TokenCursor;
 use crate::expr::ExprFn;
@@ -10,13 +10,120 @@ use crate::expr::ExprFn;
 impl<'src, 't> TokenCursor<'src, 't> {
     /// Type surface after `is` in `if … is …` / `when … is …` — structural [`TypeExpr`].
     #[inline]
-    pub fn parse_is_pattern_tag(&mut self, expr_parser: ExprFn) -> Option<Spanned<TypeExpr>> {
-        self.parse_type_expr_with(expr_parser)
+    pub fn parse_is_pattern_tag(&mut self, expr_parser: ExprFn) -> Option<Spanned<Pattern>> {
+        self.parse_pattern_node(expr_parser)
     }
 
-    /// Parse a capitalized type path (`Str`, `Maybe(T)`, `Mod.Item`) into structural type [`TypeExpr`].
-    pub fn parse_type_expr(&mut self, expr_parser: ExprFn) -> Option<Spanned<TypeExpr>> {
-        self.parse_type_expr_with(expr_parser)
+    fn parse_pattern_node(&mut self, expr_parser: ExprFn) -> Option<Spanned<Pattern>> {
+        if self.is_at(&Token::BracketOpen) {
+            return self.parse_pattern_list_node(expr_parser);
+        }
+        if self.is_at(&Token::ParenOpen) {
+            return self.parse_pattern_tuple_node(expr_parser);
+        }
+        self.parse_type_expr_structural(expr_parser).map(|pattern| Spanned {
+            value: Pattern::from(pattern.value),
+            span_id: pattern.span_id,
+        })
+    }
+
+    fn parse_pattern_tuple_node(&mut self, expr_parser: ExprFn) -> Option<Spanned<Pattern>> {
+        let start = self.peek_span()?;
+        self.expect(&Token::ParenOpen);
+        self.skip_layout();
+        if self.eat(&Token::ParenClose) {
+            let end = self.last_consumed_span();
+            return Some(Spanned {
+                value: Pattern::Unit,
+                span_id: self.merge_span(start, end),
+            });
+        }
+        let first = self.parse_pattern_node(expr_parser)?;
+        let mut elems = vec![first];
+        loop {
+            if self.is_at(&Token::ParenClose) {
+                break;
+            }
+            if self.eat_list_separator() {
+                elems.push(self.parse_pattern_node(expr_parser)?);
+                continue;
+            }
+            break;
+        }
+        self.skip_layout();
+        self.expect(&Token::ParenClose);
+        let end = self.last_consumed_span();
+        Some(Spanned {
+            value: Pattern::Tuple(elems),
+            span_id: self.merge_span(start, end),
+        })
+    }
+
+    fn parse_pattern_list_node(&mut self, expr_parser: ExprFn) -> Option<Spanned<Pattern>> {
+        let start = self.peek_span()?;
+        self.expect(&Token::BracketOpen);
+        self.skip_layout();
+        if self.eat(&Token::BracketClose) {
+            let end = self.last_consumed_span();
+            return Some(Spanned {
+                value: Pattern::ListEmpty,
+                span_id: self.merge_span(start, end),
+            });
+        }
+
+        let mut heads = vec![self.parse_pattern_node(expr_parser)?];
+        loop {
+            if self.is_at(&Token::BracketClose) {
+                break;
+            }
+            if !self.eat_list_separator() {
+                break;
+            }
+            if self.is_at(&Token::Infer) {
+                self.advance();
+                let tail = self.parse_pattern_node(expr_parser)?;
+                self.skip_layout();
+                self.expect(&Token::BracketClose);
+                let end = self.last_consumed_span();
+                let span = self.merge_span(start, end);
+                return Some(self.fold_pattern_list_node(heads, tail, span));
+            }
+            if self.is_at(&Token::BracketClose) {
+                break;
+            }
+            heads.push(self.parse_pattern_node(expr_parser)?);
+        }
+        self.skip_layout();
+        self.expect(&Token::BracketClose);
+        let end = self.last_consumed_span();
+        let span = self.merge_span(start, end);
+        Some(self.fold_pattern_list_node(
+            heads,
+            Spanned {
+                value: Pattern::ListEmpty,
+                span_id: end,
+            },
+            span,
+        ))
+    }
+
+    fn fold_pattern_list_node(
+        &mut self,
+        heads: Vec<Spanned<Pattern>>,
+        tail: Spanned<Pattern>,
+        span: SpanId,
+    ) -> Spanned<Pattern> {
+        let mut result = tail;
+        for head in heads.into_iter().rev() {
+            result = Spanned {
+                value: Pattern::ListCons {
+                    head: Box::new(head),
+                    tail: Box::new(result),
+                },
+                span_id: span,
+            };
+        }
+        result
     }
 
     pub(crate) fn parse_group_path(&mut self) -> Option<GroupPath> {
@@ -36,117 +143,147 @@ impl<'src, 't> TokenCursor<'src, 't> {
         Some(GroupPath::new(root, segments))
     }
 
-    /// Parse a type-shaped variant/pattern surface.
-    ///
-    /// Type arguments use parentheses (`Maybe(x)`), as do variant and `is`
-    /// pattern payloads (`Some(x)`).
-    pub fn parse_pattern_type_expr(&mut self, expr_parser: ExprFn) -> Option<Spanned<TypeExpr>> {
-        if self.is_at(&Token::BracketOpen) {
-            return self.parse_list_pattern(expr_parser);
-        }
-        if self.is_at(&Token::ParenOpen) {
-            return self.parse_paren_tuple_pattern(expr_parser);
-        }
-        self.parse_type_expr_with(expr_parser)
+    pub fn parse_type_expr(&mut self, expr_parser: ExprFn) -> Option<Spanned<Expr>> {
+        self.parse_type_expr_expr(expr_parser)
     }
 
-    fn parse_paren_tuple_pattern(&mut self, expr_parser: ExprFn) -> Option<Spanned<TypeExpr>> {
-        let start = self.peek_span()?;
-        self.expect(&Token::ParenOpen)?;
-        self.skip_layout();
-        if self.eat(&Token::ParenClose) {
-            let end = self.last_consumed_span();
+    fn parse_type_expr_expr(&mut self, expr_parser: ExprFn) -> Option<Spanned<Expr>> {
+        let start_span = self.current_span();
+
+        if self.eat(&Token::In) {
+            return self.parse_in_range_expr();
+        }
+
+        if self.eat(&Token::At) {
+            let inner = self.parse_type_expr_expr(expr_parser)?;
+            let span_id = self.merge_span(start_span, inner.span_id);
             return Some(Spanned {
-                value: TypeExpr::Unit,
-                span_id: self.merge_span(start, end),
+                value: Expr::TakePtr(Box::new(Typed::infer(inner.value, inner.span_id))),
+                span_id,
             });
         }
-        let first = self.parse_pattern_type_expr(expr_parser)?;
-        let mut elems = vec![first];
-        loop {
-            if self.is_at(&Token::ParenClose) {
-                break;
+
+        if matches!(self.peek(), Some(Token::Ref) | Some(Token::Mut)) {
+            let mutable = self.eat(&Token::Mut);
+            if !mutable {
+                self.advance();
             }
-            if self.eat_list_separator() {
-                elems.push(self.parse_pattern_type_expr(expr_parser)?);
-                continue;
-            }
-            break;
+            let group = if self.eat(&Token::CurlyOpen) {
+                let group = self.parse_group_path()?;
+                self.expect(&Token::CurlyClose)?;
+                Some(group)
+            } else {
+                None
+            };
+            let inner = self.parse_type_expr_expr(expr_parser)?;
+            let span_id = self.merge_span(start_span, inner.span_id);
+            return Some(Spanned {
+                value: Expr::Ref {
+                    inner: Box::new(Typed::infer(inner.value, inner.span_id)),
+                    mutable,
+                    group,
+                },
+                span_id,
+            });
         }
-        self.skip_layout();
-        self.expect(&Token::ParenClose)?;
-        let end = self.last_consumed_span();
+
+        if self.is_at(&Token::ParenOpen) && self.peek_at(1) == Some(&Token::ParenClose) {
+            let open_span = self.peek_span()?;
+            self.advance();
+            self.advance();
+            let span_id = self.merge_span(open_span, self.last_consumed_span());
+            return Some(Spanned {
+                value: Expr::Lit(ast::Literal::Number(0)),
+                span_id,
+            });
+        }
+
+        if self.peek_at(1) == Some(&Token::Dot) {
+            let checkpoint = self.checkpoint();
+            if let Some(path) = self.parse_tag_variant_path() {
+                if self.is_at(&Token::ParenOpen) {
+                    let params = self.parse_tag_type_params_delimited(
+                        expr_parser,
+                        Token::ParenOpen,
+                        Token::ParenClose,
+                    );
+                    if !params.params.is_empty() {
+                        let name = *path.segments.last().unwrap_or(&path.root);
+                        return Some(Spanned {
+                            value: Expr::TagCall(ast::TagCall {
+                                name,
+                                qual_path: None,
+                                args: type_params_to_expr_args(params),
+                            }),
+                            span_id: self.merge_span(start_span, self.last_consumed_span()),
+                        });
+                    }
+                }
+                return Some(Spanned {
+                    value: Expr::FnCall(ast::FnCall { path, args: None }),
+                    span_id: self.merge_span(start_span, self.last_consumed_span()),
+                });
+            }
+            self.rewind(checkpoint);
+        }
+
+        let (name, name_span, is_lowercase) = match *self.peek()? {
+            Token::Tag(n) => {
+                let name = self.intern(n);
+                let span = self.peek_span()?;
+                self.advance();
+                (name, span, false)
+            }
+            Token::SelfTag => {
+                let span = self.peek_span()?;
+                self.advance();
+                (Intern::from_ref("Self"), span, false)
+            }
+            Token::Id(n) => {
+                let name = self.intern(n);
+                let span = self.peek_span()?;
+                self.advance();
+                (name, span, true)
+            }
+            _ => return None,
+        };
+
+        if self.is_at(&Token::ParenOpen) {
+            let params = self.parse_tag_type_params_delimited(
+                expr_parser,
+                Token::ParenOpen,
+                Token::ParenClose,
+            );
+            if !params.params.is_empty() {
+                return Some(Spanned {
+                    value: Expr::TagCall(ast::TagCall {
+                        name,
+                        qual_path: None,
+                        args: type_params_to_expr_args(params),
+                    }),
+                    span_id: self.merge_span(name_span, self.last_consumed_span()),
+                });
+            }
+        }
+
+        let value = if is_lowercase {
+            Expr::FnCall(ast::FnCall {
+                path: Spanned::new(ast::ModPath::new(name, Vec::new()), name_span),
+                args: None,
+            })
+        } else {
+            Expr::AnonymousTag(name)
+        };
         Some(Spanned {
-            value: TypeExpr::Tuple(elems),
-            span_id: self.merge_span(start, end),
+            value,
+            span_id: name_span,
         })
     }
 
-    fn parse_list_pattern(&mut self, expr_parser: ExprFn) -> Option<Spanned<TypeExpr>> {
-        let start = self.peek_span()?;
-        self.expect(&Token::BracketOpen)?;
-        self.skip_layout();
-        if self.eat(&Token::BracketClose) {
-            let end = self.last_consumed_span();
-            return Some(Spanned {
-                value: TypeExpr::ListEmpty,
-                span_id: self.merge_span(start, end),
-            });
-        }
-
-        let mut heads = vec![self.parse_pattern_type_expr(expr_parser)?];
-        loop {
-            if self.is_at(&Token::BracketClose) {
-                break;
-            }
-            if !self.eat_list_separator() {
-                break;
-            }
-            if self.is_at(&Token::Infer) {
-                self.advance();
-                let tail = self.parse_pattern_type_expr(expr_parser)?;
-                self.skip_layout();
-                self.expect(&Token::BracketClose)?;
-                let end = self.last_consumed_span();
-                let merged_span = self.merge_span(start, end);
-                return Some(self.fold_list_cons_pattern(heads, tail, merged_span));
-            }
-            if self.is_at(&Token::BracketClose) {
-                break;
-            }
-            heads.push(self.parse_pattern_type_expr(expr_parser)?);
-        }
-        self.skip_layout();
-        self.expect(&Token::BracketClose)?;
-        let end = self.last_consumed_span();
-        let empty_tail = Spanned {
-            value: TypeExpr::ListEmpty,
-            span_id: end,
-        };
-        let merged_span = self.merge_span(start, end);
-        Some(self.fold_list_cons_pattern(heads, empty_tail, merged_span))
-    }
-
-    fn fold_list_cons_pattern(
+    pub(crate) fn parse_type_expr_structural(
         &mut self,
-        heads: Vec<Spanned<TypeExpr>>,
-        tail: Spanned<TypeExpr>,
-        span: SpanId,
-    ) -> Spanned<TypeExpr> {
-        let mut result = tail;
-        for head in heads.into_iter().rev() {
-            result = Spanned {
-                value: TypeExpr::ListCons {
-                    head: Box::new(head),
-                    tail: Box::new(result),
-                },
-                span_id: span,
-            };
-        }
-        result
-    }
-
-    fn parse_type_expr_with(&mut self, expr_parser: ExprFn) -> Option<Spanned<TypeExpr>> {
+        expr_parser: ExprFn,
+    ) -> Option<Spanned<TypeExpr>> {
         let start_span = self.current_span();
 
         // Range type: `in N...M` or `in Tag`
@@ -163,9 +300,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
         // Pointer type: `@TypeExpr`
         if self.eat(&Token::At) {
-            let inner = self.parse_type_expr_with(expr_parser)?;
+            let inner = self.parse_type_expr_structural(expr_parser)?;
             let end_span = inner.span_id;
             let span = self.merge_span(start_span, end_span);
+
             return Some(Spanned {
                 value: TypeExpr::Pointer(Box::new(inner)),
                 span_id: span,
@@ -184,7 +322,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             } else {
                 None
             };
-            let inner = self.parse_type_expr_with(expr_parser)?;
+            let inner = self.parse_type_expr_structural(expr_parser)?;
             let end_span = inner.span_id;
             let span = self.merge_span(start_span, end_span);
             return Some(Spanned {
@@ -327,11 +465,14 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
         if !self.is_at(&close_token) {
             loop {
-                if let Some((name, kind, span)) = self.parse_one_tag_param(expr_parser) {
+                if let Some((name, mut parameter, span)) =
+                    self.parse_one_tag_param(expr_parser, params.len())
+                {
                     // NOTE: Named type arguments (e.g. `Box(a: BumpAllocator)` to skip
                     // a defaulted positional param) would allow omitting defaults without
                     // triggering this flaw. Currently only positional type args are supported.
-                    if seen_default && !matches!(kind, ParameterKind::Default(_)) {
+                    parameter.name_span = span;
+                    if seen_default && !matches!(parameter.kind, ParameterKind::Default(_)) {
                         self.error(
                             "parse-parameter-after-default",
                             format!(
@@ -341,11 +482,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
                             self.current_span(),
                         );
                     }
-                    if matches!(kind, ParameterKind::Default(_)) {
+                    if matches!(parameter.kind, ParameterKind::Default(_)) {
                         seen_default = true;
                     }
                     param_spans.push((name, span));
-                    params.insert(name, kind);
+                    params.insert(name, parameter);
                 }
 
                 if self.is_at(&close_token) {
@@ -376,7 +517,8 @@ impl<'src, 't> TokenCursor<'src, 't> {
     fn parse_one_tag_param(
         &mut self,
         expr_parser: ExprFn,
-    ) -> Option<(Intern<String>, ParameterKind, ast::SpanId)> {
+        param_index: usize,
+    ) -> Option<(Intern<String>, Parameter, ast::SpanId)> {
         // Integer literal as const argument: `Vector(Int, 3)`
         if let Some(&Token::Int(n)) = self.peek() {
             let span = self.peek_span()?;
@@ -384,25 +526,57 @@ impl<'src, 't> TokenCursor<'src, 't> {
             let key = Intern::<String>::from_ref(&n.to_string());
             return Some((
                 key,
-                ParameterKind::Tagged(Box::new(Spanned {
-                    value: ast::TypeExpr::Literal(ast::expr::Literal::Int(n), span),
-                    span_id: span,
-                })),
+                Parameter::new(
+                    span,
+                    ParameterKind::Tagged(Box::new(Spanned {
+                        value: ast::Expr::Lit(ast::expr::Literal::Int(n)),
+                        span_id: span,
+                    })),
+                ),
                 span,
             ));
         }
         if matches!(self.peek(), Some(&Token::Tag(_))) {
             let sp = self.parse_type_expr(expr_parser)?;
-            let key = Intern::<String>::from_ref(sp.value.surface_mangle_name());
+            let key = Intern::<String>::from_ref(
+                Pattern::from_expr(sp.value.clone()).surface_mangle_name(),
+            );
             return Some((
                 key,
-                ParameterKind::Tagged(Box::new(Spanned {
-                    value: sp.value,
-                    span_id: sp.span_id,
-                })),
+                Parameter::new(
+                    sp.span_id,
+                    ParameterKind::Tagged(Box::new(Spanned {
+                        value: sp.value,
+                        span_id: sp.span_id,
+                    })),
+                ),
                 sp.span_id,
             ));
         }
+
+        let expr_checkpoint = self.checkpoint();
+        let expr = expr_parser(self);
+        let expression_ends_parameter = self.is_at(&Token::ParenClose)
+            || self.is_at(&Token::Comma)
+            || self.previous_token_was_newline_separator();
+        if expression_ends_parameter
+            && !matches!(
+                &expr.value,
+                ast::Expr::Bind(bind) if bind.params.is_none()
+            )
+            && !matches!(
+                &expr.value,
+                ast::Expr::FnCall(call) if call.args.is_none() && call.path.value.segments.is_empty()
+            )
+        {
+            let span = expr.span_id;
+            return Some((
+                Intern::new(format!("__expr_{param_index}")),
+                Parameter::new(span, ParameterKind::Default(Box::new(expr))),
+                span,
+            ));
+        }
+        self.rewind(expr_checkpoint);
 
         let (name, name_span) = match self.peek()? {
             &Token::Id(n) => {
@@ -418,21 +592,52 @@ impl<'src, 't> TokenCursor<'src, 't> {
             let sp = self.parse_type_expr(expr_parser)?;
             return Some((
                 name,
-                ParameterKind::Tagged(Box::new(Spanned {
-                    value: sp.value,
-                    span_id: sp.span_id,
-                })),
+                Parameter::new(
+                    name_span,
+                    ParameterKind::Tagged(Box::new(Spanned {
+                        value: sp.value,
+                        span_id: sp.span_id,
+                    })),
+                ),
                 name_span,
             ));
         }
 
         if self.eat(&Token::Colon) {
             let expr = expr_parser(self);
-            return Some((name, ParameterKind::Default(Box::new(expr)), name_span));
+            return Some((
+                name,
+                Parameter::new(name_span, ParameterKind::Default(Box::new(expr))),
+                name_span,
+            ));
         }
 
-        Some((name, ParameterKind::Generic, name_span))
+        Some((
+            name,
+            Parameter::new(name_span, ParameterKind::Generic),
+            name_span,
+        ))
     }
+}
+
+fn type_params_to_expr_args(params: ParsedTagParams) -> Vec<Typed<Expr>> {
+    params
+        .params
+        .into_iter()
+        .map(|(name, parameter)| match parameter.kind {
+            ParameterKind::Generic => Typed::infer(
+                Expr::FnCall(ast::FnCall {
+                    path: Spanned::new(ast::ModPath::new(name, Vec::new()), ast::SpanId::INVALID),
+                    args: None,
+                }),
+                parameter.name_span,
+            ),
+            ParameterKind::Tagged(sp)
+            | ParameterKind::ValueParam { ty: sp }
+            | ParameterKind::Inferred { ty: sp } => Typed::infer(sp.value, sp.span_id),
+            ParameterKind::Default(expr) => *expr,
+        })
+        .collect()
 }
 
 type OrderedTagParams = (
@@ -450,8 +655,8 @@ impl ParsedTagParams {
     fn into_ordered_param_spans(self) -> OrderedTagParams {
         let mut params = Vec::with_capacity(self.params.len());
         let param_spans = self.param_spans;
-        for (name, kind) in self.params {
-            params.push((name, kind));
+        for (name, param) in self.params {
+            params.push((name, param.kind));
         }
         (params, param_spans)
     }

@@ -39,7 +39,7 @@ fn transform_resolved_package(files: Vec<(PathBuf, String)>) -> Vec<typecheck::T
     for file in &mut resolved {
         file.output
             .symptoms
-            .extend(typecheck::prepare_file_ast(&mut file.output.ast, &entry));
+            .extend(typecheck::prepare_parse_ast(&mut file.output.ast, &entry));
     }
     let mut compile_time_eval_ast = ast::FileAst::default();
     for file in &resolved {
@@ -69,8 +69,11 @@ fn core_bundle_import_types_like_target_gin() {
     const TARGET: &str = "\
 use core.(default.Default, target.arch.Architecture, target.os.OperatingSystem, target.vendor.Vendor)
 
-Target has arch Architecture, vendor Vendor, os OperatingSystem
-Target.Default has default: (arch: 'x86_64', vendor: 'unknown', os: 'unknown')
+Target has Default
+    arch Architecture
+    vendor Vendor
+    os OperatingSystem
+    Default.default: (arch: 'x86_64', vendor: 'unknown', os: 'unknown')
 
 target := Target.default
 ";

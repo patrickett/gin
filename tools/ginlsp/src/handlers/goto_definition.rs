@@ -29,14 +29,14 @@ impl Backend {
         let locations = self
             .run_blocking_request("goto_definition", move |this| {
                 let snapshot = this.snapshot();
-                let doc = snapshot.engine.document_snapshot(&file_path)?;
+                let doc = snapshot.cache.document_snapshot(&file_path)?;
                 let byte_pos = doc.line_index.position_to_byte(
                     &doc.source,
                     position.line,
                     position.character,
                 )?;
                 let def = snapshot
-                    .engine
+                    .cache
                     .goto_definition(&file_path, byte_pos as u32)?;
                 Self::cursor_definition_to_response(&uri, &doc.source, &doc.line_index, def)
             })

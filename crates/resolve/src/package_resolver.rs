@@ -17,37 +17,6 @@ use crate::graph::{ResolveGraph, build_import_closure, build_import_closure_with
 use crate::module_loader::{ModuleLoader, ParsedModuleCache};
 use flask::FlaskPathExt;
 
-/// Whether to qualify ASTs or collect import symptoms only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResolveImportsMode {
-    /// Qualify module definitions (compiler driver).
-    Qualify,
-    /// Import diagnostics only (IDE).
-    SymptomsOnly,
-}
-
-/// Single package Resolve imports pipeline: graph → validate → qualify (optional).
-pub fn resolve_package_imports(
-    entry_files: Vec<ParsedFile>,
-    dependencies: &HashMap<String, PathBuf>,
-    mode: ResolveImportsMode,
-) -> ResolveImportsResult {
-    match mode {
-        ResolveImportsMode::Qualify => {
-            ResolveImportsResult::Files(resolve_imports(entry_files, dependencies))
-        }
-        ResolveImportsMode::SymptomsOnly => {
-            ResolveImportsResult::Symptoms(resolve_import_symptoms(entry_files, dependencies))
-        }
-    }
-}
-
-/// Outcome of [`resolve_package_imports`].
-pub enum ResolveImportsResult {
-    Files(Vec<ParsedFile>),
-    Symptoms(HashMap<PathBuf, Vec<Diagnostic>>),
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct ImportDependencyGraph {
     /// Module or file path → paths that import it (including direct and transitive).
@@ -129,16 +98,6 @@ pub fn resolve_imports(
         import_graph: _,
     } = resolve_imports_with_graph(entry_files, dependencies, ParsedModuleCache::default());
     files
-}
-
-pub fn resolve_imports_with_cache(
-    entry_files: Vec<ParsedFile>,
-    dependencies: &HashMap<String, PathBuf>,
-    cache: ParsedModuleCache,
-) -> (Vec<ParsedFile>, ParsedModuleCache) {
-    let ResolveImportsWithGraph { files, cache, .. } =
-        resolve_imports_with_graph(entry_files, dependencies, cache);
-    (files, cache)
 }
 
 pub fn resolve_imports_with_graph(
@@ -237,6 +196,15 @@ struct ResolveImportEnv<'a> {
     symptoms: &'a mut Vec<Diagnostic>,
 }
 
+struct ResolveLocalPathImportCtx<'a> {
+    module_loader: &'a mut ModuleLoader,
+    base_dir: &'a Path,
+    dependencies: &'a HashMap<String, PathBuf>,
+    spans: &'a SpanTable,
+    span_id: SpanId,
+    symptoms: &'a mut Vec<Diagnostic>,
+}
+
 pub(crate) fn resolve_module_import(
     module_import: &ModuleImport,
     base_dir: &Path,
@@ -248,14 +216,19 @@ pub(crate) fn resolve_module_import(
 ) -> ResolvedModule {
     match &module_import.source {
         ImportSource::Local(path, _) => resolve_local_path_import(
-            module_loader,
-            module_import,
-            base_dir,
             path,
-            spans,
-            span_id,
-            symptoms,
-            dependencies,
+            module_import
+                .alias
+                .as_ref()
+                .map(|alias| alias.as_ref().as_str()),
+            &mut ResolveLocalPathImportCtx {
+                module_loader,
+                base_dir,
+                dependencies,
+                spans,
+                span_id,
+                symptoms,
+            },
         ),
         ImportSource::LocalBundle(b) => {
             if b.local_path.is_some() {
@@ -600,23 +573,18 @@ fn resolve_local_member_import(
 }
 
 fn resolve_local_path_import(
-    module_loader: &mut ModuleLoader,
-    module_import: &ModuleImport,
-    base_dir: &Path,
     path: &Path,
-    spans: &SpanTable,
-    span_id: SpanId,
-    symptoms: &mut Vec<Diagnostic>,
-    dependencies: &HashMap<String, PathBuf>,
+    alias: Option<&str>,
+    ctx: &mut ResolveLocalPathImportCtx<'_>,
 ) -> ResolvedModule {
-    let Some(pkg_root) = crate::import_query::find_package_root(base_dir) else {
-        return ResolvedModule {
-            files: vec![],
-            symbol_aliases: vec![],
-        };
-    };
+    let module_loader = &mut *ctx.module_loader;
+    let base_dir = ctx.base_dir;
+    let dependencies = ctx.dependencies;
+    let spans = ctx.spans;
+    let span_id = ctx.span_id;
+    let symptoms = &mut *ctx.symptoms;
 
-    let Some(alias) = module_import.alias.as_ref() else {
+    let Some(alias) = alias else {
         symptoms.push(
             Diagnostic::new(
                 "use-local-folder-requires-as",
@@ -629,6 +597,13 @@ fn resolve_local_path_import(
             .with_help("add `as Alias` so the folder module has a single namespace prefix")
             .at_span(spans.get(span_id)),
         );
+        return ResolvedModule {
+            files: vec![],
+            symbol_aliases: vec![],
+        };
+    };
+
+    let Some(pkg_root) = crate::import_query::find_package_root(base_dir) else {
         return ResolvedModule {
             files: vec![],
             symbol_aliases: vec![],
@@ -687,7 +662,7 @@ fn resolve_local_path_import(
     if let Some(dep_name) = path.file_name().and_then(|n| n.to_str()) {
         check_dep_local_collision(
             dep_name,
-            alias.as_str(),
+            alias,
             path,
             dependencies,
             spans,

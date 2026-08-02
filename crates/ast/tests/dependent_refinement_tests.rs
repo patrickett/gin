@@ -44,6 +44,27 @@ fn refinement_accepted_with_literal() {
 }
 
 #[test]
+fn refinement_accepted_with_negative_literal() {
+    let typed = transform_source_with_typed_locals(
+        "Index has \n\
+             n Int,\n\
+             value Int and < n,\n\
+         )\n\
+         i := Index(3, -1)\n",
+    );
+    assert!(
+        !has_flaw(&typed, "dep-refinement-failed"),
+        "expected no dep-refinement-failed for Index(3, -1), got: {:?}",
+        typed.all_flaws()
+    );
+    assert!(
+        !has_flaw(&typed, "dep-refinement-unproven"),
+        "expected no dep-refinement-unproven for Index(3, -1), got: {:?}",
+        typed.all_flaws()
+    );
+}
+
+#[test]
 fn refinement_rejected_with_literal() {
     let typed = transform_source_with_typed_locals(
         "Index has \n\

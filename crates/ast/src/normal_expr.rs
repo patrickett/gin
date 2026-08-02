@@ -1,6 +1,6 @@
 //! Symbolic compile-time constant expressions.
 //!
-//! `ConstExpr` represents unevaluated constant expressions (e.g. `n + m`, `2 * n`)
+//! `NormalExpr` represents unevaluated constant expressions (e.g. `n + m`, `2 * n`)
 //! in contrast with [`ConstValue`](crate::ConstValue) which holds already-evaluated constants.
 
 use crate::ConstValue;
@@ -40,16 +40,16 @@ impl DependentArgId {
 /// A symbolic compile-time constant expression — unevaluated, in contrast with
 /// [`ConstValue`]. Evaluation/normalization is handled by a separate pass.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum ConstExpr {
+pub enum NormalExpr {
     Value(ConstValue),
     Var(Intern<String>),
     Inferred(DependentArgId),
-    Add(Box<ConstExpr>, Box<ConstExpr>),
-    Sub(Box<ConstExpr>, Box<ConstExpr>),
-    Mul(Box<ConstExpr>, Box<ConstExpr>),
+    Add(Box<NormalExpr>, Box<NormalExpr>),
+    Sub(Box<NormalExpr>, Box<NormalExpr>),
+    Mul(Box<NormalExpr>, Box<NormalExpr>),
 }
 
-impl ConstExpr {
+impl NormalExpr {
     pub fn is_zero(&self) -> bool {
         *self == ConstValue::ZERO
     }
@@ -60,38 +60,38 @@ impl ConstExpr {
 
     pub fn as_const_int(&self) -> Option<i128> {
         match self {
-            ConstExpr::Value(ConstValue::Int(n)) => Some(*n),
+            NormalExpr::Value(ConstValue::Int(n)) => Some(*n),
             _ => None,
         }
     }
 }
 
-impl From<i128> for ConstExpr {
+impl From<i128> for NormalExpr {
     fn from(n: i128) -> Self {
-        ConstExpr::Value(ConstValue::Int(n))
+        NormalExpr::Value(ConstValue::Int(n))
     }
 }
 
-impl TryFrom<&ConstExpr> for usize {
+impl TryFrom<&NormalExpr> for usize {
     type Error = ();
 
-    fn try_from(expr: &ConstExpr) -> Result<usize, ()> {
+    fn try_from(expr: &NormalExpr) -> Result<usize, ()> {
         expr.as_const_int()
             .and_then(|n| usize::try_from(n).ok())
             .ok_or(())
     }
 }
 
-impl PartialEq<ConstValue> for ConstExpr {
+impl PartialEq<ConstValue> for NormalExpr {
     fn eq(&self, other: &ConstValue) -> bool {
-        matches!(self, ConstExpr::Value(v) if v == other)
+        matches!(self, NormalExpr::Value(v) if v == other)
     }
 }
 
-impl fmt::Display for ConstExpr {
+impl fmt::Display for NormalExpr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ConstExpr::Value(v) => match v {
+            NormalExpr::Value(v) => match v {
                 ConstValue::Int(i) => write!(f, "{i}"),
                 ConstValue::Float(hf) => write!(f, "{hf}"),
                 ConstValue::String(s) => write!(f, "\"{s}\""),
@@ -111,7 +111,7 @@ impl fmt::Display for ConstExpr {
                             if i > 0 {
                                 write!(f, ", ")?;
                             }
-                            write!(f, "{}", ConstExpr::Value(arg.clone()))?;
+                            write!(f, "{}", NormalExpr::Value(arg.clone()))?;
                         }
                         write!(f, ")")?;
                     }
@@ -123,7 +123,7 @@ impl fmt::Display for ConstExpr {
                         if i > 0 {
                             write!(f, ", ")?;
                         }
-                        write!(f, "{}: {}", name.as_str(), ConstExpr::Value(val.clone()))?;
+                        write!(f, "{}: {}", name.as_str(), NormalExpr::Value(val.clone()))?;
                     }
                     write!(f, " }}")
                 }
@@ -133,16 +133,16 @@ impl fmt::Display for ConstExpr {
                         if i > 0 {
                             write!(f, ", ")?;
                         }
-                        write!(f, "{}", ConstExpr::Value(item.clone()))?;
+                        write!(f, "{}", NormalExpr::Value(item.clone()))?;
                     }
                     write!(f, "]")
                 }
             },
-            ConstExpr::Var(name) => write!(f, "{}", name.as_str()),
-            ConstExpr::Inferred(_) => write!(f, "?"),
-            ConstExpr::Add(l, r) => write!(f, "({l} + {r})"),
-            ConstExpr::Sub(l, r) => write!(f, "({l} - {r})"),
-            ConstExpr::Mul(l, r) => write!(f, "({l} * {r})"),
+            NormalExpr::Var(name) => write!(f, "{}", name.as_str()),
+            NormalExpr::Inferred(_) => write!(f, "?"),
+            NormalExpr::Add(l, r) => write!(f, "({l} + {r})"),
+            NormalExpr::Sub(l, r) => write!(f, "({l} - {r})"),
+            NormalExpr::Mul(l, r) => write!(f, "({l} * {r})"),
         }
     }
 }
@@ -154,67 +154,67 @@ mod tests {
 
     #[test]
     fn value_int_displays_as_number() {
-        let expr = ConstExpr::Value(ConstValue::Int(42));
+        let expr = NormalExpr::Value(ConstValue::Int(42));
         assert_eq!(expr.to_string(), "42");
     }
 
     #[test]
     fn var_displays_as_name() {
-        let expr = ConstExpr::Var(Intern::from_ref("n"));
+        let expr = NormalExpr::Var(Intern::from_ref("n"));
         assert_eq!(expr.to_string(), "n");
     }
 
     #[test]
     fn add_displays_parens() {
-        let expr = ConstExpr::Add(
-            Box::new(ConstExpr::Var(Intern::from_ref("n"))),
-            Box::new(ConstExpr::Value(ConstValue::Int(1))),
+        let expr = NormalExpr::Add(
+            Box::new(NormalExpr::Var(Intern::from_ref("n"))),
+            Box::new(NormalExpr::Value(ConstValue::Int(1))),
         );
         assert_eq!(expr.to_string(), "(n + 1)");
     }
 
     #[test]
     fn sub_displays_parens() {
-        let expr = ConstExpr::Sub(
-            Box::new(ConstExpr::Var(Intern::from_ref("m"))),
-            Box::new(ConstExpr::Value(ConstValue::Int(1))),
+        let expr = NormalExpr::Sub(
+            Box::new(NormalExpr::Var(Intern::from_ref("m"))),
+            Box::new(NormalExpr::Value(ConstValue::Int(1))),
         );
         assert_eq!(expr.to_string(), "(m - 1)");
     }
 
     #[test]
     fn mul_displays_parens() {
-        let expr = ConstExpr::Mul(
-            Box::new(ConstExpr::Value(ConstValue::Int(2))),
-            Box::new(ConstExpr::Var(Intern::from_ref("n"))),
+        let expr = NormalExpr::Mul(
+            Box::new(NormalExpr::Value(ConstValue::Int(2))),
+            Box::new(NormalExpr::Var(Intern::from_ref("n"))),
         );
         assert_eq!(expr.to_string(), "(2 * n)");
     }
 
     #[test]
     fn value_float_displays() {
-        let expr = ConstExpr::Value(ConstValue::Float(crate::HashFloat(3.14)));
+        let expr = NormalExpr::Value(ConstValue::Float(crate::HashFloat(314.0 / 100.0)));
         assert_eq!(expr.to_string(), "3.14");
     }
 
     #[test]
     fn value_string_displays() {
-        let expr = ConstExpr::Value(ConstValue::String("hello".into()));
+        let expr = NormalExpr::Value(ConstValue::String("hello".into()));
         assert_eq!(expr.to_string(), r#""hello""#);
     }
 
     #[test]
     fn value_int_round_trips() {
-        let expr = ConstExpr::Value(ConstValue::Int(3));
+        let expr = NormalExpr::Value(ConstValue::Int(3));
         assert_eq!(expr.to_string(), "3");
     }
 
     #[test]
     fn equality_and_hash() {
         use std::collections::HashSet;
-        let a = ConstExpr::Var(Intern::from_ref("n"));
-        let b = ConstExpr::Var(Intern::from_ref("n"));
-        let c = ConstExpr::Var(Intern::from_ref("m"));
+        let a = NormalExpr::Var(Intern::from_ref("n"));
+        let b = NormalExpr::Var(Intern::from_ref("n"));
+        let c = NormalExpr::Var(Intern::from_ref("m"));
         assert_eq!(a, b);
         assert_ne!(a, c);
 
@@ -231,10 +231,10 @@ mod tests {
         use std::collections::HashSet;
 
         let binder = BinderId::new(7, BinderOwner::Definition(Intern::from_ref("Vector")));
-        let a = ConstExpr::Inferred(DependentArgId::new(binder, 0));
-        let same = ConstExpr::Inferred(DependentArgId::new(binder, 0));
-        let other_slot = ConstExpr::Inferred(DependentArgId::new(binder, 1));
-        let other_owner = ConstExpr::Inferred(DependentArgId::new(
+        let a = NormalExpr::Inferred(DependentArgId::new(binder, 0));
+        let same = NormalExpr::Inferred(DependentArgId::new(binder, 0));
+        let other_slot = NormalExpr::Inferred(DependentArgId::new(binder, 1));
+        let other_owner = NormalExpr::Inferred(DependentArgId::new(
             BinderId::new(7, BinderOwner::Expression(3)),
             0,
         ));
@@ -249,7 +249,7 @@ mod tests {
 
     #[test]
     fn inferred_display_hides_identity() {
-        let expr = ConstExpr::Inferred(DependentArgId::new(
+        let expr = NormalExpr::Inferred(DependentArgId::new(
             BinderId::new(19, BinderOwner::Expression(42)),
             3,
         ));
@@ -258,12 +258,12 @@ mod tests {
 
     #[test]
     fn nested_add_mul_expression() {
-        let expr = ConstExpr::Add(
-            Box::new(ConstExpr::Mul(
-                Box::new(ConstExpr::Value(ConstValue::Int(2))),
-                Box::new(ConstExpr::Var(Intern::from_ref("n"))),
+        let expr = NormalExpr::Add(
+            Box::new(NormalExpr::Mul(
+                Box::new(NormalExpr::Value(ConstValue::Int(2))),
+                Box::new(NormalExpr::Var(Intern::from_ref("n"))),
             )),
-            Box::new(ConstExpr::Value(ConstValue::Int(1))),
+            Box::new(NormalExpr::Value(ConstValue::Int(1))),
         );
         assert_eq!(expr.to_string(), "((2 * n) + 1)");
     }

@@ -25,7 +25,7 @@ impl Backend {
         let locations = self
             .run_blocking_request("references", move |this| {
                 let snapshot = this.snapshot();
-                let doc = snapshot.engine.document_snapshot(&file_path)?;
+                let doc = snapshot.cache.document_snapshot(&file_path)?;
                 let converter =
                     DiagnosticConverter::new((*doc.source).clone(), (*doc.line_index).clone());
                 let byte_pos = doc.line_index.position_to_byte(
@@ -33,7 +33,7 @@ impl Backend {
                     position.line,
                     position.character,
                 )? as u32;
-                let refs = snapshot.engine.references_at(&file_path, byte_pos)?;
+                let refs = snapshot.cache.references_at(&file_path, byte_pos)?;
                 Some(
                     refs.spans
                         .into_iter()

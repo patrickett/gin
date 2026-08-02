@@ -1,4 +1,4 @@
-//! Pattern matching — check whether a [`TypeExpr`] pattern matches a [`ConstValue`].
+//! Pattern matching — check whether a [`Pattern`] matches a [`ConstValue`].
 //!
 //! Used by compile-time expression evaluation (when-arm matching, tag-declare
 //! simplification) and by trait/reflect machinery.
@@ -14,18 +14,17 @@ use ast::InRangeBounds;
 use ast::WhenArm;
 use ast::expr::{Expr, Literal, Typed};
 use ast::parameter::ParameterKind;
-use ast::type_expr::TypeExpr;
-use ast::{ConstValue, HashFloat};
+use ast::{ConstValue, HashFloat, Pattern};
 
-/// Public entry: check whether a [`TypeExpr`] pattern matches a [`ConstValue`].
-pub fn pattern_matches_public(pattern: &TypeExpr, cv: &ConstValue) -> bool {
+/// Public entry: check whether a [`Pattern`] matches a [`ConstValue`].
+pub fn pattern_matches_public(pattern: &Pattern, cv: &ConstValue) -> bool {
     pattern_matches(pattern, cv)
 }
 
 /// Like [`pattern_matches_public`] but resolves `InRangeBounds::Tag(name)`
 /// to actual literal bounds using the given tag types.
 pub fn pattern_matches_with_tag_types(
-    pattern: &TypeExpr,
+    pattern: &Pattern,
     cv: &ConstValue,
     tag_types: &HashMap<TagId, Ty>,
 ) -> bool {
@@ -36,10 +35,10 @@ pub fn pattern_matches_with_tag_types(
 /// Replace `InRangeBounds::Tag(name)` with `InRangeBounds::Literal(min, max)`
 /// by looking up the tag's bounded int type.
 fn resolve_in_range_tag<'a>(
-    pattern: &'a TypeExpr,
+    pattern: &'a Pattern,
     tag_types: &HashMap<TagId, Ty>,
-) -> std::borrow::Cow<'a, TypeExpr> {
-    if let TypeExpr::InRange {
+) -> std::borrow::Cow<'a, Pattern> {
+    if let Pattern::InRange {
         bounds: InRangeBounds::Tag(name),
         span,
     } = pattern
@@ -49,7 +48,7 @@ fn resolve_in_range_tag<'a>(
             ..
         }) = tag_types.get(&TagId(*name))
     {
-        return std::borrow::Cow::Owned(TypeExpr::InRange {
+        return std::borrow::Cow::Owned(Pattern::InRange {
             bounds: InRangeBounds::Literal(I256::from_i128(*min), I256::from_i128(*max)),
             span: *span,
         });
@@ -69,7 +68,7 @@ pub(crate) fn find_matching_when_body<'a>(
     for arm in arms {
         match arm {
             WhenArm::Is { pattern, body, .. } => {
-                if pattern_matches(&pattern.value, cv) {
+                if pattern_matches_public(&pattern.value, cv) {
                     return Some(body);
                 }
             }
@@ -80,39 +79,39 @@ pub(crate) fn find_matching_when_body<'a>(
     None
 }
 
-/// Core pattern matching — does a `TypeExpr` pattern match a `ConstValue`?
-pub(crate) fn pattern_matches(pattern: &TypeExpr, cv: &ConstValue) -> bool {
+/// Core pattern matching — does a `Pattern` match a `ConstValue`?
+pub(crate) fn pattern_matches(pattern: &Pattern, cv: &ConstValue) -> bool {
     match (pattern, cv) {
-        (TypeExpr::Literal(Literal::String(s), _), ConstValue::String(cv_s)) => s == cv_s,
-        (TypeExpr::Literal(Literal::Int(n), _), ConstValue::Int(cv_n)) => *n as i128 == *cv_n,
+        (Pattern::Literal(Literal::String(s), _), ConstValue::String(cv_s)) => s == cv_s,
+        (Pattern::Literal(Literal::Int(n), _), ConstValue::Int(cv_n)) => *n as i128 == *cv_n,
         (
-            TypeExpr::Literal(Literal::Float(HashFloat(f)), _),
+            Pattern::Literal(Literal::Float(HashFloat(f)), _),
             ConstValue::Float(HashFloat(cv_f)),
         ) => f.to_bits() == cv_f.to_bits(),
-        (TypeExpr::Literal(Literal::Number(n), _), ConstValue::Int(cv_n)) => *n as i128 == *cv_n,
+        (Pattern::Literal(Literal::Number(n), _), ConstValue::Int(cv_n)) => *n as i128 == *cv_n,
         (
-            TypeExpr::InRange {
+            Pattern::InRange {
                 bounds: InRangeBounds::Literal(min, max),
                 ..
             },
             ConstValue::Int(n),
         ) => *n >= min.as_i128() && *n <= max.as_i128(),
-        (TypeExpr::Nominal(name, _), _) if is_lowercase_type_var(name) || name.as_str() == "_" => {
+        (Pattern::Nominal(name, _), cv) if is_lowercase_type_var(name) || name.as_str() == "_" => {
+            !matches!(cv, ConstValue::String(_))
+        }
+        (Pattern::Nominal(name, _), ConstValue::Tag { name: cv_name, .. }) if name == cv_name => {
             true
         }
-        (TypeExpr::Nominal(name, _), ConstValue::Tag { name: cv_name, .. }) if name == cv_name => {
-            true
-        }
-        (TypeExpr::Qualified(path), ConstValue::Tag { name: cv_name, .. }) => {
+        (Pattern::Qualified(path), ConstValue::Tag { name: cv_name, .. }) => {
             path.segments.last() == Some(cv_name)
         }
-        (TypeExpr::Nominal(name, _), ConstValue::Record { fields })
+        (Pattern::Nominal(name, _), ConstValue::Record { fields })
             if record_matches_reflect_tag(name.as_str(), fields) =>
         {
             true
         }
         (
-            TypeExpr::Generic {
+            Pattern::Generic {
                 name,
                 params,
                 param_spans,
@@ -138,7 +137,7 @@ pub(crate) fn pattern_matches(pattern: &TypeExpr, cv: &ConstValue) -> bool {
                         pattern_param_matches(pname, kind, arg)
                     })
         }
-        (TypeExpr::ListCons { head, tail }, ConstValue::List(items)) => {
+        (Pattern::ListCons { head, tail }, ConstValue::List(items)) => {
             if items.is_empty() {
                 return false;
             }
@@ -148,8 +147,8 @@ pub(crate) fn pattern_matches(pattern: &TypeExpr, cv: &ConstValue) -> bool {
             let rest = ConstValue::List(items[1..].to_vec().into());
             pattern_matches(&tail.value, &rest)
         }
-        (TypeExpr::ListEmpty, ConstValue::List(items)) => items.is_empty(),
-        (TypeExpr::Tuple(patterns), ConstValue::List(items)) => {
+        (Pattern::ListEmpty, ConstValue::List(items)) => items.is_empty(),
+        (Pattern::Tuple(patterns), ConstValue::List(items)) => {
             if patterns.len() != items.len() {
                 return false;
             }
@@ -158,21 +157,16 @@ pub(crate) fn pattern_matches(pattern: &TypeExpr, cv: &ConstValue) -> bool {
                 .zip(items.iter())
                 .all(|(p, i)| pattern_matches(&p.value, i))
         }
-        (TypeExpr::Nominal(tag_name, _), ConstValue::Tag { name: cv_name, .. }) => {
+        (Pattern::Nominal(tag_name, _), ConstValue::Tag { name: cv_name, .. }) => {
             tag_name == cv_name
         }
-        (TypeExpr::Nominal(_tag_name, _), ConstValue::Record { .. }) => {
+        (Pattern::Nominal(_tag_name, _), ConstValue::Record { .. }) => {
             // Match a type's constructor pattern against a record.
             true
         }
-        (TypeExpr::ListEmpty, cv) => {
+        (Pattern::ListEmpty, cv) => {
             // `[]` — empty list pattern
             matches!(cv, ConstValue::List(items) if items.is_empty())
-        }
-        (TypeExpr::Nominal(name, _), ConstValue::String(s)) => {
-            // Template strings like `"svc {svc_name}"` — match on the pattern
-            let _ = s;
-            name.as_str().starts_with(|c: char| c.is_ascii_lowercase())
         }
         _ => false,
     }
@@ -187,7 +181,10 @@ fn pattern_param_matches(name: &Intern<String>, kind: &ParameterKind, cv: &Const
         }
         ParameterKind::Tagged(sp)
         | ParameterKind::ValueParam { ty: sp }
-        | ParameterKind::Inferred { ty: sp } => pattern_matches(&sp.value, cv),
+        | ParameterKind::Inferred { ty: sp } => {
+            let pattern = Pattern::from_expr(sp.value.clone());
+            pattern_matches(&pattern, cv)
+        }
         ParameterKind::Default(expr) => default_expr_matches(&expr.value, cv),
     }
 }
@@ -233,16 +230,24 @@ fn record_matches_reflect_tag(name: &str, fields: &[(Intern<String>, ConstValue)
 ///
 /// For example, matching `Some(v)` against `Some(3)` pushes `v → 3` into the env.
 pub(crate) fn collect_pattern_bindings(
-    pattern: &TypeExpr,
+    pattern: &Pattern,
+    cv: &ConstValue,
+    env: &mut HashMap<Intern<String>, ConstValue>,
+) {
+    collect_pattern_bindings_inner(pattern, cv, env);
+}
+
+fn collect_pattern_bindings_inner(
+    pattern: &Pattern,
     cv: &ConstValue,
     env: &mut HashMap<Intern<String>, ConstValue>,
 ) {
     match (pattern, cv) {
-        (TypeExpr::Nominal(name, _), _) if name.as_str() != "_" => {
+        (Pattern::Nominal(name, _), _) if name.as_str() != "_" => {
             env.insert(*name, cv.clone());
         }
         (
-            TypeExpr::Generic {
+            Pattern::Generic {
                 name,
                 params,
                 param_spans,
@@ -263,20 +268,20 @@ pub(crate) fn collect_pattern_bindings(
                 collect_pattern_param_binding(pname, kind, arg, env);
             }
         }
-        (TypeExpr::ListCons { head, tail }, ConstValue::List(items)) if !items.is_empty() => {
-            collect_pattern_bindings(&head.value, &items[0], env);
+        (Pattern::ListCons { head, tail }, ConstValue::List(items)) if !items.is_empty() => {
+            collect_pattern_bindings_inner(&head.value, &items[0], env);
             let rest = ConstValue::List(items[1..].into());
-            collect_pattern_bindings(&tail.value, &rest, env);
+            collect_pattern_bindings_inner(&tail.value, &rest, env);
         }
-        (TypeExpr::ListEmpty, _) => {}
-        (TypeExpr::Tuple(patterns), ConstValue::List(items)) => {
+        (Pattern::ListEmpty, _) => {}
+        (Pattern::Tuple(patterns), ConstValue::List(items)) => {
             for (p, i) in patterns.iter().zip(items.iter()) {
-                collect_pattern_bindings(&p.value, i, env);
+                collect_pattern_bindings_inner(&p.value, i, env);
             }
         }
         // Note: `ConstValue` has no `Tuple` variant; tuple patterns match `ConstValue::List`.
         (
-            TypeExpr::Nominal(tag_name, _),
+            Pattern::Nominal(tag_name, _),
             ConstValue::Tag {
                 name: cv_name,
                 args,
@@ -301,7 +306,10 @@ fn collect_pattern_param_binding(
         }
         ParameterKind::Tagged(sp)
         | ParameterKind::ValueParam { ty: sp }
-        | ParameterKind::Inferred { ty: sp } => collect_pattern_bindings(&sp.value, cv, env),
+        | ParameterKind::Inferred { ty: sp } => {
+            let pattern = Pattern::from_expr(sp.value.clone());
+            collect_pattern_bindings_inner(&pattern, cv, env)
+        }
         ParameterKind::Generic | ParameterKind::Default(_) => {}
     }
 }
@@ -320,6 +328,7 @@ mod tests {
     #[test]
     fn test_literal_string_match() {
         let pat = TypeExpr::Literal(Literal::String("hello".to_string()), span_id());
+        let pat = Pattern::from(pat);
         let cv = ConstValue::String("hello".to_string());
         assert!(pattern_matches(&pat, &cv));
     }
@@ -327,6 +336,7 @@ mod tests {
     #[test]
     fn test_literal_string_no_match() {
         let pat = TypeExpr::Literal(Literal::String("hello".to_string()), span_id());
+        let pat = Pattern::from(pat);
         let cv = ConstValue::String("world".to_string());
         assert!(!pattern_matches(&pat, &cv));
     }
@@ -335,14 +345,14 @@ mod tests {
     fn test_list_cons_match() {
         // pattern: [head, ..tail]
         let head = Box::new(Spanned {
-            value: TypeExpr::Nominal(Intern::new("head".to_string()), span_id()),
+            value: Pattern::Nominal(Intern::new("head".to_string()), span_id()),
             span_id: span_id(),
         });
         let tail = Box::new(Spanned {
-            value: TypeExpr::ListEmpty,
+            value: Pattern::ListEmpty,
             span_id: span_id(),
         });
-        let pat = TypeExpr::ListCons { head, tail };
+        let pat = Pattern::ListCons { head, tail };
 
         let cv = ConstValue::List(vec![ConstValue::Int(42)].into());
 
@@ -352,23 +362,23 @@ mod tests {
     #[test]
     fn test_list_cons_no_match() {
         let head = Box::new(Spanned {
-            value: TypeExpr::Nominal(Intern::new("head".to_string()), span_id()),
+            value: Pattern::Nominal(Intern::new("head".to_string()), span_id()),
             span_id: span_id(),
         });
         let tail = Box::new(Spanned {
-            value: TypeExpr::ListCons {
+            value: Pattern::ListCons {
                 head: Box::new(Spanned {
-                    value: TypeExpr::Nominal(Intern::new("tail".to_string()), span_id()),
+                    value: Pattern::Nominal(Intern::new("tail".to_string()), span_id()),
                     span_id: span_id(),
                 }),
                 tail: Box::new(Spanned {
-                    value: TypeExpr::ListEmpty,
+                    value: Pattern::ListEmpty,
                     span_id: span_id(),
                 }),
             },
             span_id: span_id(),
         });
-        let pat = TypeExpr::ListCons { head, tail };
+        let pat = Pattern::ListCons { head, tail };
 
         let cv = ConstValue::List(vec![ConstValue::Int(42)].into());
 
@@ -377,7 +387,7 @@ mod tests {
 
     #[test]
     fn test_list_nil_matches_empty() {
-        let pat = TypeExpr::ListEmpty;
+        let pat = Pattern::ListEmpty;
         let cv = ConstValue::List(vec![].into());
         assert!(pattern_matches(&pat, &cv));
     }
@@ -385,8 +395,9 @@ mod tests {
     #[test]
     fn test_pattern_matches_public_delegates() {
         let pat = TypeExpr::Literal(Literal::Int(5), span_id());
+        let pat = Pattern::from(pat);
         let cv = ConstValue::Int(5);
-        assert!(pattern_matches_public(&pat, &cv));
+        assert!(pattern_matches(&pat, &cv));
     }
 
     #[test]
@@ -394,7 +405,7 @@ mod tests {
         let pat = TypeExpr::Nominal(Intern::new("x".to_string()), span_id());
         let cv = ConstValue::Int(42);
         let mut env = HashMap::new();
-        collect_pattern_bindings(&pat, &cv, &mut env);
+        collect_pattern_bindings(&Pattern::from(pat), &cv, &mut env);
         assert_eq!(env.get(&Intern::new("x".to_string())), Some(&cv));
     }
 
@@ -403,7 +414,7 @@ mod tests {
         let pat = TypeExpr::Nominal(Intern::new("_".to_string()), span_id());
         let cv = ConstValue::Int(99);
         let mut env = HashMap::new();
-        collect_pattern_bindings(&pat, &cv, &mut env);
+        collect_pattern_bindings(&Pattern::from(pat), &cv, &mut env);
         assert!(env.is_empty(), "underscore should not create bindings");
     }
 
@@ -412,7 +423,7 @@ mod tests {
         use ast::WhenArm;
         let true_arm = WhenArm::Is {
             pattern: Box::new(Spanned {
-                value: TypeExpr::Nominal(Intern::new("True".to_string()), span_id()),
+                value: TypeExpr::Nominal(Intern::new("True".to_string()), span_id()).into(),
                 span_id: span_id(),
             }),
             body: Box::new(Typed::infer(Expr::Lit(Literal::Number(1)), span_id())),
@@ -420,7 +431,7 @@ mod tests {
         };
         let false_arm = WhenArm::Is {
             pattern: Box::new(Spanned {
-                value: TypeExpr::Nominal(Intern::new("False".to_string()), span_id()),
+                value: TypeExpr::Nominal(Intern::new("False".to_string()), span_id()).into(),
                 span_id: span_id(),
             }),
             body: Box::new(Typed::infer(Expr::Lit(Literal::Number(0)), span_id())),
@@ -445,7 +456,7 @@ mod tests {
         let cv = ConstValue::List(items.into());
 
         let mut env = HashMap::new();
-        collect_pattern_bindings(&head, &cv, &mut env);
+        collect_pattern_bindings(&Pattern::from(head), &cv, &mut env);
         assert_eq!(env.get(&Intern::new("x".to_string())), Some(&cv));
     }
 }

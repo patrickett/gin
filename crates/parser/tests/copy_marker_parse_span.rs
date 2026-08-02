@@ -1,4 +1,4 @@
-use ast::{BindValue, DeclareValue, Expr, HasMember, TypeExpr, WhenArm};
+use ast::{BindValue, DeclareValue, Expr, HasMember, WhenArm};
 use parser::query::SourceParseExt;
 
 const COPY_GIN: &str = r#"#auto
@@ -105,10 +105,10 @@ all_named_copy(fields List(NamedTy)) Bool := when fields is
             when_expr.arms
         );
     };
-    let TypeExpr::ListCons { head, tail } = &pattern.value else {
+    let ast::Pattern::ListCons { head, tail } = &pattern.value else {
         panic!("expected list cons pattern, got {:?}", pattern.value);
     };
 
-    assert!(matches!(head.value, TypeExpr::Nominal(name, _) if name.as_str() == "f"));
-    assert!(matches!(tail.value, TypeExpr::Nominal(name, _) if name.as_str() == "rest"));
+    assert!(matches!(head.value, ast::Pattern::Nominal(name, _) if name.as_str() == "f"));
+    assert!(matches!(tail.value, ast::Pattern::Nominal(name, _) if name.as_str() == "rest"));
 }

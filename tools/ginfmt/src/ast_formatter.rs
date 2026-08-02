@@ -33,24 +33,17 @@
 //! 1. Required/computed zero-input properties (no params, stored/computed fields)
 //! 2. `Self.` associated members (static methods)
 //! 3. Argument-taking instance methods (methods with params)
-//! Within each group, members should be sorted for stable output.
-
-use std::collections::HashMap;
+//!    Within each group, members should be sorted for stable output.
 
 use ast::{
     BindValue, BundleExportImport, Declare, DeclareValue, DocComment, Expr, FileAst, HasMember,
     HasMemberBody, HashFloat, ImportSource, Literal, ModuleImport, ParameterKind, Parameters,
-    SpanTable, Spanned, TypeExpr, Typed, Variant,
+    SpanTable, Spanned, Typed, Variant,
 };
-use ast_format::type_expr::TypeExprFormatExt;
+use ast_format::type_expr::{ExprFormatExt, PatternFormatExt};
 use internment::Intern;
 
-use crate::align_ast::{AlignableNode, DelimiterKind, group_alignable_nodes};
 use crate::config::Config;
-
-struct AlignmentGroup {
-    max_prefix_width: usize,
-}
 
 /// The AST-based formatter.
 pub struct AstFormatter<'a> {
@@ -59,9 +52,6 @@ pub struct AstFormatter<'a> {
     config: &'a Config,
     span_table: &'a SpanTable,
     indent_level: usize,
-    alignable_nodes: Vec<AlignableNode>,
-    next_node_id: usize,
-    alignment_groups: HashMap<(usize, DelimiterKind), AlignmentGroup>,
 }
 
 impl<'a> AstFormatter<'a> {
@@ -72,22 +62,12 @@ impl<'a> AstFormatter<'a> {
             config,
             span_table,
             indent_level: 0,
-            alignable_nodes: Vec::new(),
-            next_node_id: 0,
-            alignment_groups: HashMap::new(),
         }
-    }
-
-    fn next_id(&mut self) -> usize {
-        let id = self.next_node_id;
-        self.next_node_id += 1;
-        id
     }
 
     /// Format the entire file AST.
     pub fn format_file(&mut self, ast: &FileAst) -> String {
         self.format_file_inner(ast);
-        self.set_alignment_groups();
         let result = std::mem::take(&mut self.buffer);
         wrap_lines(&result, self.config.max_line_width)
     }
@@ -171,7 +151,6 @@ impl<'a> AstFormatter<'a> {
         if let Some(params) = &declare.params {
             self.format_params(params);
         }
-        let prefix_end = self.buffer.len();
         let st = self.span_table;
         let src = self.source;
         match &declare.value {
@@ -264,39 +243,26 @@ impl<'a> AstFormatter<'a> {
                 self.buffer.push_str(&src[span.start()..end]);
             }
         }
-        let is_single_line = !self.buffer[prefix_end.saturating_sub(1)..].contains('\n');
-        let sl = self.buffer[..prefix_end].matches('\n').count();
-        if self.config.align_declarations && is_single_line {
-            let nid = self.next_id();
-            let il = self.indent_level;
-            self.alignable_nodes.push(AlignableNode {
-                node_id: nid,
-                prefix_display_width: prefix_end,
-                kind: DelimiterKind::Is,
-                indent_level: il,
-                source_line: sl,
-            });
-        }
     }
 
     fn format_params(&mut self, params: &Parameters) {
         self.buffer.push('(');
         let st = self.span_table;
         let src = self.source;
-        for (i, (name, kind)) in params.iter().enumerate() {
+        for (i, (name, param)) in params.iter().enumerate() {
             if i > 0 {
                 self.buffer.push_str(", ");
             }
             self.buffer.push_str(name.as_str());
-            match kind {
+            match &param.kind {
                 ParameterKind::Generic => {}
                 ParameterKind::Tagged(sp) | ParameterKind::ValueParam { ty: sp } => {
                     self.buffer.push(' ');
-                    self.buffer.push_str(&type_text(&sp.value));
+                    self.buffer.push_str(&sp.value.format_surface());
                 }
                 ParameterKind::Inferred { ty } => {
                     self.buffer.push(' ');
-                    self.buffer.push_str(&type_text(&ty.value));
+                    self.buffer.push_str(&ty.value.format_surface());
                     self.buffer.push_str(": ?");
                 }
                 ParameterKind::Default(expr) => {
@@ -310,42 +276,13 @@ impl<'a> AstFormatter<'a> {
     }
 
     fn format_union_variants(&mut self, variants: &[Variant]) {
-        let st = self.span_table;
-        let src = self.source;
         for (i, variant) in variants.iter().enumerate() {
             if i > 0 {
                 self.buffer.push_str(" or ");
             }
             let shape = variant.shape();
-            let name = variant_name(&shape.value);
-            self.buffer.push_str(&name);
-            if let TypeExpr::Generic { params, .. } = &shape.value
-                && !params.is_empty()
-            {
-                self.buffer.push('(');
-                for (j, (fname, fkind)) in params.iter().enumerate() {
-                    if j > 0 {
-                        self.buffer.push_str(", ");
-                    }
-                    self.buffer.push_str(fname.as_str());
-                    self.buffer.push(' ');
-                    match fkind {
-                        ParameterKind::Generic => {}
-                        ParameterKind::Tagged(sp) | ParameterKind::ValueParam { ty: sp } => {
-                            self.buffer.push_str(&type_text(&sp.value));
-                        }
-                        ParameterKind::Inferred { ty } => {
-                            self.buffer.push_str(&type_text(&ty.value));
-                            self.buffer.push_str(": ?");
-                        }
-                        ParameterKind::Default(expr) => {
-                            let text = span_text(expr, st, src);
-                            self.buffer.push_str(&text);
-                        }
-                    }
-                }
-                self.buffer.push(')');
-            }
+            self.buffer
+                .push_str(&shape.value.format_variant_shape());
         }
     }
 
@@ -436,7 +373,7 @@ impl<'a> AstFormatter<'a> {
         let st = self.span_table;
         let src = self.source;
         if let Some(ret_tag) = &bind.return_tag {
-            let text = span_text_type(ret_tag, st, src);
+            let text = span_text_spanned_expr(ret_tag, st, src);
             self.buffer.push(' ');
             self.buffer.push_str(&text);
         }
@@ -444,7 +381,6 @@ impl<'a> AstFormatter<'a> {
         if has_colon {
             self.buffer.push_str(": ");
         }
-        let prefix_end = self.buffer.len();
 
         match &bind.value {
             BindValue::Expr(expr) => {
@@ -479,24 +415,6 @@ impl<'a> AstFormatter<'a> {
                 // No value for unassigned binds — type annotation already printed.
             }
         }
-
-        let is_single_line = if has_colon {
-            !self.buffer[prefix_end.saturating_sub(1)..].contains('\n')
-        } else {
-            true
-        };
-        let sl = self.buffer[..prefix_end].matches('\n').count();
-        if self.config.align_binds && matches!(&bind.value, BindValue::Expr(_)) && is_single_line {
-            let nid = self.next_id();
-            let il = self.indent_level;
-            self.alignable_nodes.push(AlignableNode {
-                node_id: nid,
-                prefix_display_width: prefix_end,
-                kind: DelimiterKind::Colon,
-                indent_level: il,
-                source_line: sl,
-            });
-        }
     }
 
     fn emit_doc_comment(&mut self, doc: &DocComment) {
@@ -508,20 +426,6 @@ impl<'a> AstFormatter<'a> {
                 self.buffer.push_str("--- ");
                 self.buffer.push_str(trimmed);
                 self.buffer.push('\n');
-                if self.config.align_comments {
-                    let trimmed_len = trimmed.len();
-                    let pw = self.buffer.len().saturating_sub(trimmed_len + 4);
-                    let sl = self.buffer[..pw].matches('\n').count();
-                    let node_id = self.next_id();
-                    let il = self.indent_level;
-                    self.alignable_nodes.push(AlignableNode {
-                        node_id,
-                        prefix_display_width: pw,
-                        kind: DelimiterKind::Dash,
-                        indent_level: il,
-                        source_line: sl,
-                    });
-                }
             }
         }
     }
@@ -529,43 +433,6 @@ impl<'a> AstFormatter<'a> {
     fn emit_indent(&mut self) {
         for _ in 0..self.indent_level {
             self.buffer.push_str("    ");
-        }
-    }
-
-    fn set_alignment_groups(&mut self) {
-        use DelimiterKind::*;
-        let ord = |k: DelimiterKind| -> u8 {
-            match k {
-                Is => 0,
-                Colon => 1,
-                Dash => 2,
-            }
-        };
-        self.alignable_nodes.sort_by(|a, b| {
-            (ord(a.kind), a.indent_level, a.source_line).cmp(&(
-                ord(b.kind),
-                b.indent_level,
-                b.source_line,
-            ))
-        });
-        for group in &group_alignable_nodes(&self.alignable_nodes) {
-            if group.len() < 2 {
-                continue;
-            }
-            let max = group
-                .iter()
-                .map(|&i| self.alignable_nodes[i].prefix_display_width)
-                .max()
-                .unwrap_or(0);
-            for &idx in group {
-                let n = &self.alignable_nodes[idx];
-                self.alignment_groups
-                    .entry((n.source_line, n.kind))
-                    .and_modify(|g| g.max_prefix_width = g.max_prefix_width.max(max))
-                    .or_insert(AlignmentGroup {
-                        max_prefix_width: max,
-                    });
-            }
         }
     }
 }
@@ -614,66 +481,12 @@ fn span_text(expr: &Typed<Expr>, st: &SpanTable, source: &str) -> String {
     }
 }
 
-fn span_text_type(expr: &Spanned<TypeExpr>, st: &SpanTable, source: &str) -> String {
+fn span_text_spanned_expr(expr: &Spanned<Expr>, st: &SpanTable, source: &str) -> String {
     let span = st.get(expr.span_id());
     if !span.is_empty() {
         span.extract(source).to_string()
     } else {
-        type_text(&expr.value)
-    }
-}
-
-/// Extract the variant name from a shape TypeExpr.
-fn variant_name(expr: &TypeExpr) -> String {
-    match expr {
-        TypeExpr::Nominal(name, _) => name.as_str().to_string(),
-        TypeExpr::Qualified(path) => path
-            .segments
-            .last()
-            .map(|s| s.as_str().to_string())
-            .unwrap_or_else(|| path.root.as_str().to_string()),
-        TypeExpr::Generic { name, .. } => name.as_str().to_string(),
-        TypeExpr::Literal(..) => String::new(),
-        TypeExpr::Pointer(inner) => variant_name(&inner.value),
-        TypeExpr::Ref { inner, .. } => variant_name(&inner.value),
-        TypeExpr::Unit => String::new(),
-        TypeExpr::InRange { .. }
-        | TypeExpr::ListEmpty
-        | TypeExpr::ListCons { .. }
-        | TypeExpr::Tuple(_) => expr.format_surface(),
-    }
-}
-
-/// Format a type expression name.
-fn type_text(expr: &TypeExpr) -> String {
-    match expr {
-        TypeExpr::Nominal(name, _) => name.as_str().to_string(),
-        TypeExpr::Qualified(path) => {
-            let mut s = path.root.as_str().to_string();
-            for seg in &path.segments {
-                s.push('.');
-                s.push_str(seg.as_str());
-            }
-            s
-        }
-        TypeExpr::Generic { name, .. } => name.as_str().to_string(),
-        TypeExpr::Literal(..) => String::new(),
-        TypeExpr::Pointer(inner) => {
-            let mut s = String::from("@");
-            s.push_str(&type_text(&inner.value));
-            s
-        }
-        TypeExpr::Ref { inner, mutable, .. } => {
-            let prefix = if *mutable { "mut " } else { "ref " };
-            let mut s = String::from(prefix);
-            s.push_str(&type_text(&inner.value));
-            s
-        }
-        TypeExpr::Unit => String::from("()"),
-        TypeExpr::InRange { .. }
-        | TypeExpr::ListEmpty
-        | TypeExpr::ListCons { .. }
-        | TypeExpr::Tuple(_) => expr.format_surface(),
+        expr.value.format_surface()
     }
 }
 

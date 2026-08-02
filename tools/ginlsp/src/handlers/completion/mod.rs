@@ -61,7 +61,7 @@ impl Backend {
         // Read source + line index from the engine for path completions
         // which need the current line text to parse `use` statements.
         let snapshot_st = self.snapshot();
-        if let Some(doc) = snapshot_st.engine.document_snapshot(&file_path)
+        if let Some(doc) = snapshot_st.cache.document_snapshot(&file_path)
             && let Some(items) =
                 Backend::use_completions(&doc.source, position, &doc_uri, config.as_ref())
         {
@@ -84,7 +84,7 @@ impl Backend {
         position: Position,
     ) -> Vec<CompletionItem> {
         let snapshot = backend.snapshot();
-        let doc = match snapshot.engine.document_snapshot(&file_path) {
+        let doc = match snapshot.cache.document_snapshot(&file_path) {
             Some(d) => d,
             None => return Vec::new(),
         };
@@ -96,7 +96,7 @@ impl Backend {
                 Some(b) => b as u32,
                 None => return Vec::new(),
             };
-        let candidates = snapshot.engine.completions_at(&file_path, byte_pos);
+        let candidates = snapshot.cache.completions_at(&file_path, byte_pos);
         Self::candidates_to_lsp(candidates)
     }
 

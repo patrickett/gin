@@ -110,7 +110,7 @@ f(x Type) Bool := when x is
         .expect("hover on Record");
     assert_eq!(
         record_hover,
-        "```gin\nRecord(name bytes: pointer: in 0...255, length: in 0...1000, fields List)\n```",
+        "```gin\nRecord(name bytes: pointer: addr: in 0...1000, length: in 0...1000, fields List)\n```",
         "expected Record(name String, fields List(NamedTy)), got: {record_hover}"
     );
 }

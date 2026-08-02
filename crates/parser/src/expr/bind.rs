@@ -4,8 +4,8 @@ use lexer::Token;
 
 use ast::{
     AttributeItem, Bind, BindAttributes, BindValue, DocComment, Expr, GroupParam, GroupPath,
-    ModPath, ParamConvention, ParameterKind, Parameters, PredicateExpr, Return, Spanned, TypeExpr,
-    Typed,
+    ModPath, ParamConvention, Parameter, ParameterKind, Parameters, PredicateExpr, Return, Spanned,
+    Pattern, Typed,
 };
 
 use super::ExprFn;
@@ -13,7 +13,7 @@ use crate::cursor::TokenCursor;
 
 type ReturnTypePart = (
     Option<Intern<String>>,
-    Option<Box<Spanned<TypeExpr>>>,
+    Option<Box<Spanned<Expr>>>,
     Option<(Intern<String>, Vec<Typed<Expr>>)>,
     Option<Spanned<ModPath>>,
 );
@@ -27,7 +27,7 @@ pub(crate) type ParsedParams = (
 
 pub(crate) type ParsedOneParam = (
     Intern<String>,
-    ParameterKind,
+    Parameter,
     ParamConvention,
     Option<GroupPath>,
     Option<PredicateExpr>,
@@ -65,15 +65,16 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
         let (params, conventions, param_groups, param_refinements) = self.parse_params(expr_parser);
 
-        let (return_type_name, mut return_tag, type_annotation, type_annotation_qual) =
+        let (return_type_name, return_tag, type_annotation, type_annotation_qual) =
             self.parse_return_type_part(expr_parser);
+        let mut return_tag = return_tag;
         if let Some(mutable) = binding_ref_mutability
             && let Some(inner) = return_tag.take()
         {
             let span_id = inner.span_id;
             return_tag = Some(Box::new(Spanned {
-                value: TypeExpr::Ref {
-                    inner,
+                value: Expr::Ref {
+                    inner: Box::new(Typed::infer(inner.value, inner.span_id)),
                     mutable,
                     group: None,
                 },
@@ -83,15 +84,20 @@ impl<'src, 't> TokenCursor<'src, 't> {
         let group_params = params
             .iter()
             .flat_map(|params| params.values())
-            .filter_map(|kind| match kind {
+            .filter_map(|param| match &param.kind {
                 ParameterKind::Tagged(sp) => match &sp.value {
-                    TypeExpr::Ref {
+                    Expr::Ref {
                         inner,
                         mutable,
                         group: Some(name),
                     } => Some(GroupParam {
                         path: name.clone(),
-                        ty_name: Intern::from_ref(inner.value.surface_mangle_name()),
+                        ty_name: match &inner.value {
+                            Expr::AnonymousTag(name) => *name,
+                            Expr::FnCall(call) => call.path.value.root,
+                            Expr::TagCall(call) => call.name,
+                            _ => Intern::from_ref("<expr>"),
+                        },
                         mutable: *mutable,
                     }),
                     _ => None,
@@ -321,7 +327,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 return (
                     None,
                     Some(Box::new(Spanned {
-                        value: TypeExpr::Qualified(path),
+                        value: Expr::FnCall(ast::FnCall { path, args: None }),
                         span_id: span,
                     })),
                     None,
@@ -350,21 +356,21 @@ impl<'src, 't> TokenCursor<'src, 't> {
             let args = self.parse_type_annotation_args(expr_parser);
             if !args.is_empty() {
                 // If the args are all type-like (bare identifiers or tags), promote
-                // to a `TypeGeneric` return tag so the typechecker sees a uniform
+                // to a generic return tag so the typechecker sees a uniform
                 // type-surface shape (matching how receivers are stored). Examples:
-                //   `Range[x]` → return_tag = TypeGeneric { Range, [x: Generic] }
+                //   `Range[x]` → return_tag = generic `Range` with `[x]`
                 //   `Maybe(3)` → falls through to `type_annotation` (value annotation)
-                if let Some(type_params) = Self::try_args_as_type_params(&args) {
+                let end_span = self.last_consumed_span();
+                if let Some(type_args) = Self::try_args_as_type_params(&args) {
                     return (
                         None,
                         Some(Box::new(Spanned {
-                            value: TypeExpr::Generic {
+                            value: Expr::TagCall(ast::TagCall {
                                 name,
-                                params: type_params,
-                                param_spans: Vec::new(),
-                                span: name_span,
-                            },
-                            span_id: name_span,
+                                qual_path: None,
+                                args: type_args,
+                            }),
+                            span_id: end_span,
                         })),
                         None,
                         None,
@@ -377,7 +383,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
         (
             None,
             Some(Box::new(Spanned {
-                value: TypeExpr::Nominal(name, name_span),
+                value: Expr::AnonymousTag(name),
                 span_id: name_span,
             })),
             None,
@@ -385,13 +391,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
         )
     }
 
-    /// If every arg is a "type-like" expression (bare lowercase identifier or bare
-    /// tag), convert to declaration parameters suitable for `TypeExpr::Generic`.
+    /// If every arg is a type-like expression, retain it as a generic type application.
     /// Otherwise return `None` so the caller can fall back to the value-annotation
     /// path (e.g., `Maybe(3)`).
-    fn try_args_as_type_params(
-        args: &[Typed<Expr>],
-    ) -> Option<Vec<(Intern<String>, ParameterKind)>> {
+    fn try_args_as_type_params(args: &[Typed<Expr>]) -> Option<Vec<Typed<Expr>>> {
         let mut out = Vec::with_capacity(args.len());
         for Typed {
             value: arg,
@@ -405,16 +408,12 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 // declaration positions). Stored as `Generic` so the typechecker
                 // doesn't report `x` as an undeclared tag.
                 Expr::FnCall(call) if call.path.segments.is_empty() && call.args.is_none() => {
-                    out.push((call.path.root, ParameterKind::Generic));
+                    out.push(Typed::infer(Expr::FnCall(call.clone()), *span));
                 }
                 // Bare capitalized tag, e.g. `Int` in `Range(Int)` → concrete
                 // instantiation. Tagged so the typechecker resolves and validates it.
                 Expr::AnonymousTag(n) => {
-                    let sp = Spanned {
-                        value: TypeExpr::Nominal(*n, *span),
-                        span_id: *span,
-                    };
-                    out.push((*n, ParameterKind::Tagged(Box::new(sp))));
+                    out.push(Typed::infer(Expr::AnonymousTag(*n), *span));
                 }
                 _ => return None,
             }
@@ -548,7 +547,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
         }
 
         let mut ingest = |key: Intern<String>,
-                          kind: ParameterKind,
+                          kind: Parameter,
                           conv: ParamConvention,
                           group: Option<GroupPath>,
                           refinement: Option<PredicateExpr>| {
@@ -566,7 +565,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
         loop {
             if let Some((key, kind, conv, group, refinement)) = self.parse_one_param(expr_parser) {
-                if seen_default && !matches!(kind, ParameterKind::Default(_)) {
+                if seen_default && !matches!(kind.kind, ParameterKind::Default(_)) {
                     self.error(
                         "parse-parameter-after-default",
                         format!(
@@ -576,7 +575,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                         self.current_span(),
                     );
                 }
-                if matches!(kind, ParameterKind::Default(_)) {
+                if matches!(kind.kind, ParameterKind::Default(_)) {
                     seen_default = true;
                 }
                 ingest(key, kind, conv, group, refinement);
@@ -620,13 +619,18 @@ impl<'src, 't> TokenCursor<'src, 't> {
         // Positional: bare Tag → (tag_name, ParameterKind::Tagged(tag))
         if matches!(self.peek(), Some(Token::Tag(_))) {
             let sp = self.parse_type_expr(expr_parser)?;
-            let key = Intern::<String>::from_ref(sp.value.surface_mangle_name());
+            let key = Intern::<String>::from_ref(
+                Pattern::from_expr(sp.value.clone()).surface_mangle_name(),
+            );
             return Some((
                 key,
-                ParameterKind::Tagged(Box::new(Spanned {
-                    value: sp.value,
-                    span_id: sp.span_id,
-                })),
+                Parameter::new(
+                    sp.span_id,
+                    ParameterKind::Tagged(Box::new(Spanned {
+                        value: sp.value,
+                        span_id: sp.span_id,
+                    })),
+                ),
                 ParamConvention::Own,
                 None,
                 None,
@@ -650,24 +654,27 @@ impl<'src, 't> TokenCursor<'src, 't> {
         // Named: id [Tag | id | : expr]
         let name = match self.peek() {
             Some(Token::Id(n)) => {
+                let name_span = self.peek_span()?;
                 let id = self.intern(n);
                 self.advance();
-                id
+                (id, name_span)
             }
             Some(Token::SelfInstance) => {
+                let name_span = self.peek_span()?;
                 self.advance();
-                Intern::from_ref("self")
+                (Intern::from_ref("self"), name_span)
             }
             _ => return None,
         };
 
-        let (name, kind) = self.parse_param_after_name(expr_parser, name, false)?;
-        let kind = match (convention, kind) {
+        let (name, mut parameter) =
+            self.parse_param_after_name(expr_parser, name.0, name.1, false)?;
+        let kind = match (convention, parameter.kind) {
             (ParamConvention::Observe | ParamConvention::Mutate, ParameterKind::Tagged(inner)) => {
                 let span_id = inner.span_id;
                 ParameterKind::Tagged(Box::new(Spanned {
-                    value: TypeExpr::Ref {
-                        inner,
+                    value: Expr::Ref {
+                        inner: Box::new(Typed::infer(inner.value, inner.span_id)),
                         mutable: convention == ParamConvention::Mutate,
                         group: group_name.clone(),
                     },
@@ -676,6 +683,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             }
             (_, kind) => kind,
         };
+        parameter.kind = kind;
         let refinement = if self.eat(&Token::And) {
             let mut predicates = vec![self.parse_one_predicate()];
             while self.eat(&Token::And) {
@@ -689,7 +697,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
         } else {
             None
         };
-        Some((name, kind, convention, group_name, refinement))
+        Some((name, parameter, convention, group_name, refinement))
     }
 
     pub(crate) fn parse_doc_comment(&mut self) -> Option<DocComment> {

@@ -22,8 +22,6 @@ pub enum DelimiterKind {
 /// of the same kind at the same indentation level.
 #[derive(Debug, Clone)]
 pub struct AlignableNode {
-    /// Unique identifier for the node (assigned during collection)
-    pub node_id: usize,
     /// Display width of the prefix (before the delimiter)
     pub prefix_display_width: usize,
     /// Type of delimiter
@@ -69,13 +67,6 @@ pub fn group_alignable_nodes(nodes: &[AlignableNode]) -> Vec<Vec<usize>> {
     groups
 }
 
-/// Calculate the display length of the prefix on a node's line.
-///
-/// Returns the stored display width of the prefix.
-pub fn calculate_prefix_display_len(_source: &str, node: &AlignableNode) -> usize {
-    node.prefix_display_width
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,14 +75,12 @@ mod tests {
     fn test_group_alignable_nodes_consecutive() {
         let nodes = vec![
             AlignableNode {
-                node_id: 0,
                 prefix_display_width: 4,
                 kind: DelimiterKind::Is,
                 indent_level: 0,
                 source_line: 0,
             },
             AlignableNode {
-                node_id: 1,
                 prefix_display_width: 5,
                 kind: DelimiterKind::Is,
                 indent_level: 0,
@@ -108,14 +97,12 @@ mod tests {
     fn test_group_alignable_nodes_non_consecutive() {
         let nodes = vec![
             AlignableNode {
-                node_id: 0,
                 prefix_display_width: 4,
                 kind: DelimiterKind::Is,
                 indent_level: 0,
                 source_line: 0,
             },
             AlignableNode {
-                node_id: 1,
                 prefix_display_width: 6,
                 kind: DelimiterKind::Is,
                 indent_level: 0,
@@ -133,14 +120,12 @@ mod tests {
     fn test_group_alignable_nodes_different_kind() {
         let nodes = vec![
             AlignableNode {
-                node_id: 0,
                 prefix_display_width: 4,
                 kind: DelimiterKind::Is,
                 indent_level: 0,
                 source_line: 0,
             },
             AlignableNode {
-                node_id: 1,
                 prefix_display_width: 5,
                 kind: DelimiterKind::Colon, // Different kind
                 indent_level: 0,
@@ -150,20 +135,5 @@ mod tests {
 
         let groups = group_alignable_nodes(&nodes);
         assert_eq!(groups.len(), 2);
-    }
-
-    #[test]
-    fn test_calculate_prefix_display_len() {
-        let source = "Area is 0...999\n";
-        let node = AlignableNode {
-            node_id: 0,
-            prefix_display_width: 4, // "Area"
-            kind: DelimiterKind::Is,
-            indent_level: 0,
-            source_line: 0,
-        };
-
-        let len = calculate_prefix_display_len(source, &node);
-        assert_eq!(len, 4); // "Area"
     }
 }

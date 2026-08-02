@@ -5,21 +5,20 @@ use crate::expr::ExprFn;
 use ast::declare::HasMemberQualifier;
 use ast::span::SpanId;
 use ast::{
-    ConstExpr, Declare, DeclareValue, DocComment, Expr, HasFunction, HasFunctionKind, HasMember,
-    HasMemberBody, HasProperty, ParameterKind, Parameters, PredicateExpr, ProvidedTrait, Spanned,
-    TypeExpr, Typed, Variant,
+    NormalExpr, Declare, DeclareValue, DocComment, Expr, HasFunction, HasFunctionKind, HasMember,
+    HasMemberBody, HasProperty, Parameter, ParameterKind, Parameters, PredicateExpr, ProvidedTrait,
+    Pattern, Spanned, Typed, Variant,
 };
 use i256::I256;
 use internment::Intern;
 use lexer::Token;
 
-/// `(return_type, error_type)` after parsing a method return type.
 type ParseResultType = (
-    Option<Box<Spanned<TypeExpr>>>,
-    Option<Box<Spanned<TypeExpr>>>,
+    Option<Box<Spanned<Expr>>>,
+    Option<Box<Spanned<Expr>>>,
 );
+type ParsedVariantParts = (Spanned<Pattern>, Option<Box<Spanned<Expr>>>);
 
-/// asd
 impl<'src, 't> TokenCursor<'src, 't> {
     pub fn parse_declare(&mut self, expr_parser: ExprFn) -> Option<Declare> {
         let checkpoint = self.checkpoint();
@@ -96,6 +95,8 @@ impl<'src, 't> TokenCursor<'src, 't> {
             self.eat(&Token::Dedent);
             self.reject_removed_marker_syntax();
 
+            let mut provided_traits = provided_traits;
+            Self::collect_qualified_property_provisions(name, &value, &mut provided_traits);
             let mut decl = Declare::new(name, name_span, value)
                 .with_params(params)
                 .with_doc(doc_before)
@@ -142,6 +143,12 @@ impl<'src, 't> TokenCursor<'src, 't> {
         let mut members = Vec::new();
 
         loop {
+            if self.is_at(&Token::ParenClose) {
+                if !has_block_body {
+                    self.advance();
+                }
+                break;
+            }
             if matches!(self.raw_peek(), Some(Token::Dedent)) {
                 break;
             }
@@ -252,6 +259,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 })
             } else {
                 HasMember::Property(HasProperty {
+                    qualifier,
                     name: member_name.0,
                     name_span: member_name.1,
                     ty: return_ty,
@@ -263,7 +271,25 @@ impl<'src, 't> TokenCursor<'src, 't> {
             members.push(member);
 
             if self.eat(&Token::Comma) {
-                self.skip_layout();
+                if has_block_body {
+                    // A trailing comma after the last member is allowed.
+                    self.skip_newlines();
+                    self.skip_indents();
+                    if matches!(self.raw_peek(), Some(Token::Dedent | Token::ParenClose)) {
+                        if self.eat(&Token::ParenClose) {
+                            let _ = self.eat(&Token::Dedent);
+                        }
+                        break;
+                    }
+                } else {
+                    self.skip_layout();
+                    if matches!(self.raw_peek(), Some(Token::ParenClose | Token::Dedent)) {
+                        if self.eat(&Token::ParenClose) {
+                            let _ = self.eat(&Token::Dedent);
+                        }
+                        break;
+                    }
+                }
                 continue;
             }
 
@@ -330,7 +356,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 let span = self.peek_span().unwrap_or(SpanId::INVALID);
                 self.advance();
                 let sp = Spanned {
-                    value: TypeExpr::Nominal(name, span),
+                    value: Expr::AnonymousTag(name),
                     span_id: span,
                 };
                 return self.check_or_error(expr_parser, Some(Box::new(sp)));
@@ -354,7 +380,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
     fn check_or_error(
         &mut self,
         expr_parser: ExprFn,
-        return_ty: Option<Box<Spanned<TypeExpr>>>,
+        return_ty: Option<Box<Spanned<Expr>>>,
     ) -> ParseResultType {
         // Non-consuming peek: is `or` the next significant token?
         if self.peek_past_indent() == Some(&Token::Or) {
@@ -372,7 +398,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
             );
         }
         // No `or` — leave layout unconsumed so it can serve as a list separator.
-        (return_ty, None)
+        (
+            return_ty,
+            None,
+        )
     }
 
     fn parse_is_rhs(
@@ -416,11 +445,14 @@ impl<'src, 't> TokenCursor<'src, 't> {
             self.advance(); // eat (
             self.advance(); // eat )
             let span = self.last_consumed_span();
-            let unit_expr = Spanned {
-                value: TypeExpr::Unit,
-                span_id: span,
-            };
-            return (DeclareValue::Alias(Box::new(unit_expr)), None, Vec::new());
+            return (
+                DeclareValue::Alias(Box::new(Spanned {
+                    value: Expr::Lit(ast::Literal::Number(0)),
+                    span_id: span,
+                })),
+                None,
+                Vec::new(),
+            );
         }
 
         // Union or Alias: starts with optional doc then a type pattern or literal
@@ -428,7 +460,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
         let first_doc = self.parse_doc_comment();
 
         // Try literal variant first (e.g. 'debug'), then tag pattern (e.g. Some(x))
-        let first_shape: Option<Spanned<TypeExpr>> = 'union_check: {
+        let first_variant_parts: Option<ParsedVariantParts> = 'union_check: {
             // Check if we're at a literal that could be a union variant
             if matches!(
                 self.peek(),
@@ -440,16 +472,20 @@ impl<'src, 't> TokenCursor<'src, 't> {
                     span_id: span,
                 }) = self.parse_literal()
                 {
+                    let result_ty = self.parse_variant_result_ty(expr_parser);
                     let cp_after_lit = self.checkpoint();
                     self.parse_doc_comment();
                     // Skip Indent/Dedent tokens that may precede a continuation `or`
                     while self.eat(&Token::Indent) || self.eat(&Token::Dedent) {}
                     if self.is_at(&Token::Or) {
                         self.rewind(cp_after_lit);
-                        break 'union_check Some(Spanned {
-                            value: TypeExpr::Literal(lit, span),
-                            span_id: span,
-                        });
+                        break 'union_check Some((
+                            Spanned {
+                                value: Pattern::Literal(lit, span),
+                                span_id: span,
+                            },
+                            result_ty,
+                        ));
                     }
                     self.rewind(cp_after_lit);
                 }
@@ -458,7 +494,8 @@ impl<'src, 't> TokenCursor<'src, 't> {
             }
             // Standard checkpoint approach for tag patterns
             let cp = self.checkpoint();
-            if let Some(shape) = self.parse_pattern_type_expr(expr_parser) {
+            if let Some(shape) = self.parse_is_pattern_tag(expr_parser) {
+                let result_ty = self.parse_variant_result_ty(expr_parser);
                 let cp_after_shape = self.checkpoint();
                 self.parse_doc_comment();
                 // Skip Indent/Dedent tokens that may precede a continuation `or`
@@ -467,7 +504,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 while self.eat(&Token::Indent) || self.eat(&Token::Dedent) {}
                 if self.is_at(&Token::Or) {
                     self.rewind(cp_after_shape);
-                    break 'union_check Some(shape);
+                    break 'union_check Some((shape, result_ty));
                 }
                 self.rewind(cp_after_shape);
             }
@@ -475,11 +512,12 @@ impl<'src, 't> TokenCursor<'src, 't> {
             None
         };
 
-        if let Some(first_shape) = first_shape {
+        if let Some((first_shape, first_result_ty)) = first_variant_parts {
             // Union: Tag (or Tag)+
             let first_post_doc = self.parse_doc_comment();
 
-            let first_variant = Self::make_variant(first_doc, first_shape, first_post_doc);
+            let first_variant =
+                Self::make_variant(first_doc, first_shape, first_post_doc, first_result_ty);
             let mut variants = vec![first_variant];
 
             let mut had_dedent_in_exit = false;
@@ -553,13 +591,13 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
         // Interface composition: `InOut is Input and Output`.
         let composition_checkpoint = self.checkpoint();
-        if let Some(sp) = self.parse_pattern_type_expr(expr_parser) {
+        if let Some(sp) = self.parse_type_expr(expr_parser) {
             self.skip_indents();
             if self.eat(&Token::And) {
-                let mut provided_traits = vec![Self::provided_trait_from_type_expr(sp)];
+                let mut provided_traits = vec![Self::provided_trait_from_expr(sp)];
                 loop {
                     self.skip_indents();
-                    let Some(next) = self.parse_pattern_type_expr(expr_parser) else {
+                    let Some(next) = self.parse_type_expr(expr_parser) else {
                         self.error(
                             "parse-expected-interface-name",
                             "expected interface name after 'and'",
@@ -567,7 +605,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                         );
                         break;
                     };
-                    provided_traits.push(Self::provided_trait_from_type_expr(next));
+                    provided_traits.push(Self::provided_trait_from_expr(next));
                     self.skip_indents();
                     if !self.eat(&Token::And) {
                         break;
@@ -584,22 +622,17 @@ impl<'src, 't> TokenCursor<'src, 't> {
         self.rewind(composition_checkpoint);
 
         // Try pattern type expression (allows parens for params): `Register(value: 'rax')`
-        if let Some(sp) = self.parse_pattern_type_expr(expr_parser) {
-            let doc = if matches!(self.raw_peek(), Some(Token::DocComment(_))) {
-                self.parse_doc_comment()
-            } else {
-                None
-            };
-            return (DeclareValue::Alias(Box::new(sp)), doc, Vec::new());
-        }
-
         if let Some(sp) = self.parse_type_expr(expr_parser) {
             let doc = if matches!(self.raw_peek(), Some(Token::DocComment(_))) {
                 self.parse_doc_comment()
             } else {
                 None
             };
-            return (DeclareValue::Alias(Box::new(sp)), doc, Vec::new());
+            return (
+                DeclareValue::Alias(Box::new(sp)),
+                doc,
+                Vec::new(),
+            );
         }
 
         self.error(
@@ -609,7 +642,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
         );
         (
             DeclareValue::Alias(Box::new(Spanned {
-                value: TypeExpr::Nominal(Intern::new(String::new()), self.current_span()),
+                value: Expr::AnonymousTag(Intern::new(String::new())),
                 span_id: self.current_span(),
             })),
             None,
@@ -617,12 +650,16 @@ impl<'src, 't> TokenCursor<'src, 't> {
         )
     }
 
-    fn provided_trait_from_type_expr(sp: Spanned<TypeExpr>) -> ProvidedTrait {
+    fn provided_trait_from_expr(sp: Spanned<Expr>) -> ProvidedTrait {
         let (trait_name, trait_name_span) = match sp.value {
-            TypeExpr::Nominal(name, span) => (name, span),
-            TypeExpr::Generic { name, span, .. } => (name, span),
+            Expr::AnonymousTag(name) => (name, sp.span_id),
+            Expr::TagCall(call) => (call.name, sp.span_id),
+            Expr::FnCall(call) => (
+                *call.path.value.segments.last().unwrap_or(&call.path.value.root),
+                call.path.span_id,
+            ),
             _ => (
-                Intern::new(sp.value.surface_mangle_name().to_string()),
+                Intern::<String>::from_ref(""),
                 sp.span_id,
             ),
         };
@@ -630,6 +667,16 @@ impl<'src, 't> TokenCursor<'src, 't> {
             trait_name,
             trait_name_span,
             fields: Vec::new(),
+        }
+    }
+
+    fn parse_variant_result_ty(&mut self, expr_parser: ExprFn) -> Option<Box<Spanned<Expr>>> {
+        if self.is_at(&Token::Minus) && self.peek_at(1) == Some(&Token::Greater) {
+            self.advance();
+            self.advance();
+            self.parse_type_expr(expr_parser).map(Box::new)
+        } else {
+            None
         }
     }
 
@@ -646,9 +693,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
         }) = self.parse_literal()
         {
             let shape = Box::new(Spanned {
-                value: TypeExpr::Literal(lit, span),
+                value: Pattern::Literal(lit, span),
                 span_id: span,
             });
+            let result_ty = self.parse_variant_result_ty(expr_parser);
             let doc_after = if matches!(self.raw_peek(), Some(Token::DocComment(_))) {
                 self.parse_doc_comment()
             } else {
@@ -659,18 +707,16 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 Some(d) => Variant::Local {
                     doc_comment: Some(d),
                     shape,
-                    result_ty: None,
+                    result_ty,
                 },
-                None => Variant::External {
-                    shape,
-                    result_ty: None,
-                },
+                None => Variant::External { shape, result_ty },
             });
         }
 
         // Fall through to tag-based pattern
-        let shape = self.parse_pattern_type_expr(expr_parser)?;
+        let shape = self.parse_is_pattern_tag(expr_parser)?;
         let sp = Box::new(shape);
+        let result_ty = self.parse_variant_result_ty(expr_parser);
 
         let doc_after = if matches!(self.raw_peek(), Some(Token::DocComment(_))) {
             self.parse_doc_comment()
@@ -683,40 +729,47 @@ impl<'src, 't> TokenCursor<'src, 't> {
             Some(d) => Variant::Local {
                 doc_comment: Some(d),
                 shape: sp,
-                result_ty: None,
+                result_ty,
             },
             None => Variant::External {
                 shape: sp,
-                result_ty: None,
+                result_ty,
             },
         })
     }
 
-    pub fn parse_dot_provided_impl(
-        &mut self,
-        expr_parser: ExprFn,
-    ) -> Option<(Intern<String>, ProvidedTrait)> {
-        let type_name = match self.peek()? {
-            Token::Tag(name) => {
-                let name = self.intern(name);
-                self.advance();
-                name
-            }
-            _ => return None,
+    fn collect_qualified_property_provisions(
+        type_name: Intern<String>,
+        value: &DeclareValue,
+        provided_traits: &mut [ProvidedTrait],
+    ) {
+        let DeclareValue::Has(members) = value else {
+            return;
         };
-        self.parse_params_for_declare(expr_parser);
-        if !self.eat(&Token::Dot) {
-            return None;
+        for member in members {
+            let HasMember::Property(property) = member else {
+                continue;
+            };
+            let Some(qualifier) = &property.qualifier else {
+                continue;
+            };
+            if qualifier.name == type_name {
+                continue;
+            }
+            let Some(body) = &property.body else {
+                continue;
+            };
+            let Some(provided) = provided_traits
+                .iter_mut()
+                .find(|provided| provided.trait_name == qualifier.name)
+            else {
+                continue;
+            };
+            let Some(value) = body.as_expr().cloned() else {
+                continue;
+            };
+            provided.fields.push((property.name, value));
         }
-        let parsed = self.parse_trait_fields(expr_parser)?;
-        Some((
-            type_name,
-            ProvidedTrait {
-                trait_name: parsed.trait_name,
-                trait_name_span: parsed.trait_name_span,
-                fields: parsed.fields,
-            },
-        ))
     }
 
     fn parse_trait_fields(&mut self, expr_parser: ExprFn) -> Option<ParsedTraitFields> {
@@ -888,7 +941,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             if let Some((key, kind)) = self.parse_one_declare_param(expr_parser) {
                 if seen_default
                     && !matches!(
-                        kind,
+                        kind.kind,
                         ParameterKind::Default(_) | ParameterKind::Inferred { .. }
                     )
                 {
@@ -902,7 +955,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                     );
                 }
                 if matches!(
-                    kind,
+                    kind.kind,
                     ParameterKind::Default(_) | ParameterKind::Inferred { .. }
                 ) {
                     seen_default = true;
@@ -934,47 +987,90 @@ impl<'src, 't> TokenCursor<'src, 't> {
     fn parse_one_declare_param(
         &mut self,
         expr_parser: ExprFn,
-    ) -> Option<(Intern<String>, ParameterKind)> {
+    ) -> Option<(Intern<String>, Parameter)> {
         // Positional: bare Tag
         if matches!(self.peek(), Some(Token::Tag(_))) {
             let sp = self.parse_type_expr(expr_parser)?;
-            let key = Intern::<String>::from_ref(sp.value.surface_mangle_name());
+            let key = Intern::<String>::from_ref(
+                Pattern::from_expr(sp.value.clone()).surface_mangle_name(),
+            );
             return Some((
                 key,
-                ParameterKind::Tagged(Box::new(Spanned {
-                    value: sp.value,
-                    span_id: sp.span_id,
-                })),
+                Parameter::new(
+                    sp.span_id,
+                    ParameterKind::Tagged(Box::new(Spanned {
+                        value: sp.value,
+                        span_id: sp.span_id,
+                    })),
+                ),
             ));
         }
 
         // Named: id [Tag | id | : TypeExpr]
         let name = match self.peek() {
             Some(Token::Id(n)) => {
+                let name_span = self.peek_span()?;
                 let id = self.intern(n);
+                // Consume the parameter identifier token after capturing its span.
                 self.advance();
-                id
+                (id, name_span)
             }
             _ => return None,
         };
 
+        let (name, name_span) = name;
         // In declaration (type-level) position, `:` introduces a type default,
         // not a value default. This is how `Box(x, a: LibcAllocator)` works.
         if self.eat(&Token::Colon) {
+            if matches!(self.peek(), Some(Token::Tag(_))) {
+                let sp = self.parse_type_expr(expr_parser)?;
+                return Some((
+                    name,
+                    Parameter::new(
+                        name_span,
+                        ParameterKind::Default(Box::new(Typed::infer(
+                            sp.value,
+                            sp.span_id,
+                        ))),
+                    ),
+                ));
+            }
+            let expr_checkpoint = self.checkpoint();
+            let expr = expr_parser(self);
+            let expression_ends_parameter = self.is_at(&Token::ParenClose)
+                || self.is_at(&Token::Comma)
+                || self.previous_token_was_newline_separator();
+            if expression_ends_parameter {
+                return Some((
+                    name,
+                    Parameter::new(
+                        name_span,
+                        ParameterKind::Default(Box::new(expr)),
+                    ),
+                ));
+            }
+            self.rewind(expr_checkpoint);
             let sp = self.parse_type_expr(expr_parser)?;
             return Some((
                 name,
-                ParameterKind::Default(Box::new(Typed::infer(sp.value.into(), sp.span_id))),
+                Parameter::new(
+                    name_span,
+                    ParameterKind::Default(Box::new(Typed::infer(
+                        sp.value,
+                        sp.span_id,
+                    ))),
+                ),
             ));
         }
 
-        self.parse_param_after_name(expr_parser, name, true)
+        self.parse_param_after_name(expr_parser, name, name_span, true)
     }
 
     fn make_variant(
         doc_before: Option<DocComment>,
-        shape: Spanned<TypeExpr>,
+        shape: Spanned<Pattern>,
         doc_after: Option<DocComment>,
+        result_ty: Option<Box<Spanned<Expr>>>,
     ) -> Variant {
         let doc = DocComment::combine(doc_before, doc_after);
         let sp = Box::new(shape);
@@ -982,11 +1078,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
             Some(d) => Variant::Local {
                 doc_comment: Some(d),
                 shape: sp,
-                result_ty: None,
+                result_ty,
             },
             None => Variant::External {
                 shape: sp,
-                result_ty: None,
+                result_ty,
             },
         }
     }
@@ -997,7 +1093,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
         {
             let placeholder = Variant::External {
                 shape: Box::new(Spanned {
-                    value: TypeExpr::Nominal(Intern::new(String::new()), SpanId::INVALID),
+                    value: Pattern::Nominal(Intern::new(String::new()), SpanId::INVALID),
                     span_id: SpanId::INVALID,
                 }),
                 result_ty: None,
@@ -1058,13 +1154,13 @@ impl<'src, 't> TokenCursor<'src, 't> {
                     "expected predicate after 'and' (e.g. `< n`, `> 0`)",
                     self.current_span(),
                 );
-                PredicateExpr::Lt(ConstExpr::from(0))
+                PredicateExpr::Lt(NormalExpr::from(0))
             }
         }
     }
 
     /// Parse the right-hand side of a predicate: a name or literal.
-    pub(crate) fn parse_predicate_rhs(&mut self) -> ConstExpr {
+    pub(crate) fn parse_predicate_rhs(&mut self) -> NormalExpr {
         self.skip_layout();
         let Some((token, _span)) = self.advance() else {
             self.error(
@@ -1072,19 +1168,19 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 "expected value after predicate operator",
                 self.current_span(),
             );
-            return ConstExpr::from(0);
+            return NormalExpr::from(0);
         };
         match token {
-            Token::Id(name) => ConstExpr::Var(Intern::from_ref(name)),
-            Token::Tag(name) => ConstExpr::Var(Intern::from_ref(name)),
-            Token::Int(n) => ConstExpr::from(n as i128),
+            Token::Id(name) => NormalExpr::Var(Intern::from_ref(name)),
+            Token::Tag(name) => NormalExpr::Var(Intern::from_ref(name)),
+            Token::Int(n) => NormalExpr::from(n as i128),
             _ => {
                 self.error(
                     "parse-expected-predicate-value",
                     "expected value after predicate operator",
                     self.current_span(),
                 );
-                ConstExpr::from(0)
+                NormalExpr::from(0)
             }
         }
     }
@@ -1217,9 +1313,9 @@ Allocator has
         );
         let rt = &allocate.return_ty.as_ref().unwrap().value;
         match rt {
-            TypeExpr::Generic { name, params, .. } => {
-                assert_eq!(name.as_str(), "Slice");
-                assert_eq!(params.len(), 1);
+            Expr::TagCall(call) => {
+                assert_eq!(call.name.as_str(), "Slice");
+                assert_eq!(call.args.len(), 1);
             }
             other => panic!("allocate return type should be Generic, got {:?}", other),
         }
@@ -1231,7 +1327,7 @@ Allocator has
         );
         let et = &allocate.error_ty.as_ref().unwrap().value;
         match et {
-            TypeExpr::Nominal(name, _) => {
+            Expr::AnonymousTag(name) => {
                 assert_eq!(name.as_str(), "AllocError");
             }
             other => panic!("allocate error type should be AllocError, got {:?}", other),

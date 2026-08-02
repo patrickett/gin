@@ -4,39 +4,7 @@ use ast::source::SourceExt;
 use parser::query::SourceParseExt;
 use resolve::{ImportTarget, resolve_import_at, resolve_local_symbol_hover};
 use test_fixtures::TempPackage;
-
-const STRING_GIN: &str = r#"use core.primitive.(Byte, List)
-
---- Canonical `String` type used for printing/codegen.
-String has bytes List(Byte)
-
-ToString has to_string String
-"#;
-
-const BOOL_GIN: &str = r#"use core.Happy
-use core.ToString
-
---- `Bool` represents a value, which could only be either `True` or `False`.
----
---- ## Basic usage
----
---- `Bool` implements various traits, such as BitAnd, BitOr, Not, etc.,
---- which allow us to perform boolean operations using &, | and !.
----
---- `if` requires a `Bool` value as its conditional.
-Bool is True or False
-Bool.Happy has value: Bool.True
-Bool.ToString has to_string: when self then 'true' else 'false'
-
-
-false := Bool.False
-true  := Bool.True
-
-
--- is_empty(v Maybe(x)) Bool:
---     if v is None return True
--- return False
-"#;
+use test_fixtures::gin_core::{BOOL_GIN, STRING_GIN};
 
 /// `primitive/bool.gin` in gin_core uses `use core.ToString`; these tests need the
 /// quoted local-member form exercised by `ImportSource::LocalMember`.

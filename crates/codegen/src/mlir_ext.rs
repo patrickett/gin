@@ -12,10 +12,6 @@ pub trait ContextExt {
     fn f64(&self) -> Type<'_>;
     /// String type — `!llvm.struct<(ptr, i64)>` fat pointer (data, len)
     fn string_type(&self) -> Type<'_>;
-    /// Unit/void type - currently represented as i64
-    fn unit(&self) -> Type<'_>;
-    /// LLVM void type for unit values
-    fn llvm_void(&self) -> Type<'_>;
     /// LLVM opaque pointer type
     fn llvm_ptr(&self) -> Type<'_>;
     /// Tagged union type — `!llvm.struct<(i64, i64)>` (discriminant, payload)
@@ -46,14 +42,6 @@ impl ContextExt for Context {
             &[r#type::pointer(self, 0), IntegerType::new(self, 64).into()],
             false,
         )
-    }
-
-    fn unit(&self) -> Type<'_> {
-        Type::from(IntegerType::new(self, 64))
-    }
-
-    fn llvm_void(&self) -> Type<'_> {
-        r#type::void(self)
     }
 
     fn llvm_ptr(&self) -> Type<'_> {
@@ -300,14 +288,6 @@ pub trait BlockExt<'c> {
     ) -> Value<'c, 'c>;
     /// Return a unit/void value
     fn unit_value(&self, ctx: &CodegenContext<'_, 'c>, loc: Location<'c>) -> Value<'c, 'c>;
-    fn ret(&self, ctx: &'c Context, values: &[Value<'c, 'c>], loc: Location<'c>) -> Operation<'c>;
-    fn call_void(
-        &self,
-        ctx: &'c Context,
-        func_name: &str,
-        args: &[Value<'c, 'c>],
-        loc: Location<'c>,
-    );
     fn call(
         &self,
         ctx: &'c Context,
@@ -415,28 +395,6 @@ impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
 
     fn unit_value(&self, ctx: &CodegenContext<'_, 'c>, loc: Location<'c>) -> Value<'c, 'c> {
         self.const_i64(ctx.mlir, 0, loc)
-    }
-
-    fn ret(&self, _ctx: &'c Context, values: &[Value<'c, 'c>], loc: Location<'c>) -> Operation<'c> {
-        melior::dialect::func::r#return(values, loc)
-    }
-
-    fn call_void(
-        &self,
-        ctx: &'c Context,
-        func_name: &str,
-        args: &[Value<'c, 'c>],
-        loc: Location<'c>,
-    ) {
-        let callee_id = Identifier::new(ctx, "callee");
-        let symbol_ref = ctx.symbol_ref_attr(func_name);
-        self.append_operation(
-            OperationBuilder::new("func.call", loc)
-                .add_attributes(&[(callee_id, symbol_ref)])
-                .add_operands(args)
-                .build()
-                .expect("func.call build should succeed"),
-        );
     }
 
     fn call(
@@ -608,38 +566,4 @@ impl Predicates {
     pub const UGT: u64 = 7;
     pub const ULE: u64 = 8;
     pub const UGE: u64 = 9;
-}
-
-/// Arithmetic operation names.
-pub struct ArithOps;
-impl ArithOps {
-    pub const ADD: &str = "arith.addi";
-    pub const SUB: &str = "arith.subi";
-    pub const MUL: &str = "arith.muli";
-    pub const DIV: &str = "arith.divsi";
-    pub const DIVU: &str = "arith.divui";
-    pub const REM: &str = "arith.remsi";
-    pub const REMU: &str = "arith.remui";
-    pub const ADDF: &str = "arith.addf";
-    pub const SUBF: &str = "arith.subf";
-    pub const MULF: &str = "arith.mulf";
-    pub const DIVF: &str = "arith.divf";
-    pub const REMF: &str = "arith.remf";
-    pub const ANDI: &str = "arith.andi";
-    pub const ORI: &str = "arith.ori";
-    pub const XORI: &str = "arith.xori";
-    pub const SHLI: &str = "arith.shli";
-    pub const SHRI: &str = "arith.shrsi";
-    pub const SHRUI: &str = "arith.shrui";
-}
-
-/// Floating-point comparison predicates for `arith.cmpf`.
-pub struct FPredicates;
-impl FPredicates {
-    pub const OEQ: u64 = 1;
-    pub const OGT: u64 = 2;
-    pub const OGE: u64 = 3;
-    pub const OLT: u64 = 4;
-    pub const OLE: u64 = 5;
-    pub const ONE: u64 = 6;
 }

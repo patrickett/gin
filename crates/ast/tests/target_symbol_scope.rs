@@ -6,8 +6,11 @@ use typecheck::FileId;
 use typecheck::transform::{TransformCtx, transform};
 
 const TARGET_FIXTURE: &str = r#"
-Target has arch Architecture, vendor Vendor, os OperatingSystem
-Target.Default has default: (arch: 'x86_64', vendor: 'unknown', os: 'unknown')
+Target has Default
+    arch Architecture
+    vendor Vendor
+    os OperatingSystem
+    Default.default: (arch: 'x86_64', vendor: 'unknown', os: 'unknown')
 
 target Target
 "#;
@@ -30,7 +33,7 @@ fn unknown_symbols(typed: &typecheck::TypedFileAst) -> Vec<String> {
 #[test]
 fn target_gin_target_type_not_unknown_single_file() {
     let mut file_ast = TokenCursor::parse_source(TARGET_FIXTURE);
-    let _ = typecheck::prepare_file_ast(&mut file_ast, &CompileTarget::Library);
+    let _ = typecheck::prepare_parse_ast(&mut file_ast, &CompileTarget::Library);
     let typed = transform(&file_ast, FileId(0), &TransformCtx::new());
     let unknown = unknown_symbols(&typed);
     assert!(
@@ -47,8 +50,11 @@ fn target_gin_target_type_not_unknown_single_file() {
 #[test]
 fn target_gin_target_type_not_unknown_minimal() {
     let source = r#"
-Target has arch Architecture, vendor Vendor, os OperatingSystem
-Target.Default has default: (arch: 'x86_64', vendor: 'unknown', os: 'unknown')
+Target has Default
+    arch Architecture
+    vendor Vendor
+    os OperatingSystem
+    Default.default: (arch: 'x86_64', vendor: 'unknown', os: 'unknown')
 
 target Target
 "#;
@@ -63,7 +69,7 @@ target Target
 fn transform_file_from_str(source: &str, prepare: bool) -> typecheck::TypedFileAst {
     let mut file_ast = TokenCursor::parse_source(source);
     if prepare {
-        let _ = typecheck::prepare_file_ast(&mut file_ast, &CompileTarget::Library);
+        let _ = typecheck::prepare_parse_ast(&mut file_ast, &CompileTarget::Library);
     }
     transform(&file_ast, FileId(0), &TransformCtx::new())
 }

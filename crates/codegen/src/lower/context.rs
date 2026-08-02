@@ -1,7 +1,6 @@
 //! Codegen context carrying MLIR state, type info, and symptom collection.
 //! This module provides:
 //!
-//! - [`TypeInfo`] — information about a type's min/max range and bit width
 //! - [`CodegenContext`] — the central context object shared across all lowering
 //! - Helper functions for computing line/column positions in source
 
@@ -14,42 +13,17 @@ use std::{
 use crate::ScopedSymbolTable;
 use crate::mlir_ext::{BlockExt, ContextExt, OperationBuilderExt};
 use ::span::{SpanId, SpanTable};
+use ast::Pattern;
 use ast::source::{LineStartsExt, SourceExt};
-use ast::{Bind, SymbolTable as CompileTimeSymbolTable, TypeExpr};
 use diagnostic::Diagnostic;
-use i256::I256;
 use internment::Intern;
 use melior::Context;
 use melior::ir::Location;
 use melior::ir::{BlockRef, Value, operation::OperationBuilder};
+use typecheck::TypedFileAst;
 use typecheck::VariantLookupResult;
-use typecheck::analysis::{LocalTypes, TyInferEnv};
 use typecheck::compile_time_trait::CompileTimeTraitRegistry;
 use typecheck::ty::Ty;
-use typecheck::{DefId, TagId, TypedFileAst};
-
-#[derive(Debug, Clone)]
-pub struct TypeInfo {
-    pub min: I256,
-    pub max: I256,
-}
-
-impl TypeInfo {
-    pub fn bit_width(&self) -> u32 {
-        let range = self.max - self.min;
-        if range <= I256::from_i128(u8::MAX as i128 + 1) {
-            8
-        } else if range <= I256::from_i128(u16::MAX as i128 + 1) {
-            16
-        } else if range <= I256::from_i128(u32::MAX as i128 + 1) {
-            32
-        } else if range <= I256::from_i128(u64::MAX as i128 + 1) {
-            64
-        } else {
-            128
-        }
-    }
-}
 
 /// Collects codegen-level symptoms (errors, warnings) during lowering.
 ///
@@ -137,11 +111,6 @@ impl StringRegistry {
         name
     }
 
-    /// All registered string literals for emitting as globals.
-    pub fn literals(&self) -> Vec<String> {
-        self.literals.borrow().clone()
-    }
-
     /// Consume the registry and return all registered string literals.
     pub fn into_literals(self) -> Vec<String> {
         self.literals.into_inner()
@@ -177,18 +146,11 @@ pub struct CodegenContext<'a, 'c> {
     pub typed_ast: Option<&'a TypedFileAst>,
     /// Compile-time trait registry (e.g. `Sized`, `Copy`) for querying type-level properties.
     pub trait_registry: Option<&'a CompileTimeTraitRegistry>,
-    pub type_info: &'a HashMap<Intern<String>, TypeInfo>,
-    pub symbol_table: &'a CompileTimeSymbolTable,
     /// Intern<String>-keyed tag types (converted from TagId-keyed TypedFileAst on construction).
     pub tag_types: HashMap<Intern<String>, Ty>,
     /// Intern<String>-keyed fn return types (converted from DefId-keyed TypedFileAst on construction).
     pub fn_return_types: HashMap<Intern<String>, Ty>,
     pub strings: StringRegistry,
-    /// Maps variable name → its resolved Ty, used for field-access lowering.
-    pub var_types: RefCell<HashMap<Intern<String>, Ty>>,
-
-    /// Element type of global constant arrays (top-level `:=` TupleLit binds), keyed by name.
-    pub global_const_elems: RefCell<HashMap<String, Ty>>,
     pub symptoms: SymptomCollector,
     pub current_span: Cell<SpanId>,
     pub source_filename: String,
@@ -203,8 +165,6 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         mlir: &'c Context,
         typed_ast: Option<&'a TypedFileAst>,
         trait_registry: Option<&'a CompileTimeTraitRegistry>,
-        type_info: &'a HashMap<Intern<String>, TypeInfo>,
-        symbol_table: &'a CompileTimeSymbolTable,
         source: &'a str,
         filename: &str,
         span_table: &'a SpanTable,
@@ -231,12 +191,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
             trait_registry,
             tag_types,
             fn_return_types,
-            type_info,
-            symbol_table,
             strings: StringRegistry::new(),
-            var_types: RefCell::new(HashMap::new()),
-
-            global_const_elems: RefCell::new(HashMap::new()),
             symptoms: SymptomCollector::new(),
             current_span: Cell::new(SpanId::INVALID),
             source_filename: filename.to_string(),
@@ -246,61 +201,11 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         }
     }
 
-    pub fn lookup_tag(&self, name: Intern<String>) -> Option<&Ty> {
-        self.typed_ast
-            .and_then(|typed| typed.tag_types.get(&TagId(name)))
-    }
-
     pub fn lookup_variant(&self, name: Intern<String>) -> Option<VariantLookupResult<'_>> {
         self.typed_ast
             .and_then(|typed| typed.variant_map.get(&name))
             .and_then(|candidates| candidates.first())
             .map(|(union, idx, fields)| (*union, *idx, fields.as_slice()))
-    }
-
-    pub fn fn_return_ty(&self, name: &Intern<String>) -> Option<&Ty> {
-        self.typed_ast
-            .and_then(|typed| typed.fn_return_types.get(&DefId(*name)))
-    }
-
-    pub fn infer_env(&'a self, locals: &'a dyn LocalTypes) -> TyInferEnv<'a> {
-        TyInferEnv {
-            tag_types: &self.tag_types,
-            fn_return_types: &self.fn_return_types,
-            locals,
-            tag_params: None,
-        }
-    }
-
-    pub fn resolve_type_surface(&self, e: &TypeExpr) -> Option<Ty> {
-        e.is_type_surface()
-            .then(|| typecheck::analysis::TypeEnv::new(&self.tag_types).resolve(e))
-    }
-
-    pub fn param_types<'b>(&self, bind: &'b Bind) -> Vec<(&'b Intern<String>, Ty)> {
-        match bind.params.as_ref() {
-            None => vec![],
-            Some(params) => {
-                let subst = bind
-                    .receiver_type_surface()
-                    .map(|sp| sp.value.typevars_from_receiver())
-                    .unwrap_or_default();
-                params
-                    .iter()
-                    .map(|(name, kind)| {
-                        let ty = typecheck::analysis::resolve_parameter_kind_with_subst(
-                            *name,
-                            kind,
-                            &self.tag_types,
-                            &self.fn_return_types,
-                            &subst,
-                            None,
-                        );
-                        (name, ty)
-                    })
-                    .collect()
-            }
-        }
     }
 
     pub fn location(&self) -> Location<'c> {
@@ -380,11 +285,11 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
     pub fn bind_pattern_payload_fields(
         &self,
         block: &BlockRef<'c, 'c>,
-        pattern: &TypeExpr,
+        pattern: &Pattern,
         subject_val: Value<'c, 'c>,
         symtab: &mut ScopedSymbolTable<'c>,
     ) {
-        if let TypeExpr::Generic { params, .. } = pattern {
+        if let Pattern::Generic { params, .. } = pattern {
             let variant_name = Intern::<String>::from_ref(pattern.surface_mangle_name());
             let payload_fields = self
                 .lookup_variant(variant_name)
@@ -418,11 +323,5 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 symtab.insert(*param_name, extracted, field_ty.clone(), false);
             }
         }
-    }
-}
-
-impl LocalTypes for CodegenContext<'_, '_> {
-    fn get_type(&self, name: &Intern<String>) -> Option<Ty> {
-        self.var_types.borrow().get(name).cloned()
     }
 }

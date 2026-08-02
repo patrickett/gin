@@ -3,7 +3,7 @@
 use internment::Intern;
 use std::collections::{HashMap, HashSet};
 
-use crate::{ConstExpr, ConstValue, HashFloat};
+use crate::{NormalExpr, ConstValue, HashFloat};
 use std::fmt;
 
 /// One union variant with an optional indexed result type.
@@ -31,19 +31,19 @@ impl UnionVariant {
 /// The right-hand side is a const expression (variable ref or literal).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PredicateExpr {
-    Lt(ConstExpr),
-    Gt(ConstExpr),
-    Le(ConstExpr),
-    Ge(ConstExpr),
-    Eq(ConstExpr),
-    Ne(ConstExpr),
+    Lt(NormalExpr),
+    Gt(NormalExpr),
+    Le(NormalExpr),
+    Ge(NormalExpr),
+    Eq(NormalExpr),
+    Ne(NormalExpr),
     And(Vec<PredicateExpr>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TyArg {
     Type(Box<Ty>),
-    Const(ConstExpr),
+    Const(NormalExpr),
 }
 
 impl fmt::Display for TyArg {
@@ -98,7 +98,7 @@ pub enum Ty {
     /// Fixed-size stack-allocated array (`(T.new; N)`). The value is a `!llvm.ptr`.
     Array {
         elem: Box<Ty>,
-        size: ConstExpr,
+        size: NormalExpr,
     },
     /// Raw pointer — erases `T` from layout, kept only for type checking. Maps to `!llvm.ptr`.
     Ptr {
@@ -405,7 +405,7 @@ impl Ty {
             ),
             Ty::Array { elem, size } => {
                 let size_val = match size {
-                    ConstExpr::Value(v) => v.clone(),
+                    NormalExpr::Value(v) => v.clone(),
                     _ => ConstValue::Int(0),
                 };
                 Self::tag("Array", vec![elem.to_const_value_inner(seen), size_val])

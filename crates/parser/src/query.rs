@@ -144,8 +144,75 @@ impl SourceParseExt for str {
             );
         }
 
-        ParseOutput { ast, symptoms }
+        let is_incomplete = tokens_are_incomplete(&tokens);
+        ParseOutput {
+            ast,
+            symptoms,
+            is_incomplete,
+        }
     }
+}
+
+fn tokens_are_incomplete(tokens: &[(Token<'_>, SpanId)]) -> bool {
+    let mut delimiters = Vec::new();
+    let mut last = None;
+
+    for (token, _) in tokens {
+        match token {
+            Token::ParenOpen => delimiters.push(Token::ParenClose),
+            Token::BracketOpen => delimiters.push(Token::BracketClose),
+            Token::CurlyOpen => delimiters.push(Token::CurlyClose),
+            Token::ParenClose | Token::BracketClose | Token::CurlyClose => {
+                if delimiters.last() == Some(token) {
+                    delimiters.pop();
+                }
+            }
+            Token::UnterminatedString(_) | Token::UnterminatedFormatString => return true,
+            _ => {}
+        }
+
+        if !matches!(
+            token,
+            Token::Newline | Token::Indent | Token::Dedent | Token::Comment(_)
+        ) {
+            last = Some(token);
+        }
+    }
+
+    !delimiters.is_empty()
+        || matches!(
+            last,
+            Some(
+                Token::Ampersand
+                    | Token::And
+                    | Token::ArrowLeft
+                    | Token::Caret
+                    | Token::Colon
+                    | Token::ColonEq
+                    | Token::Comma
+                    | Token::Dot
+                    | Token::Eq
+                    | Token::EqEq
+                    | Token::Greater
+                    | Token::GreaterEq
+                    | Token::In
+                    | Token::Is
+                    | Token::Less
+                    | Token::LessEq
+                    | Token::Minus
+                    | Token::NotEq
+                    | Token::Or
+                    | Token::Percent
+                    | Token::Pipe
+                    | Token::Plus
+                    | Token::ShiftLeft
+                    | Token::ShiftRight
+                    | Token::Slash
+                    | Token::SlashOr
+                    | Token::Star
+                    | Token::Then
+            )
+        )
 }
 
 /// Full output from parsing source text, including all diagnostic info.
@@ -155,6 +222,13 @@ pub struct ParseOutput {
     pub ast: FileAst,
     /// All diagnostics collected during lexing and parsing.
     pub symptoms: Vec<Diagnostic>,
+    is_incomplete: bool,
+}
+
+impl ParseOutput {
+    pub fn is_incomplete(&self) -> bool {
+        self.is_incomplete
+    }
 }
 
 /// Extension trait providing hint/helper methods on [`FileAst`].

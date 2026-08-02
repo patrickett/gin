@@ -414,7 +414,8 @@ fn consecutive_inline_and_complexity_attributes_parse() {
 
 #[test]
 fn record_declaration_with_provided_trait_parses_ast_shape() {
-    let source = "Capacity has count PointerSize\nCapacity.IsEmpty has is_empty: self.count > 0\n";
+    let source =
+        "Capacity has IsEmpty\n    count PointerSize\n    IsEmpty.is_empty: self.count > 0\n";
     let ast = assert_handwritten_parses(source);
     let cap_tag = ast
         .tags
@@ -442,7 +443,7 @@ fn record_declaration_with_provided_trait_parses_ast_shape() {
 
 #[test]
 fn record_declaration_with_multiple_provided_traits_parse() {
-    let source = "Capacity has count PointerSize\nCapacity.IsEmpty has is_empty: self.count > 0\nCapacity.Display has text: 'capacity'\n";
+    let source = "Capacity has IsEmpty and Display\n    count PointerSize\n    IsEmpty.is_empty: self.count > 0\n    Display.text: 'capacity'\n";
     let ast = assert_handwritten_parses(source);
     let decl = ast
         .tags
@@ -455,6 +456,8 @@ fn record_declaration_with_multiple_provided_traits_parse() {
         .map(|pt| pt.trait_name.as_str())
         .collect();
     assert_eq!(trait_names, ["IsEmpty", "Display"]);
+    assert_eq!(decl.provided_traits[0].fields[0].0.as_str(), "is_empty");
+    assert_eq!(decl.provided_traits[1].fields[0].0.as_str(), "text");
 }
 
 #[test]
@@ -533,8 +536,9 @@ fn qualified_conflicting_methods_have_distinct_canonical_names() {
 }
 
 #[test]
-fn dot_provided_trait_attaches_to_declaration() {
-    let source = "Capacity has count PointerSize\nCapacity.IsEmpty has is_empty: self.count > 0\n";
+fn qualified_trait_property_attaches_to_declaration() {
+    let source =
+        "Capacity has IsEmpty\n    count PointerSize\n    IsEmpty.is_empty: self.count > 0\n";
     let ast = assert_handwritten_parses(source);
     let decl = ast
         .tags
@@ -551,8 +555,8 @@ fn dot_provided_trait_attaches_to_declaration() {
 }
 
 #[test]
-fn dot_impl_of_composed_interface_flattens_components() {
-    let source = "Input has read\nOutput has write\nInOut is Input and Output\nX0.InOut\n";
+fn provided_composed_interface_flattens_components() {
+    let source = "Input has read\nOutput has write\nInOut is Input and Output\nX0 has InOut\n";
     let ast = assert_handwritten_parses(source);
     let decl = ast
         .tags

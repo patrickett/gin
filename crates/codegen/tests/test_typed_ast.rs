@@ -6,31 +6,11 @@
 //! 3. Lower to MLIR via build_module_from_typed_ast
 //! 4. Verify the MLIR output contains expected operations
 
-use codegen::CodegenContext;
-use melior::Context;
-use typecheck::FileId;
-use typecheck::transform::transform_file;
+mod support;
 
-/// Helper: parse and transform Gin source into a TypedFileAst, then lower to MLIR.
 fn typed_codegen_to_mlir(source: &str, filename: &str) -> Option<String> {
-    // 1. Parse
-    let file_ast = parser::parse_from_str(source);
-
-    // 2. Transform to TypedFileAst
-    let typed = transform_file(file_ast, FileId(0));
-
-    // 3. Set up MLIR context with required dialects
-    let context = Context::new();
-    melior::dialect::DialectHandle::llvm().register_dialect(&context);
-    context.get_or_load_dialect("arith");
-    context.get_or_load_dialect("func");
-    context.get_or_load_dialect("scf");
-    context.get_or_load_dialect("llvm");
-
-    // 4. Lower to MLIR using typed AST path
-    let (module, _symptoms) =
-        CodegenContext::build_module_from_typed_ast(&context, &typed, source, filename, None);
-    Some(module?.as_operation().to_string())
+    let (text, _) = support::codegen_to_mlir_text(source, filename, false);
+    Some(text)
 }
 
 #[test]

@@ -37,9 +37,6 @@ pub trait GinPackageExt {
     /// declaration (`Tag is …`, `Tag has …`, `name:` or `name :=`.
     fn find_public_def(&self, symbol_name: &str) -> Option<PathBuf>;
 
-    /// Whether `symbol_name` is a public definition under this directory.
-    fn check_public_def(&self, symbol_name: &str) -> bool;
-
     /// Resolve path dependencies from a flask config relative to this package root.
     fn resolve_flask_dependencies(&self, config: &FlaskConfig) -> HashMap<String, PathBuf>;
 
@@ -92,10 +89,6 @@ impl GinPackageExt for Path {
 
     fn find_public_def(&self, symbol_name: &str) -> Option<PathBuf> {
         crate::public_symbols::find_public_def(self, symbol_name, true)
-    }
-
-    fn check_public_def(&self, symbol_name: &str) -> bool {
-        self.find_public_def(symbol_name).is_some()
     }
 
     fn resolve_flask_dependencies(&self, config: &FlaskConfig) -> HashMap<String, PathBuf> {

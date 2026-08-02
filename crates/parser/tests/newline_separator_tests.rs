@@ -9,30 +9,10 @@
 //! - Declare (tag) parameter lists
 //! - `has` member lists
 
-use internment::Intern;
 use parser::query::SourceParseExt;
 
-fn intern(s: &str) -> Intern<String> {
-    Intern::new(s.to_owned())
-}
-
-fn has_def(out: &parser::query::ParseOutput, name: &str) -> bool {
-    out.ast.defs.contains_key(&intern(name))
-}
-
-fn has_tag(out: &parser::query::ParseOutput, name: &str) -> bool {
-    out.ast.tags.contains_key(&intern(name))
-}
-
-fn count_errors(out: &parser::query::ParseOutput) -> usize {
-    out.symptoms
-        .iter()
-        .filter(|d| {
-            let msg = &d.message;
-            msg.contains("error") || msg.contains("expected")
-        })
-        .count()
-}
+mod support;
+use support::*;
 
 // ── Function parameters ────────────────────────────────────────────────
 

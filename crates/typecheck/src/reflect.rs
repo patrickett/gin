@@ -140,7 +140,7 @@ fn reflect_ty_to_const_value_inner(ty: &Ty, seen: &mut HashSet<Intern<String>>) 
         ),
         Ty::Array { elem, size } => {
             let size_val = match size {
-                ast::ConstExpr::Value(v) => v.clone(),
+                ast::NormalExpr::Value(v) => v.clone(),
                 _ => ConstValue::Int(0),
             };
             tag(
@@ -218,8 +218,7 @@ pub fn const_value_to_expr(cv: &ConstValue) -> Expr {
     match cv {
         ConstValue::String(s) => Expr::Lit(Literal::String(s.clone())),
         ConstValue::Int(n) => {
-            let n = u128::try_from(*n).unwrap_or(0);
-            Expr::Lit(Literal::Int(n))
+            Expr::Lit(Literal::Int(*n as u128))
         }
         ConstValue::Float(HashFloat(f)) => Expr::Lit(Literal::Float(HashFloat(*f))),
         ConstValue::Tag { name, args, .. } if args.is_empty() => Expr::AnonymousTag(*name),

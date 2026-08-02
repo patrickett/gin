@@ -1,18 +1,17 @@
 //! Parser tests for the ownership system: `eat` consume-parameter syntax
 //! and `eat expr` call-site consume argument syntax.
 
-use ast::{ConstExpr, Expr, ParamConvention, ParameterKind, PredicateExpr, TypeExpr};
+use ast::{NormalExpr, Expr, ParamConvention, ParameterKind, PredicateExpr};
 use internment::Intern;
 use parser::query::SourceParseExt;
 
 #[test]
-fn test_parse_bare_param_is_inferred_by_default() {
+fn test_parse_bare_param_defaults_to_ownership() {
     let src = "print(s String): 0
 ";
     let ast = src.parse_source_full().ast;
     let bind = ast.defs.get(&Intern::from_ref("print")).unwrap();
-    // Bare params default to Inferred; the parser only stores non-default conventions,
-    // so nothing should be in the map for this param.
+    // Default ownership is represented by the absence of an explicit convention.
     assert!(bind.param_conventions.get(&Intern::from_ref("s")).is_none());
 }
 
@@ -28,7 +27,7 @@ return
         bind.param_conventions.get(&Intern::from_ref("db")),
         Some(&ParamConvention::Consume)
     );
-    // Bare params (Inferred, default) are not stored in the map.
+    // Default ownership is not stored in the explicit-convention map.
     assert!(
         bind.param_conventions
             .get(&Intern::from_ref("txn"))
@@ -42,14 +41,14 @@ return
 }
 
 #[test]
-fn test_parse_own_param_with_return_type() {
+fn test_parse_default_owned_param_with_return_type() {
     let src = "consume(s String) Int:
     return 0
 return
 ";
     let ast = src.parse_source_full().ast;
     let bind = ast.defs.get(&Intern::from_ref("consume")).unwrap();
-    // Bare param defaults to Inferred; convention not stored in the map.
+    // Default ownership is not stored in the explicit-convention map.
     assert!(bind.param_conventions.get(&Intern::from_ref("s")).is_none());
     // Return tag should be set (capitalized type annotation)
     assert!(
@@ -67,13 +66,13 @@ fn test_parse_typed_hidden_state_parameters() {
     let params = declaration.params.as_ref().unwrap();
 
     assert!(matches!(
-        params.get(&Intern::from_ref("x")),
-        Some(ParameterKind::Generic)
+        params.get(&Intern::from_ref("x")).map(|param| &param.kind),
+        Some(&ParameterKind::Generic)
     ));
     for name in ["length", "capacity", "storage"] {
         assert!(matches!(
-            params.get(&Intern::from_ref(name)),
-            Some(ParameterKind::Inferred { .. })
+            params.get(&Intern::from_ref(name)).map(|param| &param.kind),
+            Some(&ParameterKind::Inferred { .. })
         ));
     }
 }
@@ -88,8 +87,8 @@ fn test_parse_parameter_refinement_chain() {
     assert_eq!(
         bind.param_refinements.get(&Intern::from_ref("index")),
         Some(&PredicateExpr::And(vec![
-            PredicateExpr::Ge(ConstExpr::from(0)),
-            PredicateExpr::Lt(ConstExpr::Var(Intern::from_ref("n"))),
+            PredicateExpr::Ge(NormalExpr::from(0)),
+            PredicateExpr::Lt(NormalExpr::Var(Intern::from_ref("n"))),
         ]))
     );
 }
@@ -234,10 +233,10 @@ return
             })
             .expect("expected a Bind for 'r'");
 
-        // Check that the return_tag has TypeExpr::Ref wrapping Entity
+        // Check that the return_tag has an Expr::Ref wrapping Entity
         if let Some(return_tag) = &r_bind.return_tag {
             match &return_tag.value {
-                TypeExpr::Ref {
+                Expr::Ref {
                     inner,
                     mutable,
                     group,
@@ -245,13 +244,13 @@ return
                     assert!(!mutable, "expected immutable ref");
                     assert!(group.is_none());
                     match &inner.value {
-                        TypeExpr::Nominal(name, _) => {
+                        Expr::AnonymousTag(name) => {
                             assert_eq!(name.as_str(), "Entity");
                         }
                         other => panic!("expected Nominal inside Ref, got {other:?}"),
                     }
                 }
-                other => panic!("expected TypeExpr::Ref, got {other:?}"),
+                other => panic!("expected Expr::Ref, got {other:?}"),
             }
         } else {
             panic!("expected return_tag to be set for ref type annotation");
@@ -290,7 +289,7 @@ return
 
         if let Some(return_tag) = &r_bind.return_tag {
             match &return_tag.value {
-                TypeExpr::Ref {
+                Expr::Ref {
                     inner,
                     mutable,
                     group,
@@ -298,13 +297,13 @@ return
                     assert!(*mutable, "expected mutable ref");
                     assert!(group.is_none());
                     match &inner.value {
-                        TypeExpr::Nominal(name, _) => {
+                        Expr::AnonymousTag(name) => {
                             assert_eq!(name.as_str(), "Entity");
                         }
                         other => panic!("expected Nominal inside Ref, got {other:?}"),
                     }
                 }
-                other => panic!("expected TypeExpr::Ref, got {other:?}"),
+                other => panic!("expected Expr::Ref, got {other:?}"),
             }
         } else {
             panic!("expected return_tag to be set for mut type annotation");
@@ -356,10 +355,10 @@ fn test_parse_semantic_group_path() {
         .unwrap()
         .get(&Intern::from_ref("ring"))
         .unwrap();
-    let ast::ParameterKind::Tagged(parameter) = parameter else {
+    let ast::ParameterKind::Tagged(parameter) = &parameter.kind else {
         panic!("expected tagged parameter");
     };
-    let TypeExpr::Ref {
+    let Expr::Ref {
         group: Some(group), ..
     } = &parameter.value
     else {
@@ -426,36 +425,37 @@ borrow(ref{r} value Entity) ref{r} Entity: value
         .get(&Intern::from_ref("value"))
         .unwrap();
 
-    for ty in [
-        match parameter {
-            ast::ParameterKind::Tagged(ty) => &ty.value,
-            other => panic!("expected tagged parameter, got {other:?}"),
-        },
-        &bind.return_tag.as_ref().unwrap().value,
-    ] {
-        match ty {
-            TypeExpr::Ref {
-                inner,
-                mutable,
-                group,
-            } => {
-                assert!(!mutable);
-                assert_eq!(
-                    group.as_ref().map(ToString::to_string).as_deref(),
-                    Some("r")
-                );
-                assert!(
-                    matches!(&inner.value, TypeExpr::Nominal(name, _) if name.as_str() == "Entity")
-                );
-            }
-            other => panic!("expected grouped reference type, got {other:?}"),
-        }
-    }
+    let ast::ParameterKind::Tagged(parameter_ty) = &parameter.kind else {
+        panic!("expected tagged parameter");
+    };
+    let Expr::Ref {
+        inner,
+        mutable,
+        group,
+    } = &parameter_ty.value
+    else {
+        panic!("expected grouped parameter reference");
+    };
+    assert!(!mutable);
+    assert_eq!(group.as_ref().map(ToString::to_string).as_deref(), Some("r"));
+    assert!(matches!(&inner.value, Expr::AnonymousTag(name) if name.as_str() == "Entity"));
+
+    let Expr::Ref {
+        inner,
+        mutable,
+        group,
+    } = &bind.return_tag.as_ref().unwrap().value
+    else {
+        panic!("expected grouped return reference");
+    };
+    assert!(!mutable);
+    assert_eq!(group.as_ref().map(ToString::to_string).as_deref(), Some("r"));
+    assert!(matches!(&inner.value, Expr::AnonymousTag(name) if name.as_str() == "Entity"));
 }
 
 #[test]
 fn test_parse_and_has_copy_override() {
-    let src = "Transaction has id Int\nTransaction.Copy has can_copy: False\n";
+    let src = "Transaction has Copy\n    id Int\n    Copy.can_copy: False\n";
     let ast = src.parse_source_full().ast;
     let decl = ast.tags.get(&Intern::from_ref("Transaction")).unwrap();
     let pt = decl

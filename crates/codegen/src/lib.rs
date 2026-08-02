@@ -5,10 +5,8 @@ mod lower;
 mod mlir_ext;
 
 pub use emit::{NativeCompiler, Profile};
-pub use lower::{CodegenContext, TypeInfo};
-pub use mlir_ext::{
-    ArithOps, AttributeExt, BlockExt, ContextExt, FPredicates, OperationBuilderExt, Predicates,
-};
+pub use lower::CodegenContext;
+pub use mlir_ext::{AttributeExt, BlockExt, ContextExt, OperationBuilderExt, Predicates};
 
 use internment::Intern;
 use melior::ir::Value;
@@ -111,16 +109,13 @@ impl<'c> Default for ScopedSymbolTable<'c> {
 pub mod prelude {
     pub use crate::{
         // Extension traits
-        ArithOps,
         AttributeExt,
         BlockExt,
         CodegenContext,
         ContextExt,
-        FPredicates,
         OperationBuilderExt,
         Predicates,
         ScopedSymbolTable,
-        TypeInfo,
     };
     pub use ::ast::*;
     pub use melior::{

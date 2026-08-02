@@ -79,10 +79,6 @@ impl CompileTarget {
         }
     }
 
-    pub fn is_concrete(&self) -> bool {
-        matches!(self, Self::Concrete(_))
-    }
-
     pub fn arch_literal(&self) -> Option<&'static str> {
         match self {
             Self::Library => None,

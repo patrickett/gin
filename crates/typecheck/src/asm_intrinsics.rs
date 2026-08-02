@@ -24,7 +24,7 @@ fn collect_folded_specs(ast: &FileAst) -> HashMap<Intern<String>, ConstValue> {
     ast.defs
         .iter()
         .filter_map(|(name, bind)| {
-            if !bind.is_compile_time {
+            if !bind.is_constant {
                 return None;
             }
             match &bind.value {

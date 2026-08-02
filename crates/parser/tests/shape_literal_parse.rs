@@ -4,13 +4,11 @@
 //! named arguments, shorthand arguments, qualified variant paths,
 //! bare-variant expressions, and nested shape literals.
 
-use ast::{BindValue, Expr, TagCall, TypeExpr};
-use internment::Intern;
+use ast::{BindValue, Expr, TagCall};
 use parser::query::SourceParseExt;
 
-fn intern(s: &str) -> Intern<String> {
-    Intern::new(s.to_owned())
-}
+mod support;
+use support::*;
 
 #[test]
 fn top_level_record_field_write_parses_as_record_set() {
@@ -324,16 +322,16 @@ val Maybe(Int): Some(value: 5)
 
     let val = file.defs.get(&intern("val")).expect("val bind");
 
-    // The `Maybe(Int)` annotation is stored in `return_tag` as a Generic type.
+    // The `Maybe(Int)` annotation is stored in `return_tag` as a TagCall.
     let return_tag = val
         .return_tag
         .as_ref()
         .expect("return_tag should capture Maybe(Int)");
     match &return_tag.value {
-        TypeExpr::Generic { name, params, .. } => {
-            assert_eq!(name.as_str(), "Maybe", "return tag type is Maybe");
-            assert_eq!(params.len(), 1, "one type param");
-            assert_eq!(params[0].0.as_str(), "Int");
+        Expr::TagCall(call) => {
+            assert_eq!(call.name.as_str(), "Maybe", "return tag type is Maybe");
+            assert_eq!(call.args.len(), 1, "one type param");
+            assert!(matches!(call.args[0].value, Expr::AnonymousTag(name) if name.as_str() == "Int"));
         }
         other => panic!("return_tag should be TypeGeneric, got {other:?}"),
     }
@@ -420,10 +418,10 @@ val Maybe(Int): Some(value)
         .as_ref()
         .expect("return_tag should capture Maybe(Int)");
     match &return_tag.value {
-        TypeExpr::Generic { name, params, .. } => {
-            assert_eq!(name.as_str(), "Maybe");
-            assert_eq!(params.len(), 1);
-            assert_eq!(params[0].0.as_str(), "Int");
+        Expr::TagCall(call) => {
+            assert_eq!(call.name.as_str(), "Maybe");
+            assert_eq!(call.args.len(), 1);
+            assert!(matches!(call.args[0].value, Expr::AnonymousTag(name) if name.as_str() == "Int"));
         }
         other => panic!("return_tag should be TypeGeneric, got {other:?}"),
     }
@@ -490,10 +488,10 @@ none Maybe(Int): None
         .as_ref()
         .expect("return_tag should capture Maybe(Int)");
     match &return_tag.value {
-        TypeExpr::Generic { name, params, .. } => {
-            assert_eq!(name.as_str(), "Maybe");
-            assert_eq!(params.len(), 1);
-            assert_eq!(params[0].0.as_str(), "Int");
+        Expr::TagCall(call) => {
+            assert_eq!(call.name.as_str(), "Maybe");
+            assert_eq!(call.args.len(), 1);
+            assert!(matches!(call.args[0].value, Expr::AnonymousTag(name) if name.as_str() == "Int"));
         }
         other => panic!("return_tag should be TypeGeneric, got {other:?}"),
     }

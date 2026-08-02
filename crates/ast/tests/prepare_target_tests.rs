@@ -4,11 +4,11 @@ use ast::ConstValue;
 use flask::{CompileTarget, TargetTriple};
 use internment::Intern;
 use parser::cursor::TokenCursor;
-use typecheck::prepare_file_ast;
+use typecheck::prepare_parse_ast;
 
 fn prepare_source(source: &str, entry: &CompileTarget) -> ast::FileAst {
     let mut ast = TokenCursor::parse_source(source);
-    let _ = prepare_file_ast(&mut ast, entry);
+    let _ = prepare_parse_ast(&mut ast, entry);
     ast
 }
 
@@ -19,8 +19,11 @@ Architecture is 'x86_64' or 'arm64'
 Vendor is 'unknown'
 OperatingSystem is 'unknown'
 Default(value) has default value
-Target has arch Architecture, vendor Vendor, os OperatingSystem
-Target.Default has default: ( arch: 'x86_64', vendor: 'unknown', os: 'unknown', )
+Target has Default
+    arch Architecture
+    vendor Vendor
+    os OperatingSystem
+    Default.default: ( arch: 'x86_64', vendor: 'unknown', os: 'unknown', )
 target := Target.default
 "#;
     let ast = prepare_source(source, &CompileTarget::Library);
@@ -46,7 +49,8 @@ fn default_trait_materializes_kind_variant() {
 Default(value) has default value
 
 Kind is A or B or C
-Kind.Default has default: Kind.A
+Kind has Default
+    Default.default: Kind.A
 
 k Kind
 "#;
@@ -65,8 +69,9 @@ k Kind
 #[test]
 fn record_default_does_not_leak_top_level_defs() {
     let source = r#"
-Target has arch Architecture
-Target.Default has default: ( arch: 'x86_64', )
+Target has Default
+    arch Architecture
+    Default.default: ( arch: 'x86_64', )
 target Target
 "#;
     let ast = TokenCursor::parse_source(source);
@@ -81,8 +86,11 @@ Architecture is 'x86_64' or 'arm64' or 'wasm32'
 Vendor is 'unknown'
 OperatingSystem is 'linux' or 'macOS' or 'windows' or 'unknown'
 Default(value) has default value
-Target has arch Architecture, vendor Vendor, os OperatingSystem
-Target.Default has default: ( arch: 'x86_64', vendor: 'unknown', os: 'unknown', )
+Target has Default
+    arch Architecture
+    vendor Vendor
+    os OperatingSystem
+    Default.default: ( arch: 'x86_64', vendor: 'unknown', os: 'unknown', )
 target Target
 "#;
     let ast = TokenCursor::parse_source(source);
@@ -103,8 +111,11 @@ OperatingSystem is 'linux' or 'macOS' or 'windows' or 'unknown'
 
 Default(value) has default value
 
-Target has arch Architecture, vendor Vendor, os OperatingSystem
-Target.Default has default: ( arch: 'x86_64', vendor: 'unknown', os: 'unknown', )
+Target has Default
+    arch Architecture
+    vendor Vendor
+    os OperatingSystem
+    Default.default: ( arch: 'x86_64', vendor: 'unknown', os: 'unknown', )
 
 target Target
 "#;

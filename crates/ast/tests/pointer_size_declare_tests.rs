@@ -1,12 +1,12 @@
 //! Type-level `PointerSize is when target.arch is …` prepare + resolve.
 
-use ast::{BindValue, ConstValue, DeclareValue, TypeExpr};
+use ast::{BindValue, ConstValue, DeclareValue};
 use flask::{CompileTarget, TargetTriple};
 use internment::Intern;
 use parser::cursor::TokenCursor;
 use typecheck::analysis::when_declare_is_exhaustive;
 use typecheck::{infer_when_declare_subject_ty, materialize_when_declare_subjects_from_package};
-use typecheck::{prepare_file_ast, prepare_package_asts};
+use typecheck::{prepare_parse_ast, prepare_package_asts};
 
 fn target_fixture() -> &'static str {
     r#"
@@ -14,8 +14,11 @@ Architecture is 'x86_64' or 'arm64' or 'wasm32'
 Vendor is 'unknown'
 OperatingSystem is 'unknown'
 Default(value) has default value
-Target has arch Architecture, vendor Vendor, os OperatingSystem
-Target.Default has default: ( arch: 'x86_64', vendor: 'unknown', os: 'unknown', )
+Target has Default
+    arch Architecture
+    vendor Vendor
+    os OperatingSystem
+    Default.default: ( arch: 'x86_64', vendor: 'unknown', os: 'unknown', )
 target Target
 "#
 }
@@ -61,7 +64,7 @@ fn pointer_size_alias_nominal(ast: &ast::FileAst) -> Option<Intern<String>> {
     let decl = ast.tags.get(&Intern::from_ref("PointerSize"))?;
     match &decl.value {
         DeclareValue::Alias(sp) => match &sp.value {
-            TypeExpr::Nominal(name, _) => Some(*name),
+            ast::Expr::AnonymousTag(name) => Some(*name),
             _ => None,
         },
         _ => None,
@@ -139,7 +142,7 @@ fn pointer_size_exhaustive_subject_ty_covers_architecture() {
         TokenCursor::parse_source(pointer_fixture()),
     ];
     for a in &mut asts {
-        let _ = prepare_file_ast(a, &entry);
+        let _ = prepare_parse_ast(a, &entry);
     }
     let mut merged = ast::FileAst::default();
     for a in &asts {

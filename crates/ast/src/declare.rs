@@ -9,7 +9,7 @@ use std::hash::{Hash, Hasher};
 
 use crate::AttributeItem;
 
-use crate::TypeExpr;
+use crate::Pattern;
 use crate::WhenExpr;
 use crate::prelude::*;
 use crate::span::Spanned;
@@ -46,9 +46,10 @@ pub enum HasFunctionKind {
 /// A property (stored field or computed projection) in a `has` body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HasProperty {
+    pub qualifier: Option<HasMemberQualifier>,
     pub name: Intern<String>,
     pub name_span: SpanId,
-    pub ty: Option<Box<Spanned<TypeExpr>>>,
+    pub ty: Option<Box<Spanned<Expr>>>,
     pub body: Option<HasMemberBody>,
     pub doc_comment: Option<DocComment>,
     pub refinement: Option<PredicateExpr>,
@@ -56,6 +57,7 @@ pub struct HasProperty {
 
 impl Hash for HasProperty {
     fn hash<H: Hasher>(&self, state: &mut H) {
+        self.qualifier.hash(state);
         self.name.hash(state);
         self.name_span.hash(state);
         self.ty.hash(state);
@@ -79,8 +81,8 @@ pub struct HasFunction {
     pub name_span: SpanId,
     pub params: Parameters,
     pub conventions: IndexMap<Intern<String>, ParamConvention>,
-    pub return_ty: Option<Box<Spanned<TypeExpr>>>,
-    pub error_ty: Option<Box<Spanned<TypeExpr>>>,
+    pub return_ty: Option<Box<Spanned<Expr>>>,
+    pub error_ty: Option<Box<Spanned<Expr>>>,
     pub body: Option<HasMemberBody>,
     pub doc_comment: Option<DocComment>,
     pub refinement: Option<PredicateExpr>,
@@ -128,6 +130,9 @@ impl Hash for HasMember {
 
 impl std::fmt::Display for HasProperty {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(qualifier) = &self.qualifier {
+            write!(f, "{}.", qualifier.name.as_str())?;
+        }
         write!(f, "{}", self.name.as_str())?;
         if let Some(ty) = &self.ty {
             write!(f, " {:?}", ty.value)?;
@@ -160,7 +165,7 @@ impl std::fmt::Display for HasFunction {
                     }
                 }
                 write!(f, "{}", k.as_str())?;
-                match v {
+                match &v.kind {
                     ParameterKind::Tagged(sp) => write!(f, " {:?}", sp.value)?,
                     ParameterKind::ValueParam { ty } => write!(f, " {:?} (value)", ty.value)?,
                     ParameterKind::Inferred { ty } => write!(f, " {:?}: ?", ty.value)?,
@@ -219,7 +224,7 @@ impl DeclareAttributes {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeclareValue {
-    Alias(Box<Spanned<TypeExpr>>),
+    Alias(Box<Spanned<Expr>>),
     Union {
         variants: Vec<Variant>,
     },
@@ -240,7 +245,7 @@ impl std::fmt::Display for DeclareValue {
             Self::Union { variants } => {
                 let all_literal = variants
                     .iter()
-                    .all(|v| matches!(v.shape().value, TypeExpr::Literal(..)));
+                    .all(|v| matches!(v.shape().value, Pattern::Literal(..)));
                 if all_literal && !variants.is_empty() {
                     write!(f, "{}", variants[0])?;
                     for v in &variants[1..] {
@@ -302,10 +307,8 @@ impl Hash for DeclareValue {
     }
 }
 
-/// A trait implementation provided by a `Type.Trait has ...` declaration.
-///
-/// For example, in `Capacity.IsEmpty has is_empty: self.count > 0`, this represents
-/// the `IsEmpty has is_empty: self.count > 0` part.
+/// Nominal trait membership and any qualified property implementations collected
+/// from the containing type declaration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProvidedTrait {
     pub trait_name: Intern<String>,

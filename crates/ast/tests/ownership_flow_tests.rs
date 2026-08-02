@@ -136,8 +136,8 @@ return 0
 }
 
 #[test]
-fn test_auto_thread_keeps_copyable_alive() {
-    // Copyable (Int) via bare param — stays alive.
+fn test_default_owned_copy_argument_remains_alive() {
+    // Passing a structurally Copy value by ownership copies it.
     let src = "\
 read(x Int) Int: x
 main:
@@ -149,12 +149,34 @@ return 0
     let has_moved = diags
         .iter()
         .any(|d| d.code.slug() == "type-use-of-moved-value");
-    assert!(!has_moved, "auto-thread copyable: {:?}", diags);
+    assert!(!has_moved, "owned Copy argument moved: {:?}", diags);
 }
 
 #[test]
-fn test_auto_thread_chained_copyable() {
-    // Chained bare calls on copyable type — stays alive.
+fn test_default_owned_non_copy_argument_moves() {
+    let src = "\
+sink(pointer Pointer(Int)): eat pointer
+main:
+    value: 42
+    pointer: @value
+    sink(pointer)
+    result: deref pointer
+return 0
+";
+    let diags = collect_ownership_diagnostics(src);
+
+    assert!(
+        diags
+            .iter()
+            .any(|diagnostic| diagnostic.code.slug() == "type-use-of-moved-value"),
+        "expected owned non-Copy argument to move, got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_default_owned_copy_arguments_can_be_chained() {
+    // Each ownership pass copies a structurally Copy value.
     let src = "\
 add_one(x Int) Int: x + 1
 double(y Int) Int: y * 2
@@ -168,7 +190,106 @@ return r
     let has_moved = diags
         .iter()
         .any(|d| d.code.slug() == "type-use-of-moved-value");
-    assert!(!has_moved, "chained thread copyable: {:?}", diags);
+    assert!(
+        !has_moved,
+        "chained owned Copy arguments moved: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_move_in_when_arm_does_not_poison_sibling_arm() {
+    let src = "\
+sink(pointer Pointer(Int)) Int: eat pointer
+select(flag Int, pointer Pointer(Int)) Int:
+    when flag is
+        0 then sink(pointer)
+        else deref pointer
+";
+    let diags = collect_ownership_diagnostics(src);
+
+    assert!(
+        !diags.iter().any(|diagnostic| matches!(
+            diagnostic.code.slug(),
+            "type-use-of-moved-value" | "type-use-of-maybe-moved-value"
+        )),
+        "exclusive sibling arm saw moved value: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_move_on_one_when_path_is_maybe_moved_after_join() {
+    let src = "\
+sink(pointer Pointer(Int)) Int: eat pointer
+select(flag Int, pointer Pointer(Int)) Int:
+    when flag is
+        0 then sink(pointer)
+        else 0
+    result: deref pointer
+return result
+";
+    let diags = collect_ownership_diagnostics(src);
+
+    assert!(
+        diags
+            .iter()
+            .any(|diagnostic| diagnostic.code.slug() == "type-use-of-maybe-moved-value"),
+        "expected maybe-moved diagnostic after branch join, got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_loop_backedge_rejects_reusing_moved_value() {
+    let src = "\
+sink(pointer Pointer(Int)): eat pointer
+repeat(pointer Pointer(Int)):
+    while 1
+        sink(pointer)
+    loop
+return
+";
+    let diags = collect_ownership_diagnostics(src);
+
+    assert!(
+        diags
+            .iter()
+            .any(|diagnostic| diagnostic.code.slug() == "type-use-of-moved-value"),
+        "expected move error on a possible later iteration, got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_reference_invalidated_on_one_when_path_is_maybe_invalid_after_join() {
+    let src = "\
+Cell has value Int
+sink(cell Cell): eat cell
+check(flag Int, cell Cell) Int:
+    ref saved Cell: cell
+    when flag is
+        0 then sink(cell)
+        else saved.value
+    result: saved.value
+return result
+";
+    let diags = collect_ownership_diagnostics(src);
+
+    assert!(
+        diags.iter().any(|diagnostic| {
+            diagnostic.code.slug() == "type-use-of-maybe-invalidated-reference"
+        }),
+        "expected maybe-invalidated diagnostic after branch join, got: {:?}",
+        diags
+    );
+    assert!(
+        !diags
+            .iter()
+            .any(|diagnostic| diagnostic.code.slug() == "type-use-of-invalidated-reference"),
+        "exclusive sibling arm saw invalidated reference: {:?}",
+        diags
+    );
 }
 
 #[test]
@@ -190,8 +311,8 @@ return 0
 }
 
 #[test]
-fn test_auto_thread_mixed_consume_and_bare() {
-    // Mix of bare and consumed params.
+fn test_default_owned_copy_and_eat_arguments_can_be_mixed() {
+    // Mix a default-owned Copy parameter with an explicitly consumed parameter.
     let src = "\
 pair(a Int, eat b Int) Int: a + b
 main:
@@ -227,8 +348,8 @@ return 0
 }
 
 #[test]
-fn test_consume_arg_on_bare_param_is_error() {
-    // `eat` at call site on a bare (Threaded) param is a contract mismatch.
+fn test_eat_argument_on_default_owned_param_is_error() {
+    // `eat` does not match a default-owned parameter.
     let src = "\
 read(x Int) Int: x
 main:
@@ -237,12 +358,12 @@ main:
 return 0
 ";
     let diags = collect_ownership_diagnostics(src);
-    let has_consume_on_bare = diags
+    let has_mode_mismatch = diags
         .iter()
-        .any(|d| d.code.slug() == "type-consume-arg-on-bare-param");
+        .any(|d| d.code.slug() == "type-consume-arg-on-owned-param");
     assert!(
-        has_consume_on_bare,
-        "expected ConsumeArgOnBareParam, got: {:?}",
+        has_mode_mismatch,
+        "expected consume-on-owned diagnostic, got: {:?}",
         diags
     );
 }
@@ -555,10 +676,21 @@ fn test_copy_inference_record_with_copy_fields_is_copyable() {
 }
 
 #[test]
-fn test_bare_param_is_inferred() {
-    // Parser-level: bare params have no explicit convention stored.
+fn test_bare_param_defaults_to_ownership() {
     let src = "print(s String):\nreturn 0\n";
     let ast = parser::cursor::TokenCursor::parse_source(src);
-    let bind = ast.defs.get(&Intern::from_ref("print")).unwrap();
-    assert!(bind.param_conventions.get(&Intern::from_ref("s")).is_none());
+    let parsed = ast.defs.get(&Intern::from_ref("print")).unwrap();
+    assert!(
+        parsed
+            .param_conventions
+            .get(&Intern::from_ref("s"))
+            .is_none()
+    );
+
+    let typed = transform_file(ast, FileId(0));
+    let bind = typed
+        .defs
+        .get(&typecheck::DefId(Intern::from_ref("print")))
+        .unwrap();
+    assert_eq!(bind.param_conventions, vec![ast::ParamConvention::Own]);
 }

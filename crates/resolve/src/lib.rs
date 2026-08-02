@@ -16,9 +16,8 @@ mod module_loader;
 pub use graph::{ResolveGraph, ResolveNode};
 pub use module_loader::ParsedModuleCache;
 pub use package_resolver::{
-    ImportDependencyGraph, ResolveImportsMode, ResolveImportsWithGraph, resolve_import_symptoms,
-    resolve_imports, resolve_imports_with_cache, resolve_imports_with_graph,
-    resolve_package_imports,
+    ImportDependencyGraph, ResolveImportsWithGraph, resolve_import_symptoms, resolve_imports,
+    resolve_imports_with_graph,
 };
 pub use public_symbols::find_public_def;
 // Re-export per-request queries

@@ -2,9 +2,10 @@ use indexmap::IndexMap;
 use internment::Intern;
 
 use crate::expr::{Expr, Typed};
+use crate::span::SpanId;
 use crate::span::Spanned;
 use crate::ty_state::TyState;
-use crate::{GroupPath, TypeExpr};
+use crate::GroupPath;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ParamConvention {
@@ -32,18 +33,31 @@ pub struct ParamSlot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Parameter {
+    pub kind: ParameterKind,
+    /// Span for the declaration identifier.
+    pub name_span: SpanId,
+}
+
+impl Parameter {
+    pub fn new(name_span: SpanId, kind: ParameterKind) -> Self {
+        Self { kind, name_span }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ParameterKind {
     Generic,
     /// Type annotation for this parameter (`name Type` with no value).
-    Tagged(Box<Spanned<TypeExpr>>),
+    Tagged(Box<Spanned<Expr>>),
     Default(Box<Typed<Expr>>),
     /// Value parameter in a type declaration, e.g. `n Nat` in `Vector(x, n Nat)`.
     /// The wrapped type is the value's type (e.g. `Nat`).
     ValueParam {
-        ty: Box<Spanned<TypeExpr>>,
+        ty: Box<Spanned<Expr>>,
     },
     Inferred {
-        ty: Box<Spanned<TypeExpr>>,
+        ty: Box<Spanned<Expr>>,
     },
 }
 
@@ -69,7 +83,4 @@ pub enum ParamInfo {
     Default(Box<Typed<Expr>>),
 }
 
-// TODO: store a SpanId per parameter so LSP rename/go-to-def/find-references
-// can resolve parameter declarations and body usages precisely.
-// e.g. IndexMap<Intern<String>, (ParameterKind, SpanId)>
-pub type Parameters = IndexMap<Intern<String>, ParameterKind>;
+pub type Parameters = IndexMap<Intern<String>, Parameter>;

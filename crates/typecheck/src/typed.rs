@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use ast::{BinderId, ConstExpr, GroupPath};
+use ast::{BinderId, ConstValue, GroupPath, NormalExpr};
 
 use ast::HashFloat;
 use ast::parameter::{ParamConvention, ParameterKind, Parameters};
@@ -9,12 +9,12 @@ use ast::source::SourceExt;
 use ast::span::{SpanId, SpanTable, SubSpan};
 use ast::ty::ParamKind;
 use ast::ty::PredicateExpr;
-use ast_format::type_expr::TypeExprFormatExt;
+use ast_format::type_expr::ExprFormatExt;
 use diagnostic::Diagnostic;
 use internment::Intern;
 
 use crate::solver::{ConstraintEnv, Predicate, ProveResult};
-use crate::ty::Ty;
+use crate::ty::{Ty, TyArg};
 
 /// Opaque file identifier assigned during compilation coordination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -40,6 +40,25 @@ pub struct VariantId {
 pub struct ExprId(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Availability {
+    Unknown,
+    CompileTime,
+    Runtime,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AvailabilityRequirement {
+    Any,
+    CompileTime,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CallCapability {
+    StagePolymorphic,
+    RuntimeOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GroupId(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,7 +71,7 @@ pub enum Overlap {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TargetIndex {
-    Symbolic(ConstExpr),
+    Symbolic(NormalExpr),
     Unknown,
 }
 
@@ -694,11 +713,11 @@ mod target_overlap_tests {
         }
     }
 
-    fn symbolic(expr: ConstExpr) -> TargetIndex {
+    fn symbolic(expr: NormalExpr) -> TargetIndex {
         TargetIndex::Symbolic(expr)
     }
 
-    fn range(start: ConstExpr, end: ConstExpr) -> ReferenceTargetGroup {
+    fn range(start: NormalExpr, end: NormalExpr) -> ReferenceTargetGroup {
         ReferenceTargetGroup::ItemRange {
             base: Box::new(ReferenceTargetGroup::Local(Intern::from_ref("items"))),
             start: symbolic(start),
@@ -772,8 +791,8 @@ mod target_overlap_tests {
 
     #[test]
     fn distinct_constant_indices_are_disjoint() {
-        let left = item(symbolic(ConstExpr::Value(ConstValue::Int(1))));
-        let right = item(symbolic(ConstExpr::Value(ConstValue::Int(2))));
+        let left = item(symbolic(NormalExpr::Value(ConstValue::Int(1))));
+        let right = item(symbolic(NormalExpr::Value(ConstValue::Int(2))));
 
         assert_eq!(
             left.overlap(&right, &ConstraintEnv::default()),
@@ -784,7 +803,7 @@ mod target_overlap_tests {
     #[test]
     fn fields_beneath_distinct_items_are_disjoint() {
         let field = |index| ReferenceTargetGroup::Field {
-            base: Box::new(item(symbolic(ConstExpr::Value(ConstValue::Int(index))))),
+            base: Box::new(item(symbolic(NormalExpr::Value(ConstValue::Int(index))))),
             index: 0,
         };
 
@@ -796,7 +815,7 @@ mod target_overlap_tests {
 
     #[test]
     fn same_symbolic_index_is_equal() {
-        let index = symbolic(ConstExpr::Var(Intern::from_ref("i")));
+        let index = symbolic(NormalExpr::Var(Intern::from_ref("i")));
 
         assert_eq!(
             item(index.clone()).overlap(&item(index), &ConstraintEnv::default()),
@@ -806,8 +825,8 @@ mod target_overlap_tests {
 
     #[test]
     fn constrained_unequal_indices_are_disjoint() {
-        let i = ConstExpr::Var(Intern::from_ref("i"));
-        let j = ConstExpr::Var(Intern::from_ref("j"));
+        let i = NormalExpr::Var(Intern::from_ref("i"));
+        let j = NormalExpr::Var(Intern::from_ref("j"));
         let constraints = ConstraintEnv {
             known_lt: vec![(i.clone(), j.clone())],
             ..ConstraintEnv::default()
@@ -821,8 +840,8 @@ mod target_overlap_tests {
 
     #[test]
     fn constrained_equal_indices_are_equal() {
-        let i = ConstExpr::Var(Intern::from_ref("i"));
-        let j = ConstExpr::Var(Intern::from_ref("j"));
+        let i = NormalExpr::Var(Intern::from_ref("i"));
+        let j = NormalExpr::Var(Intern::from_ref("j"));
         let constraints = ConstraintEnv {
             known_eq: vec![(i.clone(), j.clone())],
             ..ConstraintEnv::default()
@@ -836,8 +855,8 @@ mod target_overlap_tests {
 
     #[test]
     fn unrelated_symbolic_indices_have_unknown_overlap() {
-        let left = symbolic(ConstExpr::Var(Intern::from_ref("i")));
-        let right = symbolic(ConstExpr::Var(Intern::from_ref("j")));
+        let left = symbolic(NormalExpr::Var(Intern::from_ref("i")));
+        let right = symbolic(NormalExpr::Var(Intern::from_ref("j")));
 
         assert_eq!(
             item(left).overlap(&item(right), &ConstraintEnv::default()),
@@ -847,9 +866,9 @@ mod target_overlap_tests {
 
     #[test]
     fn item_before_range_is_disjoint() {
-        let index = ConstExpr::Value(ConstValue::Int(1));
-        let start = ConstExpr::Value(ConstValue::Int(2));
-        let end = ConstExpr::Value(ConstValue::Int(5));
+        let index = NormalExpr::Value(ConstValue::Int(1));
+        let start = NormalExpr::Value(ConstValue::Int(2));
+        let end = NormalExpr::Value(ConstValue::Int(5));
 
         assert_eq!(
             item(symbolic(index)).overlap(&range(start, end), &ConstraintEnv::default()),
@@ -859,9 +878,9 @@ mod target_overlap_tests {
 
     #[test]
     fn item_inside_range_partially_overlaps() {
-        let index = ConstExpr::Value(ConstValue::Int(3));
-        let start = ConstExpr::Value(ConstValue::Int(2));
-        let end = ConstExpr::Value(ConstValue::Int(5));
+        let index = NormalExpr::Value(ConstValue::Int(3));
+        let start = NormalExpr::Value(ConstValue::Int(2));
+        let end = NormalExpr::Value(ConstValue::Int(5));
 
         assert_eq!(
             item(symbolic(index)).overlap(&range(start, end), &ConstraintEnv::default()),
@@ -872,12 +891,12 @@ mod target_overlap_tests {
     #[test]
     fn adjacent_ranges_are_disjoint() {
         let left = range(
-            ConstExpr::Value(ConstValue::Int(0)),
-            ConstExpr::Value(ConstValue::Int(2)),
+            NormalExpr::Value(ConstValue::Int(0)),
+            NormalExpr::Value(ConstValue::Int(2)),
         );
         let right = range(
-            ConstExpr::Value(ConstValue::Int(2)),
-            ConstExpr::Value(ConstValue::Int(4)),
+            NormalExpr::Value(ConstValue::Int(2)),
+            NormalExpr::Value(ConstValue::Int(4)),
         );
 
         assert_eq!(
@@ -889,8 +908,8 @@ mod target_overlap_tests {
     #[test]
     fn equal_ranges_are_equal() {
         let left = range(
-            ConstExpr::Value(ConstValue::Int(1)),
-            ConstExpr::Value(ConstValue::Int(4)),
+            NormalExpr::Value(ConstValue::Int(1)),
+            NormalExpr::Value(ConstValue::Int(4)),
         );
         let right = left.clone();
 
@@ -903,12 +922,12 @@ mod target_overlap_tests {
     #[test]
     fn intersecting_ranges_partially_overlap() {
         let left = range(
-            ConstExpr::Value(ConstValue::Int(1)),
-            ConstExpr::Value(ConstValue::Int(4)),
+            NormalExpr::Value(ConstValue::Int(1)),
+            NormalExpr::Value(ConstValue::Int(4)),
         );
         let right = range(
-            ConstExpr::Value(ConstValue::Int(3)),
-            ConstExpr::Value(ConstValue::Int(6)),
+            NormalExpr::Value(ConstValue::Int(3)),
+            NormalExpr::Value(ConstValue::Int(6)),
         );
 
         assert_eq!(
@@ -981,6 +1000,8 @@ pub struct TypedExpr {
     pub span: SpanId,
     /// Compile-time constant value, if this expression can be folded.
     pub const_value: Option<ast::ConstValue>,
+    /// Staging availability of this expression.
+    pub availability: Availability,
     pub target_group: Option<ReferenceTargetSet>,
     /// Type/flow/flaw diagnostics attached to this expression.
     pub flaws: Vec<Diagnostic>,
@@ -1017,7 +1038,7 @@ pub enum TypedWhenArm {
         arm_span: SubSpan,
     },
     Is {
-        pattern: Box<ast::span::Spanned<TypeExpr>>,
+        pattern: Box<ast::span::Spanned<ast::Pattern>>,
         body: ExprId,
         /// Span of this is-arm (pattern and body).
         arm_span: SubSpan,
@@ -1029,8 +1050,8 @@ pub enum TypedWhenArm {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedIfExpr {
     pub subject: ExprId,
-    /// Parsed `is …` pattern — structural [`TypeExpr`] (`Nominal` / `Qualified` / `Generic`).
-    pub pattern: Box<ast::span::Spanned<TypeExpr>>,
+    /// Parsed `is …` pattern — a dedicated pattern with nominal, qualified, and generic forms.
+    pub pattern: Box<ast::span::Spanned<ast::Pattern>>,
     pub stmts: Vec<ExprId>,
     pub ret: Option<ExprId>,
     /// Covers from condition start to end (excludes the `if` keyword).
@@ -1116,7 +1137,7 @@ pub enum TypedExprKind {
 
     TupleAlloc {
         init: ExprId,
-        size: ConstExpr,
+        size: NormalExpr,
     },
     TupleGet {
         base: ExprId,
@@ -1162,6 +1183,138 @@ pub enum TypedExprKind {
     Eat(ExprId),
 
     Asm(AsmExpr),
+}
+
+pub fn walk_expr_children(
+    kind: &TypedExprKind,
+    visit: &mut impl FnMut(ExprId) -> std::ops::ControlFlow<()>,
+) -> std::ops::ControlFlow<()> {
+    use std::ops::ControlFlow::Continue;
+
+    match kind {
+        TypedExprKind::Binary { lhs, rhs, .. } => {
+            visit(*lhs)?;
+            visit(*rhs)?;
+        }
+        TypedExprKind::FnCall { args, .. } | TypedExprKind::TagCall { args, .. } => {
+            if let Some(args) = args {
+                for child in args {
+                    visit(*child)?;
+                }
+            }
+        }
+        TypedExprKind::Bind {
+            stmts,
+            body,
+            unassigned,
+            ..
+        } => {
+            for child in stmts {
+                visit(*child)?;
+            }
+            if !unassigned {
+                visit(*body)?;
+            }
+        }
+        TypedExprKind::Reassign { value, .. } | TypedExprKind::Destructure { value, .. } => {
+            visit(*value)?
+        }
+        TypedExprKind::When(when_expr) => {
+            if let Some(subject) = when_expr.subject {
+                visit(subject)?;
+            }
+            for arm in &when_expr.arms {
+                match arm {
+                    TypedWhenArm::Cond {
+                        condition, body, ..
+                    } => {
+                        visit(*condition)?;
+                        visit(*body)?;
+                    }
+                    TypedWhenArm::Is { body, .. } | TypedWhenArm::Else(body, _) => visit(*body)?,
+                }
+            }
+        }
+        TypedExprKind::If(if_expr) => {
+            visit(if_expr.subject)?;
+            for child in &if_expr.stmts {
+                visit(*child)?;
+            }
+            if let Some(child) = if_expr.ret {
+                visit(child)?;
+            }
+        }
+        TypedExprKind::Loop(loop_expr) => {
+            match loop_expr.kind {
+                TypedLoopKind::While { condition } => visit(condition)?,
+                TypedLoopKind::ForIn { iterable, .. } => visit(iterable)?,
+            }
+            for child in &loop_expr.stmts {
+                visit(*child)?;
+            }
+        }
+        TypedExprKind::Range { start, end } => {
+            visit(*start)?;
+            visit(*end)?;
+        }
+        TypedExprKind::TupleLit(children) | TypedExprKind::List(children) => {
+            for child in children {
+                visit(*child)?;
+            }
+        }
+        TypedExprKind::Cast { expr, .. }
+        | TypedExprKind::TupleAlloc { init: expr, .. }
+        | TypedExprKind::TupleGet { base: expr, .. }
+        | TypedExprKind::TakePtr(expr)
+        | TypedExprKind::Ref(expr)
+        | TypedExprKind::Deref(expr)
+        | TypedExprKind::Negate(expr)
+        | TypedExprKind::ConsumeArg(expr)
+        | TypedExprKind::Eat(expr) => visit(*expr)?,
+        TypedExprKind::TupleSet { base, value, .. }
+        | TypedExprKind::RecordSet { base, value, .. } => {
+            visit(*base)?;
+            visit(*value)?;
+        }
+        TypedExprKind::BufGet { buf, index } => {
+            visit(*buf)?;
+            visit(*index)?;
+        }
+        TypedExprKind::BufSet { buf, index, value } => {
+            visit(*buf)?;
+            visit(*index)?;
+            visit(*value)?;
+        }
+        TypedExprKind::Lit(_)
+        | TypedExprKind::SelfRef { .. }
+        | TypedExprKind::FormatString(_)
+        | TypedExprKind::Asm(_) => {}
+    }
+    Continue(())
+}
+
+pub fn walk_expr_preorder(
+    typed: &TypedFileAst,
+    root: ExprId,
+    visit: &mut impl FnMut(ExprId) -> std::ops::ControlFlow<()>,
+) -> std::ops::ControlFlow<()> {
+    fn walk(
+        typed: &TypedFileAst,
+        expr_id: ExprId,
+        visited: &mut std::collections::HashSet<ExprId>,
+        visit: &mut impl FnMut(ExprId) -> std::ops::ControlFlow<()>,
+    ) -> std::ops::ControlFlow<()> {
+        if !visited.insert(expr_id) {
+            return std::ops::ControlFlow::Continue(());
+        }
+        let Some(kind) = typed.exprs.kind.get(expr_id.as_usize()) else {
+            return std::ops::ControlFlow::Continue(());
+        };
+        visit(expr_id)?;
+        walk_expr_children(kind, &mut |child| walk(typed, child, visited, visit))
+    }
+
+    walk(typed, root, &mut std::collections::HashSet::new(), visit)
 }
 
 /// A fully-resolved tag declaration.
@@ -1214,6 +1367,8 @@ pub struct TypedCallableSignature {
     pub groups: Vec<TypedGroup>,
     pub return_group: Option<GroupId>,
     pub effects: FunctionEffects,
+    pub param_requirements: Vec<AvailabilityRequirement>,
+    pub call_capability: CallCapability,
 }
 
 impl TypedCallableSignature {
@@ -1260,6 +1415,8 @@ impl From<&TypedBind> for TypedCallableSignature {
             groups: bind.groups.clone(),
             return_group: bind.return_group,
             effects: bind.effects.clone(),
+            param_requirements: bind.param_requirements.clone(),
+            call_capability: bind.call_capability,
         }
     }
 }
@@ -1287,6 +1444,8 @@ pub struct TypedBind {
     pub groups: Vec<TypedGroup>,
     pub return_group: Option<GroupId>,
     pub effects: FunctionEffects,
+    pub param_requirements: Vec<AvailabilityRequirement>,
+    pub call_capability: CallCapability,
     /// Receiver type for methods, if any.
     pub receiver_type: Option<Ty>,
     /// Bind attributes (e.g., `#[inline]`, visibility).
@@ -1298,8 +1457,6 @@ pub struct TypedBind {
     pub unassigned_decl: bool,
     /// Bound with `:=` (immutable).
     pub is_constant: bool,
-    /// Comptime-classified; skipped by runtime flow when true.
-    pub is_compile_time: bool,
     /// Source-level signature for hover (types as written, not resolved).
     pub signature_surface: String,
 }
@@ -1563,20 +1720,21 @@ impl TypedFileAst {
                             .or_else(|| {
                                 typed_bind.params.iter().find_map(|(name, ty)| {
                                     (*name == word).then(|| {
-                                        let tag_types = self.tag_types_by_name();
-                                        let tag_params = self.tag_params_by_name();
-                                        type_annotation_surface_for_hover(
+                                        type_annotation_surface_for_hover_local(
                                             ty,
-                                            &tag_types,
-                                            Some(&tag_params),
+                                            &self.tag_types,
+                                            &self.tags,
                                         )
                                     })
                                 })
                             })
                     })
                     .or_else(|| {
-                        params
-                            .and_then(|params| params.get(&word).map(param_kind_surface_for_hover))
+                        params.and_then(|params| {
+                            params
+                                .get(&word)
+                                .map(|kind| param_kind_surface_for_hover(&kind.kind))
+                        })
                     })
             })?;
 
@@ -1787,13 +1945,6 @@ impl TypedFileAst {
         variant_name.to_string()
     }
 
-    fn tag_params_by_name(&self) -> HashMap<Intern<String>, Parameters> {
-        self.tags
-            .iter()
-            .filter_map(|(id, tag)| tag.params.clone().map(|p| (id.0, p)))
-            .collect()
-    }
-
     fn hover_for_variant(&self, union_name: &str, variant_label: &str, _union_ty: &Ty) -> String {
         // Use just the base variant name (before any `(`) for annotation lookup.
         let base_name = variant_label.split('(').next().unwrap_or(variant_label);
@@ -1809,11 +1960,33 @@ impl TypedFileAst {
         h.render()
     }
 
-    fn tag_types_by_name(&self) -> HashMap<Intern<String>, Ty> {
-        self.tag_types
-            .iter()
-            .map(|(id, ty)| (id.0, ty.clone()))
-            .collect()
+    fn variant_pattern_label_local(
+        &self,
+        variant_map: &VariantMap,
+        union_name: &str,
+        variant_name: &str,
+    ) -> String {
+        let key = Intern::<String>::from_ref(variant_name);
+        if let Some(entries) = variant_map.get(&key) {
+            let union_key = Intern::<String>::from_ref(union_name);
+            if let Some((_, _, fields)) = entries.iter().find(|(u, _, _)| *u == union_key) {
+                return format_variant_pattern_label_local(
+                    variant_name,
+                    fields,
+                    &self.tag_types,
+                    &self.tags,
+                );
+            }
+            if let Some((_, _, fields)) = entries.first() {
+                return format_variant_pattern_label_local(
+                    variant_name,
+                    fields,
+                    &self.tag_types,
+                    &self.tags,
+                );
+            }
+        }
+        variant_name.to_string()
     }
 
     fn span_contains(&self, span_id: SpanId, byte_offset: usize) -> bool {
@@ -1847,42 +2020,38 @@ impl TypedFileAst {
             .cloned()
             .or_else(|| self.tag_types.get(&TagId(*union_name)).cloned())
             .unwrap_or(Ty::Opaque(*union_name));
-        let owned_tag_types;
-        let tag_types = match package {
-            Some(p) => &p.tag_types,
-            None => {
-                owned_tag_types = self.tag_types_by_name();
-                &owned_tag_types
-            }
+        let label = if let Some(p) = package {
+            self.variant_pattern_label(
+                variant_map,
+                union_name.as_str(),
+                word,
+                &p.tag_types,
+                Some(&p.tag_params),
+            )
+        } else {
+            self.variant_pattern_label_local(variant_map, union_name.as_str(), word)
         };
-        let owned_tag_params;
-        let tag_params = match package {
-            Some(p) => Some(&p.tag_params),
-            None => {
-                owned_tag_params = self.tag_params_by_name();
-                Some(&owned_tag_params)
-            }
-        };
-        let label = self.variant_pattern_label(
-            variant_map,
-            union_name.as_str(),
-            word,
-            tag_types,
-            tag_params,
-        );
         Some(
             HoverResult::single(self.hover_for_variant(union_name.as_str(), &label, &union_ty))
                 .with_qualified_union(package, union_name),
         )
     }
 
-    fn hover_type_expr_pattern(
+    fn hover_pattern(
         &self,
-        pattern: &TypeExpr,
+        pattern: &Pattern,
+        ctx: HoverPatternCtx<'_>,
+    ) -> Option<HoverResult> {
+        self.hover_pattern_node(pattern, ctx)
+    }
+
+    fn hover_pattern_node(
+        &self,
+        pattern: &Pattern,
         ctx: HoverPatternCtx<'_>,
     ) -> Option<HoverResult> {
         match pattern {
-            TypeExpr::Generic {
+            Pattern::Generic {
                 name,
                 params,
                 param_spans,
@@ -1964,25 +2133,25 @@ impl TypedFileAst {
                     }
                 }
             }
-            TypeExpr::ListCons { head, tail } => {
+            Pattern::ListCons { head, tail } => {
                 let elem_ty = ctx.subject_ty.and_then(|ty| ty.list_elem_ty(ctx.tag_types));
                 let head_ctx = HoverPatternCtx {
                     subject_ty: elem_ty.as_ref(),
                     ..ctx
                 };
-                if let Some(h) = self.hover_type_expr_pattern(&head.value, head_ctx) {
+                if let Some(h) = self.hover_pattern_node(&head.value, head_ctx) {
                     return Some(h);
                 }
-                return self.hover_type_expr_pattern(&tail.value, ctx);
+                return self.hover_pattern_node(&tail.value, ctx);
             }
-            TypeExpr::Tuple(elems) => {
+            Pattern::Tuple(elems) => {
                 for e in elems {
-                    if let Some(h) = self.hover_type_expr_pattern(&e.value, ctx) {
+                    if let Some(h) = self.hover_pattern_node(&e.value, ctx) {
                         return Some(h);
                     }
                 }
             }
-            TypeExpr::Nominal(name, span)
+            Pattern::Nominal(name, span)
                 if !name.is_pattern_wildcard()
                     && name
                         .as_str()
@@ -1995,10 +2164,36 @@ impl TypedFileAst {
                     && ctx.byte_offset < name_span.end()
                     && ctx.word == name.as_str()
                 {
+                    let list_type_param = ctx
+                        .subject_ty
+                        .and_then(|subject_ty| match subject_ty {
+                            Ty::Record { name, .. } if name.as_str() == "List" => {
+                                ctx.tag_params.and_then(|params| {
+                                    params
+                                        .get(&Intern::from_ref("List"))
+                                        .and_then(|params| params.first())
+                                        .map(|(name, _)| name.as_str().to_string())
+                                })
+                            }
+                            _ => None,
+                        });
+
                     let ty_str = ctx
                         .subject_ty
                         .map(|t| {
                             type_annotation_surface_for_hover(t, ctx.tag_types, ctx.tag_params)
+                        })
+                        .map(|surface| {
+                            if name_span.start() <= ctx.byte_offset
+                                && ctx.byte_offset < name_span.end()
+                                && ctx.word == name.as_str()
+                                && let Some(list_param) = list_type_param.as_deref()
+                                && surface.starts_with("List(")
+                            {
+                                format!("List({list_param})")
+                            } else {
+                                surface
+                            }
                         })
                         .unwrap_or_else(|| "infer".to_string());
                     let summary = format!("{} {}", ctx.word, ty_str);
@@ -2017,20 +2212,21 @@ impl TypedFileAst {
         package: Option<&PackageSemanticIndex>,
     ) -> Option<HoverResult> {
         let owned_tag_types;
-        let tag_types = match package {
-            Some(p) => &p.tag_types,
-            None => {
-                owned_tag_types = self.tag_types_by_name();
-                &owned_tag_types
-            }
-        };
         let owned_tag_params;
-        let tag_params = match package {
-            Some(p) => Some(&p.tag_params),
-            None => {
-                owned_tag_params = self.tag_params_by_name();
-                Some(&owned_tag_params)
-            }
+        let (tag_types, tag_params) = if let Some(p) = package {
+            (&p.tag_types, Some(&p.tag_params))
+        } else {
+            owned_tag_types = self
+                .tag_types
+                .iter()
+                .map(|(id, ty)| (id.0, ty.clone()))
+                .collect();
+            owned_tag_params = self
+                .tags
+                .iter()
+                .filter_map(|(id, tag)| tag.params.as_ref().map(|p| (id.0, p.clone())))
+                .collect();
+            (&owned_tag_types, Some(&owned_tag_params))
         };
         let variant_map = package.map(|p| &p.variant_map).unwrap_or(&self.variant_map);
         let pattern_ctx = HoverPatternCtx {
@@ -2057,7 +2253,7 @@ impl TypedFileAst {
                         if let TypedWhenArm::Is { pattern, .. } = arm
                             && self.span_contains(pattern.span_id, byte_offset)
                             && let Some(h) =
-                                self.hover_type_expr_pattern(&pattern.value, pattern_ctx)
+                                self.hover_pattern(&pattern.value, pattern_ctx)
                         {
                             return Some(h);
                         }
@@ -2076,7 +2272,7 @@ impl TypedFileAst {
                         ..pattern_ctx
                     };
                     if let Some(h) =
-                        self.hover_type_expr_pattern(&if_expr.pattern.value, pattern_ctx)
+                        self.hover_pattern(&if_expr.pattern.value, pattern_ctx)
                     {
                         return Some(h);
                     }
@@ -2178,10 +2374,24 @@ impl TypedFileAst {
         let Some(expr) = self.expr(*expr_id) else {
             return sig;
         };
+        if matches!(expr.ty, Ty::Record { .. }) {
+            return sig;
+        }
         let Some(const_val) = expr.const_value else {
             return sig;
         };
         sig.push(' ');
+        if let ConstValue::Tag {
+            name: variant,
+            qual_path: None,
+            ..
+        } = const_val
+            && let Some(entries) = self.variant_map.get(variant)
+            && let [(union, _, _)] = entries.as_slice()
+        {
+            sig.push_str(union.as_str());
+            sig.push('.');
+        }
         sig.push_str(&const_val.to_hover_string());
         sig
     }
@@ -2258,10 +2468,10 @@ impl TypedFileAst {
                     return Some(HoverTarget::TagDecl(tag_id.0));
                 }
             }
-        } else if let Some(pkg) = package
+        } else if self.imported_trait_names.contains(&word_interned)
+            && let Some(pkg) = package
             && pkg.tag_decl_for_word(&word_interned).is_some()
         {
-            // Tag declared in another file.
             return Some(HoverTarget::TagDecl(tag_id.0));
         }
 
@@ -2304,11 +2514,18 @@ impl TypedFileAst {
         if self.tags.contains_key(&tag_id) {
             return Some(HoverTarget::TagDecl(tag_id.0));
         }
-        if let Some(pkg) = package
+        if self.imported_trait_names.contains(&word_interned)
+            && let Some(pkg) = package
             && pkg.tag_decl_for_word(&word_interned).is_some()
         {
-            // Cross-file tag reference in a type position.
             return Some(HoverTarget::TagDecl(tag_id.0));
+        }
+
+        if word.starts_with(char::is_uppercase)
+            && !self.tags.contains_key(&tag_id)
+            && !self.imported_trait_names.contains(&word_interned)
+        {
+            return None;
         }
 
         // 5. Cursor is inside a tag declaration body (not the name or a variant).
@@ -2381,20 +2598,14 @@ impl TypedFileAst {
                 Some(result.with_def_module(package, &name))
             }
             HoverTarget::SelfRef { modifier, tag_name } => {
-                let owned_tag_types;
-                let owned_tag_params;
-                let (tag_types, tag_params) = match package {
-                    Some(p) => (&p.tag_types, Some(&p.tag_params)),
-                    None => {
-                        owned_tag_types = self.tag_types_by_name();
-                        owned_tag_params = self.tag_params_by_name();
-                        (&owned_tag_types, Some(&owned_tag_params))
-                    }
-                };
                 // Resolve the receiver type from the tag declaration.
                 let ty = self.tags.get(&TagId(tag_name)).map(|tag| &tag.resolved_ty);
                 if let Some(ty) = ty {
-                    let ty_str = type_annotation_surface_for_hover(ty, tag_types, tag_params);
+                    let ty_str = if let Some(p) = package {
+                        type_annotation_surface_for_hover(ty, &p.tag_types, Some(&p.tag_params))
+                    } else {
+                        type_annotation_surface_for_hover_local(ty, &self.tag_types, &self.tags)
+                    };
                     let rendered = if modifier.as_str() == "self" {
                         format!("self {ty_str}")
                     } else {
@@ -2405,9 +2616,11 @@ impl TypedFileAst {
                     ))
                 } else {
                     // Tag not found locally — check package index for cross-file tags.
-                    let ty_str = package
-                        .and_then(|p| p.tag_types.get(&tag_name))
-                        .map(|ty| type_annotation_surface_for_hover(ty, tag_types, tag_params));
+                    let ty_str = package.and_then(|p| {
+                        p.tag_types.get(&tag_name).map(|ty| {
+                            type_annotation_surface_for_hover(ty, &p.tag_types, Some(&p.tag_params))
+                        })
+                    });
                     if let Some(ty_str) = ty_str {
                         let rendered = if modifier.as_str() == "self" {
                             format!("self {ty_str}")
@@ -2478,11 +2691,13 @@ impl TypedFileAst {
                                             .map(|ty| ty.value.format_surface())
                                             .unwrap_or_default()
                                     });
-                                let mut hover = ast::hover_format::HoverDoc::new().gin(format!(
-                                    "{}{}",
-                                    word,
-                                    ty_surface.trim_start()
-                                ));
+                                let ty_surface = ty_surface.trim_start();
+                                let shape = if ty_surface.starts_with('(') {
+                                    format!("{word}{ty_surface}")
+                                } else {
+                                    format!("{word} {ty_surface}")
+                                };
+                                let mut hover = ast::hover_format::HoverDoc::new().gin(shape);
                                 if let Some(doc) = tag.record_field_docs.get(&member_key) {
                                     hover = hover.prose(doc.clone());
                                 }
@@ -2517,7 +2732,7 @@ impl TypedFileAst {
                                             }
                                         }
                                         signature.push_str(k.as_str());
-                                        match v {
+                                        match &v.kind {
                                             ast::ParameterKind::Tagged(sp) => {
                                                 signature.push(' ');
                                                 signature.push_str(&sp.value.format_surface());
@@ -2551,7 +2766,15 @@ impl TypedFileAst {
                                 let rendered =
                                     format!("```gin\n{}{}\n```", f.name.as_str(), signature)
                                         .replacen(" (", "(", 1);
-                                let result = HoverResult::single(rendered);
+                                let rendered = rendered
+                                    .strip_prefix("```gin\n")
+                                    .and_then(|it| it.strip_suffix("\n```"))
+                                    .unwrap_or(&rendered);
+                                let mut hover = ast::hover_format::HoverDoc::new().gin(rendered);
+                                if let Some(doc) = tag.record_field_docs.get(&f.name) {
+                                    hover = hover.prose(doc.clone());
+                                }
+                                let result = HoverResult::single(hover.render());
                                 return Some(result.with_qualified_union(package, &tag_id.0));
                             }
                             _ => {}
@@ -2578,12 +2801,15 @@ impl TypedFileAst {
                     && let Some((_, fty)) = fields.iter().find(|(n, _)| *n == member_key)
                 {
                     let ty_str = {
-                        let tag_types = self.tag_types_by_name();
                         let display_ty: &Ty = match &**fty {
                             Ty::Ptr { inner } => inner.as_ref(),
                             other => other,
                         };
-                        type_annotation_surface_for_hover(display_ty, &tag_types, None)
+                        type_annotation_surface_for_hover_local(
+                            display_ty,
+                            &self.tag_types,
+                            &self.tags,
+                        )
                     };
                     let shape = if ty_str.starts_with('(') {
                         format!("{}{}", word, ty_str)
@@ -2642,10 +2868,16 @@ impl TypedFileAst {
                         if let Some(entries) = variant_map.get(&key)
                             && let Some((_, _, fields)) = entries.first()
                         {
-                            let local_tag_types = self.tag_types_by_name();
-                            let tag_types =
-                                package.map(|p| &p.tag_types).unwrap_or(&local_tag_types);
-                            return format_variant_pattern_label(word, fields, tag_types, None);
+                            return if let Some(p) = package {
+                                format_variant_pattern_label(word, fields, &p.tag_types, None)
+                            } else {
+                                format_variant_pattern_label_local(
+                                    word,
+                                    fields,
+                                    &self.tag_types,
+                                    &self.tags,
+                                )
+                            };
                         }
                         word.to_string()
                     });
@@ -2684,17 +2916,19 @@ impl TypedFileAst {
                         name.as_str()
                     )));
                 }
-                let owned_tag_types;
-                let owned_tag_params;
-                let (tag_types, tag_params) = match package {
-                    Some(p) => (&p.tag_types, Some(&p.tag_params)),
-                    None => {
-                        owned_tag_types = self.tag_types_by_name();
-                        owned_tag_params = self.tag_params_by_name();
-                        (&owned_tag_types, Some(&owned_tag_params))
-                    }
+                let ty_str = if let Some(p) = package {
+                    type_annotation_surface_for_hover(
+                        expr_ref.ty,
+                        &p.tag_types,
+                        Some(&p.tag_params),
+                    )
+                } else {
+                    type_annotation_surface_for_hover_local(
+                        expr_ref.ty,
+                        &self.tag_types,
+                        &self.tags,
+                    )
                 };
-                let ty_str = type_annotation_surface_for_hover(expr_ref.ty, tag_types, tag_params);
                 let is_copy = false;
                 let summary = match &expr_ref.kind {
                     TypedExprKind::Bind {
@@ -2771,10 +3005,19 @@ impl TypedFileAst {
             {
                 continue;
             }
-            if let Some(Ty::Record { fields, .. }) = self.exprs.ty.get(base.as_usize())
+            if let Some(Ty::Record {
+                name: tag_name,
+                fields,
+                ..
+            }) = self.exprs.ty.get(base.as_usize())
                 && let Some((name, ty)) = fields.get(*index)
                 && *name == field
             {
+                if let Some(tag) = self.tags.get(&TagId(*tag_name))
+                    && let Some(surface) = tag.record_field_types.get(&field)
+                {
+                    return Some(surface.clone());
+                }
                 return Some(format_ty_for_hover(ty));
             }
             let TypedExprKind::FnCall { target, .. } = self.exprs.kind.get(base.as_usize())? else {
@@ -2798,6 +3041,7 @@ impl TypedFileAst {
             if *name == field {
                 return tag.record_field_types.get(&field).cloned();
             }
+            continue;
         }
         None
     }
@@ -3009,46 +3253,13 @@ fn signature_param_surface(signature: &str, name: &str) -> Option<String> {
 
 fn param_kind_surface_for_hover(kind: &ParameterKind) -> String {
     match kind {
-        ParameterKind::Tagged(sp) => type_expr_surface_for_hover(&sp.value),
-        ParameterKind::ValueParam { ty } => type_expr_surface_for_hover(&ty.value),
+        ParameterKind::Tagged(sp) => sp.value.format_surface(),
+        ParameterKind::ValueParam { ty } => ty.value.format_surface(),
         ParameterKind::Inferred { ty } => {
-            format!("{}: ?", type_expr_surface_for_hover(&ty.value))
+            format!("{}: ?", ty.value.format_surface())
         }
         ParameterKind::Generic => String::new(),
         ParameterKind::Default(expr) => format!(": {:?}", expr.value),
-    }
-}
-
-fn type_expr_surface_for_hover(expr: &TypeExpr) -> String {
-    match expr {
-        TypeExpr::Nominal(name, _) => name.as_str().to_string(),
-        TypeExpr::Generic { name, params, .. } => {
-            let inner = params
-                .iter()
-                .map(|(key, kind)| match kind {
-                    ParameterKind::Tagged(sp) => type_expr_surface_for_hover(&sp.value),
-                    ParameterKind::ValueParam { ty } => type_expr_surface_for_hover(&ty.value),
-                    ParameterKind::Inferred { ty } => format!(
-                        "{} {}: ?",
-                        key.as_str(),
-                        type_expr_surface_for_hover(&ty.value)
-                    ),
-                    ParameterKind::Generic => key.as_str().to_string(),
-                    ParameterKind::Default(expr) => format!("{}: {:?}", key.as_str(), expr.value),
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("{}({})", name.as_str(), inner)
-        }
-        TypeExpr::Qualified(path) => {
-            let mut out = path.root.as_str().to_string();
-            for segment in &path.segments {
-                out.push('.');
-                out.push_str(segment.as_str());
-            }
-            out
-        }
-        other => format!("{other:?}"),
     }
 }
 
@@ -3258,6 +3469,29 @@ fn format_variant_pattern_label(
     format!("{}({})", name, parts.join(", "))
 }
 
+fn format_variant_pattern_label_local(
+    name: &str,
+    fields: &[(Intern<String>, Ty)],
+    tag_types: &HashMap<TagId, Ty>,
+    tags: &HashMap<TagId, TypedTag>,
+) -> String {
+    if fields.is_empty() {
+        return name.to_string();
+    }
+    let parts: Vec<String> = fields
+        .iter()
+        .map(|(n, t)| {
+            let type_str = variant_pattern_field_type_surface_local(t, tag_types, tags);
+            if type_str == n.as_str() {
+                n.as_str().to_string()
+            } else {
+                format!("{} {}", n.as_str(), type_str)
+            }
+        })
+        .collect();
+    format!("{}({})", name, parts.join(", "))
+}
+
 fn variant_pattern_field_type_surface(
     ty: &Ty,
     tag_types: &HashMap<Intern<String>, Ty>,
@@ -3267,8 +3501,29 @@ fn variant_pattern_field_type_surface(
         && name.as_str() != "List"
     {
         return format_ty_for_hover(ty).replace("Union(Type)", "Union(union)");
+    } else if let Ty::Record { name, .. } = ty
+        && name.as_str() == "List"
+    {
+        return "List".to_string();
     }
     type_annotation_surface_for_hover(ty, tag_types, tag_params)
+}
+
+fn variant_pattern_field_type_surface_local(
+    ty: &Ty,
+    tag_types: &HashMap<TagId, Ty>,
+    tags: &HashMap<TagId, TypedTag>,
+) -> String {
+    if let Ty::Record { name, .. } = ty
+        && name.as_str() != "List"
+    {
+        return format_ty_for_hover(ty).replace("Union(Type)", "Union(union)");
+    } else if let Ty::Record { name, .. } = ty
+        && name.as_str() == "List"
+    {
+        return "List".to_string();
+    }
+    type_annotation_surface_for_hover_local(ty, tag_types, tags)
 }
 
 /// Type name as written in a `name Type` declare (e.g. `List(NamedTy)` not `pointer: …`).
@@ -3287,8 +3542,14 @@ pub(crate) fn type_annotation_surface_for_hover(
             name.as_str().to_string()
         }
         Ty::Opaque(name) => name.as_str().to_string(),
-        Ty::Record { name, fields, .. } => {
-            if let Some(surface) = generic_record_surface(name, fields, tag_types, tag_params) {
+        Ty::Record {
+            name,
+            fields,
+            resolved_params,
+        } => {
+            if let Some(surface) =
+                generic_record_surface(name, fields, resolved_params.as_deref(), tag_types, tag_params)
+            {
                 return surface;
             }
             if tag_types.contains_key(name) && !tag_has_generic_params(name, tag_params) {
@@ -3321,6 +3582,61 @@ pub(crate) fn type_annotation_surface_for_hover(
     }
 }
 
+pub(crate) fn type_annotation_surface_for_hover_local(
+    ty: &Ty,
+    tag_types: &HashMap<TagId, Ty>,
+    tags: &HashMap<TagId, TypedTag>,
+) -> String {
+    match ty {
+        Ty::Union { name, .. } => {
+            if name.as_str() == "union"
+                && let Some((tag_name, _)) = tag_types.iter().find(|(_, tag_ty)| *tag_ty == ty)
+            {
+                return tag_name.0.as_str().to_string();
+            }
+            name.as_str().to_string()
+        }
+        Ty::Opaque(name) => name.as_str().to_string(),
+        Ty::Record {
+            name,
+            fields,
+            resolved_params,
+        } => {
+            if let Some(surface) = generic_record_surface_local(
+                name,
+                fields,
+                resolved_params.as_deref(),
+                tag_types,
+                tags,
+            ) {
+                return surface;
+            }
+            if tag_types.contains_key(&TagId(*name)) && !tag_has_generic_params_local(name, tags) {
+                return name.as_str().to_string();
+            }
+            format_ty_for_hover(ty)
+        }
+        other => {
+            if matches!(
+                other,
+                Ty::Int {
+                    min: None,
+                    max: None,
+                    ..
+                }
+            ) && let Some((name, _)) = tag_types.iter().find(|(_, t)| {
+                matches!(
+                    (other, t),
+                    (Ty::Int { .. }, Ty::Int { .. }) | (Ty::Int { .. }, Ty::Union { .. })
+                )
+            }) {
+                return name.0.as_str().to_string();
+            }
+            format_ty_for_hover(other)
+        }
+    }
+}
+
 fn tag_has_generic_params(
     name: &Intern<String>,
     tag_params: Option<&HashMap<Intern<String>, Parameters>>,
@@ -3330,13 +3646,24 @@ fn tag_has_generic_params(
         .is_some_and(|params| {
             params
                 .iter()
-                .any(|(_, k)| matches!(k, ParameterKind::Generic))
+                .any(|(_, k)| matches!(k.kind, ParameterKind::Generic))
+        })
+}
+
+fn tag_has_generic_params_local(name: &Intern<String>, tags: &HashMap<TagId, TypedTag>) -> bool {
+    tags.get(&TagId(*name))
+        .and_then(|tag| tag.params.as_ref())
+        .is_some_and(|params| {
+            params
+                .iter()
+                .any(|(_, kind)| matches!(kind.kind, ParameterKind::Generic))
         })
 }
 
 fn generic_record_surface(
     name: &Intern<String>,
     fields: &[(Intern<String>, Box<Ty>)],
+    resolved_params: Option<&[(Intern<String>, TyArg)]>,
     tag_types: &HashMap<Intern<String>, Ty>,
     tag_params: Option<&HashMap<Intern<String>, Parameters>>,
 ) -> Option<String> {
@@ -3345,7 +3672,8 @@ fn generic_record_surface(
     }
     match name.as_str() {
         "List" => {
-            let elem = list_element_ty_from_record_fields(fields)?;
+            let elem = list_element_ty_from_resolved_params(resolved_params)
+                .or_else(|| list_element_ty_from_record_fields(fields))?;
             Some(format!(
                 "List({})",
                 type_annotation_surface_for_hover(&elem, tag_types, tag_params)
@@ -3353,6 +3681,39 @@ fn generic_record_surface(
         }
         _ => None,
     }
+}
+
+fn generic_record_surface_local(
+    name: &Intern<String>,
+    fields: &[(Intern<String>, Box<Ty>)],
+    resolved_params: Option<&[(Intern<String>, TyArg)]>,
+    tag_types: &HashMap<TagId, Ty>,
+    tags: &HashMap<TagId, TypedTag>,
+) -> Option<String> {
+    if !tag_has_generic_params_local(name, tags) {
+        return None;
+    }
+    match name.as_str() {
+        "List" => Some(format!(
+            "List({})",
+            type_annotation_surface_for_hover_local(
+                &list_element_ty_from_resolved_params(resolved_params)
+                    .or_else(|| list_element_ty_from_record_fields(fields))?,
+                tag_types,
+                tags,
+            )
+        )),
+        _ => None,
+    }
+}
+
+fn list_element_ty_from_resolved_params(
+    params: Option<&[(Intern<String>, TyArg)]>,
+) -> Option<Ty> {
+    params?.iter().find_map(|(_, arg)| match arg {
+        TyArg::Type(ty) => Some((**ty).clone()),
+        TyArg::Const(_) => None,
+    })
 }
 
 fn is_capitalized_type_name(name: &str) -> bool {

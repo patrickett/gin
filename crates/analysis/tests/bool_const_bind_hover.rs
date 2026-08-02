@@ -4,34 +4,9 @@
 //! the const RHS variant. The LSP hover popup must surface that variant so the
 //! user sees `false Bool.False` (not just `false`).
 
-use analysis::{CacheEngine, HoverContent, QueryEngine};
-use crossbeam_channel::unbounded;
+use analysis::{HoverContent, PackageCache};
 use test_fixtures::TempPackage;
-
-const BOOL_GIN: &str = r#"use core.Happy
-use core.ToString
-
---- `Bool` represents a value, which could only be either `True` or `False`.
----
---- ## Basic usage
----
---- `Bool` implements various traits, such as BitAnd, BitOr, Not, etc.,
---- which allow us to perform boolean operations using &, | and !.
----
---- `if` requires a `Bool` value as its conditional.
-Bool is True or False
-Bool.Happy has value: Bool.True
-Bool.ToString has to_string: when self then 'true' else 'false'
-
-
-false := Bool.False
-true  := Bool.True
-
-
--- is_empty(v Maybe(x)) Bool:
---     if v is None return True
--- return False
-"#;
+use test_fixtures::gin_core::BOOL_GIN;
 
 #[test]
 fn hover_false_shows_bool_false_variant() {
@@ -40,8 +15,7 @@ fn hover_false_shows_bool_false_variant() {
     pkg.write_flask("core");
     let path = pkg.write("primitive/bool.gin", bool_src);
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     engine.add_file(path.clone()).unwrap();
 
     let byte = bool_src.find("false :=").expect("`false :=` in bool.gin") as u32;
@@ -69,8 +43,7 @@ fn hover_true_shows_bool_true_variant() {
     pkg.write_flask("core");
     let path = pkg.write("primitive/bool.gin", bool_src);
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     engine.add_file(path.clone()).unwrap();
 
     let byte = bool_src.find("true  :=").expect("`true  :=` in bool.gin") as u32;

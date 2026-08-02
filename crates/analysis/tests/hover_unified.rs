@@ -1,35 +1,10 @@
-//! Contract tests for unified [`QueryEngine::hover`] (parse → import → typed).
+//! Contract tests for unified [`::hover`] (parse → import → typed).
 
-use analysis::{CacheEngine, HoverContent, QueryEngine};
+use analysis::{HoverContent, PackageCache};
 use ast::source::SourceExt;
-use crossbeam_channel::unbounded;
 use parser::query::SourceParseExt;
 use test_fixtures::TempPackage;
-
-const BOOL_GIN: &str = r#"use core.Happy
-use core.ToString
-
---- `Bool` represents a value, which could only be either `True` or `False`.
----
---- ## Basic usage
----
---- `Bool` implements various traits, such as BitAnd, BitOr, Not, etc.,
---- which allow us to perform boolean operations using &, | and !.
----
---- `if` requires a `Bool` value as its conditional.
-Bool is True or False
-Bool.Happy has value: Bool.True
-Bool.ToString has to_string: when self then 'true' else 'false'
-
-
-false := Bool.False
-true  := Bool.True
-
-
--- is_empty(v Maybe(x)) Bool:
---     if v is None return True
--- return False
-"#;
+use test_fixtures::gin_core::{BOOL_GIN, INT_GIN, LIST_GIN, STRING_GIN, TYPE_GIN};
 
 const DEFAULT_GIN: &str = r#"--- Provides a default value for a type.
 Default(value) has default value
@@ -40,70 +15,8 @@ const MAYBE_GIN: &str = r#"use core.Happy
 Maybe(x) is    --- Used to represent values that may or may not be present.
     Some(x) or --- Has some value `x`
     None       --- Has no value
-Maybe.Happy has value: Maybe.Some
-"#;
-
-const TYPE_GIN: &str = r#"use '../primitive/'.(BigInt, Bool, List)
-use '../string/'.String
-
---- Structural description of a Gin type, used for compile-time reflection.
-Type is Primitive(width BigInt, signed Bool)
-     or Record(name String, fields List(NamedTy))
-     or Union(name String, variants List(VariantShape))
-     or Tuple(elems List(Type))
-     or Ptr(inner Type)
-     or Ref(inner Type, mutable Bool)
-     or Array(elem Type, size BigInt)
-     or Opaque(name String)
-
-NamedTy has name String, ty Type
-VariantShape has name String, fields List(NamedTy)
-
---- Reserved: the compiler synthesizes `shape` for every type.
---- User-written `Type.Reflectable has ...` is a compile error.
-Reflectable has shape Type
-"#;
-
-const INT_GIN: &str = r#"--- The 8-bit signed integer type.
-SignedTinyInt is in -128...127
---- The 16-bit signed integer type.
-SignedSmallInt is in -32768...32767
---- The 32-bit signed integer type.
-SignedInt is in -2147483648...2147483647
---- The 64-bit signed integer type.
-SignedBigInt is in -9223372036854775808...9223372036854775807
---- The 128-bit signed integer type.
-SignedLargeInt is in -170141183460469231731687303715884105728...170141183460469231731687303715884105727
---- The 8-bit unsigned integer type.
-TinyInt is in 0...255
---- The 16-bit unsigned integer type.
-SmallInt is in 0...65535
---- The 32-bit unsigned integer type.
-Int is in 0...4294967295
---- The 64-bit unsigned integer type.
-BigInt is in 0...18446744073709551615
---- The 128-bit unsigned integer type.
-LargeInt is in 0...340282366920938463463374607431768211455
-
-
---- Alias for the 8-bit unsigned integer type.
-Byte is TinyInt
-"#;
-
-const LIST_GIN: &str = r#"use Pointer, PointerSize
-
---- A homogeneous list type.
---- List literals use bracket syntax: ['linux', 'macos'].
---- Generic over element type: `List(x)`.
-List(x) has pointer Pointer(x), length PointerSize
-"#;
-
-const STRING_GIN: &str = r#"use core.primitive.(Byte, List)
-
---- Canonical `String` type used for printing/codegen.
-String has bytes List(Byte)
-
-ToString has to_string String
+Maybe(x) has Happy
+    Happy.value: Maybe.Some
 "#;
 
 #[test]
@@ -111,8 +24,7 @@ fn hover_use_keyword_via_engine() {
     let path = std::path::PathBuf::from("/tmp/hover_use_keyword.gin");
     let source = "use core.io\n\nmain:\n    return 0\n";
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     engine.add_file(path.clone()).unwrap();
     engine.set_contents(&path, source.to_string());
 
@@ -169,8 +81,7 @@ fn hover_import_symbol_matches_definition_hover() {
         .hover_at(bool_gin, line, character)
         .expect("hover on `true` in bool.gin");
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     engine.add_file(path.clone()).unwrap();
 
     let HoverContent { markdown, .. } = engine
@@ -189,8 +100,7 @@ fn hover_at(source: &str, needle: &str, fixture: &str) -> HoverContent {
     pkg.write_flask("bind_hover");
     let path = pkg.write("main.gin", source);
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     engine.add_file(path.clone()).unwrap();
 
     let byte = source
@@ -255,8 +165,7 @@ fn hover_default_in_core_default_shows_core_default_module_path() {
     pkg.write_nested_flask("core", "core");
     let path = pkg.write("core/default/default.gin", default_src);
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     engine.add_file(path.clone()).unwrap();
 
     let byte = default_src.find("Default").expect("`Default` in source") as u32;
@@ -288,8 +197,7 @@ fn hover_false_constant_bind_shows_correct_type() {
     pkg.write_nested_flask("core", "core");
     let path = pkg.write("core/primitive/bool.gin", bool_src);
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     engine.add_file(path.clone()).unwrap();
 
     // Hover on `false` in `false := Bool.False`
@@ -316,8 +224,7 @@ fn hover_variant_in_union_declaration_shows_qualified_union_path() {
     pkg.write_nested_flask("core", "core");
     let path = pkg.write("core/primitive/bool.gin", bool_src);
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     engine.add_file(path.clone()).unwrap();
 
     // Hover on `True` inside `Bool is True or False`.
@@ -346,8 +253,7 @@ fn hover_variant_with_fields_shows_shape_and_doc() {
     pkg.write_nested_flask("core", "core");
     let path = pkg.write("core/maybe/maybe.gin", maybe_src);
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     engine.add_file(path.clone()).unwrap();
 
     // Hover on `Some` in `Some(x)`
@@ -379,8 +285,7 @@ fn hover_reflect_type_union_shows_multiline_named_payload_variants() {
     pkg.write_nested_flask("core", "core");
     let path = pkg.write("core/reflect/type.gin", type_src);
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     for (content, rel) in [
         (INT_GIN, "primitive/int.gin"),
         (BOOL_GIN, "primitive/bool.gin"),
@@ -427,8 +332,7 @@ fn hover_tag_name_in_qualified_path_shows_tag_declaration() {
     pkg.write_nested_flask("core", "core");
     let path = pkg.write("core/primitive/bool.gin", bool_src);
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     engine.add_file(path.clone()).unwrap();
 
     // Hover on `Bool` in `false := Bool.False` (qualified path usage)
@@ -472,12 +376,10 @@ fn hover_cross_file_tag_shows_tag_declaration() {
     pkg.write_flask("cross_tag");
     // Declare a tag in one file
     pkg.write("a.gin", "Bool is True or False");
-    // Second file that references `Bool` (via same-package cross-file resolution)
-    let source = "main:\n    b Bool := 1\n    return b\n";
+    let source = "use Bool\nmain:\n    b Bool := 1\n    return b\n";
     let path = pkg.write("main.gin", source);
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     engine.add_file(pkg.join("a.gin")).unwrap();
     engine.add_file(path.clone()).unwrap();
 
@@ -487,11 +389,28 @@ fn hover_cross_file_tag_shows_tag_declaration() {
         .hover(&path, bool_byte)
         .expect("hover on cross-file `Bool`");
 
-    assert_eq!(
-        markdown,
-        "\
-```gin\ncross_tag\n```\n\n```gin\nBool is True or False\n```"
-    );
+    assert_eq!(markdown, "```gin\nBool is True or False\n```");
+}
+
+#[test]
+fn unimported_cross_file_tag_has_no_hover_and_is_unknown() {
+    let pkg = TempPackage::new("unimported_cross_tag");
+    pkg.write_flask("unimported_cross_tag");
+    let happy_path = pkg.write("happy.gin", "Happy has value Bool\n");
+    let source = "Bool is True or False\nBool has Happy\n";
+    let bool_path = pkg.write("bool.gin", source);
+
+    let engine = PackageCache::for_test();
+    engine.add_file(happy_path.clone()).unwrap();
+    engine.add_file(bool_path.clone()).unwrap();
+
+    let happy_byte = source.find("Happy").unwrap() as u32;
+    assert!(engine.hover(&bool_path, happy_byte).is_none());
+
+    let diagnostics = engine.all_diagnostics(&[happy_path, bool_path.clone()]);
+    assert!(diagnostics[&bool_path].iter().any(|diagnostic| {
+        diagnostic.code.slug() == "type-unknown-symbol" && diagnostic.arg("name") == Some("Happy")
+    }));
 }
 
 /// Tag name referenced inside another tag's body (e.g. `Bool` in
@@ -503,8 +422,7 @@ fn hover_tag_name_in_another_tags_body_shows_tag_declaration() {
     let source = "Bool is True or False\n\nContainer(x) has b Bool\n";
     let path = pkg.write("main.gin", source);
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     engine.add_file(path.clone()).unwrap();
 
     // Hover on `Bool` in `has b Bool`
@@ -529,8 +447,7 @@ fn hover_record_field_in_tag_body_shows_field() {
     let source = "Pointer(x) is @x\n\nContainer(x) has ptr Pointer(x)\n";
     let path = pkg.write("main.gin", source);
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     engine.add_file(path.clone()).unwrap();
 
     // Hover on `ptr` in `has ptr Pointer(x)`
@@ -552,8 +469,7 @@ fn hover_record_field_same_file_shows_named_type() {
     pkg.write_flask("same_file");
     let path = pkg.write("main.gin", source);
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     engine.add_file(path.clone()).unwrap();
 
     let ptr_byte = source.rfind("ptr").expect("`ptr` field") as u32;
@@ -594,8 +510,7 @@ main:\n    identity(4)\n    return 0\n";
     pkg.write_flask("fn_call_ref");
     let path = pkg.write("main.gin", source);
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     engine.add_file(path.clone()).unwrap();
 
     let call_byte = source.rfind("identity").expect("`identity` in call") as u32;
@@ -620,8 +535,7 @@ fn hover_top_level_reference_from_body_shows_definition_hover() {
     pkg.write_flask("top_ref");
     let path = pkg.write("main.gin", source);
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     engine.add_file(path.clone()).unwrap();
 
     // Hover on the `two` inside `return two` (second occurrence).
@@ -658,8 +572,7 @@ Allocator has
     pkg.write_flask("interface_methods");
     let path = pkg.write("main.gin", source);
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     engine.add_file(path.clone()).unwrap();
 
     // Hover on `Allocator` tag name
@@ -700,8 +613,7 @@ Allocator has
     pkg.write_flask("interface_method_hover");
     let path = pkg.write("main.gin", source);
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     engine.add_file(path.clone()).unwrap();
 
     let byte = source.find("release").expect("`release` in source") as u32;
@@ -746,8 +658,7 @@ Allocator has
     pkg.write_flask("interface_member_doc");
     let path = pkg.write("main.gin", source);
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     engine.add_file(path.clone()).unwrap();
 
     // Hover on `allocate` method name
@@ -794,8 +705,7 @@ fn hover_self_in_has_method_body_shows_type() {
     pkg.write_flask("self_hover");
     let path = pkg.write("main.gin", source);
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     engine.add_file(path.clone()).unwrap();
 
     // Hover on the `self` inside the method body (not the parameter self).
@@ -816,8 +726,7 @@ fn hover_ref_self_in_has_method_body_shows_ref_type() {
     pkg.write_flask("ref_self_hover");
     let path = pkg.write("main.gin", source);
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     engine.add_file(path.clone()).unwrap();
 
     let byte = source.rfind("self").expect("body `self`") as u32;
@@ -838,8 +747,7 @@ fn hover_self_in_has_block_body_shows_ref_type() {
     pkg.write_flask("block_self_hover");
     let path = pkg.write("main.gin", source);
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     engine.add_file(path.clone()).unwrap();
 
     let byte = source.rfind("self").expect("body `self`") as u32;
@@ -869,8 +777,7 @@ fn hover_self_in_block_body_with_multiple_exprs_and_return() {
     pkg.write_flask("multi_expr_self");
     let path = pkg.write("main.gin", source);
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     engine.add_file(path.clone()).unwrap();
 
     // Hover on the standalone `self` expression at line 6, character 8.

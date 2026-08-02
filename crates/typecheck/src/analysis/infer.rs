@@ -9,10 +9,12 @@ use std::collections::HashMap;
 
 use internment::Intern;
 
-use crate::analysis::type_surface::{TypeEnv, mangled_fn_call_name};
+use crate::analysis::type_surface::{
+    TypeEnv, expr_is_type_surface, mangled_fn_call_name, typevars_from_receiver_expr,
+};
 use crate::ty::Ty;
 use ast::{
-    BinOp, Binary, Bind, BindValue, ConstExpr, Expr, FnCall, HashFloat, Literal, ParameterKind,
+    BinOp, Binary, Bind, BindValue, NormalExpr, Expr, FnCall, HashFloat, Literal, ParameterKind,
     Parameters, TagCall, WhenArm, WhenExpr,
 };
 
@@ -181,11 +183,11 @@ impl TyInfer for Bind {
     fn infer_ty(&self, env: &TyInferEnv) -> Ty {
         let subst: HashMap<Intern<String>, Ty> = self
             .receiver_type_surface()
-            .map(|sp| sp.value.typevars_from_receiver())
+            .map(|sp| typevars_from_receiver_expr(&sp.value))
             .unwrap_or_default();
 
         if let Some(sp) = &self.return_tag
-            && sp.value.is_type_surface()
+            && expr_is_type_surface(&sp.value)
         {
             return TypeEnv::new(env.tag_types)
                 .with_subst(&subst)
@@ -202,7 +204,7 @@ impl TyInfer for Bind {
                         *name,
                         resolve_parameter_kind_with_subst(
                             *name,
-                            kind,
+                            &kind.kind,
                             env.tag_types,
                             env.fn_return_types,
                             &subst,
@@ -213,7 +215,7 @@ impl TyInfer for Bind {
                 .collect(),
         };
         if let Some(sp) = self.receiver_type_surface()
-            && sp.value.is_type_surface()
+            && expr_is_type_surface(&sp.value)
         {
             let recv_ty = TypeEnv::new(env.tag_types)
                 .with_subst(&subst)
@@ -312,17 +314,19 @@ impl TyInfer for Expr {
                 .get_type(&Intern::<String>::from_ref("self"))
                 .unwrap_or_else(|| Ty::Opaque(Intern::<String>::from_ref("Self"))),
 
-            Expr::TupleAlloc { init, size } => {
-                let elem = init.infer_ty(env);
-                let size = size
-                    .value
-                    .as_size_const_expr()
-                    .unwrap_or(ConstExpr::from(0));
-                Ty::Array {
-                    elem: Box::new(elem),
-                    size,
-                }
+        Expr::TupleAlloc { init, size } => {
+            let elem = init.infer_ty(env);
+            let size = as_size_normal_expr_with_arithmetic(&size.value).unwrap_or_else(|| {
+                NormalExpr::Var(Intern::new(format!(
+                    "_unsupported_array_size_{:?}",
+                    size.span_id
+                )))
+            });
+            Ty::Array {
+                elem: Box::new(elem),
+                size,
             }
+        }
 
             Expr::TupleGet { base, index } => match base.infer_ty(env) {
                 Ty::Array { elem, .. } => *elem,
@@ -350,7 +354,7 @@ impl TyInfer for Expr {
                 inner: Box::new(inner.infer_ty(env)),
             },
 
-            Expr::Ref { inner, mutable } => Ty::Ref {
+            Expr::Ref { inner, mutable, .. } => Ty::Ref {
                 inner: Box::new(inner.infer_ty(env)),
                 mutable: *mutable,
             },
@@ -392,20 +396,29 @@ impl TyInfer for Expr {
             }
             Expr::TupleLit(elems) => Ty::Tuple(elems.iter().map(|e| e.infer_ty(env)).collect()),
             Expr::List(_) => Ty::Opaque(Intern::<String>::from_ref("List")),
-            Expr::TypeInRange(bounds) => {
-                let te = ast::TypeExpr::InRange {
-                    bounds: bounds.clone(),
-                    span: ast::span::SpanId::INVALID,
-                };
-                TypeEnv::new(env.tag_types)
-                    .with_opt_tag_params(env.tag_params)
-                    .resolve(&te)
-            }
-            Expr::TypeNominal(..)
-            | Expr::TypeQualified(_)
-            | Expr::TypeGeneric { .. }
-            | Expr::TypeRef { .. } => Ty::Unit,
         }
+    }
+}
+
+fn as_size_normal_expr_with_arithmetic(expr: &Expr) -> Option<NormalExpr> {
+    match expr {
+        Expr::Lit(Literal::Int(n)) => Some(NormalExpr::from(*n as i128)),
+        Expr::Lit(Literal::Number(n)) => Some(NormalExpr::from(*n as i128)),
+        Expr::FnCall(call) if call.args.is_none() => {
+            Some(NormalExpr::Var(call.path.value.root))
+        }
+        Expr::Bind(b) => Some(NormalExpr::Var(b.name)),
+        Expr::Binary(binary) => {
+            let lhs = as_size_normal_expr_with_arithmetic(&binary.lhs.value)?;
+            let rhs = as_size_normal_expr_with_arithmetic(&binary.rhs.value)?;
+            Some(match binary.op {
+                BinOp::Add => NormalExpr::Add(Box::new(lhs), Box::new(rhs)),
+                BinOp::Subtract => NormalExpr::Sub(Box::new(lhs), Box::new(rhs)),
+                BinOp::Multiply => NormalExpr::Mul(Box::new(lhs), Box::new(rhs)),
+                _ => return None,
+            })
+        }
+        _ => None,
     }
 }
 
@@ -435,11 +448,11 @@ pub fn resolve_parameter_kind_with_subst(
         ParameterKind::Tagged(sp)
         | ParameterKind::ValueParam { ty: sp }
         | ParameterKind::Inferred { ty: sp } => {
-            if sp.value.is_type_surface() {
+            if expr_is_type_surface(&sp.value) {
                 TypeEnv::new(tag_types)
                     .with_subst(subst)
                     .with_opt_tag_params(tag_params)
-                    .resolve(&sp.value)
+                    .resolve_expr(&sp.value)
             } else {
                 Ty::Opaque(Intern::<String>::from_ref("?"))
             }

@@ -1,33 +1,11 @@
 //! Regression: union variants with postfix `---` doc comments on the same line,
 //! continuation `or` on an indented line, and no doc on the declare itself.
 
-use ast::{DeclareValue, TypeExpr, Variant};
-use internment::Intern;
+use ast::DeclareValue;
 use parser::query::SourceParseExt;
 
-fn intern(s: &str) -> Intern<String> {
-    Intern::new(s.to_owned())
-}
-
-fn variant_name(v: &Variant) -> &str {
-    match &v.shape().value {
-        TypeExpr::Nominal(name, _) => name.as_str(),
-        other => panic!("expected nominal variant, got {other:?}"),
-    }
-}
-
-fn variant_doc(v: &Variant) -> Option<&str> {
-    match v {
-        Variant::Local {
-            doc_comment: Some(d),
-            ..
-        } => Some(d.value.as_str()),
-        Variant::Local {
-            doc_comment: None, ..
-        }
-        | Variant::External { .. } => None,
-    }
-}
+mod support;
+use support::*;
 
 #[test]
 fn parse_infection_union_minimal_inline_fixture() {

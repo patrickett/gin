@@ -32,7 +32,7 @@ impl Backend {
         let (source, engine_symptoms) = Backend::file_path_from_uri(uri)
             .and_then(|path| {
                 let st = self.snapshot();
-                st.engine
+                st.cache
                     .source_and_parse(&path)
                     .map(|(s, parse)| (s, parse.symptoms.clone()))
             })

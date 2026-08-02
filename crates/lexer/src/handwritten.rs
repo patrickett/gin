@@ -77,16 +77,6 @@ impl<'src> Lexer<'src> {
         &self.span_table
     }
 
-    /// Get a mutable reference to the span table.
-    pub fn span_table_mut(&mut self) -> &mut SpanTable {
-        &mut self.span_table
-    }
-
-    /// Consume the lexer and return the span table.
-    pub fn into_span_table(self) -> SpanTable {
-        self.span_table
-    }
-
     /// Take the span table, leaving an empty one in its place.
     pub fn take_span_table(&mut self) -> SpanTable {
         std::mem::take(&mut self.span_table)

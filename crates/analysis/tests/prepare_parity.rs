@@ -1,9 +1,8 @@
-//! Package prepare uses the same [`ast::prepare_file_ast`] path as `ginc`.
+//! Package prepare uses the same [`ast::prepare_parse_ast`] path as `ginc`.
 
-use analysis::{CacheEngine, QueryEngine};
+use analysis::PackageCache;
 use flask::CompileTarget;
 use parser::query::SourceParseExt;
-use crossbeam_channel::unbounded;
 use std::path::PathBuf;
 
 #[test]
@@ -11,8 +10,7 @@ fn package_typecheck_runs_prepare_before_transform() {
     let path = PathBuf::from("/tmp/prepare_parity_main.gin");
     let source = "main:\n    return 0\n";
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     engine.add_file(path.clone()).unwrap();
     engine.set_contents(&path, source.to_string());
 
@@ -56,11 +54,17 @@ fn compile_and_ide_paths_share_cross_file_compile_time_context() {
         "FULL and IDE should both resolve cross-file names after shared transform setup"
     );
     assert!(
-        has_unknown_symbol(&full.typed_asts) == false,
+        !has_unknown_symbol(&full.typed_asts),
         "cross-file compile-time symbol should be known in shared package transform path"
     );
 
     // Deliberate behavioral difference: IDE intentionally skips full trait synthesis.
-    assert!(full.trait_registry.is_some(), "FULL path should build compile-time trait registry");
-    assert!(ide.trait_registry.is_none(), "IDE path should keep lightweight transform mode");
+    assert!(
+        full.trait_registry.is_some(),
+        "FULL path should build compile-time trait registry"
+    );
+    assert!(
+        ide.trait_registry.is_none(),
+        "IDE path should keep lightweight transform mode"
+    );
 }

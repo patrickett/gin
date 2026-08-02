@@ -5,8 +5,7 @@
 //! not by the core compilation pipeline.
 
 use ast::{
-    Bind, Declare, DeclareValue, FileAst, HasMember, InRangeBounds, ParameterKind, Parameters,
-    TypeExpr,
+    Bind, Declare, DeclareValue, Expr, FileAst, HasMember, ParameterKind, Parameters,
 };
 use ast::{Complexity, ComplexityExpr};
 use i256::I256;
@@ -58,13 +57,13 @@ fn hash_tag_def(hasher: &mut Sha256, name: &Intern<String>, decl: &Declare) {
     match &decl.value {
         DeclareValue::Alias(sp) => {
             let _ = write!(hasher, ":ALIAS:");
-            hash_type_expr(hasher, &sp.value);
+            hash_expr(hasher, &sp.value);
         }
 
         DeclareValue::Union { variants } => {
             let _ = write!(hasher, ":UNION:");
             for variant in variants {
-                hash_type_expr(hasher, &variant.shape().value);
+                hash_pattern(hasher, &variant.shape().value);
                 let _ = write!(hasher, "|");
             }
         }
@@ -87,7 +86,7 @@ fn hash_tag_def(hasher: &mut Sha256, name: &Intern<String>, decl: &Declare) {
                     HasMember::Property(property) => {
                         let _ = write!(hasher, "{}:PROPERTY:", property.name.as_str());
                         if let Some(ty) = &property.ty {
-                            hash_type_expr(hasher, &ty.value);
+                            hash_expr(hasher, &ty.value);
                         }
                     }
                     HasMember::Function(function) => {
@@ -98,11 +97,11 @@ fn hash_tag_def(hasher: &mut Sha256, name: &Intern<String>, decl: &Declare) {
                         }
                         if let Some(return_ty) = &function.return_ty {
                             let _ = write!(hasher, ":RET:");
-                            hash_type_expr(hasher, &return_ty.value);
+                            hash_expr(hasher, &return_ty.value);
                         }
                         if let Some(error_ty) = &function.error_ty {
                             let _ = write!(hasher, ":ERR:");
-                            hash_type_expr(hasher, &error_ty.value);
+                            hash_expr(hasher, &error_ty.value);
                         }
                     }
                 }
@@ -111,7 +110,7 @@ fn hash_tag_def(hasher: &mut Sha256, name: &Intern<String>, decl: &Declare) {
         }
     }
 
-    // Hash provided traits from `Type.Trait has ...` provisions.
+    // Trait membership and provision values are part of a declaration's signature.
     for pt in &decl.provided_traits {
         let _ = write!(hasher, ":PROVIDES:{}:", pt.trait_name.as_str());
         for (field_name, _) in &pt.fields {
@@ -140,7 +139,7 @@ fn hash_parameters(hasher: &mut Sha256, params: Option<&Parameters>) {
             let _ = write!(hasher, "(");
             for (param_name, kind) in parameters {
                 let _ = write!(hasher, "{param_name}:");
-                hash_param_kind(hasher, kind);
+                hash_param_kind(hasher, &kind.kind);
                 let _ = write!(hasher, ",");
             }
             let _ = write!(hasher, ")");
@@ -159,15 +158,15 @@ fn hash_param_kind(hasher: &mut Sha256, kind: &ParameterKind) {
         }
         ParameterKind::Tagged(sp) => {
             let _ = write!(hasher, "TAGGED:");
-            hash_type_expr(hasher, &sp.value);
+            hash_expr(hasher, &sp.value);
         }
         ParameterKind::ValueParam { ty } => {
             let _ = write!(hasher, "VALUE:");
-            hash_type_expr(hasher, &ty.value);
+            hash_expr(hasher, &ty.value);
         }
         ParameterKind::Inferred { ty } => {
             let _ = write!(hasher, "INFERRED:");
-            hash_type_expr(hasher, &ty.value);
+            hash_expr(hasher, &ty.value);
         }
         ParameterKind::Default(_) => {
             let _ = write!(hasher, "DEFAULT");
@@ -175,77 +174,12 @@ fn hash_param_kind(hasher: &mut Sha256, kind: &ParameterKind) {
     }
 }
 
-fn hash_type_expr(hasher: &mut Sha256, e: &TypeExpr) {
-    match e {
-        TypeExpr::Nominal(name, _) => {
-            let _ = write!(hasher, "N:{}", name);
-        }
-        TypeExpr::Generic { name, params, .. } => {
-            let _ = write!(hasher, "G:{}[", name);
-            for (param_name, kind) in params.iter() {
-                let _ = write!(hasher, "{param_name}:");
-                hash_param_kind(hasher, kind);
-                let _ = write!(hasher, ",");
-            }
-            let _ = write!(hasher, "]");
-        }
-        TypeExpr::Qualified(path) => {
-            let _ = write!(hasher, "Q:{}", path.root);
-            for seg in &path.segments {
-                let _ = write!(hasher, ".{}", seg);
-            }
-        }
-        TypeExpr::Literal(..) => {
-            let _ = write!(hasher, "LIT");
-        }
-        TypeExpr::InRange { bounds, .. } => {
-            let _ = write!(hasher, "IR:");
-            match bounds {
-                InRangeBounds::Literal(a, b) => {
-                    let _ = write!(hasher, "{a}..{b}");
-                }
-                InRangeBounds::Tag(t) => {
-                    let _ = write!(hasher, "{}", t);
-                }
-            }
-        }
-        TypeExpr::Pointer(_) => {
-            let _ = write!(hasher, "PTR");
-        }
-        TypeExpr::Ref {
-            inner,
-            mutable,
-            group,
-        } => {
-            if *mutable {
-                let _ = write!(hasher, "MUT");
-            } else {
-                let _ = write!(hasher, "REF");
-            }
-            if let Some(group) = group {
-                let _ = write!(hasher, "{{{group}}}");
-            }
-            let _ = write!(hasher, ":");
-            hash_type_expr(hasher, &inner.value);
-        }
-        TypeExpr::Unit => {
-            let _ = write!(hasher, "UNIT");
-        }
-        TypeExpr::ListEmpty => {
-            let _ = write!(hasher, "LIST_EMPTY");
-        }
-        TypeExpr::ListCons { head, tail } => {
-            let _ = write!(hasher, "LIST_CONS:");
-            hash_type_expr(hasher, &head.value);
-            hash_type_expr(hasher, &tail.value);
-        }
-        TypeExpr::Tuple(elems) => {
-            let _ = write!(hasher, "TUPLE:");
-            for e in elems {
-                hash_type_expr(hasher, &e.value);
-            }
-        }
-    }
+fn hash_expr(hasher: &mut Sha256, expr: &Expr) {
+    let _ = write!(hasher, "E:{expr:?}");
+}
+
+fn hash_pattern(hasher: &mut Sha256, pattern: &ast::Pattern) {
+    let _ = write!(hasher, "P:{pattern:?}");
 }
 
 // ── Interface Signature: extractable, serializable, diffable ──────────
@@ -413,7 +347,7 @@ fn extract_params(params: Option<&Parameters>) -> Vec<(String, ParamKindSig)> {
         Some(parameters) => {
             let mut pairs: Vec<_> = parameters
                 .iter()
-                .map(|(name, kind)| (name.to_string(), extract_param_kind(kind)))
+                .map(|(name, kind)| (name.to_string(), extract_param_kind(&kind.kind)))
                 .collect();
             pairs.sort_by(|a, b| a.0.cmp(&b.0));
             pairs
@@ -426,25 +360,56 @@ fn extract_param_kind(kind: &ParameterKind) -> ParamKindSig {
     match kind {
         ParameterKind::Generic => ParamKindSig::Generic,
         ParameterKind::Tagged(sp) => {
-            let sig = extract_type_expr_sig(&sp.value);
+            let sig = extract_expr_sig(&sp.value);
             ParamKindSig::Tagged(sig)
         }
         ParameterKind::ValueParam { ty } => {
-            let sig = extract_type_expr_sig(&ty.value);
+            let sig = extract_expr_sig(&ty.value);
             ParamKindSig::Tagged(sig)
         }
         ParameterKind::Inferred { ty } => {
-            let sig = extract_type_expr_sig(&ty.value);
+            let sig = extract_expr_sig(&ty.value);
             ParamKindSig::Inferred(sig)
         }
         ParameterKind::Default(_) => ParamKindSig::Default,
     }
 }
 
-fn extract_type_expr_sig(e: &TypeExpr) -> TagSig {
-    match e {
-        TypeExpr::Nominal(name, _) => TagSig::Nominal(name.to_string()),
-        TypeExpr::Generic { name, params, .. } => {
+fn extract_expr_sig(expr: &Expr) -> TagSig {
+    match expr {
+        Expr::AnonymousTag(name) => TagSig::Nominal(name.to_string()),
+        Expr::FnCall(call) if call.args.as_ref().is_none_or(Vec::is_empty) => {
+            let mut parts = vec![call.path.value.root.to_string()];
+            parts.extend(call.path.value.segments.iter().map(ToString::to_string));
+            if parts.len() == 1 {
+                TagSig::Nominal(parts.remove(0))
+            } else {
+                TagSig::Qualified(parts)
+            }
+        }
+        Expr::TagCall(call) => TagSig::Generic(
+            call.name.to_string(),
+            call.args
+                .iter()
+                .enumerate()
+                .map(|(index, arg)| {
+                    (
+                        index.to_string(),
+                        ParamKindSig::Tagged(extract_expr_sig(&arg.value)),
+                    )
+                })
+                .collect(),
+        ),
+        Expr::Ref { inner, .. } | Expr::TakePtr(inner) => extract_expr_sig(&inner.value),
+        Expr::Lit(..) => TagSig::Nominal(String::new()),
+        _ => TagSig::Nominal(String::new()),
+    }
+}
+
+fn extract_pattern_sig(pattern: &ast::Pattern) -> TagSig {
+    match pattern {
+        ast::Pattern::Nominal(name, _) => TagSig::Nominal(name.to_string()),
+        ast::Pattern::Generic { name, params, .. } => {
             let mut pairs: Vec<_> = params
                 .iter()
                 .map(|(n, k)| (n.to_string(), extract_param_kind(k)))
@@ -452,32 +417,24 @@ fn extract_type_expr_sig(e: &TypeExpr) -> TagSig {
             pairs.sort_by(|a, b| a.0.cmp(&b.0));
             TagSig::Generic(name.to_string(), pairs)
         }
-        TypeExpr::Qualified(path) => {
-            let mut parts = vec![path.root.to_string()];
-            for seg in &path.segments {
-                parts.push(seg.to_string());
-            }
+        ast::Pattern::Qualified(path) => {
+            let mut parts = vec![path.value.root.to_string()];
+            parts.extend(path.value.segments.iter().map(ToString::to_string));
             TagSig::Qualified(parts)
         }
-        TypeExpr::Literal(..) => TagSig::Nominal(String::new()),
-        TypeExpr::InRange { .. }
-        | TypeExpr::Pointer(_)
-        | TypeExpr::Ref { .. }
-        | TypeExpr::Unit
-        | TypeExpr::ListEmpty
-        | TypeExpr::ListCons { .. }
-        | TypeExpr::Tuple(_) => TagSig::Nominal(String::new()),
+        ast::Pattern::Literal(..) => TagSig::Nominal(String::new()),
+        _ => TagSig::Nominal(String::new()),
     }
 }
 
 fn extract_tag_shape(value: &DeclareValue) -> TagShapeSig {
     match value {
-        DeclareValue::Alias(sp) => TagShapeSig::Alias(extract_type_expr_sig(&sp.value)),
+        DeclareValue::Alias(sp) => TagShapeSig::Alias(extract_expr_sig(&sp.value)),
 
         DeclareValue::Union { variants } => TagShapeSig::Union(
             variants
                 .iter()
-                .map(|v| extract_type_expr_sig(&v.shape().value))
+                .map(|v| extract_pattern_sig(&v.shape().value))
                 .collect(),
         ),
         DeclareValue::When(_) => TagShapeSig::Alias(TagSig::Nominal("when".to_string())),

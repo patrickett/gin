@@ -1,5 +1,5 @@
-use crate::{FileId, typed::TypedFileAst};
 use crate::compile_time_trait::CompileTimeTraitRegistry;
+use crate::{FileId, typed::TypedFileAst};
 use ast::FileAst;
 use std::sync::Arc;
 
@@ -30,7 +30,8 @@ pub fn transform_package_with_shared_context(
         ))
     };
 
-    let package_ctx = TransformCtx::with_package_compile_time_arc(Arc::clone(&compile_time_eval_ast));
+    let package_ctx =
+        TransformCtx::with_package_compile_time_arc(Arc::clone(&compile_time_eval_ast));
 
     let file_asts_with_ids: Vec<(FileAst, FileId)> = file_asts
         .drain(..)

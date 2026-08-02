@@ -2,15 +2,10 @@
 //!
 //! Runs compiler passes in a fixed order after parse (and after import resolution
 //! when the driver has applied it. Both `ginc` and the IDE database must call
-//! [`prepare_file_ast`] before transform.
+//! [`prepare_parse_ast`] before transform.
 
 use flask::CompileTarget;
 
-use crate::analysis::{
-    check_const_bind_after_declare, check_construction_refinements, fold_compile_time_binds,
-    validate_compile_time_binds,
-};
-use crate::asm_intrinsics::inject_asm_exprs;
 use crate::intrinsic_fold::inject_compiler_intrinsics;
 use crate::prepare_target::{
     apply_entry_target_merge, materialize_default_binds, materialize_type_static_access,
@@ -19,28 +14,15 @@ use crate::prepare_target::{
 use ast::{DeclareValue, FileAst, HasMember};
 use diagnostic::Diagnostic;
 
-/// Default materialization, entry `target` merge, compile-time validation/folding, asm injection.
+/// Parse-only preparation before semantic lowering.
 ///
-/// Order:
-/// 1. Materialize `has Default` on unassigned binds
-/// 2. Classify comptime vs runtime; validate and fold comptime binds
-/// 3. Merge entry flask triple into `target` **after** fold (fold would otherwise
-///    re-evaluate `target` from `Target.default` and erase the triple override)
-/// 4. Validate / simplify type-level `when` declares; inject asm from folded specs
-pub fn prepare_file_ast(ast: &mut FileAst, entry: &CompileTarget) -> Vec<Diagnostic> {
+/// This phase may materialize syntax-driven defaults and apply the entry target,
+/// but it must not classify or evaluate expressions.
+pub fn prepare_parse_ast(ast: &mut FileAst, entry: &CompileTarget) -> Vec<Diagnostic> {
     let mut diags = validate_auto_traits(ast);
     diags.extend(materialize_default_binds(ast));
     materialize_type_static_access(ast);
-    use crate::comptime_classify::FileAstComptimeExt as _;
-    ast.apply_comptime_classification();
-    diags.extend(check_const_bind_after_declare(ast));
-    diags.extend(validate_compile_time_binds(ast));
-    fold_compile_time_binds(ast);
-    diags.extend(check_construction_refinements(ast));
     diags.extend(apply_entry_target_merge(ast, entry));
-    diags.extend(validate_when_declare_exhaustiveness(ast, &ast.tags));
-    inject_compiler_intrinsics(ast);
-    inject_asm_exprs(ast);
     diags
 }
 
@@ -116,7 +98,7 @@ pub fn prepare_package_asts(asts: &mut [FileAst], entry: &CompileTarget) -> Vec<
     let mut diags: Vec<Vec<Diagnostic>> = asts
         .iter_mut()
         .map(|ast| {
-            let mut diags = prepare_file_ast(ast, entry);
+            let mut diags = prepare_parse_ast(ast, entry);
             // Type-level `when` subjects may depend on tags or const binds from sibling files.
             // Re-run this validation after package merge below so exhaustive cross-file cases
             // don't keep stale single-file MissingElse/UnreachableElse diagnostics.
@@ -145,13 +127,13 @@ pub fn prepare_package_asts(asts: &mut [FileAst], entry: &CompileTarget) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::prepare_file_ast;
+    use crate::prepare_parse_ast;
     use parser::cursor::TokenCursor;
 
     #[test]
     fn auto_trait_requires_member_defaults() {
         let mut ast = TokenCursor::parse_source("#auto\nCopy has can_copy Bool\n");
-        let diags = prepare_file_ast(&mut ast, &CompileTarget::Library);
+        let diags = prepare_parse_ast(&mut ast, &CompileTarget::Library);
 
         assert!(
             diags
@@ -164,7 +146,7 @@ mod tests {
     #[test]
     fn auto_attribute_rejects_non_trait_declare() {
         let mut ast = TokenCursor::parse_source("#auto\nMaybe is Some(Int) or None\n");
-        let diags = prepare_file_ast(&mut ast, &CompileTarget::Library);
+        let diags = prepare_parse_ast(&mut ast, &CompileTarget::Library);
 
         assert!(
             diags
@@ -172,5 +154,18 @@ mod tests {
                 .any(|d| d.code.slug() == "type-auto-attribute-target"),
             "diags: {diags:?}"
         );
+    }
+
+    #[test]
+    fn parse_preparation_does_not_classify_or_fold_expressions() {
+        let mut ast = TokenCursor::parse_source("value: 1 + 2\n");
+        let diags = prepare_parse_ast(&mut ast, &CompileTarget::Library);
+
+        assert!(diags.is_empty(), "diags: {diags:?}");
+        let bind = ast.defs.get(&internment::Intern::from_ref("value"));
+        assert!(matches!(
+            bind.map(|bind| &bind.value),
+            Some(ast::BindValue::Expr(expr)) if expr.const_value.is_none()
+        ));
     }
 }

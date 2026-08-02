@@ -1,21 +1,19 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::expr::Literal;
+use crate::expr::{Expr, Literal};
 use crate::parameter::ParameterKind;
 use crate::path::ModPath;
-use crate::pattern::PatternNameExt;
 use crate::span::{SpanId, Spanned};
 use crate::ty::{Ty, VariantMap};
-use crate::{ConstExpr, GroupPath};
+use crate::GroupPath;
 use i256::I256;
 use internment::Intern;
 
 /// A type expression — the right-hand side of a type annotation.
 ///
-/// This replaces the old `Expr::TypeNominal`, `Expr::TypeQualified`, and
-/// `Expr::TypeGeneric` variants so that type expressions are a distinct AST
-/// node from value expressions.
+/// Type expressions remain distinct from ordinary value expressions while
+/// preserving the source-level type surface used by declarations.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeExpr {
     /// Bare `Tag` (e.g. `Str` in `(x Str)`).
@@ -45,17 +43,35 @@ pub enum TypeExpr {
     },
     /// The unit type `()`.
     Unit,
-    /// Empty list pattern `[]` (compile-time `when` arms).
-    ListEmpty,
-    /// List cons pattern `[head, ...tail]` (compile-time `when` arms).
-    ListCons {
-        head: Box<Spanned<TypeExpr>>,
-        tail: Box<Spanned<TypeExpr>>,
-    },
-    /// Tuple pattern `(A, B, ...)` in compile-time `when ... is` arms.
-    Tuple(Vec<Spanned<TypeExpr>>),
     /// Scalar in an inclusive range: `x in 0...10` or `week_num in WeekRange`.
     InRange { bounds: InRangeBounds, span: SpanId },
+}
+
+pub(crate) fn resolve_expr_type(
+    expr: &Expr,
+    tag_types: &HashMap<Intern<String>, Ty>,
+) -> Ty {
+    match expr {
+        Expr::AnonymousTag(name) => tag_types.get(name).cloned().unwrap_or(Ty::Opaque(*name)),
+        Expr::FnCall(call) if call.args.as_ref().is_none_or(Vec::is_empty) => {
+            let name = call.path.segments.last().unwrap_or(&call.path.root);
+            tag_types.get(name).cloned().unwrap_or(Ty::Opaque(*name))
+        }
+        Expr::TagCall(call) => tag_types
+            .get(&call.name)
+            .cloned()
+            .unwrap_or(Ty::Opaque(call.name)),
+        Expr::Ref {
+            inner, mutable, ..
+        } => Ty::Ref {
+            inner: Box::new(resolve_expr_type(&inner.value, tag_types)),
+            mutable: *mutable,
+        },
+        Expr::TakePtr(inner) => Ty::Ptr {
+            inner: Box::new(resolve_expr_type(&inner.value, tag_types)),
+        },
+        _ => Ty::Opaque(Intern::from_ref("<expr>")),
+    }
 }
 
 /// Right-hand side of `in` in a type position.
@@ -92,7 +108,6 @@ impl TypeExpr {
     pub fn is_catch_all_pattern(&self) -> bool {
         match self {
             TypeExpr::Nominal(name, _) if name.as_str() == "_" => true,
-            TypeExpr::ListCons { tail, .. } => tail.value.is_catch_all_pattern(),
             TypeExpr::Generic { params, .. } => {
                 params.len() == 1
                     && params[0].0.as_str() == "_"
@@ -131,208 +146,11 @@ impl TypeExpr {
         }
     }
 
-    /// Types introduced by matching this pattern against a value of `subject_ty`.
-    pub fn pattern_binding_types(
-        &self,
-        subject_ty: Option<&Ty>,
-        variant_map: &VariantMap,
-        tag_types: &HashMap<Intern<String>, Ty>,
-    ) -> HashMap<Intern<String>, Ty> {
-        let mut out = HashMap::new();
-        match self {
-            TypeExpr::Generic {
-                params,
-                param_spans,
-                ..
-            } => {
-                let variant_name = Intern::<String>::from_ref(self.surface_mangle_name());
-                if let Some(payload_fields) =
-                    payload_fields_for_variant(variant_name, subject_ty, variant_map)
-                {
-                    for (slot, (param_name, _span)) in param_spans.iter().enumerate() {
-                        let ty = if let Some((_, t)) = payload_fields.get(slot) {
-                            t.clone()
-                        } else if let Some((_, kind)) = params.iter().find(|(n, _)| n == param_name)
-                        {
-                            match kind {
-                                ParameterKind::Tagged(sp) => sp.value.resolve_type(tag_types),
-                                ParameterKind::ValueParam { ty }
-                                | ParameterKind::Inferred { ty } => {
-                                    ty.value.resolve_type(tag_types)
-                                }
-                                ParameterKind::Generic => Ty::Opaque(*param_name),
-                                ParameterKind::Default(_) => continue,
-                            }
-                        } else {
-                            continue;
-                        };
-                        if !param_name.is_pattern_wildcard() {
-                            out.insert(*param_name, ty);
-                        }
-                    }
-                } else {
-                    for (param_name, kind) in params {
-                        if param_name.is_pattern_wildcard() {
-                            continue;
-                        }
-                        if let ParameterKind::Tagged(sp) = kind {
-                            out.insert(*param_name, sp.value.resolve_type(tag_types));
-                        } else {
-                            out.insert(*param_name, Ty::Opaque(*param_name));
-                        }
-                    }
-                }
-            }
-            TypeExpr::Nominal(name, _)
-                if name
-                    .as_str()
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_ascii_lowercase())
-                    && !name.is_pattern_wildcard() =>
-            {
-                if let Some(subject_ty) = subject_ty {
-                    out.insert(*name, subject_ty.clone());
-                } else {
-                    out.insert(*name, Ty::Opaque(*name));
-                }
-            }
-            TypeExpr::ListCons { head, tail } => {
-                if let Some(elem_ty) = subject_ty.and_then(|ty| ty.list_elem_ty(tag_types)) {
-                    for (name, ty) in
-                        head.value
-                            .pattern_binding_types(Some(&elem_ty), variant_map, tag_types)
-                    {
-                        out.insert(name, ty);
-                    }
-                    let tail_ty = match subject_ty {
-                        Some(Ty::Array { elem, .. }) => Ty::Array {
-                            elem: elem.clone(),
-                            size: ConstExpr::from(0),
-                        },
-                        Some(ty) => ty.clone(),
-                        None => Ty::Opaque(Intern::new("list_tail".to_string())),
-                    };
-                    for (name, ty) in
-                        tail.value
-                            .pattern_binding_types(Some(&tail_ty), variant_map, tag_types)
-                    {
-                        out.insert(name, ty);
-                    }
-                }
-            }
-            TypeExpr::Tuple(elems) => {
-                if let Some(Ty::Tuple(subject_elems)) = subject_ty {
-                    for (pat, subj) in elems.iter().zip(subject_elems.iter()) {
-                        for (name, ty) in
-                            pat.value
-                                .pattern_binding_types(Some(subj), variant_map, tag_types)
-                        {
-                            out.insert(name, ty);
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-        out
-    }
-
-    /// Type at parameter slot `slot` when matching this pattern against `subject_ty`.
-    pub fn pattern_param_type_at_slot(
-        &self,
-        slot: usize,
-        subject_ty: Option<&Ty>,
-        variant_map: &VariantMap,
-        tag_types: &HashMap<Intern<String>, Ty>,
-    ) -> Option<Ty> {
-        match self {
-            TypeExpr::Generic {
-                params,
-                param_spans,
-                ..
-            } => {
-                let (param_name, _) = param_spans.get(slot)?;
-                let variant_name = Intern::<String>::from_ref(self.surface_mangle_name());
-                if let Some(payload_fields) =
-                    payload_fields_for_variant(variant_name, subject_ty, variant_map)
-                    && let Some((_, ty)) = payload_fields.get(slot)
-                {
-                    return Some(ty.clone());
-                }
-                let kind = params.iter().find(|(n, _)| n == param_name).map(|(_, k)| k);
-                match kind {
-                    Some(ParameterKind::Tagged(sp)) => Some(sp.value.resolve_type(tag_types)),
-                    Some(ParameterKind::Generic) if !param_name.is_pattern_wildcard() => {
-                        Some(Ty::Opaque(*param_name))
-                    }
-                    _ => None,
-                }
-            }
-            TypeExpr::ListCons { head, tail } => {
-                let elem_ty = subject_ty.and_then(|ty| ty.list_elem_ty(tag_types))?;
-                if slot == 0 {
-                    head.value
-                        .pattern_param_type_at_slot(0, Some(&elem_ty), variant_map, tag_types)
-                } else {
-                    let tail_ty = match subject_ty {
-                        Some(Ty::Array { elem, .. }) => Ty::Array {
-                            elem: elem.clone(),
-                            size: ConstExpr::from(0),
-                        },
-                        _ => tag_types
-                            .get(&Intern::from_ref("List"))
-                            .cloned()
-                            .unwrap_or(Ty::Opaque(Intern::new("list_tail".to_string()))),
-                    };
-                    tail.value.pattern_param_type_at_slot(
-                        slot.saturating_sub(1),
-                        Some(&tail_ty),
-                        variant_map,
-                        tag_types,
-                    )
-                }
-            }
-            _ => None,
-        }
-    }
-
-    /// Resolve this type expression to its [`Ty`] via simple name lookup.
-    ///
-    /// This is a simplified version kept in `ast` for `pub(crate)` callers.
-    /// The full resolution (with generics/substitution) lives in
-    /// `typecheck::analysis::type_surface::TypeEnv`.
-    fn resolve_type(&self, tag_types: &HashMap<Intern<String>, Ty>) -> Ty {
-        match self {
-            TypeExpr::Nominal(name, _) => tag_types.get(name).cloned().unwrap_or(Ty::Opaque(*name)),
-            TypeExpr::Qualified(mp) => {
-                if let Some(last) = mp.segments.last() {
-                    tag_types.get(last).cloned().unwrap_or(Ty::Opaque(*last))
-                } else {
-                    tag_types
-                        .get(&mp.root)
-                        .cloned()
-                        .unwrap_or(Ty::Opaque(mp.root))
-                }
-            }
-            TypeExpr::Ref { inner, .. } => {
-                let inner_ty = inner.value.resolve_type(tag_types);
-                Ty::Ref {
-                    inner: Box::new(inner_ty),
-                    mutable: false,
-                }
-            }
-            TypeExpr::Generic { name, .. } => {
-                tag_types.get(name).cloned().unwrap_or(Ty::Opaque(*name))
-            }
-            _ => Ty::Opaque(Intern::from_ref("<expr>")),
-        }
-    }
 }
 
 /// Payload fields for a variant, looking up the variant in the variant map
 /// and matching against the subject type's union name.
-fn payload_fields_for_variant(
+pub(crate) fn payload_fields_for_variant(
     variant_name: Intern<String>,
     subject_ty: Option<&Ty>,
     variant_map: &VariantMap,

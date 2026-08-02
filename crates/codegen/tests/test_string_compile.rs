@@ -1,31 +1,6 @@
-use codegen::CodegenContext;
-use diagnostic::Diagnostic;
+mod support;
 use internment::Intern;
-use melior::Context;
 use parser::parse_from_str;
-use typecheck::FileId;
-use typecheck::transform::transform_file;
-
-/// Helper to generate MLIR text from a source string.
-fn codegen_to_mlir_text(source: &str, filename: &str) -> (String, Vec<Diagnostic>) {
-    let ast = parse_from_str(source);
-    let typed = transform_file(ast, FileId(0));
-
-    let context = Context::new();
-    melior::dialect::DialectHandle::llvm().register_dialect(&context);
-    context.get_or_load_dialect("arith");
-    context.get_or_load_dialect("func");
-    context.get_or_load_dialect("scf");
-    context.get_or_load_dialect("llvm");
-
-    let (module, symptoms) =
-        CodegenContext::build_module_from_typed_ast(&context, &typed, source, filename, None);
-    let mlir_text = module
-        .expect("codegen should succeed")
-        .as_operation()
-        .to_string();
-    (mlir_text, symptoms)
-}
 
 #[test]
 fn test_parse_string_literal() {
@@ -36,7 +11,8 @@ fn test_parse_string_literal() {
 
 #[test]
 fn test_compile_number_literal() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text("hello_text: 42\n", "test.gin");
+    let (mlir_text, symptoms) =
+        support::codegen_to_mlir_text("hello_text: 42\n", "test.gin", false);
     assert!(
         symptoms.is_empty(),
         "expected no codegen symptoms: {symptoms:?}"
@@ -46,7 +22,8 @@ fn test_compile_number_literal() {
 
 #[test]
 fn test_compile_empty_function() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text("hello_text: 42\n", "test.gin");
+    let (mlir_text, symptoms) =
+        support::codegen_to_mlir_text("hello_text: 42\n", "test.gin", false);
     assert!(
         symptoms.is_empty(),
         "expected no codegen symptoms: {symptoms:?}"
@@ -56,7 +33,8 @@ fn test_compile_empty_function() {
 
 #[test]
 fn test_compile_string_literal() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text("hello_text: 'hello'\n", "test.gin");
+    let (mlir_text, symptoms) =
+        support::codegen_to_mlir_text("hello_text: 'hello'\n", "test.gin", false);
     assert!(
         symptoms.is_empty(),
         "expected no codegen symptoms: {symptoms:?}"
@@ -82,7 +60,8 @@ fn test_compile_string_literal() {
 
 #[test]
 fn test_compile_string_literal_with_print() {
-    let (mlir_text, symptoms) = codegen_to_mlir_text("hello_text: 'hello'\n", "test.gin");
+    let (mlir_text, symptoms) =
+        support::codegen_to_mlir_text("hello_text: 'hello'\n", "test.gin", false);
 
     // Print any diagnostics for debugging
     for symptom in &symptoms {
@@ -116,7 +95,7 @@ main:
     return 0
 return
 ";
-    let (mlir_text, symptoms) = codegen_to_mlir_text(src, "test_const_union.gin");
+    let (mlir_text, symptoms) = support::codegen_to_mlir_text(src, "test_const_union.gin", false);
     assert!(
         symptoms.is_empty(),
         "expected no codegen symptoms for ConstUnion: {symptoms:?}"
@@ -141,7 +120,8 @@ main:
     return 0
 return
 ";
-    let (mlir_text, symptoms) = codegen_to_mlir_text(src, "test_const_union_fn.gin");
+    let (mlir_text, symptoms) =
+        support::codegen_to_mlir_text(src, "test_const_union_fn.gin", false);
     assert!(
         symptoms.is_empty(),
         "expected no codegen symptoms for ConstUnion fn arg: {symptoms:?}"
@@ -159,7 +139,8 @@ main:
     return result
 return
 ";
-    let (mlir_text, symptoms) = codegen_to_mlir_text(src, "test_const_union_when.gin");
+    let (mlir_text, symptoms) =
+        support::codegen_to_mlir_text(src, "test_const_union_when.gin", false);
     assert!(symptoms.is_empty(), "expected no symptoms: {symptoms:?}");
     assert!(!mlir_text.is_empty(), "should produce MLIR");
     assert!(
@@ -181,7 +162,7 @@ main:
     return result
 return
 ";
-    let (mlir_text, symptoms) = codegen_to_mlir_text(src, "test_when_hanging.gin");
+    let (mlir_text, symptoms) = support::codegen_to_mlir_text(src, "test_when_hanging.gin", false);
     assert!(symptoms.is_empty(), "expected no symptoms: {symptoms:?}");
     assert!(!mlir_text.is_empty(), "should produce MLIR");
     assert!(
@@ -201,7 +182,8 @@ main:
     return result
 return
 ";
-    let (mlir_text, symptoms) = codegen_to_mlir_text(src, "test_when_multiline.gin");
+    let (mlir_text, symptoms) =
+        support::codegen_to_mlir_text(src, "test_when_multiline.gin", false);
     assert!(symptoms.is_empty(), "expected no symptoms: {symptoms:?}");
     assert!(!mlir_text.is_empty(), "should produce MLIR");
     assert!(
@@ -228,7 +210,8 @@ main:
     return result
 return
 ";
-    let (mlir_text, symptoms) = codegen_to_mlir_text(src, "test_const_union_when.gin");
+    let (mlir_text, symptoms) =
+        support::codegen_to_mlir_text(src, "test_const_union_when.gin", false);
     if !symptoms.is_empty() || mlir_text.is_empty() {
         eprintln!("NOTE: ConstUnion lowering not fully supported in typed AST pipeline");
     }

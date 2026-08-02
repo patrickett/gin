@@ -1,20 +1,20 @@
 //! Tests for parameter-level shape and trait constraints.
 //!
-//! `Type.Trait has ...` provided-trait declarations.
+//! Unified declarations with provided traits.
 
 mod support;
 
 use support::transform_source;
 
-/// `Type.Trait has ...` is the standard way to provide a trait implementation.
 #[test]
 fn provided_trait_on_declaration() {
     let src = "\
 Copy has can_copy Bool
 Bool is True or False
 
-UniqueId has id Int
-UniqueId.Copy has can_copy: False
+UniqueId has Copy
+    id Int
+    Copy.can_copy: False
 ";
     let typed = transform_source(src);
     let tag_id = typecheck::TagId(internment::Intern::new("UniqueId".to_string()));

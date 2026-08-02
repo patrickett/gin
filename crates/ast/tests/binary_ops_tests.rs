@@ -5,8 +5,8 @@ use ast::{ConstValue, HashFloat};
 use flask::CompileTarget;
 use internment::Intern;
 use std::collections::HashMap;
-use typecheck::analysis::{TyInfer, TyInferEnv, eval_compile_time_expr};
-use typecheck::prepare_file_ast;
+use typecheck::analysis::{CompTimeEvaluator, ConstEnv, TyInfer, TyInferEnv};
+use typecheck::prepare_parse_ast;
 use typecheck::ty::Ty;
 use typecheck::{DefId, ExprId, TypedExprKind};
 
@@ -15,16 +15,8 @@ use support::transform_source;
 
 fn prepare(source: &str) -> ast::FileAst {
     let mut ast = parser::cursor::TokenCursor::parse_source(source);
-    let _ = prepare_file_ast(&mut ast, &CompileTarget::Library);
+    let _ = prepare_parse_ast(&mut ast, &CompileTarget::Library);
     ast
-}
-
-fn bind_expr_const_value<'a>(ast: &'a ast::FileAst, name: &str) -> Option<&'a ConstValue> {
-    let bind = ast.defs.get(&Intern::from_ref(name))?;
-    match &bind.value {
-        ast::BindValue::Expr(e) => e.const_value.as_ref(),
-        _ => None,
-    }
 }
 
 fn body_expr_id(typed: &typecheck::TypedFileAst, def_name: &str) -> Option<ExprId> {
@@ -35,6 +27,14 @@ fn body_expr_id(typed: &typecheck::TypedFileAst, def_name: &str) -> Option<ExprI
         typecheck::BindBody::Body { exprs, ret } => ret.or_else(|| exprs.last().copied()),
         typecheck::BindBody::Extern => None,
     }
+}
+
+fn typed_bind_const_value<'a>(
+    typed: &'a typecheck::TypedFileAst,
+    name: &str,
+) -> Option<&'a ConstValue> {
+    let id = body_expr_id(typed, name)?;
+    typed.exprs.get(id.as_usize())?.const_value.as_ref()
 }
 
 fn assert_const_int(cv: Option<&ConstValue>, n: i128) {
@@ -97,35 +97,74 @@ fn eval_binop_float_arithmetic() {
 
 #[test]
 fn compile_time_bind_folds_addition() {
-    let ast = prepare("two := 1 + 1\n");
-    let bind = ast.defs.get(&Intern::from_ref("two")).expect("two");
-    assert!(bind.is_constant);
-    assert!(bind.is_compile_time);
-    assert_const_int(bind_expr_const_value(&ast, "two"), 2);
+    let typed = transform_source("two := 1 + 1\n");
+    assert_const_int(typed_bind_const_value(&typed, "two"), 2);
 }
 
 #[test]
 fn compile_time_bind_folds_nested_addition() {
-    let ast = prepare("sum := (1 + 2) + 3\n");
-    assert_const_int(bind_expr_const_value(&ast, "sum"), 6);
+    let typed = transform_source("sum := (1 + 2) + 3\n");
+    assert_const_int(typed_bind_const_value(&typed, "sum"), 6);
 }
 
 #[test]
 fn eval_compile_time_expr_folds_addition() {
-    let ast = prepare("two := 1 + 1\n");
-    let mut const_binds: HashMap<Intern<String>, Option<ConstValue>> =
-        ast.defs.keys().map(|name| (*name, None)).collect();
-    const_binds.insert(
-        Intern::from_ref("two"),
-        bind_expr_const_value(&ast, "two").cloned(),
-    );
     let main = parser::cursor::TokenCursor::parse_source("x: 1 + 2\n");
+    let const_binds: ConstEnv = main.defs.keys().map(|name| (*name, None)).collect();
     let bind = main.defs.get(&Intern::from_ref("x")).unwrap();
     let ast::BindValue::Expr(e) = &bind.value else {
         panic!("expected expr bind");
     };
-    let cv = eval_compile_time_expr(&e.value, &const_binds, &main).expect("fold 1+2");
+    let evaluator = CompTimeEvaluator::new(&const_binds, &main);
+    let cv = evaluator.eval(&e.value).expect("fold 1+2");
     assert_const_int(Some(&cv), 3);
+}
+
+#[test]
+fn compile_time_function_body_exposes_local_binds_to_return() {
+    let ast = parser::cursor::TokenCursor::parse_source(
+        "identity(value Int) Int :=\n    result := value\n    doubled := result + result\nreturn doubled\nanswer := identity(42)\n",
+    );
+    let const_binds = ast.defs.keys().map(|name| (*name, None)).collect();
+    let answer = ast.defs.get(&Intern::from_ref("answer")).expect("answer");
+    let ast::BindValue::Expr(expr) = &answer.value else {
+        panic!("expected expression body");
+    };
+    let evaluator = CompTimeEvaluator::new(&const_binds, &ast);
+
+    let value = evaluator.eval(&expr.value);
+
+    assert_const_int(value.as_ref(), 84);
+}
+
+#[test]
+fn compile_time_call_with_wrong_arity_is_not_evaluated() {
+    let ast = parser::cursor::TokenCursor::parse_source(
+        "pick(first Int, second Int) Int := first\nanswer := pick(1)\n",
+    );
+    let const_binds = ast.defs.keys().map(|name| (*name, None)).collect();
+    let answer = ast.defs.get(&Intern::from_ref("answer")).expect("answer");
+    let ast::BindValue::Expr(expr) = &answer.value else {
+        panic!("expected expression body");
+    };
+    let evaluator = CompTimeEvaluator::new(&const_binds, &ast);
+
+    assert_eq!(evaluator.eval(&expr.value), None);
+}
+
+#[test]
+fn recursive_compile_time_call_is_not_evaluated() {
+    let ast = parser::cursor::TokenCursor::parse_source(
+        "recurse(value Int) Int := recurse(value)\nanswer := recurse(1)\n",
+    );
+    let const_binds = ast.defs.keys().map(|name| (*name, None)).collect();
+    let answer = ast.defs.get(&Intern::from_ref("answer")).expect("answer");
+    let ast::BindValue::Expr(expr) = &answer.value else {
+        panic!("expected expression body");
+    };
+    let evaluator = CompTimeEvaluator::new(&const_binds, &ast);
+
+    assert_eq!(evaluator.eval(&expr.value), None);
 }
 
 #[test]
@@ -183,17 +222,25 @@ fn runtime_bind_resolve_type_folds_literal_addition() {
 }
 
 #[test]
-fn rebindable_foldable_top_level_still_folds() {
+fn rebindable_top_level_stays_runtime() {
     let raw = parser::cursor::TokenCursor::parse_source("two: 1 + 1\n");
-    assert!(bind_expr_const_value(&raw, "two").is_none());
+    let raw_bind = raw.defs.get(&Intern::from_ref("two")).expect("two");
+    assert!(matches!(
+        &raw_bind.value,
+        ast::BindValue::Expr(expr) if expr.const_value.is_none()
+    ));
     let prepared = prepare("two: 1 + 1\n");
     let bind = prepared.defs.get(&Intern::from_ref("two")).expect("two");
     assert!(!bind.is_constant, "`:=` is required for constant bind");
-    assert!(
-        bind.is_compile_time,
-        "pure literal fold should still comptime-classify"
-    );
-    assert_const_int(bind_expr_const_value(&prepared, "two"), 2);
+    assert!(bind_expr_const_value_removed(&prepared, "two"));
+}
+
+fn bind_expr_const_value_removed(ast: &ast::FileAst, name: &str) -> bool {
+    let bind = ast.defs.get(&Intern::from_ref(name)).expect("bind");
+    match &bind.value {
+        ast::BindValue::Expr(expr) => expr.const_value.is_none(),
+        _ => false,
+    }
 }
 
 #[test]

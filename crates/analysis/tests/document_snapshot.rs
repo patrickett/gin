@@ -1,9 +1,8 @@
 //! Tests for `PackageCache::document_snapshot` — verifying that the returned
 //! source, parse output, and line index are consistent and usable.
 
-use analysis::{CacheEngine, QueryEngine};
+use analysis::PackageCache;
 use ast::source::SourceExt;
-use crossbeam_channel::unbounded;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -27,12 +26,10 @@ fn document_snapshot_returns_all_three_fields() {
     let dir = unique_temp_dir("three_fields");
     let path = make_test_file(&dir, "main.gin", "hello is Unit\nworld is Unit\n");
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     engine.add_file(path.clone()).unwrap();
 
-    let snapshot = engine.snapshot();
-    let doc = snapshot
+    let doc = engine
         .document_snapshot(&path)
         .expect("document should exist");
 
@@ -55,14 +52,12 @@ fn document_snapshot_uses_cached_line_index() {
     let dir = unique_temp_dir("cached");
     let path = make_test_file(&dir, "data.gin", "a\nb\nc\n");
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     engine.add_file(path.clone()).unwrap();
 
     // First snapshot — "a\nb\nc\n" has 4 line starts: [0, 2, 4, 6]
     // bytes: a0 \n1 b2 \n3 c4 \n5
-    let snap1 = engine.snapshot();
-    let doc1 = snap1.document_snapshot(&path).unwrap();
+    let doc1 = engine.document_snapshot(&path).unwrap();
     assert_eq!(doc1.line_index.line_count(), 4);
     assert_eq!(doc1.line_index.byte_to_position(&doc1.source, 0), (0, 0));
     assert_eq!(doc1.line_index.byte_to_position(&doc1.source, 2), (1, 0));
@@ -73,8 +68,7 @@ fn document_snapshot_uses_cached_line_index() {
 
     // Second snapshot — "a\nb\nc\nd\ne\nf\n": 7 lines, [0, 2, 4, 6, 8, 10, 12]
     // bytes: a0 \n1 b2 \n3 c4 \n5 d6 \n7 e8 \n9 f10 \n11
-    let snap2 = engine.snapshot();
-    let doc2 = snap2.document_snapshot(&path).unwrap();
+    let doc2 = engine.document_snapshot(&path).unwrap();
     assert_eq!(doc2.line_index.line_count(), 7);
     assert_eq!(doc2.line_index.byte_to_position(&doc2.source, 3), (1, 1));
     assert_eq!(doc2.line_index.byte_to_position(&doc2.source, 9), (4, 1));
@@ -86,12 +80,10 @@ fn document_snapshot_line_index_consistent_with_sourceext() {
     let content = "use core.true\n\nmain:\n    core.true\n    check(core.true)\nreturn\n";
     let path = make_test_file(&dir, "main.gin", content);
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     engine.add_file(path.clone()).unwrap();
 
-    let snapshot = engine.snapshot();
-    let doc = snapshot.document_snapshot(&path).unwrap();
+    let doc = engine.document_snapshot(&path).unwrap();
 
     // byte_to_position must match SourceExt for all valid char-boundary bytes.
     for byte in 0..content.len() {
@@ -123,12 +115,10 @@ fn document_snapshot_line_index_consistent_with_sourceext() {
 
 #[test]
 fn document_snapshot_returns_none_for_unknown_file() {
-    let (tx, _rx) = unbounded();
-    let engine = CacheEngine::new(tx);
-    let snapshot = engine.snapshot();
+    let engine = PackageCache::for_test();
 
     assert!(
-        snapshot
+        engine
             .document_snapshot(&PathBuf::from("/nonexistent/file.gin"))
             .is_none()
     );
@@ -139,12 +129,10 @@ fn document_snapshot_fields_are_coherent() {
     let dir = unique_temp_dir("coherent");
     let path = make_test_file(&dir, "test.gin", "x is Unit\n");
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     engine.add_file(path.clone()).unwrap();
 
-    let snapshot = engine.snapshot();
-    let doc = snapshot.document_snapshot(&path).unwrap();
+    let doc = engine.document_snapshot(&path).unwrap();
 
     assert!(doc.line_index.line_count() >= 1);
     assert!(!doc.source.is_empty());

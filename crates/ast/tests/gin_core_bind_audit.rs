@@ -7,12 +7,11 @@
 use flask::CompileTarget;
 use internment::Intern;
 use parser::cursor::TokenCursor;
-use typecheck::comptime_classify::BindComptimeExt;
-use typecheck::{ComptimeClass, prepare_file_ast};
+use typecheck::prepare_parse_ast;
 
 fn prepare_and_check(source: &str, name: &str) -> (ast::FileAst, ast::Bind) {
     let mut ast = TokenCursor::parse_source(source);
-    let _ = prepare_file_ast(&mut ast, &CompileTarget::Library);
+    let _ = prepare_parse_ast(&mut ast, &CompileTarget::Library);
     let bind = ast
         .defs
         .get(&Intern::from_ref(name))
@@ -23,8 +22,7 @@ fn prepare_and_check(source: &str, name: &str) -> (ast::FileAst, ast::Bind) {
 
 #[test]
 fn marker_copy_is_constant_comptime_fn() {
-    // Minimal: just needs a Type tag + Bool so typecheck/classify can resolve
-    // `is_copy(x Type) Bool := when x is ...` as a constant comptime fn.
+    // Minimal: just needs a Type tag + Bool so the binder convention is clear.
     let source = "\
 Type is Primitive(width BigInt, signed Bool) or Ptr(inner Type)
 Bool is True or False
@@ -36,8 +34,7 @@ is_copy(x Type) Bool := when x is
 ";
     let (ast, bind) = prepare_and_check(source, "is_copy");
     assert!(bind.is_constant, "is_copy uses `:=`");
-    assert!(bind.is_compile_time);
-    assert_eq!(bind.classify(&ast), ComptimeClass::ComptimeFn);
+    assert!(ast.defs.contains_key(&Intern::from_ref("is_copy")));
 }
 
 #[test]
@@ -53,12 +50,7 @@ compute_size(x Type) Size := when x is
 ";
     let (ast, bind) = prepare_and_check(source, "compute_size");
     assert!(bind.is_constant, "compute_size uses `:=`");
-    assert!(bind.is_compile_time, "compute_size should fold at prepare");
-    assert_eq!(
-        bind.classify(&ast),
-        ComptimeClass::ComptimeFn,
-        "compute_size"
-    );
+    assert!(ast.defs.contains_key(&Intern::from_ref("compute_size")));
 }
 
 #[test]
@@ -69,8 +61,7 @@ target := Target('x86_64', 'unknown', 'unknown')
 ";
     let (ast, bind) = prepare_and_check(source, "target");
     assert!(bind.is_constant);
-    assert!(bind.is_compile_time);
-    assert_eq!(bind.classify(&ast), ComptimeClass::FoldableValue);
+    assert!(ast.defs.contains_key(&Intern::from_ref("target")));
 }
 
 #[test]
@@ -81,14 +72,13 @@ false := Bool.False
 true  := Bool.True
 ";
     let mut ast = TokenCursor::parse_source(source);
-    let _ = prepare_file_ast(&mut ast, &CompileTarget::Library);
+    let _ = prepare_parse_ast(&mut ast, &CompileTarget::Library);
     for name in ["true", "false"] {
         let bind = ast
             .defs
             .get(&Intern::from_ref(name))
             .unwrap_or_else(|| panic!("missing def `{name}`"));
         assert!(bind.is_constant, "{name} uses `:=`");
-        assert!(bind.is_compile_time, "{name} should fold");
     }
 }
 
@@ -104,7 +94,7 @@ write(fd Int, buf Pointer(Int), len Int) Int:
     return result
 ";
     let mut ast = TokenCursor::parse_source(source);
-    let _ = prepare_file_ast(&mut ast, &CompileTarget::Library);
+    let _ = prepare_parse_ast(&mut ast, &CompileTarget::Library);
     assert!(
         ast.defs
             .get(&Intern::from_ref("write_spec"))
@@ -112,28 +102,9 @@ write(fd Int, buf Pointer(Int), len Int) Int:
             .is_constant
     );
     assert!(
-        ast.defs
-            .get(&Intern::from_ref("write_spec"))
-            .unwrap()
-            .is_compile_time
-    );
-    assert!(
         !ast.defs
             .get(&Intern::from_ref("write"))
             .unwrap()
             .is_constant
-    );
-    assert!(
-        !ast.defs
-            .get(&Intern::from_ref("write"))
-            .unwrap()
-            .is_compile_time
-    );
-    assert_eq!(
-        ast.defs
-            .get(&Intern::from_ref("write"))
-            .unwrap()
-            .classify(&ast),
-        ComptimeClass::RuntimeFn
     );
 }

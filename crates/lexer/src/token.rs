@@ -110,6 +110,4 @@ pub enum Token<'src> {
 
     When,
     While,
-
-    Whitespace,
 }

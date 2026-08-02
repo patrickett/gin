@@ -260,10 +260,10 @@ pub fn compile_and_run_with_options(source: &str, opts: Options) -> RunResult {
         ..Default::default()
     };
 
-    GinCompiler::compile(&mut args);
+    let result = GinCompiler::compile(&mut args);
 
     // The compiler is void — detect success by checking the executable exists.
-    if !exe_path.exists() {
+    if !result.is_success() || !exe_path.exists() {
         return RunResult {
             compiled: false,
             ran: false,

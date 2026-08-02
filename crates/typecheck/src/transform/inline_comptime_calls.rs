@@ -1,44 +1,33 @@
-//! Inline calls to comptime-classified functions at runtime call sites when all arguments are known.
-
-use std::collections::{HashMap, HashSet};
-
 use diagnostic::Diagnostic;
 use internment::Intern;
 
 use super::TransformCtx;
-use super::flow::{children_of_kind, eval_const_from_expr};
-use crate::analysis::eval_compile_time_bind_call;
-use crate::reflect::reflect_ty_to_const_value;
-use ast::BindValue;
-use ast::FileAst;
 use ast::expr::Literal;
-use ast::{ConstValue, HashFloat};
+use ast::{ConstValue, FileAst, HashFloat};
 
-use crate::ty::Ty;
-use crate::typed::{BindBody, DefId, ExprId, TypedExprKind, TypedFileAst};
+use crate::staging::normalize;
+use crate::typed::{
+    Availability, AvailabilityRequirement, BindBody, CallCapability, DefId, ExprId,
+    TypedExprKind, TypedFileAst, walk_expr_children,
+};
 
-const MAX_INLINE_DEPTH: usize = 64;
 const MAX_INLINE_ROUNDS: usize = 32;
 
-/// Replace comptime `FnCall`s in runtime function bodies when arguments are compile-time-known.
 pub fn stage_inline_comptime_calls(
     typed: &mut TypedFileAst,
-    file_ast: &FileAst,
-    ctx: &TransformCtx,
+    _file_ast: &FileAst,
+    _ctx: &TransformCtx,
 ) {
-    let eval_ast = ctx.compile_time_eval_ast.as_ref();
-    let env = build_top_level_const_env(eval_ast, file_ast);
-
     let runtime_defs: Vec<DefId> = typed
         .defs
         .iter()
-        .filter(|(_, b)| !b.is_compile_time)
+        .filter(|(_, bind)| !bind.is_constant || bind.name.as_str() == "main")
         .map(|(id, _)| *id)
         .collect();
 
     for def_id in runtime_defs {
-        let root_ids = match typed.defs.get(&def_id).map(|b| &b.body) {
-            Some(BindBody::Expr(id)) => vec![*id],
+        let root_ids = match typed.defs.get(&def_id).map(|bind| &bind.body) {
+            Some(BindBody::Expr(expr)) => vec![*expr],
             Some(BindBody::Body { exprs, ret }) => {
                 let mut ids = exprs.clone();
                 ids.extend(ret);
@@ -46,20 +35,11 @@ pub fn stage_inline_comptime_calls(
             }
             _ => continue,
         };
-        for _round in 0..MAX_INLINE_ROUNDS {
+
+        for _ in 0..MAX_INLINE_ROUNDS {
             let mut changed = false;
             for root in &root_ids {
-                if inline_in_expr(
-                    typed,
-                    eval_ast,
-                    file_ast,
-                    *root,
-                    &env,
-                    &mut HashSet::new(),
-                    0,
-                ) {
-                    changed = true;
-                }
+                changed |= inline_in_expr(typed, *root);
             }
             if !changed {
                 break;
@@ -68,162 +48,139 @@ pub fn stage_inline_comptime_calls(
     }
 }
 
-fn build_top_level_const_env(
-    eval_ast: &FileAst,
-    file_ast: &FileAst,
-) -> HashMap<Intern<String>, Option<ConstValue>> {
-    let mut env: HashMap<Intern<String>, Option<ConstValue>> = eval_ast
-        .defs
-        .keys()
-        .chain(file_ast.defs.keys())
-        .map(|n| (*n, None))
-        .collect();
-
-    for (name, bind) in file_ast.defs.iter().chain(eval_ast.defs.iter()) {
-        if let BindValue::Expr(e) = &bind.value
-            && let Some(cv) = &e.const_value
-        {
-            env.insert(*name, Some(cv.clone()));
-        }
-    }
-    env
-}
-
-fn inline_in_expr(
-    typed: &mut TypedFileAst,
-    eval_ast: &FileAst,
-    file_ast: &FileAst,
-    expr_id: ExprId,
-    env: &HashMap<Intern<String>, Option<ConstValue>>,
-    call_stack: &mut HashSet<String>,
-    depth: usize,
-) -> bool {
+fn inline_in_expr(typed: &mut TypedFileAst, expr_id: ExprId) -> bool {
     let idx = expr_id.as_usize();
     if idx >= typed.exprs.kind.len() {
         return false;
     }
 
-    let mut changed = false;
-    for child in children_of_kind(&typed.exprs.kind[idx]) {
-        if inline_in_expr(typed, eval_ast, file_ast, child, env, call_stack, depth) {
-            changed = true;
-        }
+    if let TypedExprKind::FnCall {
+        target,
+        args: Some(args),
+        ..
+    } = typed.exprs.kind[idx].clone()
+        && let Some(bind) = typed.defs.get(&target)
+        && is_staging_bind(bind)
+        && bind.call_capability == CallCapability::StagePolymorphic
+        && has_invalid_compile_time_argument(typed, bind, &args)
+    {
+        emit_cannot_inline(typed, expr_id, &target.0, "non-constant argument");
+        return false;
     }
 
-    let TypedExprKind::FnCall { target, args, .. } = typed.exprs.kind[idx].clone() else {
-        return changed;
-    };
+    let mut children = Vec::new();
+    let _ = walk_expr_children(&typed.exprs.kind[idx], &mut |child| {
+        children.push(child);
+        std::ops::ControlFlow::Continue(())
+    });
+    let mut changed = false;
+    for child in children {
+        changed |= inline_in_expr(typed, child);
+    }
 
-    let Some(bind) = eval_ast
-        .defs
-        .get(&target.0)
-        .or_else(|| file_ast.defs.get(&target.0))
+    let TypedExprKind::FnCall {
+        target,
+        args: Some(args),
+        ..
+    } = typed.exprs.kind[idx].clone()
     else {
         return changed;
     };
 
-    if !bind.is_compile_time {
+    let Some(bind) = typed.defs.get(&target) else {
+        return changed;
+    };
+    if !is_staging_bind(bind) {
         return changed;
     }
 
-    let target_name = target.0.as_str().to_string();
-    if call_stack.contains(&target_name) || depth >= MAX_INLINE_DEPTH {
+    if has_invalid_compile_time_argument(typed, bind, &args) {
+        emit_cannot_inline(typed, expr_id, &target.0, "non-constant argument");
         return changed;
     }
 
-    let arg_ids = match args {
-        Some(a) => a,
-        None => {
-            if bind.params.is_some() {
-                emit_cannot_inline(typed, expr_id, &target.0, "missing arguments");
+    match normalize(typed, expr_id, &crate::subst::DepSubst::new()) {
+        crate::staging::NormalizeResult::Value(value) => {
+            if !matches!(
+                value,
+                ConstValue::String(_) | ConstValue::Int(_) | ConstValue::Float(_)
+            ) {
+                return changed;
             }
-            return changed;
+            replace_with_value(typed, expr_id, value);
+            true
         }
-    };
-
-    let arg_cvs = match collect_call_arg_const_values(typed, &arg_ids) {
-        Some(v) => v,
-        None => {
-            emit_cannot_inline(typed, expr_id, &target.0, "non-constant argument");
-            return changed;
+        crate::staging::NormalizeResult::Unsupported(_) => {
+            emit_cannot_inline(typed, expr_id, &target.0, "could not evaluate at compile time");
+            changed
         }
-    };
-
-    call_stack.insert(target_name.clone());
-    let result = eval_compile_time_bind_call(bind, &arg_cvs, env, eval_ast, depth + 1, call_stack);
-    call_stack.remove(&target_name);
-
-    let Some(cv) = result else {
-        emit_cannot_inline(
-            typed,
-            expr_id,
-            &target.0,
-            "could not evaluate at compile time",
-        );
-        return changed;
-    };
-
-    let lit = const_value_to_literal(&cv);
-    typed.exprs.kind[idx] = TypedExprKind::Lit(lit.clone());
-    // Tag values (e.g. `True`, `False`, `None`) keep their original type from the
-    // function's return type annotation — don't reconstruct it from the ConstValue.
-    if !matches!(&cv, ConstValue::Tag { .. }) {
-        typed.exprs.ty[idx] = const_value_to_ty(&cv);
+        crate::staging::NormalizeResult::Residual(_)
+        | crate::staging::NormalizeResult::RuntimeDependency(_) => changed,
     }
-    typed.exprs.const_value[idx] = Some(cv);
-    true
 }
 
-fn collect_call_arg_const_values(
+fn is_staging_bind(bind: &crate::typed::TypedBind) -> bool {
+    bind.is_constant && bind.call_capability == CallCapability::StagePolymorphic
+}
+
+fn has_invalid_compile_time_argument(
     typed: &TypedFileAst,
-    arg_ids: &[ExprId],
-) -> Option<Vec<ConstValue>> {
-    let mut out = Vec::with_capacity(arg_ids.len());
-    for id in arg_ids {
-        out.push(arg_const_value(typed, id.as_usize())?);
-    }
-    Some(out)
+    bind: &crate::typed::TypedBind,
+    args: &[ExprId],
+) -> bool {
+    args.iter().zip(&bind.param_requirements).any(|(arg, requirement)| {
+        *requirement == AvailabilityRequirement::CompileTime
+            && (typed.exprs.availability[arg.as_usize()] != Availability::CompileTime
+                || is_runtime_form_type_argument(typed, *arg))
+    })
 }
 
-fn arg_const_value(typed: &TypedFileAst, idx: usize) -> Option<ConstValue> {
-    if let TypedExprKind::FnCall { target, .. } = &typed.exprs.kind[idx] {
-        return typed
-            .defs
-            .get(target)
-            .filter(|b| b.is_compile_time)
-            .and_then(|_| typed.exprs.const_value[idx].clone());
+fn is_runtime_form_type_argument(typed: &TypedFileAst, arg: ExprId) -> bool {
+    let Some(TypedExprKind::FnCall { target, .. }) = typed.exprs.kind.get(arg.as_usize()) else {
+        return false;
+    };
+    if target.0.as_str() == "Self" {
+        return false;
     }
-    if let Some(cv) = typed.exprs.const_value[idx].clone() {
-        return Some(cv);
-    }
-    if let Some(cv) = eval_const_from_expr(typed, idx) {
-        return Some(cv);
-    }
-    // Type / tag operands: `Int` in `f(Int)` is a `TagCall` with `ty: Opaque("Int")`.
-    if matches!(
-        &typed.exprs.kind[idx],
-        TypedExprKind::Lit(_) | TypedExprKind::TagCall { .. }
-    ) && !matches!(&typed.exprs.ty[idx], Ty::Literal(_))
+    if !typed.defs.contains_key(target)
+        && typed.exprs.availability[arg.as_usize()] == Availability::CompileTime
     {
-        return Some(reflect_ty_to_const_value(&typed.exprs.ty[idx]));
+        return false;
     }
-    None
+    !typed.defs.get(target).is_some_and(|bind| {
+        bind.call_capability == CallCapability::StagePolymorphic
+            && bind
+                .param_kinds
+                .iter()
+                .all(|kind| matches!(kind, crate::ty::ParamKind::Type))
+    })
 }
 
-fn const_value_to_ty(cv: &ConstValue) -> Ty {
-    match cv {
-        ConstValue::String(s) => Ty::Literal(ConstValue::String(s.clone())),
-        ConstValue::Int(n) => Ty::Int {
+fn replace_with_value(typed: &mut TypedFileAst, expr_id: ExprId, value: ConstValue) {
+    let idx = expr_id.as_usize();
+    typed.exprs.kind[idx] = TypedExprKind::Lit(const_value_to_literal(&value));
+    if !matches!(value, ConstValue::Tag { .. }) {
+        typed.exprs.ty[idx] = const_value_to_ty(&value);
+    }
+    typed.exprs.const_value[idx] = Some(value);
+}
+
+fn const_value_to_ty(value: &ConstValue) -> crate::ty::Ty {
+    match value {
+        ConstValue::String(value) => crate::ty::Ty::Literal(ConstValue::String(value.clone())),
+        ConstValue::Int(value) => crate::ty::Ty::Int {
             width: 64,
             signed: true,
-            value: Some(*n),
+            value: Some(*value),
             min: None,
             max: None,
         },
-        ConstValue::Float(HashFloat(f)) => Ty::Float {
-            value: Some(HashFloat(*f)),
+        ConstValue::Float(value) => crate::ty::Ty::Float {
+            value: Some(*value),
         },
-        _ => Ty::Opaque(Intern::new("comptime".to_string())),
+        ConstValue::Tag { .. } | ConstValue::Record { .. } | ConstValue::List(_) => {
+            crate::ty::Ty::Opaque(Intern::from_ref("comptime"))
+        }
     }
 }
 
@@ -233,6 +190,12 @@ fn emit_cannot_inline(
     fn_name: &Intern<String>,
     detail: &str,
 ) {
+    if typed.exprs.flaws[expr_id.as_usize()]
+        .iter()
+        .any(|flaw| flaw.code.slug() == "type-cannot-call-comptime-with-runtime-args")
+    {
+        return;
+    }
     typed.exprs.flaws[expr_id.as_usize()].push(
         Diagnostic::new(
             "type-cannot-call-comptime-with-runtime-args",
@@ -247,12 +210,31 @@ fn emit_cannot_inline(
     );
 }
 
-fn const_value_to_literal(cv: &ConstValue) -> Literal {
-    match cv {
-        ConstValue::String(s) => Literal::String(s.clone()),
-        ConstValue::Int(n) => Literal::Int(u128::try_from(*n).unwrap_or(0)),
-        ConstValue::Float(HashFloat(f)) => Literal::Float(HashFloat(*f)),
-        ConstValue::Tag { .. } => Literal::Number(0),
-        ConstValue::Record { .. } | ConstValue::List(_) => Literal::Number(0),
+fn const_value_to_literal(value: &ConstValue) -> Literal {
+    match value {
+        ConstValue::String(value) => Literal::String(value.clone()),
+        ConstValue::Int(value) => Literal::Int(*value as u128),
+        ConstValue::Float(HashFloat(value)) => Literal::Float(HashFloat(*value)),
+        ConstValue::Tag { .. } | ConstValue::Record { .. } | ConstValue::List(_) => {
+            Literal::Number(0)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn const_value_to_literal_preserves_negative_integers() {
+        assert_eq!(
+            const_value_to_literal(&ConstValue::Int(-1)),
+            Literal::Int(u128::MAX),
+        );
+    }
+
+    #[test]
+    fn const_value_to_literal_handles_positive_integers() {
+        assert_eq!(const_value_to_literal(&ConstValue::Int(42)), Literal::Int(42));
     }
 }

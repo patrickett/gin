@@ -8,8 +8,7 @@
 //! sits around 22 MB. The 256 MB cap leaves room for normal AST growth while
 //! still catching another exponential regression early.
 
-use analysis::{CacheEngine, QueryEngine};
-use crossbeam_channel::unbounded;
+use analysis::PackageCache;
 use std::path::PathBuf;
 
 const MAX_RSS_AFTER_SEMANTICS: usize = 320 * 1024 * 1024;
@@ -31,8 +30,7 @@ fn full_package_load_memory() {
 
     let rss_before = process_rss_bytes();
 
-    let (tx, _rx) = unbounded();
-    let mut engine = CacheEngine::new(tx);
+    let engine = PackageCache::for_test();
     let mut paths: Vec<PathBuf> = Vec::new();
     for entry in walkdir(&modules_dir) {
         if entry.extension().is_some_and(|e| e == "gin") {

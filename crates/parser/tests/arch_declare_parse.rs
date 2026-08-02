@@ -26,7 +26,7 @@ arch Architecture
     );
     assert!(
         arch.return_tag.as_ref().is_some_and(
-            |t| matches!(&t.value, ast::TypeExpr::Nominal(n, _) if n.as_str() == "Architecture")
+            |t| matches!(&t.value, ast::Expr::AnonymousTag(n) if n.as_str() == "Architecture")
         ),
         "return_tag should be Architecture"
     );
