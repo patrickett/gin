@@ -14,6 +14,7 @@ default-members = [
     "tools/ginc",
     "tools/ginfmt",
     "tools/ginlsp",
+    "tools/ginrepl",
 ]
 members = [
     "editors/tree-sitter-gin",
@@ -31,6 +32,7 @@ members = [
     "tools/ginc",
     "tools/ginfmt",
     "tools/ginlsp",
+    "tools/ginrepl",
     "crates/typecheck",
     "crates/ast/signature",
     "crates/ast/format",

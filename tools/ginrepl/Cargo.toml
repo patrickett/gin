@@ -1,0 +1,17 @@
+[package]
+name = "ginrepl"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+ast = { workspace = true }
+clap = { workspace = true }
+diagnostic = { workspace = true }
+flask = { workspace = true }
+parser = { workspace = true }
+resolve = { workspace = true }
+rustyline = "17"
+typecheck = { workspace = true }
