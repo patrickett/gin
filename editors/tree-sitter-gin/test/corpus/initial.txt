@@ -514,44 +514,39 @@ Widget has
           (identifier))))))
 
 ================================================================================
-provisions with has members
+qualified trait members
 ================================================================================
 
-Bool.ToString
-Bool.ToString has to_string: 'true'
-Bool.ToString has to_string(self) Str := 'true'
+Bool has ToString
+    ToString.to_string: 'true'
+    ToString.format(self) Str := 'true'
 
 --------------------------------------------------------------------------------
 
 (source_file
-  (member_expression
+  (declare_statement
     (type_identifier)
-    (type_identifier))
-  (provided_impl
-    (tag
-      (type_identifier))
-    (tag
-      (type_identifier))
-    (provided_member_list
-      (provided_member
-        (provided_value
-          (identifier)
+    (trait_composition
+      (tag
+        (type_identifier)))
+    (decl_member_list
+      (record_property
+        (qualified_member_name
+          (type_identifier)
+          (identifier))
+        (field_default
           (literal
-            (string))))))
-  (provided_impl
-    (tag
-      (type_identifier))
-    (tag
-      (type_identifier))
-    (provided_member_list
-      (provided_member
-        (provided_method
-          (identifier)
-          (parameters
-            (parameter
-              (self_parameter)))
-          (tag
-            (type_identifier))
+            (string))))
+      (record_signature
+        (qualified_member_name
+          (type_identifier)
+          (identifier))
+        (parameters
+          (parameter
+            (self_parameter)))
+        (tag
+          (type_identifier))
+        (member_default
           (literal
             (string)))))))
 

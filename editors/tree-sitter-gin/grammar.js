@@ -32,9 +32,9 @@ module.exports = grammar({
     [$.tag, $.qualified_tag, $._expression],
     [$.tag, $.qualified_tag],
     [$.declaration_parameters, $.type_application],
+    [$.declaration_parameters, $._expression],
 
     [$.intersection_type],
-    [$.provided_value, $._bind_value],
     [$.path],
     [$.record_signature, $.record_field],
   ],
@@ -76,7 +76,6 @@ module.exports = grammar({
     _top_level_item: ($) =>
       choice(
         $.declare_statement,
-        $.provided_impl,
         $.bind_statement,
         $.return_statement,
         $._expression,
@@ -156,7 +155,12 @@ module.exports = grammar({
       ),
 
     record_property: ($) =>
-      prec.right(seq(field("name", $.identifier), optional($.field_default))),
+      prec.right(
+        seq(
+          choice(field("name", $.identifier), $.qualified_member_name),
+          optional($.field_default),
+        ),
+      ),
 
     field_default: ($) =>
       seq(field("operator", choice(":=", ":")), field("value", $._expression)),
@@ -241,35 +245,6 @@ module.exports = grammar({
           seq(".", field("segment", choice($.identifier, $.type_identifier))),
         ),
         "}",
-      ),
-
-    provided_impl: ($) =>
-      prec(
-        10,
-        seq(
-          field("receiver", $.tag),
-          ".",
-          field("trait", $.tag),
-          optional(seq("has", $.provided_member_list)),
-        ),
-      ),
-
-    provided_member_list: ($) => prec.right(nlist($, $.provided_member)),
-
-    provided_member: ($) => choice($.provided_value, $.provided_method),
-
-    provided_value: ($) =>
-      seq(field("name", $.identifier), ":", field("value", $._expression)),
-
-    provided_method: ($) =>
-      seq(
-        field("name", $.identifier),
-        $.parameters,
-        optional(field("return_type", $._type_hint)),
-        choice(
-          seq(field("operator", ":="), field("value", $._expression)),
-          seq(field("operator", ":"), field("body", $.block_body)),
-        ),
       ),
 
     bind_statement: ($) =>
