@@ -21,6 +21,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
     pub(crate) fn lower_typed_format_string(
         &self,
         fs: &ast::FormatString,
+        result_ty: &ast::Ty,
         block: &BlockRef<'c, 'c>,
         _symtab: &mut ScopedSymbolTable<'c>,
     ) -> Option<Value<'c, 'c>> {
@@ -59,9 +60,9 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         }
 
         if parts.is_empty() {
-            let undef = block.append_op(self.mlir.llvm_undef(self.mlir.string_type(), loc));
+            let ptr = block.append_op(self.mlir.llvm_undef(self.mlir.llvm_ptr(), loc));
             let zero = block.const_i64(self.mlir, 0, loc);
-            return Some(block.append_op(self.mlir.llvm_insertvalue(undef, zero, 1, loc)));
+            return Some(self.build_string_value(block, ptr, zero, result_ty, loc));
         }
 
         // 2. Sum all lengths.
@@ -100,8 +101,6 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         }
 
         // 5. Return {buf, total_len} as a string fat pointer.
-        let undef = block.append_op(self.mlir.llvm_undef(self.mlir.string_type(), loc));
-        let with_ptr = block.append_op(self.mlir.llvm_insertvalue(undef, buf, 0, loc));
-        Some(block.append_op(self.mlir.llvm_insertvalue(with_ptr, total_len, 1, loc)))
+        Some(self.build_string_value(block, buf, total_len, result_ty, loc))
     }
 }

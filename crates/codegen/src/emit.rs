@@ -9,12 +9,15 @@ use diagnostic::Diagnostic;
 use melior::{Context, dialect::DialectRegistry, ir::Module, pass, utility};
 use std::path::Path;
 use std::process::Command;
+use strum::Display;
 
 /// Build profile for optimization levels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Display)]
 pub enum Profile {
     #[default]
+    #[strum(to_string = "debug")]
     Debug,
+    #[strum(to_string = "release")]
     Release,
 }
 
@@ -24,12 +27,6 @@ impl Profile {
             Self::Debug => "debug",
             Self::Release => "release",
         }
-    }
-}
-
-impl std::fmt::Display for Profile {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
     }
 }
 
@@ -68,75 +65,8 @@ impl Default for NativeCompiler {
 }
 
 impl NativeCompiler {
-    /// Compile pre-generated MLIR text to a native object file.
-    ///
-    /// Pipeline: MLIR text → fix llvm.call → re-parse → optimize (Release)
-    /// → lower to LLVM dialect → mlir-translate → LLVM IR → cc -c → object file.
-    pub fn native_from_mlir(
-        &self,
-        mlir_text: &str,
-        obj_path: &Path,
-        profile: Profile,
-        fast: bool,
-    ) -> (bool, Vec<Diagnostic>) {
-        let (ok, symptoms, _) =
-            self.native_from_mlir_with_timings(mlir_text, obj_path, profile, fast);
-        (ok, symptoms)
-    }
-
-    /// Compile pre-generated MLIR text to a native object file and return phase timings.
-    pub fn native_from_mlir_with_timings(
-        &self,
-        mlir_text: &str,
-        obj_path: &Path,
-        profile: Profile,
-        fast: bool,
-    ) -> (bool, Vec<Diagnostic>, NativeCodegenTimings) {
-        let mut symptoms = Vec::new();
-        let mut timings = NativeCodegenTimings::default();
-
-        let fixed_text = Self::fix_llvm_call_segments(mlir_text);
-        let mut module = match Module::parse(&self.context, &fixed_text) {
-            Some(m) => m,
-            None => {
-                symptoms.push(
-                    Diagnostic::new(
-                        "codegen-internal",
-                        "Failed to re-parse MLIR for native compilation",
-                    )
-                    .with_help("an internal compiler error occurred")
-                    .at_span(diagnostic::Span::new(0, 0)),
-                );
-                return (false, symptoms, timings);
-            }
-        };
-
-        let start = std::time::Instant::now();
-        if !self.optimize(&mut module, profile, fast, &mut symptoms) {
-            timings.optimization = start.elapsed();
-            return (false, symptoms, timings);
-        }
-        timings.optimization = start.elapsed();
-
-        let start = std::time::Instant::now();
-        if !self.lower_to_llvm(&mut module, &mut symptoms) {
-            timings.lowering = start.elapsed();
-            return (false, symptoms, timings);
-        }
-        timings.lowering = start.elapsed();
-
-        let start = std::time::Instant::now();
-        let lowered_mlir = module.as_operation().to_string();
-        let Some(llvm_ir) = Self::mlir_to_llvm_ir(&lowered_mlir, &mut symptoms) else {
-            timings.lowering += start.elapsed();
-            return (false, symptoms, timings);
-        };
-        timings.lowering += start.elapsed();
-
-        let start = std::time::Instant::now();
-        let ok = Self::compile_llvm_ir_to_object(&llvm_ir, obj_path, profile, fast, &mut symptoms);
-        timings.object_emission = start.elapsed();
-        (ok, symptoms, timings)
+    pub(crate) fn context(&self) -> &Context {
+        &self.context
     }
 
     /// Compile a pre-built MLIR `Module` to a native object file.
@@ -150,16 +80,28 @@ impl NativeCompiler {
     ///
     /// Pipeline: serialize → fix `llvm.call` segments → re-parse → optimize (Release)
     /// → lower to LLVM dialect → `mlir-translate` → LLVM IR → `cc -c` → object file.
-    pub fn native_from_module(
+    pub fn llvm_ir_from_module(
         &self,
         module: &Module,
-        obj_path: &Path,
         profile: Profile,
         fast: bool,
-    ) -> (bool, Vec<Diagnostic>) {
-        let (ok, symptoms, _) =
-            self.native_from_module_with_timings(module, obj_path, profile, fast);
-        (ok, symptoms)
+    ) -> (Option<String>, Vec<Diagnostic>) {
+        let mut symptoms = Vec::new();
+        let mut module = match self.reparse_for_backend(module) {
+            Ok(module) => module,
+            Err(diagnostic) => {
+                symptoms.push(*diagnostic);
+                return (None, symptoms);
+            }
+        };
+        if !self.optimize(&mut module, profile, fast, &mut symptoms)
+            || !self.lower_to_llvm(&mut module, &mut symptoms)
+        {
+            return (None, symptoms);
+        }
+        let lowered = module.as_operation().to_string();
+        let llvm = Self::mlir_to_llvm_ir(&lowered, &mut symptoms);
+        (llvm, symptoms)
     }
 
     /// Compile a pre-built MLIR `Module` to a native object file and return phase timings.
@@ -172,21 +114,10 @@ impl NativeCompiler {
     ) -> (bool, Vec<Diagnostic>, NativeCodegenTimings) {
         let mut symptoms = Vec::new();
         let mut timings = NativeCodegenTimings::default();
-        let mlir_text = module.as_operation().to_string();
-
-        let fixed_text = Self::fix_llvm_call_segments(&mlir_text);
-
-        let mut fixed_module = match Module::parse(&self.context, &fixed_text) {
-            Some(m) => m,
-            None => {
-                symptoms.push(
-                    Diagnostic::new(
-                        "codegen-internal",
-                        "Failed to re-parse MLIR after fixing llvm.call segments",
-                    )
-                    .with_help("an internal compiler error occurred")
-                    .at_span(diagnostic::Span::new(0, 0)),
-                );
+        let mut fixed_module = match self.reparse_for_backend(module) {
+            Ok(module) => module,
+            Err(diagnostic) => {
+                symptoms.push(*diagnostic);
                 return (false, symptoms, timings);
             }
         };
@@ -252,7 +183,11 @@ impl NativeCompiler {
     }
 
     /// Lower a module in-place: SCF → CF, then everything → LLVM.
-    fn lower_to_llvm(&self, module: &mut Module, symptoms: &mut Vec<Diagnostic>) -> bool {
+    pub(crate) fn lower_to_llvm(
+        &self,
+        module: &mut Module,
+        symptoms: &mut Vec<Diagnostic>,
+    ) -> bool {
         let pm = pass::PassManager::new(&self.context);
 
         // SCF (structured control flow) must be lowered to CF first
@@ -276,6 +211,25 @@ impl NativeCompiler {
                 false
             }
         }
+    }
+
+    pub(crate) fn reparse_for_backend<'a>(
+        &'a self,
+        module: &Module,
+    ) -> Result<Module<'a>, Box<Diagnostic>> {
+        let mlir_text = module.as_operation().to_string();
+        let fixed_text = Self::fix_llvm_call_segments(&mlir_text);
+
+        Module::parse(&self.context, &fixed_text).ok_or_else(|| {
+            Box::new(
+                Diagnostic::new(
+                    "codegen-internal",
+                    "Failed to re-parse MLIR after fixing llvm.call segments",
+                )
+                .with_help("an internal compiler error occurred")
+                .at_span(diagnostic::Span::new(0, 0)),
+            )
+        })
     }
 
     /// Create a fully-initialized MLIR context with all dialects and LLVM translations.

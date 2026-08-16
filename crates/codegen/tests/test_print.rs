@@ -11,14 +11,21 @@ fn assert_no_symptoms(symptoms: &[Diagnostic]) {
 // Self-contained print program with all dependencies defined inline.
 const PRINT_PROGRAM: &str = "\
 Int is in -9223372036854775808...9223372036854775807
+Byte is in 0...255
+String has pointer @Byte, len Int
 
-sys_write := 4
+#intrinsic(BitsAdd)
+add_bits(lhs Int, rhs Int) Int extern
+#operator(Add)
+add_int(lhs Int, rhs Int) Int: add_bits(lhs, rhs)
+
+sys_write Int := 4
 
 write(fd Int, buf Int, len Int) Int:
     result := sys_write + fd + buf + len
 return result
 
-print(s Str):
+print(s String):
     write(1, s.pointer as Int, s.len)
 return
 
@@ -200,21 +207,6 @@ fn test_print_calls_write_via_func_call() {
     );
 }
 
-// Tests for the write syscall internals.
-
-#[test]
-#[ignore = "inline ASM deferred"]
-fn test_write_uses_syscall_number_as_first_operand() {
-    let (mlir_text, symptoms) = support::codegen_to_mlir_text(PRINT_PROGRAM, "test.gin", false);
-    assert_no_symptoms(&symptoms);
-    // The inline asm should have sys_write (4) as its first operand.
-    // This verifies the bind `sys_write := 4` is resolved and passed correctly.
-    assert!(
-        mlir_text.contains("callee = @sys_write"),
-        "write function should reference sys_write bind:\n{mlir_text}"
-    );
-}
-
 #[test]
 fn test_sys_write_is_zero_arg_function_returning_constant() {
     let (mlir_text, symptoms) = support::codegen_to_mlir_text(PRINT_PROGRAM, "test.gin", false);
@@ -286,14 +278,19 @@ fn test_string_struct_type_is_ptr_and_i64() {
 
 const MULTI_PRINT_PROGRAM: &str = "\
 Int is in -9223372036854775808...9223372036854775807
+Byte is in 0...255
+String has pointer @Byte, len Int
 
-sys_write := 4
+#intrinsic(BitsAdd)
+add_bits(lhs Int, rhs Int) Int extern
+#operator(Add)
+add_int(lhs Int, rhs Int) Int: add_bits(lhs, rhs)
 
 write(fd Int, buf Int, len Int) Int:
-    result := asm('svc #0x80', '={x0},{x16},0,{x1},{x2},{x3},{x4},~{memory}', sys_write, fd, buf, len, 0, 0)
+    result := fd + buf + len
 return result
 
-print(s Str):
+print(s String):
     write(1, s.pointer as Int, s.len)
 return
 
@@ -305,7 +302,8 @@ return
 
 #[test]
 fn test_multiple_prints_produce_separate_globals() {
-    let (mlir_text, symptoms) = support::codegen_to_mlir_text(MULTI_PRINT_PROGRAM, "test.gin", false);
+    let (mlir_text, symptoms) =
+        support::codegen_to_mlir_text(MULTI_PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     // Each string literal should get its own global.
     let global_count = mlir_text.matches("llvm.mlir.global").count();
@@ -317,7 +315,8 @@ fn test_multiple_prints_produce_separate_globals() {
 
 #[test]
 fn test_multiple_prints_have_distinct_content() {
-    let (mlir_text, symptoms) = support::codegen_to_mlir_text(MULTI_PRINT_PROGRAM, "test.gin", false);
+    let (mlir_text, symptoms) =
+        support::codegen_to_mlir_text(MULTI_PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     assert!(
         mlir_text.contains("hello\\00"),
@@ -331,7 +330,8 @@ fn test_multiple_prints_have_distinct_content() {
 
 #[test]
 fn test_hello_string_is_six_bytes() {
-    let (mlir_text, symptoms) = support::codegen_to_mlir_text(MULTI_PRINT_PROGRAM, "test.gin", false);
+    let (mlir_text, symptoms) =
+        support::codegen_to_mlir_text(MULTI_PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     // "hello" = 5 chars + 1 null = 6 bytes.
     assert!(
@@ -342,7 +342,8 @@ fn test_hello_string_is_six_bytes() {
 
 #[test]
 fn test_world_string_is_six_bytes() {
-    let (mlir_text, symptoms) = support::codegen_to_mlir_text(MULTI_PRINT_PROGRAM, "test.gin", false);
+    let (mlir_text, symptoms) =
+        support::codegen_to_mlir_text(MULTI_PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     // "world" = 5 chars + 1 null = 6 bytes.
     // Both globals should have array<6 x i8>.
@@ -357,14 +358,21 @@ fn test_world_string_is_six_bytes() {
 
 const EMPTY_STRING_PRINT_PROGRAM: &str = "\
 Int is in -9223372036854775808...9223372036854775807
+Byte is in 0...255
+String has pointer @Byte, len Int
 
-sys_write := 4
+#intrinsic(BitsAdd)
+add_bits(lhs Int, rhs Int) Int extern
+#operator(Add)
+add_int(lhs Int, rhs Int) Int: add_bits(lhs, rhs)
+
+sys_write Int := 4
 
 write(fd Int, buf Int, len Int) Int:
     result := sys_write + fd + buf + len
 return result
 
-print(s Str):
+print(s String):
     write(1, s.pointer as Int, s.len)
 return
 
@@ -375,7 +383,8 @@ return
 
 #[test]
 fn test_empty_string_print_has_length_zero() {
-    let (mlir_text, symptoms) = support::codegen_to_mlir_text(EMPTY_STRING_PRINT_PROGRAM, "test.gin", false);
+    let (mlir_text, symptoms) =
+        support::codegen_to_mlir_text(EMPTY_STRING_PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     assert!(
         mlir_text.contains("value = 0 : i64"),
@@ -385,7 +394,8 @@ fn test_empty_string_print_has_length_zero() {
 
 #[test]
 fn test_empty_string_global_is_one_byte() {
-    let (mlir_text, symptoms) = support::codegen_to_mlir_text(EMPTY_STRING_PRINT_PROGRAM, "test.gin", false);
+    let (mlir_text, symptoms) =
+        support::codegen_to_mlir_text(EMPTY_STRING_PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     // Empty string = 0 chars + 1 null = 1 byte.
     assert!(

@@ -1,11 +1,16 @@
 //! MLIR code generation infrastructure.
 
 pub mod emit;
+mod jit;
 mod lower;
 mod mlir_ext;
 
 pub use emit::{NativeCompiler, Profile};
-pub use lower::CodegenContext;
+pub use jit::{JitError, NativeEngine};
+pub use lower::{
+    CodegenContext, CodegenSourceMap, FileCodegenDiagnostics, ModuleCodegenOutput,
+    ResolvedFileInput,
+};
 pub use mlir_ext::{AttributeExt, BlockExt, ContextExt, OperationBuilderExt, Predicates};
 
 use internment::Intern;
@@ -86,6 +91,16 @@ impl<'c> ScopedSymbolTable<'c> {
     /// Look up a variable and return just its MLIR value.
     pub fn get_value(&self, name: &Intern<String>) -> Option<Value<'c, 'c>> {
         self.get(name).map(|s| s.value)
+    }
+
+    pub fn assign(&mut self, name: &Intern<String>, slot: Slot<'c>) -> bool {
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(binding) = scope.get_mut(name) {
+                *binding = slot;
+                return true;
+            }
+        }
+        false
     }
 
     /// Check if a variable exists and is a stack slot.

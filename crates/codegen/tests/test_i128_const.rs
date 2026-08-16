@@ -12,12 +12,10 @@ mod support;
 // signal to investigate. Add `insta = "1"` to [dev-dependencies] in codegen/Cargo.toml, then
 // replace substring assertions with `insta::assert_snapshot!("i128_const", mlir_text)`.
 
-
-
 #[test]
 fn test_i128_constant_not_truncated() {
     // Value: 170141183460469231731687303715884105727 (2^127 - 1)
-    let source = "main: 170141183460469231731687303715884105727\n";
+    let source = "Signed128 is in -170141183460469231731687303715884105728...170141183460469231731687303715884105727\nmain Signed128: 170141183460469231731687303715884105727\n";
     let (mlir_text, symptoms) = support::codegen_to_mlir_text(source, "test.gin", false);
 
     if !symptoms.is_empty() {
@@ -38,7 +36,7 @@ fn test_negative_i128_constant() {
     // Value: -20000000000000000000 (-2e19, below i64::MIN of -9223372036854775808)
     // Note: -2^127 can't be used because the lexer parses the positive literal first,
     // and 2^127 overflows i128 (max is 2^127 - 1).
-    let source = "main: -20000000000000000000\n";
+    let source = "Signed128 is in -170141183460469231731687303715884105728...170141183460469231731687303715884105727\nmain Signed128: -20000000000000000000\n";
     let (mlir_text, symptoms) = support::codegen_to_mlir_text(source, "test.gin", false);
 
     if !symptoms.is_empty() {
@@ -47,22 +45,16 @@ fn test_negative_i128_constant() {
         }
     }
 
-    // Unary minus is lowered as `arith.subi(0, val)`, so the positive literal
-    // must appear at full precision in the constant, not truncated.
     assert!(
-        mlir_text.contains("20000000000000000000 : i128"),
+        mlir_text.contains("-20000000000000000000 : i128"),
         "Negative i128 constant should not be truncated. MLIR output:\n{mlir_text}"
-    );
-    assert!(
-        mlir_text.contains("arith.subi"),
-        "Negation should be lowered via subi. MLIR output:\n{mlir_text}"
     );
 }
 
 #[test]
 fn test_i64_constant_fast_path() {
     // A value that fits in i64 should still work correctly
-    let source = "main: 42\n";
+    let source = "Signed64 is in -9223372036854775808...9223372036854775807\nmain Signed64: 42\n";
     let (mlir_text, symptoms) = support::codegen_to_mlir_text(source, "test.gin", false);
 
     if !symptoms.is_empty() {

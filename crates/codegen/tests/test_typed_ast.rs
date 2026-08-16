@@ -3,7 +3,7 @@
 //! These tests verify that the full pipeline works:
 //! 1. Parse Gin source → FileAst
 //! 2. Transform → TypedFileAst
-//! 3. Lower to MLIR via build_module_from_typed_ast
+//! 3. Lower the resolved program to MLIR
 //! 4. Verify the MLIR output contains expected operations
 
 mod support;
@@ -15,9 +15,8 @@ fn typed_codegen_to_mlir(source: &str, filename: &str) -> Option<String> {
 
 #[test]
 fn test_typed_ast_literal_codegen() {
-    // The simplest case: a single integer literal.
-    // `main: 42` should produce a func.func with an arith.constant.
-    let source = "main: 42";
+    let source = "Signed64 is in -9223372036854775808...9223372036854775807\n\
+main Signed64: 42";
     let mlir = typed_codegen_to_mlir(source, "test.gin").expect("codegen should succeed");
 
     eprintln!("Generated MLIR:\n{mlir}");
@@ -36,23 +35,23 @@ fn test_typed_ast_literal_codegen() {
 
 #[test]
 fn test_typed_ast_fn_call_codegen() {
-    // Function calls should produce func.call.
-    let source = "add(a Int, b Int) Int: a + b\nmain: add(1, 2)";
-    let mlir = typed_codegen_to_mlir(source, "test.gin");
+    let source = "Signed64 is in -9223372036854775808...9223372036854775807\n\
+first(a Signed64, b Signed64) Signed64: a\n\
+main() Signed64: first(1, 2)";
+    let mlir = typed_codegen_to_mlir(source, "test.gin").expect("codegen should succeed");
 
-    // FnCall currently returns None from lower_typed_expr (not yet implemented).
-    // So the module should still be produced but may not have func.call.
-    // This test documents current behavior.
-    if let Some(text) = mlir {
-        assert!(text.contains("func.func"), "should have func operations");
-    }
-    // If None, that's expected for now until full ExprId lowering is implemented.
+    assert!(mlir.contains("func.func"), "should have func operations");
+    assert!(
+        mlir.contains("func.call"),
+        "should lower the function call, got:\n{mlir}"
+    );
 }
 
 #[test]
 fn test_typed_ast_multiple_defs() {
-    // Multiple defs should create multiple func.func operations.
-    let source = "x: 10\ny: 20";
+    let source = "Signed64 is in -9223372036854775808...9223372036854775807\n\
+x Signed64: 10\n\
+y Signed64: 20";
     let mlir = typed_codegen_to_mlir(source, "test.gin").expect("codegen should succeed");
 
     eprintln!("Generated MLIR:\n{mlir}");

@@ -10,8 +10,6 @@ pub trait ContextExt {
     fn i128(&self) -> Type<'_>;
     fn i1(&self) -> Type<'_>;
     fn f64(&self) -> Type<'_>;
-    /// String type — `!llvm.struct<(ptr, i64)>` fat pointer (data, len)
-    fn string_type(&self) -> Type<'_>;
     /// LLVM opaque pointer type
     fn llvm_ptr(&self) -> Type<'_>;
     /// Tagged union type — `!llvm.struct<(i64, i64)>` (discriminant, payload)
@@ -34,14 +32,6 @@ impl ContextExt for Context {
 
     fn f64(&self) -> Type<'_> {
         Type::float64(self)
-    }
-
-    fn string_type(&self) -> Type<'_> {
-        r#type::r#struct(
-            self,
-            &[r#type::pointer(self, 0), IntegerType::new(self, 64).into()],
-            false,
-        )
     }
 
     fn llvm_ptr(&self) -> Type<'_> {
@@ -284,6 +274,7 @@ pub trait BlockExt<'c> {
         &self,
         ctx: &CodegenContext<'_, 'c>,
         value: &str,
+        ty: &ast::Ty,
         loc: Location<'c>,
     ) -> Value<'c, 'c>;
     /// Return a unit/void value
@@ -296,6 +287,13 @@ pub trait BlockExt<'c> {
         return_type: Type<'c>,
         loc: Location<'c>,
     ) -> Value<'c, 'c>;
+    fn call_unit(
+        &self,
+        ctx: &'c Context,
+        func_name: &str,
+        args: &[Value<'c, 'c>],
+        loc: Location<'c>,
+    );
     fn gep_typed(
         &self,
         cctx: &CodegenContext<'_, 'c>,
@@ -303,6 +301,17 @@ pub trait BlockExt<'c> {
         elem_ty: Type<'c>,
         indices: &[Value<'c, 'c>],
         raw_indices: &[i32],
+        loc: Location<'c>,
+    ) -> Option<Value<'c, 'c>>;
+    #[allow(clippy::too_many_arguments)]
+    fn gep_typed_result(
+        &self,
+        cctx: &CodegenContext<'_, 'c>,
+        base: Value<'c, 'c>,
+        elem_ty: Type<'c>,
+        indices: &[Value<'c, 'c>],
+        raw_indices: &[i32],
+        result_ty: Type<'c>,
         loc: Location<'c>,
     ) -> Option<Value<'c, 'c>>;
     /// `llvm.getelementptr` with a dynamic byte offset into a `!llvm.ptr`.
@@ -370,6 +379,7 @@ impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
         &self,
         ctx: &CodegenContext<'_, 'c>,
         value: &str,
+        ty: &ast::Ty,
         loc: Location<'c>,
     ) -> Value<'c, 'c> {
         let c = ctx.mlir;
@@ -379,22 +389,14 @@ impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
         let ptr = ctx
             .addressof_string_global(self, &symbol_name, loc)
             .expect("addressof should succeed");
-
-        // llvm.mlir.undef : !llvm.struct<(ptr, i64)>
-        let undef = self.append_op(c.llvm_undef(c.string_type(), loc));
-
-        // llvm.insertvalue ptr, undef[0]
-        let with_ptr = self.append_op(c.llvm_insertvalue(undef, ptr, 0, loc));
-
-        // arith.constant <byte len> : i64
         let len = self.const_i64(c, value.len() as i64, loc);
 
-        // llvm.insertvalue len, struct[1]
-        self.append_op(c.llvm_insertvalue(with_ptr, len, 1, loc))
+        ctx.build_string_value(self, ptr, len, ty, loc)
     }
 
     fn unit_value(&self, ctx: &CodegenContext<'_, 'c>, loc: Location<'c>) -> Value<'c, 'c> {
-        self.const_i64(ctx.mlir, 0, loc)
+        let unit_ty = r#type::r#struct(ctx.mlir, &[], false);
+        self.append_op(ctx.mlir.llvm_undef(unit_ty, loc))
     }
 
     fn call(
@@ -417,6 +419,24 @@ impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
         )
     }
 
+    fn call_unit(
+        &self,
+        ctx: &'c Context,
+        func_name: &str,
+        args: &[Value<'c, 'c>],
+        loc: Location<'c>,
+    ) {
+        let callee_id = Identifier::new(ctx, "callee");
+        let symbol_ref = ctx.symbol_ref_attr(func_name);
+        let _ = self.append_operation(
+            OperationBuilder::new("func.call", loc)
+                .add_attributes(&[(callee_id, symbol_ref)])
+                .add_operands(args)
+                .build()
+                .expect("func.call build should succeed"),
+        );
+    }
+
     fn gep_typed(
         &self,
         cctx: &CodegenContext<'_, 'c>,
@@ -424,6 +444,27 @@ impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
         elem_ty: Type<'c>,
         indices: &[Value<'c, 'c>],
         raw_indices: &[i32],
+        loc: Location<'c>,
+    ) -> Option<Value<'c, 'c>> {
+        self.gep_typed_result(
+            cctx,
+            base,
+            elem_ty,
+            indices,
+            raw_indices,
+            cctx.mlir.llvm_ptr(),
+            loc,
+        )
+    }
+
+    fn gep_typed_result(
+        &self,
+        cctx: &CodegenContext<'_, 'c>,
+        base: Value<'c, 'c>,
+        elem_ty: Type<'c>,
+        indices: &[Value<'c, 'c>],
+        raw_indices: &[i32],
+        result_ty: Type<'c>,
         loc: Location<'c>,
     ) -> Option<Value<'c, 'c>> {
         let ctx = cctx.mlir;
@@ -442,7 +483,7 @@ impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
                 ),
             ])
             .add_operands(&operands)
-            .add_results(&[ctx.llvm_ptr()])
+            .add_results(&[result_ty])
             .build()
             .map_err(|e| cctx.emit_internal(format!("GEP: {e}")))
             .ok()?;

@@ -32,12 +32,10 @@ fn bench_codegen(c: &mut Criterion) {
     group.bench_function("build_module/codegen_source", |b| {
         b.iter(|| {
             let context = melior::Context::new();
-            let result = codegen::CodegenContext::build_module_from_typed_ast(
+            let result = codegen::CodegenContext::build_module_from_resolved_program(
                 &context,
-                &typed,
-                &source,
-                "bench.gin",
-                None,
+                typed.resolved_program(),
+                codegen::CodegenSourceMap::new("bench.gin", &source, &typed.span_table),
             );
             std::hint::black_box(&result);
         });
@@ -48,20 +46,3 @@ fn bench_codegen(c: &mut Criterion) {
 
 criterion_group!(benches, bench_codegen);
 criterion_main!(benches);
-
-#[cfg(test)]
-mod tests {
-
-    #[test]
-    fn test_codegen_source_compiles() {
-        let source = codegen_source();
-        let parsed = source.parse_source_full();
-        let typed = transform_file(parsed.ast, FileId(0));
-        assert!(!typed.defs.is_empty());
-        let context = melior::Context::new();
-        let (module, _) = codegen::CodegenContext::build_module_from_typed_ast(
-            &context, &typed, &source, "test.gin", None,
-        );
-        assert!(module.is_some(), "codegen should succeed");
-    }
-}

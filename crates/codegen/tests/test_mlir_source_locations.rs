@@ -4,7 +4,7 @@ mod support;
 
 /// Zero-arg callee used so the emitted IR contains a single obvious `func.call`.
 const TWO_FN_PROGRAM: &str = "\
-noop() Unit:\n\
+noop():\n\
 return\n\
 \n\
 main:\n\

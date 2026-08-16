@@ -13,6 +13,19 @@ use melior::ir::Region;
 use melior::ir::operation::OperationBuilder;
 
 impl<'a, 'c> CodegenContext<'a, 'c> {
+    pub(crate) fn build_string_value(
+        &self,
+        block: &BlockRef<'c, 'c>,
+        ptr: Value<'c, 'c>,
+        len: Value<'c, 'c>,
+        string_ty: &ast::Ty,
+        loc: Location<'c>,
+    ) -> Value<'c, 'c> {
+        let undef = block.append_op(self.mlir.llvm_undef(self.ty_to_mlir(string_ty), loc));
+        let with_ptr = block.append_op(self.mlir.llvm_insertvalue(undef, ptr, 0, loc));
+        block.append_op(self.mlir.llvm_insertvalue(with_ptr, len, 1, loc))
+    }
+
     /// This returns a pointer to the global that can be used in function calls.
     pub fn addressof_string_global(
         &self,
@@ -103,22 +116,26 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         &self,
         block: &BlockRef<'c, 'c>,
         cv: &ConstValue,
+        ty: &ast::Ty,
     ) -> Option<Value<'c, 'c>> {
         match cv {
             ConstValue::Int(n) => {
-                let mlir_ty = if *n > i64::MAX as i128 || *n < i64::MIN as i128 {
+                let n = ast::integer::to_i128(*n)?;
+                let mlir_ty = if n > i64::MAX as i128 || n < i64::MIN as i128 {
                     self.mlir.i128()
                 } else {
                     self.mlir.i64()
                 };
-                Some(block.const_int(self.mlir, mlir_ty, *n, self.location()))
+                Some(block.const_int(self.mlir, mlir_ty, n, self.location()))
             }
             ConstValue::Float(HashFloat(f)) => Some(block.append_op(self.mlir.const_op(
                 self.mlir.f64_attr(*f),
                 self.mlir.f64(),
                 self.location(),
             ))),
-            ConstValue::String(s) => Some(block.const_string_with_ctx(self, s, self.location())),
+            ConstValue::String(s) => {
+                Some(block.const_string_with_ctx(self, s, ty, self.location()))
+            }
             _ => None,
         }
     }

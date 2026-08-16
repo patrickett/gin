@@ -1,115 +1,53 @@
 use crate::prelude::*;
-use ast::ConstValue;
 use ast::ty::Ty;
-use typecheck::compile_time_trait::trait_field_for_ty;
+use typecheck::layout::LayoutKind;
+use typecheck::representation::Repr;
 
 impl<'a, 'c> CodegenContext<'a, 'c> {
-    /// Discriminant byte size for a union with the given number of variants.
-    fn union_discriminant_byte_size(num_variants: usize) -> usize {
-        if num_variants <= 256 {
-            1
-        } else if num_variants <= 65536 {
-            2
-        } else {
-            8
-        }
-    }
-
-    /// Query the `Sized.size` trait field for a type and extract the byte count.
-    ///
-    /// Returns `None` when the trait is not in scope, the type is dynamic-sized,
-    /// or the trait query fails. Callers should fall back to a sensible default.
-    fn sized_byte_size(&self, ty: &Ty) -> Option<usize> {
-        let typed = self.typed_ast?;
-        let registry = self.trait_registry?;
-
-        // Ty::Literal doesn't route through the Sized auto default cleanly since its
-        // Reflectable.shape wraps the value in Record { name: "Literal", ty: <cv> }
-        // which compute_size can't handle. Handle inline with rough estimates
-        // (16 for strings, 8 for everything else) to avoid falling back to 0.
-        //
-        // TODO: Handle each literal type properly:
-        //   - ConstValue::String → actual Str struct size (16 bytes, but should come from Sized)
-        //   - ConstValue::Int(n) → depends on bit width (could be i128)
-        //   - ConstValue::Float(_) → always 8 bytes
-        //   - ConstValue::Tag { args, .. } → depends on args
-        //   - ConstValue::Record { fields, .. } → sum of field sizes
-        //   - ConstValue::List(items) → depends on element type + length
-        //   The Sized trait should handle these, but Ty::Literal's Reflectable.shape
-        //   produces a Record { name: "Literal", ty: <cv> } that compute_size can't match.
-        if let Ty::Literal(cv) = ty {
-            return Some(match cv {
-                ConstValue::String(_) => 16,
-                _ => 8,
-            });
-        }
-        let cv = trait_field_for_ty("Sized", "size", ty, typed, registry)?;
-        match cv {
-            ConstValue::Tag { name, args, .. } if name.as_str() == "Const" => {
-                args.first().and_then(|a| match a {
-                    ConstValue::Int(n) => usize::try_from(*n).ok(),
-                    _ => None,
-                })
-            }
-            _ => None,
-        }
-    }
-
     /// Convert a resolved `Ty` to its MLIR `Type` representation.
     pub fn ty_to_mlir(&self, ty: &Ty) -> Type<'c> {
         let mlir_ctx = self.mlir;
+        if self.reference_pointee_ty(ty).is_some() {
+            return self.repr_to_mlir(&Repr::Address { address_space: 0 });
+        }
+        if let Ok(repr) = Repr::derive(ty, Some(self.program.type_registry)) {
+            if self.target_layout.layout_repr(&repr).is_err() {
+                self.emit_internal("target layout cannot represent this type");
+                return r#type::r#struct(mlir_ctx, &[], false);
+            }
+            return self.repr_to_mlir(&repr);
+        }
+        if let Ok(repr) = Repr::derive(ty, None) {
+            if self.target_layout.layout_repr(&repr).is_err() {
+                self.emit_internal("target layout cannot represent this type");
+                return r#type::r#struct(mlir_ctx, &[], false);
+            }
+            return self.repr_to_mlir(&repr);
+        }
         match ty {
-            Ty::Int { width: 8, .. } => IntegerType::new(mlir_ctx, 8).into(),
-            Ty::Int { width: 16, .. } => IntegerType::new(mlir_ctx, 16).into(),
-            Ty::Int { width: 32, .. } => IntegerType::new(mlir_ctx, 32).into(),
-            Ty::Int { width: 128, .. } => IntegerType::new(mlir_ctx, 128).into(),
-            Ty::Int { .. } => mlir_ctx.i64(),
+            Ty::Ptr { .. } | Ty::Address { .. } | Ty::Ref { .. } => {
+                self.repr_to_mlir(&Repr::Address { address_space: 0 })
+            }
+            Ty::AnonymousInteger { .. } | Ty::ResultFamily { .. } | Ty::Named { .. } => {
+                self.emit_symptom(
+                    "type-representation-unavailable",
+                    format!(
+                        "type `{}` has no concrete codegen representation",
+                        ty.format_for_hover()
+                    ),
+                );
+                r#type::r#struct(mlir_ctx, &[], false)
+            }
             Ty::Float { .. } => mlir_ctx.f64(),
-            Ty::Union { variants, .. } => {
-                let all_empty = variants.iter().all(|v| v.fields.is_empty());
-                let disc_bytes = Self::union_discriminant_byte_size(variants.len());
-                if all_empty && variants.len() <= 256 {
-                    if variants.len() == 2 {
-                        mlir_ctx.i1()
-                    } else {
-                        IntegerType::new(mlir_ctx, 8).into()
-                    }
-                } else if all_empty {
-                    let discriminant_bits = (disc_bytes * 8) as u32;
-                    IntegerType::new(mlir_ctx, discriminant_bits).into()
-                } else {
-                    let discriminant_bits = (disc_bytes * 8) as u32;
-                    let max_fields = variants.iter().map(|v| v.fields.len()).max().unwrap_or(0);
-                    let mut slot_types = vec![IntegerType::new(mlir_ctx, discriminant_bits).into()];
-                    for slot_idx in 0..max_fields {
-                        let widest = variants
-                            .iter()
-                            .filter_map(|v| v.fields.get(slot_idx))
-                            .map(|(_, ft)| self.sized_byte_size(ft).unwrap_or(8))
-                            .max()
-                            .unwrap_or(8);
-                        let slot_ty: Type<'c> = match widest {
-                            0..=1 => IntegerType::new(mlir_ctx, 8).into(),
-                            2 => IntegerType::new(mlir_ctx, 16).into(),
-                            3..=4 => IntegerType::new(mlir_ctx, 32).into(),
-                            5..=8 => mlir_ctx.i64(),
-                            _ => mlir_ctx.i128(),
-                        };
-                        slot_types.push(slot_ty);
-                    }
-                    r#type::r#struct(mlir_ctx, &slot_types, false)
-                }
+            Ty::Union { .. } => {
+                self.emit_symptom(
+                    "sum-representation-missing",
+                    "tagged-sum representation is unavailable during codegen".to_string(),
+                );
+                r#type::r#struct(mlir_ctx, &[], false)
             }
-            Ty::Record { fields, .. } => {
-                // Fields in declaration order — the language's type system handles layout.
-                let field_types: Vec<Type<'c>> =
-                    fields.iter().map(|(_, ft)| self.ty_to_mlir(ft)).collect();
-                r#type::r#struct(mlir_ctx, &field_types, false)
-            }
-            Ty::Literal(_) => {
-                // Literal types without union values are single values (e.g. `5`).
-                mlir_ctx.i64()
-            }
+            Ty::UnresolvedLiteral(_) => mlir_ctx.i1(),
+            Ty::Literal(_) => mlir_ctx.i64(),
             ty if ty.union_literal_values().is_some() => {
                 let n = ty.union_literal_values().unwrap().len();
                 if n <= 256 {
@@ -124,18 +62,157 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     mlir_ctx.i64()
                 }
             }
-            Ty::Unit => mlir_ctx.i64(),
-            Ty::Opaque(name) if name.as_str() == "Str" || name.as_str() == "String" => {
-                mlir_ctx.string_type()
+            Ty::Record { .. } | Ty::Tuple(_) | Ty::Unit => {
+                self.emit_symptom(
+                    "product-representation-missing",
+                    "product representation is unavailable during codegen".to_string(),
+                );
+                r#type::r#struct(mlir_ctx, &[], false)
             }
-            Ty::Opaque(_) => mlir_ctx.i64(),
-            Ty::Array { .. } | Ty::Ptr { .. } => mlir_ctx.llvm_ptr(),
-            Ty::Ref { .. } => mlir_ctx.llvm_ptr(),
-            Ty::Tuple(fields) => {
-                let field_types: Vec<Type<'c>> =
-                    fields.iter().map(|f| self.ty_to_mlir(f)).collect();
-                r#type::r#struct(mlir_ctx, &field_types, false)
+            Ty::Opaque(_) => {
+                self.emit_symptom(
+                    "unsupported-type-representation",
+                    "opaque type reached codegen without a physical representation".to_string(),
+                );
+                r#type::r#struct(mlir_ctx, &[], false)
+            }
+            Ty::Array { .. } => {
+                self.emit_symptom(
+                    "array-representation-missing",
+                    "fixed-array representation is unavailable during codegen".to_string(),
+                );
+                r#type::r#struct(mlir_ctx, &[], false)
             }
         }
+    }
+
+    pub(crate) fn reference_pointee_ty(&self, ty: &Ty) -> Option<Ty> {
+        let definition = self.program.type_registry.resolved_definition_for_type(ty);
+        if let Some(pointee) = definition.pointee_ty().filter(|pointee| pointee.is_ref()) {
+            return Some(pointee.without_reference_wrappers().clone());
+        }
+        if let Ty::Ref { inner, .. } = ty {
+            return Some(inner.without_reference_wrappers().clone());
+        }
+        if let Some(pointee) =
+            typecheck::ty::reference_pointee_for_type(ty, Some(self.program.type_registry))
+        {
+            return Some(pointee);
+        }
+
+        if ty.is_ref() {
+            self.emit_symptom(
+                "incompatible-reference-kind",
+                format!(
+                    "reference type `{}` has no resolved reference semantics",
+                    ty.format_for_hover()
+                ),
+            );
+        }
+
+        None
+    }
+
+    pub(crate) fn repr_to_mlir(&self, repr: &Repr) -> Type<'c> {
+        match repr {
+            Repr::Bits { width } => IntegerType::new(self.mlir, *width).into(),
+            Repr::Address { address_space } => {
+                melior::dialect::llvm::r#type::pointer(self.mlir, *address_space)
+            }
+            Repr::Product { fields } => {
+                let field_types: Vec<Type<'c>> = fields
+                    .iter()
+                    .map(|field| self.repr_to_mlir(field))
+                    .collect();
+                r#type::r#struct(self.mlir, &field_types, false)
+            }
+            Repr::Array { element, length } => {
+                let Ok(length) = u32::try_from(*length) else {
+                    self.emit_symptom(
+                        "array-layout-overflow",
+                        "fixed-array length exceeds the MLIR array dimension".to_string(),
+                    );
+                    return r#type::r#struct(self.mlir, &[], false);
+                };
+                r#type::array(self.repr_to_mlir(element), length)
+            }
+            Repr::Sum { .. } => self.sum_to_mlir(repr),
+        }
+    }
+
+    fn sum_to_mlir(&self, repr: &Repr) -> Type<'c> {
+        let layout = match self.target_layout.layout_repr(repr) {
+            Ok(layout) => layout,
+            Err(error) => {
+                self.emit_symptom(error.code(), error.to_string());
+                return r#type::r#struct(self.mlir, &[], false);
+            }
+        };
+        let LayoutKind::Sum {
+            discriminant,
+            payload_offset,
+            payload_size,
+            payload_alignment,
+            ..
+        } = layout.kind
+        else {
+            self.emit_symptom(
+                "sum-representation-missing",
+                "sum representation did not produce sum layout".to_string(),
+            );
+            return r#type::r#struct(self.mlir, &[], false);
+        };
+        if payload_size == 0 {
+            return self.repr_to_mlir(&discriminant);
+        }
+
+        let discriminant_ty = self.repr_to_mlir(&discriminant);
+        let mut fields = vec![discriminant_ty];
+        let Some(prefix_padding) = payload_offset.checked_sub(discriminant_size(&discriminant))
+        else {
+            self.emit_symptom(
+                "sum-layout-overflow",
+                "tagged-sum payload offset precedes its discriminant".to_string(),
+            );
+            return r#type::r#struct(self.mlir, &[], false);
+        };
+        self.append_sum_bytes(&mut fields, prefix_padding);
+        fields.push(self.sum_alignment_carrier(payload_alignment));
+        self.append_sum_bytes(&mut fields, payload_size.saturating_sub(payload_alignment));
+        let represented = payload_offset.saturating_add(payload_size);
+        self.append_sum_bytes(&mut fields, layout.size.saturating_sub(represented));
+        r#type::r#struct(self.mlir, &fields, false)
+    }
+
+    fn append_sum_bytes(&self, fields: &mut Vec<Type<'c>>, count: u64) {
+        if count == 0 {
+            return;
+        }
+        let Ok(count) = u32::try_from(count) else {
+            self.emit_symptom(
+                "sum-layout-overflow",
+                "tagged-sum padding does not fit an MLIR array length".to_string(),
+            );
+            return;
+        };
+        fields.push(r#type::array(IntegerType::new(self.mlir, 8).into(), count));
+    }
+
+    fn sum_alignment_carrier(&self, alignment: u64) -> Type<'c> {
+        let width = match alignment {
+            0 | 1 => 8,
+            2 => 16,
+            3..=4 => 32,
+            5..=8 => 64,
+            _ => 128,
+        };
+        IntegerType::new(self.mlir, width).into()
+    }
+}
+
+fn discriminant_size(repr: &Repr) -> u64 {
+    match repr {
+        Repr::Bits { width } => u64::from(width.div_ceil(8)),
+        _ => 0,
     }
 }
