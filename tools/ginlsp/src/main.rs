@@ -11,6 +11,7 @@ use diagnostics::DiagnosticConverter;
 use futures::FutureExt;
 use resolve::GinPackageExt;
 use state::{GinHost, JsonDocumentState};
+use std::collections::HashSet;
 use std::ops::Deref;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
@@ -468,7 +469,12 @@ impl Backend {
 
         let mut all_file_paths: Vec<PathBuf> = if let Some(root) = &pkg_root {
             let mut host = self.lock_host();
-            let mut paths = host.load_package(root).file_paths;
+            let mut seen = HashSet::new();
+            let mut paths = Vec::new();
+            for p in host.load_package(root).file_paths {
+                seen.insert(p.clone());
+                paths.push(p);
+            }
             for dep_dir in dependency_dirs.values() {
                 for p in dep_dir.collect_gin_files() {
                     let p = p.normalize_diagnostic_path();
@@ -478,7 +484,7 @@ impl Backend {
                     if !host.cache.contains(&p) {
                         let _ = host.cache.add_file(p.clone());
                     }
-                    if !paths.contains(&p) {
+                    if seen.insert(p.clone()) {
                         paths.push(p);
                     }
                 }
@@ -619,35 +625,6 @@ async fn main() {
     let (service, socket) = LspService::new(Backend::new);
     Server::new(stdin, stdout, socket).serve(service).await;
 }
-
 #[cfg(test)]
-mod tests {
-    use internment::Intern;
-    use parser::parse_from_str;
-
-    #[test]
-    fn dot_completion_union_variants() {
-        use typecheck::completions::dot_completions_for_ty;
-        use typecheck::transform::transform_file;
-
-        let source = "Maybe(x) is Some(x) or None";
-        let po = parse_from_str(source);
-        let typed = transform_file(po.clone(), typecheck::FileId(0));
-
-        let ty = typed
-            .tag_types
-            .get(&typecheck::TagId(Intern::<String>::from_ref("Maybe")))
-            .cloned()
-            .expect("Expected Maybe to resolve to a union type");
-        let items = dot_completions_for_ty(ty);
-
-        assert_eq!(items.len(), 2, "Expected 2 variants for Maybe type");
-
-        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
-        assert!(labels.contains(&"Some(x)"), "Expected 'Some(x)' variant");
-        assert!(labels.contains(&"None"), "Expected 'None' variant");
-
-        let some_item = items.iter().find(|i| i.label == "Some(x)").unwrap();
-        assert_eq!(some_item.detail.as_ref().unwrap(), "Maybe.Some(x)");
-    }
-}
+#[path = "tests/main_tests.rs"]
+mod tests;

@@ -1,0 +1,25 @@
+[package]
+name = "ginterpreter"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+ast = { workspace = true }
+ast-format = { workspace = true }
+clap = { workspace = true }
+codegen = { workspace = true }
+diagnostic = { workspace = true }
+flask = { workspace = true }
+ginc = { workspace = true }
+parser = { workspace = true }
+resolve = { workspace = true }
+typecheck = { workspace = true }
+rustyline = "17"
+thiserror = { workspace = true }
+derive_more = { workspace = true }
+
+[dev-dependencies]
+test-fixtures = { workspace = true }

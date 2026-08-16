@@ -119,9 +119,10 @@ fn range_new_pkg_folder_emits_mlir_with_gin_core_range_gin() {
     );
     write_pkg_file(&dir.join("main.gin"), &main);
 
+    let target = test_target_triple();
     let out = Command::new(ginc_debug_exe())
         .arg(&dir)
-        .args(["--emit", "mlir"])
+        .args(["--emit", "mlir", "--target", &target])
         .output()
         .expect("spawn ginc for mlir probe");
 
@@ -159,6 +160,7 @@ fn range_new_pkg_folder_compiles_exe_with_output_flag() {
         emit: Emit::Exe,
         output: Some(exe_path.clone()),
         profile: Profile::Debug,
+        target: Some(test_target_triple()),
         ..Default::default()
     };
     GinCompiler::compile(&mut args);

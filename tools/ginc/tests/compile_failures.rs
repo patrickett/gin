@@ -5,7 +5,7 @@ use std::process::Command;
 use flask::FlaskConfig;
 use ginc::cli::{Args, Emit, Profile};
 use ginc::compile::{CompileFailure, CompileResult, GinCompiler};
-use test_fixtures::unique_temp_dir;
+use test_fixtures::{host_target_triple, unique_temp_dir};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -125,8 +125,31 @@ fn invalid_target_is_not_suppressed() {
     let result = GinCompiler::compile(&mut args);
 
     assert!(
-        matches!(result, CompileResult::Failed(CompileFailure::InvalidTarget { source: Some(s), .. }) if s == "bad_target")
+        matches!(result, CompileResult::Failed(CompileFailure::InvalidTarget(flask::TargetError::InvalidTriple { value: s, .. })) if s == "bad_target")
     );
+}
+
+#[test]
+fn parse_failure_precedes_invalid_target() {
+    let dir = unique_temp_dir("ginc-parse-before-target");
+    fs::create_dir_all(&dir).expect("create input dir");
+
+    let source = dir.join("main.gin");
+    write_source(&source, "main:\n");
+
+    let mut args = Args {
+        input: source,
+        emit: Emit::Exe,
+        target: Some("bad_target".to_string()),
+        ..Default::default()
+    };
+
+    let result = GinCompiler::compile(&mut args);
+
+    assert!(matches!(
+        result,
+        CompileResult::Failed(CompileFailure::ParseFailed)
+    ));
 }
 
 #[test]
@@ -151,6 +174,7 @@ fn successful_compilation_is_success() {
         input: source_file,
         emit: Emit::Exe,
         output: Some(exe_path.clone()),
+        target: Some(host_target_triple()),
         ..Default::default()
     };
 
@@ -176,6 +200,7 @@ fn typecheck_flaws_do_not_block_emission() {
         input: source,
         emit: Emit::Obj,
         output: Some(obj_path.clone()),
+        target: Some(host_target_triple()),
         ..Default::default()
     };
     let result = GinCompiler::compile(&mut args);
@@ -183,6 +208,129 @@ fn typecheck_flaws_do_not_block_emission() {
     assert!(result.has_typecheck_diagnostics());
     assert!(result.is_success());
     assert!(obj_path.exists());
+}
+
+#[test]
+fn interface_emission_succeeds() {
+    let dir = unique_temp_dir("ginc-interface-success");
+    fs::create_dir_all(&dir).expect("create temp dir");
+
+    let source = dir.join("main.gin");
+    write_source(&source, "main:\n    return 1\n");
+
+    let interface_path = dir.join("main.ginif");
+    let mut args = Args {
+        input: source.clone(),
+        emit: Emit::Interface,
+        output: Some(interface_path.clone()),
+        ..Default::default()
+    };
+    let result = GinCompiler::compile(&mut args);
+
+    assert!(
+        matches!(result, CompileResult::Success { output: Some(path) } if path == interface_path)
+    );
+    assert!(interface_path.exists());
+    let bytes = fs::read(&interface_path).expect("read interface artifact");
+    assert!(!bytes.is_empty());
+}
+
+#[test]
+fn interface_emission_with_warnings_still_succeeds() {
+    let dir = unique_temp_dir("ginc-interface-warnings");
+    fs::create_dir_all(&dir).expect("create temp dir");
+
+    let source = dir.join("main.gin");
+    write_source(
+        &source,
+        "main:\n    x: when 1 is\n        2 then 1\n        1 then 2\n        3 then 3\n    return x\n",
+    );
+
+    let interface_path = dir.join("main.ginif");
+    let mut args = Args {
+        input: source,
+        emit: Emit::Interface,
+        output: Some(interface_path.clone()),
+        ..Default::default()
+    };
+    let result = GinCompiler::compile(&mut args);
+
+    assert!(result.has_typecheck_diagnostics());
+    assert!(result.is_success());
+    assert!(interface_path.exists());
+}
+
+#[test]
+fn interface_emission_failed_build_does_not_clobber_prior_artifact() {
+    let dir = unique_temp_dir("ginc-interface-stale-on-failure");
+    fs::create_dir_all(&dir).expect("create temp dir");
+
+    let source = dir.join("main.gin");
+    write_source(&source, "main:\n    return 1\n");
+
+    let interface_path = dir.join("main.ginif");
+    let mut args = Args {
+        input: source.clone(),
+        emit: Emit::Interface,
+        output: Some(interface_path.clone()),
+        ..Default::default()
+    };
+    let first = GinCompiler::compile(&mut args);
+    assert!(
+        matches!(first, CompileResult::Success { output: Some(path) } if path == interface_path)
+    );
+    let stale_bytes = fs::read(&interface_path).expect("read first interface artifact");
+
+    write_source(&source, "main:\n");
+    let second = GinCompiler::compile(&mut args);
+    assert!(matches!(
+        second,
+        CompileResult::Failed(CompileFailure::ParseFailed)
+    ));
+
+    let current_bytes = fs::read(&interface_path).expect("read interface artifact");
+    assert_eq!(
+        current_bytes, stale_bytes,
+        "failed emission should preserve prior artifact"
+    );
+}
+
+#[test]
+fn interface_emission_is_deterministic_across_file_order() {
+    let dir = unique_temp_dir("ginc-interface-file-order");
+    fs::create_dir_all(&dir).expect("create temp dir");
+
+    let a = dir.join("a.gin");
+    let b = dir.join("b.gin");
+    write_source(&a, "main:\n    return 1\n\nx:\n    return 2\n");
+    write_source(&b, "y:\n    return 3\n\nz:\n    return 4\n");
+
+    let interface_path = dir.join("main.ginif");
+    let mut args = Args {
+        input: dir.clone(),
+        emit: Emit::Interface,
+        output: Some(interface_path.clone()),
+        ..Default::default()
+    };
+    let first = GinCompiler::compile(&mut args);
+    assert!(
+        matches!(first, CompileResult::Success { output: Some(path) } if path == interface_path)
+    );
+    let first_bytes = fs::read(&interface_path).expect("read interface artifact");
+
+    write_source(&a, "x:\n    return 2\n\nmain:\n    return 1\n");
+    write_source(&b, "z:\n    return 4\n\ny:\n    return 3\n");
+
+    let second = GinCompiler::compile(&mut args);
+    assert!(
+        matches!(second, CompileResult::Success { output: Some(path) } if path == interface_path)
+    );
+    let second_bytes = fs::read(&interface_path).expect("read interface artifact");
+
+    assert_eq!(
+        first_bytes, second_bytes,
+        "interface artifact should be deterministic across file ordering"
+    );
 }
 
 #[test]

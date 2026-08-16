@@ -1,19 +1,17 @@
 //! Compilation orchestration.
 
 use crate::cli::Args;
-use codegen::CodegenContext;
+use crate::driver::{
+    CheckedFile, CheckedPackage, CompilePackage, CompilerDriver, CompilerDriverError,
+    LoweredFileDiagnostics, ParsedPackage, SourceFile, SourcePackage,
+};
 use diagnostic::{Category, Diagnostic, DiagnosticPathExt};
 use flask::TargetTriple;
 use flask::{CompileTarget, FlaskConfig};
-use parser::query::SourceParseExt;
-use resolve::{GinPackageExt, ParsedFile};
-use std::fmt;
+use resolve::GinPackageExt;
 use std::path::{Path, PathBuf};
-use typecheck::TypedFileAst;
-use typecheck::compile_time_trait::CompileTimeTraitRegistry;
-use typecheck::transform::{
-    PackageTransformArtifacts, PackageTransformOptions, transform_package_with_shared_context,
-};
+use strum::Display;
+use thiserror::Error;
 
 struct CompilationTimings {
     enabled: bool,
@@ -31,16 +29,7 @@ impl CompilationTimings {
     }
 
     fn enabled() -> bool {
-        if std::env::var("GINC_TIMINGS").is_err() {
-            return false;
-        }
-
-        matches!(
-            std::env::var("GINC_TIMINGS")
-                .map(|v| v.to_lowercase())
-                .as_deref(),
-            Ok("1") | Ok("true") | Ok("on") | Ok("yes")
-        )
+        env_flag_enabled("GINC_TIMINGS")
     }
 
     fn run<T>(&mut self, name: &'static str, action: impl FnOnce() -> T) -> T {
@@ -100,22 +89,28 @@ pub enum CompileResult {
 }
 
 /// Structured fatal failure surfaced by the compiler driver.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CompileFailure {
     /// No `.gin` files were discovered.
+    #[error("no .gin files found in {path}")]
     NoInputFiles { path: PathBuf },
     /// A source file was unreadable.
+    #[error("failed to read {path}: {error}")]
     UnreadableSource { path: PathBuf, error: String },
     /// Parse stage produced a fatal flaw.
+    #[error("parse failed")]
     ParseFailed,
+    /// Compiler input violated a structural driver invariant.
+    #[error("compiler driver failed: {0}")]
+    Driver(CompilerDriverError),
     /// Target resolution failed.
-    InvalidTarget {
-        source: Option<String>,
-        error: flask::TargetError,
-    },
+    #[error("{0}")]
+    InvalidTarget(flask::TargetError),
     /// Entry package did not define a concrete target.
+    #[error("entry package must set `target` to a full target triple")]
     MissingEntryTarget,
     /// Emission or linking failed.
+    #[error("{stage} failed")]
     EmissionFailed {
         stage: CompileEmitStage,
         diagnostics: Vec<Diagnostic>,
@@ -123,50 +118,20 @@ pub enum CompileFailure {
 }
 
 /// Codegen phase names for emission failures.
-#[derive(Debug)]
+#[derive(Debug, Display)]
 pub enum CompileEmitStage {
     /// Typed-AST lowering to MLIR failed.
+    #[strum(to_string = "codegen")]
     Codegen,
     /// MLIR → object emission failed.
+    #[strum(to_string = "object emission")]
     ObjectEmission,
     /// Executable linking failed.
+    #[strum(to_string = "linking")]
     Linking,
-}
-
-impl fmt::Display for CompileFailure {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NoInputFiles { path } => {
-                write!(f, "no .gin files found in {}", path.display())
-            }
-            Self::UnreadableSource { path, error } => {
-                write!(f, "failed to read {}: {error}", path.display())
-            }
-            Self::ParseFailed => write!(f, "parse failed"),
-            Self::InvalidTarget { source, error } => {
-                if let Some(source) = source {
-                    write!(f, "invalid target `{source}`: {error}")
-                } else {
-                    write!(f, "{error}")
-                }
-            }
-            Self::MissingEntryTarget => {
-                write!(f, "entry package must set `target` to a full target triple")
-            }
-            Self::EmissionFailed { stage, .. } => write!(f, "{stage} failed"),
-        }
-    }
-}
-
-impl fmt::Display for CompileEmitStage {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let label = match self {
-            Self::Codegen => "codegen",
-            Self::ObjectEmission => "object emission",
-            Self::Linking => "linking",
-        };
-        write!(f, "{label}")
-    }
+    /// Interface artifact emission failed.
+    #[strum(to_string = "interface emission")]
+    InterfaceEmission,
 }
 
 impl GinCompiler {
@@ -193,10 +158,15 @@ impl GinCompiler {
             Ok(sources) => sources,
             Err(error) => return CompileResult::Failed(error),
         };
-
-        let files = timings.run("parse", || parse(&sources));
-
-        if print_diagnostics(&files) {
+        let primary_path = sources[0].path.clone();
+        let mut driver = CompilerDriver::default();
+        let parsed = match timings.run("parse", || {
+            driver.parse(SourcePackage::new(primary_path.clone(), sources))
+        }) {
+            Ok(parsed) => parsed,
+            Err(error) => return CompileResult::Failed(CompileFailure::Driver(error)),
+        };
+        if print_parse_diagnostics(&parsed) {
             return CompileResult::Failed(CompileFailure::ParseFailed);
         }
 
@@ -205,15 +175,14 @@ impl GinCompiler {
         let entry_dir = if is_library {
             path.clone()
         } else {
-            files[0]
-                .path
+            primary_path
                 .parent()
                 .map(|p| p.to_path_buf())
                 .unwrap_or_default()
         };
         let flask_config = FlaskConfig::find_package_config(&entry_dir).map(|(cfg, _)| cfg);
         if args.dependencies.is_empty() {
-            args.dependencies = files[0].path.flask_path_dependencies();
+            args.dependencies = primary_path.flask_path_dependencies();
         }
 
         let cli_triple = args.target.as_deref();
@@ -221,19 +190,15 @@ impl GinCompiler {
             (Some(config), target) => match CompileTarget::resolve(config, target) {
                 Ok(compile_target) => compile_target,
                 Err(error) => {
-                    return CompileResult::Failed(CompileFailure::InvalidTarget {
-                        source: target.map(ToString::to_string),
-                        error,
+                    return CompileResult::Failed(match target {
+                        Some(_) | None => CompileFailure::InvalidTarget(error),
                     });
                 }
             },
             (None, Some(target)) => match TargetTriple::parse(target) {
                 Ok(compile_target) => CompileTarget::Concrete(compile_target),
                 Err(error) => {
-                    return CompileResult::Failed(CompileFailure::InvalidTarget {
-                        source: Some(target.to_string()),
-                        error,
-                    });
+                    return CompileResult::Failed(CompileFailure::InvalidTarget(error));
                 }
             },
             (None, None) => CompileTarget::Library,
@@ -249,65 +214,23 @@ impl GinCompiler {
         {
             return CompileResult::Failed(match e {
                 flask::TargetError::MissingTarget => CompileFailure::MissingEntryTarget,
-                error => CompileFailure::InvalidTarget {
-                    source: None,
-                    error,
-                },
+                error => CompileFailure::InvalidTarget(error),
             });
         }
 
-        let mut files = if args.dependencies.is_empty() && !is_library {
-            files
-        } else {
-            timings.record("inventory", std::time::Duration::from_nanos(0));
-            timings.run("resolve", || {
-                resolve::resolve_imports(files, &args.dependencies)
-            })
-        };
+        let use_package_resolver =
+            flask_config.is_some() || !args.dependencies.is_empty() || is_library;
+        let checked = timings.run("front-end", || {
+            driver.check(
+                CompilePackage::new(parsed, compile_target)
+                    .with_dependencies(args.dependencies.clone())
+                    .with_import_resolution(use_package_resolver),
+            )
+        });
 
-        if args.dependencies.is_empty() && !is_library {
-            timings.run("prepare", || {
-                for file in &mut files {
-                    file.output.symptoms.extend(typecheck::prepare_parse_ast(
-                        &mut file.output.ast,
-                        &compile_target,
-                    ));
-                }
-            });
-        } else {
-            let mut file_asts: Vec<ast::FileAst> =
-                files.iter().map(|f| f.output.ast.clone()).collect();
-            let prepare_diags: Vec<Vec<Diagnostic>> = timings.run("prepare", || {
-                file_asts
-                    .iter_mut()
-                    .map(|ast| typecheck::prepare_parse_ast(ast, &compile_target))
-                    .collect()
-            });
-            for (file, (ast, mut diags)) in files
-                .iter_mut()
-                .zip(file_asts.into_iter().zip(prepare_diags))
-            {
-                file.output.ast = ast;
-                file.output.symptoms.append(&mut diags);
-            }
-        }
-
-        if print_diagnostics(&files) {
+        if print_diagnostics(&checked) {
             return CompileResult::Failed(CompileFailure::ParseFailed);
         }
-
-        // Two-pass transform: declare all files, then lower/flow with full-package ctx
-        // so defs are visible regardless of file order.
-        let (typed_asts, trait_registry) = timings.run("transform/typecheck", || {
-            let file_asts: Vec<ast::FileAst> = files.iter().map(|f| f.output.ast.clone()).collect();
-            let PackageTransformArtifacts {
-                typed_asts,
-                trait_registry,
-                ..
-            } = transform_package_with_shared_context(file_asts, PackageTransformOptions::FULL);
-
-            (typed_asts, trait_registry)
-        });
 
         // Print type-check flaws from the typed AST (uses the diagnostic crate for proper
         // messages, help text, and ariadne rendering).
@@ -315,24 +238,18 @@ impl GinCompiler {
         // Type flaws are printed but do NOT gate compilation — type checking is
         // best-effort diagnostics; codegen may still succeed for code the checker
         // doesn't fully understand yet (e.g. template unions).
-        let has_typecheck_flaws =
-            timings.run("typecheck", || print_type_diagnostics(&files, &typed_asts));
+        let has_typecheck_flaws = timings.run("typecheck", || print_type_diagnostics(&checked));
 
         let emit_result = match args.emit {
-            crate::cli::Emit::Mlir => emit_mlir_typed(
-                &files,
-                &typed_asts,
-                trait_registry.as_ref(),
-                Some(&mut timings),
-            ),
+            crate::cli::Emit::Mlir => emit_mlir_typed(&driver, &checked, Some(&mut timings)),
+            crate::cli::Emit::Interface => emit_interface(&checked, args),
             crate::cli::Emit::Obj | crate::cli::Emit::Exe => emit_native_typed(
-                &files,
-                &typed_asts,
+                &driver,
+                &checked,
                 NativeEmitOptions {
                     args,
                     path: &path,
                     is_library,
-                    trait_registry: trait_registry.as_ref(),
                     fast_llvm,
                     timings: Some(&mut timings),
                 },
@@ -353,17 +270,17 @@ impl GinCompiler {
     }
 
     fn fast_llvm_enabled() -> bool {
-        if std::env::var("GINC_FAST_LLVM").is_err() {
-            return false;
-        }
-
-        matches!(
-            std::env::var("GINC_FAST_LLVM")
-                .map(|v| v.to_lowercase())
-                .as_deref(),
-            Ok("1") | Ok("true") | Ok("on") | Ok("yes")
-        )
+        env_flag_enabled("GINC_FAST_LLVM")
     }
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    matches!(
+        std::env::var(name)
+            .map(|value| value.to_lowercase())
+            .as_deref(),
+        Ok("1") | Ok("true") | Ok("on") | Ok("yes")
+    )
 }
 
 impl CompileResult {
@@ -388,25 +305,11 @@ impl CompileResult {
     }
 }
 
-fn parse(sources: &[(PathBuf, String)]) -> Vec<ParsedFile> {
-    sources
-        .iter()
-        .map(|(path, source)| {
-            let output = source.parse_source_full();
-            ParsedFile {
-                path: path.clone(),
-                source: source.clone(),
-                output,
-            }
-        })
-        .collect()
-}
-
-fn read_sources(paths: &[PathBuf]) -> Result<Vec<(PathBuf, String)>, CompileFailure> {
+fn read_sources(paths: &[PathBuf]) -> Result<Vec<SourceFile>, CompileFailure> {
     let mut sources = Vec::with_capacity(paths.len());
     for fp in paths {
         match std::fs::read_to_string(fp) {
-            Ok(s) => sources.push((fp.clone(), s)),
+            Ok(source) => sources.push(SourceFile::new(fp.clone(), source)),
             Err(error) => {
                 return Err(CompileFailure::UnreadableSource {
                     path: fp.clone(),
@@ -422,130 +325,122 @@ fn read_sources(paths: &[PathBuf]) -> Result<Vec<(PathBuf, String)>, CompileFail
 ///
 /// Each file's symptoms are printed with its own span table and source text.
 /// Returns `true` if any fatal diagnostics were found.
-fn print_diagnostics(files: &[ParsedFile]) -> bool {
+fn print_parse_diagnostics(package: &ParsedPackage) -> bool {
     let mut has_flaws = false;
-    for file in files {
-        let filename = file.path.diagnostic_report_path_from_cwd();
-        for diag in &file.output.symptoms {
-            diag.print(&file.source, &filename);
-            if matches!(diag.category, Category::Flaw) {
-                has_flaws = true;
-            }
-        }
+    for file in package.files() {
+        has_flaws |= print_file_diagnostics(&file.path, &file.source, &file.output.symptoms);
     }
     has_flaws
 }
 
-/// Print type-check flaws from the typed AST for every file.
-fn print_type_diagnostics(files: &[ParsedFile], typed_asts: &[TypedFileAst]) -> bool {
+fn print_diagnostics(package: &CheckedPackage) -> bool {
     let mut has_flaws = false;
-    for (file, typed) in files.iter().zip(typed_asts) {
-        let filename = file.path.diagnostic_report_path_from_cwd();
-        for (_, flaw) in typed.all_flaws() {
-            flaw.clone().print(&file.source, &filename);
+    for file in package.files() {
+        has_flaws |=
+            print_file_diagnostics(file.path(), file.source(), file.front_end_diagnostics());
+    }
+    has_flaws
+}
+
+fn print_file_diagnostics(path: &Path, source: &str, diagnostics: &[Diagnostic]) -> bool {
+    let filename = path.diagnostic_report_path_from_cwd();
+    for diagnostic in diagnostics {
+        diagnostic.print(source, &filename);
+    }
+    diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.category == Category::Flaw)
+}
+
+/// Print type-check flaws from the typed AST for every file.
+fn print_type_diagnostics(package: &CheckedPackage) -> bool {
+    let mut has_flaws = false;
+    for file in package.files() {
+        let filename = file.path().diagnostic_report_path_from_cwd();
+        for flaw in file.typecheck_diagnostics() {
+            flaw.clone().print(file.source(), &filename);
             has_flaws = true;
         }
     }
     has_flaws
 }
 
-/// Print codegen / link diagnostics with the same ariadne layout as parse and type errors.
-///
-/// Uses the first parsed `.gin` file as source context (span table + text). This matches
-/// lowering, which is keyed off the compilation entry file.
-fn print_codegen_diagnostics(files: &[ParsedFile], symptoms: &[Diagnostic]) {
+/// Backend and linker diagnostics lack file ownership, so they use the primary source context.
+fn print_codegen_diagnostics(primary: &CheckedFile, symptoms: &[Diagnostic]) {
     if symptoms.is_empty() {
         return;
     }
-    let Some(primary) = files.first() else {
-        for s in symptoms {
-            eprintln!(
-                "{}: [{}] {}",
-                s.category.as_str(),
-                s.error_code(),
-                s.message
-            );
-        }
-        return;
-    };
-    let label = primary.path.diagnostic_report_path_from_cwd();
-    let source = primary.source.as_str();
+    let label = primary.path().diagnostic_report_path_from_cwd();
+    let source = primary.source();
     for d in symptoms {
         d.print(source, &label);
     }
 }
 
-/// Print MLIR text to stdout using the typed AST (no merge step).
-fn emit_mlir_typed(
-    files: &[ParsedFile],
-    typed_asts: &[TypedFileAst],
-    trait_registry: Option<&CompileTimeTraitRegistry>,
-    mut timings: Option<&mut CompilationTimings>,
-) -> Result<Option<PathBuf>, CompileFailure> {
-    let Some(typed) = typed_asts.first() else {
-        return Ok(None);
-    };
-    let (source, label) = match files.first() {
-        Some(f) => (f.source.as_str(), f.path.diagnostic_report_path_from_cwd()),
-        None => ("", "<stdin>".to_string()),
-    };
-    let context = codegen::emit::NativeCompiler::create_context();
-    let (module, symptoms) = if let Some(timings) = timings.as_mut() {
-        timings.run("mlir-lowering", || {
-            CodegenContext::build_module_from_typed_ast(
-                &context,
-                typed,
-                source,
-                &label,
-                trait_registry,
-            )
-        })
-    } else {
-        CodegenContext::build_module_from_typed_ast(&context, typed, source, &label, trait_registry)
-    };
-    let result = module.map(|m| m.as_operation().to_string());
-    match result {
-        Some(mlir_text) => {
-            print_codegen_diagnostics(files, &symptoms);
-            println!("\n```mlir\n{mlir_text}```\n");
-            Ok(None)
-        }
-        None => {
-            print_codegen_diagnostics(files, &symptoms);
-            Err(CompileFailure::EmissionFailed {
-                stage: CompileEmitStage::Codegen,
-                diagnostics: symptoms,
-            })
-        }
+fn print_package_codegen_diagnostics(
+    package: &CheckedPackage,
+    diagnostics: &[LoweredFileDiagnostics],
+) {
+    for file_diagnostics in diagnostics {
+        let file = package
+            .file(&file_diagnostics.path)
+            .expect("codegen diagnostics retain their checked source");
+        print_file_diagnostics(file.path(), file.source(), &file_diagnostics.diagnostics);
     }
 }
 
-/// Compile to object file / executable using the typed AST (no merge step).
+fn emit_mlir_typed(
+    driver: &CompilerDriver,
+    package: &CheckedPackage,
+    mut timings: Option<&mut CompilationTimings>,
+) -> Result<Option<PathBuf>, CompileFailure> {
+    let context = codegen::emit::NativeCompiler::create_context();
+    let lowered = if let Some(timings) = timings.as_mut() {
+        timings.run("mlir-lowering", || driver.lower_package(&context, package))
+    } else {
+        driver.lower_package(&context, package)
+    };
+    print_package_codegen_diagnostics(package, &lowered.diagnostics);
+    let symptoms = lowered
+        .diagnostics
+        .into_iter()
+        .flat_map(|file| file.diagnostics)
+        .collect();
+    let result = lowered
+        .module
+        .map(|module| module.as_operation().to_string());
+    match result {
+        Some(mlir_text) => {
+            println!("\n```mlir\n{mlir_text}```\n");
+            Ok(None)
+        }
+        None => Err(CompileFailure::EmissionFailed {
+            stage: CompileEmitStage::Codegen,
+            diagnostics: symptoms,
+        }),
+    }
+}
+
 struct NativeEmitOptions<'a> {
     args: &'a Args,
     path: &'a Path,
     is_library: bool,
-    trait_registry: Option<&'a CompileTimeTraitRegistry>,
     fast_llvm: bool,
     timings: Option<&'a mut CompilationTimings>,
 }
 
 fn emit_native_typed(
-    files: &[ParsedFile],
-    typed_asts: &[TypedFileAst],
+    driver: &CompilerDriver,
+    package: &CheckedPackage,
     options: NativeEmitOptions<'_>,
 ) -> Result<Option<PathBuf>, CompileFailure> {
     let NativeEmitOptions {
         args,
         path,
         is_library,
-        trait_registry,
         fast_llvm,
         mut timings,
     } = options;
-    let (Some(typed), Some(file)) = (typed_asts.first(), files.first()) else {
-        return Ok(None);
-    };
     let obj_path = if is_library {
         // Folder packages reuse `args.output` only for `-o exe`/`link` destinations.
         // When emitting Exe we always stage `.o` under `<pkg>/target/` so `-o foo`
@@ -574,27 +469,22 @@ fn emit_native_typed(
         let _ = std::fs::create_dir_all(parent);
     }
 
-    let source = file.source.as_str();
-    let label = file.path.diagnostic_report_path_from_cwd();
     let profile = args.profile;
 
     let compiler = codegen::emit::NativeCompiler::default();
     let context = codegen::emit::NativeCompiler::create_context();
-    let (module, symptoms) = if let Some(timings) = timings.as_mut() {
-        timings.run("mlir-lowering", || {
-            CodegenContext::build_module_from_typed_ast(
-                &context,
-                typed,
-                source,
-                &label,
-                trait_registry,
-            )
-        })
+    let lowered = if let Some(timings) = timings.as_mut() {
+        timings.run("mlir-lowering", || driver.lower_package(&context, package))
     } else {
-        CodegenContext::build_module_from_typed_ast(&context, typed, source, &label, trait_registry)
+        driver.lower_package(&context, package)
     };
-    let Some(module) = module else {
-        print_codegen_diagnostics(files, &symptoms);
+    print_package_codegen_diagnostics(package, &lowered.diagnostics);
+    let mut symptoms: Vec<_> = lowered
+        .diagnostics
+        .into_iter()
+        .flat_map(|file| file.diagnostics)
+        .collect();
+    let Some(module) = lowered.module else {
         return Err(CompileFailure::EmissionFailed {
             stage: CompileEmitStage::Codegen,
             diagnostics: symptoms,
@@ -607,10 +497,9 @@ fn emit_native_typed(
         timings.record("llvm-lowering", native_timings.lowering);
         timings.record("object-emission", native_timings.object_emission);
     }
-    let mut symptoms = symptoms;
-    symptoms.extend(more);
     if !ok {
-        print_codegen_diagnostics(files, &symptoms);
+        print_codegen_diagnostics(package.primary_file(), &more);
+        symptoms.extend(more);
         return Err(CompileFailure::EmissionFailed {
             stage: CompileEmitStage::ObjectEmission,
             diagnostics: symptoms,
@@ -638,7 +527,7 @@ fn emit_native_typed(
             )
         };
         if !linked {
-            print_codegen_diagnostics(files, &link_symptoms);
+            print_codegen_diagnostics(package.primary_file(), &link_symptoms);
             return Err(CompileFailure::EmissionFailed {
                 stage: CompileEmitStage::Linking,
                 diagnostics: link_symptoms,
@@ -650,4 +539,52 @@ fn emit_native_typed(
         println!("Compiled to {}", obj_path.display());
         Ok(Some(obj_path))
     }
+}
+
+fn emit_interface(
+    package: &CheckedPackage,
+    args: &Args,
+) -> Result<Option<PathBuf>, CompileFailure> {
+    let is_library = args.input.is_dir();
+    let interface_path = if is_library {
+        let pkg_name = args.input.file_name().unwrap_or_default().to_string_lossy();
+        args.output
+            .clone()
+            .unwrap_or_else(|| args.input.join("target").join(format!("{pkg_name}.ginif")))
+    } else {
+        args.output
+            .clone()
+            .unwrap_or_else(|| args.input.with_extension("ginif"))
+    };
+
+    if let Some(parent) = interface_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let temp_path = interface_path.with_extension("ginif.tmp");
+    if let Err(error) = std::fs::write(&temp_path, package.public_interface().canonical_bytes()) {
+        return Err(CompileFailure::EmissionFailed {
+            stage: CompileEmitStage::InterfaceEmission,
+            diagnostics: vec![Diagnostic::new(
+                "interface-write-failed",
+                format!("failed to write temporary interface artifact: {error}"),
+            )],
+        });
+    }
+    if let Err(error) = std::fs::rename(&temp_path, &interface_path) {
+        let cleanup = std::fs::remove_file(&temp_path);
+        if cleanup.is_err() {
+            // Ignore cleanup failures; keep the primary error as authoritative.
+        }
+        return Err(CompileFailure::EmissionFailed {
+            stage: CompileEmitStage::InterfaceEmission,
+            diagnostics: vec![Diagnostic::new(
+                "interface-write-failed",
+                format!("failed to publish interface artifact: {error}"),
+            )],
+        });
+    }
+
+    println!("Wrote interface artifact {}", interface_path.display());
+    Ok(Some(interface_path))
 }

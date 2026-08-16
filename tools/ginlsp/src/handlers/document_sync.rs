@@ -118,13 +118,12 @@ impl Backend {
         let uri = params.text_document.uri.to_string();
 
         if self.json_documents.remove(&uri).is_none() {
-            // .gin file closed: evict the cached package entry to free typed
-            // AST memory. The file's source + parse output remain cached so
-            // cross-file diagnostics still work for any still-open files in
-            // the same package. The entry is recomputed on next access.
+            // .gin file closed: evict cached file/module state so closed
+            // documents can drop parse memory while active files keep
+            // responsive diagnostics via recomputation.
             if let Some(path) = Backend::file_path_from_uri(&params.text_document.uri) {
-                let host = self.lock_host();
-                host.evict_package_for(&path);
+                let mut host = self.lock_host();
+                host.evict_file_for(&path);
             }
         }
 

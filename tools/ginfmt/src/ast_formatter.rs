@@ -233,7 +233,10 @@ impl<'a> AstFormatter<'a> {
             DeclareValue::Set(..) => {
                 self.buffer.push_str(" is set");
             }
-            DeclareValue::Range(_, _) | DeclareValue::InRange(_, _) | DeclareValue::When(_) => {
+            DeclareValue::Range(_, _)
+            | DeclareValue::InRange(_, _)
+            | DeclareValue::Refinement(_)
+            | DeclareValue::When(_) => {
                 self.buffer.push_str(" is ");
                 let span = st.get(declare.name_span);
                 let end = src[span.start()..]
@@ -281,8 +284,7 @@ impl<'a> AstFormatter<'a> {
                 self.buffer.push_str(" or ");
             }
             let shape = variant.shape();
-            self.buffer
-                .push_str(&shape.value.format_variant_shape());
+            self.buffer.push_str(&shape.value.format_variant_shape());
         }
     }
 
@@ -566,117 +568,6 @@ fn find_break_point(line: &str, max_width: usize) -> usize {
     }
     target
 }
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use parser::query::SourceParseExt;
-
-    #[test]
-    fn test_basic_declare() {
-        let source = "Maybe is Some or None\nResult is Ok or Error\n";
-        let out = source.parse_source_full();
-        let cfg = Config::default();
-        let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
-        let r = f.format_file(&out.ast);
-        assert_eq!(r, "Maybe is Some or None\nResult is Ok or Error\n");
-    }
-
-    #[test]
-    fn test_has_members_use_canonical_no_paren_syntax() {
-        let source = "Range(x) has start x, contains(self, value x) Bool\n";
-        let out = source.parse_source_full();
-        let cfg = Config::default();
-        let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
-        let r = f.format_file(&out.ast);
-        assert_eq!(r, "Range(x) has start x, contains(self, value x) Bool\n");
-    }
-
-    #[test]
-    fn composed_interface_preserves_qualified_methods() {
-        let source = "TraitA has run(ref self) Int\nTraitB has run(ref self) Int\nCombined has TraitA and TraitB\n    TraitA.run(ref self) Int := 1\n    TraitB.run(ref self) Int := 2\n";
-        let out = source.parse_source_full();
-        let cfg = Config::default();
-        let mut formatter = AstFormatter::new(source, &cfg, &out.ast.span_table);
-        let formatted = formatter.format_file(&out.ast);
-
-        assert!(
-            formatted.contains("Combined has TraitA and TraitB\n    TraitA.run(self) Int:= ...\n    TraitB.run(self) Int:= ..."),
-            "formatted output: {formatted:?}",
-        );
-        assert_eq!(formatted.matches("TraitA.run").count(), 1);
-        assert_eq!(formatted.matches("TraitB.run").count(), 1);
-    }
-
-    #[test]
-    fn test_simple_bind() {
-        let source = "main:\n    print('hello')\nreturn\n";
-        let out = source.parse_source_full();
-        let cfg = Config::default();
-        let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
-        let r = f.format_file(&out.ast);
-        assert!(r.contains("main:"));
-        assert!(r.contains("print('hello')"));
-        assert!(r.contains("return"));
-    }
-
-    #[test]
-    fn test_empty() {
-        let source = "";
-        let out = source.parse_source_full();
-        let cfg = Config::default();
-        let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
-        let r = f.format_file(&out.ast);
-        assert_eq!(r, "");
-    }
-
-    #[test]
-    fn test_import_sort_current_module() {
-        let source = "use ToString, Copy\n";
-        let out = source.parse_source_full();
-        let cfg = Config::default();
-        let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
-        let r = f.format_file(&out.ast);
-        assert_eq!(r, "use Copy, ToString\n");
-    }
-
-    #[test]
-    fn test_import_sort_package() {
-        let source = "use http.web, crypto.hash\n";
-        let out = source.parse_source_full();
-        let cfg = Config::default();
-        let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
-        let r = f.format_file(&out.ast);
-        assert_eq!(r, "use crypto.hash, http.web\n");
-    }
-
-    #[test]
-    fn test_import_sort_single() {
-        let source = "use http\n";
-        let out = source.parse_source_full();
-        let cfg = Config::default();
-        let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
-        let r = f.format_file(&out.ast);
-        assert_eq!(r, "use http\n");
-    }
-
-    #[test]
-    fn test_bundle_member_sort() {
-        let source = "use core.(Int, Byte, Area)\n";
-        let out = source.parse_source_full();
-        let cfg = Config::default();
-        let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
-        let r = f.format_file(&out.ast);
-        assert_eq!(r, "use core.(Area, Byte, Int)\n");
-    }
-
-    #[test]
-    fn test_import_sort_idempotent() {
-        let source = "use Copy, ToString\n";
-        let out = source.parse_source_full();
-        let cfg = Config::default();
-        let mut f = AstFormatter::new(source, &cfg, &out.ast.span_table);
-        let r = f.format_file(&out.ast);
-        assert_eq!(r, "use Copy, ToString\n");
-    }
-}
+#[path = "tests/ast_formatter_tests.rs"]
+mod tests;

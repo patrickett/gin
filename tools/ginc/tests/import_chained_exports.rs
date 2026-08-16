@@ -2,7 +2,7 @@ use std::fs;
 
 use ginc::cli::{Args, Emit, Profile};
 use ginc::compile::GinCompiler;
-use test_fixtures::{unique_temp_dir, write_file};
+use test_fixtures::{host_target_triple, unique_temp_dir, write_file};
 
 #[test]
 fn chained_nested_dep_a_b_loads_package_at_b() {
@@ -48,6 +48,7 @@ fn chained_nested_dep_a_b_loads_package_at_b() {
         emit: Emit::Exe,
         output: Some(exe.clone()),
         profile: Profile::Debug,
+        target: Some(host_target_triple()),
         ..Default::default()
     };
     GinCompiler::compile(&mut args);
@@ -104,6 +105,7 @@ fn chained_exports_dep_a_b_imports_folder_module_sources() {
         emit: Emit::Exe,
         output: Some(exe.clone()),
         profile: Profile::Debug,
+        target: Some(host_target_triple()),
         ..Default::default()
     };
     GinCompiler::compile(&mut args);
@@ -147,6 +149,7 @@ fn missing_nested_package_is_a_fatal_import_flaw() {
         emit: Emit::Exe,
         output: Some(exe.clone()),
         profile: Profile::Debug,
+        target: Some(host_target_triple()),
         ..Default::default()
     };
     GinCompiler::compile(&mut args);
@@ -207,6 +210,7 @@ main:
         emit: Emit::Exe,
         output: Some(exe.clone()),
         profile: Profile::Debug,
+        target: Some(host_target_triple()),
         ..Default::default()
     };
     GinCompiler::compile(&mut args);

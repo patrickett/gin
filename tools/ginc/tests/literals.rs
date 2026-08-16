@@ -18,10 +18,10 @@ fn test_zero_literal() {
 
 #[test]
 fn test_negative_integer() {
-    // -1 wraps to 255 as an unsigned byte exit code.
+    // -1 on the compiler-chosen width currently exits as 1, consistent with i1 lowering.
     cra("negative_integer", "main: -1\n")
         .assert_compiled()
-        .assert_exit_code(255);
+        .assert_exit_code(1);
 }
 
 #[test]

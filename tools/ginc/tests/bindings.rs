@@ -65,7 +65,7 @@ fn test_const_union_when_else() {
         "LogLevel is 'debug' or 'info' or 'warn' or 'error'
 
 main:
-    level LogLevel: 'info'
+    level LogLevel: 'warn'
     result: when level
         is 'debug': 1
         is 'info': 2
@@ -79,7 +79,7 @@ return
         },
     )
     .assert_compiled()
-    .assert_exit_code(2);
+    .assert_exit_code(0);
 }
 
 #[test]

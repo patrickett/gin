@@ -257,6 +257,7 @@ pub fn compile_and_run_with_options(source: &str, opts: Options) -> RunResult {
         emit: Emit::Exe,
         output: Some(exe_path.clone()),
         profile: opts.profile,
+        target: Some(test_target_triple()),
         ..Default::default()
     };
 
@@ -293,6 +294,10 @@ pub fn compile_and_run_with_options(source: &str, opts: Options) -> RunResult {
             temp_dir,
         },
     }
+}
+
+pub fn test_target_triple() -> String {
+    test_fixtures::host_target_triple()
 }
 
 /// Shorthand: compile-and-run with a unique test name.

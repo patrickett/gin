@@ -13,6 +13,8 @@ pub enum Emit {
     Obj,
     /// Print MLIR text to stdout
     Mlir,
+    /// Emit the resolved public interface artifact.
+    Interface,
 }
 
 #[derive(Parser, Debug, Default)]
