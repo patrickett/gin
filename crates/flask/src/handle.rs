@@ -6,30 +6,16 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ConfigError {
+    #[error("IO error: {0}")]
     Io(std::io::Error),
+    #[error("Flask config not found in or above {searched_from}")]
     NotFound { searched_from: PathBuf },
 }
-
-impl std::fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ConfigError::Io(err) => write!(f, "IO error: {}", err),
-            ConfigError::NotFound { searched_from } => {
-                write!(
-                    f,
-                    "Flask config not found in or above {}",
-                    searched_from.display()
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for ConfigError {}
 
 #[derive(Debug, Clone)]
 pub struct FlaskConfigHandle {

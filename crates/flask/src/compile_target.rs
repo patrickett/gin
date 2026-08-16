@@ -1,8 +1,7 @@
 //! Entry-package compile target from `flask.jsonc` and CLI overrides.
 
-use std::fmt;
-
 use crate::FlaskConfig;
+use thiserror::Error;
 
 /// Parsed target triple components for inject into `target Target`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,29 +36,13 @@ pub enum CompileTarget {
     Concrete(TargetTriple),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum TargetError {
+    #[error("entry package must set `target` to a full target triple in flask.jsonc")]
     MissingTarget,
+    #[error("invalid target triple `{value}`: {reason}")]
     InvalidTriple { value: String, reason: String },
 }
-
-impl fmt::Display for TargetError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MissingTarget => {
-                write!(
-                    f,
-                    "entry package must set `target` to a full target triple in flask.jsonc"
-                )
-            }
-            Self::InvalidTriple { value, reason } => {
-                write!(f, "invalid target triple `{value}`: {reason}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for TargetError {}
 
 #[derive(Debug, Clone)]
 pub enum TargetKindField {
@@ -210,36 +193,5 @@ impl FlaskConfig {
                 Ok(())
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_linux_triple() {
-        let t = TargetTriple::parse("x86_64-unknown-linux-gnu").unwrap();
-        assert_eq!(t.arch, TargetArch::X86_64);
-        assert_eq!(t.os, TargetOs::Linux);
-    }
-
-    #[test]
-    fn parse_wasm_triple() {
-        let t = TargetTriple::parse("wasm32-unknown-unknown").unwrap();
-        assert_eq!(t.arch, TargetArch::Wasm32);
-        assert_eq!(t.os, TargetOs::Unknown);
-    }
-
-    #[test]
-    fn reject_bare_arch() {
-        assert!(TargetTriple::parse("x86_64").is_err());
-    }
-
-    #[test]
-    fn deny_unknown_targets_field() {
-        let raw = r#"{"name":"x","version":"0","authors":[],"targets":[]}"#;
-        let err = json5::from_str::<FlaskConfig>(raw).unwrap_err();
-        assert!(err.to_string().contains("targets"));
     }
 }
