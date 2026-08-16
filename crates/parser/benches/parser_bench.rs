@@ -51,7 +51,6 @@ BigInt is in 0...18446744073709551615
 List(x) has pointer Pointer(x), length BigInt
 String has bytes List(BigInt)
 
-#auto
 Copy has can_copy Bool: is_copy(Self)
 
 is_copy(x Type) Bool := when x is
@@ -86,7 +85,6 @@ List(x) has pointer Pointer(x), length BigInt
 String has bytes List(BigInt)
 
 Size is Const(BigInt) or Dynamic
-#auto
 Sized has size Size: compute_size(Self)
 
 compute_size(x Type) Size := when x is
@@ -120,78 +118,26 @@ max_size(a Size, b Size) Size := when (a, b) is
                          else Dynamic
 ";
 
-/// Asm spec + format strings + binds with bodies (~62 lines, ~1.6KB).
+/// IO pipeline fixture (~62 lines, ~1.6KB).
 const IO_GIN: &str = "\
 Int is in 0...4294967295
 Pointer(x) is @x
 
-write_spec := 'svc #0x80'
+write_spec := 'sink'
 
 write(fd Int, buf Pointer(Int), len Int) Int:
-    result := asm(write_spec, fd, buf, len)
+    result := process_output(write_spec, fd, buf, len)
     return result
 
 print(s String):
-    write(1, s.pointer, s.len)
+    _result := write(1, s.pointer, s.len)
     return
 
 println(s String):
     newline := '\\n'
-    print(s)
+    out := print(s)
     print(newline)
-    return
-";
-
-/// A larger module with declares, methods, format strings (~100 lines, ~5KB).
-const ASM_GIN: &str = "\
-Register has value Str
-
-AsmSpec has
-    template    Str,
-    constraints Str,
-
-AsmBuilder has
-    template  Str,
-    outputs   List(Str),
-    inputs    List(Str),
-    clobbers  List(Str),
-
-AsmBuilder.new(template Str) AsmBuilder:
-    return AsmBuilder(template, [], [], [])
-
-AsmBuilder.input(self AsmBuilder, reg Register) AsmBuilder:
-    self.inputs.push(reg.value)
-    return self
-
-AsmBuilder.output(self AsmBuilder, reg Register) AsmBuilder:
-    self.outputs.push('=' .. reg.value)
-    return self
-
-AsmBuilder.inout(self AsmBuilder, reg Register) AsmBuilder:
-    self.outputs.push('=' .. reg.value)
-    self.inputs.push(self.outputs.len() - 1)
-    return self
-
-AsmBuilder.clobber(self AsmBuilder, reg Register) AsmBuilder:
-    self.clobbers.push('~' .. reg.value)
-    return self
-
-AsmBuilder.clobber_memory(self AsmBuilder) AsmBuilder:
-    self.clobbers.push('~{memory}')
-    return self
-
-AsmBuilder.build(self AsmBuilder) AsmSpec:
-    parts := []
-    if self.outputs.len() > 0:
-        parts.push(self.outputs.join(','))
-    if self.inputs.len() > 0:
-        parts.push(self.inputs.join(','))
-    if self.clobbers.len() > 0:
-        parts.push(self.clobbers.join(','))
-    return AsmSpec(self.template, parts.join(','))
-
-RegConstraint(reg Register) Str:
-    return '\\{' .. reg.value .. '\\}'
+    return out
 ";
 
 /// Combined bundle of import-free files for a larger parse workload (~193 lines, ~8KB).
@@ -203,13 +149,30 @@ fn bundle_source() -> String {
     s.push('\n');
     s.push_str(INT_GIN);
     s.push('\n');
-    s.push_str(ASM_GIN);
+    s.push_str(COPY_GIN);
+    s.push('\n');
+    s.push_str(SIZED_GIN);
+    s
+}
+
+fn large_int_source() -> String {
+    let mut s = String::with_capacity(64 * 1024);
+    s.push_str("Int is in 0...18446744073709551615\n");
+    for i in 0..400 {
+        s.push_str("IntType");
+        s.push_str(&i.to_string());
+        s.push_str(" is in ");
+        s.push_str(&i.to_string());
+        s.push_str("...0x");
+        s.push_str(&format!("{:x}", 1024 + i * 17));
+        s.push('\n');
+    }
     s
 }
 
 /// Validate that every benchmark source produces a non-empty AST.
 /// Panics with a descriptive message on failure.
-fn validate_sources() {
+pub(crate) fn validate_sources() {
     let bundle = bundle_source();
 
     let sources: &[(&str, &str)] = &[
@@ -218,7 +181,7 @@ fn validate_sources() {
         ("copy", COPY_GIN),
         ("sized", SIZED_GIN),
         ("io", IO_GIN),
-        ("asm", ASM_GIN),
+        ("large_int", &large_int_source()),
         ("bundle", &bundle),
     ];
 
@@ -258,7 +221,7 @@ fn bench_lex_and_parse(c: &mut Criterion) {
         ("copy", COPY_GIN),
         ("sized", SIZED_GIN),
         ("io", IO_GIN),
-        ("asm", ASM_GIN),
+        ("large_int", &large_int_source()),
         ("bundle", &bundle),
     ];
 
@@ -285,7 +248,7 @@ fn bench_parse_only(c: &mut Criterion) {
         ("copy", COPY_GIN),
         ("sized", SIZED_GIN),
         ("io", IO_GIN),
-        ("asm", ASM_GIN),
+        ("large_int", &large_int_source()),
         ("bundle", &bundle),
     ];
 
@@ -311,10 +274,5 @@ criterion_group!(benches, bench_lex_and_parse, bench_parse_only);
 criterion_main!(benches);
 
 #[cfg(test)]
-mod tests {
-    /// Every benchmark source must produce a non-empty AST.
-    #[test]
-    fn test_sources_parse_cleanly() {
-        validate_sources();
-    }
-}
+#[path = "parser_bench_tests.rs"]
+mod tests;

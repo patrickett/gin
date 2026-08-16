@@ -1,7 +1,7 @@
 //! Parser tests for the ownership system: `eat` consume-parameter syntax
 //! and `eat expr` call-site consume argument syntax.
 
-use ast::{NormalExpr, Expr, ParamConvention, ParameterKind, PredicateExpr};
+use ast::{Expr, NormalExpr, ParamConvention, ParameterKind, PredicateExpr};
 use internment::Intern;
 use parser::query::SourceParseExt;
 
@@ -94,6 +94,21 @@ fn test_parse_parameter_refinement_chain() {
 }
 
 #[test]
+fn test_parse_parameter_equality_refinement() {
+    let src = "select(value Int, expected Int and = value) Int: expected\n";
+    let output = src.parse_source_full();
+    assert!(output.symptoms.is_empty(), "{:?}", output.symptoms);
+    let bind = output.ast.defs.get(&Intern::from_ref("select")).unwrap();
+
+    assert_eq!(
+        bind.param_refinements.get(&Intern::from_ref("expected")),
+        Some(&PredicateExpr::Eq(NormalExpr::Var(Intern::from_ref(
+            "value"
+        ))))
+    );
+}
+
+#[test]
 fn test_parse_consume_arg_in_call() {
     // A call with `eat x` argument inside a function body
     let src = "\
@@ -156,7 +171,7 @@ return
 #[test]
 fn test_parse_mut_param() {
     let src = "write(mut e Entity, hp Int):
-    e.hp: hp
+    e.hp:: hp
 return
 ";
     let ast = src.parse_source_full().ast;
@@ -190,7 +205,7 @@ return
 #[test]
 fn test_parse_mixed_ref_and_bare_params() {
     let src = "attack(ref a Entity, ref d Entity):
-    d.hp: d.hp - a.damage
+    d.hp:: d.hp - a.damage
 return
 ";
     let ast = src.parse_source_full().ast;
@@ -332,7 +347,7 @@ return
 fn test_parse_group_annotation_mutable() {
     let src = "\
 attack(mut{r} a Entity, mut{r} d Entity):
-    d.hp: d.hp - a.calculate_damage(d)
+    d.hp:: d.hp - a.calculate_damage(d)
 return
 ";
     let ast = src.parse_source_full().ast;
@@ -384,7 +399,7 @@ fn test_parse_semantic_group_path() {
 fn test_parse_multiple_group_annotations() {
     let src = "\
 process(ref{e} entity Entity, mut{rr} ring Ring):
-    ring.power: ring.power + entity.energy
+    ring.power:: ring.power + entity.energy
 return
 ";
     let ast = src.parse_source_full().ast;
@@ -437,7 +452,10 @@ borrow(ref{r} value Entity) ref{r} Entity: value
         panic!("expected grouped parameter reference");
     };
     assert!(!mutable);
-    assert_eq!(group.as_ref().map(ToString::to_string).as_deref(), Some("r"));
+    assert_eq!(
+        group.as_ref().map(ToString::to_string).as_deref(),
+        Some("r")
+    );
     assert!(matches!(&inner.value, Expr::AnonymousTag(name) if name.as_str() == "Entity"));
 
     let Expr::Ref {
@@ -449,42 +467,18 @@ borrow(ref{r} value Entity) ref{r} Entity: value
         panic!("expected grouped return reference");
     };
     assert!(!mutable);
-    assert_eq!(group.as_ref().map(ToString::to_string).as_deref(), Some("r"));
-    assert!(matches!(&inner.value, Expr::AnonymousTag(name) if name.as_str() == "Entity"));
-}
-
-#[test]
-fn test_parse_and_has_copy_override() {
-    let src = "Transaction has Copy\n    id Int\n    Copy.can_copy: False\n";
-    let ast = src.parse_source_full().ast;
-    let decl = ast.tags.get(&Intern::from_ref("Transaction")).unwrap();
-    let pt = decl
-        .provided_traits
-        .iter()
-        .find(|p| p.trait_name.as_str() == "Copy")
-        .expect("Copy provided trait");
-    assert_eq!(pt.fields.len(), 1);
-    assert_eq!(pt.fields[0].0.as_str(), "can_copy");
-}
-
-#[test]
-fn test_parse_and_is_not_copy_rejected() {
-    let src = "Transaction has id Int\n     and is not Copy\n";
-    let out = src.parse_source_full();
-    assert!(
-        out.symptoms
-            .iter()
-            .any(|d| d.message.contains("marker syntax removed")),
-        "expected migration diagnostic, got: {:?}",
-        out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
+    assert_eq!(
+        group.as_ref().map(ToString::to_string).as_deref(),
+        Some("r")
     );
+    assert!(matches!(&inner.value, Expr::AnonymousTag(name) if name.as_str() == "Entity"));
 }
 
 #[test]
 fn test_parse_group_annotation_param_groups_mapped() {
     let src = "\
 process(ref{e} entity Entity, mut{rr} ring Ring):
-    ring.power: ring.power + entity.energy
+    ring.power:: ring.power + entity.energy
 return
 ";
     let ast = src.parse_source_full().ast;

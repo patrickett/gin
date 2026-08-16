@@ -22,15 +22,13 @@ use internment::Intern;
 use lexer::{Lexer, Token};
 
 use ast::span::{SpanId, SpanTable};
-use ast::{Expr, FileAst, Spanned, Typed};
+use ast::{Expr, FileAst, Spanned, TargetQueryKind, TypeReference, Typed};
 
 use crate::cursor::{ParseError, TokenCursor};
 
 use crate::unescape::UnescapeExt;
 use ast::ModPath;
-use ast::{
-    AsmExpr, BinOp, Binary, Bind, BindValue, FnCall, FormatPart, FormatString, Range, TagCall,
-};
+use ast::{BinOp, Binary, Bind, BindValue, FnCall, FormatPart, FormatString, Range, TagCall};
 
 pub type ExprFn = fn(&mut TokenCursor) -> Typed<Expr>;
 
@@ -147,24 +145,6 @@ impl<'src, 't> TokenCursor<'src, 't> {
             let inner = self.parse_expression();
             let span_id = inner.span_id;
             Typed::infer(Expr::ConsumeArg(Box::new(inner)), span_id)
-        } else if matches!(self.peek(), Some(Token::Id(_)))
-            && self.peek_at(1) == Some(&Token::Eq)
-        {
-            let (name, name_span) = match self.advance() {
-                Some((Token::Id(name), span)) => (self.intern(name), span),
-                _ => unreachable!(),
-            };
-            self.advance();
-            let rhs = self.parse_expression();
-            let end_span = self.last_consumed_span();
-            Typed::infer(
-                Expr::Bind(Box::new(Bind::new(
-                    name,
-                    name_span,
-                    BindValue::Expr(Box::new(rhs)),
-                ))),
-                self.merge_span(name_span, end_span),
-            )
         } else {
             self.parse_expression()
         }
@@ -214,9 +194,8 @@ impl<'src, 't> TokenCursor<'src, 't> {
             // re-evaluate with the operator.
             if matches!(token, Token::Indent) {
                 if let Some(next_tok) = self.peek_past_indent() {
-                    let is_infix = self.try_infix_op(next_tok).is_some()
-                        || self.try_comparison_op(next_tok).is_some()
-                        || matches!(next_tok, Token::Infer);
+                    let is_infix =
+                        self.try_infix_op(next_tok).is_some() || matches!(next_tok, Token::Infer);
                     if is_infix {
                         self.skip_indents();
                         consumed_indents += 1;
@@ -246,10 +225,9 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 break;
             }
 
-            if matches!(token, Token::Eq | Token::EqEq | Token::NotEq) {
+            if matches!(token, Token::EqEq | Token::NotEq) {
                 self.advance();
                 let desc = match token {
-                    Token::Eq => "`=`",
                     Token::EqEq => "`==`",
                     Token::NotEq => "`/=`",
                     _ => unreachable!(),
@@ -261,24 +239,6 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 );
                 // Consume RHS for error recovery
                 self.parse_expr_min_prec(0);
-                self.advance_pop();
-                continue;
-            }
-
-            // Comparison operators: desugar to function calls (`a < b` → `lt(a, b)`)
-            if let Some((fn_name, prec)) = self.try_comparison_op(&token)
-                && prec >= min_prec
-            {
-                self.advance();
-                let lhs_span = lhs.span_id;
-                let rhs = self.parse_expr_min_prec(prec + 1);
-                let rhs_span = rhs.span_id;
-                let path = ModPath::new(self.intern(fn_name), vec![]);
-                let fn_call = FnCall {
-                    path: ast::Spanned::new(path, lhs_span),
-                    args: Some(vec![lhs, rhs]),
-                };
-                lhs = Typed::infer(Expr::FnCall(fn_call), self.merge_span(lhs_span, rhs_span));
                 self.advance_pop();
                 continue;
             }
@@ -343,6 +303,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
     fn parse_atom(&mut self) -> Typed<Expr> {
         match self.peek() {
             Some(Token::At) => self.parse_take_ptr(),
+            Some(Token::Pound) => self.parse_compile_time_query(),
             Some(Token::Star) => self.parse_deref(),
             Some(Token::SelfInstance) => self.parse_self_ref(),
             Some(Token::Ref) => self.parse_ref_take(),
@@ -352,8 +313,23 @@ impl<'src, 't> TokenCursor<'src, 't> {
             Some(Token::BracketOpen) => self.parse_list_lit(),
             Some(Token::ParenOpen) => self.parse_tuple_lit_or_alloc_or_group(),
             Some(Token::FormatStringDelim) => self.parse_format_string_expr(),
-            Some(Token::Asm) => self.parse_asm_expr(),
             Some(Token::Id(_)) => {
+                if let Some((Token::Id(name), name_span)) = self.peek().zip(self.peek_span())
+                    && *name == "_"
+                    && self.peek_at(1) == Some(&Token::Eq)
+                {
+                    let name = self.intern(name);
+                    self.advance();
+                    self.expect(&Token::Eq);
+                    let value = self.parse_expression();
+                    let end_span = self.last_consumed_span();
+                    let bind = Bind::new(name, name_span, BindValue::Expr(Box::new(value)));
+                    return Typed::infer(
+                        Expr::Bind(Box::new(bind)),
+                        self.merge_span(name_span, end_span),
+                    );
+                }
+
                 // Fast check: Id followed directly by : or := is always a bind.
                 // This avoids calling looks_like_bind (which scans ahead for complex
                 // patterns like `id Tag:` and `id(...) type:`) for the simple case.
@@ -410,8 +386,25 @@ impl<'src, 't> TokenCursor<'src, 't> {
     /// True when we see `id :`, `id :=`, `id(...) :`, `id Tag :`, or `id Tag[...] :` patterns.
     pub(crate) fn looks_like_bind(&self) -> bool {
         // id: or id:=  → definitely a bind
-        if matches!(self.peek_at(1), Some(Token::Colon) | Some(Token::ColonEq)) {
+        if matches!(
+            self.peek_at(1),
+            Some(Token::Colon | Token::ColonColon | Token::ColonEq)
+        ) {
             return true;
+        }
+        if self.compound_rebind_at(1).is_some() {
+            return true;
+        }
+
+        if self.peek_at(1) == Some(&Token::Is) {
+            let mut offset = 2;
+            loop {
+                match self.peek_at(offset) {
+                    Some(Token::Colon | Token::ColonColon | Token::ColonEq) => return true,
+                    Some(Token::Newline) | Some(Token::Dedent) | None => return false,
+                    _ => offset += 1,
+                }
+            }
         }
 
         // id ref or id mut followed by type and `:`/`:=`  → typed ref bind
@@ -545,6 +538,30 @@ impl<'src, 't> TokenCursor<'src, 't> {
         false
     }
 
+    pub(crate) fn compound_rebind_at(&self, offset: usize) -> Option<BinOp> {
+        let operator = match self.peek_at(offset)? {
+            Token::Plus => BinOp::Add,
+            Token::Minus => BinOp::Subtract,
+            Token::Star => BinOp::Multiply,
+            Token::Slash => BinOp::Divide,
+            Token::Percent => BinOp::Modulo,
+            Token::Ampersand => BinOp::BitAnd,
+            Token::Pipe => BinOp::BitOr,
+            Token::Caret => BinOp::BitXor,
+            Token::ShiftLeft => BinOp::ShiftLeft,
+            Token::ShiftRight => BinOp::ShiftRight,
+            _ => return None,
+        };
+        (self.peek_at(offset + 1) == Some(&Token::Colon)).then_some(operator)
+    }
+
+    pub(crate) fn eat_compound_rebind(&mut self) -> Option<BinOp> {
+        let operator = self.compound_rebind_at(0)?;
+        self.advance();
+        self.advance();
+        Some(operator)
+    }
+
     fn skip_balanced_delimiters(
         &self,
         mut offset: usize,
@@ -574,7 +591,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
     }
 
     fn parse_id_atom(&mut self) -> Typed<Expr> {
-        // BufSet: name.(index): value or BufGet: name.(index)
+        // BufSet: name.(index):: value or BufGet: name.(index)
         if matches!(self.peek(), Some(Token::Id(_)))
             && self.peek_at(1) == Some(&Token::Dot)
             && self.peek_at(2) == Some(&Token::ParenOpen)
@@ -589,12 +606,12 @@ impl<'src, 't> TokenCursor<'src, 't> {
             let index = self.parse_expression();
             self.expect(&Token::ParenClose);
 
-            if self.is_at(&Token::Colon) || self.is_at(&Token::ColonEq) {
-                // BufSet
-                let is_const = self.eat(&Token::ColonEq);
-                if !is_const {
-                    self.eat(&Token::Colon);
-                }
+            let operator = if self.eat(&Token::ColonColon) {
+                Some(None)
+            } else {
+                self.eat_compound_rebind().map(Some)
+            };
+            if let Some(operator) = operator {
                 let value = self.parse_expression();
                 let end_span = self.last_consumed_span();
                 let base = Typed::infer(
@@ -609,6 +626,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                         buf: Box::new(base),
                         index: Box::new(index),
                         value: Box::new(value),
+                        operator,
                     },
                     self.merge_span(id_span, end_span),
                 );
@@ -631,7 +649,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             );
         }
 
-        // TupleSet: name.N: value or TupleGet: name.N
+        // TupleSet: name.N:: value or TupleGet: name.N
         if matches!(self.peek(), Some(Token::Id(_)))
             && self.peek_at(1) == Some(&Token::Dot)
             && matches!(self.peek_at(2), Some(Token::Int(_)))
@@ -646,12 +664,12 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 unreachable!()
             };
 
-            if self.is_at(&Token::Colon) || self.is_at(&Token::ColonEq) {
-                // TupleSet
-                let is_const = self.eat(&Token::ColonEq);
-                if !is_const {
-                    self.eat(&Token::Colon);
-                }
+            let operator = if self.eat(&Token::ColonColon) {
+                Some(None)
+            } else {
+                self.eat_compound_rebind().map(Some)
+            };
+            if let Some(operator) = operator {
                 let value = self.parse_expression();
                 let end_span = self.last_consumed_span();
                 let base = Typed::infer(
@@ -664,8 +682,9 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 return Typed::infer(
                     Expr::TupleSet {
                         base: Box::new(base),
-                        index: idx as usize,
+                        index: ast::integer::to_usize(idx).unwrap_or(usize::MAX),
                         value: Box::new(value),
+                        operator,
                     },
                     self.merge_span(id_span, end_span),
                 );
@@ -682,7 +701,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             return Typed::infer(
                 Expr::TupleGet {
                     base: Box::new(base),
-                    index: idx as usize,
+                    index: ast::integer::to_usize(idx).unwrap_or(usize::MAX),
                 },
                 self.merge_span(id_span, end_span),
             );
@@ -691,7 +710,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
         if matches!(self.peek(), Some(Token::Id(_)))
             && self.peek_at(1) == Some(&Token::Dot)
             && matches!(self.peek_at(2), Some(Token::Id(_)))
-            && matches!(self.peek_at(3), Some(Token::Colon | Token::ColonEq))
+            && (self.peek_at(3) == Some(&Token::ColonColon) || self.compound_rebind_at(3).is_some())
         {
             let Some((Token::Id(base_name), base_span)) = self.advance() else {
                 unreachable!()
@@ -700,9 +719,14 @@ impl<'src, 't> TokenCursor<'src, 't> {
             let Some((Token::Id(field_name), _)) = self.advance() else {
                 unreachable!()
             };
-            if !self.eat(&Token::ColonEq) {
-                self.advance();
-            }
+            let operator = if self.eat(&Token::ColonColon) {
+                None
+            } else {
+                Some(
+                    self.eat_compound_rebind()
+                        .expect("compound rebind lookahead"),
+                )
+            };
             let value = self.parse_expression();
             let end_span = self.last_consumed_span();
             let base = Typed::infer(
@@ -717,6 +741,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                     base: Box::new(base),
                     field: self.intern(field_name),
                     value: Box::new(value),
+                    operator,
                 },
                 self.merge_span(base_span, end_span),
             );
@@ -1043,6 +1068,63 @@ impl<'src, 't> TokenCursor<'src, 't> {
         )
     }
 
+    fn parse_compile_time_query(&mut self) -> Typed<Expr> {
+        let (_, start_span) = self
+            .advance()
+            .expect("peek confirmed '#' token before compile-time query");
+        let kind = match self.advance() {
+            Some((Token::Id("size"), _)) => TargetQueryKind::Size,
+            Some((Token::Id("alignment"), _)) => TargetQueryKind::Alignment,
+            Some((Token::Id("index_bits"), _)) => TargetQueryKind::IndexBits,
+            _ => {
+                self.error(
+                    "parse-expected-query-name",
+                    "expected compile-time query name after '#'",
+                    self.current_span(),
+                );
+                TargetQueryKind::Size
+            }
+        };
+        self.expect(&Token::ParenOpen);
+        let operand = self
+            .parse_type_reference()
+            .unwrap_or_else(|| TypeReference::Nominal(self.intern("__parse_error")));
+        self.expect(&Token::ParenClose);
+        let end_span = self.last_consumed_span();
+        Typed::infer(
+            Expr::TargetQuery { kind, operand },
+            self.merge_span(start_span, end_span),
+        )
+    }
+
+    pub(crate) fn parse_type_reference(&mut self) -> Option<TypeReference> {
+        if self.eat(&Token::At) {
+            return self
+                .parse_type_reference()
+                .map(|inner| TypeReference::Pointer(Box::new(inner)));
+        }
+        if self.eat(&Token::ParenOpen) {
+            self.expect(&Token::ParenClose);
+            return Some(TypeReference::Unit);
+        }
+        let name = match self.advance()? {
+            (Token::Id(name) | Token::Tag(name), _) => self.intern(name),
+            _ => return None,
+        };
+        if !self.eat(&Token::ParenOpen) {
+            return Some(TypeReference::Nominal(name));
+        }
+        let mut arguments = Vec::new();
+        while !self.is_at(&Token::ParenClose) {
+            arguments.push(self.parse_type_reference()?);
+            if !self.eat_list_separator() {
+                break;
+            }
+        }
+        self.expect(&Token::ParenClose);
+        Some(TypeReference::Application { name, arguments })
+    }
+
     fn parse_deref(&mut self) -> Typed<Expr> {
         let (_, start_span) = self
             .advance()
@@ -1119,27 +1201,17 @@ impl<'src, 't> TokenCursor<'src, 't> {
         Typed::infer(Expr::SelfRef, span)
     }
 
-    /// Map a comparison token to the function name it desugars to.
-    ///
-    /// Comparison operators are NOT represented as `BinOp` variants.
-    /// Instead, `a == b` desugars to `eq(a, b)`, `a < b` to `lt(a, b)`, etc.
-    /// These function calls go through normal trait method resolution.
-    fn try_comparison_op(&self, token: &Token) -> Option<(&'static str, u8)> {
-        match token {
-            Token::Less => Some(("lt", 3)),
-            Token::LessEq => Some(("le", 3)),
-            Token::Greater => Some(("gt", 3)),
-            Token::GreaterEq => Some(("ge", 3)),
-            _ => None,
-        }
-    }
-
     fn try_infix_op(&self, token: &Token) -> Option<(BinOp, u8)> {
         match token {
             // Precedence 1-2: logical
             Token::Or => Some((BinOp::LogicalOr, 1)),
             Token::And => Some((BinOp::LogicalAnd, 2)),
             // Precedence 3: bitwise
+            Token::Eq => Some((BinOp::Equal, 3)),
+            Token::Less => Some((BinOp::Less, 3)),
+            Token::LessEq => Some((BinOp::LessOrEqual, 3)),
+            Token::Greater => Some((BinOp::Greater, 3)),
+            Token::GreaterEq => Some((BinOp::GreaterOrEqual, 3)),
             Token::Ampersand => Some((BinOp::BitAnd, 3)),
             Token::Pipe => Some((BinOp::BitOr, 3)),
             Token::Caret => Some((BinOp::BitXor, 3)),
@@ -1168,7 +1240,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             return Ok(Typed::infer(
                 Expr::TupleGet {
                     base: Box::new(lhs),
-                    index: n as usize,
+                    index: ast::integer::to_usize(n).unwrap_or(usize::MAX),
                 },
                 self.merge_span(lhs_span, end_span),
             ));
@@ -1201,9 +1273,12 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 let field = self.intern(name);
                 let lhs_span = lhs.span_id;
 
-                // Check for field write: p.field: value
-                if self.is_at(&Token::Colon) {
-                    self.advance(); // Colon
+                let operator = if self.eat(&Token::ColonColon) {
+                    Some(None)
+                } else {
+                    self.eat_compound_rebind().map(Some)
+                };
+                if let Some(operator) = operator {
                     let value = self.parse_expression();
                     let end_span = self.last_consumed_span();
                     return Ok(Typed::infer(
@@ -1211,6 +1286,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                             base: Box::new(lhs),
                             field,
                             value: Box::new(value),
+                            operator,
                         },
                         self.merge_span(lhs_span, end_span),
                     ));
@@ -1253,9 +1329,8 @@ impl<'src, 't> TokenCursor<'src, 't> {
         // as Type → Cast
         if self.is_at(&Token::As) {
             self.advance(); // As
-            match self.advance() {
-                Some((Token::Tag(name), _)) => {
-                    let ty = self.intern(name);
+            match self.parse_type_reference() {
+                Some(ty) => {
                     let end_span = self.last_consumed_span();
                     let lhs_span = lhs.span_id;
                     return Ok(Typed::infer(
@@ -1266,7 +1341,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                         self.merge_span(lhs_span, end_span),
                     ));
                 }
-                _ => {
+                None => {
                     self.error(
                         "parse-expected-type-name",
                         "expected type name after 'as'",
@@ -1366,143 +1441,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             }
         }
     }
-
-    fn parse_asm_expr(&mut self) -> Typed<Expr> {
-        let start_span = self.peek_span().unwrap_or_else(|| self.current_span());
-        self.advance(); // eat Asm
-
-        // expect (
-        if !self.eat(&Token::ParenOpen) {
-            self.error(
-                "parse-expected-paren",
-                "expected '(' after 'asm'",
-                self.current_span(),
-            );
-            return Typed::infer(Expr::AnonymousTag(self.intern("__parse_error")), start_span);
-        }
-
-        // Parse the spec expression (an AsmSpec value constructed with :=)
-        let spec_expr = self.parse_expression();
-
-        // Parse optional runtime operand values
-        let mut operand_values = Vec::new();
-        while self.eat(&Token::Comma) {
-            // Skip indent/dedent tokens that appear after newlines
-            while matches!(self.peek(), Some(Token::Indent) | Some(Token::Dedent)) {
-                self.advance();
-            }
-            if self.is_at(&Token::ParenClose) {
-                break;
-            }
-            operand_values.push(self.parse_expression());
-        }
-
-        // expect )
-        if !self.eat(&Token::ParenClose) {
-            self.error(
-                "parse-expected-paren",
-                "expected ')' after asm operands",
-                self.current_span(),
-            );
-            return Typed::infer(Expr::AnonymousTag(self.intern("__parse_error")), start_span);
-        }
-
-        // Consume any trailing dedent tokens that were produced by the indent-aware lexer
-        // for arguments inside the `(...)`. These dedents should not leak out to the enclosing
-        // body parser.
-        while matches!(self.peek(), Some(Token::Dedent)) {
-            self.advance();
-        }
-
-        let end_span = self.last_consumed_span();
-
-        Typed::infer(
-            Expr::Asm(AsmExpr {
-                template: Intern::new(String::new()),
-                operands: Vec::new(),
-                clobbers: Vec::new(),
-                operand_values,
-                spec_expr: Some(Box::new(spec_expr)),
-            }),
-            self.merge_span(start_span, end_span),
-        )
-    }
 }
-
 #[cfg(test)]
-mod tests {
-    use crate::query::SourceParseExt;
-
-    fn has_unexpected_token_symptom(output: &crate::query::ParseOutput, token: &str) -> bool {
-        output
-            .symptoms
-            .iter()
-            .any(|d| d.message == format!("unexpected token {token}"))
-    }
-
-    #[test]
-    fn standalone_equals_is_unexpected_token() {
-        let output = "main:\n  =\n    return".parse_source_full();
-        assert!(has_unexpected_token_symptom(&output, "`=`"));
-    }
-
-    #[test]
-    fn standalone_double_equals_is_unexpected_token() {
-        let output = "main:\n  ==\n    return".parse_source_full();
-        assert!(has_unexpected_token_symptom(&output, "`==`"));
-    }
-
-    #[test]
-    fn standalone_not_equals_is_unexpected_token() {
-        let output = "main:\n  /=\n    return".parse_source_full();
-        assert!(has_unexpected_token_symptom(&output, "`/=`"));
-    }
-
-    #[test]
-    fn standalone_equals_after_blank_lines_uses_equals_span() {
-        let output = "main:\n  =\n    return".parse_source_full();
-        assert!(has_unexpected_token_symptom(&output, "`=`"));
-    }
-
-    #[test]
-    fn infix_equals_is_unexpected_token() {
-        let output = "x: a = b\n".parse_source_full();
-        assert!(has_unexpected_token_symptom(&output, "`=`"));
-    }
-
-    #[test]
-    fn infix_double_equals_is_unexpected_token() {
-        let output = "x: a == b\n".parse_source_full();
-        assert!(has_unexpected_token_symptom(&output, "`==`"));
-    }
-
-    #[test]
-    fn infix_not_equals_is_unexpected_token() {
-        let output = "x: a /= b\n".parse_source_full();
-        assert!(has_unexpected_token_symptom(&output, "`/=`"));
-    }
-
-    #[test]
-    fn less_than_still_works() {
-        let output = "x: a < b\n".parse_source_full();
-        assert!(!has_unexpected_token_symptom(&output, "`<`"));
-    }
-
-    #[test]
-    fn greater_than_still_works() {
-        let output = "x: a > b\n".parse_source_full();
-        assert!(!has_unexpected_token_symptom(&output, "`>`"));
-    }
-
-    #[test]
-    fn less_than_or_equal_still_works() {
-        let output = "x: a <= b\n".parse_source_full();
-        assert!(!has_unexpected_token_symptom(&output, "`<=`"));
-    }
-
-    #[test]
-    fn greater_than_or_equal_still_works() {
-        let output = "x: a >= b\n".parse_source_full();
-        assert!(!has_unexpected_token_symptom(&output, "`>=`"));
-    }
-}
+#[path = "../../tests/mod_tests.rs"]
+mod tests;

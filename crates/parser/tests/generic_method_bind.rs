@@ -36,7 +36,9 @@ fn parses_generic_method_bind_with_typevar_params_and_return() {
         Expr::TagCall(call) => {
             assert_eq!(call.name.as_str(), "Range");
             assert_eq!(call.args.len(), 1);
-            assert!(matches!(call.args[0].value, Expr::FnCall(ref f) if f.path.value.root.as_str() == "x" && f.args.is_none()));
+            assert!(
+                matches!(call.args[0].value, Expr::FnCall(ref f) if f.path.value.root.as_str() == "x" && f.args.is_none())
+            );
         }
         other => panic!("receiver should be TypeGeneric, got {:?}", other),
     }
@@ -70,7 +72,9 @@ fn parses_generic_method_bind_with_typevar_params_and_return() {
         Expr::TagCall(call) => {
             assert_eq!(call.name.as_str(), "Range");
             assert_eq!(call.args.len(), 1);
-            assert!(matches!(call.args[0].value, Expr::FnCall(ref f) if f.path.value.root.as_str() == "x" && f.args.is_none()));
+            assert!(
+                matches!(call.args[0].value, Expr::FnCall(ref f) if f.path.value.root.as_str() == "x" && f.args.is_none())
+            );
         }
         other => panic!("return_tag should be TypeGeneric Range(x), got {:?}", other),
     }
@@ -241,6 +245,49 @@ fn explicit_empty_params_classify_associated_function() {
     };
     assert!(create.params.is_empty());
     assert_eq!(create.kind, HasFunctionKind::Associated);
+}
+
+#[test]
+fn has_method_preserves_parameter_refinements_in_the_callable_bind() {
+    let out = "Box has\n    new(value is in 1...8) Self: Self\n".parse_source_full();
+    assert!(out.symptoms.is_empty(), "symptoms: {:?}", out.symptoms);
+    let boxed = out.ast.tags.get(&intern("Box")).expect("Box");
+    let DeclareValue::Has(members) = &boxed.value else {
+        panic!("expected has members");
+    };
+    let HasMember::Function(new) = &members[0] else {
+        panic!("new should be a function member");
+    };
+    assert!(new.param_refinements.contains_key(&intern("value")));
+    assert!(
+        out.ast.defs[&intern("Box.new")]
+            .param_refinements
+            .contains_key(&intern("value"))
+    );
+}
+
+#[test]
+fn has_extension_after_refinement_registers_its_methods() {
+    let out = "Alignment is in 1...8\nAlignment has\n    new(value is in 1...8) Self: value as Alignment\n"
+        .parse_source_full();
+    assert!(out.symptoms.is_empty(), "symptoms: {:?}", out.symptoms);
+    assert!(out.ast.defs.contains_key(&intern("Alignment.new")));
+    assert!(
+        out.ast.defs[&intern("Alignment.new")]
+            .param_refinements
+            .contains_key(&intern("value"))
+    );
+}
+
+#[test]
+fn has_method_overloads_with_distinct_arities_remain_independent_definitions() {
+    let out = "Layout(element) has\n    new(count element) Self: Self(count)\n    new(count element, alignment element) Self: Self(count, alignment)\n"
+        .parse_source_full();
+
+    assert!(out.symptoms.is_empty(), "symptoms: {:?}", out.symptoms);
+    assert!(out.ast.defs.contains_key(&intern("Layout.new$arity1")));
+    assert!(out.ast.defs.contains_key(&intern("Layout.new$arity2")));
+    assert_eq!(out.ast.method_binds.len(), 2);
 }
 
 #[test]

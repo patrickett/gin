@@ -1,11 +1,11 @@
 use ast::span::{SpanId, SpanTable};
 use lexer::Token;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use ast::warnings::BindWarningsExt;
 use ast::{
-    Bind, BindValue, Declare, DeclareValue, Expr, FileAst, HasSpanId, Spanned,
-    ParameterKind, Typed, Variant,
+    Bind, BindValue, Declare, DeclareValue, Expr, FileAst, HasSpanId, ParameterKind, Spanned,
+    Typed, Variant,
 };
 use indexmap::IndexMap;
 use internment::Intern;
@@ -14,9 +14,9 @@ use crate::cursor::TokenCursor;
 use crate::expr::ExprFn;
 
 enum TopLevelValue {
-    Tag(Declare),
+    Tag(Box<Declare>),
     Bind(Box<Bind>),
-    Expr(Typed<Expr>),
+    Expr(Box<Typed<Expr>>),
 }
 
 impl TokenCursor<'_, '_> {
@@ -81,6 +81,11 @@ impl TokenCursor<'_, '_> {
             Self::collect_top_level(el, &mut tags_scratch, &mut defs_scratch, &mut exprs);
         }
 
+        let method_binds = Self::materialize_has_method_binds(
+            tags_scratch
+                .values()
+                .flat_map(|declarations| declarations.iter()),
+        );
         let mut tags = ast::TagMap::new();
         for (name, declares) in tags_scratch {
             let mut declarations = declares.into_iter();
@@ -94,29 +99,29 @@ impl TokenCursor<'_, '_> {
             }
         }
         Self::expand_composed_provided_traits(&mut tags);
-        let method_binds = Self::materialize_has_method_binds(&tags);
+        let mut method_overload_counts = HashMap::new();
         for bind in &method_binds {
-            let receiver_name = match &bind
-                .receiver_type_surface()
-                .expect("has method receiver")
-                .value
+            let receiver = Self::has_method_receiver_name(bind);
+            *method_overload_counts
+                .entry((receiver, bind.name))
+                .or_insert(0usize) += 1;
+        }
+        for bind in &method_binds {
+            let receiver_name = Self::has_method_receiver_name(bind);
+            let base_name = format!("{}.{}", receiver_name, bind.name);
+            let name = if method_overload_counts
+                .get(&(receiver_name, bind.name))
+                .copied()
+                .unwrap_or_default()
+                > 1
             {
-                ast::Expr::AnonymousTag(name) => *name,
-                ast::Expr::TagCall(call) => call.name,
-                ast::Expr::FnCall(call) => call
-                    .path
-                    .value
-                    .segments
-                    .last()
-                    .copied()
-                    .unwrap_or(call.path.value.root),
-                _ => Intern::from_ref("<receiver>"),
+                Intern::<String>::new(format!(
+                    "{base_name}$arity{}",
+                    bind.params.as_ref().map_or(0, IndexMap::len)
+                ))
+            } else {
+                Intern::<String>::new(base_name)
             };
-            let name = Intern::<String>::new(format!(
-                "{}.{}",
-                receiver_name,
-                bind.name
-            ));
             defs_scratch.entry(name).or_default().push(bind.clone());
         }
 
@@ -136,6 +141,7 @@ impl TokenCursor<'_, '_> {
         Self::generate_return_type_unions(&defs, &mut tags, &private_defs);
 
         FileAst {
+            semantic_origin: None,
             module_doc,
             uses: imports,
             tags,
@@ -149,6 +155,25 @@ impl TokenCursor<'_, '_> {
             symbol_alias_spans: Vec::new(),
             span_table: SpanTable::new(),
             parse_warnings,
+        }
+    }
+
+    fn has_method_receiver_name(bind: &Bind) -> Intern<String> {
+        match &bind
+            .receiver_type_surface()
+            .expect("has method receiver")
+            .value
+        {
+            ast::Expr::AnonymousTag(name) => *name,
+            ast::Expr::TagCall(call) => call.name,
+            ast::Expr::FnCall(call) => call
+                .path
+                .value
+                .segments
+                .last()
+                .copied()
+                .unwrap_or(call.path.value.root),
+            _ => Intern::from_ref("<receiver>"),
         }
     }
 
@@ -288,6 +313,12 @@ impl TokenCursor<'_, '_> {
                         return Some(TopLevelValue::Bind(Box::new(bind)));
                     }
                     self.rewind(checkpoint);
+                } else if matches!(self.peek_at(start_offset + 1), Some(Token::Is)) {
+                    let checkpoint = self.checkpoint();
+                    if let Some(bind) = self.parse_bind(expr_parser) {
+                        return Some(TopLevelValue::Bind(Box::new(bind)));
+                    }
+                    self.rewind(checkpoint);
                 } else if matches!(self.peek_at(start_offset + 1), Some(Token::Tag(_))) {
                     // `arch Architecture` — declare without value (same as unassigned bind).
                     let is_type_only_declare = !matches!(
@@ -319,7 +350,7 @@ impl TokenCursor<'_, '_> {
                         self.peek_span().unwrap_or(expr.span_id),
                     );
                 }
-                Some(TopLevelValue::Expr(expr))
+                Some(TopLevelValue::Expr(Box::new(expr)))
             }
             Token::Pound => match self.peek_at(start_offset) {
                 Some(Token::Tag(_)) => self.dispatch_tag_element(expr_parser, start_offset),
@@ -328,12 +359,12 @@ impl TokenCursor<'_, '_> {
                     .map(|bind| TopLevelValue::Bind(Box::new(bind))),
                 _ => {
                     let expr = expr_parser(self);
-                    Some(TopLevelValue::Expr(expr))
+                    Some(TopLevelValue::Expr(Box::new(expr)))
                 }
             },
             _ => {
                 let expr = expr_parser(self);
-                Some(TopLevelValue::Expr(expr))
+                Some(TopLevelValue::Expr(Box::new(expr)))
             }
         }
     }
@@ -385,7 +416,10 @@ impl TokenCursor<'_, '_> {
 
         // Tag [params] is/has → declare (deterministic: no checkpoint/rewind needed)
         if self.is_declare_from_offset(tag_offset) {
-            return self.parse_declare(expr_parser).map(TopLevelValue::Tag);
+            return self
+                .parse_declare(expr_parser)
+                .map(Box::new)
+                .map(TopLevelValue::Tag);
         }
 
         // fallback: expression (bare Tag, Tag(args), etc.)
@@ -418,17 +452,17 @@ impl TokenCursor<'_, '_> {
                     _ => (Intern::new(String::new()), Intern::new(String::new())),
                 })
                 .collect();
-            return Some(TopLevelValue::Expr(Typed::infer(
+            return Some(TopLevelValue::Expr(Box::new(Typed::infer(
                 Expr::Destructure {
                     tag_name: tc.name,
                     field_bindings,
                     value: Box::new(value),
                 },
                 self.merge_span(expr.span_id, value_span),
-            )));
+            ))));
         }
 
-        Some(TopLevelValue::Expr(expr))
+        Some(TopLevelValue::Expr(Box::new(expr)))
     }
 
     /// If the token at `offset` is an opening delimiter, return the offset just
@@ -526,9 +560,11 @@ impl TokenCursor<'_, '_> {
         Some(TopLevelValue::Bind(Box::new(bind)))
     }
 
-    fn materialize_has_method_binds(tags: &ast::TagMap) -> Vec<Bind> {
+    fn materialize_has_method_binds<'a>(
+        declarations: impl Iterator<Item = &'a Declare>,
+    ) -> Vec<Bind> {
         let mut binds = Vec::new();
-        for declare in tags.values() {
+        for declare in declarations {
             let DeclareValue::Has(members) = &declare.value else {
                 continue;
             };
@@ -554,10 +590,7 @@ impl TokenCursor<'_, '_> {
             } else {
                 Expr::AnonymousTag(declare.name)
             };
-            let receiver = Spanned::new(
-                receiver,
-                declare.span,
-            );
+            let receiver = Spanned::new(receiver, declare.span);
 
             for member in members {
                 let ast::HasMember::Function(function) = member else {
@@ -582,12 +615,18 @@ impl TokenCursor<'_, '_> {
                         ))
                     });
                 let mut bind = Bind::new(bind_name, function.name_span, value)
-                    .with_params(Some(function.params.clone()))
+                    .with_params(Some(function.params.as_ref().clone()))
                     .with_receiver_type(Some(Box::new(receiver.clone())))
                     .with_doc(function.doc_comment.clone());
-                bind.param_conventions = function.conventions.clone();
+                bind.param_conventions = function.conventions.as_ref().clone();
+                bind.param_groups = function.param_groups.as_ref().clone();
+                bind.param_refinements = function.param_refinements.as_ref().clone();
                 bind.return_tag = function.return_ty.clone();
-                bind.is_constant = matches!(body, ast::HasMemberBody::Final(_));
+                bind.operator = if matches!(body, ast::HasMemberBody::Final(_)) {
+                    ast::BindOperator::FreshImmutable
+                } else {
+                    ast::BindOperator::FreshMutable
+                };
                 binds.push(bind);
             }
         }
@@ -602,6 +641,7 @@ impl TokenCursor<'_, '_> {
     ) {
         match el {
             TopLevelValue::Tag(decl) => {
+                let decl = *decl;
                 let name = decl.name;
                 tags.entry(name).or_default().push(decl);
             }
@@ -619,17 +659,14 @@ impl TokenCursor<'_, '_> {
                             .unwrap_or(call.path.value.root),
                         _ => Intern::from_ref("<receiver>"),
                     };
-                    Intern::<String>::new(format!(
-                        "{}.{}",
-                        receiver_name,
-                        bind.name
-                    ))
+                    Intern::<String>::new(format!("{}.{}", receiver_name, bind.name))
                 } else {
                     bind.name
                 };
                 defs.entry(name).or_default().push(*bind);
             }
             TopLevelValue::Expr(expr) => {
+                let expr = *expr;
                 exprs.push((expr.value, expr.span_id));
             }
         }
@@ -720,7 +757,7 @@ impl TokenCursor<'_, '_> {
                         return offset;
                     }
                     match self.peek_at(offset) {
-                        Some(Token::Id(_)) => offset += 1,
+                        Some(Token::Id(_)) | Some(Token::Tag(_)) => offset += 1,
                         _ => return offset,
                     }
                     if matches!(self.peek_at(offset), Some(Token::ParenOpen)) {
@@ -759,10 +796,7 @@ impl TokenCursor<'_, '_> {
         }
     }
 
-    fn collect_expr_type_surface_tags(
-        expr: &ast::Expr,
-        tags: &mut Vec<(Intern<String>, SpanId)>,
-    ) {
+    fn collect_expr_type_surface_tags(expr: &ast::Expr, tags: &mut Vec<(Intern<String>, SpanId)>) {
         match expr {
             ast::Expr::AnonymousTag(name) => tags.push((*name, SpanId::INVALID)),
             ast::Expr::FnCall(call)
@@ -787,5 +821,4 @@ impl TokenCursor<'_, '_> {
             _ => {}
         }
     }
-
 }

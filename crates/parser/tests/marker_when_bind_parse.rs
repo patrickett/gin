@@ -14,7 +14,7 @@ is_copy(x Type) Bool := when x is
         .defs
         .get(&internment::Intern::new("is_copy".to_string()))
         .expect("is_copy def");
-    assert!(bind.is_constant, "fn def with `:=` should be constant");
+    assert!(bind.is_constant(), "fn def with `:=` should be constant");
     match &bind.value {
         ast::BindValue::Expr(e) => match &e.value {
             ast::Expr::When(w) => {
@@ -86,7 +86,6 @@ is_copy(x Type) Bool := when x is
 fn full_sized_gin_parses_compile_time_helpers() {
     let src = "\
 Size is Const(BigInt) or Dynamic
-#auto
 Sized has size Size: compute_size(Self)
 
 compute_size(x) Size := when x is
@@ -119,7 +118,6 @@ add(a Size, b Size) Size := when (a, b) is
 fn full_copy_gin_is_copy_body() {
     // Parser-only: no type defs needed — just the `when` body + list-when helpers.
     let src = "\
-#auto
 Copy has can_copy Bool: is_copy(Self)
 
 is_copy(x) Bool := when x is

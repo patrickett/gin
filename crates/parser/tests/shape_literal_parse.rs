@@ -12,7 +12,7 @@ use support::*;
 
 #[test]
 fn top_level_record_field_write_parses_as_record_set() {
-    let out = "Int is in 1...400\n\nCoord has x Int, y Int, z Int\np := Coord(x: 1, y: 2, z: 3)\np.x: 10\n"
+    let out = "Int is in 1...400\n\nCoord has x Int, y Int, z Int\np: Coord(x: 1, y: 2, z: 3)\np.x:: 10\n"
         .parse_source_full();
     assert!(
         out.symptoms
@@ -331,7 +331,9 @@ val Maybe(Int): Some(value: 5)
         Expr::TagCall(call) => {
             assert_eq!(call.name.as_str(), "Maybe", "return tag type is Maybe");
             assert_eq!(call.args.len(), 1, "one type param");
-            assert!(matches!(call.args[0].value, Expr::AnonymousTag(name) if name.as_str() == "Int"));
+            assert!(
+                matches!(call.args[0].value, Expr::AnonymousTag(name) if name.as_str() == "Int")
+            );
         }
         other => panic!("return_tag should be TypeGeneric, got {other:?}"),
     }
@@ -421,7 +423,9 @@ val Maybe(Int): Some(value)
         Expr::TagCall(call) => {
             assert_eq!(call.name.as_str(), "Maybe");
             assert_eq!(call.args.len(), 1);
-            assert!(matches!(call.args[0].value, Expr::AnonymousTag(name) if name.as_str() == "Int"));
+            assert!(
+                matches!(call.args[0].value, Expr::AnonymousTag(name) if name.as_str() == "Int")
+            );
         }
         other => panic!("return_tag should be TypeGeneric, got {other:?}"),
     }
@@ -491,7 +495,9 @@ none Maybe(Int): None
         Expr::TagCall(call) => {
             assert_eq!(call.name.as_str(), "Maybe");
             assert_eq!(call.args.len(), 1);
-            assert!(matches!(call.args[0].value, Expr::AnonymousTag(name) if name.as_str() == "Int"));
+            assert!(
+                matches!(call.args[0].value, Expr::AnonymousTag(name) if name.as_str() == "Int")
+            );
         }
         other => panic!("return_tag should be TypeGeneric, got {other:?}"),
     }

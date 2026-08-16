@@ -5,7 +5,11 @@ use parser::query::SourceParseExt;
 fn binary_expression_is_preserved_in_type_application_argument() {
     let output = "Array(x Type, n Int) has size Int\nHolder has values Array(Int, n + 1)\n"
         .parse_source_full();
-    assert!(output.symptoms.is_empty(), "parse symptoms: {:?}", output.symptoms);
+    assert!(
+        output.symptoms.is_empty(),
+        "parse symptoms: {:?}",
+        output.symptoms
+    );
 
     let holder = output
         .ast
@@ -18,8 +22,7 @@ fn binary_expression_is_preserved_in_type_application_argument() {
     let HasMember::Property(property) = &members[0] else {
         panic!("Holder should have a property");
     };
-    let Expr::TagCall(call) = &property.ty.as_ref().expect("property type").value
-    else {
+    let Expr::TagCall(call) = &property.ty.as_ref().expect("property type").value else {
         panic!("property should use a generic type application");
     };
     assert!(matches!(

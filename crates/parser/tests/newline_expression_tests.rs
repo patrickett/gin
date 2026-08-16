@@ -167,12 +167,13 @@ fn if_body_expression_continuation() {
 
 #[test]
 fn when_then_across_lines() {
-    let src = "x : when 5 > 0\n          then 1\n          else 2\n";
+    let src = "x : when 5 > 0 is True\n          then 1\n          else 2\n";
     let out = src.parse_source_full();
     let errors = count_errors(&out);
     assert_eq!(
         errors, 0,
-        "when/then across lines should parse without errors, got {errors} errors"
+        "when/then across lines should parse without errors, got {errors} errors: {:?}",
+        out.symptoms
     );
 }
 

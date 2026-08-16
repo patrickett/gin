@@ -32,6 +32,14 @@ fn test_keywords() {
 }
 
 #[test]
+fn lexes_thus_as_proof_contract_keyword() {
+    let tokens = lexer::Lexer::new("thus")
+        .map(|token| token.0)
+        .collect::<Vec<_>>();
+    assert!(matches!(tokens.as_slice(), [Token::Thus]));
+}
+
+#[test]
 fn test_identifiers() {
     let src = "foo bar baz hello_world";
 
@@ -69,9 +77,9 @@ fn test_numbers() {
         if let Token::Int(v) = &tokens[0] {
             *v
         } else {
-            0
+            0.into()
         },
-        42
+        42.into()
     );
 
     assert!(matches!(tokens[1], Token::Float(_)));
@@ -81,12 +89,26 @@ fn test_numbers() {
         if let Token::Int(v) = &tokens[2] {
             *v
         } else {
-            0
+            0.into()
         },
-        0
+        0.into()
     );
 
     assert!(matches!(tokens[3], Token::Int(_)));
+}
+
+#[test]
+fn integer_literal_preserves_values_above_u128() {
+    let source = "1606938044258990275541962092341162602522202993782792835301376";
+    let mut lexer = Lexer::new(source);
+    let (token, _) = lexer.next().expect("integer token");
+
+    assert!(matches!(
+        token,
+        Token::Int(value)
+            if value == i256::I256::from_str_radix(source, 10).expect("I256 literal")
+    ));
+    assert!(lexer.errors.is_empty(), "{:?}", lexer.errors);
 }
 
 #[test]
@@ -101,9 +123,9 @@ fn test_underscore_int() {
         if let Token::Int(v) = &tokens[0] {
             *v
         } else {
-            0
+            0.into()
         },
-        1_000
+        1_000.into()
     );
 
     assert!(matches!(tokens[1], Token::Int(_)));
@@ -111,9 +133,9 @@ fn test_underscore_int() {
         if let Token::Int(v) = &tokens[1] {
             *v
         } else {
-            0
+            0.into()
         },
-        1_000_000
+        1_000_000.into()
     );
 
     assert!(matches!(tokens[2], Token::Int(_)));
@@ -121,9 +143,9 @@ fn test_underscore_int() {
         if let Token::Int(v) = &tokens[2] {
             *v
         } else {
-            0
+            0.into()
         },
-        42
+        42.into()
     );
 }
 
@@ -139,9 +161,9 @@ fn test_underscore_hex() {
         if let Token::Int(v) = &tokens[0] {
             *v
         } else {
-            0
+            0.into()
         },
-        0xFFFF
+        0xFFFF.into()
     );
 
     assert!(matches!(tokens[1], Token::Int(_)));
@@ -149,9 +171,9 @@ fn test_underscore_hex() {
         if let Token::Int(v) = &tokens[1] {
             *v
         } else {
-            0
+            0.into()
         },
-        0xDEAD_BEEF
+        0xDEAD_BEEFu64.into()
     );
 }
 
@@ -203,6 +225,62 @@ fn test_operators() {
     assert!(matches!(tokens[10], Token::Slash));
     assert!(matches!(tokens[11], Token::Caret));
     assert!(matches!(tokens[12], Token::SlashOr));
+}
+
+#[test]
+fn test_decimal_boundaries_with_arithmetic_operators() {
+    let src = "12+34 -56*78 /90";
+
+    let mut lexer = Lexer::new(src);
+    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+
+    assert!(matches!(tokens[0], Token::Int(value) if value == 12.into()));
+    assert!(matches!(tokens[1], Token::Plus));
+    assert!(matches!(tokens[2], Token::Int(value) if value == 34.into()));
+    assert!(matches!(tokens[3], Token::Minus));
+    assert!(matches!(tokens[4], Token::Int(value) if value == 56.into()));
+    assert!(matches!(tokens[5], Token::Star));
+    assert!(matches!(tokens[6], Token::Int(value) if value == 78.into()));
+    assert!(matches!(tokens[7], Token::Slash));
+    assert!(matches!(tokens[8], Token::Int(value) if value == 90.into()));
+}
+
+#[test]
+fn test_invalid_underscore_placement_in_numbers() {
+    let src = "1__2 1_ 0x_DEAD 0xDEAD__BEEF";
+
+    let mut lexer = Lexer::new(src);
+    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+
+    assert!(matches!(tokens[0], Token::Int(value) if value == 12.into()));
+    assert!(matches!(tokens[1], Token::Int(value) if value == 1.into()));
+    assert!(matches!(tokens[2], Token::Int(value) if value == 0.into()));
+    assert!(matches!(tokens[4], Token::Int(value) if value == 0xDEAD_BEEFu64.into()));
+    assert!(tokens.len() >= 5);
+    assert!(
+        lexer
+            .errors
+            .iter()
+            .any(|diagnostic| diagnostic.code.slug() == "lex-invalid-integer")
+    );
+}
+
+#[test]
+fn test_range_syntax_vs_decimal_points() {
+    let src = "1.2 1..2 1.0..2.5";
+
+    let mut lexer = Lexer::new(src);
+    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+
+    assert!(matches!(tokens[0], Token::Float(_)));
+    assert!(matches!(tokens[1], Token::Int(value) if value == 1.into()));
+    assert!(matches!(tokens[2], Token::Dot));
+    assert!(matches!(tokens[3], Token::Dot));
+    assert!(matches!(tokens[4], Token::Int(value) if value == 2.into()));
+    assert!(matches!(tokens[5], Token::Float(_)));
+    assert!(matches!(tokens[6], Token::Dot));
+    assert!(matches!(tokens[7], Token::Dot));
+    assert!(matches!(tokens[8], Token::Float(_)));
 }
 
 #[test]
@@ -586,13 +664,13 @@ fn test_empty_string() {
 }
 
 #[test]
-fn test_asm_keyword() {
-    let src = "asm('nop', '')";
+fn test_as_keyword() {
+    let src = "as('nop', '')";
     let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
     assert!(
-        matches!(tokens[0], Token::Asm),
-        "expected Asm, got {:?}",
+        matches!(tokens[0], Token::As),
+        "expected As keyword, got {:?}",
         tokens[0]
     );
     assert!(

@@ -235,7 +235,7 @@ Int is in 1...400
 #complexity(Linear(len))
 find_index(target Byte, buf Buffer, len Int) Int:
     i: 0
-    while i < len
+    while i < len is True
         -- if buf.(i) = target
         -- return i
         i: i + 1
@@ -248,7 +248,7 @@ return -1
 -- so we can have functions narrow potential values for us and that is kept inside the type
 -- system
 less_than_ten(num Int) Maybe(Int):
-    if (num < 10) is True
+    if num < 10 is True
     return Some(num)
 return None
 

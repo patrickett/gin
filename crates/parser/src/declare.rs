@@ -5,18 +5,15 @@ use crate::expr::ExprFn;
 use ast::declare::HasMemberQualifier;
 use ast::span::SpanId;
 use ast::{
-    NormalExpr, Declare, DeclareValue, DocComment, Expr, HasFunction, HasFunctionKind, HasMember,
-    HasMemberBody, HasProperty, Parameter, ParameterKind, Parameters, PredicateExpr, ProvidedTrait,
-    Pattern, Spanned, Typed, Variant,
+    Declare, DeclareValue, DocComment, Expr, HasFunction, HasFunctionKind, HasMember,
+    HasMemberBody, HasProperty, NormalExpr, Parameter, ParameterKind, Parameters, Pattern,
+    PredicateExpr, ProvidedTrait, Spanned, Typed, Variant,
 };
 use i256::I256;
 use internment::Intern;
 use lexer::Token;
 
-type ParseResultType = (
-    Option<Box<Spanned<Expr>>>,
-    Option<Box<Spanned<Expr>>>,
-);
+type ParseResultType = (Option<Box<Spanned<Expr>>>, Option<Box<Spanned<Expr>>>);
 type ParsedVariantParts = (Spanned<Pattern>, Option<Box<Spanned<Expr>>>);
 
 impl<'src, 't> TokenCursor<'src, 't> {
@@ -51,7 +48,6 @@ impl<'src, 't> TokenCursor<'src, 't> {
             let (value, doc_after_value, mut provided_traits) = self.parse_is_rhs(expr_parser);
             provided_traits.extend(self.parse_provided_trait_clauses(expr_parser));
             self.eat(&Token::Dedent);
-            self.reject_removed_marker_syntax();
 
             let doc = DocComment::combine(
                 DocComment::combine(doc_before, doc_after_is),
@@ -93,7 +89,6 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 (self.parse_has_rhs(expr_parser, has_block_body), Vec::new())
             };
             self.eat(&Token::Dedent);
-            self.reject_removed_marker_syntax();
 
             let mut provided_traits = provided_traits;
             Self::collect_qualified_property_provisions(name, &value, &mut provided_traits);
@@ -198,7 +193,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             };
 
             let is_function = self.is_at(&Token::ParenOpen);
-            let (params, conventions, _param_groups, _param_refinements) = if is_function {
+            let (params, conventions, param_groups, param_refinements) = if is_function {
                 self.parse_params(expr_parser)
             } else {
                 (
@@ -244,19 +239,21 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 } else {
                     HasFunctionKind::Associated
                 };
-                HasMember::Function(HasFunction {
+                HasMember::Function(Box::new(HasFunction {
                     qualifier,
                     name: member_name.0,
                     name_span: member_name.1,
-                    params,
-                    conventions,
+                    params: Box::new(params),
+                    conventions: Box::new(conventions),
+                    param_groups: Box::new(param_groups),
+                    param_refinements: Box::new(param_refinements),
                     return_ty,
                     error_ty,
                     body,
                     doc_comment: member_doc,
                     refinement,
                     kind,
-                })
+                }))
             } else {
                 HasMember::Property(HasProperty {
                     qualifier,
@@ -398,10 +395,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             );
         }
         // No `or` — leave layout unconsumed so it can serve as a list separator.
-        (
-            return_ty,
-            None,
-        )
+        (return_ty, None)
     }
 
     fn parse_is_rhs(
@@ -416,8 +410,23 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
         // InRange: `in` N...M
         if self.eat(&Token::In) {
+            let checkpoint = self.checkpoint();
             if let Some((a, b)) = self.parse_int_range() {
+                self.reject_removed_marker_clause();
                 return (DeclareValue::InRange(a, b), None, Vec::new());
+            }
+            self.rewind(checkpoint);
+            if let Some((min, max)) = self.parse_symbolic_range() {
+                let mut predicates = vec![PredicateExpr::Ge(min), PredicateExpr::Le(max)];
+                self.reject_removed_marker_clause();
+                while self.eat(&Token::And) {
+                    predicates.push(self.parse_one_predicate());
+                }
+                return (
+                    DeclareValue::Refinement(Box::new(PredicateExpr::And(predicates))),
+                    None,
+                    Vec::new(),
+                );
             }
             self.error(
                 "parse-expected-integer-range",
@@ -435,6 +444,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
         if matches!(self.peek(), Some(Token::Int(_)) | Some(Token::Minus)) {
             let checkpoint = self.checkpoint();
             if let Some((a, b)) = self.parse_int_range() {
+                self.reject_removed_marker_clause();
                 return (DeclareValue::Range(a, b), None, Vec::new());
             }
             self.rewind(checkpoint);
@@ -589,6 +599,24 @@ impl<'src, 't> TokenCursor<'src, 't> {
             );
         }
 
+        if self.is_at(&Token::SelfInstance) {
+            let span_id = self.current_span();
+            self.advance();
+            let doc = if matches!(self.raw_peek(), Some(Token::DocComment(_))) {
+                self.parse_doc_comment()
+            } else {
+                None
+            };
+            return (
+                DeclareValue::Alias(Box::new(Spanned {
+                    value: Expr::SelfRef,
+                    span_id,
+                })),
+                doc,
+                Vec::new(),
+            );
+        }
+
         // Interface composition: `InOut is Input and Output`.
         let composition_checkpoint = self.checkpoint();
         if let Some(sp) = self.parse_type_expr(expr_parser) {
@@ -628,11 +656,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             } else {
                 None
             };
-            return (
-                DeclareValue::Alias(Box::new(sp)),
-                doc,
-                Vec::new(),
-            );
+            return (DeclareValue::Alias(Box::new(sp)), doc, Vec::new());
         }
 
         self.error(
@@ -650,18 +674,38 @@ impl<'src, 't> TokenCursor<'src, 't> {
         )
     }
 
+    fn reject_removed_marker_clause(&mut self) {
+        if self.peek() != Some(&Token::And)
+            || self.peek_at(1) != Some(&Token::Is)
+            || !matches!(self.peek_at(2), Some(Token::Tag("Copy" | "Sized")))
+        {
+            return;
+        }
+        let span = self.peek_span().unwrap_or_else(|| self.current_span());
+        self.advance();
+        self.advance();
+        self.advance();
+        self.error(
+            "parse-removed-marker-syntax",
+            "`and is Copy` and `and is Sized` have been removed",
+            span,
+        );
+    }
+
     fn provided_trait_from_expr(sp: Spanned<Expr>) -> ProvidedTrait {
         let (trait_name, trait_name_span) = match sp.value {
             Expr::AnonymousTag(name) => (name, sp.span_id),
             Expr::TagCall(call) => (call.name, sp.span_id),
             Expr::FnCall(call) => (
-                *call.path.value.segments.last().unwrap_or(&call.path.value.root),
+                *call
+                    .path
+                    .value
+                    .segments
+                    .last()
+                    .unwrap_or(&call.path.value.root),
                 call.path.span_id,
             ),
-            _ => (
-                Intern::<String>::from_ref(""),
-                sp.span_id,
-            ),
+            _ => (Intern::<String>::from_ref(""), sp.span_id),
         };
         ProvidedTrait {
             trait_name,
@@ -905,21 +949,6 @@ impl<'src, 't> TokenCursor<'src, 't> {
         traits
     }
 
-    /// Reject legacy `and is [not] Copy` marker syntax after a declaration.
-    fn reject_removed_marker_syntax(&mut self) {
-        self.skip_indents();
-        let checkpoint = self.checkpoint();
-        if self.eat(&Token::And) && self.eat(&Token::Is) {
-            self.error(
-                "parse-removed-marker-syntax",
-                "marker syntax removed; use `and has Copy(can_copy: False)` to opt out of copyability",
-                self.current_span(),
-            );
-        } else {
-            self.rewind(checkpoint);
-        }
-    }
-
     fn parse_params_for_declare(&mut self, expr_parser: ExprFn) -> Option<Parameters> {
         if !self.is_at(&Token::ParenOpen) {
             return None;
@@ -1028,10 +1057,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                     name,
                     Parameter::new(
                         name_span,
-                        ParameterKind::Default(Box::new(Typed::infer(
-                            sp.value,
-                            sp.span_id,
-                        ))),
+                        ParameterKind::Default(Box::new(Typed::infer(sp.value, sp.span_id))),
                     ),
                 ));
             }
@@ -1043,10 +1069,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             if expression_ends_parameter {
                 return Some((
                     name,
-                    Parameter::new(
-                        name_span,
-                        ParameterKind::Default(Box::new(expr)),
-                    ),
+                    Parameter::new(name_span, ParameterKind::Default(Box::new(expr))),
                 ));
             }
             self.rewind(expr_checkpoint);
@@ -1055,10 +1078,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 name,
                 Parameter::new(
                     name_span,
-                    ParameterKind::Default(Box::new(Typed::infer(
-                        sp.value,
-                        sp.span_id,
-                    ))),
+                    ParameterKind::Default(Box::new(Typed::infer(sp.value, sp.span_id))),
                 ),
             ));
         }
@@ -1140,13 +1160,41 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 self.advance();
                 PredicateExpr::Ge(self.parse_predicate_rhs())
             }
-            Some(Token::EqEq) => {
+            Some(Token::Eq) => {
                 self.advance();
                 PredicateExpr::Eq(self.parse_predicate_rhs())
             }
             Some(Token::NotEq) => {
                 self.advance();
                 PredicateExpr::Ne(self.parse_predicate_rhs())
+            }
+            Some(Token::Not) if self.peek_at(1) == Some(&Token::Eq) => {
+                self.advance();
+                self.advance();
+                PredicateExpr::Ne(self.parse_predicate_rhs())
+            }
+            Some(Token::Star) => {
+                self.advance();
+                let right = self.parse_proof_proposition();
+                let proposition = match right {
+                    ast::ProofProposition::Compare {
+                        left,
+                        relation,
+                        right,
+                    } => ast::ProofProposition::Compare {
+                        left: ast::ProofTerm::Mul(
+                            Box::new(ast::ProofTerm::Name(Intern::from_ref("self"))),
+                            Box::new(left),
+                        ),
+                        relation,
+                        right,
+                    },
+                    proposition => proposition,
+                };
+                PredicateExpr::Proposition(Box::new(proposition))
+            }
+            Some(Token::Id(_) | Token::Tag(_) | Token::SelfInstance | Token::ParenOpen) => {
+                PredicateExpr::Proposition(Box::new(self.parse_proof_proposition()))
             }
             _ => {
                 self.error(
@@ -1173,7 +1221,21 @@ impl<'src, 't> TokenCursor<'src, 't> {
         match token {
             Token::Id(name) => NormalExpr::Var(Intern::from_ref(name)),
             Token::Tag(name) => NormalExpr::Var(Intern::from_ref(name)),
-            Token::Int(n) => NormalExpr::from(n as i128),
+            Token::Int(n) => NormalExpr::from(n),
+            Token::Pound => {
+                let kind = match self.advance() {
+                    Some((Token::Id("size"), _)) => ast::TargetQueryKind::Size,
+                    Some((Token::Id("alignment"), _)) => ast::TargetQueryKind::Alignment,
+                    Some((Token::Id("index_bits"), _)) => ast::TargetQueryKind::IndexBits,
+                    _ => ast::TargetQueryKind::Size,
+                };
+                self.expect(&Token::ParenOpen);
+                let operand = self.parse_type_reference().unwrap_or_else(|| {
+                    ast::TypeReference::Nominal(Intern::from_ref("__parse_error"))
+                });
+                self.expect(&Token::ParenClose);
+                NormalExpr::TargetQuery { kind, operand }
+            }
             _ => {
                 self.error(
                     "parse-expected-predicate-value",
@@ -1184,6 +1246,40 @@ impl<'src, 't> TokenCursor<'src, 't> {
             }
         }
     }
+
+    pub(crate) fn parse_symbolic_range(&mut self) -> Option<(NormalExpr, NormalExpr)> {
+        let start = self.parse_symbolic_integer_atom()?;
+        if !self.eat(&Token::Infer) {
+            return None;
+        }
+        let end = self.parse_symbolic_integer_atom()?;
+        Some((start, end))
+    }
+
+    fn parse_symbolic_integer_atom(&mut self) -> Option<NormalExpr> {
+        let negative = self.eat(&Token::Minus);
+        let value = match self.peek()? {
+            Token::Int(value) => {
+                let value = *value;
+                self.advance();
+                NormalExpr::from(value)
+            }
+            Token::Id(name) | Token::Tag(name) => {
+                let name = Intern::from_ref(*name);
+                self.advance();
+                NormalExpr::Var(name)
+            }
+            _ => return None,
+        };
+        if negative {
+            Some(NormalExpr::Sub(
+                Box::new(NormalExpr::from(0)),
+                Box::new(value),
+            ))
+        } else {
+            Some(value)
+        }
+    }
 }
 
 struct ParsedTraitFields {
@@ -1191,164 +1287,6 @@ struct ParsedTraitFields {
     trait_name_span: SpanId,
     fields: Vec<(Intern<String>, Typed<Expr>)>,
 }
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::query::SourceParseExt;
-    use ast::ParamConvention;
-
-    #[test]
-    fn parses_auto_declare_attribute() {
-        let ast = "#auto\nCopy has can_copy Bool\n".parse_source_full().ast;
-        let copy = ast
-            .tags
-            .get(&Intern::new("Copy".to_string()))
-            .expect("Copy tag should exist");
-
-        assert!(copy.attributes.auto);
-    }
-
-    #[test]
-    fn parses_stacked_declare_attributes() {
-        let ast = "#auto\n#target(\"wasm32\")\nCopy has can_copy Bool\n"
-            .parse_source_full()
-            .ast;
-        let copy = ast
-            .tags
-            .get(&Intern::new("Copy".to_string()))
-            .expect("Copy tag should exist");
-        let attrs = copy
-            .attributes
-            .raw_attributes
-            .as_ref()
-            .expect("raw attributes should be present");
-
-        assert!(copy.attributes.auto);
-        assert_eq!(attrs.len(), 2);
-    }
-
-    #[test]
-    fn parses_same_line_declare_attributes() {
-        let ast = "#auto, #target(\"wasm32\")\nCopy has can_copy Bool\n"
-            .parse_source_full()
-            .ast;
-        let copy = ast
-            .tags
-            .get(&Intern::new("Copy".to_string()))
-            .expect("Copy tag should exist");
-        let attrs = copy
-            .attributes
-            .raw_attributes
-            .as_ref()
-            .expect("raw attributes should be present");
-
-        assert!(copy.attributes.auto);
-        assert_eq!(attrs.len(), 2);
-    }
-
-    #[test]
-    fn detached_declare_attribute_reports_diagnostic() {
-        let output = "#auto\n\nCopy has can_copy Bool\n".parse_source_full();
-
-        assert!(
-            output
-                .symptoms
-                .iter()
-                .any(|d| d.code.slug() == "parse-detached-attribute"),
-            "symptoms: {:?}",
-            output.symptoms
-        );
-    }
-
-    #[test]
-    fn parses_has_function_signatures() {
-        let source = r#"
-Allocator has
-    --- Attempt to allocate.
-    allocate(ref self, l Layout) Slice(Byte) or AllocError,
-    --- Free a block.
-    deallocate(ref self, p Pointer(Byte), l Layout),
-"#;
-        let ast = source.parse_source_full().ast;
-        let allocator = ast
-            .tags
-            .get(&Intern::new("Allocator".to_string()))
-            .expect("Allocator tag should exist");
-
-        let DeclareValue::Has(members) = &allocator.value else {
-            panic!(
-                "Allocator should be parsed as Has, got {:?}",
-                allocator.value
-            );
-        };
-
-        assert_eq!(members.len(), 2, "expected 2 has members");
-
-        let HasMember::Function(allocate) = &members[0] else {
-            panic!("allocate should be a function member");
-        };
-        assert_eq!(allocate.name.as_str(), "allocate");
-        assert!(
-            allocate.doc_comment.is_some(),
-            "allocate should have doc comment"
-        );
-
-        // Check params
-        assert_eq!(allocate.params.len(), 2);
-        assert!(
-            allocate
-                .conventions
-                .contains_key(&Intern::new("self".to_string()))
-        );
-        assert_eq!(
-            allocate.conventions.get(&Intern::new("self".to_string())),
-            Some(&ParamConvention::Observe),
-        );
-
-        // Check return type: Slice(Byte)
-        assert!(
-            allocate.return_ty.is_some(),
-            "allocate should have return type"
-        );
-        let rt = &allocate.return_ty.as_ref().unwrap().value;
-        match rt {
-            Expr::TagCall(call) => {
-                assert_eq!(call.name.as_str(), "Slice");
-                assert_eq!(call.args.len(), 1);
-            }
-            other => panic!("allocate return type should be Generic, got {:?}", other),
-        }
-
-        // Check error type: AllocError
-        assert!(
-            allocate.error_ty.is_some(),
-            "allocate should have error type"
-        );
-        let et = &allocate.error_ty.as_ref().unwrap().value;
-        match et {
-            Expr::AnonymousTag(name) => {
-                assert_eq!(name.as_str(), "AllocError");
-            }
-            other => panic!("allocate error type should be AllocError, got {:?}", other),
-        }
-
-        let HasMember::Function(deallocate) = &members[1] else {
-            panic!("deallocate should be a function member");
-        };
-        assert_eq!(deallocate.name.as_str(), "deallocate");
-        assert!(
-            deallocate.doc_comment.is_some(),
-            "deallocate should have doc comment"
-        );
-        assert_eq!(deallocate.params.len(), 3);
-        assert!(
-            deallocate.return_ty.is_none(),
-            "deallocate should have no return type"
-        );
-        assert!(
-            deallocate.error_ty.is_none(),
-            "deallocate should have no error type"
-        );
-    }
-}
+#[path = "../tests/declare_tests.rs"]
+mod tests;

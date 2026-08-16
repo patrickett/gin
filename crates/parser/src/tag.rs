@@ -2,7 +2,10 @@ use internment::Intern;
 use lexer::Token;
 
 use ast::span::SpanId;
-use ast::{Expr, GroupPath, Parameter, ParameterKind, Parameters, Pattern, Spanned, TypeExpr, Typed};
+use ast::{
+    BindValue, Expr, GroupPath, Parameter, ParameterKind, Parameters, Pattern, Spanned, TypeExpr,
+    Typed,
+};
 
 use crate::cursor::TokenCursor;
 use crate::expr::ExprFn;
@@ -21,10 +24,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
         if self.is_at(&Token::ParenOpen) {
             return self.parse_pattern_tuple_node(expr_parser);
         }
-        self.parse_type_expr_structural(expr_parser).map(|pattern| Spanned {
-            value: Pattern::from(pattern.value),
-            span_id: pattern.span_id,
-        })
+        self.parse_type_expr_structural(expr_parser)
+            .map(|pattern| Spanned {
+                value: Pattern::from(pattern.value),
+                span_id: pattern.span_id,
+            })
     }
 
     fn parse_pattern_tuple_node(&mut self, expr_parser: ExprFn) -> Option<Spanned<Pattern>> {
@@ -522,36 +526,60 @@ impl<'src, 't> TokenCursor<'src, 't> {
         // Integer literal as const argument: `Vector(Int, 3)`
         if let Some(&Token::Int(n)) = self.peek() {
             let span = self.peek_span()?;
+            let expr_checkpoint = self.checkpoint();
             self.advance();
-            let key = Intern::<String>::from_ref(&n.to_string());
-            return Some((
-                key,
-                Parameter::new(
+            let expression_ends_parameter = self.is_at(&Token::ParenClose)
+                || self.is_at(&Token::Comma)
+                || self.previous_token_was_newline_separator();
+            if expression_ends_parameter {
+                let key = Intern::<String>::from_ref(&n.to_string());
+                return Some((
+                    key,
+                    Parameter::new(
+                        span,
+                        ParameterKind::Tagged(Box::new(Spanned {
+                            value: ast::Expr::Lit(ast::expr::Literal::Int(n)),
+                            span_id: span,
+                        })),
+                    ),
                     span,
-                    ParameterKind::Tagged(Box::new(Spanned {
-                        value: ast::Expr::Lit(ast::expr::Literal::Int(n)),
-                        span_id: span,
-                    })),
-                ),
-                span,
-            ));
+                ));
+            }
+            self.rewind(expr_checkpoint);
         }
         if matches!(self.peek(), Some(&Token::Tag(_))) {
-            let sp = self.parse_type_expr(expr_parser)?;
-            let key = Intern::<String>::from_ref(
-                Pattern::from_expr(sp.value.clone()).surface_mangle_name(),
-            );
-            return Some((
-                key,
-                Parameter::new(
-                    sp.span_id,
-                    ParameterKind::Tagged(Box::new(Spanned {
-                        value: sp.value,
-                        span_id: sp.span_id,
-                    })),
-                ),
-                sp.span_id,
-            ));
+            let expr_checkpoint = self.checkpoint();
+            let expr = expr_parser(self);
+            let expression_ends_parameter = self.is_at(&Token::ParenClose)
+                || self.is_at(&Token::Comma)
+                || self.previous_token_was_newline_separator();
+            if expression_ends_parameter
+                && !is_parse_error_expr(&expr.value)
+                && !matches!(&expr.value, ast::Expr::Bind(bind) if bind.params.is_none())
+                && !matches!(
+                    &expr.value,
+                    ast::Expr::FnCall(call) if call.args.is_none() && call.path.value.segments.is_empty()
+                )
+                && matches!(
+                    &expr.value,
+                    ast::Expr::AnonymousTag(_)
+                        | ast::Expr::Ref { .. }
+                        | ast::Expr::TakePtr(_)
+                        | ast::Expr::FnCall(_)
+                )
+            {
+                let key = Pattern::from_expr(expr.value.clone())
+                    .surface_mangle_name()
+                    .to_string();
+                let span = expr.span_id;
+                let key = Intern::new(key);
+                return Some((
+                    key,
+                    Parameter::new(span, ParameterKind::Tagged(Box::new(expr.into()))),
+                    span,
+                ));
+            }
+            self.rewind(expr_checkpoint);
         }
 
         let expr_checkpoint = self.checkpoint();
@@ -560,6 +588,30 @@ impl<'src, 't> TokenCursor<'src, 't> {
             || self.is_at(&Token::Comma)
             || self.previous_token_was_newline_separator();
         if expression_ends_parameter
+            && !is_parse_error_expr(&expr.value)
+            && !matches!(
+                &expr.value,
+                ast::Expr::Bind(bind) if bind.params.is_none()
+            )
+            && !matches!(
+                &expr.value,
+                ast::Expr::FnCall(call) if call.args.is_none() && call.path.value.segments.is_empty()
+            )
+        {
+            let span = expr.span_id;
+            return Some((
+                Intern::new(format!("__expr_{param_index}")),
+                Parameter::new(span, ParameterKind::Default(Box::new(expr))),
+                span,
+            ));
+        }
+        self.rewind(expr_checkpoint);
+        let expr = self.parse_expression();
+        let expression_ends_parameter = self.is_at(&Token::ParenClose)
+            || self.is_at(&Token::Comma)
+            || self.previous_token_was_newline_separator();
+        if expression_ends_parameter
+            && !is_parse_error_expr(&expr.value)
             && !matches!(
                 &expr.value,
                 ast::Expr::Bind(bind) if bind.params.is_none()
@@ -617,6 +669,80 @@ impl<'src, 't> TokenCursor<'src, 't> {
             Parameter::new(name_span, ParameterKind::Generic),
             name_span,
         ))
+    }
+}
+
+fn is_parse_error_expr(expr: &ast::Expr) -> bool {
+    match expr {
+        ast::Expr::AnonymousTag(name) if name.as_str() == "__parse_error" => true,
+        ast::Expr::Binary(binary) => {
+            is_parse_error_expr(&binary.lhs.value) || is_parse_error_expr(&binary.rhs.value)
+        }
+        ast::Expr::FnCall(call) => call.path.value.root.as_str() == "__parse_error",
+        ast::Expr::Bind(bind) => match &bind.value {
+            BindValue::Expr(expr) => is_parse_error_expr(&expr.value),
+            _ => false,
+        },
+        ast::Expr::TakePtr(inner) => is_parse_error_expr(&inner.value),
+        ast::Expr::Range(range) => {
+            is_parse_error_expr(&range.start.value) || is_parse_error_expr(&range.end.value)
+        }
+        ast::Expr::Ref { inner, .. } => is_parse_error_expr(&inner.value),
+        ast::Expr::Negate(inner) => is_parse_error_expr(&inner.value),
+        ast::Expr::TupleAlloc { init, size } => {
+            is_parse_error_expr(&init.value) || is_parse_error_expr(&size.value)
+        }
+        ast::Expr::TupleGet { base, .. } => is_parse_error_expr(&base.value),
+        ast::Expr::TupleSet { base, value, .. } => {
+            is_parse_error_expr(&base.value) || is_parse_error_expr(&value.value)
+        }
+        ast::Expr::Cast { expr, .. } => is_parse_error_expr(&expr.value),
+        ast::Expr::BufGet { buf, index } => {
+            is_parse_error_expr(&buf.value) || is_parse_error_expr(&index.value)
+        }
+        ast::Expr::BufSet {
+            buf, index, value, ..
+        } => {
+            is_parse_error_expr(&buf.value)
+                || is_parse_error_expr(&index.value)
+                || is_parse_error_expr(&value.value)
+        }
+        ast::Expr::RecordGet { base, .. } => is_parse_error_expr(&base.value),
+        ast::Expr::RecordSet { base, value, .. } => {
+            is_parse_error_expr(&base.value) || is_parse_error_expr(&value.value)
+        }
+        ast::Expr::RecordLit(fields) => fields
+            .iter()
+            .any(|(_, field)| is_parse_error_expr(&field.value)),
+        ast::Expr::TupleLit(fields) | ast::Expr::List(fields) => {
+            fields.iter().any(|field| is_parse_error_expr(&field.value))
+        }
+        ast::Expr::Destructure { value, .. } => is_parse_error_expr(&value.value),
+        ast::Expr::When(when_expr) => when_expr.arms.iter().any(|arm| match arm {
+            ast::WhenArm::Cond {
+                condition, body, ..
+            } => is_parse_error_condition(condition) || is_parse_error_expr(&body.value),
+            ast::WhenArm::Is { body, .. } => is_parse_error_expr(&body.value),
+            ast::WhenArm::Else(body, _) => is_parse_error_expr(&body.value),
+        }),
+        ast::Expr::If(if_expr) => {
+            is_parse_error_condition(&if_expr.condition)
+                || if_expr
+                    .body
+                    .iter()
+                    .any(|expr| is_parse_error_expr(&expr.value))
+        }
+        _ => false,
+    }
+}
+
+fn is_parse_error_condition(condition: &ast::Condition) -> bool {
+    match condition {
+        ast::Condition::Is { subject, .. } => is_parse_error_expr(&subject.value),
+        ast::Condition::Not(inner) => is_parse_error_condition(inner),
+        ast::Condition::And(left, right) | ast::Condition::Or(left, right) => {
+            is_parse_error_condition(left) || is_parse_error_condition(right)
+        }
     }
 }
 

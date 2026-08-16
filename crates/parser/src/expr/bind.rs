@@ -3,9 +3,10 @@ use internment::Intern;
 use lexer::Token;
 
 use ast::{
-    AttributeItem, Bind, BindAttributes, BindValue, DocComment, Expr, GroupParam, GroupPath,
-    ModPath, ParamConvention, Parameter, ParameterKind, Parameters, PredicateExpr, Return, Spanned,
-    Pattern, Typed,
+    AttributeItem, Bind, BindAttributes, BindOperator, BindValue, DocComment, Expr, GroupParam,
+    GroupPath, ModPath, ParamConvention, Parameter, ParameterKind, Parameters, Pattern,
+    PredicateExpr, ProofProposition, ProofRelation, ProofTerm, ResultAlternative, Return, SpanId,
+    Spanned, Typed,
 };
 
 use super::ExprFn;
@@ -65,8 +66,104 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
         let (params, conventions, param_groups, param_refinements) = self.parse_params(expr_parser);
 
-        let (return_type_name, return_tag, type_annotation, type_annotation_qual) =
+        let mut return_refinement = if self.eat(&Token::Is) {
+            let mut predicates = if self.eat(&Token::In) {
+                match self.parse_symbolic_range() {
+                    Some((min, max)) => vec![PredicateExpr::Ge(min), PredicateExpr::Le(max)],
+                    None => {
+                        self.error(
+                            "parse-expected-integer-range",
+                            "expected integer range after 'in'",
+                            self.current_span(),
+                        );
+                        Vec::new()
+                    }
+                }
+            } else {
+                vec![self.parse_one_predicate()]
+            };
+            while self.eat(&Token::And) {
+                predicates.push(self.parse_one_predicate());
+            }
+            Some(if predicates.len() == 1 {
+                predicates.remove(0)
+            } else {
+                PredicateExpr::And(predicates)
+            })
+        } else {
+            None
+        };
+
+        let (return_type_name, mut return_tag, type_annotation, type_annotation_qual) =
             self.parse_return_type_part(expr_parser);
+        if self.eat(&Token::And) {
+            let mut predicates = match return_refinement.take() {
+                Some(PredicateExpr::And(predicates)) => predicates,
+                Some(predicate) => vec![predicate],
+                None => Vec::new(),
+            };
+            predicates.push(self.parse_one_predicate());
+            while self.eat(&Token::And) {
+                predicates.push(self.parse_one_predicate());
+            }
+            return_refinement = Some(if predicates.len() == 1 {
+                predicates.remove(0)
+            } else {
+                PredicateExpr::And(predicates)
+            });
+        }
+        let mut anonymous_result_alternatives = Vec::new();
+        if (self.is_at(&Token::Or) || self.is_at(&Token::Thus))
+            && let Some(first) = return_tag.as_deref()
+            && let Expr::AnonymousTag(label) = first.value
+        {
+            let first_span = first.span_id;
+            let proposition = self
+                .eat(&Token::Thus)
+                .then(|| self.parse_proof_proposition());
+            anonymous_result_alternatives.push(Spanned {
+                value: ResultAlternative { label, proposition },
+                span_id: first_span,
+            });
+            return_tag = None;
+            while self.eat(&Token::Or) {
+                let Some(Token::Tag(label)) = self.peek() else {
+                    self.error(
+                        "parse-expected-result-alternative",
+                        "expected an anonymous result alternative after `or`",
+                        self.current_span(),
+                    );
+                    break;
+                };
+                let span_id = self.peek_span().unwrap_or(SpanId::INVALID);
+                let label = self.intern(label);
+                self.advance();
+                let proposition = self
+                    .eat(&Token::Thus)
+                    .then(|| self.parse_proof_proposition());
+                anonymous_result_alternatives.push(Spanned {
+                    value: ResultAlternative { label, proposition },
+                    span_id,
+                });
+            }
+        }
+        if return_type_name.is_none()
+            && return_tag.is_none()
+            && type_annotation.is_none()
+            && self.is_at(&Token::Colon)
+        {
+            let checkpoint = self.checkpoint();
+            self.advance();
+            if let Some(type_expr) = self.parse_type_expr(expr_parser) {
+                if self.is_at(&Token::Colon) {
+                    return_tag = Some(Box::new(type_expr));
+                } else {
+                    self.rewind(checkpoint);
+                }
+            } else {
+                self.rewind(checkpoint);
+            }
+        }
         let mut return_tag = return_tag;
         if let Some(mutable) = binding_ref_mutability
             && let Some(inner) = return_tag.take()
@@ -122,10 +219,14 @@ impl<'src, 't> TokenCursor<'src, 't> {
             // `name Type` on its own line — declared, assigned later via `name: value`.
             (BindValue::Unassigned, None)
         } else {
-            let is_constant = if self.eat(&Token::ColonEq) {
-                true
+            let operator = if self.eat(&Token::ColonEq) {
+                BindOperator::FreshImmutable
+            } else if self.eat(&Token::ColonColon) {
+                BindOperator::Rebind
+            } else if let Some(operator) = self.eat_compound_rebind() {
+                BindOperator::Compound(operator)
             } else if self.eat(&Token::Colon) {
-                false
+                BindOperator::FreshMutable
             } else {
                 self.error(
                     "parse-expected-bind-operator",
@@ -140,7 +241,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 .with_params(params)
                 .with_return_type_name(return_type_name)
                 .with_doc(doc);
-            bind.is_constant = is_constant;
+            bind.operator = operator;
             if let Some(attrs) = attrs {
                 bind = bind.with_attributes(attrs);
             }
@@ -149,6 +250,8 @@ impl<'src, 't> TokenCursor<'src, 't> {
             bind.param_groups = param_groups;
             bind.param_refinements = param_refinements;
             bind.return_tag = return_tag;
+            bind.return_refinement = return_refinement;
+            bind.anonymous_result_alternatives = anonymous_result_alternatives;
             bind.type_annotation = type_annotation;
             bind.type_annotation_qual = type_annotation_qual;
             return Some(bind);
@@ -169,10 +272,208 @@ impl<'src, 't> TokenCursor<'src, 't> {
         bind.param_groups = param_groups;
         bind.param_refinements = param_refinements;
         bind.return_tag = return_tag;
+        bind.return_refinement = return_refinement;
+        bind.anonymous_result_alternatives = anonymous_result_alternatives;
         bind.type_annotation = type_annotation;
         bind.type_annotation_qual = type_annotation_qual;
 
         Some(bind)
+    }
+
+    pub(crate) fn parse_proof_proposition(&mut self) -> ProofProposition {
+        self.parse_proof_or()
+    }
+
+    fn parse_proof_or(&mut self) -> ProofProposition {
+        let mut proposition = self.parse_proof_and();
+        while self.is_at(&Token::Or)
+            && !(matches!(self.peek_at(1), Some(Token::Tag(_)))
+                && matches!(
+                    self.peek_at(2),
+                    Some(Token::Thus) | Some(Token::Or) | Some(Token::Colon)
+                ))
+        {
+            self.advance();
+            proposition =
+                ProofProposition::Or(Box::new(proposition), Box::new(self.parse_proof_and()));
+        }
+        proposition
+    }
+
+    fn parse_proof_and(&mut self) -> ProofProposition {
+        let mut proposition = self.parse_proof_not();
+        while self.eat(&Token::And) {
+            proposition =
+                ProofProposition::And(Box::new(proposition), Box::new(self.parse_proof_not()));
+        }
+        proposition
+    }
+
+    fn parse_proof_not(&mut self) -> ProofProposition {
+        if self.eat(&Token::Not) {
+            return ProofProposition::Not(Box::new(self.parse_proof_not()));
+        }
+        if self.eat(&Token::ParenOpen) {
+            let proposition = self.parse_proof_proposition();
+            if !self.eat(&Token::ParenClose) {
+                self.error(
+                    "parse-expected-proof-close",
+                    "expected `)` after proof proposition",
+                    self.current_span(),
+                );
+            }
+            return proposition;
+        }
+        self.parse_proof_relation()
+    }
+
+    fn parse_proof_relation(&mut self) -> ProofProposition {
+        let left = self.parse_proof_term();
+        if self.eat(&Token::In) {
+            let start = self.parse_proof_term();
+            if !self.eat(&Token::Infer) {
+                self.error(
+                    "parse-expected-proof-range",
+                    "expected `...` in proof range",
+                    self.current_span(),
+                );
+            }
+            let end = self.parse_proof_term();
+            return ProofProposition::InRange {
+                value: left,
+                start,
+                end,
+            };
+        }
+        let relation = match self.peek() {
+            Some(Token::Eq) | Some(Token::EqEq) => ProofRelation::Equal,
+            Some(Token::NotEq) => ProofRelation::NotEqual,
+            Some(Token::Less) => ProofRelation::Less,
+            Some(Token::LessEq) => ProofRelation::LessOrEqual,
+            Some(Token::Greater) => ProofRelation::Greater,
+            Some(Token::GreaterEq) => ProofRelation::GreaterOrEqual,
+            _ => {
+                self.error(
+                    "parse-expected-proof-relation",
+                    "expected a mathematical relation in proof proposition",
+                    self.current_span(),
+                );
+                return ProofProposition::Compare {
+                    left,
+                    relation: ProofRelation::Equal,
+                    right: ProofTerm::Value(i256::I256::from(0)),
+                };
+            }
+        };
+        self.advance();
+        ProofProposition::Compare {
+            left,
+            relation,
+            right: self.parse_proof_term(),
+        }
+    }
+
+    fn parse_proof_term(&mut self) -> ProofTerm {
+        let mut term = self.parse_proof_product();
+        loop {
+            if self.eat(&Token::Plus) {
+                term = ProofTerm::Add(Box::new(term), Box::new(self.parse_proof_product()));
+            } else if self.eat(&Token::Minus) {
+                term = ProofTerm::Sub(Box::new(term), Box::new(self.parse_proof_product()));
+            } else {
+                return term;
+            }
+        }
+    }
+
+    fn parse_proof_product(&mut self) -> ProofTerm {
+        let mut term = self.parse_proof_primary();
+        loop {
+            if self.eat(&Token::Star) {
+                term = ProofTerm::Mul(Box::new(term), Box::new(self.parse_proof_primary()));
+            } else if self.eat(&Token::Percent) {
+                term = ProofTerm::Remainder(Box::new(term), Box::new(self.parse_proof_primary()));
+            } else {
+                return term;
+            }
+        }
+    }
+
+    fn parse_proof_primary(&mut self) -> ProofTerm {
+        if self.eat(&Token::Minus) {
+            return ProofTerm::Sub(
+                Box::new(ProofTerm::Value(i256::I256::from(0))),
+                Box::new(self.parse_proof_primary()),
+            );
+        }
+        let Some((token, _)) = self.advance() else {
+            self.error(
+                "parse-expected-proof-term",
+                "expected an integer term in proof proposition",
+                self.current_span(),
+            );
+            return ProofTerm::Value(i256::I256::from(0));
+        };
+        match token {
+            Token::Int(value) => ProofTerm::Value(value),
+            Token::Id(name) | Token::Tag(name) => {
+                let name = self.intern(name);
+                if name.as_str() == "PowerOfTwo" && self.eat(&Token::ParenOpen) {
+                    let argument = self.parse_proof_term();
+                    if !self.eat(&Token::ParenClose) {
+                        self.error(
+                            "parse-expected-proof-close",
+                            "expected `)` after `PowerOfTwo` term",
+                            self.current_span(),
+                        );
+                    }
+                    ProofTerm::PowerOfTwo(Box::new(argument))
+                } else {
+                    ProofTerm::Name(name)
+                }
+            }
+            Token::SelfInstance => ProofTerm::Name(Intern::from_ref("self")),
+            Token::Pound => {
+                let kind = match self.advance() {
+                    Some((Token::Id("size"), _)) => ast::TargetQueryKind::Size,
+                    Some((Token::Id("alignment"), _)) => ast::TargetQueryKind::Alignment,
+                    Some((Token::Id("index_bits"), _)) => ast::TargetQueryKind::IndexBits,
+                    _ => {
+                        self.error(
+                            "parse-expected-query-name",
+                            "expected compile-time query name after '#'",
+                            self.current_span(),
+                        );
+                        ast::TargetQueryKind::Size
+                    }
+                };
+                self.expect(&Token::ParenOpen);
+                let operand = self.parse_type_reference().unwrap_or_else(|| {
+                    ast::TypeReference::Nominal(Intern::from_ref("__parse_error"))
+                });
+                self.expect(&Token::ParenClose);
+                ProofTerm::TargetQuery { kind, operand }
+            }
+            Token::ParenOpen => {
+                let term = self.parse_proof_term();
+                if !self.eat(&Token::ParenClose) {
+                    self.error(
+                        "parse-expected-proof-close",
+                        "expected `)` after proof term",
+                        self.current_span(),
+                    );
+                }
+                term
+            }
+            _ => {
+                self.error(
+                    "parse-expected-proof-term",
+                    "expected an integer term in proof proposition",
+                    self.current_span(),
+                );
+                ProofTerm::Value(i256::I256::from(0))
+            }
+        }
     }
 
     pub fn parse_bind_attributes(&mut self) -> Option<BindAttributes> {
@@ -267,7 +568,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
     pub(crate) fn parse_one_attribute_item(&mut self) -> Option<AttributeItem> {
         match self.peek()? {
-            Token::Id(name) => {
+            Token::Id(name) | Token::Tag(name) => {
                 let name_interned = self.intern(name);
                 let name_span = self.peek_span()?;
                 self.advance();
@@ -281,7 +582,13 @@ impl<'src, 't> TokenCursor<'src, 't> {
                         args,
                     })
                 } else {
-                    // bare Id → flag attribute
+                    if name_interned.as_str() == "auto" {
+                        self.error(
+                            "parse-removed-auto-attribute",
+                            "`#auto` has been removed; ownership is linear by default",
+                            name_span,
+                        );
+                    }
                     Some(AttributeItem::Flag {
                         name: name_interned,
                         span: name_span,
@@ -666,6 +973,30 @@ impl<'src, 't> TokenCursor<'src, 't> {
             }
             _ => return None,
         };
+
+        if self.eat(&Token::Is) {
+            if !self.eat(&Token::In) {
+                self.error(
+                    "parse-expected-integer-range",
+                    "expected 'in' after parameter 'is'",
+                    self.current_span(),
+                );
+            }
+            let refinement = self.parse_symbolic_range().map(|(min, max)| {
+                let mut predicates = vec![PredicateExpr::Ge(min), PredicateExpr::Le(max)];
+                while self.eat(&Token::And) {
+                    predicates.push(self.parse_one_predicate());
+                }
+                PredicateExpr::And(predicates)
+            });
+            return Some((
+                name.0,
+                Parameter::new(name.1, ParameterKind::Generic),
+                convention,
+                group_name,
+                refinement,
+            ));
+        }
 
         let (name, mut parameter) =
             self.parse_param_after_name(expr_parser, name.0, name.1, false)?;

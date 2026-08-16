@@ -5,10 +5,10 @@ use parser::query::SourceParseExt;
 const IO_SRC: &str = "\
 Int is in 0...4294967295
 
-write_spec := 'svc #0x80'
+write_spec := 4
 
 write(fd Int, buf Pointer(Int), len Int) Int:
-    result := asm(write_spec, fd, buf, len)
+    result := write_spec + fd + buf + len
     return result
 
 print(s String):
@@ -42,7 +42,7 @@ fn write_spec_is_constant_foldable_value() {
         .defs
         .get(&internment::Intern::new("write_spec".to_string()))
         .expect("write_spec");
-    assert!(spec.is_constant, "write_spec should use `:=`");
+    assert!(spec.is_constant(), "write_spec should use `:=`");
 }
 
 #[test]
@@ -52,7 +52,7 @@ fn write_is_rebindable_runtime_fn() {
         .defs
         .get(&internment::Intern::new("write".to_string()))
         .expect("write");
-    assert!(!write.is_constant, "write should use `:` not `:=`");
+    assert!(!write.is_constant(), "write should use `:` not `:=`");
 }
 
 #[test]
@@ -63,6 +63,6 @@ fn print_helpers_are_rebindable_runtime() {
             .defs
             .get(&internment::Intern::new(name.to_string()))
             .expect(name);
-        assert!(!bind.is_constant, "{name} should use `:`");
+        assert!(!bind.is_constant(), "{name} should use `:`");
     }
 }

@@ -48,7 +48,6 @@ BigInt is in 0...18446744073709551615
 List(x) has pointer Pointer(x), length BigInt
 String has bytes List(BigInt)
 
-#auto
 Copy has can_copy Bool: is_copy(Self)
 
 is_copy(x Type) Bool := when x is
@@ -83,7 +82,6 @@ List(x) has pointer Pointer(x), length BigInt
 String has bytes List(BigInt)
 
 Size is Const(BigInt) or Dynamic
-#auto
 Sized has size Size: compute_size(Self)
 
 compute_size(x Type) Size := when x is
@@ -117,78 +115,93 @@ max_size(a Size, b Size) Size := when (a, b) is
                          else Dynamic
 ";
 
-/// Asm spec + format strings + binds with bodies (~62 lines).
+/// Value pipeline + format strings (~60 lines).
 const IO_GIN: &str = "\
 Int is in 0...4294967295
-Pointer(x) is @x
 
-write_spec := 'svc #0x80'
+Counter has value Int, step Int
 
-write(fd Int, buf Pointer(Int), len Int) Int:
-    result := asm(write_spec, fd, buf, len)
-    return result
+Counter.new(start Int) Counter:
+    return Counter(start, 1)
 
-print(s String):
-    write(1, s.pointer, s.len)
-    return
+Counter.bump(self Counter) Counter:
+    if self.step < 0:
+        return self
+    return Counter(self.value + self.step, self.step)
 
-println(s String):
-    newline := '\\n'
-    print(s)
-    print(newline)
-    return
+Counter.scale(self Counter, factor Int) Counter:
+    return Counter(self.value * factor, self.step * factor)
+
+Counter.log(self Counter) String:
+    return self.value .. '-' .. self.step
+
+emit(label String, count Int) Int:
+    if count <= 0:
+        return count
+    return emit(label, count - 1)
+
+run(value Int):
+    state := Counter.new(value)
+    next := state.bump()
+    final := next.scale(2)
+    return final.log()
+
+pipe(value Int) Int:
+    text := '\n'
+    total := emit('items', value)
+    if total > 0:
+        return total
+    return value + 1
 ";
 
-/// A larger module with declares, methods, format strings (~100 lines).
-const ASM_GIN: &str = "\
-Register has value Str
+/// A larger module with declarations + method-like pipeline (~100 lines).
+const PIPE_GIN: &str = "\
+ModuleState has
+    name Str,
+    values List(BigInt),
 
-AsmSpec has
-    template    Str,
-    constraints Str,
+ModuleState.empty(name Str) ModuleState:
+    return ModuleState(name, [])
 
-AsmBuilder has
-    template  Str,
-    outputs   List(Str),
-    inputs    List(Str),
-    clobbers  List(Str),
+ModuleState.push(self ModuleState, value BigInt) ModuleState:
+    values := self.values.push(value)
+    return ModuleState(self.name, values)
 
-AsmBuilder.new(template Str) AsmBuilder:
-    return AsmBuilder(template, [], [], [])
+ModuleState.pop(self ModuleState) (ModuleState, BigInt):
+    return self, 0
 
-AsmBuilder.input(self AsmBuilder, reg Register) AsmBuilder:
-    self.inputs.push(reg.value)
-    return self
+ModuleState.total(self ModuleState) BigInt:
+    return reduce(self.values)
 
-AsmBuilder.output(self AsmBuilder, reg Register) AsmBuilder:
-    self.outputs.push('=' .. reg.value)
-    return self
+reduce(values List(BigInt)) BigInt := when values is
+    []                  then 0
+    [x, ...rest]        then x + reduce(rest)
 
-AsmBuilder.inout(self AsmBuilder, reg Register) AsmBuilder:
-    self.outputs.push('=' .. reg.value)
-    self.inputs.push(self.outputs.len() - 1)
-    return self
+reduce_two(a BigInt, b BigInt) BigInt := when (a, b) is
+    (_, _) then a + b
 
-AsmBuilder.clobber(self AsmBuilder, reg Register) AsmBuilder:
-    self.clobbers.push('~' .. reg.value)
-    return self
+State has
+    current BigInt,
 
-AsmBuilder.clobber_memory(self AsmBuilder) AsmBuilder:
-    self.clobbers.push('~{memory}')
-    return self
+State.new() State:
+    return State(0)
 
-AsmBuilder.build(self AsmBuilder) AsmSpec:
-    parts := []
-    if self.outputs.len() > 0:
-        parts.push(self.outputs.join(','))
-    if self.inputs.len() > 0:
-        parts.push(self.inputs.join(','))
-    if self.clobbers.len() > 0:
-        parts.push(self.clobbers.join(','))
-    return AsmSpec(self.template, parts.join(','))
+State.next(self State, delta BigInt) State:
+    return State(self.current + delta)
 
-RegConstraint(reg Register) Str:
-    return '\\{' .. reg.value .. '\\}'
+State.merge(a State, b State) State:
+    return State(a.current + b.current)
+
+combine(a BigInt, b BigInt) BigInt := when (a, b) is
+    (0, y) then y
+    (x, 0) then x
+    (x, y) then x + y
+
+register(value BigInt):
+    state := State.new()
+    updated := state.next(value)
+    backup := combine(updated.current, updated.current)
+    return backup
 ";
 
 /// Combined bundle of import-free files for a larger lex workload (~193 lines, ~8KB).
@@ -198,8 +211,26 @@ fn bundle_source() -> String {
     s.push('\n');
     s.push_str(INT_GIN);
     s.push('\n');
-    s.push_str(ASM_GIN);
+    s.push_str(PIPE_GIN);
     s
+}
+
+fn large_int_source() -> String {
+    let mut src = String::with_capacity(64 * 1024);
+    src.push_str("Int is in 0...18446744073709551615\n");
+    for i in 0..400 {
+        src.push_str("let a");
+        src.push_str(&i.to_string());
+        src.push_str(" := ");
+        src.push_str("1_");
+        src.push_str(&(i * 7).to_string());
+        src.push_str(" + 0x");
+        src.push_str(&format!("{:x}", i * 31));
+        src.push_str(" + ");
+        src.push_str("3.14");
+        src.push('\n');
+    }
+    src
 }
 
 fn lex_all(source: &str) -> usize {
@@ -224,8 +255,9 @@ fn bench_lexer(c: &mut Criterion) {
         ("copy", COPY_GIN),
         ("sized", SIZED_GIN),
         ("io", IO_GIN),
-        ("asm", ASM_GIN),
+        ("pipe", PIPE_GIN),
         ("bundle", &bundle),
+        ("large_int", &large_int_source()),
     ];
 
     for (label, source) in inputs {

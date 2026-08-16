@@ -28,7 +28,7 @@ target := Target.default
                 ast.defs.keys().collect::<Vec<_>>()
             )
         });
-    assert!(target.is_constant, "target should use `:=`");
+    assert!(target.is_constant(), "target should use `:=`");
     let BindValue::Expr(expr) = &target.value else {
         panic!("expected Expr bind, got {:?}", target.value);
     };

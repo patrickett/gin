@@ -86,6 +86,7 @@ impl SourceParseExt for str {
         }
 
         ast.span_table = span_table;
+        symptoms.extend(ast.parse_warnings.iter().cloned());
 
         // Help hints (empty-paren suggestions) -- compute before spans borrows ast.
         let hints = ast.collect_empty_paren_hints();

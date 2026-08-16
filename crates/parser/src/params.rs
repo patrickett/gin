@@ -23,6 +23,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
     /// Recognises (in order):
     /// - `id Tag` / `id Tag(args)` → value param (declare) or tagged (bind)
     /// - `id id` → tagged type variable (if lowercase) or tagged (if uppercase)
+    /// - `id ref|mut type` → tagged reference/mutable reference
     /// - `id : expr` → default value
     /// - bare `id` → generic parameter
     pub fn parse_param_after_name(
@@ -50,6 +51,14 @@ impl<'src, 't> TokenCursor<'src, 't> {
         }
 
         if let Some(sp) = self.parse_type_annotation(expr_parser) {
+            return Some((
+                name,
+                Parameter::new(name_span, ParameterKind::Tagged(Box::new(sp))),
+            ));
+        }
+
+        if matches!(self.peek(), Some(Token::Ref) | Some(Token::Mut)) {
+            let sp = self.parse_type_expr(expr_parser)?;
             return Some((
                 name,
                 Parameter::new(name_span, ParameterKind::Tagged(Box::new(sp))),

@@ -12,11 +12,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
         match self.peek()? {
             &Token::Int(n) => {
                 self.advance();
-                if neg {
-                    Some(-I256::from_u128(n))
-                } else {
-                    Some(I256::from_u128(n))
-                }
+                if neg { Some(-n) } else { Some(n) }
             }
             _ => None,
         }
@@ -34,11 +30,30 @@ impl<'src, 't> TokenCursor<'src, 't> {
     /// Parse `in N...M` or `in Tag` after `in` was consumed.
     pub fn parse_in_range_type(&mut self) -> Option<TypeExpr> {
         let span = self.current_span();
-        if let Some((min, max)) = self.parse_int_range() {
-            return Some(TypeExpr::InRange {
-                bounds: InRangeBounds::Literal(min, max),
-                span,
-            });
+        if let Some(min) = self.parse_signed_int() {
+            if !self.eat(&Token::Infer) {
+                self.error(
+                    "parse-expected-type-or-range",
+                    "expected `...` after integer range start",
+                    span,
+                );
+                return None;
+            }
+            let bounds = if let Some(max) = self.parse_signed_int() {
+                InRangeBounds::Literal(min, max)
+            } else if let Some(Token::Tag(t) | Token::Id(t)) = self.peek() {
+                let max = self.intern(t);
+                self.advance();
+                InRangeBounds::LiteralToTag(min, max)
+            } else {
+                self.error(
+                    "parse-expected-type-or-range",
+                    "expected integer or compile-time name after `...`",
+                    span,
+                );
+                return None;
+            };
+            return Some(TypeExpr::InRange { bounds, span });
         }
         if let Some(Token::Tag(t)) = self.peek() {
             let name = self.intern(t);
@@ -66,8 +81,29 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
     pub fn parse_in_range_expr(&mut self) -> Option<Spanned<Expr>> {
         let span = self.current_span();
-        let bounds = if let Some((min, max)) = self.parse_int_range() {
-            InRangeBounds::Literal(min, max)
+        let bounds = if let Some(min) = self.parse_signed_int() {
+            if !self.eat(&Token::Infer) {
+                self.error(
+                    "parse-expected-type-or-range",
+                    "expected `...` after integer range start",
+                    span,
+                );
+                return None;
+            }
+            if let Some(max) = self.parse_signed_int() {
+                InRangeBounds::Literal(min, max)
+            } else if let Some(Token::Tag(t) | Token::Id(t)) = self.peek() {
+                let max = self.intern(t);
+                self.advance();
+                InRangeBounds::LiteralToTag(min, max)
+            } else {
+                self.error(
+                    "parse-expected-type-or-range",
+                    "expected integer or compile-time name after `...`",
+                    span,
+                );
+                return None;
+            }
         } else if let Some(Token::Tag(t)) = self.peek() {
             let name = self.intern(t);
             self.advance();
@@ -93,10 +129,12 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
 fn in_range_expr(bounds: InRangeBounds, span: ast::SpanId) -> Expr {
     let (start, end) = match bounds {
-        InRangeBounds::Literal(min, max) => (
-            Expr::Lit(Literal::Int(min.as_u128())),
-            Expr::Lit(Literal::Int(max.as_u128())),
-        ),
+        InRangeBounds::Literal(min, max) => {
+            (Expr::Lit(Literal::Int(min)), Expr::Lit(Literal::Int(max)))
+        }
+        InRangeBounds::LiteralToTag(min, max) => {
+            (Expr::Lit(Literal::Int(min)), Expr::AnonymousTag(max))
+        }
         InRangeBounds::Tag(name) => {
             let tag = Expr::AnonymousTag(name);
             (tag.clone(), tag)

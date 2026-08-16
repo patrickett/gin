@@ -1,14 +1,14 @@
 //! Parser for the Gin language.
 //!
 //! This crate contains the recursive-descent parser and content hashing.
+#[cfg(test)]
+extern crate self as parser;
 
 pub mod content_hash;
 pub mod cursor;
 pub mod declare;
 pub mod expr;
-pub mod gin_walk;
 mod int_range;
-pub mod module;
 pub mod params;
 pub mod path;
 pub mod query;

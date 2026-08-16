@@ -1,14 +1,110 @@
 use lexer::Token;
 
 use ast::{
-    Expr, FnCall, ForInLoop, IfExpr, Loop, ModPath, Pattern, Return, SpanId, Spanned, SubSpan,
-    Typed, WhenArm, WhenExpr, WhileLoop,
+    Condition, Expr, FnCall, ForInLoop, IfExpr, Loop, ModPath, Pattern, Return, SpanId, Spanned,
+    SubSpan, Typed, WhenArm, WhenExpr, WhileLoop,
 };
 
 use super::ExprFn;
 use crate::cursor::TokenCursor;
 
 impl TokenCursor<'_, '_> {
+    fn parse_condition_atom(&mut self, expr_parser: ExprFn) -> Option<Condition> {
+        if self.eat(&Token::Not) {
+            return Some(Condition::Not(Box::new(
+                self.parse_condition_atom(expr_parser)?,
+            )));
+        }
+        if self.eat(&Token::ParenOpen) {
+            let condition = self.parse_condition(expr_parser)?;
+            self.expect(&Token::ParenClose)?;
+            return Some(condition);
+        }
+
+        let subject = expr_parser(self);
+        if !self.eat(&Token::Is) {
+            self.error(
+                "parse-expected-condition-pattern",
+                "condition clause must explicitly match a pattern with 'is'",
+                self.current_span(),
+            );
+            return None;
+        }
+        let pattern = self.parse_condition_pattern(expr_parser)?;
+        Some(Condition::Is {
+            subject: Box::new(subject),
+            pattern: Box::new(pattern),
+        })
+    }
+
+    fn parse_condition_and(&mut self, expr_parser: ExprFn) -> Option<Condition> {
+        let mut condition = self.parse_condition_atom(expr_parser)?;
+        while self.eat(&Token::And) {
+            condition = Condition::And(
+                Box::new(condition),
+                Box::new(self.parse_condition_atom(expr_parser)?),
+            );
+        }
+        Some(condition)
+    }
+
+    fn parse_condition(&mut self, expr_parser: ExprFn) -> Option<Condition> {
+        let mut condition = self.parse_condition_and(expr_parser)?;
+        while self.eat(&Token::Or) {
+            condition = Condition::Or(
+                Box::new(condition),
+                Box::new(self.parse_condition_and(expr_parser)?),
+            );
+        }
+        Some(condition)
+    }
+
+    fn parse_condition_rest(&mut self, expr_parser: ExprFn, first: Condition) -> Option<Condition> {
+        let mut conjunction = first;
+        while self.eat(&Token::And) {
+            conjunction = Condition::And(
+                Box::new(conjunction),
+                Box::new(self.parse_condition_atom(expr_parser)?),
+            );
+        }
+        let mut condition = conjunction;
+        while self.eat(&Token::Or) {
+            condition = Condition::Or(
+                Box::new(condition),
+                Box::new(self.parse_condition_and(expr_parser)?),
+            );
+        }
+        Some(condition)
+    }
+
+    fn parse_condition_pattern(&mut self, expr_parser: ExprFn) -> Option<Spanned<Pattern>> {
+        if matches!(
+            self.peek(),
+            Some(Token::String(_)) | Some(Token::Int(_)) | Some(Token::Float(_))
+        ) {
+            let Spanned {
+                value: lit,
+                span_id: span,
+            } = self.parse_literal()?;
+            return Some(Spanned {
+                value: Pattern::Literal(lit, span),
+                span_id: span,
+            });
+        }
+        self.parse_is_pattern_tag(expr_parser)
+    }
+
+    fn or_starts_condition_clause(&self) -> bool {
+        let mut offset = 1;
+        loop {
+            match self.peek_at(offset) {
+                Some(Token::Is) => return true,
+                Some(Token::Then | Token::Or | Token::And) | None => return false,
+                _ => offset += 1,
+            }
+        }
+    }
+
     /// Parse a `for` binder using the same token shape as before (ids and `(id, …)` only).
     /// Produces `Expr` so the AST matches the unified-syntax direction without routing
     /// through the full expression parser (keeps `for` headers cheap on hot paths).
@@ -80,17 +176,22 @@ impl TokenCursor<'_, '_> {
             return None;
         }
 
-        let subject = expr_parser(self);
-        let cond_span = subject.span_id;
+        let condition = self.parse_condition(expr_parser)?;
+        let cond_span = self.last_consumed_span();
 
-        let pattern = if self.eat(&Token::Is) {
-            Some(Box::new(self.parse_is_pattern_tag(expr_parser)?))
-        } else {
-            None
-        };
-
+        self.skip_newlines();
         let has_indent = self.eat(&Token::Indent);
-        let body = self.parse_body_exprs(expr_parser);
+        let mut body = self.parse_body_exprs(expr_parser);
+
+        if has_indent && self.is_at(&Token::Return) {
+            let span = self.peek_span().unwrap_or(SpanId::INVALID);
+            self.hint("__gin_hint__:indented-return", span);
+            if let Some(ret) = self.parse_return(expr_parser)
+                && let Some(value) = ret.value
+            {
+                body.push(*value);
+            }
+        }
 
         // Detect improperly indented return inside the if body.
         if has_indent && self.is_at(&Token::Return) {
@@ -117,8 +218,7 @@ impl TokenCursor<'_, '_> {
         let end_span = self.last_consumed_span();
 
         Some(IfExpr {
-            subject: Box::new(subject),
-            pattern,
+            condition,
             body,
             ret,
             body_span: SubSpan::new(self.merge_span(cond_span, end_span)),
@@ -129,6 +229,42 @@ impl TokenCursor<'_, '_> {
         let start_cp = self.checkpoint();
         if !self.eat(&Token::When) {
             return None;
+        }
+
+        if self.is_at(&Token::Not) || self.parenthesized_when_condition() {
+            let condition = self.parse_condition(expr_parser)?;
+            if !self.eat(&Token::Then) {
+                self.error(
+                    "parse-expected-then",
+                    "expected 'then'",
+                    self.current_span(),
+                );
+                self.rewind(start_cp);
+                return None;
+            }
+            let body = expr_parser(self);
+            let mut arms = vec![WhenArm::Cond {
+                condition,
+                arm_span: SubSpan::new(body.span_id),
+                body: Box::new(body),
+            }];
+            self.skip_newlines();
+            if self.is_at(&Token::Else) {
+                let else_start = self.current_span();
+                self.advance();
+                let body = expr_parser(self);
+                arms.push(WhenArm::Else(
+                    Box::new(body),
+                    SubSpan::new(self.merge_span(else_start, self.last_consumed_span())),
+                ));
+            }
+            return Some(WhenExpr {
+                subject: None,
+                arms,
+                body_span: SubSpan::new(
+                    self.merge_span(self.current_span(), self.last_consumed_span()),
+                ),
+            });
         }
 
         let initial_expr = expr_parser(self);
@@ -151,16 +287,62 @@ impl TokenCursor<'_, '_> {
 
         match self.peek() {
             Some(Token::Then) => {
+                self.error(
+                    "parse-expected-condition-pattern",
+                    "when condition must explicitly match a pattern before 'then'",
+                    initial_expr.span_id,
+                );
+                self.rewind(start_cp);
+                None
+            }
+            Some(Token::Is) => {
+                if had_continuation_indent {
+                    self.rewind(continuation_cp);
+                }
+                let is_checkpoint = self.checkpoint();
                 self.advance();
-                let first_result = expr_parser(self);
-
+                self.skip_newlines();
+                self.skip_indents();
+                let pattern = self.parse_condition_pattern(expr_parser)?;
+                let composed = self.is_at(&Token::And)
+                    || (self.is_at(&Token::Or) && self.or_starts_condition_clause());
+                if !composed {
+                    self.rewind(is_checkpoint);
+                    let Some(arms) = self.parse_when_is_arms(expr_parser) else {
+                        self.rewind(start_cp);
+                        return None;
+                    };
+                    let end_span = self.last_consumed_span();
+                    return Some(WhenExpr {
+                        subject: Some(Box::new(initial_expr)),
+                        arms,
+                        body_span: SubSpan::new(self.merge_span(when_start_span, end_span)),
+                    });
+                }
+                let condition = self.parse_condition_rest(
+                    expr_parser,
+                    Condition::Is {
+                        subject: Box::new(initial_expr),
+                        pattern: Box::new(pattern),
+                    },
+                )?;
+                if !self.eat(&Token::Then) {
+                    self.error(
+                        "parse-expected-then",
+                        "expected 'then'",
+                        self.current_span(),
+                    );
+                    self.rewind(start_cp);
+                    return None;
+                }
+                let body = expr_parser(self);
                 let mut arms = vec![WhenArm::Cond {
-                    condition: Box::new(initial_expr),
-                    body: Box::new(first_result),
-                    arm_span: SubSpan::new(self.merge_span(when_start_span, self.current_span())),
+                    condition,
+                    arm_span: SubSpan::new(
+                        self.merge_span(when_start_span, self.last_consumed_span()),
+                    ),
+                    body: Box::new(body),
                 }];
-
-                // Look for the else arm (newlines auto-skipped by peek)
                 self.skip_newlines();
                 if self.eat(&Token::Indent) {
                     self.parse_when_boolean_arms(expr_parser, &mut arms);
@@ -174,33 +356,9 @@ impl TokenCursor<'_, '_> {
                         SubSpan::new(self.merge_span(else_start, self.last_consumed_span())),
                     ));
                 }
-
-                // If we consumed a continuation Indent, eat the matching Dedent
-                if had_continuation_indent {
-                    self.skip_newlines();
-                    self.eat(&Token::Dedent);
-                }
-
                 let end_span = self.last_consumed_span();
                 Some(WhenExpr {
                     subject: None,
-                    arms,
-                    body_span: SubSpan::new(self.merge_span(when_start_span, end_span)),
-                })
-            }
-            Some(Token::Is) => {
-                // Revert any continuation-indent consumption (is-pattern form)
-                // before proceeding with the normal is-arm parsing.
-                if had_continuation_indent {
-                    self.rewind(continuation_cp);
-                }
-                let Some(arms) = self.parse_when_is_arms(expr_parser) else {
-                    self.rewind(start_cp);
-                    return None;
-                };
-                let end_span = self.last_consumed_span();
-                Some(WhenExpr {
-                    subject: Some(Box::new(initial_expr)),
                     arms,
                     body_span: SubSpan::new(self.merge_span(when_start_span, end_span)),
                 })
@@ -231,6 +389,29 @@ impl TokenCursor<'_, '_> {
         }
     }
 
+    fn parenthesized_when_condition(&self) -> bool {
+        if !self.is_at(&Token::ParenOpen) {
+            return false;
+        }
+        let mut depth = 0_usize;
+        let mut offset = 0_usize;
+        loop {
+            match self.peek_at(offset) {
+                Some(Token::ParenOpen) => depth += 1,
+                Some(Token::ParenClose) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return false;
+                    }
+                }
+                Some(Token::Is) if depth == 1 => return true,
+                Some(_) => {}
+                None => return false,
+            }
+            offset += 1;
+        }
+    }
+
     fn parse_when_boolean_arms(&mut self, expr_parser: ExprFn, arms: &mut Vec<WhenArm>) {
         loop {
             if self.is_at(&Token::Dedent) || self.is_eof() {
@@ -248,7 +429,10 @@ impl TokenCursor<'_, '_> {
                 continue;
             }
 
-            let cond = expr_parser(self);
+            let condition = self.parse_condition(expr_parser);
+            let Some(condition) = condition else {
+                break;
+            };
             if !self.eat(&Token::Then) {
                 self.error(
                     "parse-expected-then",
@@ -258,9 +442,9 @@ impl TokenCursor<'_, '_> {
                 break;
             }
             let body = expr_parser(self);
-            let span = self.merge_span(cond.span_id, body.span_id);
+            let span = self.merge_span(self.last_consumed_span(), body.span_id);
             arms.push(WhenArm::Cond {
-                condition: Box::new(cond),
+                condition,
                 body: Box::new(body),
                 arm_span: SubSpan::new(span),
             });
@@ -378,7 +562,10 @@ impl TokenCursor<'_, '_> {
                         return None;
                     }
                 } else if !self.can_start_when_is_pattern() {
-                    let condition = expr_parser(self);
+                    let Some(condition) = self.parse_condition(expr_parser) else {
+                        break;
+                    };
+                    let condition_end = self.last_consumed_span();
                     if !self.eat(&Token::Then) {
                         self.error(
                             "parse-expected-then",
@@ -388,9 +575,9 @@ impl TokenCursor<'_, '_> {
                         break;
                     }
                     let body = expr_parser(self);
-                    let span = self.merge_span(condition.span_id, body.span_id);
+                    let span = self.merge_span(condition_end, body.span_id);
                     arms.push(WhenArm::Cond {
-                        condition: Box::new(condition),
+                        condition,
                         body: Box::new(body),
                         arm_span: SubSpan::new(span),
                     });
@@ -476,7 +663,7 @@ impl TokenCursor<'_, '_> {
         } else if self.is_at(&Token::While) {
             self.advance();
 
-            let cond = expr_parser(self);
+            let condition = self.parse_condition(expr_parser)?;
 
             self.eat(&Token::Indent);
 
@@ -494,7 +681,7 @@ impl TokenCursor<'_, '_> {
             }
 
             Some(Loop::While(WhileLoop {
-                cond: Box::new(cond),
+                condition,
                 exprs,
                 keyword_span: SubSpan::new(self.current_span()),
             }))
@@ -531,34 +718,5 @@ impl TokenCursor<'_, '_> {
 }
 
 #[cfg(test)]
-mod when_parse_tests {
-    use crate::cursor::TokenCursor;
-
-    use lexer::{Lexer, Token};
-
-    fn parse_when_source(source: &str) -> Option<ast::WhenExpr> {
-        let mut lexer = Lexer::new(source);
-        let tokens: Vec<_> = lexer
-            .by_ref()
-            .filter(|(t, _)| !matches!(t, Token::Comment(_)))
-            .collect();
-        let mut span_table = lexer.take_span_table();
-        let mut cursor = TokenCursor::new(&tokens, &mut span_table);
-        cursor.parse_when_expr(|c: &mut TokenCursor| c.parse_expression())
-    }
-
-    #[test]
-    fn when_is_multiline_arms_parse() {
-        let source = "when target.arch is\n    'x86_64' then BigInt\n    else Int";
-        assert!(
-            parse_when_source(source).is_some(),
-            "multiline is-when should parse"
-        );
-    }
-
-    #[test]
-    fn when_is_single_line_parses() {
-        let source = "when target.arch is 'x86_64' then BigInt else Int";
-        assert!(parse_when_source(source).is_some());
-    }
-}
+#[path = "../../tests/when_parse_tests.rs"]
+mod when_parse_tests;
