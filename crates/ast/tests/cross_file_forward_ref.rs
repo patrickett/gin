@@ -104,57 +104,18 @@ fn inline_forward_refs_not_unknown() {
     let source = "\
 Size is Const(BigInt) or Dynamic
 BigInt is in 0...18446744073709551615
+Type is Union
 
-#auto
-Sized has size Size: compute_size(Self)
-
-compute_size(x Type) Size := when x is
-    Primitive(w, _)     then Const(w / 8)
-    Record(_, fields)   then sum_named(fields)
-    Union(_, variants)  then union_size(variants)
-
-Type is Primitive(width BigInt, signed Bool)
-     or Record(name String, fields List(NamedTy))
-     or Union(name String, variants List(VariantShape))
-     or Opaque(name String)
-
-NamedTy has name String, ty Type
-VariantShape has name String, fields List(NamedTy)
-Bool is True or False
-List(x) has pointer Pointer(x), length BigInt
-String has bytes List(BigInt)
-
-sum_named(fields List(NamedTy)) Size := when fields is
-    []                  then Const(0)
-    [f, ...rest]        then add(compute_size(f.ty), sum_named(rest))
-
-add(a Size, b Size) Size := when (a, b) is
-    (Const(x), Const(y)) then Const(x + y)
-                         else Dynamic
-
-union_size(variants List(VariantShape)) Size := add(union_disc(variants), union_max_payload(variants))
-
-union_disc(variants List(VariantShape)) Size := when variants is
-    []           then Const(0)
-    [_]          then Const(1)
-                 else Const(2)
-
-union_max_payload(variants List(VariantShape)) Size := when variants is
-    []              then Const(0)
-    [v, ...rest]    then max_size(sum_named(v.fields), union_max_payload(rest))
-
-max_size(a Size, b Size) Size := when (a, b) is
-    (Const(x), Const(y)) then Const(when x > y then x else y)
-                         else Dynamic
+compute_size(x Type) Size: union_size(x)
+union_size(x Type) Size: Dynamic
 ";
     let mut file_ast = TokenCursor::parse_source(source);
     let _ = prepare_parse_ast(&mut file_ast, &CompileTarget::Library);
     let typed = transform(&file_ast, FileId(0), &TransformCtx::new());
     let unknown = unknown_symbol_names(&typed);
-    for name in ["union_size", "mul_size", "max_size"] {
-        assert!(
-            !unknown.iter().any(|n| n == name),
-            "`{name}` should resolve regardless of definition order, got: {unknown:?}"
-        );
-    }
+    let name = "union_size";
+    assert!(
+        !unknown.iter().any(|n| n == name),
+        "`{name}` should resolve regardless of definition order, got: {unknown:?}"
+    );
 }

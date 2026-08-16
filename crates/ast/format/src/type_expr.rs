@@ -142,11 +142,9 @@ impl PatternFormatExt for Pattern {
                         ParameterKind::ValueParam { ty } => {
                             format!("{} {}", param_name.as_str(), ty.value.format_surface())
                         }
-                        ParameterKind::Inferred { ty } => format!(
-                            "{} {}: ?",
-                            param_name.as_str(),
-                            ty.value.format_surface()
-                        ),
+                        ParameterKind::Inferred { ty } => {
+                            format!("{} {}: ?", param_name.as_str(), ty.value.format_surface())
+                        }
                         ParameterKind::Generic => param_name.as_str().to_string(),
                         ParameterKind::Default(expr) => {
                             format!("{}: {:?}", param_name.as_str(), expr.value)
@@ -159,11 +157,17 @@ impl PatternFormatExt for Pattern {
             Pattern::Literal(lit, _) => lit.to_string(),
             Pattern::Pointer(inner) => format!("@{}", inner.value.format_variant_shape()),
             Pattern::Ref {
-                inner, mutable, group, ..
+                inner,
+                mutable,
+                group,
+                ..
             } => format!(
                 "{}{}{}",
                 if *mutable { "mut" } else { "ref" },
-                group.as_ref().map(|g| format!("{{{g}}}")).unwrap_or_default(),
+                group
+                    .as_ref()
+                    .map(|g| format!("{{{g}}}"))
+                    .unwrap_or_default(),
                 format_args!(" {}", inner.value.format_variant_shape())
             ),
             Pattern::Unit => "()".to_string(),
@@ -363,80 +367,6 @@ impl TypeExprFormatExt for TypeExpr {
         }
     }
 }
-
 #[cfg(test)]
-mod tests {
-    use ast::parameter::ParameterKind;
-    use ast::span::{SpanId, Spanned};
-    use ast::{Expr, Pattern, TypeExpr};
-    use internment::Intern;
-
-    use super::{PatternFormatExt, TypeExprFormatExt};
-
-    fn pattern_name(name: &str) -> Spanned<Pattern> {
-        Spanned {
-            value: Pattern::Nominal(Intern::new(name.to_string()), SpanId::INVALID),
-            span_id: SpanId::INVALID,
-        }
-    }
-
-    fn list_cons(head: Spanned<Pattern>, tail: Spanned<Pattern>) -> Pattern {
-        Pattern::ListCons {
-            head: Box::new(head),
-            tail: Box::new(tail),
-        }
-    }
-
-    fn generic(name: &str, params: Vec<(&str, TypeExpr)>) -> TypeExpr {
-        TypeExpr::Generic {
-            name: Intern::new(name.to_string()),
-            params: params
-                .into_iter()
-                .map(|(name, ty)| {
-                    (
-                        Intern::new(name.to_string()),
-                        ParameterKind::Tagged(Box::new(Spanned {
-                            value: match ty {
-                                TypeExpr::Nominal(name, _) => Expr::AnonymousTag(name),
-                                TypeExpr::Literal(lit, _) => Expr::Lit(lit),
-                                _ => Expr::Lit(ast::Literal::Number(0)),
-                            },
-                            span_id: SpanId::INVALID,
-                        })),
-                    )
-                })
-                .collect(),
-            param_spans: Vec::new(),
-            span: SpanId::INVALID,
-        }
-    }
-
-    #[test]
-    fn list_cons_variant_shape_surface_uses_js_rest_syntax() {
-        let expr = list_cons(pattern_name("head"), pattern_name("tail"));
-
-        assert_eq!(expr.format_variant_shape(), "[head, ...tail]");
-    }
-
-    #[test]
-    fn variant_shape_surface_keeps_field_names() {
-        let expr = generic(
-            "Primitive",
-            vec![
-                (
-                    "width",
-                    TypeExpr::Nominal(Intern::new("BigInt".to_string()), SpanId::INVALID),
-                ),
-                (
-                    "signed",
-                    TypeExpr::Nominal(Intern::new("Bool".to_string()), SpanId::INVALID),
-                ),
-            ],
-        );
-
-        assert_eq!(
-            expr.format_variant_shape(),
-            "Primitive(width BigInt, signed Bool)"
-        );
-    }
-}
+#[path = "../../tests/type_expr_tests.rs"]
+mod tests;

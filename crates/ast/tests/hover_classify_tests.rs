@@ -284,19 +284,6 @@ fn hover_doc_matches_tag_golden_shape() {
         .gin("Bool is True or False")
         .ty_display("Bool")
         .prose("A boolean type.")
-        .copy_from_ty(
-            &Ty::Union {
-                name: Intern::from_ref("Bool"),
-                variants: vec![
-                    UnionVariant::new(Intern::from_ref("True"), vec![]),
-                    UnionVariant::new(Intern::from_ref("False"), vec![]),
-                ],
-                literal_values: None,
-                resolved_params: None,
-            },
-            &(),
-            &(),
-        )
         .size_align_from_ty(
             &Ty::Union {
                 name: Intern::from_ref("Bool"),

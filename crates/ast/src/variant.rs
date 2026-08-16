@@ -2,9 +2,9 @@
 
 use std::hash::{Hash, Hasher};
 
-use crate::{Expr, Pattern};
 use crate::doc_comment::DocComment;
 use crate::span::Spanned;
+use crate::{Expr, Pattern};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Variant {

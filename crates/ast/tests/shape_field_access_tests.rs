@@ -57,22 +57,21 @@ p := Coord(x: 1, y: 2, z: 3)
     let p_body = body_expr_id(&typed, "p").expect("p has body");
     let p_ty = typed.exprs.ty.get(p_body.as_usize()).expect("p type");
     assert!(
-        matches!(p_ty, Ty::Record { name, .. } if name.as_str() == "Coord"),
+        matches!(
+            typed.type_registry.resolved_definition_for_type(p_ty),
+            Ty::Record { name, .. } if name.as_str() == "Coord"
+        ),
         "p should have Coord record type, got {p_ty:?}"
     );
 }
-
-// `p.x: 10` field writes are not yet implemented in the parser/AST
-// (no RecordSet expression kind). This test documents the expected
-// behavior when it is.
 
 #[test]
 fn field_write_dot_setter() {
     let src = format!(
         "{INT_TAG}\
 Coord has x Int, y Int, z Int
-p := Coord(x: 1, y: 2, z: 3)
-p.x: 10
+p: Coord(x: 1, y: 2, z: 3)
+p.x:: 10
 "
     );
     let typed = transform_source(&src);
@@ -111,8 +110,8 @@ fn field_write_changes_value() {
     let src = format!(
         "{INT_TAG}\
 Coord has x Int, y Int, z Int
-p := Coord(x: 1, y: 2, z: 3)
-p.x: 10
+p: Coord(x: 1, y: 2, z: 3)
+p.x:: 10
 "
     );
     let typed = transform_source(&src);
@@ -126,10 +125,13 @@ p.x: 10
 #[test]
 fn field_write_with_expression() {
     let src = format!(
-        "{INT_TAG}\
+        "{INT_TAG}
 Coord has x Int, y Int, z Int
-p := Coord(x: 1, y: 2, z: 3)
-p.x: p.x + 1
+p: Coord(x: 1, y: 2, z: 3)
+#operator(Add)
+#inline
+plus(left Int, right Int) Int: left + right
+p.x:: p.x + 1
 "
     );
     let typed = transform_source(&src);
@@ -145,8 +147,8 @@ fn cannot_write_non_existent_field() {
     let src = format!(
         "{INT_TAG}\
 Coord has x Int, y Int, z Int
-p := Coord(x: 1, y: 2, z: 3)
-p.w: 5
+p: Coord(x: 1, y: 2, z: 3)
+p.w:: 5
 "
     );
     let typed = transform_source(&src);

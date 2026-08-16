@@ -7,3 +7,6 @@
 
 pub mod declare;
 pub mod type_expr;
+
+#[cfg(test)]
+extern crate self as ast_format;

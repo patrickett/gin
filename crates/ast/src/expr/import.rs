@@ -1,6 +1,6 @@
-use std::ops::Deref;
 use std::path::PathBuf;
 
+use derive_more::{Deref, From};
 use internment::Intern;
 
 use crate::span::{HasSpanId, SpanId};
@@ -56,16 +56,8 @@ pub struct LocalBundleImport {
 /// use utils.(math, http as h)
 /// use './path'.(item1, item2)
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deref, From)]
 pub struct Import(pub Vec<ModuleImport>);
-
-impl Deref for Import {
-    type Target = Vec<ModuleImport>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ImportSource {

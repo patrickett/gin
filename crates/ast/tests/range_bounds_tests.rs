@@ -1,72 +1,50 @@
-//! Bounded `in` types and compile-time call-site checks.
+use ast::ty::Ty;
+use i256::I256;
 
-mod support;
+#[test]
+fn bounded_assignability_uses_validity() {
+    let narrow = Ty::bounded_int(I256::from_i128(2), I256::from_i128(4));
+    let wide = Ty::bounded_int(I256::from_i128(1), I256::from_i128(7));
 
-use diagnostic::Diagnostic;
-use typecheck::FileId;
-use typecheck::transform::transform_file;
-const INT_TAG: &str = "Int is in 1...400\n\n";
-
-fn with_int_tag(body: &str) -> String {
-    format!("{INT_TAG}{body}")
-}
-
-fn collect_flaws(source: &str) -> Vec<Diagnostic> {
-    let ast = parser::cursor::TokenCursor::parse_source(&with_int_tag(source));
-    let typed = transform_file(ast, FileId(0));
-    typed
-        .all_flaws()
-        .into_iter()
-        .map(|(_, f)| f.clone())
-        .collect()
+    assert!(narrow.int_assignable_to(&wide));
+    assert!(!wide.int_assignable_to(&narrow));
+    assert!(wide.check_int_in_bounds(7).is_ok());
+    assert!(wide.check_int_in_bounds(8).is_err());
 }
 
 #[test]
-fn bounded_param_accepts_literal_in_range() {
-    let src = r#"
-favorite_number(x in 0...10):
-    favorite_number(9)
-"#;
-    let flaws = collect_flaws(src);
-    assert!(
-        !flaws.iter().any(|f| f.code.slug() == "type-out-of-range"),
-        "expected no OutOfRange flaws, got {flaws:?}"
-    );
+fn bounded_int_widths_match_expected_values() {
+    let values = [
+        (0, 1, 1),
+        (0, 2, 2),
+        (0, 255, 8),
+        (0, 256, 9),
+        (250, 260, 9),
+        (-1, 0, 1),
+        (-1, 1, 2),
+        (-1, 127, 8),
+        (-1, 128, 9),
+        (-1, 255, 9),
+        (-1, 256, 10),
+    ];
+
+    for (min, max, width) in values {
+        let ty = Ty::bounded_int(I256::from_i128(min), I256::from_i128(max));
+        assert!(matches!(&ty, Ty::AnonymousInteger { .. }));
+        assert_eq!(
+            ty.anonymous_integer_width(),
+            Some(width),
+            "width for {min}...{max}"
+        );
+    }
 }
 
 #[test]
-fn bounded_param_rejects_literal_out_of_range() {
-    let src = r#"
-favorite_number(x in 0...10):
-    favorite_number(11)
-"#;
-    let flaws = collect_flaws(src);
-    assert!(
-        flaws.iter().any(|f| {
-            f.code.slug() == "type-out-of-range"
-                && f.arg("value") == Some("11")
-                && f.arg("min") == Some("0")
-                && f.arg("max") == Some("10")
-        }),
-        "expected OutOfRange for 11, got {flaws:?}"
-    );
-}
+fn bounded_int_does_not_project_wide_i256_validity_through_i128() {
+    let max = (I256::from(1) << 199) - I256::from(1);
+    let ty = Ty::bounded_int(I256::from(0), max);
+    let validity = ty.anonymous_integer_validity().unwrap();
 
-#[test]
-fn in_on_bounded_int_tag_is_invalid() {
-    let src = r#"
-TinyInt is in 0...255
-
-bad(n in TinyInt):
-    return 0
-"#;
-    let ast = parser::cursor::TokenCursor::parse_source(&with_int_tag(src));
-    let typed = transform_file(ast, FileId(0));
-    assert!(
-        typed
-            .declaration_flaws
-            .iter()
-            .any(|(_, f)| f.code.slug() == "type-in-range-on-bounded-int-tag"),
-        "expected InRangeOnBoundedIntTag flaw"
-    );
+    assert_eq!(validity.domain().storage_hull().unwrap().max(), max);
+    assert_eq!(ty.int_bounds(), None);
 }

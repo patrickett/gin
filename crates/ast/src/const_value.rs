@@ -5,6 +5,7 @@
 //! within `typecheck`.
 
 use crate::HashFloat;
+use i256::I256;
 use internment::Intern;
 use std::sync::Arc;
 
@@ -48,13 +49,17 @@ impl TypeConstraint {
 /// A compile-time known constant value tracked through flow analysis.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ConstValue {
-    Int(i128),
+    Int(I256),
     Float(HashFloat),
     String(String),
     Tag {
         name: Intern<String>,
         qual_path: Option<String>,
         args: Arc<[ConstValue]>,
+    },
+    ResultAlternative {
+        owner: crate::ResultFamilyOwner,
+        label: Intern<String>,
     },
     Record {
         fields: Arc<[(Intern<String>, ConstValue)]>,
@@ -63,12 +68,16 @@ pub enum ConstValue {
 }
 
 impl ConstValue {
-    pub const ZERO: ConstValue = ConstValue::Int(0);
-    pub const ONE: ConstValue = ConstValue::Int(1);
+    pub const ZERO: ConstValue = ConstValue::Int(I256::from_i128(0));
+    pub const ONE: ConstValue = ConstValue::Int(I256::from_i128(1));
 
     pub fn as_const_size_int(&self) -> Option<i128> {
         match self {
-            ConstValue::Int(n) => Some(*n),
+            ConstValue::Int(n)
+                if *n >= I256::from_i128(i128::MIN) && *n <= I256::from_i128(i128::MAX) =>
+            {
+                Some(n.as_i128())
+            }
             ConstValue::Tag { name, args, .. } if name.as_str() == "Const" => {
                 args.first()?.as_const_size_int()
             }
@@ -80,7 +89,7 @@ impl ConstValue {
         ConstValue::Tag {
             name: Intern::from_ref("Const"),
             qual_path: None,
-            args: vec![ConstValue::Int(n)].into(),
+            args: vec![ConstValue::Int(I256::from(n))].into(),
         }
     }
 
@@ -94,6 +103,13 @@ impl ConstValue {
 
     pub fn eval_binop(&self, op: &crate::BinOp, rhs: &ConstValue) -> Option<ConstValue> {
         use crate::BinOp;
+        if *op == BinOp::Equal {
+            return Some(ConstValue::Tag {
+                name: Intern::from_ref(if self == rhs { "True" } else { "False" }),
+                qual_path: None,
+                args: vec![].into(),
+            });
+        }
         // Only wrap in `Const` tag when at least one operand already is a `Const`
         // size tag. Plain `Int` values should stay as `Int` (unwrapped).
         let is_const_size = matches!(
@@ -148,19 +164,27 @@ impl ConstValue {
                 BinOp::Subtract => Some(ConstValue::Int(a.wrapping_sub(*b))),
                 BinOp::Multiply => Some(ConstValue::Int(a.wrapping_mul(*b))),
                 BinOp::Divide => {
-                    if *b != 0 {
-                        Some(ConstValue::Int(a / *b))
+                    if *b != I256::from(0) {
+                        Some(ConstValue::Int(*a / *b))
                     } else {
                         None
                     }
                 }
                 BinOp::Modulo => {
-                    if *b != 0 {
-                        Some(ConstValue::Int(a % *b))
+                    if *b != I256::from(0) {
+                        Some(ConstValue::Int(*a % *b))
                     } else {
                         None
                     }
                 }
+                BinOp::ShiftLeft => crate::integer::to_u64(*b)
+                    .and_then(|shift| u32::try_from(shift).ok())
+                    .filter(|shift| *shift < 256)
+                    .map(|shift| ConstValue::Int(*a << shift)),
+                BinOp::ShiftRight => crate::integer::to_u64(*b)
+                    .and_then(|shift| u32::try_from(shift).ok())
+                    .filter(|shift| *shift < 256)
+                    .map(|shift| ConstValue::Int(*a >> shift)),
                 _ => None,
             },
             (ConstValue::Float(HashFloat(a)), ConstValue::Float(HashFloat(b))) => match op {
@@ -196,6 +220,7 @@ impl ConstValue {
                     format!("{tag_name}({})", args.join(", "))
                 }
             }
+            ConstValue::ResultAlternative { label, .. } => label.as_str().to_string(),
             ConstValue::Record { fields } => {
                 let fields: Vec<String> = fields
                     .iter()
@@ -228,6 +253,7 @@ impl ConstValue {
             ConstValue::Int(i) => Intern::new(i.to_string()),
             ConstValue::Float(HashFloat(f)) => Intern::new(f.to_string()),
             ConstValue::Tag { name, .. } => *name,
+            ConstValue::ResultAlternative { label, .. } => *label,
             ConstValue::Record { .. } => Intern::new(String::from("Record")),
             ConstValue::List(_) => Intern::new(String::from("List")),
         }

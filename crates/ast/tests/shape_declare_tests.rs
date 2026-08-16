@@ -23,7 +23,10 @@ fn simple_shape_with_fields() {
     let coord_id = TagId(Intern::new("Coord".to_string()));
     let tag = typed.tags.get(&coord_id).expect("Coord tag exists");
 
-    match &tag.resolved_ty {
+    match typed
+        .type_registry
+        .resolved_definition_for_type(&tag.resolved_ty)
+    {
         Ty::Record { name, fields, .. } => {
             assert_eq!(name.as_str(), "Coord", "record name");
             assert_eq!(fields.len(), 3, "three fields");
@@ -60,7 +63,10 @@ fn has_method_does_not_become_record_field() {
     let range_id = TagId(Intern::new("Range".to_string()));
     let tag = typed.tags.get(&range_id).expect("Range tag exists");
 
-    match &tag.resolved_ty {
+    match typed
+        .type_registry
+        .resolved_definition_for_type(&tag.resolved_ty)
+    {
         Ty::Record { name, fields, .. } => {
             assert_eq!(name.as_str(), "Range", "record name");
             assert_eq!(fields.len(), 2, "only 2 fields (not contains)");
@@ -108,7 +114,10 @@ fn generic_shape_with_type_params() {
         panic!("expected generic params on Pair, got none");
     }
 
-    match &tag.resolved_ty {
+    match typed
+        .type_registry
+        .resolved_definition_for_type(&tag.resolved_ty)
+    {
         Ty::Record { name, fields, .. } => {
             assert_eq!(name.as_str(), "Pair");
             assert_eq!(fields.len(), 2);
@@ -145,7 +154,12 @@ fn shape_with_interface_member() {
 
     // The `resolved_ty` should be a Record.
     assert!(
-        matches!(&tag.resolved_ty, Ty::Record { .. }),
+        matches!(
+            typed
+                .type_registry
+                .resolved_definition_for_type(&tag.resolved_ty),
+            Ty::Record { .. }
+        ),
         "Iterator should be a Record, got {:?}",
         tag.resolved_ty
     );
@@ -171,7 +185,12 @@ Allocator has
     let tag = typed.tags.get(&alloc_id).expect("Allocator tag exists");
 
     assert!(
-        matches!(&tag.resolved_ty, Ty::Record { .. }),
+        matches!(
+            typed
+                .type_registry
+                .resolved_definition_for_type(&tag.resolved_ty),
+            Ty::Record { .. }
+        ),
         "Allocator should be a Record, got {:?}",
         tag.resolved_ty
     );
@@ -231,12 +250,14 @@ Coord has Default
         tag.provided_traits
     );
 
-    // Compiler always synthesises Reflectable.
     let has_reflectable = tag
         .provided_traits
         .iter()
         .any(|pt| pt.trait_name.as_str() == "Reflectable");
-    assert!(has_reflectable, "Reflectable should be synthesised");
+    assert!(
+        !has_reflectable,
+        "reflection must not be synthesized without an authenticated schema"
+    );
 
     let flaws = typed.all_flaws();
     let _ = flaws;
@@ -283,7 +304,10 @@ Status is
     let status_id = TagId(Intern::new("Status".to_string()));
     let tag = typed.tags.get(&status_id).expect("Status tag exists");
 
-    match &tag.resolved_ty {
+    match typed
+        .type_registry
+        .resolved_definition_for_type(&tag.resolved_ty)
+    {
         Ty::Union { name, variants, .. } => {
             assert_eq!(name.as_str(), "Status");
 
@@ -331,7 +355,10 @@ fn union_with_generic_variant() {
     let maybe_id = TagId(Intern::new("Maybe".to_string()));
     let tag = typed.tags.get(&maybe_id).expect("Maybe tag exists");
 
-    match &tag.resolved_ty {
+    match typed
+        .type_registry
+        .resolved_definition_for_type(&tag.resolved_ty)
+    {
         Ty::Union { name, variants, .. } => {
             assert_eq!(name.as_str(), "Maybe");
 

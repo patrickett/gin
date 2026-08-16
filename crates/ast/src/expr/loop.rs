@@ -1,5 +1,5 @@
-use crate::expr::Expr;
 use crate::expr::Typed;
+use crate::expr::{Condition, Expr};
 use crate::span::SubSpan;
 
 /// For-in loop: iterate over a range or collection
@@ -39,7 +39,7 @@ pub struct ForInLoop {
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WhileLoop {
-    pub cond: Box<Typed<Expr>>,
+    pub condition: Condition,
     pub exprs: Vec<Typed<Expr>>,
     pub keyword_span: SubSpan,
 }

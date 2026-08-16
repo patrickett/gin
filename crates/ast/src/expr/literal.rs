@@ -1,4 +1,5 @@
 use crate::HashFloat;
+use i256::I256;
 use std::fmt;
 
 #[derive(Debug, Clone, Hash)]
@@ -6,7 +7,7 @@ use std::fmt;
 pub enum Literal {
     Number(usize),
     Float(HashFloat),
-    Int(u128),
+    Int(I256),
     String(String),
 }
 

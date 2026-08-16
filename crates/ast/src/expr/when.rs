@@ -1,6 +1,5 @@
 use crate::Pattern;
-use crate::expr::Expr;
-use crate::expr::Typed;
+use crate::expr::{Condition, Expr, Typed};
 use crate::span::{Spanned, SubSpan};
 
 /// Exhaustive conditional expression.
@@ -32,11 +31,11 @@ pub struct WhenExpr {
 pub enum WhenArm {
     /// Boolean condition: `<condition> then <body>`
     Cond {
-        condition: Box<Typed<Expr>>,
+        condition: Condition,
         body: Box<Typed<Expr>>,
         arm_span: SubSpan,
     },
-/// Pattern match: `is <pattern> then <body>` — a dedicated [`Pattern`] node.
+    /// Pattern match: `is <pattern> then <body>` — a dedicated [`Pattern`] node.
     Is {
         pattern: Box<Spanned<Pattern>>,
         body: Box<Typed<Expr>>,

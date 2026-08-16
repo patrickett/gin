@@ -37,7 +37,7 @@ all_copy(fields List(NamedTy)) Bool := when fields is
     assert_eq!(
         markdown,
         "\
-```gin\nf x\n```"
+```gin\nf NamedTy\n```"
     );
 }
 
@@ -71,6 +71,6 @@ all_copy(fields List(NamedTy)) Bool := when fields is
     assert_eq!(
         markdown,
         "\
-```gin\nrest List(x)\n```"
+```gin\nrest List(NamedTy)\n```"
     );
 }

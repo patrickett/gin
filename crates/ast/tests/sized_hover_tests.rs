@@ -39,7 +39,6 @@ Reflectable has shape Type
 const SIZED_SRC: &str = "\
 Size is Const(BigInt) or Dynamic
 
-#auto
 Sized has size Size: compute_size(Self)
 
 compute_size(x Type) Size := when x is
@@ -112,17 +111,14 @@ fn hover_primitive_and_w_in_compute_size() {
         .hover_at_with_package(src, line, character, Some(&index))
         .expect("hover on Primitive")
         .markdown;
-    assert_eq!(
-        hover,
-        "```gin\nPrimitive(width in 0...18446744073709551615, signed Bool)\n```"
-    );
+    assert_eq!(hover, "```gin\nPrimitive(width BigInt, signed Bool)\n```");
     let w_pos = arm_start + arm.find('w').expect("w binder");
     let (line, character) = src.byte_offset_to_position(w_pos);
     let hover = typed
         .hover_at_with_package(src, line, character, Some(&index))
         .expect("hover on w")
         .markdown;
-    assert_eq!(hover, "```gin\nw in 0...18446744073709551615\n```");
+    assert_eq!(hover, "```gin\nw BigInt\n```");
 }
 
 #[test]
@@ -173,7 +169,7 @@ fn hover_record_pattern_fields_and_variant_head() {
         .markdown;
     assert_eq!(
         record_hover,
-        "```gin\nRecord(name bytes: pointer: *in 0...18446744073709551615, length: in 0...18446744073709551615, fields List)\n```"
+        "```gin\nRecord(name String, fields List(NamedTy))\n```"
     );
 
     let sum_named_pos = arm_start + arm.find("sum_named").expect("sum_named");

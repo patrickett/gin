@@ -269,7 +269,10 @@ fn indexed_adt_parses() {
     );
     let vec_id = typecheck::TagId(Intern::new("Vec".to_string()));
     let tag = typed.tags.get(&vec_id).expect("Vec tag exists");
-    if let Ty::Union { variants, .. } = &tag.resolved_ty {
+    if let Ty::Union { variants, .. } = typed
+        .type_registry
+        .resolved_definition_for_type(&tag.resolved_ty)
+    {
         assert_eq!(variants.len(), 2, "two variants");
         let nil = &variants[0];
         assert_eq!(nil.name.as_str(), "Nil");
@@ -300,7 +303,7 @@ fn const_generic_union_stores_resolved_params() {
     // The base union type should NOT have resolved_params (none set on the tag itself).
     if let Ty::Union {
         resolved_params, ..
-    } = &vec_ty
+    } = typed.type_registry.resolved_definition_for_type(&vec_ty)
     {
         assert!(
             resolved_params.is_none(),
@@ -387,7 +390,10 @@ fn const_generic_call_substituted_ty_is_record() {
             ..
         } => {
             assert!(
-                matches!(ty, Ty::Record { name, .. } if name.as_str() == "Pair"),
+                matches!(
+                    typed.type_registry.resolved_definition_for_type(ty),
+                    Ty::Record { name, .. } if name.as_str() == "Pair"
+                ),
                 "expected substituted_ty to be Pair record, got {:?}",
                 ty
             );

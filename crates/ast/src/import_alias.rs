@@ -116,7 +116,7 @@ impl Folder for ImportAliasFolder {
             WhenArm::Cond {
                 condition, body, ..
             } => {
-                self.visit_expr(&mut condition.value)?;
+                self.visit_condition(condition)?;
                 self.visit_expr(&mut body.value)
             }
             WhenArm::Is { pattern, body, .. } => {
@@ -124,6 +124,21 @@ impl Folder for ImportAliasFolder {
                 self.visit_expr(&mut body.value)
             }
             WhenArm::Else(body, _) => self.visit_expr(&mut body.value),
+        }
+    }
+
+    fn visit_condition(&mut self, condition: &mut crate::Condition) -> ControlFlow<()> {
+        match condition {
+            crate::Condition::Is { subject, pattern } => {
+                self.visit_expr(&mut subject.value)?;
+                pattern.value.apply_alias(&self.alias_map);
+                Continue(())
+            }
+            crate::Condition::Not(inner) => self.visit_condition(inner),
+            crate::Condition::And(left, right) | crate::Condition::Or(left, right) => {
+                self.visit_condition(left)?;
+                self.visit_condition(right)
+            }
         }
     }
 
@@ -146,7 +161,13 @@ impl Pattern {
     fn apply_alias(&mut self, alias_map: &AliasMap) {
         match self {
             Pattern::Nominal(name, span) => {
-                if let Some(target) = alias_map.get(name) {
+                if name
+                    .as_str()
+                    .chars()
+                    .next()
+                    .is_some_and(|character| character.is_ascii_uppercase())
+                    && let Some(target) = alias_map.get(name)
+                {
                     *self = Pattern::Qualified(Spanned::new(target.value.clone(), *span));
                 }
             }
@@ -158,9 +179,7 @@ impl Pattern {
                     match kind {
                         crate::ParameterKind::Tagged(sp) => sp.value.apply_alias(alias_map),
                         crate::ParameterKind::ValueParam { ty }
-                        | crate::ParameterKind::Inferred { ty } => {
-                            ty.value.apply_alias(alias_map)
-                        }
+                        | crate::ParameterKind::Inferred { ty } => ty.value.apply_alias(alias_map),
                         _ => {}
                     }
                 }
@@ -177,7 +196,8 @@ impl Pattern {
                     elem.value.apply_alias(alias_map);
                 }
             }
-            Pattern::Literal(..) | Pattern::Unit | Pattern::ListEmpty | Pattern::InRange { .. } => {}
+            Pattern::Literal(..) | Pattern::Unit | Pattern::ListEmpty | Pattern::InRange { .. } => {
+            }
         }
     }
 }

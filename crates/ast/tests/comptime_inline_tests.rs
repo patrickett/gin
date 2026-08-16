@@ -6,8 +6,8 @@ use internment::Intern;
 use parser::cursor::TokenCursor;
 use typecheck::prepare_parse_ast;
 use typecheck::transform::{TransformCtx, transform};
-use typecheck::{BindBody, DefId, ExprId, FileId, TypedExprKind};
 use typecheck::typed::CallCapability;
+use typecheck::{BindBody, DefId, ExprId, FileId, TypedExprKind};
 
 fn transform_prepared(source: &str) -> typecheck::TypedFileAst {
     let mut file_ast = TokenCursor::parse_source(source);
@@ -68,7 +68,9 @@ fn literal_string_values_for_name<'a>(
         walk_exprs(typed, *root, &mut |_, kind| {
             let value_id = match kind {
                 TypedExprKind::Bind { name: n, body, .. } if n.as_str() == name => Some(*body),
-                TypedExprKind::Reassign { name: n, value } if n.as_str() == name => Some(*value),
+                TypedExprKind::Reassign { name: n, value, .. } if n.as_str() == name => {
+                    Some(*value)
+                }
                 _ => None,
             };
             if let Some(id) = value_id
@@ -90,8 +92,7 @@ fn comptime_fn_inlined_in_main_with_type_arg() {
         .get(&DefId(Intern::from_ref("size_for")))
         .expect("size_for def in typed ast");
     assert!(
-        size_for.is_constant
-            && size_for.call_capability == CallCapability::StagePolymorphic,
+        size_for.is_constant && size_for.call_capability == CallCapability::StagePolymorphic,
         "size_for must be a stage-polymorphic constant bind in typed defs"
     );
     let roots = main_body_exprs(&typed);
@@ -102,7 +103,7 @@ fn comptime_fn_inlined_in_main_with_type_arg() {
     );
     let n_values = literal_string_values_for_name(&typed, &roots, "n");
     assert_eq!(n_values.len(), 1);
-    assert!(matches!(n_values[0], ConstValue::Int(64)));
+    assert!(matches!(n_values[0], ConstValue::Int(value) if *value == i256::I256::from(64)));
 }
 
 #[test]
@@ -143,7 +144,7 @@ fn comptime_fn_inlined_returning_negative_int() {
     for root in roots {
         walk_exprs(&typed, root, &mut |id, kind| {
             if let Some(cv) = &typed.exprs.const_value[id.as_usize()]
-                && matches!(cv, ConstValue::Int(-1))
+                && matches!(cv, ConstValue::Int(value) if *value == (-1).into())
             {
                 inline_values += 1;
             }

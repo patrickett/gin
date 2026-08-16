@@ -4,9 +4,7 @@ use std::ops::ControlFlow;
 
 use internment::Intern;
 
-use crate::{AsmExpr, DefMap, Expr, FileAst, FnCall, folder::*, path::ModPath};
-
-use ControlFlow::Continue;
+use crate::{DefMap, Expr, FileAst, FnCall, folder::*, path::ModPath};
 
 impl FileAst {
     /// Prefix every top-level def with `module_qual.` (e.g. `io.print`), rewrite
@@ -73,16 +71,6 @@ impl Folder for ModuleQualifyFolder {
             .rewrite_module_path(&self.old_names, &self.qual_parts);
         walk_fn_call_mut(self, call)
     }
-
-    fn visit_asm_expr(&mut self, a: &mut AsmExpr) -> ControlFlow<()> {
-        if let Some(spec) = &mut a.spec_expr {
-            self.visit_expr(spec)?;
-        }
-        for o in &mut a.operand_values {
-            self.visit_expr(o)?;
-        }
-        Continue(())
-    }
 }
 
 impl ModPath {
@@ -99,7 +87,8 @@ impl ModPath {
             return;
         }
         let old_root = self.root;
-        let mut segments: Vec<Intern<String>> = qual_parts[1..].to_vec();
+        let mut segments = Vec::with_capacity(qual_parts.len());
+        segments.extend_from_slice(&qual_parts[1..]);
         segments.push(old_root);
         self.root = qual_parts[0];
         self.segments = segments;

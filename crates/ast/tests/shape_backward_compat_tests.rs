@@ -27,7 +27,12 @@ Default(value) has default value";
             .get(&id)
             .unwrap_or_else(|| panic!("{name} tag should exist"));
         assert!(
-            matches!(&tag.resolved_ty, Ty::Record { .. }),
+            matches!(
+                typed
+                    .type_registry
+                    .resolved_definition_for_type(&tag.resolved_ty),
+                Ty::Record { .. }
+            ),
             "{name} should be a Record, got {:?}",
             tag.resolved_ty
         );
@@ -76,7 +81,12 @@ Allocator has
     let allocator_id = TagId(Intern::new("Allocator".to_string()));
     let allocator = typed.tags.get(&allocator_id).expect("Allocator");
     assert!(
-        matches!(&allocator.resolved_ty, Ty::Record { .. }),
+        matches!(
+            typed
+                .type_registry
+                .resolved_definition_for_type(&allocator.resolved_ty),
+            Ty::Record { .. }
+        ),
         "Allocator should be a Record, got {:?}",
         allocator.resolved_ty
     );

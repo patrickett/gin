@@ -3,15 +3,23 @@ use std::collections::HashMap;
 use indexmap::IndexMap;
 use internment::Intern;
 
+use crate::GroupPath;
 use crate::doc_comment::DocComment;
 use crate::expr::{Expr, Typed};
 use crate::parameter::{GroupParam, ParamConvention, ParamSlot, Parameters};
 use crate::path::ModPath;
 use crate::prelude::*;
 use crate::span::{SpanId, Spanned};
-use crate::ty::{PredicateExpr, Ty};
+use crate::ty::{PredicateExpr, ResultAlternative, Ty};
 use crate::ty_state::TyState;
-use crate::GroupPath;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BindOperator {
+    FreshMutable,
+    FreshImmutable,
+    Rebind,
+    Compound(BinOp),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bind {
@@ -35,8 +43,9 @@ pub struct Bind {
     pub return_type_name: Option<Intern<String>>,
     /// Explicit return type annotation stored as an ordinary expression.
     pub return_tag: Option<Box<Spanned<Expr>>>,
-    /// Bound with `:=` instead of `:`. Immutable after evaluation in this scope.
-    pub is_constant: bool,
+    pub return_refinement: Option<PredicateExpr>,
+    pub anonymous_result_alternatives: Vec<Spanned<ResultAlternative>>,
+    pub operator: BindOperator,
     /// Resolved/progressive return type. Populated during analysis.
     /// Replaces `return_type_name` + `return_tag` + the `fn_return_types` side-table.
     pub return_type: TyState,
@@ -65,7 +74,9 @@ impl Bind {
             receiver_typevars: HashMap::new(),
             return_type_name: None,
             return_tag: None,
-            is_constant: false,
+            return_refinement: None,
+            anonymous_result_alternatives: Vec::new(),
+            operator: BindOperator::FreshMutable,
             return_type: TyState::Infer,
             type_annotation: None,
             type_annotation_qual: None,
@@ -99,6 +110,17 @@ impl Bind {
     pub fn with_attributes(mut self, attrs: BindAttributes) -> Self {
         self.attributes = attrs;
         self
+    }
+
+    pub fn is_constant(&self) -> bool {
+        self.operator == BindOperator::FreshImmutable
+    }
+
+    pub fn is_rebind(&self) -> bool {
+        matches!(
+            self.operator,
+            BindOperator::Rebind | BindOperator::Compound(_)
+        )
     }
 
     pub fn value_mut(&mut self) -> &mut BindValue {
@@ -162,6 +184,8 @@ impl std::hash::Hash for Bind {
         }
         self.receiver_type.hash(state);
         self.return_tag.hash(state);
+        self.return_refinement.hash(state);
+        self.anonymous_result_alternatives.hash(state);
         self.return_type_name.hash(state);
         self.type_annotation.hash(state);
         self.type_annotation_qual.hash(state);
@@ -306,6 +330,10 @@ pub struct BindAttributes {
     pub debug_only: bool,
     /// Time complexity annotation (`#complexity(...)`). `None` means unannotated.
     pub complexity: Option<Complexity>,
+    pub intrinsic: Option<Intern<String>>,
+    pub operator_role: Option<OperatorRole>,
+    pub invalid_operator_role: Option<Intern<String>>,
+    pub operator_role_span: Option<SpanId>,
     /// Raw parsed attributes before semantic extraction.
     /// `None` means no attributes were present.
     pub raw_attributes: Option<Vec<AttributeItem>>,
@@ -328,6 +356,24 @@ impl BindAttributes {
                 AttributeItem::Call { name, args, .. } => {
                     if name.as_str() == "complexity" {
                         self.complexity = Complexity::extract(args);
+                    } else if name.as_str() == "intrinsic"
+                        && let Some(Typed {
+                            value: Expr::AnonymousTag(intrinsic),
+                            ..
+                        }) = args.first()
+                    {
+                        self.intrinsic = Some(*intrinsic);
+                    } else if name.as_str() == "operator"
+                        && let Some(Typed {
+                            value: Expr::AnonymousTag(role),
+                            ..
+                        }) = args.first()
+                    {
+                        self.operator_role = role.as_str().parse().ok();
+                        if self.operator_role.is_none() {
+                            self.invalid_operator_role = Some(*role);
+                        }
+                        self.operator_role_span = Some(args[0].span_id);
                     }
                 }
                 AttributeItem::Flag { name, .. } => match name.as_str() {

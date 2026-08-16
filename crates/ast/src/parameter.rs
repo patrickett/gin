@@ -1,11 +1,11 @@
 use indexmap::IndexMap;
 use internment::Intern;
 
+use crate::GroupPath;
 use crate::expr::{Expr, Typed};
 use crate::span::SpanId;
 use crate::span::Spanned;
 use crate::ty_state::TyState;
-use crate::GroupPath;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ParamConvention {

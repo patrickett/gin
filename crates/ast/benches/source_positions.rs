@@ -21,7 +21,7 @@ fn synthetic_gin() -> &'static str {
             s.push_str("register_");
             s.push_str(&i.to_string());
             s.push_str(" has value Str\n\n");
-            s.push_str("AsmSpec_");
+            s.push_str("SyscallSpec_");
             s.push_str(&i.to_string());
             s.push_str(" has template Str, constraints Str\n\n");
         }
@@ -46,12 +46,23 @@ fn make_gin(lines: usize) -> String {
     s
 }
 
+fn make_unicode_gin(lines: usize) -> String {
+    let mut s = String::with_capacity(lines * 32);
+    for i in 0..lines {
+        s.push_str("déclaration_");
+        s.push_str(&i.to_string());
+        s.push_str(" is '😀💯'\n");
+    }
+    s
+}
+
 fn make_sources() -> Vec<(&'static str, String)> {
     vec![
         ("synthetic_7k", synthetic_gin().to_string()),
         ("synth_100ln", make_gin(100)),
         ("synth_1k", make_gin(1_000)),
         ("synth_10k", make_gin(10_000)),
+        ("unicode_1k", make_unicode_gin(1_000)),
     ]
 }
 

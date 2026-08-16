@@ -1,7 +1,7 @@
 use std::ops::ControlFlow;
 
 use crate::{
-    AsmExpr, Binary, Bind, BindValue, Expr, FileAst, FnCall, ForInLoop, FormatPart, FormatString,
+    Binary, Bind, BindValue, Condition, Expr, FileAst, FnCall, ForInLoop, FormatPart, FormatString,
     IfExpr, Loop, Range, Return, SpanId, TagCall, WhenArm, WhenExpr, WhileLoop,
 };
 
@@ -19,7 +19,6 @@ macro_rules! walk_expr_body {
             Expr::TagCall(tc) => $v.visit_tag_call(tc),
             Expr::FormatString(fs) => $v.visit_format_string(fs),
             Expr::Range(r) => $v.visit_range(r),
-            Expr::Asm(a) => $v.visit_asm_expr(a),
             Expr::RecordLit(fields) => {
                 for (_, e) in fields {
                     $v.visit_expr(e)?;
@@ -46,7 +45,9 @@ macro_rules! walk_expr_body {
                 $v.visit_expr(buf)?;
                 $v.visit_expr(index)
             }
-            Expr::BufSet { buf, index, value } => {
+            Expr::BufSet {
+                buf, index, value, ..
+            } => {
                 $v.visit_expr(buf)?;
                 $v.visit_expr(index)?;
                 $v.visit_expr(value)
@@ -58,9 +59,9 @@ macro_rules! walk_expr_body {
             | Expr::Eat(e)
             | Expr::Deref(e)
             | Expr::Negate(e) => $v.visit_expr(e),
-            Expr::Lit(_)
-            | Expr::SelfRef
-            | Expr::AnonymousTag(..) => Continue(()),
+            Expr::Lit(_) | Expr::SelfRef | Expr::AnonymousTag(..) | Expr::TargetQuery { .. } => {
+                Continue(())
+            }
         }
     };
 }
@@ -70,24 +71,37 @@ macro_rules! walk_expr_child_nodes {
         match $expr {
             Expr::FnCall(call) => {
                 if let Some(args) = borrow!(call.args) {
-                    for arg in args { child!(arg); }
+                    for arg in args {
+                        child!(arg);
+                    }
                 }
             }
-            Expr::Binary(binary) => { child!(binary.lhs); child!(binary.rhs); }
+            Expr::Binary(binary) => {
+                child!(binary.lhs);
+                child!(binary.rhs);
+            }
             Expr::Bind(bind) => match borrow!(bind.value) {
                 BindValue::Expr(expr) => child!(expr),
                 BindValue::Body { exprs, ret } => {
-                    for expr in exprs { child!(expr); }
-                    if let Some(expr) = borrow!(ret.value) { child!(expr); }
+                    for expr in exprs {
+                        child!(expr);
+                    }
+                    if let Some(expr) = borrow!(ret.value) {
+                        child!(expr);
+                    }
                 }
                 BindValue::Extern | BindValue::Unassigned => {}
             },
             Expr::When(when) => {
-                if let Some(subject) = borrow!(when.subject) { child!(subject); }
+                if let Some(subject) = borrow!(when.subject) {
+                    child!(subject);
+                }
                 for arm in borrow!(when.arms) {
                     match arm {
-                        WhenArm::Cond { condition, body, .. } => {
-                            child!(condition);
+                        WhenArm::Cond {
+                            condition, body, ..
+                        } => {
+                            condition!(condition);
                             child!(body);
                         }
                         WhenArm::Is { body, .. } | WhenArm::Else(body, _) => child!(body),
@@ -95,41 +109,59 @@ macro_rules! walk_expr_child_nodes {
                 }
             }
             Expr::If(if_expr) => {
-                child!(if_expr.subject);
-                for expr in borrow!(if_expr.body) { child!(expr); }
-                if let Some(expr) = borrow!(if_expr.ret.value) { child!(expr); }
+                condition!(borrow!(if_expr.condition));
+                for expr in borrow!(if_expr.body) {
+                    child!(expr);
+                }
+                if let Some(expr) = borrow!(if_expr.ret.value) {
+                    child!(expr);
+                }
             }
             Expr::Loop(loop_expr) => match loop_expr {
                 Loop::While(while_loop) => {
-                    child!(while_loop.cond);
-                    for expr in borrow!(while_loop.exprs) { child!(expr); }
+                    condition!(borrow!(while_loop.condition));
+                    for expr in borrow!(while_loop.exprs) {
+                        child!(expr);
+                    }
                 }
                 Loop::ForIn(for_loop) => {
                     child!(for_loop.pat);
                     child!(for_loop.iter);
-                    for expr in borrow!(for_loop.exprs) { child!(expr); }
+                    for expr in borrow!(for_loop.exprs) {
+                        child!(expr);
+                    }
                 }
             },
             Expr::TagCall(call) => {
-                for arg in borrow!(call.args) { child!(arg); }
+                for arg in borrow!(call.args) {
+                    child!(arg);
+                }
             }
             Expr::FormatString(format) => {
                 for part in borrow!(format.parts) {
-                    if let FormatPart::Expr(expr, _) = part { child!(expr); }
+                    if let FormatPart::Expr(expr, _) = part {
+                        child!(expr);
+                    }
                 }
             }
-            Expr::Range(range) => { child!(range.start); child!(range.end); }
-            Expr::Asm(asm) => {
-                if let Some(spec) = borrow!(asm.spec_expr) { child!(spec); }
-                for operand in borrow!(asm.operand_values) { child!(operand); }
+            Expr::Range(range) => {
+                child!(range.start);
+                child!(range.end);
             }
             Expr::RecordLit(fields) => {
-                for (_, expr) in fields { child!(expr); }
+                for (_, expr) in fields {
+                    child!(expr);
+                }
             }
             Expr::TupleLit(exprs) | Expr::List(exprs) => {
-                for expr in exprs { child!(expr); }
+                for expr in exprs {
+                    child!(expr);
+                }
             }
-            Expr::TupleAlloc { init, size } => { child!(init); child!(size); }
+            Expr::TupleAlloc { init, size } => {
+                child!(init);
+                child!(size);
+            }
             Expr::TupleGet { base, .. }
             | Expr::RecordGet { base, .. }
             | Expr::Cast { expr: base, .. }
@@ -144,15 +176,18 @@ macro_rules! walk_expr_child_nodes {
                 child!(base);
                 child!(value);
             }
-            Expr::BufGet { buf, index } => { child!(buf); child!(index); }
-            Expr::BufSet { buf, index, value } => {
+            Expr::BufGet { buf, index } => {
+                child!(buf);
+                child!(index);
+            }
+            Expr::BufSet {
+                buf, index, value, ..
+            } => {
                 child!(buf);
                 child!(index);
                 child!(value);
             }
-            Expr::Lit(_)
-            | Expr::SelfRef
-            | Expr::AnonymousTag(_) => {}
+            Expr::Lit(_) | Expr::SelfRef | Expr::AnonymousTag(_) | Expr::TargetQuery { .. } => {}
         }
         Continue(())
     }};
@@ -162,8 +197,21 @@ pub fn walk_typed_expr_children<'a>(
     expr: &'a Expr,
     visit: &mut impl FnMut(&'a crate::expr::Typed<Expr>) -> ControlFlow<()>,
 ) -> ControlFlow<()> {
-    macro_rules! borrow { ($value:expr) => { &$value }; }
-    macro_rules! child { ($child:expr) => { visit(&*$child)? }; }
+    macro_rules! borrow {
+        ($value:expr) => {
+            &$value
+        };
+    }
+    macro_rules! child {
+        ($child:expr) => {
+            visit(&*$child)?
+        };
+    }
+    macro_rules! condition {
+        ($condition:expr) => {
+            walk_condition_typed_exprs(&$condition, visit)?
+        };
+    }
     walk_expr_child_nodes!(expr)
 }
 
@@ -171,9 +219,50 @@ pub fn walk_typed_expr_children_mut(
     expr: &mut Expr,
     visit: &mut impl FnMut(&mut crate::expr::Typed<Expr>) -> ControlFlow<()>,
 ) -> ControlFlow<()> {
-    macro_rules! borrow { ($value:expr) => { &mut $value }; }
-    macro_rules! child { ($child:expr) => { visit(&mut *$child)? }; }
+    macro_rules! borrow {
+        ($value:expr) => {
+            &mut $value
+        };
+    }
+    macro_rules! child {
+        ($child:expr) => {
+            visit(&mut *$child)?
+        };
+    }
+    macro_rules! condition {
+        ($condition:expr) => {
+            walk_condition_typed_exprs_mut($condition, visit)?
+        };
+    }
     walk_expr_child_nodes!(expr)
+}
+
+pub fn walk_condition_typed_exprs<'a>(
+    condition: &'a Condition,
+    visit: &mut impl FnMut(&'a crate::expr::Typed<Expr>) -> ControlFlow<()>,
+) -> ControlFlow<()> {
+    match condition {
+        Condition::Is { subject, .. } => visit(subject),
+        Condition::Not(inner) => walk_condition_typed_exprs(inner, visit),
+        Condition::And(left, right) | Condition::Or(left, right) => {
+            walk_condition_typed_exprs(left, visit)?;
+            walk_condition_typed_exprs(right, visit)
+        }
+    }
+}
+
+pub fn walk_condition_typed_exprs_mut(
+    condition: &mut Condition,
+    visit: &mut impl FnMut(&mut crate::expr::Typed<Expr>) -> ControlFlow<()>,
+) -> ControlFlow<()> {
+    match condition {
+        Condition::Is { subject, .. } => visit(subject),
+        Condition::Not(inner) => walk_condition_typed_exprs_mut(inner, visit),
+        Condition::And(left, right) | Condition::Or(left, right) => {
+            walk_condition_typed_exprs_mut(left, visit)?;
+            walk_condition_typed_exprs_mut(right, visit)
+        }
+    }
 }
 
 pub fn walk_expr_children<'a>(
@@ -261,10 +350,19 @@ walk_fn!(@d walk_when, walk_when_mut, v, when, WhenExpr, {
     Continue(())
 });
 
-walk_fn!(@s walk_when_arm, walk_when_arm_mut, v, arm, WhenArm, {
+walk_fn!(@d walk_when_arm, walk_when_arm_mut, v, arm, WhenArm, {
     match arm {
         WhenArm::Cond { condition, body, .. } => {
-            v.visit_expr(condition)?;
+            v.visit_condition(condition)?;
+            v.visit_expr(body)
+        }
+        WhenArm::Is { body, .. } => v.visit_expr(body),
+        WhenArm::Else(body, _) => v.visit_expr(body),
+    }
+}, {
+    match arm {
+        WhenArm::Cond { condition, body, .. } => {
+            v.visit_condition(condition)?;
             v.visit_expr(body)
         }
         WhenArm::Is { body, .. } => v.visit_expr(body),
@@ -272,12 +370,32 @@ walk_fn!(@s walk_when_arm, walk_when_arm_mut, v, arm, WhenArm, {
     }
 });
 
+walk_fn!(@d walk_condition, walk_condition_mut, v, condition, Condition, {
+    match condition {
+        Condition::Is { subject, .. } => v.visit_expr(subject),
+        Condition::Not(inner) => v.visit_condition(inner),
+        Condition::And(left, right) | Condition::Or(left, right) => {
+            v.visit_condition(left)?;
+            v.visit_condition(right)
+        }
+    }
+}, {
+    match condition {
+        Condition::Is { subject, .. } => v.visit_expr(subject),
+        Condition::Not(inner) => v.visit_condition(inner),
+        Condition::And(left, right) | Condition::Or(left, right) => {
+            v.visit_condition(left)?;
+            v.visit_condition(right)
+        }
+    }
+});
+
 walk_fn!(@d walk_if, walk_if_mut, v, ifx, IfExpr, {
-    v.visit_expr(&ifx.subject)?;
+    v.visit_condition(&ifx.condition)?;
     for e in &ifx.body { v.visit_expr(e)?; }
     v.visit_return(&ifx.ret)
 }, {
-    v.visit_expr(&mut ifx.subject)?;
+    v.visit_condition(&mut ifx.condition)?;
     for e in &mut ifx.body { v.visit_expr(e)?; }
     v.visit_return(&mut ifx.ret)
 });
@@ -290,11 +408,11 @@ walk_fn!(@s walk_loop, walk_loop_mut, v, l, Loop, {
 });
 
 walk_fn!(@d walk_while, walk_while_mut, v, w, WhileLoop, {
-    v.visit_expr(&w.cond)?;
+    v.visit_condition(&w.condition)?;
     for e in &w.exprs { v.visit_expr(e)?; }
     Continue(())
 }, {
-    v.visit_expr(&mut w.cond)?;
+    v.visit_condition(&mut w.condition)?;
     for e in &mut w.exprs { v.visit_expr(e)?; }
     Continue(())
 });
@@ -338,16 +456,6 @@ walk_fn!(@d walk_return, walk_return_mut, v, r, Return,
     { if let Some(e) = &mut r.value { v.visit_expr(e)?; } Continue(()) }
 );
 
-walk_fn!(@d walk_asm, walk_asm_mut, v, a, AsmExpr, {
-    if let Some(spec) = &a.spec_expr { v.visit_expr(spec)?; }
-    for o in &a.operand_values { v.visit_expr(o)?; }
-    Continue(())
-}, {
-    if let Some(spec) = &mut a.spec_expr { v.visit_expr(spec)?; }
-    for o in &mut a.operand_values { v.visit_expr(o)?; }
-    Continue(())
-});
-
 macro_rules! v {
     () => {
         fn visit_file_ast(&mut self, ast: &FileAst) -> ControlFlow<()> {
@@ -373,6 +481,9 @@ macro_rules! v {
         }
         fn visit_when_arm(&mut self, arm: &WhenArm) -> ControlFlow<()> {
             walk_when_arm(self, arm)
+        }
+        fn visit_condition(&mut self, condition: &Condition) -> ControlFlow<()> {
+            walk_condition(self, condition)
         }
         fn visit_if_expr(&mut self, ifx: &IfExpr) -> ControlFlow<()> {
             walk_if(self, ifx)
@@ -400,9 +511,6 @@ macro_rules! v {
         }
         fn visit_return(&mut self, r: &Return) -> ControlFlow<()> {
             walk_return(self, r)
-        }
-        fn visit_asm_expr(&mut self, a: &AsmExpr) -> ControlFlow<()> {
-            walk_asm(self, a)
         }
     };
 }
@@ -433,6 +541,9 @@ macro_rules! f {
         fn visit_when_arm(&mut self, arm: &mut WhenArm) -> ControlFlow<()> {
             walk_when_arm_mut(self, arm)
         }
+        fn visit_condition(&mut self, condition: &mut Condition) -> ControlFlow<()> {
+            walk_condition_mut(self, condition)
+        }
         fn visit_if_expr(&mut self, ifx: &mut IfExpr) -> ControlFlow<()> {
             walk_if_mut(self, ifx)
         }
@@ -460,9 +571,6 @@ macro_rules! f {
         fn visit_return(&mut self, r: &mut Return) -> ControlFlow<()> {
             walk_return_mut(self, r)
         }
-        fn visit_asm_expr(&mut self, a: &mut AsmExpr) -> ControlFlow<()> {
-            walk_asm_mut(self, a)
-        }
     };
 }
 
@@ -473,35 +581,4 @@ pub trait Visitor: Sized {
 /// Mutable folder — same shape as [`Visitor`] but with `&mut` references.
 pub trait Folder: Sized {
     f!();
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::expr::{Literal, Typed};
-    use crate::span::SpanId;
-
-    #[test]
-    fn tuple_allocation_visits_initializer_and_size() {
-        struct Literals(Vec<u128>);
-
-        impl Visitor for Literals {
-            fn visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
-                if let Expr::Lit(Literal::Int(value)) = expr {
-                    self.0.push(*value);
-                }
-                walk_expr(self, expr)
-            }
-        }
-
-        let expr = Expr::TupleAlloc {
-            init: Box::new(Typed::infer(Expr::Lit(Literal::Int(1)), SpanId::INVALID)),
-            size: Box::new(Typed::infer(Expr::Lit(Literal::Int(2)), SpanId::INVALID)),
-        };
-        let mut literals = Literals(Vec::new());
-
-        let _ = literals.visit_expr(&expr);
-
-        assert_eq!(literals.0, vec![1, 2]);
-    }
 }

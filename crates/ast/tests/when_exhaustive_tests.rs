@@ -37,10 +37,6 @@ fn is_wildcard_pattern(f: &Diagnostic) -> bool {
     f.code.slug() == "type-wildcard-when-pattern"
 }
 
-fn is_mixed_when_forms(f: &Diagnostic) -> bool {
-    f.code.slug() == "type-mixed-when-forms"
-}
-
 fn transform_resolved_package(files: Vec<(PathBuf, String)>) -> Vec<typecheck::TypedFileAst> {
     let mut deps = HashMap::new();
     let mut parsed = Vec::new();
@@ -127,12 +123,13 @@ pick(m Maybe(Int)) Int: when m is Some(x) then x
 }
 
 #[test]
-fn cond_when_still_requires_else() {
-    let source = "Bool is True or False\nInt is in 0...1000\nlt(x Int, y Int) Bool: True\nfoo(x Int) Int: when lt(x, 10) then x else 0";
+fn nonexhaustive_subject_when_still_requires_else() {
+    let source =
+        "Bool is True or False\nInt is in 0...1000\nfoo(x Int) Int: when x is 10 then x else 0";
     let typed = transform_source(source);
     assert!(!has_flaw(&typed, is_missing_else));
 
-    let source = "Bool is True or False\nInt is in 0...1000\nlt(x Int, y Int) Bool: True\nfoo(x Int) Int: when lt(x, 10) then x";
+    let source = "Bool is True or False\nInt is in 0...1000\nfoo(x Int) Int: when x is 10 then x";
     let typed = transform_source(source);
     assert!(has_flaw(&typed, is_missing_else));
 }
@@ -165,25 +162,24 @@ pick(b Bool) Int: when b is True then 1
 }
 
 #[test]
-fn lowercase_bool_value_alias_patterns_are_exhaustive() {
+fn lowercase_binding_pattern_is_exhaustive() {
     let source = r#"
 Bool is True or False
 false Bool: False
 true Bool: True
 Int is in 0...1000
-pick(b Bool) Int: when b is true then 1
-                         is false then 2
+pick(b Bool) Int: when b is value then 1
 "#;
     let typed = transform_source(source);
     assert!(
         !has_flaw(&typed, is_missing_else),
-        "true/false value patterns should cover Bool: {:?}",
+        "a lowercase binding should cover Bool: {:?}",
         typed.all_flaws()
     );
 }
 
 #[test]
-fn lowercase_bool_value_alias_pattern_with_else_is_valid() {
+fn lowercase_binding_makes_else_unreachable() {
     let source = r#"
 Bool is True or False
 false Bool: False
@@ -197,11 +193,11 @@ something() Int:
 "#;
     let typed = transform_source(source);
     assert!(!has_flaw(&typed, is_missing_else));
-    assert!(!has_flaw(&typed, is_unreachable_else));
+    assert!(has_flaw(&typed, is_unreachable_else));
 }
 
 #[test]
-fn known_subject_value_selects_matching_else_branch_when_is_arm_does_not_match() {
+fn lowercase_binding_matches_known_subject_value() {
     let source = r#"
 Bool is True or False
 false Bool: False
@@ -214,22 +210,19 @@ something() Int:
     return x
 "#;
     let typed = transform_source(source);
-    // The when is folded to just the else body at compile time.
-    // No MissingElseArm because the folded body is valid.
     assert!(!has_flaw(&typed, is_missing_else));
-    assert!(!has_flaw(&typed, is_unreachable_else));
+    assert!(has_flaw(&typed, is_unreachable_else));
 }
 
 #[test]
-fn else_must_be_last_in_boolean_when() {
-    let source = "Bool is True or False\nInt is in 0...1000\nx(_ Bool) Bool: True\npick(b Bool) Int: when x(b) then 1\n                         else 0\n                         x(b) then 2\n";
+fn arm_after_else_is_rejected() {
+    let source = "Bool is True or False\nInt is in 0...1000\npick(b Bool) Int: when b is True then 1\n                         else 0\n                         is False then 2\n";
     let typed = transform_source(source);
-    // The boolean form parser supports arms after else (via continue).
-    // The second `x(b) then 2` arm should be flagged unreachable.
-    // (Exact check: at least one unreachable arm flaw should exist.)
     assert!(
-        has_flaw(&typed, is_unreachable_arm),
-        "arm after else should be unreachable: {:?}",
+        typed.all_flaws().iter().any(|(_, flaw)| {
+            flaw.code.slug() == "type-unknown-symbol" && flaw.arg("name") == Some("__parse_error")
+        }),
+        "arm after else should be rejected: {:?}",
         typed.all_flaws()
     );
 }
@@ -334,7 +327,7 @@ something() Int:
 }
 
 #[test]
-fn imported_lowercase_bool_value_pattern_with_else_is_valid() {
+fn imported_lowercase_name_still_binds_in_pattern_position() {
     let pkg = TempPackage::new("when_imported_bool_values");
     pkg.write_flask_with_deps("app", r#"{"core":{"path":"."}}"#);
     let bool_path = pkg.write(
@@ -369,10 +362,10 @@ something() Int:
         .expect("main file typed output");
     assert!(
         !has_flaw(main_typed, is_missing_else),
-        "imported `true` should resolve as a value pattern: {:?}",
+        "a lowercase pattern should be exhaustive even when a value has the same name: {:?}",
         main_typed.all_flaws()
     );
-    assert!(!has_flaw(main_typed, is_unreachable_else));
+    assert!(has_flaw(main_typed, is_unreachable_else));
 }
 
 #[test]
@@ -492,14 +485,14 @@ pick(b Bool) Int: when b is _ then 1
 }
 
 #[test]
-fn lowercase_pattern_is_not_a_catch_all() {
+fn lowercase_pattern_is_a_catch_all() {
     let source = r#"
 Bool is True or False
 Int is in 0...1000
 pick(b Bool) Int: when b is value then 1
 "#;
     let typed = transform_source(source);
-    assert!(has_flaw(&typed, is_missing_else));
+    assert!(!has_flaw(&typed, is_missing_else));
 }
 
 #[test]
@@ -556,7 +549,7 @@ pick(b Bool) Int: when b is True then 1
 }
 
 #[test]
-fn condition_and_pattern_arms_cannot_be_mixed() {
+fn condition_arm_without_explicit_pattern_is_rejected() {
     let source = r#"
 Bool is True or False
 Int is in 0...1000
@@ -565,7 +558,9 @@ pick(b Bool) Int: when b is True then 1
                          is False then 0
 "#;
     let typed = transform_source(source);
-    assert!(has_flaw(&typed, is_mixed_when_forms));
+    assert!(typed.all_flaws().iter().any(|(_, flaw)| {
+        flaw.code.slug() == "type-unknown-symbol" && flaw.arg("name") == Some("__parse_error")
+    }));
 }
 
 #[test]
@@ -633,7 +628,7 @@ pick(b Bool) Int: when b is True then 1
 }
 
 #[test]
-fn known_subject_non_matching_value_pattern_is_unreachable() {
+fn lowercase_binding_matches_regardless_of_existing_value() {
     let source = r#"
 Bool is True or False
 false Bool: False
@@ -646,11 +641,8 @@ something() Int:
     return x
 "#;
     let typed = transform_source(source);
-    assert!(
-        has_flaw(&typed, is_unreachable_arm),
-        "`is true` should be unreachable when subject b is false: {:?}",
-        typed.all_flaws()
-    );
+    assert!(!has_flaw(&typed, is_unreachable_arm));
+    assert!(has_flaw(&typed, is_unreachable_else));
 }
 
 #[test]

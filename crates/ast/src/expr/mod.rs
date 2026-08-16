@@ -1,5 +1,5 @@
-use crate::span::SpanId;
 use crate::GroupPath;
+use crate::span::SpanId;
 use crate::ty::Ty;
 use crate::ty_state::TyState;
 use internment::Intern;
@@ -7,6 +7,9 @@ use internment::Intern;
 use std::ops::{Deref, DerefMut};
 
 use crate::span::Spanned;
+
+mod condition;
+pub use condition::Condition;
 
 /// A typed AST node — pairs an inner expression `T` with its resolved type,
 /// optional compile-time constant value, and source span.
@@ -24,7 +27,7 @@ pub struct Typed<T> {
     /// The resolved (or inferred) type of this expression.
     ///
     /// * [`TyState::Infer`] — not yet typechecked.
-/// * [`TyState::Resolved`] — concrete type after inference.
+    /// * [`TyState::Resolved`] — concrete type after inference.
     /// * [`TyState::Narrowed`] — control-flow-refined type (e.g., inside
     ///   `if x is Some(v)` the type is narrowed to the `Some` variant).
     pub ty: TyState,
@@ -174,8 +177,6 @@ impl<T> crate::span::HasSpanId for Typed<T> {
 
 mod bind;
 pub use bind::*;
-mod asm;
-pub use asm::*;
 pub mod format_string;
 pub use format_string::*;
 pub mod literal;
@@ -226,27 +227,33 @@ pub enum Expr {
         base: Box<Typed<Expr>>,
         index: usize,
     },
-    /// Positional element write: `arr.N: val` — emits GEP + store.
+    /// Positional element write: `arr.N:: val` — emits GEP + store.
     TupleSet {
         base: Box<Typed<Expr>>,
         index: usize,
         value: Box<Typed<Expr>>,
+        operator: Option<BinOp>,
     },
     /// Explicit numeric cast: `expr as Type` — emits trunci/extsi/sitofp/fptosi.
     Cast {
         expr: Box<Typed<Expr>>,
-        ty: Intern<String>,
+        ty: crate::TypeReference,
+    },
+    TargetQuery {
+        kind: crate::TargetQueryKind,
+        operand: crate::TypeReference,
     },
     /// Dynamic buffer element read: `buf.(i)` — emits GEP(i * elem_bytes) + load.
     BufGet {
         buf: Box<Typed<Expr>>,
         index: Box<Typed<Expr>>,
     },
-    /// Dynamic buffer element write: `buf.(i): val` — emits GEP(i * elem_bytes) + store.
+    /// Dynamic buffer element write: `buf.(i):: val` — emits GEP(i * elem_bytes) + store.
     BufSet {
         buf: Box<Typed<Expr>>,
         index: Box<Typed<Expr>>,
         value: Box<Typed<Expr>>,
+        operator: Option<BinOp>,
     },
     /// Take a raw pointer to a value: `@expr` — emits alloca + spill if needed, returns `!llvm.ptr`.
     TakePtr(Box<Typed<Expr>>),
@@ -263,8 +270,6 @@ pub enum Expr {
     /// Unary negation: `-expr`.
     Negate(Box<Typed<Expr>>),
 
-    /// Inline assembly: `asm("template", "constraints", args...)"
-    Asm(AsmExpr),
     /// Argument passed with `eat` at call site: `eat expr` — explicit consume.
     ConsumeArg(Box<Typed<Expr>>),
     /// Explicit consume: `eat expr`. Used standalone, not at call site.
@@ -274,11 +279,12 @@ pub enum Expr {
         base: Box<Typed<Expr>>,
         field: internment::Intern<String>,
     },
-    /// Record field write: `base.field: value`
+    /// Record field write: `base.field:: value`
     RecordSet {
         base: Box<Typed<Expr>>,
         field: internment::Intern<String>,
         value: Box<Typed<Expr>>,
+        operator: Option<BinOp>,
     },
     /// Record literal: `(name: val, …)` — named fields, behaves as a record value.
     RecordLit(Vec<(Intern<String>, Typed<Expr>)>),

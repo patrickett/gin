@@ -19,7 +19,6 @@
 
 use internment::Intern;
 use typecheck::FileId;
-use typecheck::analysis::TyCopyExt;
 use typecheck::transform::transform_file;
 
 /// `Int` tag so ownership tests can type parameters without loading gin_core.
@@ -245,7 +244,7 @@ fn test_loop_backedge_rejects_reusing_moved_value() {
     let src = "\
 sink(pointer Pointer(Int)): eat pointer
 repeat(pointer Pointer(Int)):
-    while 1
+    while 1 is 1
         sink(pointer)
     loop
 return
@@ -348,6 +347,108 @@ return 0
 }
 
 #[test]
+fn test_eat_param_returned_reports_consuming_parameter_escapes() {
+    let src = "\
+consume(eat x Int) Int: x
+main:
+    consume(eat 42)
+    return 0
+";
+    let diags = collect_ownership_diagnostics(src);
+    let has_escape = diags
+        .iter()
+        .any(|d| d.code.slug() == "type-consuming-parameter-escapes");
+    assert!(
+        has_escape,
+        "expected consuming-parameter-escape diagnostic, got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_partial_record_destructure_discards_non_discardable_remainder() {
+    let src = "
+Point has head Int, tail Pointer(Int)
+main:
+    value: 42
+    point := Point(head: value, tail: @value)
+    Point(head: projected) := point
+";
+    let diags = collect_ownership_diagnostics(src);
+    let has_remainder_error = diags
+        .iter()
+        .any(|d| d.code.slug() == "type-pattern-would-discard-value");
+    assert!(
+        has_remainder_error,
+        "expected pattern discard diagnostic, got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_partial_record_destructure_with_nominal_remainder_reports_discard_error() {
+    let src = "
+Point has head Int, tail Pointer(Int)
+main:
+    ptr: @42
+    point: Point(head: 1, tail: ptr)
+    Point(head: value) := point
+";
+    let diags = collect_ownership_diagnostics(src);
+    let has_remainder_error = diags
+        .iter()
+        .any(|d| d.code.slug() == "type-pattern-would-discard-value");
+    assert!(
+        has_remainder_error,
+        "nominal remainder should fail discardability check: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_discardable_sum_with_nullary_alternative_is_allowed() {
+    let src = "
+Option(Int) is Some(Int) or None
+main:
+    val: None
+    when val is
+        Some(_) then 0
+        None then 0
+";
+    let diags = collect_ownership_diagnostics(src);
+    let has_discard_error = diags
+        .iter()
+        .any(|d| d.code.slug() == "type-pattern-would-discard-value");
+    assert!(
+        !has_discard_error,
+        "nullary-sum fallback should be discardable: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_sum_discardability_with_reachable_nominal_payload_and_proven_branch_is_allowed() {
+    let src = "
+ValueCell has value Pointer(Int)
+CellMaybe is Some(ValueCell) or None
+main:
+    cell: @42
+    val: Some(ValueCell(value: cell))
+    when val is
+        Some(_) then 0
+";
+    let diags = collect_ownership_diagnostics(src);
+    let has_discard_error = diags
+        .iter()
+        .any(|d| d.code.slug() == "type-pattern-would-discard-value");
+    assert!(
+        !has_discard_error,
+        "active reachable arm should admit discardability: {:?}",
+        diags
+    );
+}
+
+#[test]
 fn test_eat_argument_on_default_owned_param_is_error() {
     // `eat` does not match a default-owned parameter.
     let src = "\
@@ -388,6 +489,129 @@ return 0
 }
 
 #[test]
+fn test_nominal_record_owned_param_not_consumed_reports_owned_value_not_consumed() {
+    let src = "
+Point has head Int, tail Pointer(Int)
+consume(point Point) Int: 0
+main:
+    value: 42
+    point: Point(head: value, tail: @value)
+    consume(point)
+return 0
+";
+    let diags = collect_ownership_diagnostics(src);
+    let has_owned_not_consumed = diags
+        .iter()
+        .any(|d| d.code.slug() == "type-owned-value-not-consumed");
+    assert!(
+        has_owned_not_consumed,
+        "expected owned value not consumed at callable exit: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_nominal_record_with_only_anonymous_ints_not_consumed_reports_owned_value_not_consumed() {
+    let src = "
+IntPair has head Int, tail Int
+consume(pair IntPair) Int: 0
+main:
+    pair_value: IntPair(head: 1, tail: 2)
+    consume(pair_value)
+return 0
+";
+    let diags = collect_ownership_diagnostics(src);
+    let has_owned_not_consumed = diags
+        .iter()
+        .any(|d| d.code.slug() == "type-owned-value-not-consumed");
+    assert!(
+        has_owned_not_consumed,
+        "expected owned value not consumed for nominal record of anonymous ints: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_explicit_consumption_parameter_with_eat_handle_discharge_at_callsite() {
+    let src = "
+read_handle(eat handle Pointer(Int)) Int: 0
+main:
+    p: @42
+    read_handle(eat p)
+return 0
+";
+    let diags = collect_ownership_diagnostics(src);
+    let has_escape = diags
+        .iter()
+        .any(|d| d.code.slug() == "type-consuming-parameter-escapes");
+    assert!(
+        !has_escape,
+        "calling eat param should not leak ownership: {:?}",
+        diags
+    );
+    let has_owned_not_consumed = diags
+        .iter()
+        .any(|d| d.code.slug() == "type-owned-param-not-consumed");
+    assert!(
+        !has_owned_not_consumed,
+        "reader should not report owned-param leak: {:?}",
+        diags
+    );
+    let has_moved = diags
+        .iter()
+        .any(|d| d.code.slug() == "type-use-of-moved-value");
+    assert!(
+        !has_moved,
+        "explicit consumption should be valid and not moved: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_pattern_ownership_modes_in_when_subject() {
+    let src = "
+Payload has value Pointer(Int)
+Option(Payload) is Some(Payload) or None
+
+observe_without_binding(value Option(Payload)) Int: when value is
+    Some(_) then 0
+    None then 0
+
+observe_with_value_binding(value Option(Payload)) Int:
+    when value is
+        Some(v) then 0
+        None then 0
+
+observe_with_ref_binding(value Option(Payload)) Int:
+    when value is
+        Some(ref v) then 0
+        None then 0
+
+observe_with_mut_binding(value Option(Payload)) Int:
+    when value is
+        Some(mut v) then 0
+        None then 0
+
+main:
+    none: None
+    some: Some(Payload(value: @42))
+    result: observe_without_binding(none)
+    result2: observe_with_value_binding(some)
+    result3: observe_with_ref_binding(Some(Payload(value: @7)))
+    result4: observe_with_mut_binding(Some(Payload(value: @8)))
+";
+    let diags = collect_ownership_diagnostics(src);
+    let bad = diags
+        .iter()
+        .any(|d| d.code.slug() == "type-use-of-moved-value");
+    assert!(
+        !bad,
+        "pattern ownership modes should not emit move flaw: {:?}",
+        diags
+    );
+}
+
+#[test]
 fn test_mut_call_preserves_existing_reference_without_invalidation_effect() {
     let src = "\
 replace(mut x Int) Int:
@@ -411,12 +635,32 @@ return 0
 }
 
 #[test]
-fn test_fixed_array_item_replacement_preserves_reference() {
+fn test_fixed_array_item_replacement_invalidates_equal_reference() {
     let src = "\
 main:
     items: (0; 2)
     ref saved Int: items.(0)
-    items.(0): 1
+    items.(0):: 1
+    result: saved
+return 0
+";
+    let diags = collect_ownership_diagnostics(src);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code.slug() == "type-use-of-invalidated-reference"),
+        "expected equal-place invalidation diagnostic: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_fixed_array_disjoint_item_replacement_preserves_reference() {
+    let src = "\
+main:
+    items: (0; 2)
+    ref saved Int: items.(0)
+    items.(1):: 1
     result: saved
 return 0
 ";
@@ -425,8 +669,65 @@ return 0
         !diags
             .iter()
             .any(|d| d.code.slug() == "type-use-of-invalidated-reference"),
-        "unexpected invalidated reference diagnostic: {:?}",
+        "proven-disjoint sibling write should preserve the reference: {diags:?}"
+    );
+}
+
+#[test]
+fn test_symbolic_item_replacement_conservatively_invalidates_reference() {
+    let src = "\
+main(i Int, j Int):
+    items: (0; 2)
+    ref saved Int: items.(i)
+    items.(j):: 1
+    result: saved
+return 0
+";
+    let diags = collect_ownership_diagnostics(src);
+    assert!(
         diags
+            .iter()
+            .any(|d| d.code.slug() == "type-use-of-invalidated-reference"),
+        "unknown-overlap write should invalidate the reference: {diags:?}"
+    );
+}
+
+#[test]
+fn test_ancestor_replacement_invalidates_descendant_reference() {
+    let src = "\
+main:
+    items: (0; 2)
+    ref saved Int: items.(0)
+    items:: (1; 2)
+    result: saved
+return 0
+";
+    let diags = collect_ownership_diagnostics(src);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code.slug() == "type-use-of-invalidated-reference"),
+        "ancestor write should invalidate a descendant borrow: {diags:?}"
+    );
+}
+
+#[test]
+fn test_descendant_replacement_invalidates_ancestor_reference() {
+    let src = "\
+Pair has head Int, tail Int
+main:
+    pair: Pair(head: 1, tail: 2)
+    ref saved Pair: pair
+    pair.head:: 3
+    result: saved
+return 0
+";
+    let diags = collect_ownership_diagnostics(src);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code.slug() == "type-use-of-invalidated-reference"),
+        "descendant write should invalidate an ancestor borrow: {diags:?}"
     );
 }
 
@@ -596,84 +897,407 @@ return 0
     );
 }
 
+#[test]
+fn test_gate4_rebind_immutable_reports_error() {
+    let src = "\
+main:
+    counter := 1
+    counter:: 2
+return 0
+";
+    let diags = collect_ownership_diagnostics(src);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code.slug() == "type-rebind-immutable"),
+        "expected immutable rebind diagnostic, got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_gate4_rebind_nearest_mutable_succeeds() {
+    let src = "\
+main:
+    counter: 0
+    counter:: counter + 1
+return 0
+";
+    let diags = collect_ownership_diagnostics(src);
+    let has_immutable = diags
+        .iter()
+        .any(|d| d.code.slug() == "type-rebind-immutable");
+    assert!(
+        !has_immutable,
+        "unexpected immutable diagnostic: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_gate4_rebind_non_discardable_without_transfer() {
+    let src = "\
+IntPair has head Int, tail Int
+main:
+    buffer: IntPair(head: 1, tail: 2)
+    buffer:: IntPair(head: 3, tail: 4)
+return 0
+";
+    let diags = collect_ownership_diagnostics(src);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code.slug() == "type-rebind-would-discard-value"),
+        "expected rebind discard diagnostic, got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_gate4_rebind_discardable_value_succeeds() {
+    let src = "\
+main:
+    counter: 1
+    counter:: 2
+return counter
+";
+    let diags = collect_ownership_diagnostics(src);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.code.slug() == "type-rebind-would-discard-value"),
+        "discardable replacement should succeed: {diags:?}"
+    );
+}
+
+#[test]
+fn test_gate4_rebind_transfers_non_discardable_old_value() {
+    let src = "\
+IntPair has head Int, tail Int
+reopen(eat old IntPair) IntPair extern
+main:
+    buffer: IntPair(head: 1, tail: 2)
+    buffer:: reopen(eat buffer)
+return 0
+";
+    let diags = collect_ownership_diagnostics(src);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.code.slug() == "type-rebind-would-discard-value"),
+        "explicit transfer should discharge the old value: {diags:?}"
+    );
+}
+
+#[test]
+fn test_gate4_permanent_shadow_rejects_live_non_discardable_value() {
+    let src = "\
+IntPair has head Int, tail Int
+main:
+    buffer: IntPair(head: 1, tail: 2)
+    buffer: IntPair(head: 3, tail: 4)
+return 0
+";
+    let diags = collect_ownership_diagnostics(src);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code.slug() == "type-shadow-would-hide-live-value"),
+        "expected permanent-shadow diagnostic: {diags:?}"
+    );
+}
+
+#[test]
+fn test_gate4_shadow_initializer_can_transfer_old_value() {
+    let src = "\
+IntPair has head Int, tail Int
+reopen(eat old IntPair) IntPair extern
+main:
+    buffer: IntPair(head: 1, tail: 2)
+    buffer: reopen(eat buffer)
+return 0
+";
+    let diags = collect_ownership_diagnostics(src);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.code.slug() == "type-shadow-would-hide-live-value"),
+        "initializer transfer should discharge the hidden value: {diags:?}"
+    );
+}
+
+#[test]
+fn test_gate4_child_scope_can_temporarily_shadow_owned_value() {
+    let src = "\
+IntPair has head Int, tail Int
+main(flag Int):
+    buffer: IntPair(head: 1, tail: 2)
+    if flag is 1
+        buffer: IntPair(head: 3, tail: 4)
+    return
+return 0
+";
+    let diags = collect_ownership_diagnostics(src);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.code.slug() == "type-shadow-would-hide-live-value"),
+        "child-scope shadowing should be temporary: {diags:?}"
+    );
+}
+
+#[test]
+fn test_gate4_rebind_target_not_found_reports_error() {
+    let src = "\
+bad(value Int) ref Int extern
+Small is in 0...255
+main:
+    missing ref Small: bad(1)
+    value Small: 1
+    missing:: value
+return
+";
+    let diags = collect_ownership_diagnostics(src);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code.slug() == "type-rebind-target-not-found"),
+        "expected target-not-found diagnostic, got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_gate4_rebind_crosses_callable_boundary() {
+    let src = "\
+next(x Int) Int: x
+bad(value Int) ref Int extern
+Small is in 0...255
+main:
+    value Small: 1
+    next ref Small: bad(1)
+    next:: value
+return
+";
+    let diags = collect_ownership_diagnostics(src);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code.slug() == "type-rebind-crosses-callable-boundary"),
+        "expected callable-boundary diagnostic, got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_gate4_rebind_violates_validity_reports_error() {
+    let src = "\
+Small is in 0...2
+main:
+    counter Small: 2
+    counter:: 3
+return 0
+";
+    let diags = collect_ownership_diagnostics(src);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code.slug() == "type-rebind-violates-validity"),
+        "expected violates-validity diagnostic, got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_gate4_rebind_violates_validity_with_proof_succeeds() {
+    let src = "\
+Small2 is in 0...3
+main:
+    counter Small2: 0
+    counter:: 2
+return 0
+";
+    let diags = collect_ownership_diagnostics(src);
+    let has_violates_validity = diags
+        .iter()
+        .any(|d| d.code.slug() == "type-rebind-violates-validity");
+    assert!(
+        !has_violates_validity,
+        "unexpected rebind validity diagnostic: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_gate4_branch_proof_allows_bounded_increment_rebind() {
+    let src = "\
+Small is in 0...3
+#operator(Add)
+#inline
+small_add(a Small, b Small) Int: (a as Int) + (b as Int)
+advance(counter Small):
+    if counter is < 3
+        counter:: (eat counter) + 1
+    return
+return
+";
+    let diags = collect_ownership_diagnostics(src);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.code.slug() == "type-rebind-violates-validity"),
+        "branch evidence should prove the bounded increment: {diags:?}"
+    );
+}
+
+#[test]
+fn test_gate4_unproven_increment_rebind_violates_validity() {
+    let src = "\
+Small is in 0...3
+#operator(Add)
+#inline
+small_add(a Small, b Small) Int: (a as Int) + (b as Int)
+advance(counter Small):
+    counter:: (eat counter) + 1
+return
+";
+    let diags = collect_ownership_diagnostics(src);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code.slug() == "type-rebind-violates-validity"),
+        "the same increment without branch evidence must be rejected: {diags:?}"
+    );
+}
+
+#[test]
+fn test_gate4_use_before_initialization_reports_error() {
+    let src = "\
+main:
+    value Int
+    result: value
+return 0
+";
+    let diags = collect_ownership_diagnostics(src);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code.slug() == "type-use-before-initialization"),
+        "expected use-before-initialization diagnostic, got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn test_gate4_all_predecessors_initialize_place() {
+    let src = "\
+main(flag Int):
+    value Int
+    when flag is
+        1 then value:: 1
+        else value:: 2
+    observed: value
+return observed
+";
+    let diags = collect_ownership_diagnostics(src);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.code.slug() == "type-use-before-initialization"),
+        "all predecessors initialize the place: {diags:?}"
+    );
+}
+
+#[test]
+fn test_gate4_one_predecessor_leaves_place_uninitialized() {
+    let src = "\
+main(flag Int):
+    value Int
+    if flag is 1
+        value:: 1
+    return
+    observed: value
+return observed
+";
+    let diags = collect_ownership_diagnostics(src);
+    let diagnostic = diags
+        .iter()
+        .find(|d| d.code.slug() == "type-use-before-initialization")
+        .unwrap_or_else(|| panic!("expected a maybe-uninitialized diagnostic: {diags:?}"));
+    assert!(
+        diagnostic
+            .related
+            .iter()
+            .any(|related| related.label == "declared without an initializer"),
+        "expected the declaration path label: {diagnostic:?}"
+    );
+    assert!(
+        diagnostic
+            .related
+            .iter()
+            .any(|related| related.label == "initialized on this predecessor"),
+        "expected the initialized predecessor label: {diagnostic:?}"
+    );
+}
+
+#[test]
+fn test_gate4_consumed_place_can_be_reinitialized() {
+    let src = "\
+drop(eat value Pointer(Int)): 0
+main:
+    value: @1
+    drop(eat value)
+    value:: @2
+    observed: deref value
+return observed
+";
+    let diags = collect_ownership_diagnostics(src);
+    assert!(
+        !diags.iter().any(|d| matches!(
+            d.code.slug(),
+            "type-use-after-move" | "type-use-before-initialization"
+        )),
+        "reinitialization should restore the place: {diags:?}"
+    );
+}
+
+#[test]
+fn test_gate4_ref_parameter_cannot_be_rebound() {
+    let src = "\
+bad(ref value Int): value:: 2
+main:
+    value: 1
+    bad(ref value)
+return 0
+";
+    let diags = collect_ownership_diagnostics(src);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code.slug() == "type-rebind-immutable"),
+        "expected immutable ref-parameter diagnostic: {diags:?}"
+    );
+}
+
+#[test]
+fn test_gate4_mut_parameter_can_write_through_borrow() {
+    let src = "\
+replace(mut value Int): value:: 2
+main:
+    value: 1
+    replace(mut value)
+return 0
+";
+    let diags = collect_ownership_diagnostics(src);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.code.slug() == "type-rebind-immutable"),
+        "mut parameter should permit replacement: {diags:?}"
+    );
+}
+
 mod support;
-use support::{empty_typed, marker_trait_registry};
-
-#[test]
-fn test_copy_inference_int_is_copyable() {
-    let int_ty = typecheck::ty::Ty::Int {
-        width: 64,
-        signed: true,
-        value: None,
-        min: None,
-        max: None,
-    };
-    let registry = marker_trait_registry();
-    let typed = empty_typed();
-    assert!(int_ty.is_copyable(&registry, &typed));
-}
-
-#[test]
-fn test_copy_inference_ptr_is_not_copyable() {
-    let ptr_ty = typecheck::ty::Ty::Ptr {
-        inner: Box::new(typecheck::ty::Ty::Int {
-            width: 64,
-            signed: true,
-            value: None,
-            min: None,
-            max: None,
-        }),
-    };
-    let registry = marker_trait_registry();
-    let typed = empty_typed();
-    assert!(!ptr_ty.is_copyable(&registry, &typed));
-}
-
-#[test]
-fn test_copy_inference_small_record_is_copyable() {
-    let small = typecheck::ty::Ty::Record {
-        name: Intern::from_ref("Small"),
-        resolved_params: None,
-        fields: vec![(
-            Intern::from_ref("x"),
-            Box::new(typecheck::ty::Ty::Int {
-                width: 64,
-                signed: true,
-                value: None,
-                min: None,
-                max: None,
-            }),
-        )],
-    };
-    let registry = marker_trait_registry();
-    let typed = empty_typed();
-    assert!(small.is_copyable(&registry, &typed));
-}
-
-#[test]
-fn test_copy_inference_record_with_copy_fields_is_copyable() {
-    let large = typecheck::ty::Ty::Record {
-        name: Intern::from_ref("Large"),
-        resolved_params: None,
-        fields: (0..5)
-            .map(|i| {
-                (
-                    Intern::new(format!("f{i}")),
-                    Box::new(typecheck::ty::Ty::Int {
-                        width: 64,
-                        signed: true,
-                        value: None,
-                        min: None,
-                        max: None,
-                    }),
-                )
-            })
-            .collect(),
-    };
-    let registry = marker_trait_registry();
-    let typed = empty_typed();
-    assert!(large.is_copyable(&registry, &typed));
-}
 
 #[test]
 fn test_bare_param_defaults_to_ownership() {

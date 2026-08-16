@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use crate::GroupPath;
 use crate::expr::{Expr, Literal};
 use crate::parameter::ParameterKind;
 use crate::path::ModPath;
 use crate::span::{SpanId, Spanned};
 use crate::ty::{Ty, VariantMap};
-use crate::GroupPath;
 use i256::I256;
 use internment::Intern;
 
@@ -47,10 +47,7 @@ pub enum TypeExpr {
     InRange { bounds: InRangeBounds, span: SpanId },
 }
 
-pub(crate) fn resolve_expr_type(
-    expr: &Expr,
-    tag_types: &HashMap<Intern<String>, Ty>,
-) -> Ty {
+pub(crate) fn resolve_expr_type(expr: &Expr, tag_types: &HashMap<Intern<String>, Ty>) -> Ty {
     match expr {
         Expr::AnonymousTag(name) => tag_types.get(name).cloned().unwrap_or(Ty::Opaque(*name)),
         Expr::FnCall(call) if call.args.as_ref().is_none_or(Vec::is_empty) => {
@@ -61,9 +58,7 @@ pub(crate) fn resolve_expr_type(
             .get(&call.name)
             .cloned()
             .unwrap_or(Ty::Opaque(call.name)),
-        Expr::Ref {
-            inner, mutable, ..
-        } => Ty::Ref {
+        Expr::Ref { inner, mutable, .. } => Ty::Ref {
             inner: Box::new(resolve_expr_type(&inner.value, tag_types)),
             mutable: *mutable,
         },
@@ -78,6 +73,7 @@ pub(crate) fn resolve_expr_type(
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum InRangeBounds {
     Literal(I256, I256),
+    LiteralToTag(I256, Intern<String>),
     Tag(Intern<String>),
 }
 
@@ -86,6 +82,7 @@ impl fmt::Display for InRangeBounds {
         write!(f, "in ")?;
         match self {
             InRangeBounds::Literal(min, max) => write!(f, "{min}...{max}"),
+            InRangeBounds::LiteralToTag(min, max) => write!(f, "{min}...{max}"),
             InRangeBounds::Tag(name) => write!(f, "{}", name.as_str()),
         }
     }
@@ -145,7 +142,6 @@ impl TypeExpr {
             _ => None,
         }
     }
-
 }
 
 /// Payload fields for a variant, looking up the variant in the variant map

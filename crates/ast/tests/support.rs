@@ -171,7 +171,6 @@ VariantShape has name String, fields List(NamedTy)
 
 Reflectable has shape Type
 
-#auto
 Copy has can_copy Bool: True
 ";
 
@@ -212,7 +211,6 @@ Reflectable has shape Type
 
 Size is Const(BigInt) or Dynamic
 
-#auto
 Sized has size Size: compute_size(Self)
 
 compute_size(x Type) Size := when x is
@@ -256,7 +254,6 @@ max_size(a Size, b Size) Size := when (a, b) is
 
 union_size(variants List(VariantShape)) Size := add(union_disc(variants), union_max_payload(variants))
 
-#auto
 Copy has can_copy Bool: is_copy(Self)
 
 is_copy(x Type) Bool := when x is

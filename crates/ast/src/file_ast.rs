@@ -138,9 +138,16 @@ pub struct SymbolAlias {
     pub target: Spanned<ModPath>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileSemanticOrigin {
+    pub package: crate::ty::PackageInstanceKey,
+    pub module: Vec<Intern<String>>,
+}
+
 /// Output of parsing a gin file.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FileAst {
+    pub semantic_origin: Option<FileSemanticOrigin>,
     /// Module-level doc comment collected from leading `--| ...` lines.
     pub module_doc: Option<DocComment>,
     pub uses: Vec<Import>,
@@ -159,6 +166,10 @@ pub struct FileAst {
 }
 
 impl FileAst {
+    pub fn with_semantic_origin(mut self, semantic_origin: FileSemanticOrigin) -> Self {
+        self.semantic_origin = Some(semantic_origin);
+        self
+    }
     /// Minimal AST for compile-time evaluation helpers (no source file).
     pub fn empty_for_tests() -> Self {
         Self::default()
@@ -185,6 +196,19 @@ impl FileAst {
             .copied()
             .collect();
         names.sort();
+        names
+    }
+
+    pub fn contains_public_symbol(&self, name: &Intern<String>) -> bool {
+        (self.tags.contains_key(name) && !self.private_tags.contains(name))
+            || (self.defs.contains_key(name) && !self.private_defs.contains(name))
+    }
+
+    pub fn public_symbol_names(&self) -> Vec<Intern<String>> {
+        let mut names = self.public_tag_names();
+        names.extend(self.public_def_names());
+        names.sort();
+        names.dedup();
         names
     }
 
@@ -357,39 +381,55 @@ impl FileAst {
         let key = Intern::<String>::from_ref(name);
         for imp in &self.uses {
             for mi in &imp.0 {
-                let imported = mi
-                    .alias
-                    .unwrap_or_else(|| Intern::<String>::new(mi.effective_name()));
-                if imported != key {
-                    continue;
-                }
-                if let crate::ImportSource::Package(mod_path) = &mi.source
-                    && let Some(last_seg) = mod_path.segments.last()
-                {
-                    let path_span = span_table.get(mod_path.span_id());
-                    let path_text = source.get(path_span.start()..path_span.end())?;
-                    let dot_pos = path_text.rfind('.')?;
-                    let seg_start = path_span.start() + dot_pos + 1;
-                    let seg_end = seg_start + last_seg.len();
-                    return Some(seg_start..seg_end);
-                }
-                if let crate::ImportSource::LocalBundle(b) = &mi.source {
-                    for member in &b.members {
-                        let member_name = member.alias.unwrap_or(member.export);
-                        if member_name == key {
+                match &mi.source {
+                    crate::ImportSource::Package(mod_path) => {
+                        let imported = mi
+                            .alias
+                            .unwrap_or_else(|| Intern::<String>::new(mi.effective_name()));
+                        if imported == key
+                            && let Some(last_seg) = mod_path.segments.last()
+                        {
+                            let path_span = span_table.get(mod_path.span_id());
+                            let path_text = source.get(path_span.start()..path_span.end())?;
+                            let dot_pos = path_text.rfind('.')?;
+                            let seg_start = path_span.start() + dot_pos + 1;
+                            let seg_end = seg_start + last_seg.len();
+                            return Some(seg_start..seg_end);
+                        }
+                    }
+                    crate::ImportSource::LocalBundle(b) => {
+                        for member in &b.members {
+                            let member_name = member.alias.unwrap_or(member.flat_name());
+                            if member_name == key {
+                                let mspan = span_table.get(member.span);
+                                return Some(mspan.start()..mspan.end());
+                            }
+                        }
+                    }
+                    crate::ImportSource::CurrentModule { member } => {
+                        let imported = member.alias.unwrap_or(member.export);
+                        if imported == key {
                             let mspan = span_table.get(member.span);
                             return Some(mspan.start()..mspan.end());
                         }
                     }
+                    crate::ImportSource::LocalMember(m) => {
+                        let imported = m.member.alias.unwrap_or(m.member.export);
+                        if imported == key {
+                            let mspan = span_table.get(m.member.span);
+                            return Some(mspan.start()..mspan.end());
+                        }
+                    }
+                    _ => {
+                        let imported = mi
+                            .alias
+                            .unwrap_or_else(|| Intern::<String>::new(mi.effective_name()));
+                        if imported == key {
+                            let span = span_table.get(mi.source.span_id());
+                            return Some(span.start()..span.end());
+                        }
+                    }
                 }
-                if let crate::ImportSource::CurrentModule { member } = &mi.source
-                    && member.alias.unwrap_or(member.export) == key
-                {
-                    let mspan = span_table.get(member.span);
-                    return Some(mspan.start()..mspan.end());
-                }
-                let span = span_table.get(mi.source.span_id());
-                return Some(span.start()..span.end());
             }
         }
         None

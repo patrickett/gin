@@ -37,10 +37,10 @@ fn declared_log_level_is_literal_union() {
         .tags
         .get(&TagId(Intern::new("LogLevel".to_string())))
         .expect("LogLevel");
-    let values = tag
-        .resolved_ty
-        .union_literal_values()
-        .expect("literal union");
+    let definition = typed
+        .type_registry
+        .resolved_definition_for_type(&tag.resolved_ty);
+    let values = definition.union_literal_values().expect("literal union");
     assert_eq!(values.len(), 2);
     assert!(matches!(&values[0], ConstValue::String(s) if s == "debug"));
 }
@@ -50,7 +50,7 @@ fn widened_string_bind_uses_nominal_string() {
     let typed =
         transform_source("String has pointer Pointer(Byte), len Int\n\nlabel String: 'John'\n");
     let ty = bind_body_ty(&typed, "label");
-    match &ty {
+    match typed.type_registry.resolved_definition_for_type(&ty) {
         Ty::Record { name, .. } if name.as_str() == "String" => {}
         other => panic!("widened bind body type should be String, got {other:?}"),
     }
@@ -58,7 +58,10 @@ fn widened_string_bind_uses_nominal_string() {
         .defs
         .get(&DefId(Intern::new("label".to_string())))
         .expect("label");
-    match &bind.return_type {
+    match typed
+        .type_registry
+        .resolved_definition_for_type(&bind.return_type)
+    {
         Ty::Record { name, .. } if name.as_str() == "String" => {}
         other => panic!("widened bind return_type should be String, got {other:?}"),
     }

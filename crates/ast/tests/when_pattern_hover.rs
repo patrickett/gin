@@ -28,7 +28,7 @@ f(x Type) Bool := when x is
         .hover_at(src, line, character)
         .expect("hover on _ in pattern");
     assert_eq!(
-        hover, "```gin\n_: `in 0...255`\n```",
+        hover, "```gin\n_: `Str`\n```",
         "expected wildcard slot type, got: {hover}"
     );
 }
@@ -63,12 +63,20 @@ Type is Primitive(width BigInt, signed Bool) or Record(name String, fields List(
     assert_eq!(fields.len(), 2);
     assert_eq!(fields[0].0.as_str(), "name");
     assert!(
-        matches!(fields[0].1, Ty::Record { .. }),
+        matches!(
+            typed
+                .type_registry
+                .resolved_definition_for_type(&fields[0].1),
+            Ty::Record { .. }
+        ),
         "name field should be String record, got {:?}",
         fields[0].1
     );
     assert_eq!(fields[1].0.as_str(), "fields");
-    let Ty::Record { name, .. } = &fields[1].1 else {
+    let Ty::Record { name, .. } = typed
+        .type_registry
+        .resolved_definition_for_type(&fields[1].1)
+    else {
         panic!("fields should be List(...), got {:?}", fields[1].1);
     };
     assert_eq!(name.as_str(), "List");
@@ -109,8 +117,7 @@ f(x Type) Bool := when x is
         .hover_at(src, line, character)
         .expect("hover on Record");
     assert_eq!(
-        record_hover,
-        "```gin\nRecord(name bytes: pointer: addr: in 0...1000, length: in 0...1000, fields List)\n```",
+        record_hover, "```gin\nRecord(name String, fields List(NamedTy))\n```",
         "expected Record(name String, fields List(NamedTy)), got: {record_hover}"
     );
 }
@@ -137,7 +144,7 @@ f(x Type) Bool := when x is
         .hover_at(src, line, character)
         .expect("hover on Record in pattern");
     assert_eq!(
-        hover, "```gin\nRecord(name in 0...255, fields List)\n```",
+        hover, "```gin\nRecord(name Str, fields List(NamedTy))\n```",
         "expected Record hover with union type context, got: {hover}"
     );
 }
@@ -152,7 +159,6 @@ BigInt is in 0...18446744073709551615
 Type is Primitive(width BigInt, signed Bool)
      or Ref(inner Type, mutable Bool)
 
-#auto
 Copy has can_copy Bool: is_copy(Self)
 
 is_copy(x Type) Bool := when x is
@@ -183,7 +189,6 @@ BigInt is in 0...18446744073709551615
 Type is Primitive(width BigInt, signed Bool)
      or Ref(inner Type, mutable Bool)
 
-#auto
 Copy has can_copy Bool: is_copy(Self)
 
 is_copy(x Type) Bool := when x is
@@ -238,7 +243,7 @@ all_copy(fields List(NamedTy)) Bool := when fields is\n\
         "hover on f in pattern should return Some"
     );
     if let Some(ref text) = f_hover {
-        assert_eq!(text, "```gin\nf x\n```");
+        assert_eq!(text, "```gin\nf NamedTy\n```");
     }
 
     // Hover on `rest` in the cons pattern `[f, ...rest]`
@@ -250,6 +255,6 @@ all_copy(fields List(NamedTy)) Bool := when fields is\n\
         "hover on rest in pattern should return Some"
     );
     if let Some(ref text) = rest_hover {
-        assert_eq!(text, "```gin\nrest List(x)\n```");
+        assert_eq!(text, "```gin\nrest List(NamedTy)\n```");
     }
 }

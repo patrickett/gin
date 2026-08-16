@@ -86,7 +86,7 @@ impl BindWarningsExt for [Bind] {
         let mut diags = Vec::new();
         if matches!(&self[0].value, BindValue::Unassigned) {
             for bind in self.iter().skip(1) {
-                if bind.is_constant {
+                if bind.is_constant() {
                     let name = bind.name.as_str().to_string();
                     diags.push(Diagnostic {
                         code: DiagnosticCode::from("type-const-bind-after-declare"),

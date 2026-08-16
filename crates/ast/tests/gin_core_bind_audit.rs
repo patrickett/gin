@@ -33,7 +33,7 @@ is_copy(x Type) Bool := when x is
     Ptr(_)              then False
 ";
     let (ast, bind) = prepare_and_check(source, "is_copy");
-    assert!(bind.is_constant, "is_copy uses `:=`");
+    assert!(bind.is_constant(), "is_copy uses `:=`");
     assert!(ast.defs.contains_key(&Intern::from_ref("is_copy")));
 }
 
@@ -49,7 +49,7 @@ compute_size(x Type) Size := when x is
     Primitive(w, _)     then Const(w / 8)
 ";
     let (ast, bind) = prepare_and_check(source, "compute_size");
-    assert!(bind.is_constant, "compute_size uses `:=`");
+    assert!(bind.is_constant(), "compute_size uses `:=`");
     assert!(ast.defs.contains_key(&Intern::from_ref("compute_size")));
 }
 
@@ -60,7 +60,7 @@ Target has arch Str, vendor Str, os Str
 target := Target('x86_64', 'unknown', 'unknown')
 ";
     let (ast, bind) = prepare_and_check(source, "target");
-    assert!(bind.is_constant);
+    assert!(bind.is_constant());
     assert!(ast.defs.contains_key(&Intern::from_ref("target")));
 }
 
@@ -78,7 +78,7 @@ true  := Bool.True
             .defs
             .get(&Intern::from_ref(name))
             .unwrap_or_else(|| panic!("missing def `{name}`"));
-        assert!(bind.is_constant, "{name} uses `:=`");
+        assert!(bind.is_constant(), "{name} uses `:=`");
     }
 }
 
@@ -87,10 +87,10 @@ fn io_write_runtime_write_spec_foldable() {
     let source = "\
 Int is in 0...4294967295
 
-write_spec := 'svc #0x80'
+write_spec := 4
 
 write(fd Int, buf Pointer(Int), len Int) Int:
-    result := asm(write_spec, fd, buf, len)
+    result := write_spec + fd + buf + len
     return result
 ";
     let mut ast = TokenCursor::parse_source(source);
@@ -99,12 +99,12 @@ write(fd Int, buf Pointer(Int), len Int) Int:
         ast.defs
             .get(&Intern::from_ref("write_spec"))
             .unwrap()
-            .is_constant
+            .is_constant()
     );
     assert!(
         !ast.defs
             .get(&Intern::from_ref("write"))
             .unwrap()
-            .is_constant
+            .is_constant()
     );
 }

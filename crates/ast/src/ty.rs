@@ -1,10 +1,211 @@
 //! Type representation and type-level operations.
 
 use internment::Intern;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use crate::{NormalExpr, ConstValue, HashFloat};
+use crate::{ConstValue, HashFloat, NormalExpr};
 use std::fmt;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TypeId {
+    pub file: u32,
+    pub name: Intern<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PackageSourceKey {
+    Workspace,
+    Registry {
+        registry: Intern<String>,
+    },
+    Git {
+        url: Intern<String>,
+        revision: Intern<String>,
+    },
+    Path {
+        parent_instance: Intern<String>,
+        relative_path: Intern<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PackageInstanceKey {
+    pub name: Intern<String>,
+    pub version: Intern<String>,
+    pub source: PackageSourceKey,
+    pub instance: Intern<String>,
+}
+
+impl PackageInstanceKey {
+    pub fn workspace(name: &str, version: &str) -> Self {
+        Self {
+            name: Intern::new(name.to_string()),
+            version: Intern::new(version.to_string()),
+            source: PackageSourceKey::Workspace,
+            instance: Intern::from_ref("root"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DeclarationKey {
+    pub package: PackageInstanceKey,
+    pub module: Vec<Intern<String>>,
+    pub declaration: Intern<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ResultFamilyOwner {
+    Callable(DeclarationKey),
+    LocalCallable(crate::BinderId),
+    Structural(crate::OperatorRole),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResultAlternative {
+    pub label: Intern<String>,
+    pub proposition: Option<ProofProposition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ProofTerm {
+    Value(i256::I256),
+    Name(Intern<String>),
+    Add(Box<Self>, Box<Self>),
+    Sub(Box<Self>, Box<Self>),
+    Mul(Box<Self>, Box<Self>),
+    Remainder(Box<Self>, Box<Self>),
+    PowerOfTwo(Box<Self>),
+    TargetQuery {
+        kind: crate::TargetQueryKind,
+        operand: crate::TypeReference,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProofRelation {
+    Equal,
+    NotEqual,
+    Less,
+    LessOrEqual,
+    Greater,
+    GreaterOrEqual,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ProofProposition {
+    Compare {
+        left: ProofTerm,
+        relation: ProofRelation,
+        right: ProofTerm,
+    },
+    InRange {
+        value: ProofTerm,
+        start: ProofTerm,
+        end: ProofTerm,
+    },
+    Not(Box<Self>),
+    And(Box<Self>, Box<Self>),
+    Or(Box<Self>, Box<Self>),
+}
+
+impl fmt::Display for ProofTerm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Value(value) => write!(f, "{value}"),
+            Self::Name(name) => write!(f, "{}", name.as_str()),
+            Self::Add(left, right) => write!(f, "({left} + {right})"),
+            Self::Sub(left, right) => write!(f, "({left} - {right})"),
+            Self::Mul(left, right) => write!(f, "({left} * {right})"),
+            Self::Remainder(left, right) => write!(f, "({left} % {right})"),
+            Self::PowerOfTwo(inner) => write!(f, "PowerOfTwo({inner})"),
+            Self::TargetQuery { kind, operand } => {
+                write!(f, "#{kind}({operand})")
+            }
+        }
+    }
+}
+
+impl fmt::Display for ProofRelation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Equal => "=",
+            Self::NotEqual => "!=",
+            Self::Less => "<",
+            Self::LessOrEqual => "<=",
+            Self::Greater => ">",
+            Self::GreaterOrEqual => ">=",
+        })
+    }
+}
+
+impl fmt::Display for ProofProposition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Compare {
+                left,
+                relation,
+                right,
+            } => write!(f, "{left} {relation} {right}"),
+            Self::InRange { value, start, end } => write!(f, "{value} in {start}...{end}"),
+            Self::Not(inner) => write!(f, "not ({inner})"),
+            Self::And(left, right) => write!(f, "({left}) and ({right})"),
+            Self::Or(left, right) => write!(f, "({left}) or ({right})"),
+        }
+    }
+}
+
+impl DeclarationKey {
+    pub fn new(
+        package: PackageInstanceKey,
+        module: Vec<Intern<String>>,
+        declaration: Intern<String>,
+    ) -> Self {
+        Self {
+            package,
+            module,
+            declaration,
+        }
+    }
+
+    pub fn from_qualified_name(
+        package: PackageInstanceKey,
+        qualified_name: Intern<String>,
+    ) -> Self {
+        let mut parts: Vec<_> = qualified_name
+            .as_str()
+            .split('.')
+            .map(|part| Intern::new(part.to_string()))
+            .collect();
+        let declaration = parts.pop().unwrap_or(qualified_name);
+        if parts.first() == Some(&package.name) {
+            parts.remove(0);
+        }
+        Self::new(package, parts, declaration)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NamedTypeInstance {
+    pub declaration: TypeId,
+    pub arguments: Vec<(Intern<String>, TyArg)>,
+}
+
+impl NamedTypeInstance {
+    pub fn new(declaration: TypeId) -> Self {
+        Self {
+            declaration,
+            arguments: Vec::new(),
+        }
+    }
+
+    pub fn with_arguments(mut self, arguments: Vec<(Intern<String>, TyArg)>) -> Self {
+        self.arguments = arguments;
+        self
+    }
+}
+
+pub use crate::integer::IntegerInterpretation;
 
 /// One union variant with an optional indexed result type.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -38,12 +239,27 @@ pub enum PredicateExpr {
     Eq(NormalExpr),
     Ne(NormalExpr),
     And(Vec<PredicateExpr>),
+    Proposition(Box<ProofProposition>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TyArg {
     Type(Box<Ty>),
     Const(NormalExpr),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LiteralKind {
+    Integer,
+}
+
+impl LiteralKind {
+    pub fn resolve(name: &str) -> Option<Self> {
+        match name {
+            "IntegerLiteral" => Some(Self::Integer),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for TyArg {
@@ -73,16 +289,18 @@ impl fmt::Display for ParamKind {
 /// Resolved type — the canonical representation after resolving declared type names against declarations.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Ty {
-    Int {
-        width: u8,
-        signed: bool,
-        /// Known compile-time value when constant-folded, otherwise `None`.
-        value: Option<i128>,
-        /// Inclusive lower bound for `in N...M` / `is in N...M` types, when set.
-        min: Option<i128>,
-        /// Inclusive upper bound for `in N...M` / `is in N...M` types, when set.
-        max: Option<i128>,
+    Named {
+        instance: NamedTypeInstance,
+        name: Intern<String>,
     },
+    AnonymousInteger {
+        validity: crate::integer::IntegerValidity,
+    },
+    ResultFamily {
+        owner: ResultFamilyOwner,
+        alternatives: Vec<ResultAlternative>,
+    },
+    UnresolvedLiteral(LiteralKind),
     Float {
         /// Known compile-time value when constant-folded, otherwise `None`.
         value: Option<HashFloat>,
@@ -104,7 +322,12 @@ pub enum Ty {
     Ptr {
         inner: Box<Ty>,
     },
-    /// Safe reference — does not consume source. Copy semantics.
+    /// Address-taking before an expected named raw-pointer type is selected.
+    Address {
+        pointee: Box<Ty>,
+        address_space: u32,
+    },
+    /// Safe reference — does not consume its referent.
     /// `ref T` is immutable, `mut T` is mutable.
     /// Invalidation is tracked in flow analysis.
     Ref {
@@ -129,16 +352,76 @@ pub enum Ty {
 }
 
 impl Ty {
+    pub fn type_id(&self) -> Option<TypeId> {
+        match self {
+            Ty::Named { instance, .. } => Some(instance.declaration),
+            _ => None,
+        }
+    }
+
+    pub fn named_instance(&self) -> Option<&NamedTypeInstance> {
+        match self {
+            Ty::Named { instance, .. } => Some(instance),
+            _ => None,
+        }
+    }
+
+    /// Return the nominal instance for a type that may be wrapped in
+    /// compatibility adapters (`ref`, `mut`, and bounded refinements).
+    pub fn named_instance_stripping_reference_wrappers(&self) -> Option<&NamedTypeInstance> {
+        match self {
+            Ty::Ref { inner, .. } => inner.named_instance_stripping_reference_wrappers(),
+            Ty::Named { instance, .. } => Some(instance),
+            _ => None,
+        }
+    }
+
+    /// Return the referent for a type that may be wrapped in compatibility
+    /// adapters (`ref`, `mut`, and bounded refinements). This is used by
+    /// registry-adapter APIs that should ignore those wrappers when resolving
+    /// nominal identity.
+    pub fn without_reference_wrappers(&self) -> &Ty {
+        match self {
+            Ty::Ref { inner, .. } => inner.without_reference_wrappers(),
+            ty => ty,
+        }
+    }
+
     pub fn is_int(&self) -> bool {
-        matches!(self, Ty::Int { .. })
+        matches!(self, Ty::AnonymousInteger { .. })
     }
 
-    pub fn is_unsigned_int(&self) -> bool {
-        matches!(self, Ty::Int { signed: false, .. })
+    pub fn anonymous_integer_validity(&self) -> Option<&crate::integer::IntegerValidity> {
+        match self {
+            Ty::AnonymousInteger { validity } => Some(validity),
+            _ => None,
+        }
     }
 
-    pub fn is_signed_int(&self) -> bool {
-        matches!(self, Ty::Int { signed: true, .. })
+    pub fn anonymous_operation_interpretation(&self) -> Option<IntegerInterpretation> {
+        self.anonymous_integer_validity().map(|validity| {
+            if validity
+                .domain()
+                .storage_hull()
+                .is_some_and(|hull| hull.min().is_negative())
+            {
+                IntegerInterpretation::Signed
+            } else {
+                IntegerInterpretation::Unsigned
+            }
+        })
+    }
+
+    pub fn anonymous_integer_width(&self) -> Option<u8> {
+        match self {
+            Ty::AnonymousInteger { validity } => crate::integer::resolve_representation(
+                validity,
+                &crate::integer::IntegerRepresentationRule::InferFromValidity,
+            )
+            .ok()
+            .and_then(|representation| u8::try_from(representation.width().get()).ok()),
+            _ => None,
+        }
     }
 
     pub fn is_float(&self) -> bool {
@@ -146,7 +429,26 @@ impl Ty {
     }
 
     pub fn is_ptr(&self) -> bool {
-        matches!(self, Ty::Ptr { .. })
+        self.address_space().is_some()
+    }
+
+    pub fn address_space(&self) -> Option<u32> {
+        match self {
+            Ty::Ptr { .. } => Some(0),
+            Ty::Address { address_space, .. } => Some(*address_space),
+            _ => None,
+        }
+    }
+
+    pub fn pointee_ty(&self) -> Option<&Ty> {
+        match self {
+            Ty::Ptr { inner } | Ty::Address { pointee: inner, .. } => Some(inner),
+            _ => None,
+        }
+    }
+
+    pub fn is_unresolved_address(&self) -> bool {
+        matches!(self, Ty::Address { .. })
     }
 
     pub fn is_ref(&self) -> bool {
@@ -220,28 +522,37 @@ impl Ty {
     /// Format this type for hover display.
     pub fn format_for_hover(&self) -> String {
         match self {
-            Ty::Int {
-                width,
-                signed,
-                value,
-                min,
-                max,
-            } => {
-                if let (Some(lo), Some(hi)) = (min, max) {
-                    if let Some(v) = value {
-                        format!("in {lo}...{hi} (= {v})")
-                    } else {
-                        format!("in {lo}...{hi}")
-                    }
+            Ty::Named { instance, name, .. } => {
+                if instance.arguments.is_empty() {
+                    name.as_str().to_string()
                 } else {
-                    let prefix = if *signed { "i" } else { "u" };
-                    if let Some(v) = value {
-                        format!("{}{} = {}", prefix, width, v)
-                    } else {
-                        format!("{}{}", prefix, width)
-                    }
+                    let arguments = instance
+                        .arguments
+                        .iter()
+                        .map(|(_, argument)| argument.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("{}({arguments})", name.as_str())
                 }
             }
+            Ty::AnonymousInteger { validity, .. } => validity
+                .domain()
+                .storage_hull()
+                .map(|hull| format!("integer in {}...{}", hull.min(), hull.max()))
+                .unwrap_or_else(|| "integer".to_string()),
+            Ty::ResultFamily {
+                owner,
+                alternatives,
+            } => format!(
+                "result {:?}({})",
+                owner,
+                alternatives
+                    .iter()
+                    .map(|alternative| alternative.label.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" or ")
+            ),
+            Ty::UnresolvedLiteral(LiteralKind::Integer) => "integer literal".to_string(),
             Ty::Float { value } => {
                 if let Some(HashFloat(v)) = value {
                     format!("f64 = {}", v)
@@ -261,6 +572,13 @@ impl Ty {
             Ty::Opaque(name) => name.as_str().to_string(),
             Ty::Array { elem, size } => format!("[{}; {}]", elem.format_for_hover(), size),
             Ty::Ptr { inner } => format!("*{}", inner.format_for_hover()),
+            Ty::Address {
+                pointee,
+                address_space,
+            } => format!(
+                "unresolved address(space {address_space}, {})",
+                pointee.format_for_hover()
+            ),
             Ty::Ref { inner, mutable } => {
                 let prefix = if *mutable { "mut " } else { "ref " };
                 format!("{}{}", prefix, inner.format_for_hover())
@@ -276,221 +594,40 @@ impl Ty {
         }
     }
 
-    /// Build a `ConstValue` describing this type for the synthesized `Reflectable.shape` field.
-    pub fn to_const_value(&self) -> ConstValue {
-        let mut seen: HashSet<Intern<String>> = HashSet::new();
-        self.to_const_value_inner(&mut seen)
-    }
-
-    fn to_const_value_inner(&self, seen: &mut HashSet<Intern<String>>) -> ConstValue {
-        match self {
-            Ty::Int { width, signed, .. } => Self::tag(
-                "Primitive",
-                vec![
-                    ConstValue::Int(i128::from(*width)),
-                    ConstValue::Tag {
-                        name: Intern::from_ref(if *signed { "True" } else { "False" }),
-                        qual_path: None,
-                        args: vec![].into(),
-                    },
-                ],
-            ),
-            Ty::Float { .. } => Self::tag(
-                "Primitive",
-                vec![
-                    ConstValue::Int(64),
-                    ConstValue::Tag {
-                        name: Intern::from_ref("True"),
-                        qual_path: None,
-                        args: vec![].into(),
-                    },
-                ],
-            ),
-            Ty::Unit => Self::tag("Tuple", vec![ConstValue::List(vec![].into())]),
-            Ty::Record { name, fields, .. } => {
-                if !seen.insert(*name) {
-                    return Self::tag(
-                        "Opaque",
-                        vec![ConstValue::String(name.as_str().to_string())],
-                    );
-                }
-                let named: Vec<ConstValue> = fields
-                    .iter()
-                    .map(|(fname, fty)| {
-                        Self::record_named(fname.as_str(), fty.to_const_value_inner(seen))
-                    })
-                    .collect();
-                seen.remove(name);
-                Self::tag(
-                    "Record",
-                    vec![
-                        ConstValue::String(name.as_str().to_string()),
-                        ConstValue::List(named.into()),
-                    ],
-                )
-            }
-            Ty::Union {
-                name,
-                variants,
-                literal_values: Some(values),
-                ..
-            } if !values.is_empty() => {
-                if !seen.insert(*name) {
-                    return Self::tag(
-                        "Opaque",
-                        vec![ConstValue::String(name.as_str().to_string())],
-                    );
-                }
-                let variant_shapes: Vec<ConstValue> = values
-                    .iter()
-                    .map(|cv| {
-                        let vname = cv.to_hover_string();
-                        Self::record_variant(&vname, vec![Self::record_named("value", cv.clone())])
-                    })
-                    .collect();
-                seen.remove(name);
-                Self::tag(
-                    "Union",
-                    vec![
-                        ConstValue::String(name.as_str().to_string()),
-                        ConstValue::List(variant_shapes.into()),
-                    ],
-                )
-            }
-            Ty::Union { name, variants, .. } => {
-                if !seen.insert(*name) {
-                    return Self::tag(
-                        "Opaque",
-                        vec![ConstValue::String(name.as_str().to_string())],
-                    );
-                }
-                let variant_shapes: Vec<ConstValue> = variants
-                    .iter()
-                    .map(|v| {
-                        let fields: Vec<ConstValue> = v
-                            .fields
-                            .iter()
-                            .map(|(fname, fty)| {
-                                Self::record_named(fname.as_str(), fty.to_const_value_inner(seen))
-                            })
-                            .collect();
-                        Self::record_variant(v.name.as_str(), fields)
-                    })
-                    .collect();
-                seen.remove(name);
-                Self::tag(
-                    "Union",
-                    vec![
-                        ConstValue::String(name.as_str().to_string()),
-                        ConstValue::List(variant_shapes.into()),
-                    ],
-                )
-            }
-            Ty::Tuple(elems) => {
-                let items: Vec<ConstValue> =
-                    elems.iter().map(|t| t.to_const_value_inner(seen)).collect();
-                Self::tag("Tuple", vec![ConstValue::List(items.into())])
-            }
-            Ty::Ptr { inner } => Self::tag("Ptr", vec![inner.to_const_value_inner(seen)]),
-            Ty::Ref { inner, mutable } => Self::tag(
-                "Ref",
-                vec![
-                    inner.to_const_value_inner(seen),
-                    ConstValue::Tag {
-                        name: Intern::from_ref(if *mutable { "True" } else { "False" }),
-                        qual_path: None,
-                        args: vec![].into(),
-                    },
-                ],
-            ),
-            Ty::Array { elem, size } => {
-                let size_val = match size {
-                    NormalExpr::Value(v) => v.clone(),
-                    _ => ConstValue::Int(0),
-                };
-                Self::tag("Array", vec![elem.to_const_value_inner(seen), size_val])
-            }
-            Ty::Opaque(name) => Self::tag(
-                "Opaque",
-                vec![ConstValue::String(name.as_str().to_string())],
-            ),
-            Ty::Literal(cv) => Self::record_named("Literal", cv.clone()),
-        }
-    }
-
-    fn tag(name: &str, args: Vec<ConstValue>) -> ConstValue {
-        ConstValue::Tag {
-            name: Intern::new(name.to_string()),
-            qual_path: None,
-            args: args.into(),
-        }
-    }
-
-    fn record_named(name: &str, ty: ConstValue) -> ConstValue {
-        ConstValue::Record {
-            fields: vec![
-                (
-                    Intern::new("name".to_string()),
-                    ConstValue::String(name.to_string()),
-                ),
-                (Intern::new("ty".to_string()), ty),
-            ]
-            .into(),
-        }
-    }
-
-    fn record_variant(name: &str, fields: Vec<ConstValue>) -> ConstValue {
-        ConstValue::Record {
-            fields: vec![
-                (
-                    Intern::new("name".to_string()),
-                    ConstValue::String(name.to_string()),
-                ),
-                (
-                    Intern::new("fields".to_string()),
-                    ConstValue::List(fields.into()),
-                ),
-            ]
-            .into(),
-        }
-    }
-
     /// Convenience constructor for a default-width signed integer type.
     pub fn i64() -> Self {
-        Ty::Int {
-            width: 64,
-            signed: true,
-            value: None,
-            min: None,
-            max: None,
-        }
+        Self::anonymous_integer_for_width(64, true)
     }
 
     /// Convenience constructor for an 8-bit unsigned integer type.
     pub fn u8() -> Self {
-        Ty::Int {
-            width: 8,
-            signed: false,
-            value: None,
-            min: None,
-            max: None,
+        Self::anonymous_integer_for_width(8, false)
+    }
+
+    pub fn anonymous_integer_for_width(width: u8, signed: bool) -> Self {
+        let domain = if width == 0 || width > 128 {
+            None
+        } else if signed {
+            let magnitude = i256::I256::from(1) << (u32::from(width) - 1);
+            crate::integer::IntegerDomain::bounded(-magnitude, magnitude - i256::I256::from(1))
+        } else {
+            let upper = (i256::I256::from(1) << u32::from(width)) - i256::I256::from(1);
+            crate::integer::IntegerDomain::bounded(i256::I256::from(0), upper)
+        }
+        .unwrap_or_else(crate::integer::IntegerDomain::empty);
+        Ty::AnonymousInteger {
+            validity: crate::integer::IntegerValidity::new(domain),
         }
     }
 
     pub fn is_bounded_int(&self) -> bool {
-        matches!(
-            self,
-            Ty::Int {
-                min: Some(_),
-                max: Some(_),
-                ..
-            }
-        )
+        self.anonymous_integer_validity().is_some()
     }
 
     /// Extract the name of a nominal type for compile-time trait lookup.
     pub fn type_name(&self) -> Option<&Intern<String>> {
         match self {
+            Ty::Named { name, .. } => Some(name),
             Ty::Record { name, .. } => Some(name),
             Ty::Union { name, .. } => Some(name),
             Ty::Opaque(name) => Some(name),
@@ -502,6 +639,30 @@ impl Ty {
     /// entry in `subst`.
     pub fn substitute(&self, subst: &HashMap<Intern<String>, Ty>) -> Ty {
         match self {
+            Ty::Named { instance, name } => Ty::Named {
+                instance: NamedTypeInstance {
+                    declaration: instance.declaration,
+                    arguments: instance
+                        .arguments
+                        .iter()
+                        .map(|(name, arg)| {
+                            let arg = match arg {
+                                TyArg::Type(ty) => TyArg::Type(Box::new(ty.substitute(subst))),
+                                TyArg::Const(expr) => TyArg::Const(expr.clone()),
+                            };
+                            (*name, arg)
+                        })
+                        .collect(),
+                },
+                name: *name,
+            },
+            Ty::AnonymousInteger { validity } => Ty::AnonymousInteger {
+                validity: validity.clone(),
+            },
+            Ty::Ref { inner, mutable } => Ty::Ref {
+                inner: Box::new(inner.substitute(subst)),
+                mutable: *mutable,
+            },
             Ty::Opaque(name) => subst.get(name).cloned().unwrap_or(Ty::Opaque(*name)),
             Ty::Record {
                 name,
@@ -560,6 +721,13 @@ impl Ty {
             Ty::Ptr { inner } => Ty::Ptr {
                 inner: Box::new(inner.substitute(subst)),
             },
+            Ty::Address {
+                pointee,
+                address_space,
+            } => Ty::Address {
+                pointee: Box::new(pointee.substitute(subst)),
+                address_space: *address_space,
+            },
             _ => self.clone(),
         }
     }
@@ -567,6 +735,14 @@ impl Ty {
     /// If this type is an array or tuple, return the element type.
     /// Otherwise, look up the `List` type in `tag_types` and extract its `pointer` field.
     pub fn list_elem_ty(&self, tag_types: &HashMap<Intern<String>, Ty>) -> Option<Ty> {
+        if let Some(instance) = self.named_instance()
+            && let Some((_, TyArg::Type(elem))) = instance
+                .arguments
+                .iter()
+                .find(|(name, _)| name.as_str() == "x")
+        {
+            return Some((**elem).clone());
+        }
         match self {
             Ty::Array { elem, .. } => Some(*elem.clone()),
             Ty::Tuple(elems) if !elems.is_empty() => Some(elems[0].clone()),

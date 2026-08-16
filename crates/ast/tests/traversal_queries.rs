@@ -28,11 +28,11 @@ fn parse_direct_children_follow_source_order() {
         ("main: left...right\n", "range", 2),
         ("main: (init; size)\n", "tuple allocation", 2),
         ("main: buffer.(index)\n", "buffer get", 2),
-        ("main: buffer.(index): value\n", "buffer set", 3),
+        ("main: buffer.(index):: value\n", "buffer set", 3),
         ("main: tuple.0\n", "tuple get", 1),
-        ("main: tuple.0: value\n", "tuple set", 2),
+        ("main: tuple.0:: value\n", "tuple set", 2),
         ("main: record.field\n", "record get", 1),
-        ("main: record.field: value\n", "record set", 2),
+        ("main: record.field:: value\n", "record set", 2),
         ("main: value as Int\n", "cast", 1),
         ("main: @value\n", "take pointer", 1),
         ("main: *value\n", "dereference", 1),
@@ -41,11 +41,10 @@ fn parse_direct_children_follow_source_order() {
         ("main: deref value\n", "dereference", 1),
         ("main: eat value\n", "eat", 1),
         ("main: -value\n", "negate", 1),
-        ("main: asm(spec, left, right)\n", "asm", 3),
+        ("main: dispatch(spec, left, right)\n", "call", 3),
         ("main: \"value: (needle)\"\n", "format string", 1),
-        ("main: when condition then body else fallback\n", "when", 3),
         (
-            "main: when subject is True then body else fallback\n",
+            "main: when condition is True then body else fallback\n",
             "when",
             3,
         ),
@@ -54,9 +53,18 @@ fn parse_direct_children_follow_source_order() {
             "when",
             3,
         ),
-        ("main: while condition\n    body\nloop\n", "loop", 2),
+        (
+            "main: when subject is True then body else fallback\n",
+            "when",
+            3,
+        ),
+        ("main: while condition is True\n    body\nloop\n", "loop", 2),
         ("main: for item in iterable\n    body\nloop\n", "loop", 3),
-        ("main: if condition\n    body\nreturn fallback\n", "if", 3),
+        (
+            "main: if condition is True\n    body\nreturn fallback\n",
+            "if",
+            3,
+        ),
     ];
 
     for (source, expected_variant, expected_count) in cases {
@@ -83,7 +91,6 @@ fn parse_direct_children_follow_source_order() {
             Expr::Ref { mutable: true, .. } => "mutable reference",
             Expr::Eat(_) => "eat",
             Expr::Negate(_) => "negate",
-            Expr::Asm(_) => "asm",
             Expr::FormatString(_) => "format string",
             Expr::When(_) => "when",
             Expr::Loop(_) => "loop",
@@ -131,17 +138,17 @@ fn mutable_parse_traversal_visits_all_allocation_children() {
 fn typed_direct_children_cover_lowered_multi_child_shapes() {
     let cases = [
         ("main: call(left, right)\n", "call", 2),
-        ("main: left + right\n", "binary", 2),
+        ("main: left + right\n", "intrinsic", 2),
         ("main: (left, right)\n", "tuple", 2),
         ("main: [left, right]\n", "list", 2),
         ("main: Shape(left, right)\n", "tag call", 2),
         ("main: left...right\n", "range", 2),
         ("main: (init; 3)\n", "tuple allocation", 1),
         ("main: buffer.(index)\n", "buffer get", 2),
-        ("main: buffer.(index): value\n", "buffer set", 3),
+        ("main: buffer.(index):: value\n", "buffer set", 3),
         ("main: tuple.0\n", "tuple get", 1),
-        ("main: tuple.0: value\n", "tuple set", 2),
-        ("main: record.field: value\n", "record set", 2),
+        ("main: tuple.0:: value\n", "tuple set", 2),
+        ("main: record.field:: value\n", "record set", 2),
         ("main: value as Int\n", "cast", 1),
         ("main: @value\n", "take pointer", 1),
         ("main: *value\n", "dereference", 1),
@@ -149,12 +156,20 @@ fn typed_direct_children_cover_lowered_multi_child_shapes() {
         ("main: deref value\n", "dereference", 1),
         ("main: eat value\n", "eat", 1),
         ("main: -value\n", "negate", 1),
-        ("main: asm(spec, left, right)\n", "asm", 0),
+        ("main: dispatch(spec, left, right)\n", "call", 3),
         ("main: \"value: (needle)\"\n", "format string", 0),
-        ("main: when condition then body else fallback\n", "when", 3),
-        ("main: while condition\n    body\nloop\n", "loop", 2),
+        (
+            "main: when condition is True then body else fallback\n",
+            "when",
+            3,
+        ),
+        ("main: while condition is True\n    body\nloop\n", "loop", 2),
         ("main: for item in iterable\n    body\nloop\n", "loop", 2),
-        ("main: if condition\n    body\nreturn fallback\n", "if", 3),
+        (
+            "main: if condition is True\n    body\nreturn fallback\n",
+            "if",
+            3,
+        ),
     ];
 
     for (source, expected_variant, expected_count) in cases {
@@ -171,7 +186,9 @@ fn typed_direct_children_cover_lowered_multi_child_shapes() {
         let kind = &typed.exprs.kind[root.as_usize()];
         let actual_variant = match kind {
             TypedExprKind::FnCall { .. } => "call",
+            TypedExprKind::IntrinsicCall { .. } => "intrinsic",
             TypedExprKind::Binary { .. } => "binary",
+            TypedExprKind::InvalidOperator { .. } => "binary",
             TypedExprKind::TupleLit(_) => "tuple",
             TypedExprKind::List(_) => "list",
             TypedExprKind::TagCall { .. } => "tag call",
@@ -188,7 +205,6 @@ fn typed_direct_children_cover_lowered_multi_child_shapes() {
             TypedExprKind::Ref(_) => "reference",
             TypedExprKind::Eat(_) => "eat",
             TypedExprKind::Negate(_) => "negate",
-            TypedExprKind::Asm(_) => "asm",
             TypedExprKind::FormatString(_) => "format string",
             TypedExprKind::When(_) => "when",
             TypedExprKind::Loop(_) => "loop",
@@ -210,7 +226,7 @@ fn body_expression_children_cover_bind_reassign_and_destructure() {
     let source = "\
 main:
     local Int
-    local: initializer
+    local:: initializer
     Some(x: item) := source
 return item
 ";

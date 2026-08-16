@@ -5,10 +5,10 @@
 pub mod expr;
 pub mod warnings;
 pub use expr::{
-    AsmExpr, AttributeItem, BinOp, Binary, Bind, BindAttributes, BindValue, BundleExportImport,
-    ClobberSpec, Complexity, ComplexityExpr, Expr, FnCall, ForInLoop, FormatPart, FormatString,
-    IfExpr, Import, ImportSource, Literal, LocalBundleImport, LocalMemberImport, Loop, LoopEnum,
-    ModuleImport, OperandKind, OperandSpec, Range, Return, TagCall, Typed, WhenArm, WhenExpr,
+    AttributeItem, BinOp, Binary, Bind, BindAttributes, BindOperator, BindValue,
+    BundleExportImport, Complexity, ComplexityExpr, Condition, Expr, FnCall, ForInLoop, FormatPart,
+    FormatString, IfExpr, Import, ImportSource, Literal, LocalBundleImport, LocalMemberImport,
+    Loop, LoopEnum, ModuleImport, OperatorRole, Range, Return, TagCall, Typed, WhenArm, WhenExpr,
     WhileLoop,
 };
 
@@ -36,7 +36,11 @@ pub mod type_decl;
 pub use type_decl::TypeNameExt;
 
 pub mod normal_expr;
-pub use normal_expr::{BinderId, BinderOwner, DependentArgId, NormalExpr};
+pub use normal_expr::{
+    BinderId, BinderOwner, DependentArgId, NormalExpr, TargetQueryKind, TypeReference,
+};
+
+pub mod integer;
 
 pub mod const_value;
 pub use const_value::{ConstValue, TypeConstraint};
@@ -63,8 +67,8 @@ pub use doc_comment::DocComment;
 
 pub mod declare;
 pub use declare::{
-    Declare, DeclareAttributes, DeclareValue, HasFunction, HasFunctionKind, HasMember,
-    HasMemberBody, HasProperty, ProvidedTrait,
+    Declare, DeclareAttributes, DeclareValue, DefaultTypeFormerRole, FixedArrayContract,
+    HasFunction, HasFunctionKind, HasMember, HasMemberBody, HasProperty, ProvidedTrait,
 };
 
 pub mod pattern;
@@ -75,8 +79,8 @@ pub use span::{HasSpanId, Span, SpanId, SpanTable, Spanned, SubSpan};
 
 pub mod ty;
 pub use ty::{
-    ParamKind, PredicateExpr, Ty, TyArg, UnionVariant, VariantLookupResult, VariantMap,
-    VariantMapEntry,
+    ParamKind, PredicateExpr, ProofProposition, ProofRelation, ProofTerm, ResultAlternative,
+    ResultFamilyOwner, Ty, TyArg, UnionVariant, VariantLookupResult, VariantMap, VariantMapEntry,
 };
 
 pub mod range_bounds;

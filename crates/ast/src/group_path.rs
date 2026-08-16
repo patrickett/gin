@@ -1,6 +1,7 @@
 use std::fmt;
 
 use internment::Intern;
+use itertools::Itertools;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GroupPath {
@@ -26,10 +27,11 @@ impl GroupPath {
 
 impl fmt::Display for GroupPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.root.as_str())?;
-        for segment in &self.segments {
-            write!(f, ".{}", segment.as_str())?;
-        }
-        Ok(())
+        write!(
+            f,
+            "{}{}",
+            self.root.as_str(),
+            self.segments.iter().format(".")
+        )
     }
 }

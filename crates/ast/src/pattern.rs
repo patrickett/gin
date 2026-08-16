@@ -11,19 +11,21 @@
 //! Ref: https://matklad.github.io/2025/08/09/zigs-lovely-syntax.html#Everything-Is-an-Expression
 
 use internment::Intern;
+use kinded::Kinded;
 use std::collections::HashMap;
 
-use crate::{GroupPath, InRangeBounds, ModPath, TypeExpr};
 use crate::expr::{Expr, FnCall, Literal, Typed, WhenArm, WhenExpr};
-use crate::parameter::ParameterKind;
 use crate::normal_expr::NormalExpr;
+use crate::parameter::ParameterKind;
 use crate::source::SourceExt;
 use crate::span::{SpanId, SpanTable, Spanned};
 use crate::ty::{Ty, VariantMap};
 use crate::{BindValue, DeclareValue, FileAst};
+use crate::{GroupPath, InRangeBounds, ModPath, TypeExpr};
 
 /// A pattern-bearing syntax node kept distinct from ordinary type surfaces.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Kinded)]
+#[kinded(kind = PatternKind)]
 pub enum Pattern {
     Nominal(Intern<String>, SpanId),
     Qualified(crate::Spanned<ModPath>),
@@ -47,14 +49,20 @@ pub enum Pattern {
         tail: Box<crate::Spanned<Pattern>>,
     },
     Tuple(Vec<crate::Spanned<Pattern>>),
-    InRange { bounds: InRangeBounds, span: SpanId },
+    InRange {
+        bounds: InRangeBounds,
+        span: SpanId,
+    },
 }
 
 impl Pattern {
     pub fn variant_shape_name_span(&self, variant_name: &str) -> Option<SpanId> {
         match self {
             Self::Nominal(name, span) | Self::Generic { name, span, .. }
-                if name.as_str() == variant_name => Some(*span),
+                if name.as_str() == variant_name =>
+            {
+                Some(*span)
+            }
             Self::Literal(Literal::String(value), span) if value == variant_name => Some(*span),
             _ => None,
         }
@@ -143,7 +151,16 @@ impl Pattern {
 
     pub fn is_catch_all_pattern(&self) -> bool {
         match self {
-            Self::Nominal(name, _) if name.as_str() == "_" => true,
+            Self::Nominal(name, _)
+                if name.as_str() == "_"
+                    || name
+                        .as_str()
+                        .chars()
+                        .next()
+                        .is_some_and(|character| character.is_ascii_lowercase()) =>
+            {
+                true
+            }
             Self::ListCons { tail, .. } => tail.value.is_catch_all_pattern(),
             Self::Generic { params, .. } => {
                 params.len() == 1
@@ -221,20 +238,14 @@ impl Pattern {
                     .is_some_and(|c| c.is_ascii_lowercase())
                     && !name.is_pattern_wildcard() =>
             {
-                out.insert(
-                    *name,
-                    subject_ty
-                        .cloned()
-                        .unwrap_or(Ty::Opaque(*name)),
-                );
+                out.insert(*name, subject_ty.cloned().unwrap_or(Ty::Opaque(*name)));
             }
             Pattern::ListCons { head, tail } => {
                 if let Some(elem_ty) = subject_ty.and_then(|ty| ty.list_elem_ty(tag_types)) {
-                    for (name, ty) in head.value.pattern_binding_types(
-                        Some(&elem_ty),
-                        variant_map,
-                        tag_types,
-                    ) {
+                    for (name, ty) in
+                        head.value
+                            .pattern_binding_types(Some(&elem_ty), variant_map, tag_types)
+                    {
                         out.insert(name, ty);
                     }
                     let tail_ty = match subject_ty {
@@ -245,11 +256,10 @@ impl Pattern {
                         Some(ty) => ty.clone(),
                         None => Ty::Opaque(Intern::new("list_tail".to_string())),
                     };
-                    for (name, ty) in tail.value.pattern_binding_types(
-                        Some(&tail_ty),
-                        variant_map,
-                        tag_types,
-                    ) {
+                    for (name, ty) in
+                        tail.value
+                            .pattern_binding_types(Some(&tail_ty), variant_map, tag_types)
+                    {
                         out.insert(name, ty);
                     }
                 }
@@ -257,11 +267,10 @@ impl Pattern {
             Pattern::Tuple(elems) => {
                 if let Some(Ty::Tuple(subject_elems)) = subject_ty {
                     for (pat, subj) in elems.iter().zip(subject_elems.iter()) {
-                        for (name, ty) in pat.value.pattern_binding_types(
-                            Some(subj),
-                            variant_map,
-                            tag_types,
-                        ) {
+                        for (name, ty) in
+                            pat.value
+                                .pattern_binding_types(Some(subj), variant_map, tag_types)
+                        {
                             out.insert(name, ty);
                         }
                     }
@@ -295,11 +304,14 @@ impl Pattern {
                 {
                     return Some(ty.clone());
                 }
-                let kind = params.iter().find(|(name, _)| name == param_name).map(|(_, k)| k);
+                let kind = params
+                    .iter()
+                    .find(|(name, _)| name == param_name)
+                    .map(|(_, k)| k);
                 match kind {
-                    Some(ParameterKind::Tagged(sp)) => Some(
-                        crate::type_expr::resolve_expr_type(&sp.value, tag_types),
-                    ),
+                    Some(ParameterKind::Tagged(sp)) => {
+                        Some(crate::type_expr::resolve_expr_type(&sp.value, tag_types))
+                    }
                     Some(ParameterKind::Generic) if !param_name.is_pattern_wildcard() => {
                         Some(Ty::Opaque(*param_name))
                     }
@@ -309,12 +321,8 @@ impl Pattern {
             Pattern::ListCons { head, tail } => {
                 let elem_ty = subject_ty.and_then(|ty| ty.list_elem_ty(tag_types))?;
                 if slot == 0 {
-                    head.value.pattern_param_type_at_slot(
-                        0,
-                        Some(&elem_ty),
-                        variant_map,
-                        tag_types,
-                    )
+                    head.value
+                        .pattern_param_type_at_slot(0, Some(&elem_ty), variant_map, tag_types)
                 } else {
                     let tail_ty = match subject_ty {
                         Some(Ty::Array { elem, .. }) => Ty::Array {
@@ -353,9 +361,7 @@ impl Pattern {
                 Literal::Float(_) => "__literal_float",
                 Literal::Number(_) => "__literal_number",
             },
-            Self::Pointer(inner) | Self::Ref { inner, .. } => {
-                inner.value.surface_mangle_name()
-            }
+            Self::Pointer(inner) | Self::Ref { inner, .. } => inner.value.surface_mangle_name(),
             Self::Unit => "()",
             Self::InRange { .. } => "__in_range",
             Self::ListEmpty => "[]",
@@ -379,11 +385,11 @@ impl Pattern {
     }
 
     pub fn is_list_empty(&self) -> bool {
-        matches!(self, Self::ListEmpty)
+        self.kind() == PatternKind::ListEmpty
     }
 
     pub fn is_list_cons(&self) -> bool {
-        matches!(self, Self::ListCons { .. })
+        self.kind() == PatternKind::ListCons
     }
 
     pub fn is_list_tail_catch_all(&self) -> bool {
@@ -448,25 +454,28 @@ impl Pattern {
                 {
                     return true;
                 }
-                param_spans.iter().enumerate().any(|(slot, (pname, pspan))| {
-                    let ps = span_table.get(*pspan);
-                    if ps.start() <= byte_pos
-                        && byte_pos < ps.end()
-                        && (word == pname.as_str()
-                            || (pname.is_pattern_wildcard() && word == "_"))
-                    {
-                        return params
-                            .get(slot)
-                            .and_then(|(_, kind)| match kind {
-                                ParameterKind::Tagged(sp) => {
-                                    Some(sp.value.denotes_variant_name(word))
-                                }
-                                _ => None,
-                            })
-                            .unwrap_or(false);
-                    }
-                    false
-                })
+                param_spans
+                    .iter()
+                    .enumerate()
+                    .any(|(slot, (pname, pspan))| {
+                        let ps = span_table.get(*pspan);
+                        if ps.start() <= byte_pos
+                            && byte_pos < ps.end()
+                            && (word == pname.as_str()
+                                || (pname.is_pattern_wildcard() && word == "_"))
+                        {
+                            return params
+                                .get(slot)
+                                .and_then(|(_, kind)| match kind {
+                                    ParameterKind::Tagged(sp) => {
+                                        Some(sp.value.denotes_variant_name(word))
+                                    }
+                                    _ => None,
+                                })
+                                .unwrap_or(false);
+                        }
+                        false
+                    })
             }
             Pattern::ListCons { head, tail } => {
                 head.value
@@ -605,17 +614,14 @@ impl Expr {
     }
 }
 
-
 impl Expr {
     /// Check if a variant word appears at `byte_pos` within this expression tree.
     fn pattern_variant_word_in(&self, span_table: &SpanTable, byte_pos: usize, word: &str) -> bool {
         match self {
             Expr::When(w) => w.pattern_variant_word_in(span_table, byte_pos, word),
-            Expr::If(i) => i.pattern.as_ref().is_some_and(|pattern| {
-                pattern
-                    .value
-                    .variant_word_at(pattern.span_id, span_table, byte_pos, word)
-            }),
+            Expr::If(i) => i
+                .condition
+                .pattern_variant_word_in(span_table, byte_pos, word),
             Expr::Bind(b) => b.value.pattern_variant_word_in(span_table, byte_pos, word),
             Expr::Binary(b) => {
                 b.lhs
@@ -664,9 +670,7 @@ impl WhenExpr {
             WhenArm::Cond {
                 condition, body, ..
             } => {
-                condition
-                    .value
-                    .pattern_variant_word_in(span_table, byte_pos, word)
+                condition.pattern_variant_word_in(span_table, byte_pos, word)
                     || body
                         .value
                         .pattern_variant_word_in(span_table, byte_pos, word)
@@ -675,6 +679,28 @@ impl WhenExpr {
                 .value
                 .pattern_variant_word_in(span_table, byte_pos, word),
         })
+    }
+}
+
+impl crate::Condition {
+    fn pattern_variant_word_in(&self, span_table: &SpanTable, byte_pos: usize, word: &str) -> bool {
+        match self {
+            crate::Condition::Is { subject, pattern } => {
+                pattern
+                    .value
+                    .variant_word_at(pattern.span_id, span_table, byte_pos, word)
+                    || subject
+                        .value
+                        .pattern_variant_word_in(span_table, byte_pos, word)
+            }
+            crate::Condition::Not(inner) => {
+                inner.pattern_variant_word_in(span_table, byte_pos, word)
+            }
+            crate::Condition::And(left, right) | crate::Condition::Or(left, right) => {
+                left.pattern_variant_word_in(span_table, byte_pos, word)
+                    || right.pattern_variant_word_in(span_table, byte_pos, word)
+            }
+        }
     }
 }
 
@@ -751,9 +777,7 @@ impl FileAst {
                     Pattern::Nominal(n, span_id) if span_table.contains(*span_id, byte_pos) => {
                         Some(n.as_str().to_string())
                     }
-                    Pattern::Generic { name, span, .. }
-                        if span_table.contains(*span, byte_pos) =>
-                    {
+                    Pattern::Generic { name, span, .. } if span_table.contains(*span, byte_pos) => {
                         Some(name.as_str().to_string())
                     }
                     _ => None,
@@ -828,245 +852,5 @@ impl Pattern {
             names.retain(|n| !n.is_pattern_wildcard());
         }
         names
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::HashFloat;
-    use crate::parameter::ParameterKind;
-    use crate::path::ModPath;
-    use crate::span::{SpanId, Spanned};
-    use crate::ty::Ty;
-    use std::collections::HashMap;
-
-    fn intern(s: &str) -> Intern<String> {
-        Intern::new(s.to_owned())
-    }
-
-    fn simple_var(name: &str) -> Expr {
-        let n = intern(name);
-        Expr::FnCall(FnCall {
-            path: Spanned::new(ModPath::new(n, Vec::new()), SpanId::new(0)),
-            args: None,
-        })
-    }
-
-    fn list_cons_pat(head_name: &str, tail_name: &str) -> Pattern {
-        Pattern::ListCons {
-            head: Box::new(Spanned {
-                value: Pattern::Nominal(intern(head_name), SpanId::new(0)),
-                span_id: SpanId::new(0),
-            }),
-            tail: Box::new(Spanned {
-                value: Pattern::Nominal(intern(tail_name), SpanId::new(1)),
-                span_id: SpanId::new(1),
-            }),
-        }
-    }
-
-    #[test]
-    fn for_loop_pattern_cases() {
-        #[allow(clippy::type_complexity)]
-        let cases: Vec<(&str, Vec<Expr>, Option<Vec<&str>>, Option<&str>)> = vec![
-            (
-                "single_name",
-                vec![simple_var("i")],
-                Some(vec!["i"]),
-                Some("i"),
-            ),
-            (
-                "tuple_names",
-                vec![Expr::TupleLit(vec![
-                    Typed::infer(simple_var("a"), SpanId::new(1)),
-                    Typed::infer(simple_var("b"), SpanId::new(2)),
-                ])],
-                Some(vec!["a", "b"]),
-                None,
-            ),
-            (
-                "rejects_calls",
-                vec![Expr::FnCall(FnCall {
-                    path: Spanned::new(ModPath::new(intern("f"), Vec::new()), SpanId::new(0)),
-                    args: Some(vec![]),
-                })],
-                None,
-                None,
-            ),
-        ];
-
-        for (name, exprs, expected_names, expected_single) in cases {
-            let e = exprs.into_iter().next().unwrap();
-            let result = e.for_loop_pattern_names();
-            let expected: Option<Vec<Intern<String>>> =
-                expected_names.map(|v| v.into_iter().map(intern).collect());
-            assert_eq!(result, expected, "for_loop_pattern_names({name})");
-
-            let single_result = e.for_loop_single_binding();
-            let expected = expected_single.map(intern);
-            assert_eq!(single_result, expected, "for_loop_single_binding({name})");
-        }
-    }
-
-    #[test]
-    fn pattern_type_binding_names_cases() {
-        let cases: Vec<(&str, Pattern, Vec<&str>)> = vec![
-            (
-                "generic",
-                Pattern::Generic {
-                    name: intern("Some"),
-                    params: vec![(intern("v"), ParameterKind::Generic)],
-                    param_spans: vec![(intern("v"), SpanId::new(0))],
-                    span: SpanId::new(0),
-                },
-                vec!["v"],
-            ),
-            (
-                "excludes_wildcard",
-                Pattern::Generic {
-                    name: intern("Record"),
-                    params: vec![
-                        (intern("_"), ParameterKind::Generic),
-                        (intern("fields"), ParameterKind::Generic),
-                    ],
-                    param_spans: vec![
-                        (intern("_"), SpanId::new(0)),
-                        (intern("fields"), SpanId::new(1)),
-                    ],
-                    span: SpanId::new(0),
-                },
-                vec!["fields"],
-            ),
-            (
-                "list_cons_lowercase",
-                list_cons_pat("head", "tail"),
-                vec!["head", "tail"],
-            ),
-            (
-                "list_cons_uppercase",
-                list_cons_pat("Head", "Tail"),
-                vec![],
-            ),
-            ("list_empty", Pattern::ListEmpty, vec![]),
-        ];
-
-        for (name, pat, expected_names) in cases {
-            let result = pat.binding_names();
-            let expected: Vec<Intern<String>> = expected_names.into_iter().map(intern).collect();
-            assert_eq!(
-                result.len(),
-                expected.len(),
-                "{name}: expected {} bindings, got {}",
-                expected.len(),
-                result.len()
-            );
-            for en in &expected {
-                assert!(
-                    result.contains(en),
-                    "{name}: expected binding `{}` not found in {:?}",
-                    en.as_str(),
-                    result
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn surface_mangle_name_cases() {
-        let cases: Vec<(&str, TypeExpr)> = vec![
-            ("U32", TypeExpr::Nominal(intern("U32"), SpanId::new(1))),
-            (
-                "__literal_float",
-                TypeExpr::Literal(
-                    crate::Literal::Float(HashFloat(314.0 / 100.0)),
-                    SpanId::new(0),
-                ),
-            ),
-            (
-                "__literal_int",
-                TypeExpr::Literal(crate::Literal::Int(42), SpanId::new(0)),
-            ),
-        ];
-
-        for (expected, expr) in cases {
-            assert_eq!(
-                expr.surface_mangle_name(),
-                expected,
-                "surface_mangle_name({expr:?})"
-            );
-        }
-    }
-
-    #[test]
-    fn pattern_binding_types_list_cons() {
-        // pattern: [item, ...rest]
-        let pat = list_cons_pat("item", "rest");
-
-        // Subject type: List(NamedTy) = Record { pointer: Ptr(NamedTy), length: ... }
-        let named_ty = Ty::Record {
-            name: intern("NamedTy"),
-            resolved_params: None,
-            fields: vec![
-                (intern("name"), Box::new(Ty::Opaque(intern("String")))),
-                (intern("ty"), Box::new(Ty::Opaque(intern("Type")))),
-            ],
-        };
-        let list_record_fields: Vec<(Intern<String>, Box<Ty>)> = vec![
-            (
-                intern("pointer"),
-                Box::new(Ty::Ptr {
-                    inner: Box::new(named_ty.clone()),
-                }),
-            ),
-            (
-                intern("length"),
-                Box::new(Ty::Opaque(intern("PointerSize"))),
-            ),
-        ];
-        let list_record = Ty::Record {
-            name: intern("List"),
-            resolved_params: None,
-            fields: list_record_fields,
-        };
-        let mut tag_types = HashMap::new();
-        tag_types.insert(intern("List"), list_record);
-        let variant_map: crate::ty::VariantMap = HashMap::new();
-
-        let subject_ty = Some(Ty::Record {
-            name: intern("List"),
-            resolved_params: None,
-            fields: vec![
-                (
-                    intern("pointer"),
-                    Box::new(Ty::Ptr {
-                        inner: Box::new(named_ty.clone()),
-                    }),
-                ),
-                (
-                    intern("length"),
-                    Box::new(Ty::Opaque(intern("PointerSize"))),
-                ),
-            ],
-        });
-
-        let bindings = pat.pattern_binding_types(subject_ty.as_ref(), &variant_map, &tag_types);
-
-        assert_eq!(bindings.len(), 2, "should bind both item and rest");
-
-        // item should have the element type (extracted from Ptr)
-        let item_ty = bindings.get(&intern("item")).expect("item binding");
-        assert_eq!(item_ty, &named_ty, "item should have element type");
-
-        // rest should have List(NamedTy) type
-        let rest_ty = bindings.get(&intern("rest")).expect("rest binding");
-        match rest_ty {
-            Ty::Record { name, fields, .. } => {
-                assert_eq!(name.as_str(), "List", "rest should be a List");
-                let has_pointer = fields.iter().any(|(n, _)| n.as_str() == "pointer");
-                assert!(has_pointer, "rest List should have pointer field");
-            }
-            other => panic!("rest should be Record, got {:?}", other),
-        }
     }
 }

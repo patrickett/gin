@@ -46,7 +46,10 @@ main: Range.new(12, 1200)
         .get(&DefId(Intern::new("Range.new".to_string())))
         .expect("Range.new definition");
     assert!(
-        matches!(method.return_type, Ty::Record { ref name, .. } if name.as_str() == "Range"),
+        matches!(
+            typed.type_registry.resolved_definition_for_type(&method.return_type),
+            Ty::Record { name, .. } if name.as_str() == "Range"
+        ),
         "Range.new declaration should return Range, got {:?}; receiver: {:?}",
         method.return_type,
         method.receiver_type
@@ -62,7 +65,10 @@ main: Range.new(12, 1200)
         })
         .expect("Range.new call");
     assert!(
-        matches!(call_ty, Ty::Record { name, .. } if name.as_str() == "Range"),
+        matches!(
+            typed.type_registry.resolved_definition_for_type(call_ty),
+            Ty::Record { name, .. } if name.as_str() == "Range"
+        ),
         "Range.new call should return Range, got {call_ty:?}"
     );
 }
@@ -83,7 +89,7 @@ p := Coord(x: 1, y: 2, z: 3)
     let body = body_expr_id(&typed, "p").expect("p has body");
     let body_ty = typed.exprs.ty.get(body.as_usize()).expect("p body type");
 
-    match body_ty {
+    match typed.type_registry.resolved_definition_for_type(body_ty) {
         Ty::Record { name, fields, .. } => {
             assert_eq!(name.as_str(), "Coord", "p should have type Coord");
             assert_eq!(fields.len(), 3, "Coord has three fields");
@@ -120,7 +126,10 @@ Coord.new(x Int, y Int, z Int):
         let last = exprs.last().expect("Coord.new has body exprs");
         let last_ty = typed.exprs.ty.get(last.as_usize()).expect("last expr type");
         assert!(
-            matches!(last_ty, Ty::Record { name, .. } if name.as_str() == "Coord"),
+            matches!(
+                typed.type_registry.resolved_definition_for_type(last_ty),
+                Ty::Record { name, .. } if name.as_str() == "Coord"
+            ),
             "body last expression should be Coord record, got {last_ty:?}"
         );
     } else {
@@ -148,7 +157,10 @@ Maybe.some(v Int):
         let last = exprs.last().expect("Maybe.some has body exprs");
         let last_ty = typed.exprs.ty.get(last.as_usize()).expect("last expr type");
         assert!(
-            matches!(last_ty, Ty::Union { name, .. } if name.as_str() == "Maybe"),
+            matches!(
+                typed.type_registry.resolved_definition_for_type(last_ty),
+                Ty::Union { name, .. } if name.as_str() == "Maybe"
+            ),
             "body last expression should be Maybe union, got {last_ty:?}"
         );
     } else {
@@ -171,7 +183,7 @@ p := Pair(first: 1, second: 2)
     let body = body_expr_id(&typed, "p").expect("p has body");
     let body_ty = typed.exprs.ty.get(body.as_usize()).expect("p body type");
 
-    match body_ty {
+    match typed.type_registry.resolved_definition_for_type(body_ty) {
         Ty::Record { name, .. } => {
             assert_eq!(
                 name.as_str(),
@@ -195,7 +207,9 @@ fn generic_record_application_retains_resolved_params_in_declaration_order() {
     let Ty::Record {
         resolved_params: Some(params),
         ..
-    } = &value.return_type
+    } = typed
+        .type_registry
+        .resolved_definition_for_type(&value.return_type)
     else {
         panic!("expected resolved Pair record, got {:?}", value.return_type);
     };
@@ -237,7 +251,10 @@ Coord.new(x Int, y Int, z Int): Coord(x, y, z)
         .get(origin_body.as_usize())
         .expect("origin expr type");
     assert!(
-        matches!(origin_ty, Ty::Record { name, .. } if name.as_str() == "Coord"),
+        matches!(
+            typed.type_registry.resolved_definition_for_type(origin_ty),
+            Ty::Record { name, .. } if name.as_str() == "Coord"
+        ),
         "Coord.origin body type should be Coord, got {origin_ty:?}"
     );
 
@@ -249,7 +266,10 @@ Coord.new(x Int, y Int, z Int): Coord(x, y, z)
         .get(new_body.as_usize())
         .expect("new expr type");
     assert!(
-        matches!(new_ty, Ty::Record { name, .. } if name.as_str() == "Coord"),
+        matches!(
+            typed.type_registry.resolved_definition_for_type(new_ty),
+            Ty::Record { name, .. } if name.as_str() == "Coord"
+        ),
         "Coord.new body type should be Coord, got {new_ty:?}"
     );
 }

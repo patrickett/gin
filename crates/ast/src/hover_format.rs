@@ -15,9 +15,6 @@ pub enum HoverSection {
     /// Type string without surrounding backticks (render adds them).
     Type(String),
     Prose(String),
-    Copy {
-        is_copy: bool,
-    },
     SizeAlign {
         size: usize,
         align: usize,
@@ -64,16 +61,6 @@ impl HoverDoc {
         self
     }
 
-    pub fn copy_is(mut self, is_copy: bool) -> Self {
-        self.sections.push(HoverSection::Copy { is_copy });
-        self
-    }
-
-    pub fn copy_from_ty(self, _ty: &crate::ty::Ty, _registry: &(), _typed: &()) -> Self {
-        // Simplified stub — typecheck dependency was split out
-        self
-    }
-
     pub fn size_align_from_ty(self, _ty: &crate::ty::Ty, _registry: &(), _typed: &()) -> Self {
         // Simplified stub — typecheck dependency was split out
         self
@@ -107,11 +94,6 @@ impl HoverDoc {
                 }
                 HoverSection::Inline(text) => {
                     result.push_str(text);
-                }
-                HoverSection::Copy { is_copy } => {
-                    if *is_copy {
-                        result.push_str("[`Copy`](gin:copy)");
-                    }
                 }
                 HoverSection::SizeAlign { size, align } => {
                     result.push_str(&format!("size = {size}, align = {align}"));

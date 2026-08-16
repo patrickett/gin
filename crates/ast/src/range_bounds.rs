@@ -39,21 +39,14 @@ impl InclusiveBounds {
 impl Ty {
     /// Extract inclusive scalar bounds from a resolved bounded-int type.
     pub fn int_bounds(&self) -> Option<InclusiveBounds> {
-        let Ty::Int { min, max, .. } = self else {
+        let hull = self.anonymous_integer_validity()?.domain().storage_hull()?;
+        if hull.min() < I256::from(i128::MIN) || hull.max() > I256::from(i128::MAX) {
             return None;
-        };
-        Some(InclusiveBounds {
-            min: *min.as_ref()?,
-            max: *max.as_ref()?,
-        })
-    }
-
-    /// Known compile-time integer value from a type (literal / const-folded).
-    pub fn int_known_value(&self) -> Option<i128> {
-        match self {
-            Ty::Int { value: Some(v), .. } => Some(*v),
-            _ => None,
         }
+        Some(InclusiveBounds {
+            min: hull.min().as_i128(),
+            max: hull.max().as_i128(),
+        })
     }
 
     /// Check a known value against this type's bounded-int expectations.
@@ -74,24 +67,24 @@ impl Ty {
     /// Whether `self` is assignable to a parameter typed as `expected`
     /// (subset subtyping for bounded ints).
     pub fn int_assignable_to(&self, expected: &Ty) -> bool {
+        if let (Some(actual), Some(expected)) = (self.type_id(), expected.type_id())
+            && actual != expected
+        {
+            return false;
+        }
         match (self.int_bounds(), expected.int_bounds()) {
             (Some(a), Some(e)) => e.contains_bounds(&a),
             (None, Some(_)) => false,
-            (_, None) => self == expected || self.fallback_equal_to(expected),
+            (_, None) => self == expected,
         }
     }
 
-    /// Build a bounded scalar `Ty::Int` from `is in` / `is N...M` bounds.
+    /// Build a bounded anonymous integer from `is in` / `is N...M` bounds.
     pub fn bounded_int(min: I256, max: I256) -> Ty {
-        let width = Self::range_bit_width(min, max);
-        let signed = min.is_negative();
-        let (min, max) = (min.as_i128(), max.as_i128());
-        Ty::Int {
-            width,
-            signed,
-            value: None,
-            min: Some(min),
-            max: Some(max),
+        let validity = crate::integer::IntegerDomain::bounded(min, max)
+            .unwrap_or_else(crate::integer::IntegerDomain::empty);
+        Ty::AnonymousInteger {
+            validity: crate::integer::IntegerValidity::new(validity),
         }
     }
 
@@ -130,22 +123,6 @@ impl Ty {
             && fields.iter().any(|(n, _)| n.as_str() == "start")
             && fields.iter().any(|(n, _)| n.as_str() == "end"))
     }
-
-    /// Determine the smallest bit width that can represent `max - min`.
-    fn range_bit_width(min: I256, max: I256) -> u8 {
-        let range = max - min;
-        if range <= I256::from_i128(i128::from(u8::MAX) + 1) {
-            8
-        } else if range <= I256::from_i128(i128::from(u16::MAX) + 1) {
-            16
-        } else if range <= I256::from_i128(i128::from(u32::MAX) + 1) {
-            32
-        } else if range <= I256::from_i128(i128::from(u64::MAX) + 1) {
-            64
-        } else {
-            128
-        }
-    }
 }
 
 impl DeclareValue {
@@ -155,33 +132,8 @@ impl DeclareValue {
             DeclareValue::InRange(start, end) | DeclareValue::Range(start, end) => {
                 InclusiveBounds::from_i256(*start, *end)
             }
+            DeclareValue::Refinement(_) => None,
             _ => None,
-        }
-    }
-}
-
-impl Ty {
-    /// Fallback equality check for ints without bounds (width + signed only).
-    fn fallback_equal_to(&self, expected: &Ty) -> bool {
-        match (self, expected) {
-            (
-                Ty::Int {
-                    width: aw,
-                    signed: as_,
-                    ..
-                },
-                Ty::Int {
-                    width: ew,
-                    signed: es,
-                    ..
-                },
-            ) => {
-                aw == ew
-                    && as_ == es
-                    && self.int_bounds().is_none()
-                    && expected.int_bounds().is_none()
-            }
-            _ => false,
         }
     }
 }

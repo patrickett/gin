@@ -6,7 +6,7 @@ use internment::Intern;
 use parser::cursor::TokenCursor;
 use typecheck::analysis::when_declare_is_exhaustive;
 use typecheck::{infer_when_declare_subject_ty, materialize_when_declare_subjects_from_package};
-use typecheck::{prepare_parse_ast, prepare_package_asts};
+use typecheck::{prepare_package_asts, prepare_parse_ast};
 
 fn target_fixture() -> &'static str {
     r#"
