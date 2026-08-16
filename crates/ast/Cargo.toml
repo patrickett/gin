@@ -12,6 +12,10 @@ span = { workspace = true }
 soa_derive = "0.14"
 indexmap = { workspace = true }
 internment = "0.8"
+itertools = { workspace = true }
+derive_more = { workspace = true }
+strum = { workspace = true }
+kinded = { workspace = true }
 i256 = { workspace = true }
 diagnostic = { workspace = true }
 
@@ -19,6 +23,7 @@ diagnostic = { workspace = true }
 criterion = { workspace = true }
 flask = { workspace = true }
 parser = { workspace = true }
+ast-format = { workspace = true }
 resolve = { workspace = true }
 test-fixtures = { workspace = true }
 typecheck = { workspace = true }
@@ -26,4 +31,20 @@ indoc = "2.0"
 
 [[bench]]
 name = "source_positions"
+harness = false
+
+[[bench]]
+name = "ty_substitute"
+harness = false
+
+[[bench]]
+name = "import_alias"
+harness = false
+
+[[bench]]
+name = "module_qualify"
+harness = false
+
+[[bench]]
+name = "ty_operations"
 harness = false

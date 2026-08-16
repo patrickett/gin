@@ -14,7 +14,7 @@ default-members = [
     "tools/ginc",
     "tools/ginfmt",
     "tools/ginlsp",
-    "tools/ginrepl",
+    "tools/ginterpreter",
 ]
 members = [
     "editors/tree-sitter-gin",
@@ -32,10 +32,10 @@ members = [
     "tools/ginc",
     "tools/ginfmt",
     "tools/ginlsp",
-    "tools/ginrepl",
+    "tools/ginterpreter",
     "crates/typecheck",
-    "crates/ast/signature",
     "crates/ast/format",
+    "crates/interface",
 ]
 resolver = "3"
 
@@ -67,6 +67,7 @@ analysis = { path = "crates/analysis" }
 parser = { path = "crates/parser" }
 ginfmt = { path = "tools/ginfmt" }
 resolve = { path = "crates/resolve" }
+interface = { path = "crates/interface" }
 test-fixtures = { path = "crates/test-fixtures" }
 typecheck = { path = "crates/typecheck" }
 indexmap = "2"
@@ -79,6 +80,9 @@ sha2 = "0.10"
 ignore = "0.4"
 
 strum = { version = "0.27", features = ["derive"] }
+derive_more = { version = "2.1", features = ["from", "deref", "deref_mut", "display"] }
+itertools = "0.14"
+kinded = "0.5"
 i256 = "0.2"
 semver = "1"
 criterion = "0.5"

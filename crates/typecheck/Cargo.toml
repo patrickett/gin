@@ -9,6 +9,7 @@ workspace = true
 [dependencies]
 ast = { workspace = true }
 ast-format = { workspace = true }
+interface = { workspace = true }
 soa_derive = "0.14"
 span = { workspace = true }
 diagnostic = { workspace = true }
@@ -17,8 +18,16 @@ indexmap = { workspace = true }
 internment = "0.8"
 i256 = { workspace = true }
 semver = { workspace = true }
+thiserror = { workspace = true }
+derive_more = { workspace = true }
+itertools = { workspace = true }
 
 [dev-dependencies]
 parser = { workspace = true }
 resolve = { workspace = true }
 test-fixtures = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "transform_scale"
+harness = false

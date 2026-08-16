@@ -17,6 +17,8 @@ i256 = { workspace = true }
 melior = "0.27"
 mlir-sys = "220.0.2"
 internment = "0.8"
+strum = { workspace = true }
+thiserror = { workspace = true }
 flask = { workspace = true }
 
 [dev-dependencies]

@@ -13,6 +13,7 @@ parser = { workspace = true }
 flask = { workspace = true }
 typecheck = { workspace = true }
 internment = "0.8"
+derive_more = { workspace = true }
 
 [dev-dependencies]
 test-fixtures = { workspace = true }

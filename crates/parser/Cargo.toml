@@ -12,7 +12,6 @@ flask = { workspace = true }
 span = { workspace = true }
 lexer = { workspace = true }
 diagnostic = { workspace = true }
-ignore = { workspace = true }
 indexmap = { workspace = true }
 internment = "0.8"
 i256 = { workspace = true }
