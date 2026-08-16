@@ -16,13 +16,13 @@ LogLevel is 'debug'
          or 'warn'
          or 'error'
 
---- A record type
-Task has name     String
-         priority Int
-         level    LogLevel
+--- A record type providing Default
+Task has Default
+    name     String
+    priority Int
+    level    LogLevel
 
---- A trait impl
-Task.Default has default: (name: 'unnamed', priority: 0, level: 'info')
+    Default.default: (name: 'unnamed', priority: 0, level: 'info')
 
 --- Compile-time-inferred function via `:=` (constant binding)
 log_prefix(level LogLevel) String := when level is
