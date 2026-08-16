@@ -16,6 +16,7 @@ pub enum Predicate {
     Eq(NormalExpr, NormalExpr),
     Ne(NormalExpr, NormalExpr),
     And(Vec<Predicate>),
+    Opaque(ast::ProofProposition),
 }
 
 /// Known constraints on const variables, used to resolve predicate checks.
@@ -35,6 +36,7 @@ impl ConstraintEnv {
             Predicate::Ge(left, right) => self.known_le.push((right.clone(), left.clone())),
             Predicate::Eq(left, right) => self.known_eq.push((left.clone(), right.clone())),
             Predicate::Ne(_, _) => {}
+            Predicate::Opaque(_) => {}
             Predicate::And(predicates) => {
                 for predicate in predicates {
                     self.assume(predicate);
@@ -57,13 +59,17 @@ impl ConstraintEnv {
             types: HashMap::new(),
             consts: var_values.clone(),
         };
+        self.prove_with_substitution(pred, &subst)
+    }
+
+    pub fn prove_with_substitution(&self, pred: &Predicate, subst: &DepSubst) -> ProveResult {
         match pred {
-            Predicate::Lt(l, r) => self.prove_lt(l, r, &subst),
-            Predicate::Gt(l, r) => self.prove_lt(r, l, &subst),
-            Predicate::Le(l, r) => self.prove_lt(l, r, &subst).or(self.prove_eq(l, r, &subst)),
-            Predicate::Ge(l, r) => self.prove_lt(r, l, &subst).or(self.prove_eq(l, r, &subst)),
-            Predicate::Eq(l, r) => self.prove_eq(l, r, &subst),
-            Predicate::Ne(l, r) => match self.prove_eq(l, r, &subst) {
+            Predicate::Lt(l, r) => self.prove_lt(l, r, subst),
+            Predicate::Gt(l, r) => self.prove_lt(r, l, subst),
+            Predicate::Le(l, r) => self.prove_le(l, r, subst),
+            Predicate::Ge(l, r) => self.prove_le(r, l, subst),
+            Predicate::Eq(l, r) => self.prove_eq(l, r, subst),
+            Predicate::Ne(l, r) => match self.prove_eq(l, r, subst) {
                 ProveResult::Proven => ProveResult::Disproven,
                 ProveResult::Disproven => ProveResult::Proven,
                 ProveResult::Unknown => ProveResult::Unknown,
@@ -71,7 +77,7 @@ impl ConstraintEnv {
             Predicate::And(preds) => {
                 let mut result = ProveResult::Proven;
                 for p in preds {
-                    let r = self.prove(p, var_values);
+                    let r = self.prove_with_substitution(p, subst);
                     if r == ProveResult::Disproven {
                         return ProveResult::Disproven;
                     }
@@ -81,6 +87,7 @@ impl ConstraintEnv {
                 }
                 result
             }
+            Predicate::Opaque(_) => ProveResult::Unknown,
         }
     }
 
@@ -102,6 +109,31 @@ impl ConstraintEnv {
         // Check known_lt facts in the constraint env
         if self.known_lt.iter().any(|(kl, kr)| &l == kl && &r == kr) {
             return ProveResult::Proven;
+        }
+
+        let mut frontier = vec![(l.clone(), false)];
+        let mut visited = Vec::new();
+        while let Some((current, strict)) = frontier.pop() {
+            if visited.contains(&(current.clone(), strict)) {
+                continue;
+            }
+            visited.push((current.clone(), strict));
+            for (left, right) in &self.known_lt {
+                if *left == current {
+                    if *right == r {
+                        return ProveResult::Proven;
+                    }
+                    frontier.push((right.clone(), true));
+                }
+            }
+            for (left, right) in &self.known_le {
+                if *left == current {
+                    if strict && *right == r {
+                        return ProveResult::Proven;
+                    }
+                    frontier.push((right.clone(), strict));
+                }
+            }
         }
 
         ProveResult::Unknown
@@ -128,6 +160,20 @@ impl ConstraintEnv {
         }
 
         ProveResult::Unknown
+    }
+
+    fn prove_le(&self, l: &NormalExpr, r: &NormalExpr, subst: &DepSubst) -> ProveResult {
+        let l = subst.apply_to_normal(l).normalize();
+        let r = subst.apply_to_normal(r).normalize();
+        if self
+            .known_le
+            .iter()
+            .any(|(known_left, known_right)| l == *known_left && r == *known_right)
+        {
+            return ProveResult::Proven;
+        }
+        self.prove_lt(&l, &r, subst)
+            .or(self.prove_eq(&l, &r, subst))
     }
 }
 
@@ -176,225 +222,94 @@ pub fn predicate_expr_to_predicate(
                 .map(|p| predicate_expr_to_predicate(p, field_value.clone(), var_values))
                 .collect(),
         ),
+        PredicateExpr::Proposition(proposition) => {
+            proposition_to_predicate(proposition, &field_value, var_values)
+                .unwrap_or_else(|| Predicate::Opaque(proposition.as_ref().clone()))
+        }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ast::{BinderId, BinderOwner, NormalExpr, ConstValue, DependentArgId};
-    use internment::Intern;
-
-    fn env() -> ConstraintEnv {
-        ConstraintEnv::default()
+fn proposition_to_predicate(
+    proposition: &ast::ProofProposition,
+    field_value: &NormalExpr,
+    var_values: &HashMap<Intern<String>, NormalExpr>,
+) -> Option<Predicate> {
+    use ast::{ProofProposition, ProofRelation};
+    match proposition {
+        ProofProposition::Compare {
+            left,
+            relation,
+            right,
+        } => {
+            let left = proof_term_to_normal(left, field_value, var_values)?;
+            let right = proof_term_to_normal(right, field_value, var_values)?;
+            Some(match relation {
+                ProofRelation::Equal => Predicate::Eq(left, right),
+                ProofRelation::NotEqual => Predicate::Ne(left, right),
+                ProofRelation::Less => Predicate::Lt(left, right),
+                ProofRelation::LessOrEqual => Predicate::Le(left, right),
+                ProofRelation::Greater => Predicate::Gt(left, right),
+                ProofRelation::GreaterOrEqual => Predicate::Ge(left, right),
+            })
+        }
+        ProofProposition::InRange { value, start, end } => Some(Predicate::And(vec![
+            Predicate::Ge(
+                proof_term_to_normal(value, field_value, var_values)?,
+                proof_term_to_normal(start, field_value, var_values)?,
+            ),
+            Predicate::Le(
+                proof_term_to_normal(value, field_value, var_values)?,
+                proof_term_to_normal(end, field_value, var_values)?,
+            ),
+        ])),
+        ProofProposition::And(left, right) => Some(Predicate::And(vec![
+            proposition_to_predicate(left, field_value, var_values)?,
+            proposition_to_predicate(right, field_value, var_values)?,
+        ])),
+        ProofProposition::Not(_) | ProofProposition::Or(_, _) => None,
     }
+}
 
-    fn vals() -> HashMap<Intern<String>, NormalExpr> {
-        HashMap::new()
-    }
-
-    fn inferred(slot: u32) -> NormalExpr {
-        NormalExpr::Inferred(DependentArgId::new(
-            BinderId::new(4, BinderOwner::Definition(Intern::from_ref("Vector"))),
-            slot,
+fn proof_term_to_normal(
+    term: &ast::ProofTerm,
+    field_value: &NormalExpr,
+    var_values: &HashMap<Intern<String>, NormalExpr>,
+) -> Option<NormalExpr> {
+    use ast::ProofTerm;
+    let binary = |left: &ProofTerm, right: &ProofTerm| {
+        Some((
+            proof_term_to_normal(left, field_value, var_values)?,
+            proof_term_to_normal(right, field_value, var_values)?,
         ))
-    }
-
-    #[test]
-    fn literal_lt_true() {
-        let p = Predicate::Lt(
-            NormalExpr::Value(ConstValue::Int(3)),
-            NormalExpr::Value(ConstValue::Int(5)),
-        );
-        assert_eq!(env().prove(&p, &vals()), ProveResult::Proven);
-    }
-
-    #[test]
-    fn literal_lt_false() {
-        let p = Predicate::Lt(
-            NormalExpr::Value(ConstValue::Int(5)),
-            NormalExpr::Value(ConstValue::Int(3)),
-        );
-        assert_eq!(env().prove(&p, &vals()), ProveResult::Disproven);
-    }
-
-    #[test]
-    fn literal_eq_true() {
-        let p = Predicate::Eq(
-            NormalExpr::Value(ConstValue::Int(42)),
-            NormalExpr::Value(ConstValue::Int(42)),
-        );
-        assert_eq!(env().prove(&p, &vals()), ProveResult::Proven);
-    }
-
-    #[test]
-    fn literal_eq_false() {
-        let p = Predicate::Eq(
-            NormalExpr::Value(ConstValue::Int(1)),
-            NormalExpr::Value(ConstValue::Int(2)),
-        );
-        assert_eq!(env().prove(&p, &vals()), ProveResult::Disproven);
-    }
-
-    #[test]
-    fn var_unknown() {
-        let p = Predicate::Lt(
-            NormalExpr::Var(Intern::from_ref("n")),
-            NormalExpr::Var(Intern::from_ref("m")),
-        );
-        assert_eq!(env().prove(&p, &vals()), ProveResult::Unknown);
-    }
-
-    #[test]
-    fn var_resolved_from_map() {
-        let mut vals = HashMap::new();
-        vals.insert(Intern::from_ref("n"), NormalExpr::Value(ConstValue::Int(3)));
-        vals.insert(Intern::from_ref("m"), NormalExpr::Value(ConstValue::Int(5)));
-        let p = Predicate::Lt(
-            NormalExpr::Var(Intern::from_ref("n")),
-            NormalExpr::Var(Intern::from_ref("m")),
-        );
-        assert_eq!(env().prove(&p, &vals), ProveResult::Proven);
-    }
-
-    #[test]
-    fn and_both_true() {
-        let p = Predicate::And(vec![
-            Predicate::Lt(
-                NormalExpr::Value(ConstValue::Int(1)),
-                NormalExpr::Value(ConstValue::Int(2)),
-            ),
-            Predicate::Lt(
-                NormalExpr::Value(ConstValue::Int(2)),
-                NormalExpr::Value(ConstValue::Int(3)),
-            ),
-        ]);
-        assert_eq!(env().prove(&p, &vals()), ProveResult::Proven);
-    }
-
-    #[test]
-    fn and_one_false() {
-        let p = Predicate::And(vec![
-            Predicate::Lt(
-                NormalExpr::Value(ConstValue::Int(1)),
-                NormalExpr::Value(ConstValue::Int(2)),
-            ),
-            Predicate::Lt(
-                NormalExpr::Value(ConstValue::Int(5)),
-                NormalExpr::Value(ConstValue::Int(3)),
-            ),
-        ]);
-        assert_eq!(env().prove(&p, &vals()), ProveResult::Disproven);
-    }
-
-    #[test]
-    fn and_mixed_unknown() {
-        let p = Predicate::And(vec![
-            Predicate::Lt(
-                NormalExpr::Value(ConstValue::Int(1)),
-                NormalExpr::Value(ConstValue::Int(2)),
-            ),
-            Predicate::Lt(
-                NormalExpr::Var(Intern::from_ref("n")),
-                NormalExpr::Var(Intern::from_ref("m")),
-            ),
-        ]);
-        assert_eq!(env().prove(&p, &vals()), ProveResult::Unknown);
-    }
-
-    #[test]
-    fn normalized_identity() {
-        let p = Predicate::Eq(
-            NormalExpr::Add(
-                Box::new(NormalExpr::Var(Intern::from_ref("n"))),
-                Box::new(NormalExpr::Value(ConstValue::Int(0))),
-            ),
-            NormalExpr::Var(Intern::from_ref("n")),
-        );
-        assert_eq!(env().prove(&p, &vals()), ProveResult::Proven);
-    }
-
-    #[test]
-    fn identical_inferred_witnesses_are_equal() {
-        let p = Predicate::Eq(inferred(0), inferred(0));
-        assert_eq!(env().prove(&p, &vals()), ProveResult::Proven);
-    }
-
-    #[test]
-    fn distinct_inferred_witnesses_are_disproven_equal() {
-        let p = Predicate::Eq(inferred(0), inferred(1));
-        assert_eq!(env().prove(&p, &vals()), ProveResult::Disproven);
-    }
-
-    #[test]
-    fn inferred_witness_and_concrete_value_have_unknown_equality() {
-        let p = Predicate::Eq(inferred(0), NormalExpr::Value(ConstValue::Int(3)));
-        assert_eq!(env().prove(&p, &vals()), ProveResult::Unknown);
-    }
-
-    #[test]
-    fn distinct_inferred_witnesses_are_proven_unequal() {
-        let p = Predicate::Ne(inferred(0), inferred(1));
-        assert_eq!(env().prove(&p, &vals()), ProveResult::Proven);
-    }
-
-    #[test]
-    fn inferred_ordering_is_unknown() {
-        let p = Predicate::Lt(inferred(0), inferred(1));
-        assert_eq!(env().prove(&p, &vals()), ProveResult::Unknown);
-    }
-
-    #[test]
-    fn ne_true() {
-        let p = Predicate::Ne(
-            NormalExpr::Value(ConstValue::Int(1)),
-            NormalExpr::Value(ConstValue::Int(2)),
-        );
-        assert_eq!(env().prove(&p, &vals()), ProveResult::Proven);
-    }
-
-    #[test]
-    fn ne_false() {
-        let p = Predicate::Ne(
-            NormalExpr::Value(ConstValue::Int(42)),
-            NormalExpr::Value(ConstValue::Int(42)),
-        );
-        assert_eq!(env().prove(&p, &vals()), ProveResult::Disproven);
-    }
-
-    #[test]
-    fn le_true() {
-        let p = Predicate::Le(
-            NormalExpr::Value(ConstValue::Int(3)),
-            NormalExpr::Value(ConstValue::Int(5)),
-        );
-        assert_eq!(env().prove(&p, &vals()), ProveResult::Proven);
-    }
-
-    #[test]
-    fn le_equal_true() {
-        let p = Predicate::Le(
-            NormalExpr::Value(ConstValue::Int(5)),
-            NormalExpr::Value(ConstValue::Int(5)),
-        );
-        assert_eq!(env().prove(&p, &vals()), ProveResult::Proven);
-    }
-
-    #[test]
-    fn le_false() {
-        let p = Predicate::Le(
-            NormalExpr::Value(ConstValue::Int(6)),
-            NormalExpr::Value(ConstValue::Int(3)),
-        );
-        assert_eq!(env().prove(&p, &vals()), ProveResult::Disproven);
-    }
-
-    #[test]
-    fn ge_true() {
-        let p = Predicate::Ge(
-            NormalExpr::Value(ConstValue::Int(5)),
-            NormalExpr::Value(ConstValue::Int(3)),
-        );
-        assert_eq!(env().prove(&p, &vals()), ProveResult::Proven);
+    };
+    match term {
+        ProofTerm::Value(value) => Some(NormalExpr::Value(ast::ConstValue::Int(*value))),
+        ProofTerm::Name(name) if name.as_str() == "self" => Some(field_value.clone()),
+        ProofTerm::Name(name) => Some(
+            var_values
+                .get(name)
+                .cloned()
+                .unwrap_or(NormalExpr::Var(*name)),
+        ),
+        ProofTerm::Add(left, right) => {
+            let (left, right) = binary(left, right)?;
+            Some(NormalExpr::Add(Box::new(left), Box::new(right)))
+        }
+        ProofTerm::Sub(left, right) => {
+            let (left, right) = binary(left, right)?;
+            Some(NormalExpr::Sub(Box::new(left), Box::new(right)))
+        }
+        ProofTerm::Mul(left, right) => {
+            let (left, right) = binary(left, right)?;
+            Some(NormalExpr::Mul(Box::new(left), Box::new(right)))
+        }
+        ProofTerm::TargetQuery { kind, operand } => Some(NormalExpr::TargetQuery {
+            kind: *kind,
+            operand: operand.clone(),
+        }),
+        ProofTerm::Remainder(_, _) | ProofTerm::PowerOfTwo(_) => None,
     }
 }
+#[cfg(test)]
+#[path = "../tests/solver_tests.rs"]
+mod tests;

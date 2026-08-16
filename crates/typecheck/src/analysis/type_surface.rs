@@ -4,11 +4,11 @@
 //! `HashMap`. Resolution unfolds aliases, computes union variants and const-unions,
 //! and produces the canonical [`Ty`] that other passes consume.
 
+use crate::analysis::{TyInfer, TyInferEnv};
 use crate::subst::DepSubst;
 use crate::ty::Ty;
-use crate::analysis::{TyInfer, TyInferEnv};
 use ast::{
-    BinderId, NormalExpr, DeclareValue, DependentArgId, FnCall, InRangeBounds, Literal, ParamKind,
+    BinderId, DeclareValue, DependentArgId, FnCall, InRangeBounds, Literal, NormalExpr, ParamKind,
     ParameterKind, Parameters, TyArg,
 };
 use internment::Intern;
@@ -102,6 +102,15 @@ impl<'a> TypeEnv<'a> {
     ) -> DepSubst {
         let mut types = HashMap::new();
         let mut consts = HashMap::new();
+        let fixed_array_length_param = self
+            .tag_decls
+            .and_then(|tag_decls| tag_decls.get(tag_name))
+            .and_then(|declare| declare.attributes.fixed_array.as_ref())
+            .map(|former| former.length_parameter);
+        let is_fixed_array_length =
+            |name: &Intern<String>, fixed_array_length_param: &Option<Intern<String>>| {
+                fixed_array_length_param.is_some_and(|length| length == *name)
+            };
 
         if let Some(tag_params) = self.tag_params
             && let Some(decl_params) = tag_params.get(tag_name)
@@ -116,32 +125,33 @@ impl<'a> TypeEnv<'a> {
             for (i, (name, kind)) in use_site_params.iter().enumerate() {
                 if let Some((decl_name, _)) = decl_entries.get(i) {
                     match kind {
-                        ParameterKind::Tagged(sp) | ParameterKind::ValueParam { ty: sp }
-                            if is_literal_expr(&sp.value) =>
-                        {
-                            if let Some(cv) = literal_expr_as_const(&sp.value) {
-                                consts.insert(**decl_name, cv);
+                        ParameterKind::Tagged(sp) | ParameterKind::ValueParam { ty: sp } => {
+                            let is_length_parameter =
+                                is_fixed_array_length(decl_name, &fixed_array_length_param);
+                            if is_length_parameter {
+                                if let Some(cv) = expr_as_size_normal_expr(&sp.value) {
+                                    consts.insert(**decl_name, cv);
+                                }
+                            } else if is_literal_expr(&sp.value) {
+                                if let Some(cv) = literal_expr_as_const(&sp.value) {
+                                    consts.insert(**decl_name, cv);
+                                }
+                            } else if expr_is_type_surface(&sp.value) {
+                                let ty = self.resolve_expr(&sp.value);
+                                types.insert(**decl_name, ty);
                             }
-                        }
-                        ParameterKind::Tagged(sp) | ParameterKind::ValueParam { ty: sp }
-                            if expr_is_type_surface(&sp.value) =>
-                        {
-                            let ty = self.resolve_expr(&sp.value);
-                            types.insert(**decl_name, ty);
                         }
                         ParameterKind::Generic => {
                             types.insert(**decl_name, Ty::Opaque(*name));
                         }
                         ParameterKind::Default(expr) => {
                             if expr_is_type_surface(&expr.value) {
-                            types.insert(**decl_name, self.resolve_expr(&expr.value));
-                        } else if let Some(value) = expr_as_size_normal_expr(&expr.value) {
+                                types.insert(**decl_name, self.resolve_expr(&expr.value));
+                            } else if let Some(value) = expr_as_size_normal_expr(&expr.value) {
                                 consts.insert(**decl_name, value);
                             }
                         }
-                        ParameterKind::Inferred { .. }
-                        | ParameterKind::Tagged(_)
-                        | ParameterKind::ValueParam { .. } => continue,
+                        ParameterKind::Inferred { .. } => continue,
                     }
                 }
             }
@@ -168,34 +178,41 @@ impl<'a> TypeEnv<'a> {
                 }
             }
         } else {
-            for (name, kind) in use_site_params {
+            for (index, (name, kind)) in use_site_params.iter().enumerate() {
                 match kind {
-                    ParameterKind::Tagged(sp) | ParameterKind::ValueParam { ty: sp }
-                        if is_literal_expr(&sp.value) =>
-                    {
-                        if let Some(cv) = literal_expr_as_const(&sp.value) {
-                            consts.insert(*name, cv);
+                    ParameterKind::Tagged(sp) | ParameterKind::ValueParam { ty: sp } => {
+                        let is_length_parameter = fixed_array_length_param.is_some() && index == 1;
+                        if is_length_parameter {
+                            if let Some(cv) = expr_as_size_normal_expr(&sp.value)
+                                && let Some(length_name) = fixed_array_length_param
+                            {
+                                consts.insert(length_name, cv);
+                            }
+                            if fixed_array_length_param.is_none()
+                                && let Some(cv) = expr_as_size_normal_expr(&sp.value)
+                            {
+                                consts.insert(*name, cv);
+                            }
+                        } else if is_literal_expr(&sp.value) {
+                            if let Some(cv) = literal_expr_as_const(&sp.value) {
+                                consts.insert(*name, cv);
+                            }
+                        } else if expr_is_type_surface(&sp.value) {
+                            let ty = self.resolve_expr(&sp.value);
+                            types.insert(*name, ty);
                         }
-                    }
-                    ParameterKind::Tagged(sp) | ParameterKind::ValueParam { ty: sp }
-                        if expr_is_type_surface(&sp.value) =>
-                    {
-                        let ty = self.resolve_expr(&sp.value);
-                        types.insert(*name, ty);
                     }
                     ParameterKind::Generic => {
                         types.insert(*name, Ty::Opaque(*name));
                     }
                     ParameterKind::Default(expr) => {
                         if expr_is_type_surface(&expr.value) {
-                        types.insert(*name, self.resolve_expr(&expr.value));
+                            types.insert(*name, self.resolve_expr(&expr.value));
                         } else if let Some(value) = expr_as_size_normal_expr(&expr.value) {
                             consts.insert(*name, value);
                         }
                     }
-                    ParameterKind::Inferred { .. }
-                    | ParameterKind::Tagged(_)
-                    | ParameterKind::ValueParam { .. } => continue,
+                    ParameterKind::Inferred { .. } => continue,
                 }
             }
         }
@@ -237,9 +254,7 @@ impl<'a> TypeEnv<'a> {
                     .collect();
                 self.resolve_generic(&call.name, &params)
             }
-            ast::Expr::Ref {
-                inner, mutable, ..
-            } => Ty::Ref {
+            ast::Expr::Ref { inner, mutable, .. } => Ty::Ref {
                 inner: Box::new(self.resolve_expr(&inner.value)),
                 mutable: *mutable,
             },
@@ -274,13 +289,7 @@ impl<'a> TypeEnv<'a> {
                 (
                     ast::Expr::Lit(ast::Literal::Int(start)),
                     ast::Expr::Lit(ast::Literal::Int(end)),
-                ) => resolve_in_range_bounds(
-                    &InRangeBounds::Literal(
-                        i256::I256::from_u128(*start),
-                        i256::I256::from_u128(*end),
-                    ),
-                    self.tag_types,
-                ),
+                ) => resolve_in_range_bounds(&InRangeBounds::Literal(*start, *end), self.tag_types),
                 _ => Ty::Opaque(Intern::from_ref("<expr>")),
             },
             _ => Ty::Opaque(Intern::from_ref("<expr>")),
@@ -296,7 +305,15 @@ impl<'a> TypeEnv<'a> {
         name: &Intern<String>,
         params: &[(Intern<String>, ParameterKind)],
     ) -> Ty {
-        if name.as_str() == "Array" && params.len() == 2 {
+        let validated_array = self
+            .tag_decls
+            .and_then(|decls| decls.get(name))
+            .and_then(|declare| declare.attributes.fixed_array.as_ref())
+            .is_some();
+        if !validated_array
+            && params.len() == 2
+            && self.tag_decls.is_none_or(|decls| !decls.contains_key(name))
+        {
             let (element_name, element_kind) = &params[0];
             let element = match element_kind {
                 ParameterKind::Tagged(ty)
@@ -312,12 +329,31 @@ impl<'a> TypeEnv<'a> {
             let (size_name, size_kind) = &params[1];
             let size = match size_kind {
                 ParameterKind::Default(expr) => {
-                    expr_as_size_normal_expr(&expr.value).unwrap_or(NormalExpr::Var(*size_name))
+                    let size = expr_as_size_normal_expr(&expr.value)
+                        .unwrap_or(NormalExpr::Var(*size_name));
+                    let Some(decl_params) =
+                        self.tag_params.and_then(|tag_params| tag_params.get(name))
+                    else {
+                        return Ty::Array {
+                            elem: Box::new(element),
+                            size,
+                        };
+                    };
+                    let length_param = decl_params
+                        .iter()
+                        .nth(1)
+                        .map(|(decl_name, _)| *decl_name)
+                        .filter(|decl_name| !decl_name.as_str().is_empty());
+                    let mappings: Vec<_> = length_param
+                        .into_iter()
+                        .map(|length| (length, *size_name))
+                        .collect();
+                    rewrite_normal_expr(size, &mappings)
                 }
                 ParameterKind::Tagged(ty)
                 | ParameterKind::ValueParam { ty }
                 | ParameterKind::Inferred { ty } => {
-                    literal_expr_as_const(&ty.value).unwrap_or(NormalExpr::Var(*size_name))
+                    expr_as_size_normal_expr(&ty.value).unwrap_or(NormalExpr::Var(*size_name))
                 }
                 ParameterKind::Generic => NormalExpr::Var(*size_name),
             };
@@ -328,7 +364,9 @@ impl<'a> TypeEnv<'a> {
         }
 
         if let Some(subst) = self.subst
-            && params.iter().all(|(_, kind)| matches!(kind, ParameterKind::Generic))
+            && params
+                .iter()
+                .all(|(_, kind)| matches!(kind, ParameterKind::Generic))
             && params.len() == 1
             && let Some((var, _)) = params.first()
             && let Some(ty) = subst.get(var)
@@ -358,11 +396,28 @@ impl<'a> TypeEnv<'a> {
                     ast::HasMember::Function(_) => None,
                 })
                 .collect();
-            return Ty::Record {
+            let definition = Ty::Record {
                 name: *name,
                 fields,
                 resolved_params: self.resolved_params(name, params, &local_dep),
             };
+            if let Some(Ty::Named {
+                instance,
+                name: display_name,
+                ..
+            }) = self.tag_types.get(name)
+            {
+                return Ty::Named {
+                    instance: ast::ty::NamedTypeInstance {
+                        declaration: instance.declaration,
+                        arguments: self
+                            .resolved_params(name, params, &local_dep)
+                            .unwrap_or_default(),
+                    },
+                    name: *display_name,
+                };
+            }
+            return definition;
         }
         if params.is_empty()
             && let Some(tag_decls) = self.tag_decls
@@ -380,19 +435,23 @@ impl<'a> TypeEnv<'a> {
         } else {
             let subst = DepSubst::from_maps(merged_types, local_dep.consts);
             let mut resolved = subst.apply_to_ty(&base);
+            let arguments = self.resolved_params(name, params, &subst);
+            if let Ty::Named { instance, .. } = &mut resolved {
+                instance.arguments = arguments.clone().unwrap_or_default();
+            }
             if let Ty::Union {
                 ref mut resolved_params,
                 ..
             } = resolved
             {
-                *resolved_params = self.resolved_params(name, params, &subst);
+                *resolved_params = arguments.clone();
             }
             if let Ty::Record {
                 ref mut resolved_params,
                 ..
             } = resolved
             {
-                *resolved_params = self.resolved_params(name, params, &subst);
+                *resolved_params = arguments;
             }
             resolved
         }
@@ -440,39 +499,18 @@ fn merge_subst(
 fn resolve_in_range_bounds(bounds: &InRangeBounds, tag_types: &HashMap<Intern<String>, Ty>) -> Ty {
     match bounds {
         InRangeBounds::Literal(min, max) => Ty::bounded_int(*min, *max),
+        InRangeBounds::LiteralToTag(_, name) => Ty::Opaque(*name),
         InRangeBounds::Tag(name) => {
             if let Some(ty) = tag_types.get(name) {
                 if ty.is_bounded_int() {
                     return ty.clone();
                 }
                 if let Some(b) = ty.scalar_bounds_from_range_value() {
-                    return Ty::Int {
-                        width: ty_int_width(ty).unwrap_or(64),
-                        signed: b.min < 0,
-                        value: None,
-                        min: Some(b.min),
-                        max: Some(b.max),
-                    };
+                    return Ty::bounded_int(i256::I256::from(b.min), i256::I256::from(b.max));
                 }
             }
             Ty::Opaque(*name)
         }
-    }
-}
-
-fn ty_int_width(ty: &Ty) -> Option<u8> {
-    match ty {
-        Ty::Record { fields, .. } => {
-            fields
-                .iter()
-                .find(|(n, _)| n.as_str() == "start")
-                .and_then(|(_, t)| match t.as_ref() {
-                    Ty::Int { width, .. } => Some(*width),
-                    _ => None,
-                })
-        }
-        Ty::Int { width, .. } => Some(*width),
-        _ => None,
     }
 }
 
@@ -518,7 +556,7 @@ pub fn resolve_name_from_files(
                             let ty = property
                                 .ty
                                 .as_ref()
-                            .map(|ty| env.resolve_expr(&ty.value))
+                                .map(|ty| env.resolve_expr(&ty.value))
                                 .unwrap_or(Ty::Unit);
                             Some((property.name, Box::new(ty)))
                         }
@@ -604,7 +642,7 @@ fn is_literal_expr(expr: &ast::Expr) -> bool {
 
 fn literal_expr_as_const(expr: &ast::Expr) -> Option<NormalExpr> {
     match expr {
-        ast::Expr::Lit(Literal::Int(n)) => Some(NormalExpr::from(*n as i128)),
+        ast::Expr::Lit(Literal::Int(n)) => Some(NormalExpr::from(*n)),
         ast::Expr::Lit(Literal::Number(n)) => Some(NormalExpr::from(*n as i128)),
         _ => None,
     }
@@ -620,30 +658,26 @@ pub(crate) fn expr_is_type_surface(expr: &ast::Expr) -> bool {
         }
         ast::Expr::Range(range) => match (&range.start.value, &range.end.value) {
             (ast::Expr::AnonymousTag(start), ast::Expr::AnonymousTag(end)) if start == end => true,
-            (
-                ast::Expr::Lit(ast::Literal::Number(_)),
-                ast::Expr::Lit(ast::Literal::Number(_)),
-            )
-            | (
-                ast::Expr::Lit(ast::Literal::Int(_)),
-                ast::Expr::Lit(ast::Literal::Int(_)),
-            ) => true,
+            (ast::Expr::Lit(ast::Literal::Number(_)), ast::Expr::Lit(ast::Literal::Number(_)))
+            | (ast::Expr::Lit(ast::Literal::Int(_)), ast::Expr::Lit(ast::Literal::Int(_))) => true,
             _ => false,
         },
         _ => false,
     }
 }
 
-pub(crate) fn typevars_from_receiver_expr(
-    expr: &ast::Expr,
-) -> HashMap<Intern<String>, Ty> {
+pub(crate) fn typevars_from_receiver_expr(expr: &ast::Expr) -> HashMap<Intern<String>, Ty> {
     let mut out = HashMap::new();
     let ast::Expr::TagCall(call) = expr else {
         return out;
     };
     for arg in &call.args {
         if let ast::Expr::AnonymousTag(name) = arg.value
-            && name.as_str().chars().next().is_some_and(|c| c.is_ascii_lowercase())
+            && name
+                .as_str()
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_lowercase())
         {
             out.insert(name, Ty::Opaque(name));
         }
@@ -653,7 +687,7 @@ pub(crate) fn typevars_from_receiver_expr(
 
 fn expr_as_size_normal_expr(expr: &ast::Expr) -> Option<NormalExpr> {
     match expr {
-        ast::Expr::Lit(Literal::Int(n)) => Some(NormalExpr::from(*n as i128)),
+        ast::Expr::Lit(Literal::Int(n)) => Some(NormalExpr::from(*n)),
         ast::Expr::Lit(Literal::Number(n)) => Some(NormalExpr::from(*n as i128)),
         ast::Expr::FnCall(call) if call.args.is_none() => {
             Some(NormalExpr::Var(call.path.value.root))
@@ -664,8 +698,23 @@ fn expr_as_size_normal_expr(expr: &ast::Expr) -> Option<NormalExpr> {
 
 fn expr_as_size_normal_expr_without_calls(expr: &ast::Expr) -> Option<NormalExpr> {
     match expr {
-        ast::Expr::Lit(Literal::Int(n)) => Some(NormalExpr::from(*n as i128)),
+        ast::Expr::Lit(Literal::Int(n)) => Some(NormalExpr::from(*n)),
         ast::Expr::Lit(Literal::Number(n)) => Some(NormalExpr::from(*n as i128)),
+        ast::Expr::AnonymousTag(name) => {
+            if name
+                .as_str()
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_lowercase())
+            {
+                Some(NormalExpr::Var(*name))
+            } else {
+                None
+            }
+        }
+        ast::Expr::FnCall(call) if call.args.is_none() => {
+            Some(NormalExpr::Var(call.path.value.root))
+        }
         ast::Expr::Bind(bind) => Some(NormalExpr::Var(bind.name)),
         ast::Expr::Binary(binary) => {
             let lhs = expr_as_size_normal_expr_without_calls(&binary.lhs.value)?;
@@ -679,6 +728,40 @@ fn expr_as_size_normal_expr_without_calls(expr: &ast::Expr) -> Option<NormalExpr
         }
         _ => None,
     }
+}
+
+fn rewrite_normal_expr(
+    expr: NormalExpr,
+    mapping: &[(Intern<String>, Intern<String>)],
+) -> NormalExpr {
+    fn rewrite(expr: NormalExpr, mapping: &[(Intern<String>, Intern<String>)]) -> NormalExpr {
+        let replace = |name| {
+            mapping
+                .iter()
+                .find_map(|(from, to)| (*from == name).then_some(*to))
+                .unwrap_or(name)
+        };
+        match expr {
+            NormalExpr::Var(name) => NormalExpr::Var(replace(name)),
+            NormalExpr::Add(lhs, rhs) => NormalExpr::Add(
+                Box::new(rewrite(*lhs, mapping)),
+                Box::new(rewrite(*rhs, mapping)),
+            ),
+            NormalExpr::Sub(lhs, rhs) => NormalExpr::Sub(
+                Box::new(rewrite(*lhs, mapping)),
+                Box::new(rewrite(*rhs, mapping)),
+            ),
+            NormalExpr::Mul(lhs, rhs) => NormalExpr::Mul(
+                Box::new(rewrite(*lhs, mapping)),
+                Box::new(rewrite(*rhs, mapping)),
+            ),
+            NormalExpr::Value(value) => NormalExpr::Value(value),
+            NormalExpr::Inferred(dependent_arg_id) => NormalExpr::Inferred(dependent_arg_id),
+            NormalExpr::TargetQuery { kind, operand } => NormalExpr::TargetQuery { kind, operand },
+        }
+    }
+
+    rewrite(expr, mapping)
 }
 
 fn infer_default_type_arg(expr: &ast::Typed<ast::Expr>, env: &TypeEnv<'_>) -> Ty {

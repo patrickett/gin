@@ -2,12 +2,13 @@ use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 
 use ast::{
-    BinOp, BinderId, BinderOwner, ConstValue, DependentArgId, Literal, ParamKind,
-    NormalExpr as DependentNormalExpr,
+    BinOp, BinderId, BinderOwner, ConstValue, DependentArgId, Literal,
+    NormalExpr as DependentNormalExpr, ParamKind,
 };
 use diagnostic::Diagnostic;
 use internment::Intern;
 
+use crate::ResolvedProgram;
 use crate::subst::DepSubst;
 use crate::ty::Ty;
 use crate::typed::{
@@ -39,6 +40,10 @@ pub enum NormalExpr {
     },
     /// A tuple/record field access in residual form.
     FieldGet { base: Box<NormalExpr>, index: usize },
+    TargetQuery {
+        kind: ast::TargetQueryKind,
+        operand: ast::TypeReference,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -89,8 +94,12 @@ impl NormalExpr {
                 let right = rhs.as_dependent_normal_expr()?;
                 match op {
                     BinOp::Add => Some(DependentNormalExpr::Add(Box::new(left), Box::new(right))),
-                    BinOp::Subtract => Some(DependentNormalExpr::Sub(Box::new(left), Box::new(right))),
-                    BinOp::Multiply => Some(DependentNormalExpr::Mul(Box::new(left), Box::new(right))),
+                    BinOp::Subtract => {
+                        Some(DependentNormalExpr::Sub(Box::new(left), Box::new(right)))
+                    }
+                    BinOp::Multiply => {
+                        Some(DependentNormalExpr::Mul(Box::new(left), Box::new(right)))
+                    }
                     _ => None,
                 }
             }
@@ -107,6 +116,10 @@ impl NormalExpr {
             NormalExpr::FnCall { target, args } if args.is_empty() => {
                 Some(DependentNormalExpr::Var(target.0))
             }
+            NormalExpr::TargetQuery { kind, operand } => Some(DependentNormalExpr::TargetQuery {
+                kind: *kind,
+                operand: operand.clone(),
+            }),
             _ => None,
         }
     }
@@ -119,16 +132,16 @@ struct NormalizeCall {
 }
 
 struct NormalizeContext<'a> {
-    typed: &'a TypedFileAst,
+    program: ResolvedProgram<'a>,
     depth: usize,
     call_stack: HashSet<NormalizeCall>,
     expr_owner: HashMap<ExprId, BinderId>,
 }
 
 impl<'a> NormalizeContext<'a> {
-    fn new(typed: &'a TypedFileAst) -> Self {
+    fn new(program: ResolvedProgram<'a>) -> Self {
         let mut context = Self {
-            typed,
+            program,
             depth: 0,
             call_stack: HashSet::new(),
             expr_owner: HashMap::new(),
@@ -159,13 +172,13 @@ impl<'a> NormalizeContext<'a> {
         let BinderOwner::Definition(owner_name) = owner.owner else {
             return None;
         };
-        let bind = self.typed.defs.get(&DefId(owner_name))?;
+        let bind = self.program.defs.get(&DefId(owner_name))?;
         let slot = bind.params.iter().position(|(param, _)| *param == name)?;
         Some(DependentArgId::new(owner, slot as u32))
     }
 
     fn build_expr_owner_map(&mut self) {
-        for bind in self.typed.defs.values() {
+        for bind in self.program.defs.values() {
             let owner = bind.dependent_binder;
             match &bind.body {
                 BindBody::Expr(expr) => self.assign_expr_owner(owner, *expr),
@@ -188,7 +201,7 @@ impl<'a> NormalizeContext<'a> {
         }
         self.expr_owner.insert(expr_id, owner);
 
-        let Some(kind) = self.typed.exprs.kind.get(expr_id.as_usize()) else {
+        let Some(kind) = self.program.exprs.kind.get(expr_id.as_usize()) else {
             return;
         };
 
@@ -200,7 +213,7 @@ impl<'a> NormalizeContext<'a> {
         } = kind
         {
             let nested_owner =
-                BinderId::new(self.typed.file_id.0, BinderOwner::Expression(expr_id.0));
+                BinderId::new(self.program.file_id.0, BinderOwner::Expression(expr_id.0));
             for stmt in stmts {
                 self.assign_expr_owner(nested_owner, *stmt);
             }
@@ -227,17 +240,25 @@ pub fn normalize(
     expr_id: ExprId,
     substitutions: &DepSubst,
 ) -> NormalizeResult {
-    let mut context = NormalizeContext::new(typed);
-    let substitutions = dependent_substitutions(typed, substitutions);
+    normalize_resolved(typed.resolved_program(), expr_id, substitutions)
+}
+
+pub fn normalize_resolved(
+    program: ResolvedProgram<'_>,
+    expr_id: ExprId,
+    substitutions: &DepSubst,
+) -> NormalizeResult {
+    let mut context = NormalizeContext::new(program);
+    let substitutions = dependent_substitutions(program, substitutions);
     normalize_expr(expr_id, &mut context, &substitutions)
 }
 
 fn dependent_substitutions(
-    typed: &TypedFileAst,
+    program: ResolvedProgram<'_>,
     substitutions: &DepSubst,
 ) -> HashMap<DependentArgId, NormalizeResult> {
     let mut result = HashMap::new();
-    for bind in typed.defs.values() {
+    for bind in program.defs.values() {
         for (slot, (name, _)) in bind.params.iter().enumerate() {
             let Some(value) = substitutions.consts.get(name) else {
                 continue;
@@ -254,27 +275,19 @@ fn dependent_substitutions(
 fn dependent_expr_to_result(expr: &DependentNormalExpr) -> NormalizeResult {
     match expr {
         DependentNormalExpr::Value(value) => NormalizeResult::Value(value.clone()),
-        DependentNormalExpr::Var(name) => {
-            NormalizeResult::Residual(NormalExpr::Var(*name))
-        }
+        DependentNormalExpr::Var(name) => NormalizeResult::Residual(NormalExpr::Var(*name)),
         DependentNormalExpr::Inferred(param) => {
             NormalizeResult::Residual(NormalExpr::Param(*param))
         }
-        DependentNormalExpr::Add(lhs, rhs) => dependent_binary_to_result(
-            BinOp::Add,
-            lhs,
-            rhs,
-        ),
-        DependentNormalExpr::Sub(lhs, rhs) => dependent_binary_to_result(
-            BinOp::Subtract,
-            lhs,
-            rhs,
-        ),
-        DependentNormalExpr::Mul(lhs, rhs) => dependent_binary_to_result(
-            BinOp::Multiply,
-            lhs,
-            rhs,
-        ),
+        DependentNormalExpr::Add(lhs, rhs) => dependent_binary_to_result(BinOp::Add, lhs, rhs),
+        DependentNormalExpr::Sub(lhs, rhs) => dependent_binary_to_result(BinOp::Subtract, lhs, rhs),
+        DependentNormalExpr::Mul(lhs, rhs) => dependent_binary_to_result(BinOp::Multiply, lhs, rhs),
+        DependentNormalExpr::TargetQuery { kind, operand } => {
+            NormalizeResult::Residual(NormalExpr::TargetQuery {
+                kind: *kind,
+                operand: operand.clone(),
+            })
+        }
     }
 }
 
@@ -326,21 +339,27 @@ pub fn require_compile_time(
 ) -> Result<ConstValue, Box<Diagnostic>> {
     match normalize(typed, expr_id, substitutions) {
         NormalizeResult::Value(value) => Ok(value),
-        NormalizeResult::Residual(_) => Err(Box::new(Diagnostic::new(
-            "staging-expression-not-complete",
-            "expression must be fully evaluated at compile time",
-        )
-        .at_span_id(typed.exprs.span[expr_id.as_usize()], &typed.span_table))),
-        NormalizeResult::RuntimeDependency(_) => Err(Box::new(Diagnostic::new(
-            "staging-runtime-dependency",
-            "expression depends on a runtime value",
-        )
-        .at_span_id(typed.exprs.span[expr_id.as_usize()], &typed.span_table))),
-        NormalizeResult::Unsupported(_) => Err(Box::new(Diagnostic::new(
-            "staging-expression-unsupported",
-            "expression cannot be evaluated at compile time",
-        )
-        .at_span_id(typed.exprs.span[expr_id.as_usize()], &typed.span_table))),
+        NormalizeResult::Residual(_) => Err(Box::new(
+            Diagnostic::new(
+                "staging-expression-not-complete",
+                "expression must be fully evaluated at compile time",
+            )
+            .at_span_id(typed.exprs.span[expr_id.as_usize()], &typed.span_table),
+        )),
+        NormalizeResult::RuntimeDependency(_) => Err(Box::new(
+            Diagnostic::new(
+                "staging-runtime-dependency",
+                "expression depends on a runtime value",
+            )
+            .at_span_id(typed.exprs.span[expr_id.as_usize()], &typed.span_table),
+        )),
+        NormalizeResult::Unsupported(_) => Err(Box::new(
+            Diagnostic::new(
+                "staging-expression-unsupported",
+                "expression cannot be evaluated at compile time",
+            )
+            .at_span_id(typed.exprs.span[expr_id.as_usize()], &typed.span_table),
+        )),
     }
 }
 
@@ -350,16 +369,19 @@ fn normalize_expr(
     substitutions: &HashMap<DependentArgId, NormalizeResult>,
 ) -> NormalizeResult {
     context.with_depth(expr_id, |context| {
-        let Some(expr) = context.typed.exprs.kind.get(expr_id.as_usize()) else {
+        if let Some(value) = context.program.exprs.const_value[expr_id.as_usize()].clone() {
+            return NormalizeResult::Value(value);
+        }
+        let Some(expr) = context.program.exprs.kind.get(expr_id.as_usize()) else {
             return NormalizeResult::Unsupported(expr_id);
         };
 
         match expr {
             TypedExprKind::Lit(Literal::Int(value)) => {
-                NormalizeResult::Value(ConstValue::Int(*value as i128))
+                NormalizeResult::Value(ConstValue::Int(*value))
             }
             TypedExprKind::Lit(Literal::Number(value)) => {
-                NormalizeResult::Value(ConstValue::Int(*value as i128))
+                NormalizeResult::Value(ConstValue::Int((*value as u128).into()))
             }
             TypedExprKind::SelfRef { target } => {
                 NormalizeResult::Residual(NormalExpr::Var(target.0))
@@ -388,7 +410,7 @@ fn normalize_expr(
                 ..
             } => {
                 if *unassigned {
-                    if matches!(context.typed.exprs.ty[expr_id.as_usize()], Ty::Unit) {
+                    if matches!(context.program.exprs.ty[expr_id.as_usize()], Ty::Unit) {
                         NormalizeResult::Value(ConstValue::Tag {
                             name: *name,
                             qual_path: None,
@@ -403,6 +425,37 @@ fn normalize_expr(
             }
             TypedExprKind::Binary { op, lhs, rhs } => {
                 normalize_binary(*lhs, *rhs, op.clone(), expr_id, context, substitutions)
+            }
+            TypedExprKind::IntrinsicCall { op, args } => {
+                let values: Option<Vec<_>> = args
+                    .iter()
+                    .map(|arg| match normalize_expr(*arg, context, substitutions) {
+                        NormalizeResult::Value(value) => Some(value),
+                        _ => None,
+                    })
+                    .collect();
+                let Some(values) = values else {
+                    return NormalizeResult::RuntimeDependency(expr_id);
+                };
+                let source_width = args.first().and_then(|arg| {
+                    context
+                        .program
+                        .type_registry
+                        .integer_width_for_type(&context.program.exprs.ty[arg.as_usize()])
+                });
+                let result_width = context
+                    .program
+                    .type_registry
+                    .integer_width_for_type(&context.program.exprs.ty[expr_id.as_usize()]);
+                match (source_width, result_width) {
+                    (Some(source_width), Some(result_width)) => {
+                        match op.fold(&values, source_width, result_width) {
+                            Ok(Some(value)) => NormalizeResult::Value(value),
+                            Ok(None) | Err(_) => NormalizeResult::Unsupported(expr_id),
+                        }
+                    }
+                    _ => NormalizeResult::Unsupported(expr_id),
+                }
             }
             TypedExprKind::FnCall {
                 target,
@@ -497,49 +550,10 @@ fn normalize_binary(
         return NormalizeResult::Unsupported(expr_id);
     }
 
-    match (&lhs, &rhs) {
-        (
-            NormalizeResult::Value(ConstValue::Int(lhs)),
-            NormalizeResult::Value(ConstValue::Int(rhs)),
-        ) if matches!(op, BinOp::Add) => {
-            return NormalizeResult::Value(ConstValue::Int(lhs.wrapping_add(*rhs)));
-        }
-        (NormalizeResult::Residual(lhs_expr), NormalizeResult::Residual(rhs_expr))
-            if matches!(op, BinOp::Subtract) && lhs_expr == rhs_expr =>
-        {
-            return NormalizeResult::Value(ConstValue::Int(0));
-        }
-        (NormalizeResult::Residual(lhs_expr), NormalizeResult::Value(ConstValue::Int(0)))
-            if matches!(op, BinOp::Add | BinOp::Subtract) =>
-        {
-            return NormalizeResult::Residual(lhs_expr.clone());
-        }
-        (NormalizeResult::Value(ConstValue::Int(0)), NormalizeResult::Residual(rhs_expr))
-            if matches!(op, BinOp::Add) =>
-        {
-            return NormalizeResult::Residual(rhs_expr.clone());
-        }
-        (NormalizeResult::Residual(lhs_expr), NormalizeResult::Value(ConstValue::Int(1)))
-            if matches!(op, BinOp::Multiply) =>
-        {
-            return NormalizeResult::Residual(lhs_expr.clone());
-        }
-        (NormalizeResult::Value(ConstValue::Int(1)), NormalizeResult::Residual(rhs_expr))
-            if matches!(op, BinOp::Multiply) =>
-        {
-            return NormalizeResult::Residual(rhs_expr.clone());
-        }
-        (NormalizeResult::Residual(_), NormalizeResult::Value(ConstValue::Int(0)))
-            if matches!(op, BinOp::Multiply) =>
-        {
-            return NormalizeResult::Value(ConstValue::Int(0));
-        }
-        (NormalizeResult::Value(ConstValue::Int(0)), NormalizeResult::Residual(_))
-            if matches!(op, BinOp::Multiply) =>
-        {
-            return NormalizeResult::Value(ConstValue::Int(0));
-        }
-        _ => {}
+    if let (NormalizeResult::Value(lhs), NormalizeResult::Value(rhs)) = (&lhs, &rhs)
+        && let Some(value) = lhs.eval_binop(&op, rhs)
+    {
+        return NormalizeResult::Value(value);
     }
 
     let lhs = match to_normal_expr(lhs) {
@@ -573,7 +587,7 @@ fn normalize_call(
     context: &mut NormalizeContext,
     substitutions: &HashMap<DependentArgId, NormalizeResult>,
 ) -> NormalizeResult {
-    if target.0.as_str() == "asm" || has_runtime_effects(context.typed, target) {
+    if has_runtime_effects(context.program, target) {
         return NormalizeResult::RuntimeDependency(expr_id);
     }
 
@@ -697,9 +711,9 @@ fn normalize_buf_get(
 
     if let (NormalizeResult::Value(base), NormalizeResult::Value(index)) = (&base, &index) {
         let value = match index {
-            ConstValue::Int(index) => usize::try_from(*index)
-                .ok()
-                .and_then(|index| field_from_const_value(base, index)),
+            ConstValue::Int(index) => {
+                ast::integer::to_usize(*index).and_then(|index| field_from_const_value(base, index))
+            }
             _ => None,
         };
         return value.map_or(
@@ -744,25 +758,7 @@ fn try_evaluate_pure_call(
     context: &mut NormalizeContext,
     _substitutions: &HashMap<DependentArgId, NormalizeResult>,
 ) -> Option<NormalizeResult> {
-    if let (Some(ConstValue::Int(left)), Some(ConstValue::Int(right))) =
-        (arg_values.first(), arg_values.get(1))
-        && arg_values.len() == 2
-    {
-        return match target.0.as_str() {
-            "add" => Some(NormalizeResult::Value(ConstValue::Int(
-                left.wrapping_add(*right),
-            ))),
-            "sub" => Some(NormalizeResult::Value(ConstValue::Int(
-                left.wrapping_sub(*right),
-            ))),
-            "mul" => Some(NormalizeResult::Value(ConstValue::Int(
-                left.wrapping_mul(*right),
-            ))),
-            _ => None,
-        };
-    }
-
-    let bind = context.typed.defs.get(&target)?;
+    let bind = context.program.defs.get(&target)?;
     if bind.call_capability == CallCapability::RuntimeOnly {
         return None;
     }
@@ -804,8 +800,8 @@ fn try_evaluate_pure_call(
     Some(result)
 }
 
-fn has_runtime_effects(typed: &TypedFileAst, target: DefId) -> bool {
-    typed.defs.get(&target).is_some_and(|bind| {
+fn has_runtime_effects(program: ResolvedProgram<'_>, target: DefId) -> bool {
+    program.defs.get(&target).is_some_and(|bind| {
         bind.call_capability == CallCapability::RuntimeOnly
             || !bind.effects.reads.is_empty()
             || !bind.effects.writes.is_empty()
@@ -813,241 +809,6 @@ fn has_runtime_effects(typed: &TypedFileAst, target: DefId) -> bool {
             || !bind.effects.consumes.is_empty()
     })
 }
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::transform::{TransformCtx, transform};
-    use crate::{FileId, prepare_parse_ast};
-    use parser::cursor::TokenCursor;
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    fn transform_prepared(source: &str, file_id: u32) -> crate::TypedFileAst {
-        let mut file_ast = TokenCursor::parse_source(source);
-        let _ = prepare_parse_ast(&mut file_ast, &flask::CompileTarget::Library);
-        transform(&file_ast, FileId(file_id), &TransformCtx::new())
-    }
-
-    fn transform_prepared_default(source: &str) -> crate::TypedFileAst {
-        transform_prepared(source, 0)
-    }
-
-    fn return_expr(typed: &crate::TypedFileAst, name: &str) -> ExprId {
-        let bind = typed
-            .defs
-            .get(&DefId(Intern::from_ref(name)))
-            .expect("definition exists");
-        match &bind.body {
-            crate::typed::BindBody::Expr(expr) => *expr,
-            crate::typed::BindBody::Body {
-                ret: Some(expr), ..
-            } => *expr,
-            crate::typed::BindBody::Body { exprs, ret: None } => exprs.last().copied().unwrap(),
-            _ => panic!("definition has no return expression"),
-        }
-    }
-
-    fn hash_result(result: &NormalizeResult) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        result.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    #[test]
-    fn literal_add_expression_normalizes_to_value() {
-        let typed = transform_prepared_default("main: 2 + 3");
-        let root = return_expr(&typed, "main");
-        let result = normalize(&typed, root, &DepSubst::new());
-
-        match result {
-            NormalizeResult::Value(ConstValue::Int(value)) => assert_eq!(value, 5),
-            _ => panic!("expected residual arithmetic value, got {result:?}"),
-        }
-    }
-
-    #[test]
-    fn literal_add_with_zero_preserves_value() {
-        let typed = transform_prepared_default("main: 1 + 0");
-        let root = return_expr(&typed, "main");
-        let result = normalize(&typed, root, &DepSubst::new());
-
-        match result {
-            NormalizeResult::Value(ConstValue::Int(value)) => assert_eq!(value, 1),
-            _ => panic!("expected residual arithmetic value, got {result:?}"),
-        }
-    }
-
-    #[test]
-    fn parameter_identity_is_bound_to_dependent_arg() {
-        let typed = transform_prepared_default("main(n Int): n + 0");
-        let root = return_expr(&typed, "main");
-        let result = normalize(&typed, root, &DepSubst::new());
-
-        match result {
-            NormalizeResult::Residual(NormalExpr::Param(param)) => {
-                assert_eq!(param.slot, 0);
-                assert_eq!(param.binder.file, 0);
-            }
-            _ => panic!("expected residual parameter, got {result:?}"),
-        }
-    }
-
-    #[test]
-    fn substitutions_are_applied_before_normalization() {
-        let typed = transform_prepared_default("main(n Int): n + 1");
-        let root = return_expr(&typed, "main");
-        let mut substitutions = DepSubst::new();
-        substitutions
-            .consts
-            .insert(Intern::from_ref("n"), DependentNormalExpr::from(2));
-
-        assert_eq!(
-            normalize(&typed, root, &substitutions),
-            NormalizeResult::Value(ConstValue::Int(3))
-        );
-    }
-
-    #[test]
-    fn residual_function_call_folded_with_constant_argument() {
-        let typed = transform_prepared_default("successor(n Int): n + 1\nmain: successor(2)");
-        let root = return_expr(&typed, "main");
-        let result = normalize(&typed, root, &DepSubst::new());
-
-        match result {
-            NormalizeResult::Value(ConstValue::Int(value)) => assert_eq!(value, 3),
-            _ => panic!("expected folded constant, got {result:?}"),
-        }
-    }
-
-    #[test]
-    fn residual_function_call_is_runtime_intrinsic() {
-        let typed = transform_prepared_default(
-            "spec := 'svc #0x80'\n\
-             write(fd Int, buf Int, len Int) Int: asm(spec, fd, buf, len)\n\
-             main: write(1, 2, 3)",
-        );
-        let root = return_expr(&typed, "main");
-        let result = normalize(&typed, root, &DepSubst::new());
-
-        match result {
-            NormalizeResult::RuntimeDependency(expr) => assert_eq!(expr, root),
-            _ => panic!("expected runtime dependency, got {result:?}"),
-        }
-    }
-
-    #[test]
-    fn tuple_lit_normalizes_to_value_list() {
-        let typed = transform_prepared_default("main: [1, 2, 3]");
-        let root = return_expr(&typed, "main");
-        let result = normalize(&typed, root, &DepSubst::new());
-
-        match result {
-            NormalizeResult::Value(ConstValue::List(items)) => {
-                assert_eq!(
-                    items.as_ref(),
-                    &[ConstValue::Int(1), ConstValue::Int(2), ConstValue::Int(3)]
-                );
-            }
-            _ => panic!("expected residual list, got {result:?}"),
-        }
-    }
-
-    #[test]
-    fn tuple_get_from_constant_tuple_literally_folds_to_value() {
-        let typed = transform_prepared_default("main: (1, 2).1");
-        let root = return_expr(&typed, "main");
-        let result = normalize(&typed, root, &DepSubst::new());
-
-        match result {
-            NormalizeResult::Value(ConstValue::Int(value)) => assert_eq!(value, 2),
-            _ => panic!("expected folded tuple field, got {result:?}"),
-        }
-    }
-
-    #[test]
-    fn tuple_get_from_residual_tuple_preserves_field_access() {
-        let typed =
-            transform_prepared_default("make_pair(n Int): (n, n)\nmain(n Int): make_pair(n).1");
-        let root = return_expr(&typed, "main");
-        let result = normalize(&typed, root, &DepSubst::new());
-
-        match result {
-            NormalizeResult::Residual(NormalExpr::FieldGet { .. }) => {}
-            _ => panic!("expected residual field access, got {result:?}"),
-        }
-    }
-
-    #[test]
-    fn field_from_const_value_prefers_indexed_record_fields() {
-        let value = field_from_const_value(
-            &ConstValue::Record {
-                fields: vec![
-                    (Intern::from_ref("x"), ConstValue::Int(1)),
-                    (Intern::from_ref("y"), ConstValue::Int(2)),
-                ]
-                .into(),
-            },
-            1,
-        )
-        .expect("record should return indexed field");
-
-        assert_eq!(value, ConstValue::Int(2));
-    }
-
-    #[test]
-    fn tag_call_with_all_constant_args_folds_to_const_tag() {
-        let typed =
-            transform_prepared_default("Maybe(value) is Some(value) or None\nmain: Maybe.Some(1)");
-        let root = return_expr(&typed, "main");
-        let result = normalize(&typed, root, &DepSubst::new());
-
-        match result {
-            NormalizeResult::Value(ConstValue::Tag { name, args, .. }) => {
-                assert_eq!(name.as_str(), "Some");
-                let args = args.as_ref();
-                assert_eq!(args, &[ConstValue::Int(1)]);
-            }
-            _ => panic!("expected folded constructor value, got {result:?}"),
-        }
-    }
-
-    #[test]
-    fn recursive_call_reports_unsupported() {
-        let typed = transform_prepared_default("recurse(n Int): recurse(n)\nmain: recurse(0)");
-        let root = return_expr(&typed, "main");
-        let result = normalize(&typed, root, &DepSubst::new());
-
-        assert!(matches!(result, NormalizeResult::Unsupported(_)));
-    }
-
-    #[test]
-    fn value_inputs_enforce_depth_limit() {
-        let typed = transform_prepared_default("grow(n Int): grow(n + 1)\nmain: grow(0)");
-        let root = return_expr(&typed, "main");
-        let result = normalize(&typed, root, &DepSubst::new());
-
-        assert!(matches!(result, NormalizeResult::Unsupported(_)));
-    }
-
-    #[test]
-    fn equivalent_residuals_across_files_compare() {
-        let left = transform_prepared("main: 2 + 3", 11);
-        let right = transform_prepared("main: 2 + 3", 12);
-        let left = normalize(&left, return_expr(&left, "main"), &DepSubst::new());
-        let right = normalize(&right, return_expr(&right, "main"), &DepSubst::new());
-
-        assert_eq!(left, right);
-        assert_eq!(hash_result(&left), hash_result(&right));
-    }
-
-    #[test]
-    fn same_named_params_from_different_binders_are_distinct() {
-        let left = transform_prepared("main(n Int): n + 1", 11);
-        let right = transform_prepared("main(n Int): n + 1", 12);
-        let left = normalize(&left, return_expr(&left, "main"), &DepSubst::new());
-        let right = normalize(&right, return_expr(&right, "main"), &DepSubst::new());
-
-        assert_ne!(left, right);
-    }
-}
+#[path = "../../tests/normalize_tests.rs"]
+mod tests;

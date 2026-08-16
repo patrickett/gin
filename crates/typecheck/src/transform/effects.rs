@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use ast::{BinderId, ParamConvention, TyArg};
 use internment::Intern;
 
-use crate::ty::Ty;
+use crate::ty::{Ty, reference_pointee_for_type};
 use crate::typed::{
     AppliedEffectTarget, AvailabilityRequirement, BindBody, CallCapability, DefId, EffectTarget,
     FunctionEffects, TypedCallableSignature, TypedExprKind, TypedFileAst, walk_expr_children,
@@ -277,6 +277,19 @@ fn walk_param_indices_in_ty(
     indices: &mut Vec<usize>,
 ) {
     match ty {
+        Ty::Named { instance, .. } => {
+            for (_, argument) in &instance.arguments {
+                if let ast::TyArg::Type(ty) = argument {
+                    walk_param_indices_in_ty(
+                        ty,
+                        name_to_index,
+                        inferred_index,
+                        dependent_binder,
+                        indices,
+                    );
+                }
+            }
+        }
         Ty::Record {
             fields,
             resolved_params,
@@ -374,7 +387,7 @@ fn walk_param_indices_in_ty(
                 indices,
             );
         }
-        Ty::Ptr { inner } | Ty::Ref { inner, .. } => {
+        Ty::Ptr { inner } | Ty::Address { pointee: inner, .. } => {
             walk_param_indices_in_ty(
                 inner,
                 name_to_index,
@@ -394,7 +407,12 @@ fn walk_param_indices_in_ty(
                 );
             }
         }
-        Ty::Int { .. } | Ty::Float { .. } | Ty::Unit | Ty::Literal(_) => {}
+        Ty::AnonymousInteger { .. }
+        | Ty::ResultFamily { .. }
+        | Ty::Float { .. }
+        | Ty::Unit
+        | Ty::Literal(_)
+        | Ty::UnresolvedLiteral(_) => {}
         Ty::Opaque(name) => {
             if name
                 .as_str()
@@ -407,6 +425,13 @@ fn walk_param_indices_in_ty(
                 indices.push(*index);
             }
         }
+        Ty::Ref { inner, .. } => walk_param_indices_in_ty(
+            inner,
+            name_to_index,
+            inferred_index,
+            dependent_binder,
+            indices,
+        ),
     }
 }
 
@@ -452,6 +477,7 @@ fn walk_param_indices_in_normal_expr(
                 indices,
             );
         }
+        ast::NormalExpr::TargetQuery { .. } => {}
     }
 }
 
@@ -459,7 +485,7 @@ fn infer_expr_effects(
     typed: &TypedFileAst,
     expr_id: crate::typed::ExprId,
     signatures: &HashMap<DefId, TypedCallableSignature>,
-    has_runtime_call: &mut bool,
+    _has_runtime_call: &mut bool,
     effects: &mut FunctionEffects,
     visited: &mut HashSet<crate::typed::ExprId>,
 ) {
@@ -529,21 +555,22 @@ fn infer_expr_effects(
             ..
         } => {
             let signature = signatures.get(target);
-            if target.0.as_str() == "asm" {
-                *has_runtime_call = true;
-            }
             if let Some(signature) = signature {
                 apply_call_effects(typed, args, signature, effects);
             }
-        }
-        TypedExprKind::Asm(_) => {
-            *has_runtime_call = true;
         }
         _ => {}
     }
 
     let _ = walk_expr_children(kind, &mut |child| {
-        infer_expr_effects(typed, child, signatures, has_runtime_call, effects, visited);
+        infer_expr_effects(
+            typed,
+            child,
+            signatures,
+            _has_runtime_call,
+            effects,
+            visited,
+        );
         std::ops::ControlFlow::Continue(())
     });
 }
@@ -717,103 +744,14 @@ fn record_field_index(
     base: crate::typed::ExprId,
     field: internment::Intern<String>,
 ) -> Option<usize> {
-    let mut ty = typed.exprs.ty.get(base.as_usize())?;
-    if let Ty::Ref { inner, .. } = ty {
-        ty = inner;
-    }
-    let Ty::Record { fields, .. } = ty else {
+    let ty = typed.exprs.ty.get(base.as_usize())?;
+    let ty =
+        reference_pointee_for_type(ty, Some(&typed.type_registry)).unwrap_or_else(|| ty.clone());
+    let Ty::Record { fields, .. } = typed.type_registry.resolved_definition_for_type(&ty) else {
         return None;
     };
     fields.iter().position(|(name, _)| *name == field)
 }
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::transform::{PackageTransformOptions, TransformCtx, transform, transform_package};
-    use crate::typed::FileId;
-    use internment::Intern;
-    use parser::cursor::TokenCursor;
-
-    fn signature_of(source: &str, name: &str) -> TypedCallableSignature {
-        let file_ast = TokenCursor::parse_source(source);
-        let typed = transform(&file_ast, FileId(0), &TransformCtx::new());
-        let bind = typed
-            .defs
-            .get(&DefId(Intern::from_ref(name)))
-            .expect("bind not found");
-        TypedCallableSignature::from(bind)
-    }
-
-    #[test]
-    fn pure_bind_is_stage_polymorphic() {
-        let signature = signature_of("add(x Int, y Int): x + y\n", "add");
-        assert_eq!(signature.call_capability, CallCapability::StagePolymorphic);
-        assert_eq!(
-            signature.param_requirements,
-            vec![AvailabilityRequirement::Any, AvailabilityRequirement::Any]
-        );
-    }
-
-    #[test]
-    fn asm_is_runtime_only() {
-        let source =
-            "spec := 'svc #0x80'\nwrite(fd Int, buf Int, len Int) Int: asm(spec, fd, buf, len)\n";
-        let signature = signature_of(source, "write");
-        assert_eq!(signature.call_capability, CallCapability::RuntimeOnly);
-    }
-
-    #[test]
-    fn param_type_reference_marks_requirement_compile_time() {
-        let signature = signature_of("make(size Int, y size): 1\n", "make");
-        assert_eq!(
-            signature.param_requirements,
-            vec![
-                AvailabilityRequirement::CompileTime,
-                AvailabilityRequirement::CompileTime
-            ]
-        );
-    }
-
-    #[test]
-    fn runtime_expression_only_param_remains_any() {
-        let signature = signature_of("runtime_only(x Int): Int: x + 1\n", "runtime_only");
-        assert_eq!(
-            signature.param_requirements,
-            vec![AvailabilityRequirement::Any]
-        );
-    }
-
-    #[test]
-    fn mutually_recursive_runtime_free_functions_are_stage_polymorphic() {
-        let source = "f(x Int): Int: g(x)\ng(x Int): Int: f(x)\n";
-        let signature = signature_of(source, "f");
-        assert_eq!(signature.call_capability, CallCapability::StagePolymorphic);
-    }
-
-    #[test]
-    fn cross_file_runtime_calls_set_runtime_capability() {
-        let callee =
-            TokenCursor::parse_source("Cell has value Int\na(mut cell Cell): b(mut cell)\n");
-        let caller = TokenCursor::parse_source(
-            "Cell has value Int\nb(mut cell Cell):\n    return eat cell\n",
-        );
-        let typed = transform_package(
-            &[(callee, FileId(0)), (caller, FileId(1))],
-            &TransformCtx::new(),
-            PackageTransformOptions::IDE,
-        );
-
-        let destroy = typed
-            .iter()
-            .find_map(|typed_file| typed_file.defs.get(&DefId(Intern::from_ref("a"))))
-            .expect("definition");
-        let caller = typed
-            .iter()
-            .find_map(|typed_file| typed_file.defs.get(&DefId(Intern::from_ref("b"))))
-            .expect("definition");
-
-        assert_eq!(destroy.call_capability, CallCapability::RuntimeOnly);
-        assert_eq!(caller.call_capability, CallCapability::RuntimeOnly);
-    }
-}
+#[path = "../../tests/effects_tests.rs"]
+mod tests;

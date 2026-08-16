@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use crate::subst::DepSubst;
 use crate::ty::{ParamKind, Ty};
 use crate::typed::{
-    walk_expr_children, Availability, AvailabilityRequirement, BindBody, CallCapability, ExprId,
-    TypedExprKind, TypedFileAst,
+    Availability, AvailabilityRequirement, BindBody, CallCapability, ExprId, TypedExprKind,
+    TypedFileAst, walk_expr_children_of,
 };
 use diagnostic::Diagnostic;
 
@@ -79,7 +79,7 @@ fn validate_resolved_compile_time_binds(typed: &mut TypedFileAst) {
         else {
             continue;
         };
-        let index = runtime_expr.as_usize();
+        let index = runtime_expr.index();
         if typed.exprs.flaws[index]
             .iter()
             .any(|flaw| flaw.code.slug() == "compile-time-runtime-call")
@@ -112,11 +112,15 @@ fn first_runtime_expr(typed: &TypedFileAst, root: ExprId) -> Option<ExprId> {
         if !visited.insert(expr) {
             continue;
         }
-        if typed.exprs.availability[expr.as_usize()] == Availability::Runtime {
+        if *typed
+            .exprs
+            .availability_of(expr)
+            .unwrap_or(&Availability::Unknown)
+            == Availability::Runtime
+        {
             return Some(expr);
         }
-        let kind = &typed.exprs.kind[expr.as_usize()];
-        let _ = walk_expr_children(kind, &mut |child| {
+        let _ = walk_expr_children_of(typed, expr, &mut |child| {
             pending.push(child);
             std::ops::ControlFlow::Continue(())
         });
@@ -146,7 +150,11 @@ fn validate_resolved_staging_calls(typed: &mut TypedFileAst) {
             .zip(&bind.param_requirements)
             .any(|(arg, requirement)| {
                 *requirement == AvailabilityRequirement::CompileTime
-                    && (typed.exprs.availability[arg.as_usize()] != Availability::CompileTime
+                    && (typed
+                        .exprs
+                        .availability_of(*arg)
+                        .unwrap_or(&Availability::Unknown)
+                        != &Availability::CompileTime
                         || is_runtime_form_type_argument(typed, *arg))
             });
         if invalid
@@ -170,14 +178,14 @@ fn validate_resolved_staging_calls(typed: &mut TypedFileAst) {
 }
 
 fn is_runtime_form_type_argument(typed: &TypedFileAst, arg: ExprId) -> bool {
-    let Some(TypedExprKind::FnCall { target, .. }) = typed.exprs.kind.get(arg.as_usize()) else {
+    let Some(TypedExprKind::FnCall { target, .. }) = typed.exprs.kind_of(arg) else {
         return false;
     };
     if target.0.as_str() == "Self" {
         return false;
     }
     if !typed.defs.contains_key(target)
-        && typed.exprs.availability[arg.as_usize()] == Availability::CompileTime
+        && typed.exprs.availability_of(arg) == Some(&Availability::CompileTime)
     {
         return false;
     }

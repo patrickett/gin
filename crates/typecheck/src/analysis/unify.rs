@@ -1,10 +1,20 @@
-use ast::{NormalExpr, Ty, TyArg};
+use crate::ty::{Ty, reference_semantics_for_type};
+use crate::type_registry::TypeRegistry;
+use ast::{NormalExpr, TyArg};
 use std::fmt::Write;
 
 use crate::subst::DepSubst;
 
 /// Walk two `TyArg` lists pairwise, unifying each pair and building a `DepSubst`.
 pub fn unify_type_args(expected: &[TyArg], actual: &[TyArg]) -> Result<DepSubst, String> {
+    unify_type_args_with_registry(expected, actual, None)
+}
+
+pub fn unify_type_args_with_registry(
+    expected: &[TyArg],
+    actual: &[TyArg],
+    type_registry: Option<&TypeRegistry>,
+) -> Result<DepSubst, String> {
     if expected.len() != actual.len() {
         return Err(format!(
             "expected {} type arguments, found {}",
@@ -14,22 +24,40 @@ pub fn unify_type_args(expected: &[TyArg], actual: &[TyArg]) -> Result<DepSubst,
     }
     let mut subst = DepSubst::new();
     for (exp, act) in expected.iter().zip(actual.iter()) {
-        unify_ty_arg(exp, act, &mut subst)?;
+        unify_ty_arg(exp, act, &mut subst, type_registry)?;
     }
     Ok(subst)
 }
 
-fn unify_ty_arg(expected: &TyArg, actual: &TyArg, subst: &mut DepSubst) -> Result<(), String> {
+fn unify_ty_arg(
+    expected: &TyArg,
+    actual: &TyArg,
+    subst: &mut DepSubst,
+    type_registry: Option<&TypeRegistry>,
+) -> Result<(), String> {
     match (expected, actual) {
-        (TyArg::Type(exp), TyArg::Type(act)) => unify_ty(exp, act, subst),
+        (TyArg::Type(exp), TyArg::Type(act)) => unify_ty(exp, act, subst, type_registry),
         (TyArg::Const(exp), TyArg::Const(act)) => unify_const(exp, act, subst),
         (TyArg::Type(_), _) => Err("expected type argument, found const".to_string()),
         (TyArg::Const(_), _) => Err("expected const argument, found type".to_string()),
     }
 }
 
-fn unify_ty(expected: &Ty, actual: &Ty, subst: &mut DepSubst) -> Result<(), String> {
+fn unify_ty(
+    expected: &Ty,
+    actual: &Ty,
+    subst: &mut DepSubst,
+    type_registry: Option<&TypeRegistry>,
+) -> Result<(), String> {
     match (expected, actual) {
+        (
+            Ty::Named {
+                instance: expected, ..
+            },
+            Ty::Named {
+                instance: actual, ..
+            },
+        ) if expected == actual => Ok(()),
         (Ty::Opaque(name), _) => {
             if let Some(existing) = subst.types.get(name) {
                 if existing != actual {
@@ -45,7 +73,7 @@ fn unify_ty(expected: &Ty, actual: &Ty, subst: &mut DepSubst) -> Result<(), Stri
             }
             Ok(())
         }
-        (Ty::Int { .. }, Ty::Int { .. })
+        (Ty::AnonymousInteger { .. }, Ty::AnonymousInteger { .. })
         | (Ty::Float { .. }, Ty::Float { .. })
         | (Ty::Unit, Ty::Unit) => Ok(()),
         (Ty::Record { name: n1, .. }, Ty::Record { name: n2, .. }) if n1 == n2 => {
@@ -54,7 +82,7 @@ fn unify_ty(expected: &Ty, actual: &Ty, subst: &mut DepSubst) -> Result<(), Stri
                 && ef.len() == af.len()
             {
                 for ((_, et), (_, at)) in ef.iter().zip(af.iter()) {
-                    unify_ty(et, at, subst)?;
+                    unify_ty(et, at, subst, type_registry)?;
                 }
             }
             Ok(())
@@ -62,16 +90,48 @@ fn unify_ty(expected: &Ty, actual: &Ty, subst: &mut DepSubst) -> Result<(), Stri
         (Ty::Union { name: n1, .. }, Ty::Union { name: n2, .. }) if n1 == n2 => Ok(()),
         (Ty::Tuple(e1), Ty::Tuple(e2)) if e1.len() == e2.len() => {
             for (et, at) in e1.iter().zip(e2.iter()) {
-                unify_ty(et, at, subst)?;
+                unify_ty(et, at, subst, type_registry)?;
             }
             Ok(())
         }
         (Ty::Array { elem: e1, size: s1 }, Ty::Array { elem: e2, size: s2 }) => {
-            unify_ty(e1, e2, subst)?;
+            unify_ty(e1, e2, subst, type_registry)?;
             unify_const(s1, s2, subst)
         }
-        (Ty::Ptr { inner: i1 }, Ty::Ptr { inner: i2 })
-        | (Ty::Ref { inner: i1, .. }, Ty::Ref { inner: i2, .. }) => unify_ty(i1, i2, subst),
+        (Ty::Ptr { inner: i1 }, Ty::Ptr { inner: i2 }) => unify_ty(i1, i2, subst, type_registry),
+        (
+            Ty::Address {
+                pointee: i1,
+                address_space: a1,
+            },
+            Ty::Address {
+                pointee: i2,
+                address_space: a2,
+            },
+        ) if a1 == a2 => unify_ty(i1, i2, subst, type_registry),
+        (expected, actual)
+            if let (Some(expected_reference), Some(actual_reference)) = (
+                reference_semantics_for_type(expected, type_registry),
+                reference_semantics_for_type(actual, type_registry),
+            ) =>
+        {
+            if expected_reference.permission != actual_reference.permission {
+                let mut msg = String::new();
+                let _ = write!(
+                    msg,
+                    "type mismatch: expected {}, found {}",
+                    expected.format_for_hover(),
+                    actual.format_for_hover()
+                );
+                return Err(msg);
+            }
+            unify_ty(
+                &expected_reference.pointee,
+                &actual_reference.pointee,
+                subst,
+                type_registry,
+            )
+        }
         _ => {
             let mut msg = String::new();
             let _ = write!(
@@ -120,112 +180,6 @@ fn unify_const(
         )),
     }
 }
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use ast::{NormalExpr, ConstValue, Ty, TyArg};
-    use internment::Intern;
-
-    #[test]
-    fn empty() {
-        let result = unify_type_args(&[], &[]);
-        assert!(result.is_ok());
-        let subst = result.unwrap();
-        assert!(subst.types.is_empty());
-        assert!(subst.consts.is_empty());
-    }
-
-    #[test]
-    fn assigns_type_var() {
-        let expected = vec![TyArg::Type(Box::new(Ty::Opaque(Intern::from_ref("T"))))];
-        let actual = vec![TyArg::Type(Box::new(Ty::i64()))];
-        let subst = unify_type_args(&expected, &actual).unwrap();
-        assert_eq!(subst.types.get(&Intern::from_ref("T")), Some(&Ty::i64()));
-    }
-
-    #[test]
-    fn type_kind_mismatch() {
-        let expected = vec![TyArg::Type(Box::new(Ty::Opaque(Intern::from_ref("T"))))];
-        let actual = vec![TyArg::Const(NormalExpr::Value(ConstValue::Int(3)))];
-        assert!(unify_type_args(&expected, &actual).is_err());
-    }
-
-    #[test]
-    fn const_kind_mismatch() {
-        let expected = vec![TyArg::Const(NormalExpr::Var(Intern::from_ref("n")))];
-        let actual = vec![TyArg::Type(Box::new(Ty::i64()))];
-        assert!(unify_type_args(&expected, &actual).is_err());
-    }
-
-    #[test]
-    fn assigns_const_var() {
-        let expected = vec![TyArg::Const(NormalExpr::Var(Intern::from_ref("n")))];
-        let actual = vec![TyArg::Const(NormalExpr::Value(ConstValue::Int(8)))];
-        let subst = unify_type_args(&expected, &actual).unwrap();
-        assert_eq!(
-            subst.consts.get(&Intern::from_ref("n")),
-            Some(&NormalExpr::Value(ConstValue::Int(8)))
-        );
-    }
-
-    #[test]
-    fn consistent_repeated_var() {
-        let t = TyArg::Type(Box::new(Ty::Opaque(Intern::from_ref("T"))));
-        let i64 = TyArg::Type(Box::new(Ty::i64()));
-        let subst = unify_type_args(&[t.clone(), t], &[i64.clone(), i64]).unwrap();
-        assert_eq!(subst.types.len(), 1);
-        assert_eq!(subst.types.get(&Intern::from_ref("T")), Some(&Ty::i64()));
-    }
-
-    #[test]
-    fn inconsistent_type_var() {
-        let t = TyArg::Type(Box::new(Ty::Opaque(Intern::from_ref("T"))));
-        let subst = unify_type_args(
-            &[t.clone(), t],
-            &[
-                TyArg::Type(Box::new(Ty::i64())),
-                TyArg::Type(Box::new(Ty::u8())),
-            ],
-        );
-        assert!(subst.is_err());
-    }
-
-    #[test]
-    fn inconsistent_const_var() {
-        let n = TyArg::Const(NormalExpr::Var(Intern::from_ref("n")));
-        let subst = unify_type_args(
-            &[n.clone(), n],
-            &[
-                TyArg::Const(NormalExpr::Value(ConstValue::Int(2))),
-                TyArg::Const(NormalExpr::Value(ConstValue::Int(3))),
-            ],
-        );
-        assert!(subst.is_err());
-    }
-
-    #[test]
-    fn mismatched_length() {
-        let expected = vec![TyArg::Type(Box::new(Ty::Opaque(Intern::from_ref("T"))))];
-        let actual = vec![];
-        assert!(unify_type_args(&expected, &actual).is_err());
-    }
-
-    #[test]
-    fn mixed_type_and_const() {
-        let expected = vec![
-            TyArg::Type(Box::new(Ty::Opaque(Intern::from_ref("T")))),
-            TyArg::Const(NormalExpr::Var(Intern::from_ref("n"))),
-        ];
-        let actual = vec![
-            TyArg::Type(Box::new(Ty::i64())),
-            TyArg::Const(NormalExpr::Value(ConstValue::Int(16))),
-        ];
-        let subst = unify_type_args(&expected, &actual).unwrap();
-        assert_eq!(subst.types.get(&Intern::from_ref("T")), Some(&Ty::i64()));
-        assert_eq!(
-            subst.consts.get(&Intern::from_ref("n")),
-            Some(&NormalExpr::Value(ConstValue::Int(16)))
-        );
-    }
-}
+#[path = "../../tests/unify_tests.rs"]
+mod tests;

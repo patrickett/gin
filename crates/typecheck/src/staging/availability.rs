@@ -4,7 +4,7 @@ use ast::NormalExpr;
 
 use crate::typed::{
     Availability, CallCapability, DefId, ExprId, FunctionEffects, TypedExprKind, TypedFileAst,
-    TypedWhenArm, walk_expr_children,
+    TypedWhenArm, walk_expr_children_of,
 };
 
 use super::CallableSignatures;
@@ -32,7 +32,7 @@ pub fn analyze_availability(typed: &mut TypedFileAst, signatures: &CallableSigna
     for kind in &typed.exprs.kind {
         if let TypedExprKind::When(when_expr) = kind {
             if let Some(subject) = when_expr.subject
-                && matches!(&typed.exprs.ty[subject.as_usize()], crate::ty::Ty::Opaque(name) if name.as_str() == "Type")
+                && matches!(typed.exprs.ty_of(subject), Some(crate::ty::Ty::Opaque(name)) if name.as_str() == "Type")
             {
                 compiletime_refs.insert(subject);
             }
@@ -86,16 +86,54 @@ fn analyze_expr(
     state[idx] = VisitState::Visiting;
     let kind = &typed.exprs.kind[idx];
     let availability = match kind {
-        TypedExprKind::Lit(_) => Availability::CompileTime,
-        TypedExprKind::Binary { lhs, rhs, .. } => join_availability(&[
-            analyze_expr(*lhs, typed, signatures, state, bind_cache, out, compiletime_refs),
-            analyze_expr(*rhs, typed, signatures, state, bind_cache, out, compiletime_refs),
+        TypedExprKind::Lit(_)
+        | TypedExprKind::Rematerialize { .. }
+        | TypedExprKind::TargetQuery { .. } => Availability::CompileTime,
+        TypedExprKind::Binary { lhs, rhs, .. }
+        | TypedExprKind::InvalidOperator { lhs, rhs, .. } => join_availability(&[
+            analyze_expr(
+                *lhs,
+                typed,
+                signatures,
+                state,
+                bind_cache,
+                out,
+                compiletime_refs,
+            ),
+            analyze_expr(
+                *rhs,
+                typed,
+                signatures,
+                state,
+                bind_cache,
+                out,
+                compiletime_refs,
+            ),
         ]),
+        TypedExprKind::IntrinsicCall { args, .. } => join_availability(
+            &args
+                .iter()
+                .map(|arg| {
+                    analyze_expr(
+                        *arg,
+                        typed,
+                        signatures,
+                        state,
+                        bind_cache,
+                        out,
+                        compiletime_refs,
+                    )
+                })
+                .collect::<Vec<_>>(),
+        ),
         TypedExprKind::FnCall { target, args, .. }
             if args.as_ref().is_none_or(Vec::is_empty)
                 && !typed.defs.contains_key(target)
                 && !signatures.contains_key(target)
-                && compiletime_refs.contains(&expr_id) => Availability::CompileTime,
+                && compiletime_refs.contains(&expr_id) =>
+        {
+            Availability::CompileTime
+        }
         TypedExprKind::FnCall { target, args, .. } => analyze_call(
             *target,
             args.as_deref(),
@@ -113,7 +151,17 @@ fn analyze_expr(
         } => join_availability(
             &args
                 .iter()
-                .map(|arg| analyze_expr(*arg, typed, signatures, state, bind_cache, out, compiletime_refs))
+                .map(|arg| {
+                    analyze_expr(
+                        *arg,
+                        typed,
+                        signatures,
+                        state,
+                        bind_cache,
+                        out,
+                        compiletime_refs,
+                    )
+                })
                 .collect::<Vec<_>>(),
         ),
         TypedExprKind::TagCall { args: None, .. } => Availability::CompileTime,
@@ -123,7 +171,15 @@ fn analyze_expr(
             if *unassigned || body.0 == 0 {
                 Availability::CompileTime
             } else {
-                analyze_expr(*body, typed, signatures, state, bind_cache, out, compiletime_refs)
+                analyze_expr(
+                    *body,
+                    typed,
+                    signatures,
+                    state,
+                    bind_cache,
+                    out,
+                    compiletime_refs,
+                )
             }
         }
         TypedExprKind::Reassign { .. } => Availability::Runtime,
@@ -134,8 +190,10 @@ fn analyze_expr(
             }
             for arm in &when_expr.arms {
                 match arm {
-                    TypedWhenArm::Cond { condition, body, .. } => {
-                        children.push(*condition);
+                    TypedWhenArm::Cond {
+                        condition, body, ..
+                    } => {
+                        condition.visit_subjects(&mut |subject| children.push(subject));
                         children.push(*body);
                     }
                     TypedWhenArm::Is { body, .. } | TypedWhenArm::Else(body, _) => {
@@ -146,7 +204,17 @@ fn analyze_expr(
             join_availability(
                 &children
                     .into_iter()
-                    .map(|child| analyze_expr(child, typed, signatures, state, bind_cache, out, compiletime_refs))
+                    .map(|child| {
+                        analyze_expr(
+                            child,
+                            typed,
+                            signatures,
+                            state,
+                            bind_cache,
+                            out,
+                            compiletime_refs,
+                        )
+                    })
                     .collect::<Vec<_>>(),
             )
         }
@@ -155,7 +223,17 @@ fn analyze_expr(
             join_availability(
                 &exprs
                     .into_iter()
-                    .map(|child| analyze_expr(child, typed, signatures, state, bind_cache, out, compiletime_refs))
+                    .map(|child| {
+                        analyze_expr(
+                            child,
+                            typed,
+                            signatures,
+                            state,
+                            bind_cache,
+                            out,
+                            compiletime_refs,
+                        )
+                    })
                     .collect::<Vec<_>>(),
             )
         }
@@ -163,20 +241,60 @@ fn analyze_expr(
         TypedExprKind::SelfRef { .. } => Availability::CompileTime,
         TypedExprKind::FormatString(_) => Availability::CompileTime,
         TypedExprKind::Range { start, end } => join_availability(&[
-            analyze_expr(*start, typed, signatures, state, bind_cache, out, compiletime_refs),
-            analyze_expr(*end, typed, signatures, state, bind_cache, out, compiletime_refs),
+            analyze_expr(
+                *start,
+                typed,
+                signatures,
+                state,
+                bind_cache,
+                out,
+                compiletime_refs,
+            ),
+            analyze_expr(
+                *end,
+                typed,
+                signatures,
+                state,
+                bind_cache,
+                out,
+                compiletime_refs,
+            ),
         ]),
         TypedExprKind::TupleLit(values) | TypedExprKind::List(values) => join_availability(
             &values
                 .iter()
-                .map(|value| analyze_expr(*value, typed, signatures, state, bind_cache, out, compiletime_refs))
+                .map(|value| {
+                    analyze_expr(
+                        *value,
+                        typed,
+                        signatures,
+                        state,
+                        bind_cache,
+                        out,
+                        compiletime_refs,
+                    )
+                })
                 .collect::<Vec<_>>(),
         ),
-        TypedExprKind::Cast { expr, .. } => {
-            analyze_expr(*expr, typed, signatures, state, bind_cache, out, compiletime_refs)
-        }
+        TypedExprKind::Cast { expr, .. } => analyze_expr(
+            *expr,
+            typed,
+            signatures,
+            state,
+            bind_cache,
+            out,
+            compiletime_refs,
+        ),
         TypedExprKind::TupleAlloc { init, size } => {
-            let init_availability = analyze_expr(*init, typed, signatures, state, bind_cache, out, compiletime_refs);
+            let init_availability = analyze_expr(
+                *init,
+                typed,
+                signatures,
+                state,
+                bind_cache,
+                out,
+                compiletime_refs,
+            );
             let size_is_const = matches!(size, NormalExpr::Value(_));
             if init_availability == Availability::CompileTime && size_is_const {
                 Availability::CompileTime
@@ -184,27 +302,68 @@ fn analyze_expr(
                 Availability::Runtime
             }
         }
-        TypedExprKind::TupleGet { base, .. } => {
-            analyze_expr(*base, typed, signatures, state, bind_cache, out, compiletime_refs)
-        }
+        TypedExprKind::TupleGet { base, .. } => analyze_expr(
+            *base,
+            typed,
+            signatures,
+            state,
+            bind_cache,
+            out,
+            compiletime_refs,
+        ),
         TypedExprKind::TupleSet { .. } => Availability::Runtime,
         TypedExprKind::Destructure { .. } => Availability::Runtime,
         TypedExprKind::RecordSet { .. } => Availability::Runtime,
         TypedExprKind::BufGet { buf, index } => join_availability(&[
-            analyze_expr(*buf, typed, signatures, state, bind_cache, out, compiletime_refs),
-            analyze_expr(*index, typed, signatures, state, bind_cache, out, compiletime_refs),
+            analyze_expr(
+                *buf,
+                typed,
+                signatures,
+                state,
+                bind_cache,
+                out,
+                compiletime_refs,
+            ),
+            analyze_expr(
+                *index,
+                typed,
+                signatures,
+                state,
+                bind_cache,
+                out,
+                compiletime_refs,
+            ),
         ]),
         TypedExprKind::BufSet { .. } => Availability::Runtime,
-        TypedExprKind::TakePtr(inner) => {
-            analyze_expr(*inner, typed, signatures, state, bind_cache, out, compiletime_refs)
-        }
+        TypedExprKind::TakePtr(inner) => analyze_expr(
+            *inner,
+            typed,
+            signatures,
+            state,
+            bind_cache,
+            out,
+            compiletime_refs,
+        ),
         TypedExprKind::Ref(expr) | TypedExprKind::Deref(expr) | TypedExprKind::Negate(expr) => {
-            analyze_expr(*expr, typed, signatures, state, bind_cache, out, compiletime_refs)
+            analyze_expr(
+                *expr,
+                typed,
+                signatures,
+                state,
+                bind_cache,
+                out,
+                compiletime_refs,
+            )
         }
-        TypedExprKind::ConsumeArg(expr) | TypedExprKind::Eat(expr) => {
-            analyze_expr(*expr, typed, signatures, state, bind_cache, out, compiletime_refs)
-        }
-        TypedExprKind::Asm(_) => Availability::Runtime,
+        TypedExprKind::ConsumeArg(expr) | TypedExprKind::Eat(expr) => analyze_expr(
+            *expr,
+            typed,
+            signatures,
+            state,
+            bind_cache,
+            out,
+            compiletime_refs,
+        ),
     };
     state[idx] = VisitState::Done;
     out[idx] = availability;
@@ -218,19 +377,12 @@ fn analyze_call(
     signatures: &CallableSignatures,
     availability_state: &mut AvailabilityState<'_>,
 ) -> Availability {
-    if target.0.as_str() == "asm" {
-        return Availability::Runtime;
-    }
     if target.0.as_str() == "Self" {
         return Availability::CompileTime;
     }
 
-    let callee_availability = bind_availability(
-        target,
-        typed,
-        signatures,
-        availability_state.bind_cache,
-    );
+    let callee_availability =
+        bind_availability(target, typed, signatures, availability_state.bind_cache);
     let arg_availabilities = args
         .map(|call_args| {
             call_args
@@ -308,7 +460,7 @@ fn mark_pattern_exprs(root: ExprId, typed: &TypedFileAst, marked: &mut HashSet<E
         if !marked.insert(expr_id) {
             continue;
         }
-        let _ = walk_expr_children(&typed.exprs.kind[expr_id.as_usize()], &mut |child| {
+        let _ = walk_expr_children_of(typed, expr_id, &mut |child| {
             pending.push(child);
             std::ops::ControlFlow::Continue(())
         });
@@ -339,117 +491,15 @@ fn walk_if_children(kind: &TypedExprKind) -> Vec<ExprId> {
         return Vec::new();
     };
     let mut children = Vec::with_capacity(if_expr.stmts.len() + 2);
-    children.push(if_expr.subject);
+    if_expr
+        .condition
+        .visit_subjects(&mut |subject| children.push(subject));
     children.extend(if_expr.stmts.iter().copied());
     if let Some(ret) = if_expr.ret {
         children.push(ret);
     }
     children
 }
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::transform::{TransformCtx, transform};
-    use crate::typed::{BindBody, TypedExprKind};
-    use crate::{FileId, prepare_parse_ast};
-    use flask::CompileTarget;
-    use internment::Intern;
-    use parser::cursor::TokenCursor;
-
-    fn transform_prepared(source: &str) -> crate::TypedFileAst {
-        let mut file_ast = TokenCursor::parse_source(source);
-        let _ = prepare_parse_ast(&mut file_ast, &CompileTarget::Library);
-        transform(&file_ast, FileId(0), &TransformCtx::new())
-    }
-
-    fn return_expr(typed: &crate::TypedFileAst, name: &str) -> crate::ExprId {
-        let bind = typed
-            .defs
-            .get(&crate::DefId(Intern::from_ref(name)))
-            .expect("definition");
-        match &bind.body {
-            BindBody::Expr(expr) => *expr,
-            BindBody::Body {
-                ret: Some(expr), ..
-            } => *expr,
-            _ => panic!("definition has no return expression"),
-        }
-    }
-
-    #[test]
-    fn availability_join() {
-        use Availability::*;
-        assert_eq!(join_availability(&[CompileTime, CompileTime]), CompileTime);
-        assert_eq!(join_availability(&[CompileTime, Runtime]), Runtime);
-        assert_eq!(join_availability(&[Runtime, Unknown]), Runtime);
-        assert_eq!(join_availability(&[Unknown, CompileTime]), Unknown);
-        assert_eq!(join_availability(&[]), CompileTime);
-    }
-
-    #[test]
-    fn literal_binary_expression_is_compile_time() {
-        let typed = transform_prepared("main: 1 + 2\n");
-        let root = return_expr(&typed, "main");
-
-        assert!(matches!(
-            typed.exprs.kind[root.as_usize()],
-            TypedExprKind::Binary { .. }
-        ));
-        assert_eq!(
-            typed.exprs.availability[root.as_usize()],
-            Availability::CompileTime
-        );
-    }
-
-    #[test]
-    fn runtime_parameter_forces_runtime_expression() {
-        let typed = transform_prepared("main(x) Int: x + 2\n");
-        let root = return_expr(&typed, "main");
-
-        assert_eq!(
-            typed.exprs.availability[root.as_usize()],
-            Availability::Runtime
-        );
-    }
-
-    #[test]
-    fn constructor_from_compile_time_fields_is_compile_time() {
-        let typed = transform_prepared("Maybe(x) is Some(x) or None\nmain: Maybe.Some(1)\n");
-        let root = return_expr(&typed, "main");
-        assert_eq!(
-            typed.exprs.availability[root.as_usize()],
-            Availability::CompileTime
-        );
-    }
-
-    #[test]
-    fn asm_inference_is_runtime() {
-        let typed = transform_prepared(
-            "spec := 'svc #0x80'\n\
-             write(fd Int, buf Int, len Int) Int: asm(spec, fd, buf, len)\n\
-             main: write(1, 2, 3)\n",
-        );
-        let write_root = return_expr(&typed, "write");
-        let main_root = return_expr(&typed, "main");
-
-        assert_eq!(
-            typed.exprs.availability[write_root.as_usize()],
-            Availability::Runtime
-        );
-        assert_eq!(
-            typed.exprs.availability[main_root.as_usize()],
-            Availability::Runtime
-        );
-    }
-
-    #[test]
-    fn flaw_free_exprs_have_non_unknown_availability() {
-        let typed = transform_prepared("main: 1 + 2\n");
-        for index in 0..typed.exprs.availability.len() {
-            if typed.exprs.flaws[index].is_empty() {
-                assert_ne!(typed.exprs.availability[index], Availability::Unknown);
-            }
-        }
-    }
-}
+#[path = "../../tests/availability_tests.rs"]
+mod tests;

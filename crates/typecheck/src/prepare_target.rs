@@ -1,6 +1,7 @@
 //! Default trait materialization and entry `target` merge from flask triple.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ops::ControlFlow;
 
 use diagnostic::Diagnostic;
 use flask::CompileTarget;
@@ -11,6 +12,7 @@ use crate::analysis::{CompTimeEvaluator, ConstEnv};
 use crate::ty::Ty;
 use ast::declare::{Declare, DeclareValue};
 use ast::expr::{Expr, Literal, Typed};
+use ast::folder::Folder;
 use ast::span::SpanId;
 use ast::ty_state::TyState;
 use ast::type_decl::TypeNameExt;
@@ -232,7 +234,13 @@ pub fn materialize_type_static_access(ast: &mut FileAst) {
                     WhenArm::Cond {
                         condition, body, ..
                     } => {
-                        materialize_type_static_access_typed(condition, &expansions);
+                        let _ = ast::folder::walk_condition_typed_exprs_mut(
+                            condition,
+                            &mut |subject| {
+                                materialize_type_static_access_typed(subject, &expansions);
+                                std::ops::ControlFlow::Continue(())
+                            },
+                        );
                         materialize_type_static_access_typed(body, &expansions);
                     }
                     WhenArm::Is { body, .. } => {
@@ -324,7 +332,13 @@ fn materialize_type_static_access_expr(expr: &mut Expr, expansions: &TypeStaticE
                     WhenArm::Cond {
                         condition, body, ..
                     } => {
-                        materialize_type_static_access_typed(condition, expansions);
+                        let _ = ast::folder::walk_condition_typed_exprs_mut(
+                            condition,
+                            &mut |subject| {
+                                materialize_type_static_access_typed(subject, expansions);
+                                std::ops::ControlFlow::Continue(())
+                            },
+                        );
                         materialize_type_static_access_typed(body, expansions);
                     }
                     WhenArm::Is { body, .. } => {
@@ -337,7 +351,10 @@ fn materialize_type_static_access_expr(expr: &mut Expr, expansions: &TypeStaticE
             }
         }
         Expr::If(i) => {
-            materialize_type_static_access_typed(&mut i.subject, expansions);
+            let _ = ast::folder::walk_condition_typed_exprs_mut(&mut i.condition, &mut |subject| {
+                materialize_type_static_access_typed(subject, expansions);
+                std::ops::ControlFlow::Continue(())
+            });
             for e in &mut i.body {
                 materialize_type_static_access_typed(e, expansions);
             }
@@ -369,10 +386,9 @@ fn materialize_type_static_access_expr(expr: &mut Expr, expansions: &TypeStaticE
 
 fn default_expr_value_expr(cv: &ConstValue, span_id: SpanId) -> Expr {
     match cv {
+        ConstValue::ResultAlternative { label, .. } => Expr::AnonymousTag(*label),
         ConstValue::String(s) => Expr::Lit(Literal::String(s.clone())),
-        ConstValue::Int(n) => {
-            Expr::Lit(Literal::Int(*n as u128))
-        }
+        ConstValue::Int(n) => Expr::Lit(Literal::Int(*n)),
         ConstValue::Float(HashFloat(f)) => Expr::Lit(Literal::Float(HashFloat(*f))),
         ConstValue::Tag { name, args, .. } if args.is_empty() => Expr::AnonymousTag(*name),
         ConstValue::Tag {
@@ -456,6 +472,227 @@ pub(crate) fn const_env_from_prepared_ast(ast: &FileAst) -> ConstEnv {
     const_binds
 }
 
+pub fn materialize_target_dependent_constants(ast: &mut FileAst, target: &CompileTarget) {
+    let mut const_binds: ConstEnv = ast.defs.keys().map(|name| (*name, None)).collect();
+    let target_dependent = target_dependent_bind_names(ast);
+    for _ in 0..ast.defs.len().max(1) {
+        for (name, bind) in &ast.defs {
+            if const_binds.get(name).and_then(Option::as_ref).is_some() {
+                continue;
+            }
+            let BindValue::Expr(expr) = &bind.value else {
+                continue;
+            };
+            let evaluator = CompTimeEvaluator::for_target(&const_binds, ast, target);
+            if let Some(value) = expr
+                .const_value
+                .clone()
+                .or_else(|| evaluator.eval(&expr.value))
+            {
+                const_binds.insert(*name, Some(value));
+            }
+        }
+    }
+
+    for (name, bind) in &mut ast.defs {
+        if !target_dependent.contains(name) {
+            continue;
+        }
+        let Some(value) = const_binds.get(name).and_then(Clone::clone) else {
+            continue;
+        };
+        if let BindValue::Expr(expr) = &mut bind.value {
+            expr.value = default_expr_value_expr(&value, expr.span_id);
+            expr.const_value = Some(value);
+        }
+    }
+    let _ = PredicateConstantSubstituter { env: &const_binds }.visit_file_ast(ast);
+    for declaration in ast.tags.values_mut() {
+        if let DeclareValue::Refinement(predicate) = &mut declaration.value {
+            substitute_predicate_constants(predicate, &const_binds);
+        }
+        if let DeclareValue::Has(members) = &mut declaration.value {
+            for member in members {
+                match member {
+                    ast::HasMember::Property(property) => {
+                        if let Some(predicate) = &mut property.refinement {
+                            substitute_predicate_constants(predicate, &const_binds);
+                        }
+                    }
+                    ast::HasMember::Function(function) => {
+                        if let Some(predicate) = &mut function.refinement {
+                            substitute_predicate_constants(predicate, &const_binds);
+                        }
+                        for predicate in function.param_refinements.values_mut() {
+                            substitute_predicate_constants(predicate, &const_binds);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(bits) = declaration.attributes.bits.as_mut()
+            && let Expr::FnCall(call) = &bits.value
+            && call.args.is_none()
+            && call.path.value.segments.is_empty()
+            && let Some(value) = const_binds
+                .get(&call.path.value.root)
+                .and_then(Clone::clone)
+        {
+            bits.const_value = Some(value);
+        }
+    }
+}
+
+struct PredicateConstantSubstituter<'a> {
+    env: &'a ConstEnv,
+}
+
+impl ast::folder::Folder for PredicateConstantSubstituter<'_> {
+    fn visit_bind(&mut self, bind: &mut Bind) -> ControlFlow<()> {
+        if let Some(predicate) = &mut bind.return_refinement {
+            substitute_predicate_constants(predicate, self.env);
+        }
+        for predicate in bind.param_refinements.values_mut() {
+            substitute_predicate_constants(predicate, self.env);
+        }
+        for alternative in &mut bind.anonymous_result_alternatives {
+            if let Some(proposition) = &mut alternative.value.proposition {
+                substitute_proposition_constants(proposition, self.env);
+            }
+        }
+        ast::folder::walk_bind_mut(self, bind)
+    }
+
+    fn visit_condition(&mut self, condition: &mut ast::Condition) -> ControlFlow<()> {
+        if let ast::Condition::Is { pattern, .. } = condition
+            && let ast::Pattern::InRange { bounds, .. } = &mut pattern.value
+            && let ast::InRangeBounds::LiteralToTag(min, name) = bounds
+            && let Some(ConstValue::Int(max)) = self.env.get(name).and_then(Option::as_ref)
+        {
+            *bounds = ast::InRangeBounds::Literal(*min, *max);
+        }
+        ast::folder::walk_condition_mut(self, condition)
+    }
+}
+
+pub(crate) fn target_dependent_bind_names(ast: &FileAst) -> HashSet<Intern<String>> {
+    let mut names = HashSet::new();
+    for _ in 0..ast.defs.len().max(1) {
+        let before = names.len();
+        for (name, bind) in &ast.defs {
+            if let BindValue::Expr(expr) = &bind.value
+                && expr_depends_on_target(&expr.value, &names)
+            {
+                names.insert(*name);
+            }
+        }
+        if names.len() == before {
+            break;
+        }
+    }
+    names
+}
+
+fn expr_depends_on_target(expr: &Expr, dependent_names: &HashSet<Intern<String>>) -> bool {
+    if matches!(expr, Expr::TargetQuery { .. })
+        || matches!(
+            expr,
+            Expr::FnCall(call)
+                if call.args.is_none()
+                    && call.path.value.segments.is_empty()
+                    && dependent_names.contains(&call.path.value.root)
+        )
+    {
+        return true;
+    }
+    let mut found = false;
+    let _ = ast::folder::walk_expr_children(expr, &mut |_, child| {
+        if expr_depends_on_target(child, dependent_names) {
+            found = true;
+            std::ops::ControlFlow::Break(())
+        } else {
+            std::ops::ControlFlow::Continue(())
+        }
+    });
+    found
+}
+
+fn substitute_predicate_constants(predicate: &mut ast::ty::PredicateExpr, env: &ConstEnv) {
+    match predicate {
+        ast::ty::PredicateExpr::Lt(expr)
+        | ast::ty::PredicateExpr::Gt(expr)
+        | ast::ty::PredicateExpr::Le(expr)
+        | ast::ty::PredicateExpr::Ge(expr)
+        | ast::ty::PredicateExpr::Eq(expr)
+        | ast::ty::PredicateExpr::Ne(expr) => substitute_normal_constants(expr, env),
+        ast::ty::PredicateExpr::And(predicates) => {
+            for predicate in predicates {
+                substitute_predicate_constants(predicate, env);
+            }
+        }
+        ast::ty::PredicateExpr::Proposition(proposition) => {
+            substitute_proposition_constants(proposition, env);
+        }
+    }
+}
+
+fn substitute_normal_constants(expr: &mut ast::NormalExpr, env: &ConstEnv) {
+    match expr {
+        ast::NormalExpr::Var(name) => {
+            if let Some(ConstValue::Int(value)) = env.get(name).and_then(Clone::clone) {
+                *expr = ast::NormalExpr::from(value);
+            }
+        }
+        ast::NormalExpr::Add(left, right)
+        | ast::NormalExpr::Sub(left, right)
+        | ast::NormalExpr::Mul(left, right) => {
+            substitute_normal_constants(left, env);
+            substitute_normal_constants(right, env);
+        }
+        ast::NormalExpr::Value(_)
+        | ast::NormalExpr::Inferred(_)
+        | ast::NormalExpr::TargetQuery { .. } => {}
+    }
+}
+
+fn substitute_proposition_constants(proposition: &mut ast::ProofProposition, env: &ConstEnv) {
+    match proposition {
+        ast::ProofProposition::Compare { left, right, .. } => {
+            substitute_proof_term_constants(left, env);
+            substitute_proof_term_constants(right, env);
+        }
+        ast::ProofProposition::InRange { value, start, end } => {
+            substitute_proof_term_constants(value, env);
+            substitute_proof_term_constants(start, env);
+            substitute_proof_term_constants(end, env);
+        }
+        ast::ProofProposition::Not(inner) => substitute_proposition_constants(inner, env),
+        ast::ProofProposition::And(left, right) | ast::ProofProposition::Or(left, right) => {
+            substitute_proposition_constants(left, env);
+            substitute_proposition_constants(right, env);
+        }
+    }
+}
+
+fn substitute_proof_term_constants(term: &mut ast::ProofTerm, env: &ConstEnv) {
+    match term {
+        ast::ProofTerm::Name(name) => {
+            if let Some(ConstValue::Int(value)) = env.get(name).and_then(Clone::clone) {
+                *term = ast::ProofTerm::Value(value);
+            }
+        }
+        ast::ProofTerm::Add(left, right)
+        | ast::ProofTerm::Sub(left, right)
+        | ast::ProofTerm::Mul(left, right)
+        | ast::ProofTerm::Remainder(left, right) => {
+            substitute_proof_term_constants(left, env);
+            substitute_proof_term_constants(right, env);
+        }
+        ast::ProofTerm::PowerOfTwo(inner) => substitute_proof_term_constants(inner, env),
+        ast::ProofTerm::Value(_) | ast::ProofTerm::TargetQuery { .. } => {}
+    }
+}
+
 /// Subject type for `when target.arch is` — the `Architecture` literal union when present.
 pub fn infer_when_declare_subject_ty(
     subject: Option<&Typed<Expr>>,
@@ -489,7 +726,7 @@ fn literal_union_ty_from_tag(name: Intern<String>, tags: &ast::TagMap) -> Option
         if let ast::Pattern::Literal(Literal::String(s), _) = &shape.value {
             lit_values.push(ConstValue::String(s.clone()));
             if lit_base.is_none() {
-                lit_base = Some(Ty::Opaque(Intern::<String>::from_ref("Str")));
+                lit_base = Some(Ty::Opaque(Intern::<String>::from_ref("String")));
             }
         } else if let ast::Pattern::Literal(lit, _) = &shape.value {
             if let Some(cv) = const_value_from_literal(lit) {
@@ -509,9 +746,9 @@ fn literal_union_ty_from_tag(name: Intern<String>, tags: &ast::TagMap) -> Option
 fn const_value_from_literal(lit: &Literal) -> Option<ConstValue> {
     match lit {
         Literal::String(s) => Some(ConstValue::String(s.clone())),
-        Literal::Int(n) => Some(ConstValue::Int(*n as i128)),
+        Literal::Int(n) => Some(ConstValue::Int(*n)),
         Literal::Float(HashFloat(f)) => Some(ConstValue::Float(HashFloat(*f))),
-        Literal::Number(n) => Some(ConstValue::Int(*n as i128)),
+        Literal::Number(n) => Some(ConstValue::Int((*n as u128).into())),
     }
 }
 
@@ -618,7 +855,13 @@ fn propagate_record_fields_typed(expr: &mut Typed<Expr>) {
                     WhenArm::Cond {
                         condition, body, ..
                     } => {
-                        propagate_record_fields_typed(condition);
+                        let _ = ast::folder::walk_condition_typed_exprs_mut(
+                            condition,
+                            &mut |subject| {
+                                propagate_record_fields_typed(subject);
+                                std::ops::ControlFlow::Continue(())
+                            },
+                        );
                         propagate_record_fields_typed(body);
                     }
                     WhenArm::Is { body, .. } => propagate_record_fields_typed(body),
@@ -627,7 +870,10 @@ fn propagate_record_fields_typed(expr: &mut Typed<Expr>) {
             }
         }
         Expr::If(i) => {
-            propagate_record_fields_typed(&mut i.subject);
+            let _ = ast::folder::walk_condition_typed_exprs_mut(&mut i.condition, &mut |subject| {
+                propagate_record_fields_typed(subject);
+                std::ops::ControlFlow::Continue(())
+            });
             for e in &mut i.body {
                 propagate_record_fields_typed(e);
             }

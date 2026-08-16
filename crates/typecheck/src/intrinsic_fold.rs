@@ -59,7 +59,11 @@ fn inject_when_in_tag_declares(ast: &mut FileAst) {
                 WhenArm::Cond {
                     condition, body, ..
                 } => {
-                    inject_typed_expr_intrinsics(condition);
+                    let _ =
+                        ast::folder::walk_condition_typed_exprs_mut(condition, &mut |subject| {
+                            inject_typed_expr_intrinsics(subject);
+                            std::ops::ControlFlow::Continue(())
+                        });
                     inject_typed_expr_intrinsics(body);
                 }
                 WhenArm::Is { body, .. } => inject_typed_expr_intrinsics(body),
@@ -96,8 +100,14 @@ fn inject_typed_expr_intrinsics(expr: &mut Typed<Expr>) {
 
         for arm in &mut when.arms {
             match arm {
-                WhenArm::Cond { condition, body, .. } => {
-                    inject_typed_expr_intrinsics(condition);
+                WhenArm::Cond {
+                    condition, body, ..
+                } => {
+                    let _ =
+                        ast::folder::walk_condition_typed_exprs_mut(condition, &mut |subject| {
+                            inject_typed_expr_intrinsics(subject);
+                            std::ops::ControlFlow::Continue(())
+                        });
                     inject_typed_expr_intrinsics(body);
                 }
                 WhenArm::Is { body, .. } | WhenArm::Else(body, _) => {

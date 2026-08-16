@@ -83,11 +83,9 @@ fn union_variants_covered(ty: &Ty, patterns: &[&Pattern]) -> bool {
 }
 
 /// Check whether all integer values in `[min, max]` are covered by the given patterns.
-/// Only literal and in-range patterns are considered — lowercase nominal patterns
-/// (value bindings) are not catch-alls for exhaustiveness.
 fn integer_range_covered(min: i128, max: i128, patterns: &[&Pattern]) -> bool {
     (min..=max).all(|v| {
-        let cv = ConstValue::Int(v);
+        let cv = ConstValue::Int(v.into());
         patterns.iter().any(|p| pattern_matches_public(p, &cv))
     })
 }
@@ -110,28 +108,7 @@ pub trait TyWhenExt {
 impl TyWhenExt for Ty {
     fn when_subject_exhaustive(&self, arms: &[TypedWhenArm]) -> bool {
         let patterns: Vec<_> = is_patterns_from_arms(arms).collect();
-        if patterns.is_empty() {
-            return false;
-        }
-        if patterns.iter().any(|p| p.is_catch_all_pattern()) {
-            return true;
-        }
-        if list_patterns_exhaustive(&patterns) {
-            return true;
-        }
-        if self.union_literal_values().is_some() {
-            literal_union_values_covered(self, &patterns)
-        } else {
-            match self {
-                Ty::Union { .. } => union_variants_covered(self, &patterns),
-                Ty::Int {
-                    min: Some(min_val),
-                    max: Some(max_val),
-                    ..
-                } => integer_range_covered(*min_val, *max_val, &patterns),
-                _ => false,
-            }
-        }
+        patterns_exhaustive(self, &patterns)
     }
 }
 
@@ -144,27 +121,27 @@ fn is_patterns_from_declare_arms(arms: &[WhenArm]) -> impl Iterator<Item = &Patt
 
 fn when_subject_exhaustive_declare(subject_ty: &Ty, arms: &[WhenArm]) -> bool {
     let patterns: Vec<_> = is_patterns_from_declare_arms(arms).collect();
+    patterns_exhaustive(subject_ty, &patterns)
+}
+
+fn patterns_exhaustive(subject_ty: &Ty, patterns: &[&Pattern]) -> bool {
     if patterns.is_empty() {
         return false;
     }
     if patterns.iter().any(|p| p.is_catch_all_pattern()) {
         return true;
     }
-    if list_patterns_exhaustive(&patterns) {
+    if list_patterns_exhaustive(patterns) {
         return true;
     }
     if subject_ty.union_literal_values().is_some() {
-        literal_union_values_covered(subject_ty, &patterns)
+        literal_union_values_covered(subject_ty, patterns)
+    } else if matches!(subject_ty, Ty::Union { .. }) {
+        union_variants_covered(subject_ty, patterns)
+    } else if let Some(bounds) = subject_ty.int_bounds() {
+        integer_range_covered(bounds.min, bounds.max, patterns)
     } else {
-        match subject_ty {
-            Ty::Union { .. } => union_variants_covered(subject_ty, &patterns),
-            Ty::Int {
-                min: Some(min_val),
-                max: Some(max_val),
-                ..
-            } => integer_range_covered(*min_val, *max_val, &patterns),
-            _ => false,
-        }
+        false
     }
 }
 
@@ -184,242 +161,6 @@ pub fn when_declare_is_exhaustive(subject_ty: Option<&Ty>, arms: &[WhenArm]) -> 
     };
     when_subject_exhaustive_declare(subject_ty, arms)
 }
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ty::Ty;
-    use crate::ty::UnionVariant;
-    use crate::typed::TypedWhenArm;
-    use ast::ConstValue;
-    use ast::Literal;
-    use ast::Pattern;
-    use ast::span::{SpanId, Spanned};
-    use internment::Intern;
-
-    fn intern(s: &str) -> Intern<String> {
-        Intern::new(s.to_string())
-    }
-
-    fn nominal_pat(name: &str) -> Spanned<ast::Pattern> {
-        Spanned::new(
-            ast::Pattern::Nominal(intern(name), SpanId::new(0)),
-            SpanId::new(0),
-        )
-    }
-
-    fn is_arm(name: &str) -> TypedWhenArm {
-        TypedWhenArm::Is {
-            pattern: Box::new(nominal_pat(name)),
-            body: crate::typed::ExprId(0),
-            arm_span: ast::span::SubSpan::new(SpanId::new(0)),
-        }
-    }
-
-    fn list_empty_pat() -> Spanned<ast::Pattern> {
-        Spanned::new(ast::Pattern::ListEmpty, SpanId::new(0))
-    }
-
-    fn list_cons_pat(
-        head: impl Into<ast::Pattern>,
-        tail: impl Into<ast::Pattern>,
-    ) -> Spanned<ast::Pattern> {
-        Spanned::new(
-            ast::Pattern::ListCons {
-                head: Box::new(Spanned::new(head.into(), SpanId::new(0))),
-                tail: Box::new(Spanned::new(tail.into(), SpanId::new(0))),
-            },
-            SpanId::new(0),
-        )
-    }
-
-    fn list_is_arm(pattern: Spanned<ast::Pattern>) -> TypedWhenArm {
-        TypedWhenArm::Is {
-            pattern: Box::new(pattern),
-            body: crate::typed::ExprId(0),
-            arm_span: ast::span::SubSpan::new(SpanId::new(0)),
-        }
-    }
-
-    fn pat_ref(arm: &TypedWhenArm) -> &ast::Pattern {
-        match arm {
-            TypedWhenArm::Is { pattern, .. } => &pattern.value,
-            _ => unreachable!(),
-        }
-    }
-
-    #[test]
-    fn list_empty_only_not_exhaustive() {
-        let arms = [list_is_arm(list_empty_pat())];
-        assert!(!list_patterns_exhaustive(&[pat_ref(&arms[0])]));
-    }
-
-    #[test]
-    fn list_empty_and_cons_catch_all_exhaustive() {
-        let arms = [
-            list_is_arm(list_empty_pat()),
-            list_is_arm(list_cons_pat(
-                Pattern::Nominal(intern("h"), SpanId::new(0)),
-                Pattern::Nominal(intern("_"), SpanId::new(0)),
-            )),
-        ];
-        let patterns: Vec<&ast::Pattern> = arms.iter().map(pat_ref).collect();
-        assert!(list_patterns_exhaustive(&patterns));
-    }
-
-    #[test]
-    fn list_empty_and_lowercase_rest_cons_exhaustive() {
-        let arms = [
-            list_is_arm(list_empty_pat()),
-            list_is_arm(list_cons_pat(
-                Pattern::Nominal(intern("h"), SpanId::new(0)),
-                Pattern::Nominal(intern("rest"), SpanId::new(0)),
-            )),
-        ];
-        let patterns: Vec<&ast::Pattern> = arms.iter().map(pat_ref).collect();
-        assert!(list_patterns_exhaustive(&patterns));
-    }
-
-    #[test]
-    fn list_empty_fixed_len_1_and_cons_catch_all_exhaustive() {
-        // [] + [h] + [h, t, .._] covers lengths 0, 1, >=2
-        let empty = list_empty_pat();
-        let fixed_len_1 = list_cons_pat(
-            Pattern::Nominal(intern("h"), SpanId::new(0)),
-            Pattern::ListEmpty,
-        );
-        let cons_catch_all = list_cons_pat(
-            Pattern::Nominal(intern("h"), SpanId::new(0)),
-            list_cons_pat(
-                Pattern::Nominal(intern("t"), SpanId::new(0)),
-                Pattern::Nominal(intern("_"), SpanId::new(0)),
-            )
-            .value,
-        );
-        let patterns = vec![&empty.value, &fixed_len_1.value, &cons_catch_all.value];
-        assert!(list_patterns_exhaustive(&patterns));
-    }
-
-    #[test]
-    fn list_missing_empty_not_exhaustive() {
-        // [h] + [h, t, .._] missing empty
-        let fixed_len_1 = list_cons_pat(
-            Pattern::Nominal(intern("h"), SpanId::new(0)),
-            Pattern::ListEmpty,
-        );
-        let cons_catch_all = list_cons_pat(
-            Pattern::Nominal(intern("h"), SpanId::new(0)),
-            list_cons_pat(
-                Pattern::Nominal(intern("t"), SpanId::new(0)),
-                Pattern::Nominal(intern("_"), SpanId::new(0)),
-            )
-            .value,
-        );
-        let patterns = vec![&fixed_len_1.value, &cons_catch_all.value];
-        assert!(!list_patterns_exhaustive(&patterns));
-    }
-
-    #[test]
-    fn list_missing_intermediate_length_not_exhaustive() {
-        // [] + [h, t] + [h, t, z, .._] missing length 1
-        let empty = list_empty_pat();
-        let fixed_len_2 = list_cons_pat(
-            Pattern::Nominal(intern("h"), SpanId::new(0)),
-            list_cons_pat(
-                Pattern::Nominal(intern("t"), SpanId::new(0)),
-                Pattern::ListEmpty,
-            )
-            .value,
-        );
-        let cons_catch_all = list_cons_pat(
-            Pattern::Nominal(intern("h"), SpanId::new(0)),
-            list_cons_pat(
-                Pattern::Nominal(intern("t"), SpanId::new(0)),
-                list_cons_pat(
-                    Pattern::Nominal(intern("z"), SpanId::new(0)),
-                    Pattern::Nominal(intern("_"), SpanId::new(0)),
-                )
-                .value,
-            )
-            .value,
-        );
-        let patterns = vec![&empty.value, &fixed_len_2.value, &cons_catch_all.value];
-        assert!(!list_patterns_exhaustive(&patterns));
-    }
-
-    #[test]
-    fn bool_union_two_arms_exhaustive() {
-        let ty = Ty::union_named(
-            intern("Bool"),
-            vec![
-                UnionVariant::new(intern("True"), vec![]),
-                UnionVariant::new(intern("False"), vec![]),
-            ],
-        );
-        let arms = vec![is_arm("True"), is_arm("False")];
-        assert!(ty.when_subject_exhaustive(&arms));
-    }
-
-    #[test]
-    fn bool_union_one_arm_not_exhaustive() {
-        let ty = Ty::union_named(
-            intern("Bool"),
-            vec![
-                UnionVariant::new(intern("True"), vec![]),
-                UnionVariant::new(intern("False"), vec![]),
-            ],
-        );
-        let arms = vec![is_arm("True")];
-        assert!(!ty.when_subject_exhaustive(&arms));
-    }
-
-    #[test]
-    fn wildcard_arm_exhaustive() {
-        let ty = Ty::Opaque(intern("Type"));
-        let arms = vec![is_arm("_")];
-        assert!(ty.when_subject_exhaustive(&arms));
-    }
-
-    #[test]
-    fn lowercase_pattern_is_not_exhaustive() {
-        let ty = Ty::Opaque(intern("Type"));
-        let arms = vec![is_arm("value")];
-        assert!(!ty.when_subject_exhaustive(&arms));
-    }
-
-    #[test]
-    fn const_union_literals_exhaustive() {
-        let ty = Ty::union_of_literals(
-            intern("Arch"),
-            vec![
-                ConstValue::String("x86_64".to_string()),
-                ConstValue::String("wasm32".to_string()),
-            ],
-        );
-        let arms = vec![
-            TypedWhenArm::Is {
-                pattern: Box::new(Spanned::new(
-                    Pattern::Literal(Literal::String("x86_64".to_string()), SpanId::new(0)),
-                    SpanId::new(0),
-                )),
-                body: crate::typed::ExprId(0),
-                arm_span: ast::span::SubSpan::new(SpanId::new(0)),
-            },
-            TypedWhenArm::Is {
-                pattern: Box::new(Spanned::new(
-                    Pattern::Literal(Literal::String("wasm32".to_string()), SpanId::new(0)),
-                    SpanId::new(0),
-                )),
-                body: crate::typed::ExprId(0),
-                arm_span: ast::span::SubSpan::new(SpanId::new(0)),
-            },
-        ];
-        assert!(ty.when_subject_exhaustive(&arms));
-    }
-
-    #[test]
-    fn no_subject_never_exhaustive() {
-        let arms = vec![is_arm("True")];
-        assert!(!when_is_exhaustive(None, &arms));
-    }
-}
+#[path = "../../tests/when_exhaustive_tests.rs"]
+mod tests;

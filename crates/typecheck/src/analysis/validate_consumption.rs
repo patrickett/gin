@@ -2,7 +2,6 @@ use ast::ParamConvention;
 use diagnostic::Diagnostic;
 use internment::Intern;
 
-use crate::ty::Ty;
 use crate::typed::{BindBody, ExprId, TypedExprKind, TypedFileAst};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -14,11 +13,10 @@ enum ArgumentMode {
 }
 
 fn argument_mode(typed: &TypedFileAst, expr_id: ExprId) -> ArgumentMode {
-    let idx = expr_id.as_usize();
-    match typed.exprs.kind.get(idx) {
+    match typed.exprs.kind_of(expr_id) {
         Some(TypedExprKind::ConsumeArg(_)) => ArgumentMode::Consume,
-        Some(TypedExprKind::Ref(_)) => match typed.exprs.ty.get(idx) {
-            Some(Ty::Ref { mutable: true, .. }) => ArgumentMode::Mutate,
+        Some(TypedExprKind::Ref(_)) => match typed.exprs.ty_of(expr_id) {
+            Some(ty) if ty.is_mutable_ref() => ArgumentMode::Mutate,
             _ => ArgumentMode::Observe,
         },
         _ => ArgumentMode::Own,
@@ -26,7 +24,7 @@ fn argument_mode(typed: &TypedFileAst, expr_id: ExprId) -> ArgumentMode {
 }
 
 fn is_addressable_place(typed: &TypedFileAst, expr_id: ExprId) -> bool {
-    match typed.exprs.kind.get(expr_id.as_usize()) {
+    match typed.exprs.kind_of(expr_id) {
         Some(TypedExprKind::FnCall { args, .. }) => {
             args.as_ref().is_none_or(|args| args.is_empty())
         }
@@ -92,19 +90,34 @@ fn emit_return_consumed_in_expr(
     expr_id: ExprId,
     consumed: &[Intern<String>],
 ) {
-    let idx = expr_id.as_usize();
-    if idx >= typed.exprs.kind.len() {
+    if expr_id.index() >= typed.exprs.kind.len() {
         return;
     }
-    if let TypedExprKind::FnCall { target, args, .. } = &typed.exprs.kind[idx]
-        && args.as_ref().is_none_or(|a| a.is_empty())
-        && consumed.contains(&target.0)
-    {
-        typed.exprs.flaws[idx].push(Diagnostic::new(
-            "type-return-consumed-param",
-            format!("cannot return consumed parameter `{}`", target.0.as_str()),
-        ));
-    }
+    let target_name = typed.exprs.kind_of(expr_id).and_then(|kind| match kind {
+        TypedExprKind::FnCall { target, args, .. }
+            if args.as_ref().is_none_or(Vec::is_empty) && consumed.contains(&target.0) =>
+        {
+            Some(*target)
+        }
+        _ => None,
+    });
+    let Some(target_name) = target_name else {
+        return;
+    };
+    typed.exprs.flaws[expr_id.index()].push(Diagnostic::new(
+        "type-return-consumed-param",
+        format!(
+            "cannot return consumed parameter `{}`",
+            target_name.0.as_str()
+        ),
+    ));
+    typed.exprs.flaws[expr_id.index()].push(Diagnostic::new(
+        "type-consuming-parameter-escapes",
+        format!(
+            "cannot return or recover a consuming parameter `{}`",
+            target_name.0.as_str()
+        ),
+    ));
 }
 
 fn validate_reference_returns(typed: &mut TypedFileAst) {
@@ -123,12 +136,7 @@ fn validate_reference_returns(typed: &mut TypedFileAst) {
         .collect();
 
     for (expr, expected) in returns {
-        let actual = typed
-            .exprs
-            .target_group
-            .get(expr.as_usize())
-            .cloned()
-            .flatten();
+        let actual = typed.exprs.target_group_of(expr).cloned().flatten();
         let (code, message) = match actual {
             Some(targets)
                 if targets
@@ -150,7 +158,7 @@ fn validate_reference_returns(typed: &mut TypedFileAst) {
                 "cannot determine the returned reference target",
             ),
         };
-        typed.exprs.flaws[expr.as_usize()].push(Diagnostic::new(code, message));
+        typed.exprs.flaws[expr.index()].push(Diagnostic::new(code, message));
     }
 }
 
@@ -185,8 +193,7 @@ pub fn stage_validate_consumption(typed: &mut TypedFileAst) {
                 let expected = expected_mode(*convention);
                 if actual == expected {
                     if matches!(actual, ArgumentMode::Observe | ArgumentMode::Mutate)
-                        && let Some(TypedExprKind::Ref(inner)) =
-                            typed.exprs.kind.get(arg_id.as_usize())
+                        && let Some(TypedExprKind::Ref(inner)) = typed.exprs.kind_of(*arg_id)
                         && !is_addressable_place(typed, *inner)
                     {
                         typed.exprs.flaws[idx].push(

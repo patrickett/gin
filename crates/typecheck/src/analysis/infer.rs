@@ -14,7 +14,7 @@ use crate::analysis::type_surface::{
 };
 use crate::ty::Ty;
 use ast::{
-    BinOp, Binary, Bind, BindValue, NormalExpr, Expr, FnCall, HashFloat, Literal, ParameterKind,
+    BinOp, Binary, Bind, BindValue, Expr, FnCall, HashFloat, Literal, NormalExpr, ParameterKind,
     Parameters, TagCall, WhenArm, WhenExpr,
 };
 
@@ -52,56 +52,37 @@ pub trait TyInfer {
 impl TyInfer for Literal {
     fn infer_ty(&self, env: &TyInferEnv) -> Ty {
         match self {
-            Literal::Int(n) => Ty::Int {
-                width: 64,
-                signed: true,
-                value: Some(*n as i128),
-                min: None,
-                max: None,
-            },
-            Literal::Number(n) => Ty::Int {
-                width: 64,
-                signed: true,
-                value: Some(*n as i128),
-                min: None,
-                max: None,
-            },
+            Literal::Int(_) | Literal::Number(_) => {
+                Ty::UnresolvedLiteral(ast::ty::LiteralKind::Integer)
+            }
             Literal::Float(HashFloat(f)) => Ty::Float {
                 value: Some(HashFloat(*f)),
             },
             Literal::String(_) => env
                 .tag_types
-                .get(&Intern::<String>::from_ref("Str"))
+                .get(&Intern::<String>::from_ref("String"))
                 .cloned()
-                .unwrap_or(Ty::Opaque(Intern::<String>::from_ref("Str"))),
+                .unwrap_or(Ty::Opaque(Intern::<String>::from_ref("String"))),
         }
     }
 }
 
+#[cfg(test)]
+#[path = "../../tests/analysis_infer_tests.rs"]
+mod tests;
+
 impl TyInfer for Binary {
     fn infer_ty(&self, env: &TyInferEnv) -> Ty {
+        if self.op == BinOp::Equal {
+            return env
+                .tag_types
+                .get(&Intern::from_ref("Bool"))
+                .cloned()
+                .unwrap_or(Ty::Opaque(Intern::from_ref("Bool")));
+        }
         let lhs_ty = self.lhs.infer_ty(env);
         let rhs_ty = self.rhs.infer_ty(env);
         match (&lhs_ty, &rhs_ty) {
-            (Ty::Int { value: Some(a), .. }, Ty::Int { value: Some(b), .. }) => {
-                let folded = match self.op {
-                    BinOp::Add => Some(a + b),
-                    BinOp::Subtract => Some(a - b),
-                    BinOp::Multiply => Some(a * b),
-                    BinOp::Divide if *b != 0 => Some(a / b),
-                    BinOp::Modulo if *b != 0 => Some(a % b),
-                    _ => None,
-                };
-                folded
-                    .map(|v| Ty::Int {
-                        width: 64,
-                        signed: true,
-                        value: Some(v),
-                        min: None,
-                        max: None,
-                    })
-                    .unwrap_or(lhs_ty)
-            }
             (
                 Ty::Float {
                     value: Some(HashFloat(a)),
@@ -152,14 +133,16 @@ impl TyInfer for FnCall {
         if let Some(mut ty) = env.locals.get_type(&name) {
             for seg in &self.path.segments {
                 ty = match &ty {
-                    Ty::Ptr { inner } if inner.is_record() => match inner.as_ref() {
-                        Ty::Record { fields, .. } => fields
+                    ty if ty.pointee_ty().is_some_and(Ty::is_record) => {
+                        let Some(Ty::Record { fields, .. }) = ty.pointee_ty() else {
+                            unreachable!("record predicate and pointee lookup disagree")
+                        };
+                        fields
                             .iter()
                             .find(|(fname, _)| fname.as_str() == seg.as_str())
                             .map(|(_, fty)| (**fty).clone())
-                            .unwrap_or(ty),
-                        _ => return ty,
-                    },
+                            .unwrap_or(ty.clone())
+                    }
                     Ty::Record { fields, .. } => fields
                         .iter()
                         .find(|(fname, _)| fname.as_str() == seg.as_str())
@@ -304,34 +287,51 @@ impl TyInfer for Expr {
             Expr::FormatString(_) => Ty::Opaque(Intern::<String>::from_ref("format_string")),
             Expr::Loop(_) => Ty::Unit,
             Expr::If(_) => Ty::Unit,
-            Expr::Asm(_) => Ty::i64(),
             Expr::Range(_) => Ty::Opaque(Intern::<String>::from_ref("range_expr")),
-            Expr::TupleSet { .. } | Expr::BufSet { .. } => Ty::Unit,
-            Expr::Cast { ty, .. } => Ty::Opaque(*ty),
+            Expr::TupleSet { value, .. } => value.infer_ty(env),
+            Expr::BufSet { value, .. } => value.infer_ty(env),
+            Expr::Cast { ty, .. } => ty.head_name().map(Ty::Opaque).unwrap_or_else(|| match ty {
+                ast::TypeReference::Unit => Ty::Unit,
+                ast::TypeReference::Pointer(_) => Ty::Ptr {
+                    inner: Box::new(Ty::Opaque(Intern::from_ref("<pointee>"))),
+                },
+                _ => unreachable!(),
+            }),
+            Expr::TargetQuery { kind, operand } => Ty::AnonymousInteger {
+                validity: ast::integer::IntegerValidity::new(
+                    ast::integer::IntegerDomain::symbolic(ast::NormalExpr::TargetQuery {
+                        kind: *kind,
+                        operand: operand.clone(),
+                    }),
+                ),
+            },
 
             Expr::SelfRef => env
                 .locals
                 .get_type(&Intern::<String>::from_ref("self"))
                 .unwrap_or_else(|| Ty::Opaque(Intern::<String>::from_ref("Self"))),
 
-        Expr::TupleAlloc { init, size } => {
-            let elem = init.infer_ty(env);
-            let size = as_size_normal_expr_with_arithmetic(&size.value).unwrap_or_else(|| {
-                NormalExpr::Var(Intern::new(format!(
-                    "_unsupported_array_size_{:?}",
-                    size.span_id
-                )))
-            });
-            Ty::Array {
-                elem: Box::new(elem),
-                size,
+            Expr::TupleAlloc { init, size } => {
+                let elem = init.infer_ty(env);
+                let size = as_size_normal_expr_with_arithmetic(&size.value).unwrap_or_else(|| {
+                    NormalExpr::Var(Intern::new(format!(
+                        "_unsupported_array_size_{:?}",
+                        size.span_id
+                    )))
+                });
+                Ty::Array {
+                    elem: Box::new(elem),
+                    size,
+                }
             }
-        }
 
             Expr::TupleGet { base, index } => match base.infer_ty(env) {
                 Ty::Array { elem, .. } => *elem,
-                Ty::Tuple(fields) => fields.into_iter().nth(*index).unwrap_or(Ty::i64()),
-                _ => Ty::u8(),
+                Ty::Tuple(fields) => fields
+                    .into_iter()
+                    .nth(*index)
+                    .unwrap_or(Ty::Opaque(Intern::from_ref("unresolved-tuple-element"))),
+                _ => Ty::Opaque(Intern::from_ref("unresolved-array-element")),
             },
 
             Expr::Destructure { value, .. } => value.infer_ty(env),
@@ -345,13 +345,21 @@ impl TyInfer for Expr {
                 _ => Ty::Opaque(*field),
             },
 
-            Expr::BufGet { buf, .. } => match buf.infer_ty(env) {
-                Ty::Array { elem, .. } => *elem,
-                _ => Ty::u8(),
-            },
+            Expr::BufGet { buf, .. } => {
+                let buffer_ty = buf.infer_ty(env);
+                buffer_ty
+                    .pointee_ty()
+                    .cloned()
+                    .or(match buffer_ty {
+                        Ty::Array { elem, .. } => Some(*elem),
+                        _ => None,
+                    })
+                    .unwrap_or(Ty::Opaque(Intern::from_ref("unresolved-array-element")))
+            }
 
-            Expr::TakePtr(inner) => Ty::Ptr {
-                inner: Box::new(inner.infer_ty(env)),
+            Expr::TakePtr(inner) => Ty::Address {
+                pointee: Box::new(inner.infer_ty(env)),
+                address_space: 0,
             },
 
             Expr::Ref { inner, mutable, .. } => Ty::Ref {
@@ -363,25 +371,13 @@ impl TyInfer for Expr {
 
             Expr::Eat(inner) => inner.infer_ty(env),
 
-            Expr::Deref(inner) => match inner.infer_ty(env) {
-                Ty::Ptr { inner } => *inner,
-                _ => Ty::i64(),
-            },
+            Expr::Deref(inner) => inner
+                .infer_ty(env)
+                .pointee_ty()
+                .cloned()
+                .unwrap_or(Ty::Unit),
 
             Expr::Negate(inner) => match inner.infer_ty(env) {
-                Ty::Int {
-                    value: Some(n),
-                    width,
-                    signed,
-                    min,
-                    max,
-                } => Ty::Int {
-                    width,
-                    signed,
-                    value: Some(-n),
-                    min,
-                    max,
-                },
                 Ty::Float {
                     value: Some(HashFloat(f)),
                 } => Ty::Float {
@@ -402,11 +398,9 @@ impl TyInfer for Expr {
 
 fn as_size_normal_expr_with_arithmetic(expr: &Expr) -> Option<NormalExpr> {
     match expr {
-        Expr::Lit(Literal::Int(n)) => Some(NormalExpr::from(*n as i128)),
+        Expr::Lit(Literal::Int(n)) => Some(NormalExpr::from(*n)),
         Expr::Lit(Literal::Number(n)) => Some(NormalExpr::from(*n as i128)),
-        Expr::FnCall(call) if call.args.is_none() => {
-            Some(NormalExpr::Var(call.path.value.root))
-        }
+        Expr::FnCall(call) if call.args.is_none() => Some(NormalExpr::Var(call.path.value.root)),
         Expr::Bind(b) => Some(NormalExpr::Var(b.name)),
         Expr::Binary(binary) => {
             let lhs = as_size_normal_expr_with_arithmetic(&binary.lhs.value)?;

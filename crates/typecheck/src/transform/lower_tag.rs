@@ -88,6 +88,13 @@ pub(crate) fn resolve_tag_call_type(
     variant_map: &VariantMap,
     expected_ty: Option<&Ty>,
 ) -> Ty {
+    if let Some(expected @ Ty::ResultFamily { alternatives, .. }) = expected_ty
+        && alternatives
+            .iter()
+            .any(|alternative| alternative.label == *name)
+    {
+        return expected.clone();
+    }
     if let Some(expected) = expected_ty
         && let Some(union_name) = union_name_from_ty(expected)
         && (variant_belongs_to_union(*name, union_name, variant_map, tag_types)
@@ -145,6 +152,7 @@ pub(crate) fn variant_belongs_to_union(
 pub(crate) fn union_name_from_ty(ty: &Ty) -> Option<Intern<String>> {
     match ty {
         Ty::Union { name, .. } => Some(*name),
+        Ty::Named { name, .. } => Some(*name),
         Ty::Opaque(name) => Some(*name),
         _ => None,
     }
@@ -154,8 +162,10 @@ pub(crate) fn union_name_from_ty(ty: &Ty) -> Option<Intern<String>> {
 /// union variant) by looking it up in the typed AST's tag index.
 pub(crate) fn is_record_tag_call(variant_id: &VariantId, typed: &TypedFileAst) -> bool {
     let tag_id = TagId(variant_id.name);
-    typed
-        .tag_types
-        .get(&tag_id)
-        .is_some_and(|ty| matches!(ty, Ty::Record { .. }))
+    typed.tag_types.get(&tag_id).is_some_and(|ty| {
+        matches!(
+            typed.type_registry.resolved_definition_for_type(ty),
+            Ty::Record { .. }
+        )
+    })
 }

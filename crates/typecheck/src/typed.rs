@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ops::ControlFlow;
 
 use ast::{BinderId, ConstValue, GroupPath, NormalExpr};
 
@@ -10,6 +11,7 @@ use ast::span::{SpanId, SpanTable, SubSpan};
 use ast::ty::ParamKind;
 use ast::ty::PredicateExpr;
 use ast_format::type_expr::ExprFormatExt;
+use derive_more::From;
 use diagnostic::Diagnostic;
 use internment::Intern;
 
@@ -17,16 +19,16 @@ use crate::solver::{ConstraintEnv, Predicate, ProveResult};
 use crate::ty::{Ty, TyArg};
 
 /// Opaque file identifier assigned during compilation coordination.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, From)]
 pub struct FileId(pub u32);
 
 /// A definition (bind) identifier — the fully-qualified name.
 /// Interned string, e.g. Intern("main") or Intern("Range.new").
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, From)]
 pub struct DefId(pub Intern<String>);
 
 /// A tag (type) identifier — the interned tag name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, From)]
 pub struct TagId(pub Intern<String>);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -36,8 +38,77 @@ pub struct VariantId {
 }
 
 /// Index into the expression arena (soa_derive TypedExprVec).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, From)]
 pub struct ExprId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, From)]
+pub struct PlaceId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, From)]
+pub struct PlaceVersionId(pub u32);
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedPlace {
+    pub binder: BinderId,
+    pub name: Intern<String>,
+    pub parent: Option<PlaceId>,
+    pub projection: Option<PlaceProjection>,
+    pub mutable: bool,
+    pub explicit_contract: bool,
+    pub ty: Ty,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PlaceProjection {
+    Field(usize),
+    Item(TargetIndex),
+    Deref,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlaceVersionOrigin {
+    Parameter,
+    Declared,
+    Initializer(ExprId),
+    Projection {
+        base: PlaceVersionId,
+    },
+    Rebind {
+        value: ExprId,
+        predecessor: Option<PlaceVersionId>,
+    },
+    Join(Vec<PlaceVersionId>),
+    LoopPhi {
+        incoming: PlaceVersionId,
+        backedges: Vec<PlaceVersionId>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedPlaceVersion {
+    pub place: PlaceId,
+    pub origin: PlaceVersionOrigin,
+    pub ty: Ty,
+    pub integer_knowledge: Option<ast::integer::IntegerKnowledge>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlaceVersionComponent {
+    pub versions: Vec<PlaceVersionId>,
+    pub cyclic: bool,
+}
+
+impl ExprId {
+    #[inline]
+    pub const fn as_usize(self) -> usize {
+        self.0 as usize
+    }
+
+    #[inline]
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Availability {
@@ -58,7 +129,9 @@ pub enum CallCapability {
     RuntimeOnly,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub use crate::intrinsic::IntrinsicOp;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, From)]
 pub struct GroupId(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,7 +181,7 @@ pub struct AppliedEffectTarget {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ReferenceTargetGroup {
     Param(GroupId),
-    Local(Intern<String>),
+    Local(PlaceId),
     Field {
         base: Box<ReferenceTargetGroup>,
         index: usize,
@@ -185,6 +258,9 @@ impl ReferenceTargetSet {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TargetGroupApplication {
     actuals: HashMap<GroupId, ReferenceTargetSet>,
+    grouped_argument_counts: HashMap<GroupId, usize>,
+    grouped_argument_mutate: HashMap<GroupId, bool>,
+    grouped_argument_observe: HashMap<GroupId, bool>,
 }
 
 impl TargetGroupApplication {
@@ -239,9 +315,31 @@ impl TargetGroupApplication {
         signature: &TypedCallableSignature,
         constraints: &ConstraintEnv,
     ) -> Vec<(GroupId, GroupId)> {
-        let mut groups: Vec<_> = self.actuals.keys().copied().collect();
-        groups.sort_by_key(|group| group.0);
         let mut conflicts = Vec::new();
+        let mut groups: Vec<_> = self.actuals.keys().copied().collect();
+
+        for group in self.actuals.keys() {
+            let count = self
+                .grouped_argument_counts
+                .get(group)
+                .copied()
+                .unwrap_or(0);
+            let has_mutate = self
+                .grouped_argument_mutate
+                .get(group)
+                .copied()
+                .unwrap_or(false);
+            let has_observe = self
+                .grouped_argument_observe
+                .get(group)
+                .copied()
+                .unwrap_or(false);
+            if count > 1 && has_mutate && has_observe {
+                conflicts.push((*group, *group));
+            }
+        }
+
+        groups.sort_by_key(|group| group.0);
         for (index, left) in groups.iter().enumerate() {
             for right in &groups[index + 1..] {
                 if !(signature.group_is_mutated(*left) || signature.group_is_mutated(*right)) {
@@ -257,6 +355,8 @@ impl TargetGroupApplication {
                 }
             }
         }
+        conflicts.sort_by_key(|(left, right)| (left.0, right.0));
+        conflicts.dedup();
         conflicts
     }
 }
@@ -701,257 +801,6 @@ pub struct TypedGroup {
     pub referent_type: Ty,
 }
 
-#[cfg(test)]
-mod target_overlap_tests {
-    use super::*;
-    use ast::ConstValue;
-
-    fn item(index: TargetIndex) -> ReferenceTargetGroup {
-        ReferenceTargetGroup::ItemRegion {
-            base: Box::new(ReferenceTargetGroup::Local(Intern::from_ref("items"))),
-            index,
-        }
-    }
-
-    fn symbolic(expr: NormalExpr) -> TargetIndex {
-        TargetIndex::Symbolic(expr)
-    }
-
-    fn range(start: NormalExpr, end: NormalExpr) -> ReferenceTargetGroup {
-        ReferenceTargetGroup::ItemRange {
-            base: Box::new(ReferenceTargetGroup::Local(Intern::from_ref("items"))),
-            start: symbolic(start),
-            end: symbolic(end),
-        }
-    }
-
-    fn variant(name: &str) -> ReferenceTargetGroup {
-        ReferenceTargetGroup::Variant {
-            base: Box::new(ReferenceTargetGroup::Param(GroupId(0))),
-            name: Intern::from_ref(name),
-        }
-    }
-
-    #[test]
-    fn variant_projection_matches_parent() {
-        assert!(variant("Some").matches_projection_from(
-            &ReferenceTargetGroup::Param(GroupId(0)),
-            &[GroupProjection::Variant {
-                name: Intern::from_ref("Some"),
-            }],
-            &ConstraintEnv::default(),
-        ));
-    }
-
-    #[test]
-    fn variant_field_projection_matches_parent() {
-        let target = ReferenceTargetGroup::Field {
-            base: Box::new(variant("Some")),
-            index: 0,
-        };
-
-        assert!(target.matches_projection_from(
-            &ReferenceTargetGroup::Param(GroupId(0)),
-            &[
-                GroupProjection::Variant {
-                    name: Intern::from_ref("Some"),
-                },
-                GroupProjection::Field {
-                    name: Intern::from_ref("value"),
-                    index: 0,
-                },
-            ],
-            &ConstraintEnv::default(),
-        ));
-    }
-
-    #[test]
-    fn different_variants_of_same_union_are_disjoint() {
-        assert_eq!(
-            variant("Some").overlap(&variant("None"), &ConstraintEnv::default()),
-            Overlap::Disjoint
-        );
-    }
-
-    #[test]
-    fn variant_partially_overlaps_union_parent() {
-        assert_eq!(
-            variant("Some").overlap(
-                &ReferenceTargetGroup::Param(GroupId(0)),
-                &ConstraintEnv::default()
-            ),
-            Overlap::Partial
-        );
-    }
-
-    #[test]
-    fn variant_preserves_root_parameter() {
-        assert_eq!(variant("Some").root_param(), Some(GroupId(0)));
-    }
-
-    #[test]
-    fn distinct_constant_indices_are_disjoint() {
-        let left = item(symbolic(NormalExpr::Value(ConstValue::Int(1))));
-        let right = item(symbolic(NormalExpr::Value(ConstValue::Int(2))));
-
-        assert_eq!(
-            left.overlap(&right, &ConstraintEnv::default()),
-            Overlap::Disjoint
-        );
-    }
-
-    #[test]
-    fn fields_beneath_distinct_items_are_disjoint() {
-        let field = |index| ReferenceTargetGroup::Field {
-            base: Box::new(item(symbolic(NormalExpr::Value(ConstValue::Int(index))))),
-            index: 0,
-        };
-
-        assert_eq!(
-            field(0).overlap(&field(1), &ConstraintEnv::default()),
-            Overlap::Disjoint
-        );
-    }
-
-    #[test]
-    fn same_symbolic_index_is_equal() {
-        let index = symbolic(NormalExpr::Var(Intern::from_ref("i")));
-
-        assert_eq!(
-            item(index.clone()).overlap(&item(index), &ConstraintEnv::default()),
-            Overlap::Equal
-        );
-    }
-
-    #[test]
-    fn constrained_unequal_indices_are_disjoint() {
-        let i = NormalExpr::Var(Intern::from_ref("i"));
-        let j = NormalExpr::Var(Intern::from_ref("j"));
-        let constraints = ConstraintEnv {
-            known_lt: vec![(i.clone(), j.clone())],
-            ..ConstraintEnv::default()
-        };
-
-        assert_eq!(
-            item(symbolic(i)).overlap(&item(symbolic(j)), &constraints),
-            Overlap::Disjoint
-        );
-    }
-
-    #[test]
-    fn constrained_equal_indices_are_equal() {
-        let i = NormalExpr::Var(Intern::from_ref("i"));
-        let j = NormalExpr::Var(Intern::from_ref("j"));
-        let constraints = ConstraintEnv {
-            known_eq: vec![(i.clone(), j.clone())],
-            ..ConstraintEnv::default()
-        };
-
-        assert_eq!(
-            item(symbolic(i)).overlap(&item(symbolic(j)), &constraints),
-            Overlap::Equal
-        );
-    }
-
-    #[test]
-    fn unrelated_symbolic_indices_have_unknown_overlap() {
-        let left = symbolic(NormalExpr::Var(Intern::from_ref("i")));
-        let right = symbolic(NormalExpr::Var(Intern::from_ref("j")));
-
-        assert_eq!(
-            item(left).overlap(&item(right), &ConstraintEnv::default()),
-            Overlap::Unknown
-        );
-    }
-
-    #[test]
-    fn item_before_range_is_disjoint() {
-        let index = NormalExpr::Value(ConstValue::Int(1));
-        let start = NormalExpr::Value(ConstValue::Int(2));
-        let end = NormalExpr::Value(ConstValue::Int(5));
-
-        assert_eq!(
-            item(symbolic(index)).overlap(&range(start, end), &ConstraintEnv::default()),
-            Overlap::Disjoint
-        );
-    }
-
-    #[test]
-    fn item_inside_range_partially_overlaps() {
-        let index = NormalExpr::Value(ConstValue::Int(3));
-        let start = NormalExpr::Value(ConstValue::Int(2));
-        let end = NormalExpr::Value(ConstValue::Int(5));
-
-        assert_eq!(
-            item(symbolic(index)).overlap(&range(start, end), &ConstraintEnv::default()),
-            Overlap::Partial
-        );
-    }
-
-    #[test]
-    fn adjacent_ranges_are_disjoint() {
-        let left = range(
-            NormalExpr::Value(ConstValue::Int(0)),
-            NormalExpr::Value(ConstValue::Int(2)),
-        );
-        let right = range(
-            NormalExpr::Value(ConstValue::Int(2)),
-            NormalExpr::Value(ConstValue::Int(4)),
-        );
-
-        assert_eq!(
-            left.overlap(&right, &ConstraintEnv::default()),
-            Overlap::Disjoint
-        );
-    }
-
-    #[test]
-    fn equal_ranges_are_equal() {
-        let left = range(
-            NormalExpr::Value(ConstValue::Int(1)),
-            NormalExpr::Value(ConstValue::Int(4)),
-        );
-        let right = left.clone();
-
-        assert_eq!(
-            left.overlap(&right, &ConstraintEnv::default()),
-            Overlap::Equal
-        );
-    }
-
-    #[test]
-    fn intersecting_ranges_partially_overlap() {
-        let left = range(
-            NormalExpr::Value(ConstValue::Int(1)),
-            NormalExpr::Value(ConstValue::Int(4)),
-        );
-        let right = range(
-            NormalExpr::Value(ConstValue::Int(3)),
-            NormalExpr::Value(ConstValue::Int(6)),
-        );
-
-        assert_eq!(
-            left.overlap(&right, &ConstraintEnv::default()),
-            Overlap::Partial
-        );
-    }
-
-    #[test]
-    fn unavailable_indices_have_unknown_overlap() {
-        assert_eq!(
-            item(TargetIndex::Unknown)
-                .overlap(&item(TargetIndex::Unknown), &ConstraintEnv::default()),
-            Overlap::Unknown
-        );
-    }
-}
-
-impl ExprId {
-    pub fn as_usize(self) -> usize {
-        self.0 as usize
-    }
-}
-
 /// Type alias for variant map entries: (union_name, discriminant, fields)
 pub type VariantMapEntry = (Intern<String>, usize, Vec<(Intern<String>, Ty)>);
 
@@ -987,6 +836,39 @@ pub fn collect_package_variant_map(asts: &[&TypedFileAst]) -> VariantMap {
 
 use soa_derive::StructOfArray;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MathematicalComparison {
+    Less,
+    LessOrEqual,
+    Greater,
+    GreaterOrEqual,
+    Equal,
+    NotEqual,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum EvidenceProposition {
+    IntegerComparison {
+        lhs: ExprId,
+        rhs: ExprId,
+        comparison: MathematicalComparison,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AlternativeEvidence {
+    pub label: Intern<String>,
+    pub proposition: EvidenceProposition,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResultEvidence {
+    pub owner: ast::ResultFamilyOwner,
+    pub alternatives: Vec<AlternativeEvidence>,
+}
+
+pub type ProjectedResultEvidence = HashMap<Vec<usize>, ResultEvidence>;
+
 /// A single expression in the typed AST arena.
 ///
 /// All fields are stored in separate vectors via `soa_derive` for cache-friendly
@@ -1000,11 +882,74 @@ pub struct TypedExpr {
     pub span: SpanId,
     /// Compile-time constant value, if this expression can be folded.
     pub const_value: Option<ast::ConstValue>,
+    pub integer_knowledge: Option<ast::integer::IntegerKnowledge>,
+    pub result_evidence: Option<ResultEvidence>,
+    pub projected_result_evidence: ProjectedResultEvidence,
     /// Staging availability of this expression.
     pub availability: Availability,
     pub target_group: Option<ReferenceTargetSet>,
+    pub place: Option<PlaceId>,
+    pub place_version: Option<PlaceVersionId>,
     /// Type/flow/flaw diagnostics attached to this expression.
     pub flaws: Vec<Diagnostic>,
+}
+
+impl TypedExprVec {
+    #[inline]
+    pub fn kind_of(&self, expr_id: ExprId) -> Option<&TypedExprKind> {
+        self.kind.get(expr_id.index())
+    }
+
+    #[inline]
+    pub fn ty_of(&self, expr_id: ExprId) -> Option<&Ty> {
+        self.ty.get(expr_id.index())
+    }
+
+    #[inline]
+    pub fn span_of(&self, expr_id: ExprId) -> Option<SpanId> {
+        self.span.get(expr_id.index()).copied()
+    }
+
+    #[inline]
+    pub fn const_value_of(&self, expr_id: ExprId) -> Option<&Option<ast::ConstValue>> {
+        self.const_value.get(expr_id.index())
+    }
+
+    #[inline]
+    pub fn integer_knowledge_of(
+        &self,
+        expr_id: ExprId,
+    ) -> Option<&Option<ast::integer::IntegerKnowledge>> {
+        self.integer_knowledge.get(expr_id.index())
+    }
+
+    #[inline]
+    pub fn result_evidence_of(&self, expr_id: ExprId) -> Option<&Option<ResultEvidence>> {
+        self.result_evidence.get(expr_id.index())
+    }
+
+    #[inline]
+    pub fn projected_result_evidence_of(
+        &self,
+        expr_id: ExprId,
+    ) -> Option<&ProjectedResultEvidence> {
+        self.projected_result_evidence.get(expr_id.index())
+    }
+
+    #[inline]
+    pub fn flaws_of(&self, expr_id: ExprId) -> Option<&Vec<Diagnostic>> {
+        self.flaws.get(expr_id.index())
+    }
+
+    #[inline]
+    pub fn availability_of(&self, expr_id: ExprId) -> Option<&Availability> {
+        self.availability.get(expr_id.index())
+    }
+
+    #[inline]
+    pub fn target_group_of(&self, expr_id: ExprId) -> Option<&Option<ReferenceTargetSet>> {
+        self.target_group.get(expr_id.index())
+    }
 }
 
 /// Typed expression variant — post-resolution form of parse-time [`Expr`].
@@ -1024,6 +969,7 @@ pub struct TypedWhenExpr {
     /// Subject expression for pattern matching (`None` for condition-based when).
     pub subject: Option<ExprId>,
     pub arms: Vec<TypedWhenArm>,
+    pub place_joins: Vec<PlaceVersionId>,
     /// Covers from after the `when` keyword to end.
     /// The full expression span is on the `TypedExpr` arena entry.
     pub body_span: SubSpan,
@@ -1032,7 +978,7 @@ pub struct TypedWhenExpr {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypedWhenArm {
     Cond {
-        condition: ExprId,
+        condition: TypedCondition,
         body: ExprId,
         /// Span of this arm (condition and body).
         arm_span: SubSpan,
@@ -1046,14 +992,51 @@ pub enum TypedWhenArm {
     Else(ExprId, SubSpan),
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypedCondition {
+    Is {
+        subject: ExprId,
+        pattern: Box<ast::span::Spanned<ast::Pattern>>,
+    },
+    Not(Box<Self>),
+    And(Box<Self>, Box<Self>),
+    Or(Box<Self>, Box<Self>),
+}
+
+impl TypedCondition {
+    pub fn visit_subjects(&self, visit: &mut impl FnMut(ExprId)) {
+        match self {
+            Self::Is { subject, .. } => visit(*subject),
+            Self::Not(inner) => inner.visit_subjects(visit),
+            Self::And(left, right) | Self::Or(left, right) => {
+                left.visit_subjects(visit);
+                right.visit_subjects(visit);
+            }
+        }
+    }
+
+    pub fn pattern_subjects<'a>(
+        &'a self,
+        output: &mut Vec<(ExprId, &'a ast::span::Spanned<ast::Pattern>)>,
+    ) {
+        match self {
+            Self::Is { subject, pattern } => output.push((*subject, pattern)),
+            Self::Not(inner) => inner.pattern_subjects(output),
+            Self::And(left, right) | Self::Or(left, right) => {
+                left.pattern_subjects(output);
+                right.pattern_subjects(output);
+            }
+        }
+    }
+}
+
 /// Typed if-expression — like `IfExpr` but with `ExprId` children.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedIfExpr {
-    pub subject: ExprId,
-    /// Parsed `is …` pattern — a dedicated pattern with nominal, qualified, and generic forms.
-    pub pattern: Box<ast::span::Spanned<ast::Pattern>>,
+    pub condition: TypedCondition,
     pub stmts: Vec<ExprId>,
     pub ret: Option<ExprId>,
+    pub place_joins: Vec<PlaceVersionId>,
     /// Covers from condition start to end (excludes the `if` keyword).
     /// The full expression span (including `if`) is on the `TypedExpr` arena entry.
     pub body_span: SubSpan,
@@ -1064,6 +1047,7 @@ pub struct TypedIfExpr {
 pub struct TypedLoop {
     pub kind: TypedLoopKind,
     pub stmts: Vec<ExprId>,
+    pub place_phis: Vec<PlaceVersionId>,
     /// Span of the `loop` keyword only.
     /// The full expression span is on the `TypedExpr` arena entry.
     pub keyword_span: SubSpan,
@@ -1072,7 +1056,7 @@ pub struct TypedLoop {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypedLoopKind {
     While {
-        condition: ExprId,
+        condition: TypedCondition,
     },
     ForIn {
         variable: Intern<String>,
@@ -1088,12 +1072,23 @@ pub enum TypedExprKind {
         lhs: ExprId,
         rhs: ExprId,
     },
+    InvalidOperator {
+        role: OperatorRole,
+        lhs: ExprId,
+        rhs: ExprId,
+        error: crate::operator::OperatorResolutionError,
+    },
     FnCall {
         target: DefId,
         args: Option<Vec<ExprId>>,
+        operator_role: Option<OperatorRole>,
         /// When the target has const-generic params, the return type after
         /// substituting type/const arguments from the call site.
         substituted_ty: Option<Ty>,
+    },
+    IntrinsicCall {
+        op: IntrinsicOp,
+        args: Vec<ExprId>,
     },
     TagCall {
         variant_id: VariantId,
@@ -1115,6 +1110,7 @@ pub enum TypedExprKind {
     Reassign {
         name: Intern<String>,
         value: ExprId,
+        operator: Option<BinOp>,
     },
     When(TypedWhenExpr),
     If(TypedIfExpr),
@@ -1134,6 +1130,14 @@ pub enum TypedExprKind {
         expr: ExprId,
         ty: Ty,
     },
+    TargetQuery {
+        kind: ast::TargetQueryKind,
+        operand: Ty,
+    },
+    Rematerialize {
+        source: ExprId,
+        constant: ConstValue,
+    },
 
     TupleAlloc {
         init: ExprId,
@@ -1147,6 +1151,7 @@ pub enum TypedExprKind {
         base: ExprId,
         index: usize,
         value: ExprId,
+        operator: Option<ResolvedCompoundOperator>,
     },
     /// Destructure bind: `Tag(field: bind, …) := expr`
     Destructure {
@@ -1155,11 +1160,12 @@ pub enum TypedExprKind {
         field_bindings: Vec<(Intern<String>, Intern<String>)>,
     },
 
-    /// Record field write: `base.field: value`
+    /// Record field write: `base.field:: value`
     RecordSet {
         base: ExprId,
         field: Intern<String>,
         value: ExprId,
+        operator: Option<ResolvedCompoundOperator>,
     },
     BufGet {
         buf: ExprId,
@@ -1169,6 +1175,7 @@ pub enum TypedExprKind {
         buf: ExprId,
         index: ExprId,
         value: ExprId,
+        operator: Option<ResolvedCompoundOperator>,
     },
     TakePtr(ExprId),
     /// A safe reference: `ref expr` or `mut expr`.
@@ -1181,8 +1188,13 @@ pub enum TypedExprKind {
     ConsumeArg(ExprId),
     /// Explicit consume: `eat expr`.
     Eat(ExprId),
+}
 
-    Asm(AsmExpr),
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResolvedCompoundOperator {
+    Callable { target: DefId, return_ty: Ty },
+    Intrinsic(IntrinsicOp),
+    Invalid(crate::operator::OperatorResolutionError),
 }
 
 pub fn walk_expr_children(
@@ -1192,9 +1204,15 @@ pub fn walk_expr_children(
     use std::ops::ControlFlow::Continue;
 
     match kind {
-        TypedExprKind::Binary { lhs, rhs, .. } => {
+        TypedExprKind::Binary { lhs, rhs, .. }
+        | TypedExprKind::InvalidOperator { lhs, rhs, .. } => {
             visit(*lhs)?;
             visit(*rhs)?;
+        }
+        TypedExprKind::IntrinsicCall { args, .. } => {
+            for child in args {
+                visit(*child)?;
+            }
         }
         TypedExprKind::FnCall { args, .. } | TypedExprKind::TagCall { args, .. } => {
             if let Some(args) = args {
@@ -1228,7 +1246,15 @@ pub fn walk_expr_children(
                     TypedWhenArm::Cond {
                         condition, body, ..
                     } => {
-                        visit(*condition)?;
+                        let mut failure = None;
+                        condition.visit_subjects(&mut |subject| {
+                            if failure.is_none() {
+                                failure = visit(subject).break_value();
+                            }
+                        });
+                        if failure.is_some() {
+                            return ControlFlow::Break(());
+                        }
                         visit(*body)?;
                     }
                     TypedWhenArm::Is { body, .. } | TypedWhenArm::Else(body, _) => visit(*body)?,
@@ -1236,7 +1262,15 @@ pub fn walk_expr_children(
             }
         }
         TypedExprKind::If(if_expr) => {
-            visit(if_expr.subject)?;
+            let mut failure = None;
+            if_expr.condition.visit_subjects(&mut |subject| {
+                if failure.is_none() {
+                    failure = visit(subject).break_value();
+                }
+            });
+            if failure.is_some() {
+                return ControlFlow::Break(());
+            }
             for child in &if_expr.stmts {
                 visit(*child)?;
             }
@@ -1245,9 +1279,19 @@ pub fn walk_expr_children(
             }
         }
         TypedExprKind::Loop(loop_expr) => {
-            match loop_expr.kind {
-                TypedLoopKind::While { condition } => visit(condition)?,
-                TypedLoopKind::ForIn { iterable, .. } => visit(iterable)?,
+            match &loop_expr.kind {
+                TypedLoopKind::While { condition, .. } => {
+                    let mut failure = None;
+                    condition.visit_subjects(&mut |subject| {
+                        if failure.is_none() {
+                            failure = visit(subject).break_value();
+                        }
+                    });
+                    if failure.is_some() {
+                        return ControlFlow::Break(());
+                    }
+                }
+                TypedLoopKind::ForIn { iterable, .. } => visit(*iterable)?,
             }
             for child in &loop_expr.stmts {
                 visit(*child)?;
@@ -1263,6 +1307,7 @@ pub fn walk_expr_children(
             }
         }
         TypedExprKind::Cast { expr, .. }
+        | TypedExprKind::Rematerialize { source: expr, .. }
         | TypedExprKind::TupleAlloc { init: expr, .. }
         | TypedExprKind::TupleGet { base: expr, .. }
         | TypedExprKind::TakePtr(expr)
@@ -1280,7 +1325,9 @@ pub fn walk_expr_children(
             visit(*buf)?;
             visit(*index)?;
         }
-        TypedExprKind::BufSet { buf, index, value } => {
+        TypedExprKind::BufSet {
+            buf, index, value, ..
+        } => {
             visit(*buf)?;
             visit(*index)?;
             visit(*value)?;
@@ -1288,9 +1335,20 @@ pub fn walk_expr_children(
         TypedExprKind::Lit(_)
         | TypedExprKind::SelfRef { .. }
         | TypedExprKind::FormatString(_)
-        | TypedExprKind::Asm(_) => {}
+        | TypedExprKind::TargetQuery { .. } => {}
     }
     Continue(())
+}
+
+pub fn walk_expr_children_of(
+    typed: &TypedFileAst,
+    expr_id: ExprId,
+    visit: &mut impl FnMut(ExprId) -> std::ops::ControlFlow<()>,
+) -> std::ops::ControlFlow<()> {
+    let Some(kind) = typed.exprs.kind_of(expr_id) else {
+        return std::ops::ControlFlow::Continue(());
+    };
+    walk_expr_children(kind, visit)
 }
 
 pub fn walk_expr_preorder(
@@ -1369,6 +1427,8 @@ pub struct TypedCallableSignature {
     pub effects: FunctionEffects,
     pub param_requirements: Vec<AvailabilityRequirement>,
     pub call_capability: CallCapability,
+    pub intrinsic: Option<IntrinsicOp>,
+    pub operator_role: Option<OperatorRole>,
 }
 
 impl TypedCallableSignature {
@@ -1417,6 +1477,8 @@ impl From<&TypedBind> for TypedCallableSignature {
             effects: bind.effects.clone(),
             param_requirements: bind.param_requirements.clone(),
             call_capability: bind.call_capability,
+            intrinsic: bind.intrinsic,
+            operator_role: bind.operator_role,
         }
     }
 }
@@ -1433,6 +1495,7 @@ pub struct TypedBind {
     pub return_type: Ty,
     /// User-written return type before later lowering.
     pub declared_return_type: Ty,
+    pub return_evidence: Option<ResultEvidence>,
     /// Resolved parameter types (name, resolved Ty).
     pub params: Vec<(Intern<String>, Ty)>,
     /// Whether each parameter is a type or value parameter.
@@ -1450,11 +1513,14 @@ pub struct TypedBind {
     pub receiver_type: Option<Ty>,
     /// Bind attributes (e.g., `#[inline]`, visibility).
     pub attributes: BindAttributes,
+    pub intrinsic: Option<IntrinsicOp>,
+    pub operator_role: Option<OperatorRole>,
     pub doc_comment: Option<DocComment>,
     /// Bind-level diagnostics (e.g., redundant self-param type).
     pub flaws: Vec<Diagnostic>,
     /// `name Type` at module or function scope with no `:` value yet.
     pub unassigned_decl: bool,
+    pub is_extern: bool,
     /// Bound with `:=` (immutable).
     pub is_constant: bool,
     /// Source-level signature for hover (types as written, not resolved).
@@ -1475,13 +1541,15 @@ pub enum BindBody {
 
 /// The typed AST for one `.gin` file — all types resolved, all flaws attached.
 ///
-/// This is the source of truth for LSP queries, codegen, and further analysis.
+/// This is the source of truth for LSP queries and further analysis.
 #[derive(Clone)]
 pub struct TypedFileAst {
     /// Span table mapping SpanId → byte ranges (cloned from FileAst).
     pub span_table: SpanTable,
     /// The file identifier assigned during compilation coordination.
     pub file_id: FileId,
+    pub type_registry: crate::TypeRegistry,
+    pub target_layout: Option<crate::layout::TargetLayout>,
 
     /// Resolved tag declarations.
     pub tags: HashMap<TagId, TypedTag>,
@@ -1497,6 +1565,9 @@ pub struct TypedFileAst {
 
     /// Top-level expression IDs (e.g., standalone expressions in the file).
     pub root_exprs: Vec<ExprId>,
+    pub places: Vec<TypedPlace>,
+    pub place_versions: Vec<TypedPlaceVersion>,
+    pub place_version_components: Vec<PlaceVersionComponent>,
 
     /// span.start byte offset → ExprId for O(log n) position-based lookup.
     pub span_to_expr: BTreeMap<u32, ExprId>,
@@ -1518,6 +1589,8 @@ pub struct TypedFileAst {
     pub imported_trait_names: HashSet<Intern<String>>,
     pub(crate) self_contexts: Vec<(SpanId, Intern<String>, Intern<String>)>,
     pub eval_ast: std::sync::Arc<ast::FileAst>,
+    pub semantic_origin: Option<FileSemanticOrigin>,
+    pub module_doc: Option<ast::DocComment>,
     /// Declaration-level warnings.
     pub warnings: Vec<Diagnostic>,
     /// Type-name flaws on declarations (`has` fields, return types, etc.).
@@ -1530,6 +1603,7 @@ impl std::fmt::Debug for TypedFileAst {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TypedFileAst")
             .field("file_id", &self.file_id)
+            .field("type_registry", &self.type_registry)
             .field("tags", &self.tags)
             .field("defs", &self.defs)
             .field("private_tags", &self.private_tags)
@@ -1540,6 +1614,7 @@ impl std::fmt::Debug for TypedFileAst {
             .field("tag_types", &self.tag_types)
             .field("fn_return_types", &self.fn_return_types)
             .field("variant_map", &self.variant_map)
+            .field("semantic_origin", &self.semantic_origin)
             .finish()
     }
 }
@@ -1547,6 +1622,7 @@ impl std::fmt::Debug for TypedFileAst {
 impl PartialEq for TypedFileAst {
     fn eq(&self, other: &Self) -> bool {
         self.file_id == other.file_id
+            && self.target_layout == other.target_layout
             && self.tags == other.tags
             && self.defs == other.defs
             && self.private_tags == other.private_tags
@@ -1558,6 +1634,8 @@ impl PartialEq for TypedFileAst {
             && self.fn_return_types == other.fn_return_types
             && self.variant_map == other.variant_map
             && self.variant_annotations == other.variant_annotations
+            && self.semantic_origin == other.semantic_origin
+            && self.module_doc == other.module_doc
     }
 }
 
@@ -1622,11 +1700,28 @@ impl TypedFileAst {
             else {
                 continue;
             };
+            let convention = signature
+                .param_conventions
+                .get(index)
+                .copied()
+                .unwrap_or(ParamConvention::Own);
             application
                 .actuals
                 .entry(*group)
                 .or_default()
                 .extend(actual);
+            *application
+                .grouped_argument_counts
+                .entry(*group)
+                .or_default() += 1;
+            match convention {
+                ParamConvention::Mutate => {
+                    application.grouped_argument_mutate.insert(*group, true);
+                }
+                _ => {
+                    application.grouped_argument_observe.insert(*group, true);
+                }
+            }
         }
         application
     }
@@ -1683,23 +1778,24 @@ impl TypedFileAst {
         None
     }
 
-    fn param_at_byte(
-        &self,
-        source: &str,
-        byte_offset: usize,
-        word: &str,
-    ) -> Option<(Intern<String>, String)> {
+    fn param_at_byte(&self, byte_offset: usize, word: &str) -> Option<(Intern<String>, String)> {
         let word = Intern::<String>::from_ref(word);
+        let mut def_starts: Vec<usize> = self
+            .defs
+            .values()
+            .map(|bind| self.span_table.get(bind.name_span).start())
+            .collect();
+        def_starts.sort_unstable();
+        def_starts.dedup();
         for ast_bind in self.eval_ast.defs.values() {
-            let params = ast_bind.params.as_ref();
-            let source_surface =
-                source_param_surface(source, &self.span_table, ast_bind, word.as_str());
-            if source_surface.is_none() && !params.is_some_and(|params| params.contains_key(&word))
-            {
+            let Some(parameter) = ast_bind
+                .params
+                .as_ref()
+                .and_then(|params| params.get(&word))
+            else {
                 continue;
-            }
-
-            let surface = source_surface.or_else(|| {
+            };
+            let surface =
                 self.defs
                     .get(&DefId(ast_bind.name))
                     .or_else(|| {
@@ -1710,13 +1806,7 @@ impl TypedFileAst {
                         })
                     })
                     .and_then(|typed_bind| {
-                        source_param_surface(source, &self.span_table, ast_bind, word.as_str())
-                            .or_else(|| {
-                                signature_param_surface(
-                                    &typed_bind.signature_surface,
-                                    word.as_str(),
-                                )
-                            })
+                        signature_param_surface(&typed_bind.signature_surface, word.as_str())
                             .or_else(|| {
                                 typed_bind.params.iter().find_map(|(name, ty)| {
                                     (*name == word).then(|| {
@@ -1729,22 +1819,93 @@ impl TypedFileAst {
                                 })
                             })
                     })
-                    .or_else(|| {
-                        params.and_then(|params| {
-                            params
-                                .get(&word)
-                                .map(|kind| param_kind_surface_for_hover(&kind.kind))
-                        })
-                    })
-            })?;
+                    .unwrap_or_else(|| param_kind_surface_for_hover(&parameter.kind));
 
-            if let Some(span) = self.inferred_param_name_span(source, ast_bind, word.as_str())
-                && span.contains(&byte_offset)
+            if self
+                .span_table
+                .get(parameter.name_span)
+                .contains(byte_offset)
             {
                 return Some((word, surface));
             }
 
-            if self.bind_body_contains(ast_bind, byte_offset) {
+            // Keep declaration-level parameter hovers in signatures; typed
+            // body-scope hovers are handled by typed-bind fallback for the
+            // current declaration set.
+            continue;
+        }
+        for typed_bind in self.defs.values() {
+            let has_local_def = self.eval_ast.defs.values().any(|ast_bind| {
+                ast_bind.name == typed_bind.name
+                    || ast_bind.name.split('.').next_back() == Some(typed_bind.name.as_str())
+            });
+            if has_local_def {
+                continue;
+            }
+            let Some((index, parameter_name)) = typed_bind
+                .params
+                .iter()
+                .enumerate()
+                .find_map(|(index, (name, _))| (name == &word).then_some((index, name)))
+            else {
+                continue;
+            };
+            let surface =
+                signature_param_surface(&typed_bind.signature_surface, parameter_name.as_str())
+                    .or_else(|| {
+                        typed_bind.params.get(index).map(|(_, ty)| {
+                            type_annotation_surface_for_hover_local(ty, &self.tag_types, &self.tags)
+                        })
+                    })
+                    .unwrap_or_else(|| parameter_name.as_str().to_string());
+            let body_contains = match &typed_bind.body {
+                BindBody::Expr(expr) => self
+                    .span_table
+                    .get(self.exprs.span[expr.as_usize()])
+                    .contains(byte_offset),
+                BindBody::Body { exprs, ret } => {
+                    exprs.iter().any(|expr| {
+                        self.span_table
+                            .get(self.exprs.span[expr.as_usize()])
+                            .contains(byte_offset)
+                    }) || ret.as_ref().is_some_and(|ret| {
+                        self.span_table
+                            .get(self.exprs.span[ret.as_usize()])
+                            .contains(byte_offset)
+                    })
+                }
+                BindBody::Extern => false,
+            };
+            let signature_contains = match &typed_bind.body {
+                BindBody::Expr(expr) => {
+                    byte_offset
+                        < self
+                            .span_table
+                            .get(self.exprs.span[expr.as_usize()])
+                            .start()
+                }
+                BindBody::Body { exprs, .. } => exprs.first().is_none_or(|expr| {
+                    byte_offset
+                        < self
+                            .span_table
+                            .get(self.exprs.span[expr.as_usize()])
+                            .start()
+                }),
+                BindBody::Extern => false,
+            };
+            let this_def_start = self.span_table.get(typed_bind.name_span).start();
+            if byte_offset < this_def_start {
+                continue;
+            }
+            let next_def_start = def_starts
+                .iter()
+                .find(|start| **start > this_def_start)
+                .copied()
+                .unwrap_or(usize::MAX);
+            if byte_offset >= next_def_start {
+                continue;
+            }
+            if signature_contains || (body_contains && byte_offset < next_def_start) {
                 return Some((word, surface));
             }
         }
@@ -1755,12 +1916,17 @@ impl TypedFileAst {
         Self {
             span_table,
             file_id,
+            type_registry: crate::TypeRegistry::default(),
+            target_layout: None,
             tags: HashMap::new(),
             defs: HashMap::new(),
             private_tags: HashSet::new(),
             private_defs: HashSet::new(),
             exprs: TypedExprVec::new(),
             root_exprs: Vec::new(),
+            places: Vec::new(),
+            place_versions: Vec::new(),
+            place_version_components: Vec::new(),
 
             span_to_expr: BTreeMap::new(),
             tag_types: HashMap::new(),
@@ -1770,6 +1936,8 @@ impl TypedFileAst {
             imported_trait_names: HashSet::new(),
             self_contexts: Vec::new(),
             eval_ast: std::sync::Arc::new(ast::FileAst::empty_for_tests()),
+            semantic_origin: None,
+            module_doc: None,
             warnings: Vec::new(),
             declaration_flaws: Vec::new(),
             import_mod_paths: Vec::new(),
@@ -2037,11 +2205,7 @@ impl TypedFileAst {
         )
     }
 
-    fn hover_pattern(
-        &self,
-        pattern: &Pattern,
-        ctx: HoverPatternCtx<'_>,
-    ) -> Option<HoverResult> {
+    fn hover_pattern(&self, pattern: &Pattern, ctx: HoverPatternCtx<'_>) -> Option<HoverResult> {
         self.hover_pattern_node(pattern, ctx)
     }
 
@@ -2164,19 +2328,17 @@ impl TypedFileAst {
                     && ctx.byte_offset < name_span.end()
                     && ctx.word == name.as_str()
                 {
-                    let list_type_param = ctx
-                        .subject_ty
-                        .and_then(|subject_ty| match subject_ty {
-                            Ty::Record { name, .. } if name.as_str() == "List" => {
-                                ctx.tag_params.and_then(|params| {
-                                    params
-                                        .get(&Intern::from_ref("List"))
-                                        .and_then(|params| params.first())
-                                        .map(|(name, _)| name.as_str().to_string())
-                                })
-                            }
-                            _ => None,
-                        });
+                    let list_type_param = ctx.subject_ty.and_then(|subject_ty| match subject_ty {
+                        Ty::Record { name, .. } if name.as_str() == "List" => {
+                            ctx.tag_params.and_then(|params| {
+                                params
+                                    .get(&Intern::from_ref("List"))
+                                    .and_then(|params| params.first())
+                                    .map(|(name, _)| name.as_str().to_string())
+                            })
+                        }
+                        _ => None,
+                    });
 
                     let ty_str = ctx
                         .subject_ty
@@ -2252,29 +2414,31 @@ impl TypedFileAst {
                     for arm in &w.arms {
                         if let TypedWhenArm::Is { pattern, .. } = arm
                             && self.span_contains(pattern.span_id, byte_offset)
-                            && let Some(h) =
-                                self.hover_pattern(&pattern.value, pattern_ctx)
+                            && let Some(h) = self.hover_pattern(&pattern.value, pattern_ctx)
                         {
                             return Some(h);
                         }
                     }
                 }
-                TypedExprKind::If(if_expr)
-                    if self.span_contains(if_expr.pattern.span_id, byte_offset) =>
-                {
-                    let subject_ty = Some(self.resolve_pattern_subject_ty(
-                        &self.exprs.ty[if_expr.subject.as_usize()],
-                        package,
-                    ));
-                    let subject_ty = subject_ty.as_ref();
-                    let pattern_ctx = HoverPatternCtx {
-                        subject_ty,
-                        ..pattern_ctx
-                    };
-                    if let Some(h) =
-                        self.hover_pattern(&if_expr.pattern.value, pattern_ctx)
-                    {
-                        return Some(h);
+                TypedExprKind::If(if_expr) => {
+                    let mut patterns = Vec::new();
+                    if_expr.condition.pattern_subjects(&mut patterns);
+                    for (subject, pattern) in patterns {
+                        if !self.span_contains(pattern.span_id, byte_offset) {
+                            continue;
+                        }
+                        let subject_ty = Some(self.resolve_pattern_subject_ty(
+                            &self.exprs.ty[subject.as_usize()],
+                            package,
+                        ));
+                        let subject_ty = subject_ty.as_ref();
+                        let pattern_ctx = HoverPatternCtx {
+                            subject_ty,
+                            ..pattern_ctx
+                        };
+                        if let Some(h) = self.hover_pattern(&pattern.value, pattern_ctx) {
+                            return Some(h);
+                        }
                     }
                 }
                 _ => {}
@@ -2283,17 +2447,16 @@ impl TypedFileAst {
         None
     }
 
-    fn param_surface_in_body(
-        &self,
-        source: &str,
-        byte_offset: usize,
-        word: &str,
-    ) -> Option<String> {
+    fn param_surface_in_body(&self, byte_offset: usize, word: &str) -> Option<String> {
+        let word = Intern::<String>::from_ref(word);
         self.eval_ast.defs.values().find_map(|bind| {
             if !self.bind_body_contains(bind, byte_offset) {
                 return None;
             }
-            source_param_surface(source, &self.span_table, bind, word)
+            bind.params
+                .as_ref()?
+                .get(&word)
+                .map(|parameter| param_kind_surface_for_hover(&parameter.kind))
         })
     }
 
@@ -2308,34 +2471,6 @@ impl TypedFileAst {
             }
             ast::BindValue::Extern | ast::BindValue::Unassigned => false,
         }
-    }
-
-    fn inferred_param_name_span(
-        &self,
-        source: &str,
-        bind: &ast::Bind,
-        param_name: &str,
-    ) -> Option<std::ops::Range<usize>> {
-        let start = self.span_table.get(bind.name_span).end();
-        let end = match &bind.value {
-            ast::BindValue::Expr(expr) => self.span_table.get(expr.span_id).start(),
-            ast::BindValue::Body { exprs, ret } => exprs
-                .first()
-                .map(|expr| self.span_table.get(expr.span_id).start())
-                .unwrap_or_else(|| self.span_table.get(ret.span_id).start()),
-            ast::BindValue::Extern | ast::BindValue::Unassigned => start,
-        };
-        if start >= end {
-            return None;
-        }
-        for (name, _) in bind.params.as_ref()? {
-            let name = name.as_str();
-            let offset = find_param_name_between(source, start, end, name)?;
-            if name == param_name {
-                return Some(offset..offset + name.len());
-            }
-        }
-        None
     }
 
     /// Hover for a definition name (`arch` in `arch Architecture`, or a function def).
@@ -2374,7 +2509,10 @@ impl TypedFileAst {
         let Some(expr) = self.expr(*expr_id) else {
             return sig;
         };
-        if matches!(expr.ty, Ty::Record { .. }) {
+        if matches!(
+            self.type_registry.resolved_definition_for_type(expr.ty),
+            Ty::Record { .. }
+        ) {
             return sig;
         }
         let Some(const_val) = expr.const_value else {
@@ -2408,7 +2546,7 @@ impl TypedFileAst {
     #[doc(hidden)]
     pub fn classify_hover(
         &self,
-        source: &str,
+        _source: &str,
         byte_offset: usize,
         word: &str,
         package: Option<&PackageSemanticIndex>,
@@ -2433,7 +2571,7 @@ impl TypedFileAst {
         }
 
         // 1a. Cursor is on a function parameter declaration or a use in that function body.
-        if let Some((name, surface)) = self.param_at_byte(source, byte_offset, word) {
+        if let Some((name, surface)) = self.param_at_byte(byte_offset, word) {
             return Some(HoverTarget::Param { name, surface });
         }
 
@@ -2566,13 +2704,6 @@ impl TypedFileAst {
         package: Option<&PackageSemanticIndex>,
     ) -> Option<HoverResult> {
         let byte_offset = source.position_to_byte_offset(line, character)?;
-        if let Some((name, surface)) = source_param_at_byte(source, byte_offset) {
-            return Some(HoverResult::single(
-                ast::hover_format::HoverDoc::new()
-                    .gin(format!("{name} {surface}"))
-                    .render(),
-            ));
-        }
         let word = source
             .symbol_at_byte_offset(byte_offset)
             .or_else(|| source.word_at_byte_offset(byte_offset))?;
@@ -2585,7 +2716,7 @@ impl TypedFileAst {
     /// Render markdown for a classified [`HoverTarget`].
     fn render_hover(
         &self,
-        source: &str,
+        _source: &str,
         target: HoverTarget,
         word: &str,
         byte_offset: usize,
@@ -2712,7 +2843,7 @@ impl TypedFileAst {
                                 if !f.params.is_empty() {
                                     signature.push('(');
                                     let mut first = true;
-                                    for (k, v) in &f.params {
+                                    for (k, v) in f.params.iter() {
                                         if !first {
                                             signature.push_str(", ");
                                         }
@@ -2797,12 +2928,15 @@ impl TypedFileAst {
                     return Some(result.with_qualified_union(package, &tag_id.0));
                 }
 
-                if let Ty::Record { fields, .. } = &tag.resolved_ty
+                if let Ty::Record { fields, .. } = self
+                    .type_registry
+                    .resolved_definition_for_type(&tag.resolved_ty)
                     && let Some((_, fty)) = fields.iter().find(|(n, _)| *n == member_key)
                 {
                     let ty_str = {
                         let display_ty: &Ty = match &**fty {
                             Ty::Ptr { inner } => inner.as_ref(),
+                            Ty::Address { pointee, .. } => pointee.as_ref(),
                             other => other,
                         };
                         type_annotation_surface_for_hover_local(
@@ -2844,10 +2978,12 @@ impl TypedFileAst {
                     .and_then(|p| p.tag_types.get(&union_name))
                     .or_else(|| self.tag_types.get(&TagId(union_name)))
                     .unwrap_or(&union_ty);
+                let resolved_definition =
+                    self.type_registry.resolved_definition_for_type(resolved_ty);
                 // For literal-constant unions (e.g. `Architecture is 'x86_64' or 'arm64'`),
                 // show the parent tag declaration instead of just the literal label,
                 // so the user sees the full union shape.
-                if resolved_ty.union_literal_values().is_some() {
+                if resolved_definition.union_literal_values().is_some() {
                     if let Some(tag) = self.tags.get(&TagId(union_name)) {
                         let result = HoverResult::single(self.hover_for_tag(tag));
                         return Some(result.with_tag_module(package, &union_name));
@@ -2859,7 +2995,7 @@ impl TypedFileAst {
                         return Some(result.with_tag_module(package, &union_name));
                     }
                 }
-                let variant_label = const_union_variant_label(resolved_ty, discriminant)
+                let variant_label = const_union_variant_label(&resolved_definition, discriminant)
                     .unwrap_or_else(|| {
                         // Format variant with its fields (e.g. `Some(x)` not just `Some`)
                         let variant_map =
@@ -2884,15 +3020,12 @@ impl TypedFileAst {
                 let result = HoverResult::single(self.hover_for_variant(
                     union_name.as_str(),
                     &variant_label,
-                    resolved_ty,
+                    &resolved_definition,
                 ));
                 Some(result.with_qualified_union(package, &union_name))
             }
             HoverTarget::Expr(expr_id) => {
-                if let Some(surface) = self
-                    .param_surface_in_body(source, byte_offset, word)
-                    .or_else(|| source_param_surface_before_byte(source, byte_offset, word))
-                {
+                if let Some(surface) = self.param_surface_in_body(byte_offset, word) {
                     return Some(HoverResult::single(
                         ast::hover_format::HoverDoc::new()
                             .gin(format!("{word} {surface}"))
@@ -2909,7 +3042,11 @@ impl TypedFileAst {
                 }
                 if matches!(expr_ref.kind, TypedExprKind::Lit(_))
                     && let Some(name) = self.parent_bind_name_for_body(expr_id)
-                    && expr_ref.ty.union_literal_values().is_some()
+                    && self
+                        .type_registry
+                        .resolved_definition_for_type(expr_ref.ty)
+                        .union_literal_values()
+                        .is_some()
                 {
                     return Some(HoverResult::single(format!(
                         "{} union\n---\n\n",
@@ -2929,7 +3066,6 @@ impl TypedFileAst {
                         &self.tags,
                     )
                 };
-                let is_copy = false;
                 let summary = match &expr_ref.kind {
                     TypedExprKind::Bind {
                         name,
@@ -2982,14 +3118,60 @@ impl TypedFileAst {
                     },
                     _ => ty_str,
                 };
+                let summary = self.integer_hover_summary(expr_id, summary);
                 Some(HoverResult::single(
-                    ast::hover_format::HoverDoc::new()
-                        .inline(summary)
-                        .copy_is(is_copy)
-                        .render(),
+                    ast::hover_format::HoverDoc::new().inline(summary).render(),
                 ))
             }
         }
+    }
+
+    fn integer_hover_summary(&self, expr_id: ExprId, summary: String) -> String {
+        let ty = &self.exprs.ty[expr_id.as_usize()];
+        let Some(validity) = self.type_registry.integer_validity_for_type(ty) else {
+            return summary;
+        };
+        let identity = if ty.named_instance_stripping_reference_wrappers().is_some() {
+            ty.format_for_hover()
+        } else {
+            "anonymous integer".to_string()
+        };
+        let knowledge = match self
+            .exprs
+            .integer_knowledge_of(expr_id)
+            .and_then(Option::as_ref)
+        {
+            Some(ast::integer::IntegerKnowledge::Exact(
+                ast::integer::CanonicalIntegerExpr::Value(value),
+            )) => format!("exactly {value}"),
+            Some(ast::integer::IntegerKnowledge::Exact(
+                ast::integer::CanonicalIntegerExpr::Symbolic(value),
+            )) => format!("exactly {value}"),
+            Some(ast::integer::IntegerKnowledge::Domain(domain)) => domain
+                .storage_hull()
+                .map(|hull| format!("{}...{}", hull.min(), hull.max()))
+                .unwrap_or_else(|| "symbolic domain".to_string()),
+            Some(ast::integer::IntegerKnowledge::Unknown) | None => "unknown".to_string(),
+            Some(ast::integer::IntegerKnowledge::Poison) => "poison".to_string(),
+        };
+        let validity = validity
+            .domain()
+            .storage_hull()
+            .map(|hull| format!("{}...{}", hull.min(), hull.max()))
+            .unwrap_or_else(|| "no finite hull".to_string());
+        let representation = self
+            .type_registry
+            .integer_width_for_type(ty)
+            .map(|width| format!("i{width}"))
+            .unwrap_or_else(|| "unresolved".to_string());
+        let interpretation = self
+            .type_registry
+            .nominal_integer_interpretation_for_type(ty)
+            .map(|interpretation| format!("\ninterpretation: {interpretation:?}"))
+            .unwrap_or_default();
+        format!(
+            "{summary}\n{identity}\ncurrent knowledge: {knowledge}\nvalidity: {validity}\nruntime representation: {representation}{interpretation}"
+        )
     }
 
     fn record_field_surface_at_byte(&self, byte_offset: usize, word: &str) -> Option<String> {
@@ -3005,15 +3187,20 @@ impl TypedFileAst {
             {
                 continue;
             }
+            let base_definition = self
+                .exprs
+                .ty
+                .get(base.as_usize())
+                .map(|ty| self.type_registry.resolved_definition_for_type(ty));
             if let Some(Ty::Record {
                 name: tag_name,
                 fields,
                 ..
-            }) = self.exprs.ty.get(base.as_usize())
+            }) = base_definition
                 && let Some((name, ty)) = fields.get(*index)
                 && *name == field
             {
-                if let Some(tag) = self.tags.get(&TagId(*tag_name))
+                if let Some(tag) = self.tags.get(&TagId(tag_name))
                     && let Some(surface) = tag.record_field_types.get(&field)
                 {
                     return Some(surface.clone());
@@ -3034,7 +3221,10 @@ impl TypedFileAst {
                 continue;
             };
             let tag = self.tags.get(&variant_id.union)?;
-            let Ty::Record { fields, .. } = &tag.resolved_ty else {
+            let Ty::Record { fields, .. } = self
+                .type_registry
+                .resolved_definition_for_type(&tag.resolved_ty)
+            else {
                 continue;
             };
             let (name, _) = fields.get(*index)?;
@@ -3067,12 +3257,12 @@ impl TypedFileAst {
         let expr_ref = self.expr(expr_id)?;
 
         // If the expression has a Record type, look up the field by name.
-        match &expr_ref.ty {
+        match self.type_registry.resolved_definition_for_type(expr_ref.ty) {
             Ty::Record { fields, .. } => {
                 let interned_field = Intern::<String>::from_ref(&field_name);
                 for (name, ty) in fields {
-                    if *name == interned_field {
-                        return Some(format_ty_for_hover(ty));
+                    if name == interned_field {
+                        return Some(format_ty_for_hover(&ty));
                     }
                 }
                 None
@@ -3156,84 +3346,6 @@ impl TypedFileAst {
     }
 }
 
-fn source_param_at_byte(source: &str, byte_offset: usize) -> Option<(String, String)> {
-    let bytes = source.as_bytes();
-    let mut start = byte_offset.min(bytes.len());
-    while start > 0 && is_ident_byte(bytes[start - 1]) {
-        start -= 1;
-    }
-    let mut end = byte_offset.min(bytes.len());
-    while end < bytes.len() && is_ident_byte(bytes[end]) {
-        end += 1;
-    }
-    if start == end {
-        return None;
-    }
-    let name = source.get(start..end)?;
-    let open = source.get(..start)?.rfind('(')?;
-    let close = source.get(open..)?.find(')').map(|i| open + i)?;
-    if end > close {
-        return None;
-    }
-    let colon_eq = source.get(close..)?.find(":=").map(|i| close + i)?;
-    let newline = source.get(close..colon_eq)?.find('\n');
-    if newline.is_some() {
-        return None;
-    }
-    let surface = extract_param_surface_after_name(source, end)?;
-    Some((name.to_string(), surface))
-}
-
-fn source_param_surface_before_byte(
-    source: &str,
-    byte_offset: usize,
-    name: &str,
-) -> Option<String> {
-    let prefix = source.get(..byte_offset)?;
-    let needle = format!("{name} ");
-    let mut search_end = prefix.len();
-    while let Some(relative) = prefix.get(..search_end)?.rfind(&needle) {
-        let open = prefix.get(..relative)?.rfind('(')?;
-        let colon_eq = prefix.get(open..)?.find(":=").map(|i| open + i);
-        if colon_eq.is_some_and(|idx| idx > relative) {
-            return extract_param_surface_after_name(source, relative + name.len());
-        }
-        search_end = relative;
-    }
-    None
-}
-
-fn source_param_surface(
-    source: &str,
-    span_table: &SpanTable,
-    bind: &ast::Bind,
-    name: &str,
-) -> Option<String> {
-    let span = inferred_param_name_span_from(span_table, source, bind, name)?;
-    extract_param_surface_after_name(source, span.end)
-}
-
-fn extract_param_surface_after_name(source: &str, name_end: usize) -> Option<String> {
-    let bytes = source.as_bytes();
-    let mut i = name_end;
-    while bytes.get(i).is_some_and(|b| b.is_ascii_whitespace()) {
-        i += 1;
-    }
-    let start = i;
-    let mut depth = 0i32;
-    while let Some(&b) = bytes.get(i) {
-        match b {
-            b'(' => depth += 1,
-            b')' if depth > 0 => depth -= 1,
-            b',' | b')' if depth == 0 => break,
-            _ => {}
-        }
-        i += 1;
-    }
-    let surface = source.get(start..i)?.trim();
-    (!surface.is_empty()).then(|| surface.to_string())
-}
-
 fn signature_param_surface(signature: &str, name: &str) -> Option<String> {
     let open = signature.find('(')?;
     let close = signature.rfind(')')?;
@@ -3261,47 +3373,6 @@ fn param_kind_surface_for_hover(kind: &ParameterKind) -> String {
         ParameterKind::Generic => String::new(),
         ParameterKind::Default(expr) => format!(": {:?}", expr.value),
     }
-}
-
-/// IDE hover payload; [`module_prefix`] holds a qualified type path when known.
-fn inferred_param_name_span_from(
-    span_table: &SpanTable,
-    source: &str,
-    bind: &ast::Bind,
-    param_name: &str,
-) -> Option<std::ops::Range<usize>> {
-    let start = span_table.get(bind.name_span).end();
-    let end = match &bind.value {
-        ast::BindValue::Expr(expr) => span_table.get(expr.span_id).start(),
-        ast::BindValue::Body { exprs, ret } => exprs
-            .first()
-            .map(|expr| span_table.get(expr.span_id).start())
-            .unwrap_or_else(|| span_table.get(ret.span_id).start()),
-        ast::BindValue::Extern | ast::BindValue::Unassigned => start,
-    };
-    let offset = find_param_name_between(source, start, end, param_name)?;
-    Some(offset..offset + param_name.len())
-}
-
-fn find_param_name_between(source: &str, start: usize, end: usize, name: &str) -> Option<usize> {
-    let haystack = source.get(start..end)?;
-    let mut search_from = 0;
-    while let Some(relative) = haystack.get(search_from..)?.find(name) {
-        let offset = start + search_from + relative;
-        let before = source.as_bytes().get(offset.wrapping_sub(1)).copied();
-        let after = source.as_bytes().get(offset + name.len()).copied();
-        let ident_before = before.is_some_and(is_ident_byte);
-        let ident_after = after.is_some_and(is_ident_byte);
-        if !ident_before && !ident_after {
-            return Some(offset);
-        }
-        search_from += relative + name.len();
-    }
-    None
-}
-
-fn is_ident_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3368,6 +3439,7 @@ impl HoverResult {
 /// Cross-file tag and variant index for package-scoped IDE hover.
 #[derive(Clone, PartialEq)]
 pub struct PackageSemanticIndex {
+    pub type_registry: crate::TypeRegistry,
     pub tag_types: HashMap<Intern<String>, Ty>,
     pub tag_params: HashMap<Intern<String>, Parameters>,
     pub variant_map: VariantMap,
@@ -3394,8 +3466,14 @@ impl PackageSemanticIndex {
     pub fn from_typed_asts(asts: &[&TypedFileAst]) -> Self {
         let mut tag_types: HashMap<Intern<String>, Ty> = HashMap::new();
         let mut tag_params: HashMap<Intern<String>, Parameters> = HashMap::new();
+        let mut type_registry = crate::TypeRegistry::default();
+        let mut tag_module = HashMap::new();
+        let mut tag_decls = HashMap::new();
+        let mut def_module = HashMap::new();
+        let mut module_docs: HashMap<String, Vec<String>> = HashMap::new();
 
         for ast in asts {
+            type_registry.merge_from(&ast.type_registry);
             for (tag_id, ty) in &ast.tag_types {
                 tag_types.insert(tag_id.0, ty.clone());
             }
@@ -3404,18 +3482,54 @@ impl PackageSemanticIndex {
                     tag_params.insert(tag_id.0, params.clone());
                 }
             }
+            if let Some(origin) = ast.semantic_origin.as_ref() {
+                let simple_module = origin
+                    .module
+                    .iter()
+                    .map(|part| part.as_str())
+                    .collect::<Vec<_>>()
+                    .join(".");
+                let module = if simple_module.is_empty() {
+                    origin.package.name.as_str().to_string()
+                } else {
+                    format!("{}.{}", origin.package.name.as_str(), simple_module)
+                };
+                for (tag_id, tag) in &ast.tags {
+                    tag_module.entry(tag_id.0).or_insert_with(|| module.clone());
+                    tag_decls.insert(tag_id.0, tag.clone());
+                }
+                for def_id in ast.defs.keys() {
+                    def_module.entry(def_id.0).or_insert_with(|| module.clone());
+                }
+                if let Some(doc) = ast.module_doc.as_ref() {
+                    module_docs
+                        .entry(module)
+                        .or_default()
+                        .push(doc.value.clone());
+                    if !simple_module.is_empty() {
+                        module_docs
+                            .entry(simple_module)
+                            .or_default()
+                            .push(doc.value.clone());
+                    }
+                }
+            }
         }
 
         let variant_map = collect_package_variant_map(asts);
 
         Self {
+            type_registry,
             tag_types,
             tag_params,
             variant_map,
-            tag_module: HashMap::new(),
-            tag_decls: HashMap::new(),
-            def_module: HashMap::new(),
-            module_docs: HashMap::new(),
+            tag_module,
+            tag_decls,
+            def_module,
+            module_docs: module_docs
+                .into_iter()
+                .map(|(module, docs)| (module, docs.join("\n\n")))
+                .collect(),
         }
     }
 
@@ -3547,9 +3661,13 @@ pub(crate) fn type_annotation_surface_for_hover(
             fields,
             resolved_params,
         } => {
-            if let Some(surface) =
-                generic_record_surface(name, fields, resolved_params.as_deref(), tag_types, tag_params)
-            {
+            if let Some(surface) = generic_record_surface(
+                name,
+                fields,
+                resolved_params.as_deref(),
+                tag_types,
+                tag_params,
+            ) {
                 return surface;
             }
             if tag_types.contains_key(name) && !tag_has_generic_params(name, tag_params) {
@@ -3557,28 +3675,7 @@ pub(crate) fn type_annotation_surface_for_hover(
             }
             format_ty_for_hover(ty)
         }
-        other => {
-            // For unbounded concrete ints matching a tag declaration, show the source-level
-            // type name. Bounded `in lo...hi` types should keep their range surface; otherwise
-            // unrelated aliases like `Byte`/`TinyInt` can win HashMap iteration order and obscure
-            // reflective payload slots such as `Primitive(width BigInt, ...)`.
-            if matches!(
-                other,
-                Ty::Int {
-                    min: None,
-                    max: None,
-                    ..
-                }
-            ) && let Some((name, _)) = tag_types.iter().find(|(_, t)| {
-                matches!(
-                    (other, t),
-                    (Ty::Int { .. }, Ty::Int { .. }) | (Ty::Int { .. }, Ty::Union { .. })
-                )
-            }) {
-                return name.as_str().to_string();
-            }
-            format_ty_for_hover(other)
-        }
+        other => format_ty_for_hover(other),
     }
 }
 
@@ -3616,24 +3713,7 @@ pub(crate) fn type_annotation_surface_for_hover_local(
             }
             format_ty_for_hover(ty)
         }
-        other => {
-            if matches!(
-                other,
-                Ty::Int {
-                    min: None,
-                    max: None,
-                    ..
-                }
-            ) && let Some((name, _)) = tag_types.iter().find(|(_, t)| {
-                matches!(
-                    (other, t),
-                    (Ty::Int { .. }, Ty::Int { .. }) | (Ty::Int { .. }, Ty::Union { .. })
-                )
-            }) {
-                return name.0.as_str().to_string();
-            }
-            format_ty_for_hover(other)
-        }
+        other => format_ty_for_hover(other),
     }
 }
 
@@ -3707,9 +3787,7 @@ fn generic_record_surface_local(
     }
 }
 
-fn list_element_ty_from_resolved_params(
-    params: Option<&[(Intern<String>, TyArg)]>,
-) -> Option<Ty> {
+fn list_element_ty_from_resolved_params(params: Option<&[(Intern<String>, TyArg)]>) -> Option<Ty> {
     params?.iter().find_map(|(_, arg)| match arg {
         TyArg::Type(ty) => Some((**ty).clone()),
         TyArg::Const(_) => None,
@@ -3722,8 +3800,10 @@ fn is_capitalized_type_name(name: &str) -> bool {
 
 fn list_element_ty_from_record_fields(fields: &[(Intern<String>, Box<Ty>)]) -> Option<Ty> {
     let (_, pointer) = fields.iter().find(|(n, _)| n.as_str() == "pointer")?;
+    if let Some(pointee) = pointer.pointee_ty() {
+        return Some(pointee.clone());
+    }
     match pointer.as_ref() {
-        Ty::Ptr { inner } => Some(inner.as_ref().clone()),
         Ty::Opaque(name) if is_capitalized_type_name(name.as_str()) => {
             Some(pointer.as_ref().clone())
         }
@@ -3732,24 +3812,6 @@ fn list_element_ty_from_record_fields(fields: &[(Intern<String>, Box<Ty>)]) -> O
         {
             Some(pointer.as_ref().clone())
         }
-        Ty::Record {
-            name,
-            fields: pfields,
-            ..
-        } if name.as_str() == "Pointer" => pfields.iter().find_map(|(n, t)| {
-            if n.as_str() == "addr" {
-                return None;
-            }
-            match t.as_ref() {
-                Ty::Opaque(inner) if is_capitalized_type_name(inner.as_str()) => {
-                    Some(t.as_ref().clone())
-                }
-                Ty::Record { name: inner, .. } if is_capitalized_type_name(inner.as_str()) => {
-                    Some(t.as_ref().clone())
-                }
-                _ => None,
-            }
-        }),
         _ => None,
     }
 }
@@ -3757,28 +3819,11 @@ fn list_element_ty_from_record_fields(fields: &[(Intern<String>, Box<Ty>)]) -> O
 /// Format a `Ty` for hover display.
 pub fn format_ty_for_hover(ty: &Ty) -> String {
     match ty {
-        Ty::Int {
-            width,
-            signed,
-            value,
-            min,
-            max,
-        } => {
-            if let (Some(lo), Some(hi)) = (min, max) {
-                if let Some(v) = value {
-                    format!("in {lo}...{hi} (= {v})")
-                } else {
-                    format!("in {lo}...{hi}")
-                }
-            } else {
-                let prefix = if *signed { "i" } else { "u" };
-                if let Some(v) = value {
-                    format!("{}{} = {}", prefix, width, v)
-                } else {
-                    format!("{}{}", prefix, width)
-                }
-            }
-        }
+        Ty::Named { .. } => ty.format_for_hover(),
+        Ty::AnonymousInteger { .. } => ty.format_for_hover(),
+        Ty::ResultFamily { .. } => ty.format_for_hover(),
+        Ty::Address { .. } => ty.format_for_hover(),
+        Ty::UnresolvedLiteral(ast::ty::LiteralKind::Integer) => "integer literal".to_string(),
         Ty::Float { value } => {
             if let Some(HashFloat(v)) = value {
                 format!("f64 = {}", v)

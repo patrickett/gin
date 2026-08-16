@@ -7,20 +7,21 @@ pub use const_expr::{CompTimeEvaluator, ConstEnv};
 mod flow;
 pub use flow::{FlowContext, VarState};
 
-mod copy;
-pub use copy::TyCopyExt;
+mod ownership;
+pub(crate) use ownership::stage_rematerialize_owned_arguments;
+pub use ownership::{TyOwnershipExt, expr_is_rematerializable};
 
 mod type_surface;
+pub(crate) use type_surface::expr_is_type_surface;
 pub use type_surface::{
     TypeEnv, check_type_application, mangled_fn_call_name, resolve_name_from_files,
 };
-pub(crate) use type_surface::expr_is_type_surface;
 
 pub(crate) mod validate_consumption;
 pub use validate_consumption::stage_validate_consumption;
 
 mod unify;
-pub use unify::unify_type_args;
+pub use unify::{unify_type_args, unify_type_args_with_registry};
 
 mod infer;
 pub use infer::{

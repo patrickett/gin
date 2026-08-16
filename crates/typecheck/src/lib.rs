@@ -2,18 +2,26 @@ pub mod analysis;
 
 pub mod completions;
 
+#[cfg(test)]
+extern crate self as typecheck;
+
+pub mod resolved_program;
 pub mod ty;
 pub mod typed;
 pub use completions::{
     CompletionCandidate, CompletionKind, dot_completions_for_ty, fn_call_at, signature_for_fn,
 };
+pub use resolved_program::ResolvedProgram;
 pub use typed::{
-    AppliedEffectTarget, Availability, BindBody, DefId, EffectTarget, ExprId, FileId, FunctionEffects,
-    GroupId, HoverResult, HoverTarget, Overlap, PackageSemanticIndex, ReferenceTargetGroup, TagId,
-    TargetIndex, TypedBind, TypedCallableSignature, TypedExpr, TypedExprKind, TypedFileAst,
-    TypedGroup, TypedIfExpr, TypedLoop, TypedLoopKind, TypedTag, TypedWhenArm, TypedWhenExpr,
-    VariantId, VariantLookupResult, VariantMap, VariantMapEntry, collect_package_variant_map,
-    format_ty_for_hover,
+    AlternativeEvidence, AppliedEffectTarget, Availability, BindBody, DefId, EffectTarget,
+    EvidenceProposition, ExprId, FileId, FunctionEffects, GroupId, HoverResult, HoverTarget,
+    MathematicalComparison, Overlap, PackageSemanticIndex, PlaceId, PlaceProjection,
+    PlaceVersionComponent, PlaceVersionId, PlaceVersionOrigin, ReferenceTargetGroup,
+    ResolvedCompoundOperator, ResultEvidence, TagId, TargetIndex, TypedBind,
+    TypedCallableSignature, TypedCondition, TypedExpr, TypedExprKind, TypedFileAst, TypedGroup,
+    TypedIfExpr, TypedLoop, TypedLoopKind, TypedPlace, TypedPlaceVersion, TypedTag, TypedWhenArm,
+    TypedWhenExpr, VariantId, VariantLookupResult, VariantMap, VariantMapEntry,
+    collect_package_variant_map, format_ty_for_hover,
 };
 
 pub mod staging;
@@ -27,14 +35,18 @@ pub use compile_time_trait::{
 pub mod reflect;
 pub use reflect::{
     const_value_for_provided_trait_field, const_value_to_expr, const_value_to_typed_expr,
-    reflect_ty_to_const_value,
 };
 
-pub mod asm_intrinsics;
-pub use asm_intrinsics::inject_asm_exprs;
-
+pub mod equality;
+pub mod integer_literal;
+pub mod intrinsic;
 pub mod intrinsic_fold;
+pub mod layout;
+pub mod operator;
+pub mod representation;
+pub mod type_registry;
 pub use intrinsic_fold::inject_compiler_intrinsics;
+pub use type_registry::{FixedArrayFormer, TypeDeclarationSemantics, TypeRegistry};
 
 pub mod prepare;
 pub use prepare::{prepare_package_asts, prepare_parse_ast};

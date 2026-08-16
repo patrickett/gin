@@ -1,40 +1,36 @@
 //! Compile-time expression evaluation — fold expressions to [`ConstValue`]s.
 //!
 //! Handles literal folding, tag constructors, binary ops, bind references,
-//! `AsmBuilder` method chains, and compile-time bind validation.
+//! and compile-time bind validation.
 
+use derive_more::{Deref, DerefMut, From};
 use std::collections::{HashMap, HashSet};
 use std::iter::FromIterator;
-use std::ops::{Deref, DerefMut};
 
 use internment::Intern;
 
 use crate::analysis::pattern::collect_pattern_bindings;
 use crate::prepare_target::eval_type_static_member;
 
-use ast::expr::{Expr, FnCall, Literal, Typed};
+use ast::expr::{Expr, Literal, Typed};
 
 use ast::{Bind, BindValue, FileAst, ModPath, WhenArm};
 use ast::{ConstValue, HashFloat};
 
 const MAX_COMPILE_TIME_DEPTH: usize = 512;
 
-#[derive(Clone, Default)]
+fn target_query_operand_ty(reference: &ast::TypeReference) -> Option<ast::Ty> {
+    match reference {
+        ast::TypeReference::Unit => Some(ast::Ty::Unit),
+        ast::TypeReference::Pointer(inner) => Some(ast::Ty::Ptr {
+            inner: Box::new(target_query_operand_ty(inner)?),
+        }),
+        ast::TypeReference::Nominal(_) | ast::TypeReference::Application { .. } => None,
+    }
+}
+
+#[derive(Clone, Default, Deref, DerefMut, From)]
 pub struct ConstEnv(HashMap<Intern<String>, Option<ConstValue>>);
-
-impl Deref for ConstEnv {
-    type Target = HashMap<Intern<String>, Option<ConstValue>>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for ConstEnv {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
 
 impl FromIterator<(Intern<String>, Option<ConstValue>)> for ConstEnv {
     fn from_iter<T>(iter: T) -> Self
@@ -60,24 +56,47 @@ enum ConstEvalFailure {
 pub struct CompTimeEvaluator<'a> {
     const_binds: &'a ConstEnv,
     ast: &'a FileAst,
+    target_layout: Option<crate::layout::TargetLayout>,
 }
 
 impl<'a> CompTimeEvaluator<'a> {
     pub fn new(const_binds: &'a ConstEnv, ast: &'a FileAst) -> Self {
-        Self { const_binds, ast }
+        Self {
+            const_binds,
+            ast,
+            target_layout: None,
+        }
+    }
+
+    pub fn for_target(
+        const_binds: &'a ConstEnv,
+        ast: &'a FileAst,
+        target: &flask::CompileTarget,
+    ) -> Self {
+        Self {
+            const_binds,
+            ast,
+            target_layout: crate::layout::TargetLayout::from_compile_target(target).ok(),
+        }
     }
 
     pub fn eval(&self, expr: &Expr) -> Option<ConstValue> {
         let mut call_stack = HashSet::new();
-        EvalFrame::new(self.const_binds, self.ast, &mut call_stack).eval(expr)
+        EvalFrame::new(
+            self.const_binds,
+            self.ast,
+            self.target_layout,
+            &mut call_stack,
+        )
+        .eval(expr)
     }
-
 }
 
 /// A stateful compile-time evaluator for constant expressions.
 struct EvalFrame<'a, 'b> {
     const_binds: &'a ConstEnv,
     ast: &'a FileAst,
+    target_layout: Option<crate::layout::TargetLayout>,
     depth: usize,
     call_stack: &'b mut HashSet<ComptimeCall>,
 }
@@ -86,11 +105,13 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
     pub fn new(
         const_binds: &'a ConstEnv,
         ast: &'a FileAst,
+        target_layout: Option<crate::layout::TargetLayout>,
         call_stack: &'b mut HashSet<ComptimeCall>,
     ) -> Self {
         Self {
             const_binds,
             ast,
+            target_layout,
             depth: 0,
             call_stack,
         }
@@ -105,10 +126,10 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
         self.check_depth().ok()?;
         match expr {
             Expr::Lit(lit) => match lit {
-                Literal::Int(n) => Some(ConstValue::Int(*n as i128)),
+                Literal::Int(n) => Some(ConstValue::Int(*n)),
                 Literal::Float(HashFloat(f)) => Some(ConstValue::Float(HashFloat(*f))),
                 Literal::String(s) => Some(ConstValue::String(s.clone())),
-                Literal::Number(n) => Some(ConstValue::Int(*n as i128)),
+                Literal::Number(n) => Some(ConstValue::Int((*n as u128).into())),
             },
             Expr::AnonymousTag(name) => self
                 .const_binds
@@ -217,6 +238,11 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
                 let rhs = self.eval(&bin.rhs.value)?;
                 lhs.eval_binop(&bin.op, &rhs)
             }
+            Expr::TargetQuery { kind, operand } => {
+                let operand = target_query_operand_ty(operand)?;
+                let value = self.target_layout?.query(*kind, &operand, None).ok()?;
+                Some(ConstValue::Int(i256::I256::from(value)))
+            }
             Expr::When(when) => {
                 let subject = when.subject.as_ref().and_then(|s| self.eval(&s.value))?;
                 self.eval_matching_when_arm(&when.arms, &subject)
@@ -259,19 +285,19 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
                     return Some(cv);
                 }
                 let bind = self.ast.defs.get(&name)?;
-                if !bind.is_constant {
+                if !bind.is_constant() {
                     return None;
                 }
                 self.check_arity(bind, &args).ok()?;
                 self.eval_bind_call(bind, &args, self.depth + 1)
             }
-            Expr::FnCall(call) => self.eval_fn_call_asm(call),
+            Expr::FnCall(_) => None,
             _ => None,
         }
     }
 
     fn eval_in_env(&mut self, env: &ConstEnv, depth: usize, expr: &Expr) -> Option<ConstValue> {
-        EvalFrame::new(env, self.ast, self.call_stack)
+        EvalFrame::new(env, self.ast, self.target_layout, self.call_stack)
             .with_depth(depth)
             .eval(expr)
     }
@@ -281,30 +307,6 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
             || Some(Vec::new()),
             |args| args.iter().map(|arg| self.eval(&arg.value)).collect(),
         )
-    }
-
-    fn eval_fn_call_asm(&mut self, call: &FnCall) -> Option<ConstValue> {
-        let args = self.eval_args(call.args.as_deref())?;
-        let path = &call.path.value;
-        let (method_name, is_qualified) = if !path.segments.is_empty() {
-            (path.segments[0], path.root.as_str() == "AsmBuilder")
-        } else if !path.root.as_str().is_empty() {
-            (path.root, false)
-        } else {
-            return None;
-        };
-
-        if !is_qualified
-            && method_name.as_str() != "new"
-            && !matches!(
-                method_name.as_str(),
-                "input" | "output" | "inout" | "lateout" | "clobber" | "clobber_memory" | "build"
-            )
-        {
-            return None;
-        }
-
-        crate::asm_intrinsics::try_fold_asm_builder(method_name.as_str(), &args)
     }
 
     fn eval_helper(&self, name: &str, args: &[ConstValue]) -> Option<ConstValue> {
@@ -318,11 +320,6 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
                 (Some(x), Some(y)) => Some(ConstValue::const_size_tag(if x >= y { x } else { y })),
                 _ => Some(ConstValue::dynamic_size_tag()),
             },
-            // Comparison helpers — operate on plain Int values and return Bool tags
-            ("gt", [a, b]) => self.compare_int_values(a, b, |x, y| x > y),
-            ("lt", [a, b]) => self.compare_int_values(a, b, |x, y| x < y),
-            ("ge", [a, b]) => self.compare_int_values(a, b, |x, y| x >= y),
-            ("le", [a, b]) => self.compare_int_values(a, b, |x, y| x <= y),
             _ => None,
         }
     }
@@ -346,18 +343,7 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
                     }
                 }
                 WhenArm::Else(body, _) => return self.eval(&body.value),
-                WhenArm::Cond {
-                    condition, body, ..
-                } => {
-                    let cond_cv = self.eval(&condition.value)?;
-                    match &cond_cv {
-                        ConstValue::Tag { name, .. } if name.as_str() == "True" => {
-                            return self.eval(&body.value);
-                        }
-                        ConstValue::Tag { name, .. } if name.as_str() == "False" => {}
-                        _ => return None,
-                    }
-                }
+                WhenArm::Cond { .. } => return None,
             }
         }
         None
@@ -438,21 +424,5 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
         let mut parts = vec![path.root.as_str()];
         parts.extend(path.segments.iter().map(|segment| segment.as_str()));
         Intern::new(parts.join("."))
-    }
-
-    fn compare_int_values(
-        &self,
-        a: &ConstValue,
-        b: &ConstValue,
-        cmp: fn(i128, i128) -> bool,
-    ) -> Option<ConstValue> {
-        match (a, b) {
-            (ConstValue::Int(x), ConstValue::Int(y)) => Some(ConstValue::Tag {
-                name: Intern::from_ref(if cmp(*x, *y) { "True" } else { "False" }),
-                qual_path: None,
-                args: vec![].into(),
-            }),
-            _ => None,
-        }
     }
 }
