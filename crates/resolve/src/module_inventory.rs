@@ -37,36 +37,37 @@ impl ModuleInventory {
             .insert(module_dir.to_path_buf(), files.clone());
         files
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::ModuleInventory;
-    use std::collections::HashMap;
-    use std::fs;
-
-    #[test]
-    fn discovers_and_caches_only_requested_module_directory() {
-        let root =
-            std::env::temp_dir().join(format!("gin_module_inventory_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("core/primitive")).unwrap();
-        fs::create_dir_all(root.join("core/target")).unwrap();
-        let primitive = root.join("core/primitive/bool.gin");
-        let target = root.join("core/target/arch.gin");
-        fs::write(&primitive, "Bool is True or False\n").unwrap();
-        fs::write(&target, "Architecture is 'x86_64'\n").unwrap();
-
-        let mut inventory = ModuleInventory::discover(&HashMap::new());
-        let primitive_module = root.join("core/primitive");
-
-        assert_eq!(
-            inventory.module_files(&primitive_module),
-            vec![primitive.clone()]
-        );
-        fs::remove_file(&primitive).unwrap();
-        assert_eq!(inventory.module_files(&primitive_module), vec![primitive]);
-        assert!(target.is_file());
-        let _ = fs::remove_dir_all(root);
+    fn contains_gin_files(&mut self, module_dir: &Path) -> bool {
+        if !self.module_files(module_dir).is_empty() {
+            return true;
+        }
+        let Ok(entries) = std::fs::read_dir(module_dir) else {
+            return false;
+        };
+        entries
+            .flatten()
+            .map(|entry| entry.path())
+            .any(|path| path.is_dir() && self.contains_gin_files(&path))
     }
 }
+
+pub fn child_folder_module_names(package_dir: &Path) -> Vec<String> {
+    let mut inventory = ModuleInventory::discover(&HashMap::new());
+    let Ok(entries) = std::fs::read_dir(package_dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<_> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            (path.is_dir() && inventory.contains_gin_files(&path))
+                .then(|| entry.file_name().to_string_lossy().into_owned())
+        })
+        .collect();
+    names.sort();
+    names
+}
+#[cfg(test)]
+#[path = "../tests/module_inventory_tests.rs"]
+mod tests;

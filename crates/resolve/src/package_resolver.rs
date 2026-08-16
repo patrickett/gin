@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use ast::{
@@ -73,12 +73,60 @@ impl ImportDependencyGraph {
 
         impacted
     }
+
+    /// Return file paths ordered so imported files are declared before importers.
+    pub fn declaration_file_order(&self, file_paths: &[PathBuf]) -> Vec<PathBuf> {
+        let mut imports_by_importer: HashMap<PathBuf, Vec<PathBuf>> = file_paths
+            .iter()
+            .cloned()
+            .map(|path| (path, Vec::new()))
+            .collect();
+
+        for (imported, importers) in &self.import_edges {
+            for importer in importers {
+                imports_by_importer
+                    .entry(importer.clone())
+                    .or_default()
+                    .push(imported.clone());
+            }
+        }
+
+        fn visit_imports(
+            path: &PathBuf,
+            imports_by_importer: &HashMap<PathBuf, Vec<PathBuf>>,
+            visited: &mut HashSet<PathBuf>,
+            sorted: &mut Vec<PathBuf>,
+        ) {
+            if visited.contains(path) {
+                return;
+            }
+
+            visited.insert(path.clone());
+
+            if let Some(deps) = imports_by_importer.get(path) {
+                for dep in deps {
+                    visit_imports(dep, imports_by_importer, visited, sorted);
+                }
+            }
+
+            sorted.push(path.clone());
+        }
+
+        let mut visited = HashSet::new();
+        let mut ordered = Vec::with_capacity(file_paths.len());
+        for path in file_paths {
+            visit_imports(path, &imports_by_importer, &mut visited, &mut ordered);
+        }
+
+        ordered
+    }
 }
 
 pub struct ResolveImportsWithGraph {
     pub files: Vec<ParsedFile>,
     pub cache: ParsedModuleCache,
     pub import_graph: ImportDependencyGraph,
+    pub package_graph: crate::ResolvedPackageGraph,
 }
 
 /// Full import resolution for binary compilation.
@@ -96,6 +144,7 @@ pub fn resolve_imports(
         files,
         cache: _,
         import_graph: _,
+        package_graph: _,
     } = resolve_imports_with_graph(entry_files, dependencies, ParsedModuleCache::default());
     files
 }
@@ -107,11 +156,13 @@ pub fn resolve_imports_with_graph(
 ) -> ResolveImportsWithGraph {
     let (graph, cache) = build_import_closure_with_cache(entry_files, dependencies, cache);
     let import_graph = ImportDependencyGraph::from_resolve_graph(&graph);
+    let package_graph = graph.packages.clone();
     let files = resolve(graph, &mut |path| cache.files.get(path).cloned());
     ResolveImportsWithGraph {
         files,
         cache,
         import_graph,
+        package_graph,
     }
 }
 
@@ -148,8 +199,8 @@ pub(crate) fn resolve(
         adj: _adj,
         node_aliases,
         symptoms,
+        packages,
     } = graph;
-
     let mut files: Vec<Option<ParsedFile>> = Vec::with_capacity(nodes.len());
 
     for (i, node) in nodes.iter().enumerate() {
@@ -160,6 +211,12 @@ pub(crate) fn resolve(
                 continue;
             }
         };
+
+        let package = packages.node(node.package);
+        parsed.output.ast.semantic_origin = Some(ast::prelude::FileSemanticOrigin {
+            package: package.instance.clone(),
+            module: packages.module_path(node.package, &node.path),
+        });
 
         if !node.qualifier.is_empty() {
             parsed.output.ast = parsed.output.ast.qualify_module_defs(&node.qualifier);
@@ -1106,250 +1163,6 @@ fn resolve_folder_module_files(
         .map(|p| (p, qual_prefix.to_string()))
         .collect()
 }
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::file_helpers::GinPackageExt;
-    use crate::graph::{ResolveGraph, ResolveNode, discovery};
-    use crate::module_inventory::ModuleInventory;
-    use crate::module_loader::ModuleLoader;
-    use diagnostic::Span;
-    use internment::Intern;
-    use parser::query::SourceParseExt;
-
-    fn make_pf(path: &str, source: &str) -> ParsedFile {
-        let output = source.parse_source_full();
-        ParsedFile {
-            path: PathBuf::from(path),
-            source: source.to_string(),
-            output,
-        }
-    }
-
-    #[test]
-    fn discovery_no_imports_returns_single_node() {
-        let pf = make_pf("main.gin", "x := 42\n");
-        let mut available = HashMap::new();
-        available.insert(PathBuf::from("main.gin"), pf);
-
-        let inventory = ModuleInventory::discover(&HashMap::new());
-        let mut loader = ModuleLoader::new(inventory, available.into_values());
-        let graph = discovery(&mut loader, &[PathBuf::from("main.gin")], &HashMap::new());
-
-        assert_eq!(graph.nodes.len(), 1);
-        assert_eq!(graph.nodes[0].path, PathBuf::from("main.gin"));
-        assert!(graph.nodes[0].qualifier.is_empty());
-        assert!(graph.symptoms.is_empty());
-    }
-
-    #[test]
-    fn resolve_qualifies_imported_files() {
-        let dep_src = "x := 42\n";
-        let dep_path = PathBuf::from("/dep.gin");
-        let entry_path = PathBuf::from("/main.gin");
-
-        let dep_pf = make_pf("/dep.gin", dep_src);
-        let entry_pf = make_pf("/main.gin", "main:\n    1\nreturn\n");
-
-        let graph = ResolveGraph {
-            nodes: vec![
-                ResolveNode {
-                    path: entry_path,
-                    qualifier: String::new(),
-                },
-                ResolveNode {
-                    path: dep_path.clone(),
-                    qualifier: "mydep".to_string(),
-                },
-            ],
-            adj: vec![vec![], vec![]],
-            node_aliases: vec![vec![], vec![]],
-            symptoms: vec![],
-        };
-
-        let files = resolve(graph, &mut |path| {
-            if path == "/dep.gin" {
-                Some(dep_pf.clone())
-            } else if path == "/main.gin" {
-                Some(entry_pf.clone())
-            } else {
-                None
-            }
-        });
-
-        assert_eq!(files.len(), 2);
-        let dep_ast = &files[1].output.ast;
-        assert!(
-            dep_ast
-                .defs
-                .contains_key(&Intern::<String>::from_ref("mydep.x")),
-            "expected qualified def 'mydep.x'"
-        );
-    }
-
-    #[test]
-    fn resolve_applies_symbol_aliases() {
-        use ast::{ModPath, Spanned};
-
-        let entry_src = "main:\n    foo\nreturn\n";
-        let entry_path = PathBuf::from("/main.gin");
-        let entry_pf = make_pf("/main.gin", entry_src);
-
-        let alias = SymbolAlias {
-            alias: Intern::<String>::from_ref("foo"),
-            target: Spanned::new(
-                ModPath::new(
-                    Intern::<String>::from_ref("dep"),
-                    vec![Intern::<String>::from_ref("bar")],
-                ),
-                SpanId::INVALID,
-            ),
-        };
-
-        let graph = ResolveGraph {
-            nodes: vec![ResolveNode {
-                path: entry_path,
-                qualifier: String::new(),
-            }],
-            adj: vec![vec![]],
-            node_aliases: vec![vec![alias]],
-            symptoms: vec![],
-        };
-
-        let files = resolve(graph, &mut |path| {
-            if path == "/main.gin" {
-                Some(entry_pf.clone())
-            } else {
-                None
-            }
-        });
-
-        assert_eq!(files.len(), 1);
-    }
-
-    #[test]
-    fn discovery_with_missing_available_file_is_ok() {
-        let pf = make_pf("main.gin", "use './nonexistent' as foo\n\nx := 42\n");
-        let mut available = HashMap::new();
-        available.insert(PathBuf::from("main.gin"), pf);
-
-        let inventory = ModuleInventory::discover(&HashMap::new());
-        let mut loader = ModuleLoader::new(inventory, available.into_values());
-        let graph = discovery(&mut loader, &[PathBuf::from("main.gin")], &HashMap::new());
-
-        assert_eq!(graph.nodes.len(), 1);
-    }
-
-    #[test]
-    fn resolve_with_empty_graph_returns_empty_vec() {
-        let graph = ResolveGraph {
-            nodes: vec![],
-            adj: vec![],
-            node_aliases: vec![],
-            symptoms: vec![],
-        };
-
-        let files = resolve(graph, &mut |_| None);
-        assert!(files.is_empty());
-    }
-
-    #[test]
-    fn resolve_attaches_symptoms_to_correct_file() {
-        let pf = make_pf("/main.gin", "x: 42\n");
-        let mut symptoms = vec![];
-        let diag = Diagnostic::new(
-            "use-duplicate-top-level",
-            "duplicate top-level definition `x` when merging module files",
-        )
-        .with_help(
-            "rename or move one of the definitions so each public top-level name is unique in the package",
-        )
-        .with_arg("symbol", "x")
-        .at_span(Span::new(0, 0));
-
-        symptoms.push((0usize, diag.clone()));
-
-        let graph = ResolveGraph {
-            nodes: vec![ResolveNode {
-                path: PathBuf::from("/main.gin"),
-                qualifier: String::new(),
-            }],
-            adj: vec![vec![]],
-            node_aliases: vec![vec![]],
-            symptoms,
-        };
-
-        let files = resolve(graph, &mut |path| {
-            if path == "/main.gin" {
-                Some(pf.clone())
-            } else {
-                None
-            }
-        });
-
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].output.symptoms.len(), 1);
-        assert_eq!(files[0].output.symptoms[0].message, diag.message);
-    }
-
-    struct TempDir {
-        path: PathBuf,
-    }
-
-    impl TempDir {
-        fn new(name: &str) -> Self {
-            let path =
-                std::env::temp_dir().join(format!("resolve_test_{name}_{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&path);
-            std::fs::create_dir_all(&path).unwrap();
-            Self { path }
-        }
-
-        fn add_file(&self, name: &str, contents: &str) {
-            std::fs::write(self.path.join(name), contents).unwrap();
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
-    }
-
-    #[test]
-    fn list_public_symbols_returns_defs_and_tags() {
-        let tmp = TempDir::new("list_public_symbols");
-        let pkg_dir = tmp.path.clone();
-
-        let config = r#"{"name":"testpkg","version":"0.0.0","authors":[]}"#;
-        tmp.add_file("flask.jsonc", config);
-
-        tmp.add_file(
-            "util.gin",
-            r#"Color is Red or Green
-
-help := 42
-
-private
-private_helper:
-    return
-"#,
-        );
-
-        let symbols = pkg_dir.list_public_symbols();
-
-        assert!(
-            symbols.contains(&"Color".to_string()),
-            "expected 'Color' to be listed as a public tag"
-        );
-        assert!(
-            symbols.contains(&"help".to_string()),
-            "expected 'help' to be listed as a public def"
-        );
-        assert!(
-            !symbols.contains(&"private_helper".to_string()),
-            "expected 'private_helper' to be excluded as a private def"
-        );
-    }
-}
+#[path = "../tests/package_resolver_tests.rs"]
+mod tests;

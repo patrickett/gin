@@ -88,7 +88,7 @@ impl GinPackageExt for Path {
     }
 
     fn find_public_def(&self, symbol_name: &str) -> Option<PathBuf> {
-        crate::public_symbols::find_public_def(self, symbol_name, true)
+        crate::public_symbols::find_public_def(self, symbol_name)
     }
 
     fn resolve_flask_dependencies(&self, config: &FlaskConfig) -> HashMap<String, PathBuf> {

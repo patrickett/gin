@@ -33,14 +33,6 @@ pub(crate) struct ModuleLoader {
 }
 
 impl ModuleLoader {
-    #[cfg(test)]
-    pub(crate) fn new(
-        inventory: ModuleInventory,
-        entry_files: impl IntoIterator<Item = ParsedFile>,
-    ) -> Self {
-        Self::with_cache(inventory, entry_files, ParsedModuleCache::default())
-    }
-
     pub(crate) fn with_cache(
         inventory: ModuleInventory,
         entry_files: impl IntoIterator<Item = ParsedFile>,
@@ -112,11 +104,7 @@ impl ModuleLoader {
         for path in paths {
             let file = self.parsed_files.get(&path)?;
             let name = internment::Intern::<String>::from_ref(symbol);
-            if (!file.output.ast.private_defs.contains(&name)
-                && file.output.ast.defs.contains_key(&name))
-                || (!file.output.ast.private_tags.contains(&name)
-                    && file.output.ast.tags.contains_key(&name))
-            {
+            if file.output.ast.contains_public_symbol(&name) {
                 return Some(path);
             }
         }
@@ -147,63 +135,6 @@ impl ModuleLoader {
         }
     }
 }
-
 #[cfg(test)]
-mod tests {
-    use super::ModuleLoader;
-    use crate::module_inventory::ModuleInventory;
-    use std::collections::HashMap;
-    use std::fs;
-
-    #[test]
-    fn reuses_cached_parse_after_source_is_removed() {
-        let root =
-            std::env::temp_dir().join(format!("gin_module_loader_cache_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        let core = root.join("core");
-        fs::create_dir_all(core.join("primitive")).unwrap();
-        fs::write(core.join("flask.jsonc"), "{}").unwrap();
-        let bool_path = core.join("primitive/bool.gin");
-        fs::write(&bool_path, "Bool is True or False\n").unwrap();
-
-        let mut dependencies = HashMap::new();
-        dependencies.insert("core".to_string(), core.clone());
-        let inventory = ModuleInventory::discover(&dependencies);
-        let mut loader = ModuleLoader::new(inventory, []);
-        let primitive = core.join("primitive");
-
-        assert_eq!(
-            loader.find_public_def(&primitive, "Bool"),
-            Some(bool_path.clone())
-        );
-        fs::remove_file(&bool_path).unwrap();
-        assert_eq!(loader.find_public_def(&primitive, "Bool"), Some(bool_path));
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn parses_only_the_requested_module() {
-        let root = std::env::temp_dir().join(format!("gin_module_loader_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        let core = root.join("core");
-        fs::create_dir_all(core.join("primitive")).unwrap();
-        fs::create_dir_all(core.join("target")).unwrap();
-        fs::write(core.join("flask.jsonc"), "{}").unwrap();
-        let bool_path = core.join("primitive/bool.gin");
-        let target_path = core.join("target/arch.gin");
-        fs::write(&bool_path, "Bool is True or False\n").unwrap();
-        fs::write(&target_path, "Architecture is 'x86_64'\n").unwrap();
-
-        let mut dependencies = HashMap::new();
-        dependencies.insert("core".to_string(), core.clone());
-        let inventory = ModuleInventory::discover(&dependencies);
-        let mut loader = ModuleLoader::new(inventory, []);
-
-        assert_eq!(
-            loader.find_public_def(&core.join("primitive"), "Bool"),
-            Some(bool_path)
-        );
-        assert!(loader.parsed_file(&target_path).is_none());
-        let _ = fs::remove_dir_all(root);
-    }
-}
+#[path = "../tests/module_loader_tests.rs"]
+mod tests;

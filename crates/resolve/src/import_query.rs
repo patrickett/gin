@@ -515,36 +515,5 @@ pub fn resolve_current_module_def_span(
 
 /// Resolve the definition span for a `use Symbol` import (current module).
 #[cfg(test)]
-mod tests {
-    use super::part_index_in_dotted_path;
-
-    #[test]
-    fn part_index_root() {
-        assert_eq!(part_index_in_dotted_path("core.true", 0), 0);
-        assert_eq!(part_index_in_dotted_path("core.true", 3), 0);
-    }
-
-    #[test]
-    fn part_index_first_segment() {
-        assert_eq!(part_index_in_dotted_path("core.true", 5), 1);
-        assert_eq!(part_index_in_dotted_path("core.true", 8), 1);
-    }
-
-    #[test]
-    fn part_index_multi_segment() {
-        assert_eq!(part_index_in_dotted_path("a.b.c", 0), 0);
-        assert_eq!(part_index_in_dotted_path("a.b.c", 1), 0);
-        assert_eq!(part_index_in_dotted_path("a.b.c", 2), 1);
-        assert_eq!(part_index_in_dotted_path("a.b.c", 3), 1);
-        assert_eq!(part_index_in_dotted_path("a.b.c", 4), 2);
-        assert_eq!(part_index_in_dotted_path("a.b.c", 5), 2);
-        assert_eq!(part_index_in_dotted_path("a.b.c", 6), 2);
-    }
-
-    #[test]
-    fn part_index_edge_right_at_dot() {
-        assert_eq!(part_index_in_dotted_path("core.true", 4), 0);
-        assert_eq!(part_index_in_dotted_path("a.b.c", 2), 1);
-        assert_eq!(part_index_in_dotted_path("a.b.c", 5), 2);
-    }
-}
+#[path = "../tests/import_query_tests.rs"]
+mod tests;

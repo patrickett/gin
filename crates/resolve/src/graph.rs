@@ -19,12 +19,14 @@ use crate::module_graph::{ImportEdge, detect_first_cycle};
 use crate::module_inventory::ModuleInventory;
 use crate::module_loader::{ModuleLoader, ParsedModuleCache};
 use crate::package_resolver::resolve_module_import;
+use crate::resolved_package_graph::{ResolvedPackageGraph, ResolvedPackageId};
 
 /// A single file in the import graph.
 #[derive(Debug, Clone)]
 pub struct ResolveNode {
     pub path: PathBuf,
     pub qualifier: String,
+    pub package: ResolvedPackageId,
 }
 
 /// The full import dependency graph for a package.
@@ -34,6 +36,7 @@ pub struct ResolveGraph {
     pub adj: Vec<Vec<ImportEdge>>,
     pub node_aliases: Vec<Vec<SymbolAlias>>,
     pub symptoms: Vec<(usize, Diagnostic)>,
+    pub packages: ResolvedPackageGraph,
 }
 
 /// Collect all `.gin` files for a package, parse any that aren't already
@@ -53,9 +56,13 @@ pub(crate) fn build_import_closure_with_cache(
     cache: ParsedModuleCache,
 ) -> (ResolveGraph, ParsedModuleCache) {
     let entry_paths: Vec<PathBuf> = entry_files.iter().map(|f| f.path.clone()).collect();
+    let packages = entry_paths
+        .first()
+        .map(|path| ResolvedPackageGraph::discover(path))
+        .unwrap_or_else(|| ResolvedPackageGraph::discover(Path::new(".")));
     let inventory = ModuleInventory::discover(dependencies);
     let mut loader = ModuleLoader::with_cache(inventory, entry_files, cache);
-    let graph = discovery(&mut loader, &entry_paths, dependencies);
+    let graph = discovery_with_packages(&mut loader, &entry_paths, dependencies, packages);
 
     (graph, loader.into_cache())
 }
@@ -64,15 +71,21 @@ pub(crate) fn build_import_closure_with_cache(
 ///
 /// Processes nodes iteratively, resolving each file's imports and adding
 /// newly discovered files to the graph. Detects cycles and duplicate qualifiers.
-pub(crate) fn discovery(
+fn discovery_with_packages(
     loader: &mut ModuleLoader,
     entry_paths: &[PathBuf],
     deps: &HashMap<String, PathBuf>,
+    packages: ResolvedPackageGraph,
 ) -> ResolveGraph {
     let mut nodes: Vec<ResolveNode> = Vec::new();
     let mut adj: Vec<Vec<ImportEdge>> = Vec::new();
     let mut node_aliases: Vec<Vec<SymbolAlias>> = Vec::new();
-    let mut symptoms: Vec<(usize, Diagnostic)> = Vec::new();
+    let mut symptoms: Vec<(usize, Diagnostic)> = packages
+        .diagnostics
+        .iter()
+        .cloned()
+        .map(|diagnostic| (0, diagnostic))
+        .collect();
     let entry_path_set: HashSet<&Path> = entry_paths.iter().map(PathBuf::as_path).collect();
     let mut seen: HashMap<PathBuf, String> = HashMap::new();
     let mut node_by_path: HashMap<PathBuf, usize> = HashMap::new();
@@ -86,6 +99,7 @@ pub(crate) fn discovery(
             nodes.push(ResolveNode {
                 path,
                 qualifier: String::new(),
+                package: packages.root,
             });
             adj.push(Vec::new());
             node_aliases.push(Vec::new());
@@ -109,6 +123,15 @@ pub(crate) fn discovery(
             continue;
         };
         let spans = &from_parsed.output.ast.span_table;
+        let package_dependencies = packages
+            .node(nodes[from_idx].package)
+            .resolved_dependency_roots();
+        let dependency_roots =
+            if packages.node(nodes[from_idx].package).config.name() == "anonymous" {
+                deps
+            } else {
+                &package_dependencies
+            };
 
         for import in &from_parsed.output.ast.uses {
             for module_import in &import.0 {
@@ -118,7 +141,7 @@ pub(crate) fn discovery(
                     module_import,
                     &from_dir,
                     loader,
-                    deps,
+                    dependency_roots,
                     spans,
                     span_id,
                     &mut import_symptoms,
@@ -178,6 +201,9 @@ pub(crate) fn discovery(
                         nodes.push(ResolveNode {
                             path: file_path.clone(),
                             qualifier: qual.clone(),
+                            package: packages
+                                .package_for_import(nodes[from_idx].package, &file_path)
+                                .unwrap_or(nodes[from_idx].package),
                         });
                         adj.push(Vec::new());
                         node_aliases.push(Vec::new());
@@ -222,131 +248,10 @@ pub(crate) fn discovery(
         adj,
         node_aliases,
         symptoms,
+        packages,
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::discovery;
-    use crate::ParsedFile;
-    use crate::module_inventory::ModuleInventory;
-    use crate::module_loader::ModuleLoader;
-    use parser::query::SourceParseExt;
-    use std::collections::HashMap;
-    use std::fs;
-    use std::path::{Path, PathBuf};
-
-    fn parsed_file(path: &Path) -> ParsedFile {
-        let source = fs::read_to_string(path).unwrap();
-        let output = source.parse_source_full();
-        ParsedFile {
-            path: path.to_path_buf(),
-            source,
-            output,
-        }
-    }
-
-    fn temp_dir(name: &str) -> PathBuf {
-        let path =
-            std::env::temp_dir().join(format!("gin_resolve_graph_{name}_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(&path).unwrap();
-        path
-    }
-
-    #[test]
-    fn discovery_uses_loader_cached_symbol_after_dependency_source_is_removed() {
-        let root = temp_dir("parsed_symbol_index");
-        let core_dir = root.join("core");
-        fs::create_dir_all(&core_dir).unwrap();
-        fs::write(core_dir.join("flask.jsonc"), "{}").unwrap();
-
-        let main_path = root.join("main.gin");
-        let int_path = core_dir.join("int.gin");
-        fs::write(&main_path, "use core.Int\n").unwrap();
-        fs::write(&int_path, "Int is Unit\n").unwrap();
-
-        let main = parsed_file(&main_path);
-        let int = parsed_file(&int_path);
-        let mut dependencies = HashMap::new();
-        dependencies.insert("core".to_string(), core_dir);
-        let inventory = ModuleInventory::discover(&dependencies);
-        let mut loader = ModuleLoader::new(inventory, [main, int]);
-        fs::remove_file(&int_path).unwrap();
-        let graph = discovery(&mut loader, &[main_path], &dependencies);
-
-        assert!(graph.symptoms.is_empty(), "{:#?}", graph.symptoms);
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn self_import_of_package_entry_does_not_conflict_with_its_entry_qualifier() {
-        let root = temp_dir("self_import_entry");
-        let core_dir = root.join("core");
-        let primitive_dir = core_dir.join("primitive");
-        fs::create_dir_all(&primitive_dir).unwrap();
-        fs::write(core_dir.join("flask.jsonc"), "{}").unwrap();
-
-        let marker_path = core_dir.join("marker.gin");
-        let bool_path = primitive_dir.join("bool.gin");
-        fs::write(&marker_path, "use core.primitive.Bool\n").unwrap();
-        fs::write(&bool_path, "Bool is True or False\n").unwrap();
-
-        let mut dependencies = HashMap::new();
-        dependencies.insert("core".to_string(), core_dir.clone());
-        let inventory = ModuleInventory::discover(&dependencies);
-        let mut loader = ModuleLoader::new(
-            inventory,
-            [parsed_file(&marker_path), parsed_file(&bool_path)],
-        );
-        let graph = discovery(
-            &mut loader,
-            &[marker_path, bool_path.clone()],
-            &dependencies,
-        );
-
-        assert!(graph.symptoms.is_empty(), "{:#?}", graph.symptoms);
-        let bool_node = graph
-            .nodes
-            .iter()
-            .find(|node| node.path == bool_path)
-            .unwrap();
-        assert!(bool_node.qualifier.is_empty());
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn build_import_closure_skips_dependencies_without_entry_imports() {
-        let root = temp_dir("unused_dependency");
-        let dependency_dir = root.join("dependency");
-        fs::create_dir_all(&dependency_dir).unwrap();
-        fs::write(dependency_dir.join("unused.gin"), "this is not valid gin\n").unwrap();
-
-        let main_path = root.join("main.gin");
-        fs::write(&main_path, "main:\nreturn\n").unwrap();
-        let mut dependencies = HashMap::new();
-        dependencies.insert("dependency".to_string(), dependency_dir);
-
-        let (_graph, available) =
-            super::build_import_closure(vec![parsed_file(&main_path)], &dependencies);
-
-        assert_eq!(available.len(), 1);
-        assert!(available.contains_key(&main_path));
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn module_loader_excludes_private_definitions() {
-        let root = temp_dir("private_symbol");
-        let file_path = root.join("private.gin");
-        fs::write(&file_path, "private\nHidden is Unit\n").unwrap();
-
-        let mut dependencies = HashMap::new();
-        dependencies.insert("private".to_string(), root.clone());
-        let inventory = ModuleInventory::discover(&dependencies);
-        let mut loader = ModuleLoader::new(inventory, []);
-
-        assert!(loader.find_public_def(&root, "Hidden").is_none());
-        let _ = fs::remove_dir_all(root);
-    }
-}
+#[path = "../tests/graph_tests.rs"]
+mod tests;

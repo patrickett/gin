@@ -124,16 +124,25 @@ pub fn local_bundle_def_location(
     file_reader: &dyn Fn(&Path) -> Option<ParsedFile>,
 ) -> Option<DefLocation> {
     let base_dir = file_path.parent()?;
-    let resolved = base_dir.join(local_path);
-    let resolved = std::fs::canonicalize(&resolved).unwrap_or(resolved);
+    let mut resolved = normalize_local_path_components(&base_dir.join(local_path));
+    if !resolved.exists()
+        && let Some(without_suffix) = local_path
+            .to_string_lossy()
+            .strip_suffix('.')
+            .map(PathBuf::from)
+    {
+        let alternate = normalize_local_path_components(&base_dir.join(without_suffix));
+        if alternate.exists() {
+            resolved = alternate;
+        }
+    }
     if resolved.is_dir() {
         return public_symbol_in_module_dir(&resolved, export, file_reader);
     }
     let sym = export.rsplit('.').next().unwrap_or(export);
     let parent = resolved.parent()?;
     let def_file = parent.find_public_def(sym)?;
-    let def_canonical = std::fs::canonicalize(&def_file).unwrap_or(def_file.clone());
-    if std::fs::canonicalize(&resolved).unwrap_or(resolved) != def_canonical {
+    if parent != def_file.parent()? {
         return None;
     }
     let parsed = file_reader(&def_file)?;
@@ -144,6 +153,20 @@ pub fn local_bundle_def_location(
     })
 }
 
+fn normalize_local_path_components(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            component => out.push(component.as_os_str()),
+        }
+    }
+    out
+}
+
 /// Same-folder sibling: `use Sym` in a `use` line (definition in another file in the folder).
 pub fn current_module_sibling_def_location(
     file_path: &Path,
@@ -151,7 +174,7 @@ pub fn current_module_sibling_def_location(
     file_reader: &dyn Fn(&Path) -> Option<ParsedFile>,
 ) -> Option<DefLocation> {
     let file_dir = file_path.parent()?;
-    let def_file = crate::public_symbols::find_public_def(file_dir, symbol, false)?;
+    let def_file = crate::public_symbols::find_public_def(file_dir, symbol)?;
     let parsed = file_reader(&def_file)?;
     let byte_range = parsed.output.ast.definition_span(symbol)?;
     Some(DefLocation {
@@ -542,6 +565,17 @@ pub fn cursor_definition(
         return Some(CursorDefinition::OtherFile(loc));
     }
 
+    if let Some(import_target) = crate::import_query::resolve_import_at(ast, source, byte_pos)
+        && let Some(import_loc) =
+            def_location_for_import_target(file_path, import_target, byte_pos, ast, file_reader)
+        && let ImportNavLocation::Definition(loc) = import_loc
+    {
+        if loc.file == file_path {
+            return Some(CursorDefinition::SameFile(loc.byte_range));
+        }
+        return Some(CursorDefinition::OtherFile(loc));
+    }
+
     if let Some(span) = ast.definition_span(&word) {
         return Some(CursorDefinition::SameFile(span));
     }
@@ -567,9 +601,18 @@ fn parameter_definition_span(ast: &FileAst, word: &str, byte_pos: usize) -> Opti
     let key = internment::Intern::<String>::from_ref(word);
     // Search standard defs (top-level binds).
     for bind in ast.defs.values() {
+        if bind.receiver_type.is_some() {
+            continue;
+        }
         let Some(params) = bind.params.as_ref() else {
             continue;
         };
+        if let Some(param) = params.get(&key) {
+            let span = span_table.get(param.name_span);
+            if span.contains(byte_pos) {
+                return Some(span.start()..span.end());
+            }
+        }
         if !params.contains_key(&key) || !bind_body_contains(span_table, bind, byte_pos) {
             continue;
         }
@@ -587,13 +630,25 @@ fn parameter_definition_span(ast: &FileAst, word: &str, byte_pos: usize) -> Opti
             ast::DeclareValue::Has(members) => members,
             _ => continue,
         };
+        let type_declares_param = decl
+            .params
+            .as_ref()
+            .is_some_and(|params| params.contains_key(&key));
         for m in members {
             if let ast::HasMember::Function(f) = m
                 && f.params.contains_key(&key)
-                && byte_in_has_function_body(f, byte_pos, span_table)
+                && !type_declares_param
             {
-                let span = span_table.get(f.params.get(&key)?.name_span);
-                return Some(span.start()..span.end());
+                if let Some(param) = f.params.get(&key) {
+                    let span = span_table.get(param.name_span);
+                    if span.contains(byte_pos) {
+                        return Some(span.start()..span.end());
+                    }
+                }
+                if byte_in_has_function_body(f, byte_pos, span_table) {
+                    let span = span_table.get(f.params.get(&key)?.name_span);
+                    return Some(span.start()..span.end());
+                }
             }
         }
     }
@@ -747,12 +802,9 @@ fn type_param_def_span(ast: &FileAst, word: &str, byte_pos: usize) -> Option<Ran
         };
         for function in members {
             let contains_type_param = match function {
-                ast::HasMember::Property(property) => has_expr_span_contains(
-                    property.ty.as_deref(),
-                    span_table,
-                    byte_pos,
-                    &key,
-                ),
+                ast::HasMember::Property(property) => {
+                    has_expr_span_contains(property.ty.as_deref(), span_table, byte_pos, &key)
+                }
                 ast::HasMember::Function(function) => {
                     has_expr_span_contains(
                         function.return_ty.as_deref(),

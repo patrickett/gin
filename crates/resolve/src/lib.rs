@@ -1,11 +1,13 @@
 pub(crate) mod file_helpers;
 pub(crate) mod folder_module;
+mod front_end;
 pub(crate) mod graph;
 pub(crate) mod import_merge;
 pub(crate) mod import_query;
 pub(crate) mod import_suggest;
 pub(crate) mod package_resolver;
 pub(crate) mod public_symbols;
+pub mod resolved_package_graph;
 pub(crate) mod symbol_location;
 
 mod module_graph;
@@ -13,13 +15,19 @@ mod module_inventory;
 mod module_loader;
 
 // Re-export batch pipeline
+pub use front_end::{PackageFrontEndOptions, PackageFrontEndOutput, run_package_front_end};
 pub use graph::{ResolveGraph, ResolveNode};
+pub use module_inventory::child_folder_module_names;
 pub use module_loader::ParsedModuleCache;
 pub use package_resolver::{
     ImportDependencyGraph, ResolveImportsWithGraph, resolve_import_symptoms, resolve_imports,
     resolve_imports_with_graph,
 };
 pub use public_symbols::find_public_def;
+pub use resolved_package_graph::{
+    ResolvedDependencyEdge, ResolvedDependencyState, ResolvedPackageGraph, ResolvedPackageId,
+    ResolvedPackageNode, UnresolvedDependency,
+};
 // Re-export per-request queries
 pub use import_query::{
     ImportTarget, def_span_for_import_target, find_package_root, hover_for_import_target,
