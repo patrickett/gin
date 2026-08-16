@@ -2,7 +2,9 @@
 
 use analysis::PackageCache;
 use test_fixtures::TempPackage;
-use test_fixtures::gin_core::{BOOL_GIN, COPY_GIN, INT_GIN, LIST_GIN, POINTER_GIN, SIZED_GIN, STRING_GIN, TYPE_GIN};
+use test_fixtures::gin_core::{
+    BOOL_GIN, INT_GIN, LIST_GIN, POINTER_GIN, SIZED_GIN, STRING_GIN, TYPE_GIN,
+};
 
 const RANGE_GIN: &str = r#"use '../'.Bounded
 
@@ -36,40 +38,12 @@ const MARKER_PACKAGE: &[(&str, &str)] = &[
     (POINTER_GIN, "primitive/pointer.gin"),
     (STRING_GIN, "string/string.gin"),
     (SIZED_GIN, "marker/sized.gin"),
-    (COPY_GIN, "marker/copy.gin"),
 ];
 
 fn write_marker_package(pkg: &TempPackage) {
     for (content, rel) in MARKER_PACKAGE {
         pkg.write(rel, content);
     }
-}
-
-#[test]
-fn package_diagnostics_copy_gin_is_clean() {
-    let pkg = TempPackage::new("copy_marker_diagnostics");
-    pkg.write_flask("core");
-    write_marker_package(&pkg);
-
-    let engine = PackageCache::for_test();
-    let rels: Vec<&str> = MARKER_PACKAGE.iter().map(|(_, rel)| *rel).collect();
-    let paths: Vec<_> = rels.iter().map(|rel| pkg.root.join(rel)).collect();
-    for path in &paths {
-        engine.add_file(path.clone()).unwrap();
-    }
-
-    let copy_path = pkg.root.join("marker/copy.gin");
-    let diagnostics = engine.all_diagnostics(&paths);
-    let copy_diagnostics = diagnostics.get(&copy_path).cloned().unwrap_or_default();
-    let semantic_diagnostics: Vec<_> = copy_diagnostics
-        .iter()
-        .filter(|diagnostic| !diagnostic.code.slug().starts_with("use-"))
-        .collect();
-
-    assert!(
-        semantic_diagnostics.is_empty(),
-        "copy.gin should have no parser/type diagnostics through analysis/LSP path: {semantic_diagnostics:?}"
-    );
 }
 
 #[test]
@@ -80,7 +54,7 @@ fn package_hover_compute_size_name_not_range_tag() {
     write_marker_package(&pkg);
     let sized_path = pkg.root.join("marker/sized.gin");
 
-    let bind_line = "compute_size(x Type) Size := when x is";
+    let bind_line = "compute_size(x ReflectionType) Size := when x is";
     let byte = sized_src.find(bind_line).expect("compute_size bind") as u32
         + bind_line.find("compute_size").expect("name") as u32;
 
@@ -95,7 +69,7 @@ fn package_hover_compute_size_name_not_range_tag() {
         .markdown;
 
     assert_eq!(
-        hover, "```gin\ncore.marker\n```\n\n```gin\ncompute_size(x Type) Size\n```",
+        hover, "```gin\ncore.marker\n```\n\n```gin\ncompute_size(x ReflectionType) Size\n```",
         "expected compute_size signature"
     );
 }
@@ -109,7 +83,7 @@ fn package_hover_compute_size_wins_over_phantom_range_declare_span() {
     let sized_path = pkg.write("marker/sized.gin", sized_src);
     let range_path = pkg.write("primitive/range.gin", range_src);
 
-    let bind_line = "compute_size(x Type) Size := when x is";
+    let bind_line = "compute_size(x ReflectionType) Size := when x is";
     let byte = sized_src.find(bind_line).expect("compute_size bind") as u32
         + bind_line.find("compute_size").expect("name") as u32;
 
@@ -123,7 +97,7 @@ fn package_hover_compute_size_wins_over_phantom_range_declare_span() {
         .markdown;
 
     assert_eq!(
-        hover, "```gin\ncore.marker\n```\n\n```gin\ncompute_size(x Type) Size\n```",
+        hover, "```gin\ncore.marker\n```\n\n```gin\ncompute_size(x ReflectionType) Size\n```",
         "def name must win over any declare-span overlap"
     );
 }

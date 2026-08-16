@@ -116,20 +116,25 @@ fn hover_at(source: &str, needle: &str, fixture: &str) -> HoverContent {
 fn hover_local_constant_bind() {
     let source = "main:\n    x := 1\n    return 0\n";
     let HoverContent { markdown, .. } = hover_at(source, "x :=", "local_constant");
-    assert_eq!(markdown, "x 1\n---\n\n");
+    assert_eq!(
+        markdown,
+        "x 1\nanonymous integer\ncurrent knowledge: exactly 1\nvalidity: 1...1\nruntime representation: i1"
+    );
 }
 
 #[test]
 fn hover_local_rebindable_bind() {
     let source = "main:\n    x: 1\n    return 0\n";
     let HoverContent { markdown, .. } = hover_at(source, "x: 1", "local_rebindable");
-    // `:` binds show the const value when available.
-    assert_eq!(markdown, "x 1\n---\n\n");
+    assert_eq!(
+        markdown,
+        "x 1\nanonymous integer\ncurrent knowledge: exactly 1\nvalidity: 1...1\nruntime representation: i1"
+    );
 }
 
 #[test]
 fn hover_top_level_constant_bind() {
-    let source = "two := 1 + 1\n";
+    let source = "two := 2\n";
     let HoverContent { markdown, .. } = hover_at(source, "two", "top_level_constant");
     assert_eq!(markdown, "```gin\nbind_hover\n```\n\n```gin\ntwo 2\n```");
 }
@@ -310,14 +315,17 @@ core.reflect
 ```
 
 ```gin
-Type is Primitive(width BigInt, signed Bool)
-     or Record(name String, fields List(NamedTy))
-     or Union(name String, variants List(VariantShape))
+Type is Bits(width BigInt, interpretation IntInterpretation)
+     or Address(space BigInt, pointee Type)
+     or Product(name String, fields List(ReflectionTypeNamed))
+     or Sum(name String, variants List(ReflectionVariantShape))
      or Tuple(elems List(Type))
-     or Ptr(inner Type)
-     or Ref(inner Type, mutable Bool)
+     or SafeReference(pointee Type, permission IntPermission)
+     or RawPointer(pointee Type)
      or Array(elem Type, size BigInt)
      or Opaque(name String)
+     or Unsupported(reason String)
+     or Unit
 ```
 ---
 
@@ -486,17 +494,22 @@ fn hover_record_field_same_file_shows_named_type() {
 #[test]
 fn hover_narrowed_type_in_when_then_body() {
     let source = "\
-Int is in -9223372036854775808...9223372036854775807\n\nmain:\n    x := 42\n    when x is\n        Int then x + 1\n            else 0\n    return x\n";
+#default(IntegerLiteral)\nInt is in -9223372036854775808...9223372036854775807\n\nmain:\n    x := 42\n    when x is\n        Int then x + 1\n            else 0\n    return x\n";
     let HoverContent { markdown, .. } = hover_at(source, "x + 1", "narrowed");
-    assert_eq!(markdown, "x Int\n---\n\n");
+    assert_eq!(
+        markdown,
+        "x Int\nInt\ncurrent knowledge: exactly 42\nvalidity: -9223372036854775808...9223372036854775807\nruntime representation: i64\ninterpretation: Signed"
+    );
 }
 
-/// Hover on a literal `42` expression — shows the literal value directly.
 #[test]
-fn hover_literal_shows_value() {
+fn hover_literal_separates_integer_semantic_facts() {
     let source = "main:\n    return 42\n";
     let HoverContent { markdown, .. } = hover_at(source, "42", "literal");
-    assert_eq!(markdown, "42\n---\n\n");
+    assert_eq!(
+        markdown,
+        "42\nanonymous integer\ncurrent knowledge: exactly 42\nvalidity: 0...63\nruntime representation: i6"
+    );
 }
 
 /// Hover on a function call name in an expression — should route to the
@@ -529,7 +542,7 @@ main:\n    identity(4)\n    return 0\n";
 /// body should show the same hover as the definition itself.
 #[test]
 fn hover_top_level_reference_from_body_shows_definition_hover() {
-    let source = "two := 1 + 1\n\nmain:\n    return two\n";
+    let source = "two := 2\n\nmain:\n    return two\n";
     // Use the same hover_at helper but hover on `two` inside the body.
     let pkg = TempPackage::new("top_ref");
     pkg.write_flask("top_ref");

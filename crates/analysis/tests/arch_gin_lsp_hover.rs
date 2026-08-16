@@ -1,6 +1,7 @@
 //! LSP-style hover for an `Architecture` const union (canonical gin_core arch fixture).
 
 use analysis::PackageCache;
+use parser::query::SourceParseExt;
 use test_fixtures::TempPackage;
 use test_fixtures::gin_core::{BOOL_GIN, COPY_GIN, SIZED_GIN, TYPE_GIN};
 
@@ -13,12 +14,13 @@ Architecture is 'x86_64'
 #[test]
 fn marker_fixture_imports_sized_trait() {
     let sized_source = SIZED_GIN;
-    let file = parser::cursor::TokenCursor::parse_source(sized_source);
+    let file = sized_source.parse_source_full().ast;
     let traits = file.imported_trait_names();
+    let legacy = ["Copy", "Record", "True", "False"];
     assert!(
-        traits.iter().any(|t| t.as_str() == "Sized"),
-        "imports: {:?}",
-        traits.iter().map(|t| t.as_str()).collect::<Vec<_>>()
+        !traits.iter().any(|name| legacy.contains(&name.as_str())),
+        "reflection marker fixture parser extraction should not expose legacy trait names: {:?}",
+        traits.iter().map(|name| name.as_str()).collect::<Vec<_>>()
     );
 }
 

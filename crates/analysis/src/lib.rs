@@ -3,6 +3,9 @@ pub mod engine;
 pub mod hover;
 pub mod package_cache;
 
+#[cfg(test)]
+extern crate self as analysis;
+
 // Internal modules used by PackageCache.
 mod semantic_queries;
 pub use semantic_queries::HoverDocExt;

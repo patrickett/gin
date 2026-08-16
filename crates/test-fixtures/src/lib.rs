@@ -11,6 +11,21 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static FIXTURE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+pub fn host_target_triple() -> String {
+    let arch = match std::env::consts::ARCH {
+        "aarch64" => "aarch64",
+        "x86_64" => "x86_64",
+        arch => panic!("unsupported test host architecture: {arch}"),
+    };
+    let suffix = match std::env::consts::OS {
+        "linux" => "unknown-linux-gnu",
+        "macos" => "apple-darwin",
+        "windows" => "pc-windows-msvc",
+        os => panic!("unsupported test host operating system: {os}"),
+    };
+    format!("{arch}-{suffix}")
+}
+
 /// Unique directory under the system temp dir (parallel-safe).
 pub fn unique_temp_dir(prefix: &str) -> PathBuf {
     let id = FIXTURE_COUNTER.fetch_add(1, Ordering::Relaxed);

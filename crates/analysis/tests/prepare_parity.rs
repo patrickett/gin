@@ -8,7 +8,7 @@ use std::path::PathBuf;
 #[test]
 fn package_typecheck_runs_prepare_before_transform() {
     let path = PathBuf::from("/tmp/prepare_parity_main.gin");
-    let source = "main:\n    return 0\n";
+    let source = "#default(IntegerLiteral)\nDefaultInteger is in 0...255\nmain:\n    return 0\n";
 
     let engine = PackageCache::for_test();
     engine.add_file(path.clone()).unwrap();
@@ -24,7 +24,10 @@ fn package_typecheck_runs_prepare_before_transform() {
 
 #[test]
 fn compile_and_ide_paths_share_cross_file_compile_time_context() {
-    let package_a: ast::FileAst = "shared_const := 1\n".parse_source_full().ast;
+    let package_a: ast::FileAst =
+        "#default(IntegerLiteral)\nDefaultInteger is in 0...255\nshared_const := 1\n"
+            .parse_source_full()
+            .ast;
     let package_b: ast::FileAst = "main() Int: return shared_const\n".parse_source_full().ast;
     let compile_target = CompileTarget::Library;
 
