@@ -956,7 +956,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             if self.is_at(&Token::ParenClose) {
                 break;
             }
-            if !self.eat(&Token::Comma) {
+            if !(self.eat_list_separator() || self.previous_token_was_newline_separator()) {
                 // No comma — newline is the separator (handled by skip_newlines
                 // at the top of the next iteration).
                 continue;

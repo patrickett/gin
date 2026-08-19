@@ -26,6 +26,17 @@ fn standalone_not_equals_is_unexpected_token() {
 }
 
 #[test]
+fn standalone_exclamation_equals_is_lex_error() {
+    let output = "main:\n  !=\n    return".parse_source_full();
+    assert!(
+        output
+            .symptoms
+            .iter()
+            .any(|diagnostic| diagnostic.code.slug() == "lex-unexpected-character"),
+    );
+}
+
+#[test]
 fn standalone_equals_after_blank_lines_uses_equals_span() {
     let output = "main:\n  =\n    return".parse_source_full();
     assert!(has_unexpected_token_symptom(&output, "`=`"));
@@ -84,6 +95,17 @@ fn infix_double_equals_is_unexpected_token() {
 fn infix_not_equals_is_unexpected_token() {
     let output = "x: a /= b\n".parse_source_full();
     assert!(has_unexpected_token_symptom(&output, "`/=`"));
+}
+
+#[test]
+fn infix_not_equals_with_bang_equals_is_lex_error() {
+    let output = "x: a != b\n".parse_source_full();
+    assert!(
+        output
+            .symptoms
+            .iter()
+            .any(|diagnostic| diagnostic.code.slug() == "lex-unexpected-character"),
+    );
 }
 
 #[test]

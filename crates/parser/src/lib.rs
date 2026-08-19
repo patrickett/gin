@@ -9,6 +9,7 @@ pub mod cursor;
 pub mod declare;
 pub mod expr;
 mod int_range;
+mod lowering;
 pub mod params;
 pub mod path;
 pub mod query;
@@ -23,7 +24,8 @@ use ast::FileAst;
 ///
 /// This is the primary entry point used by external consumers.
 /// It lexes the input, filters comments, runs the handwritten parser,
-/// and attaches lex errors as `parse_warnings` on the AST.
+/// canonicalizes parser method keys via post-parse lowering, and attaches lex
+/// errors as `parse_warnings` on the AST.
 pub fn parse_from_str(source: &str) -> FileAst {
     cursor::TokenCursor::parse_source(source)
 }

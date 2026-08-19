@@ -892,8 +892,15 @@ impl<'src, 't> TokenCursor<'src, 't> {
             self.expect(&Token::Colon)?;
             fields.push((field_name, expr_parser(self)));
 
-            if self.eat(&Token::Comma) {
+            let has_separator = if has_block_body {
+                self.eat_list_separator()
+            } else {
+                self.eat(&Token::Comma)
+            };
+
+            if has_separator {
                 self.skip_layout();
+                continue;
             } else if !has_block_body {
                 break;
             }

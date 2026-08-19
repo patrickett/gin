@@ -1,6 +1,6 @@
 use ast::span::{SpanId, SpanTable};
 use lexer::Token;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use ast::warnings::BindWarningsExt;
 use ast::{
@@ -20,7 +20,22 @@ enum TopLevelValue {
 }
 
 impl TokenCursor<'_, '_> {
+    /// Parse a file and apply parser-level lowering, including canonical method
+    /// bind key rewriting.
+    ///
+    /// This is the public parser entrypoint for this cursor and always emits a
+    /// canonicalized `FileAst` where method call keys match the parser lowering
+    /// contract.
     pub fn parse_file(&mut self, expr_parser: ExprFn) -> FileAst {
+        let mut ast = self.parse_file_without_lowering(expr_parser);
+        crate::lowering::lower(&mut ast);
+        ast
+    }
+
+    /// Parse a raw, pre-lowering AST for parser-internal and test usage only.
+    /// Callers should use [`parse_file`](Self::parse_file) for canonicalized
+    /// outputs.
+    fn parse_file_without_lowering(&mut self, expr_parser: ExprFn) -> FileAst {
         let module_doc = self.parse_module_doc();
         let imports = self.parse_imports();
 
@@ -99,31 +114,6 @@ impl TokenCursor<'_, '_> {
             }
         }
         Self::expand_composed_provided_traits(&mut tags);
-        let mut method_overload_counts = HashMap::new();
-        for bind in &method_binds {
-            let receiver = Self::has_method_receiver_name(bind);
-            *method_overload_counts
-                .entry((receiver, bind.name))
-                .or_insert(0usize) += 1;
-        }
-        for bind in &method_binds {
-            let receiver_name = Self::has_method_receiver_name(bind);
-            let base_name = format!("{}.{}", receiver_name, bind.name);
-            let name = if method_overload_counts
-                .get(&(receiver_name, bind.name))
-                .copied()
-                .unwrap_or_default()
-                > 1
-            {
-                Intern::<String>::new(format!(
-                    "{base_name}$arity{}",
-                    bind.params.as_ref().map_or(0, IndexMap::len)
-                ))
-            } else {
-                Intern::<String>::new(base_name)
-            };
-            defs_scratch.entry(name).or_default().push(bind.clone());
-        }
 
         let mut defs = ast::DefMap::new();
         let mut parse_warnings = Vec::new();
@@ -137,6 +127,12 @@ impl TokenCursor<'_, '_> {
             if let Some(bind) = binds.into_iter().last() {
                 defs.insert(name, bind);
             }
+        }
+        for bind in &method_binds {
+            parse_warnings.extend(bind.name_case_warning(self.span_table()));
+            parse_warnings.extend(
+                std::slice::from_ref(bind).const_bind_after_declare_warnings(self.span_table()),
+            );
         }
         Self::generate_return_type_unions(&defs, &mut tags, &private_defs);
 
@@ -158,23 +154,9 @@ impl TokenCursor<'_, '_> {
         }
     }
 
-    fn has_method_receiver_name(bind: &Bind) -> Intern<String> {
-        match &bind
-            .receiver_type_surface()
-            .expect("has method receiver")
-            .value
-        {
-            ast::Expr::AnonymousTag(name) => *name,
-            ast::Expr::TagCall(call) => call.name,
-            ast::Expr::FnCall(call) => call
-                .path
-                .value
-                .segments
-                .last()
-                .copied()
-                .unwrap_or(call.path.value.root),
-            _ => Intern::from_ref("<receiver>"),
-        }
+    #[cfg(test)]
+    pub(crate) fn parse_file_for_test(&mut self, expr_parser: ExprFn) -> FileAst {
+        self.parse_file_without_lowering(expr_parser)
     }
 
     fn parse_module_doc(&mut self) -> Option<ast::DocComment> {
