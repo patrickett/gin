@@ -10,8 +10,7 @@ use typecheck::transform::{TransformCtx, transform};
 const PRIMITIVES_SRC: &str = "\
 BigInt is in 0...18446744073709551615
 Bool is True or False
-List(x) has pointer Pointer(x), length BigInt
-Pointer(x) is @x
+List(x) has pointer @x, length BigInt
 PointerSize is BigInt
 String has bytes List(BigInt)
 ToString has to_string String

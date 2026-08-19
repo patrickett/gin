@@ -22,6 +22,28 @@ fn preserves_removed_condition_attribute_as_raw_syntax() {
 }
 
 #[test]
+fn rejects_removed_default_attribute() {
+    let output = "#default(IntegerLiteral)\nInt is in 0...255\n".parse_source_full();
+    assert!(
+        output
+            .symptoms
+            .iter()
+            .any(|diagnostic| { diagnostic.code.slug() == "parse-removed-default-attribute" })
+    );
+}
+
+#[test]
+fn rejects_generic_pointer_former() {
+    let output = "Pointer(x) is @x\n".parse_source_full();
+    assert!(
+        output
+            .symptoms
+            .iter()
+            .any(|diagnostic| diagnostic.code.slug() == "parse-removed-pointer-former")
+    );
+}
+
+#[test]
 fn parses_fixed_array_contract_structurally() {
     let ast = "#fixed_array(element, count)\nBuffer(element Type, count BigInt) has\n"
         .parse_source_full()
@@ -93,7 +115,7 @@ Allocator has
     --- Attempt to allocate.
     allocate(ref self, l Layout) Slice(Byte) or AllocError,
     --- Free a block.
-    deallocate(ref self, p Pointer(Byte), l Layout),
+    deallocate(ref self, p @Byte, l Layout),
 "#;
     let ast = source.parse_source_full().ast;
     let allocator = ast

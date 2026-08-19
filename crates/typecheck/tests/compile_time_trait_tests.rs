@@ -12,8 +12,7 @@ Int is in 0...4294967295\n\
 \
 Bool is True or False\n\
 \
-List(x) has pointer Pointer(x), length Int\n\
-Pointer(x) is @x\n\
+List(x) has pointer @x, length Int\n\
 PointerSize is Int\n\
 \
 String is bytes List(Int)\nToString has to_string String\nHappy has value Bool\n\

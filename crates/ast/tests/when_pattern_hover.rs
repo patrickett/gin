@@ -9,7 +9,7 @@ fn hover_wildcard_in_record_pattern() {
     let src = "\
 Type is Primitive(width BigInt, signed Bool) or Record(name Str, fields List(NamedTy))
 NamedTy has name Str, ty Type
-List(x) has pointer Pointer(x), length BigInt
+List(x) has pointer @x, length BigInt
 BigInt is in 0...1000
 Str is in 0...255
 Bool is True or False
@@ -41,7 +41,7 @@ fn reflect_type_record_variant_map_resolves_forward_refs() {
     // Self-contained: no gin_core fixture load (avoids multi-GB Reflectable shape materialization).
     let src = "\
 NamedTy has name String, ty Type
-List(x) has pointer Pointer(x), length BigInt
+List(x) has pointer @x, length BigInt
 BigInt is in 0...1000
 String has bytes List(Byte)
 Byte is in 0...255
@@ -86,7 +86,7 @@ Type is Primitive(width BigInt, signed Bool) or Record(name String, fields List(
 fn record_pattern_fields_hover_matches_reflect_type() {
     let src = "\
 NamedTy has name String, ty Type
-List(x) has pointer Pointer(x), length BigInt
+List(x) has pointer @x, length BigInt
 BigInt is in 0...1000
 String has bytes List(Byte)
 Byte is in 0...255
@@ -127,7 +127,7 @@ fn hover_record_variant_head_in_pattern() {
     let src = "\
 Type is Primitive(width BigInt, signed Bool) or Record(name Str, fields List(NamedTy))
 NamedTy has name Str, ty Type
-List(x) has pointer Pointer(x), length BigInt
+List(x) has pointer @x, length BigInt
 BigInt is in 0...1000
 Str is in 0...255
 Bool is True or False
@@ -218,10 +218,9 @@ is_copy(x Type) Bool := when x is
 #[test]
 fn hover_list_pattern_variables_not_bool() {
     let src = "\
-List(x) has pointer Pointer(x), length BigInt\n\
+List(x) has pointer @x, length BigInt\n\
 BigInt is in 0...1000\n\
 Bool is True or False\n\
-Pointer(x) is @x\n\
 NamedTy has name String, ty Type\n\
 String has bytes List(Byte)\n\
 Byte is in 0...255\n\

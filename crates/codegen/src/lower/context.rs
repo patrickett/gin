@@ -212,6 +212,20 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         self.strings.register(s)
     }
 
+    pub fn function_symbol_name<'d>(&self, def_id: &'d typecheck::DefId) -> &'d str {
+        let name = def_id.0.as_str();
+        if self
+            .program
+            .defs
+            .get(def_id)
+            .is_some_and(|bind| bind.is_extern)
+        {
+            name.rsplit('.').next().unwrap_or(name)
+        } else {
+            name
+        }
+    }
+
     pub fn emit_symptom(&self, code: &str, message: String) {
         self.symptoms.emit(
             Diagnostic::new(code, message)

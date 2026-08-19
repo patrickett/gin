@@ -17,7 +17,7 @@ struct Workload {
 }
 
 fn expression_heavy_source() -> String {
-    let mut source = String::from("#default(IntegerLiteral)\nInt is in 0...10000\nvalues := [");
+    let mut source = String::from("Int is in 0...10000\nvalues := [");
     for value in 0..500 {
         if value != 0 {
             source.push_str(", ");
@@ -29,7 +29,7 @@ fn expression_heavy_source() -> String {
 }
 
 fn bind_heavy_source() -> String {
-    let mut source = String::from("#default(IntegerLiteral)\nInt is in 0...10000\n");
+    let mut source = String::from("Int is in 0...10000\n");
     for value in 0..200 {
         source.push_str(&format!("value{value} := {value}\n"));
     }

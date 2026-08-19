@@ -576,6 +576,13 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 // Id(...) → function call attribute
                 if self.is_at(&Token::ParenOpen) {
                     let args = self.parse_paren_args().unwrap_or_default();
+                    if name_interned.as_str() == "default" {
+                        self.error(
+                            "parse-removed-default-attribute",
+                            "`#default` has been removed; use an explicit type or contextual construction",
+                            name_span,
+                        );
+                    }
                     Some(AttributeItem::Call {
                         name: name_interned,
                         name_span,
@@ -605,7 +612,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
             return (Some(name), None, None, None);
         }
 
-        if matches!(self.peek(), Some(Token::Ref) | Some(Token::Mut)) {
+        if matches!(
+            self.peek(),
+            Some(Token::At) | Some(Token::Ref) | Some(Token::Mut)
+        ) {
             return match self.parse_type_expr(expr_parser) {
                 Some(sp) => (None, Some(Box::new(sp)), None, None),
                 None => (None, None, None, None),

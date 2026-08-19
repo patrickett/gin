@@ -234,21 +234,6 @@ enum VisitedTraitKey {
     Id(TypeId),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DefaultTypeFormerContract {
-    pub declaration: TypeId,
-    pub declaration_name: Intern<String>,
-    pub declaration_type: crate::ty::Ty,
-    pub fixed_array_contract: Option<ast::FixedArrayContract>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DefaultTypeFormerResolutionError {
-    Missing,
-    Ambiguous,
-    Invalid,
-}
-
 #[derive(Debug, Clone)]
 pub struct CompileTimeTraitRegistry {
     pub imported_traits: HashSet<Intern<String>>,
@@ -267,69 +252,6 @@ impl Default for CompileTimeTraitRegistry {
 }
 
 impl CompileTimeTraitRegistry {
-    pub fn resolve_default_type_former(
-        &self,
-        typed: &TypedFileAst,
-        role: ast::DefaultTypeFormerRole,
-    ) -> Result<DefaultTypeFormerContract, DefaultTypeFormerResolutionError> {
-        let mut valid: Vec<DefaultTypeFormerContract> = Vec::new();
-        let mut invalid: Vec<DefaultTypeFormerContract> = Vec::new();
-
-        for (name, declaration) in &self.eval_ast.tags {
-            if declaration.attributes.default_type_former != Some(role) {
-                continue;
-            }
-            if !self.trait_in_scope(name.as_str(), typed) {
-                continue;
-            }
-
-            let Some(ty) = typed.tag_types.get(&TagId(*name)) else {
-                continue;
-            };
-            let Some(declaration_id) = ty.type_id() else {
-                continue;
-            };
-
-            let fixed_array_contract =
-                declaration.attributes.fixed_array.as_ref().map(|contract| {
-                    ast::FixedArrayContract {
-                        element_parameter: contract.element_parameter,
-                        length_parameter: contract.length_parameter,
-                        span: contract.span,
-                    }
-                });
-
-            let candidate = DefaultTypeFormerContract {
-                declaration: declaration_id,
-                declaration_name: *name,
-                declaration_type: ty.clone(),
-                fixed_array_contract,
-            };
-
-            if !validate_default_type_former_contract(
-                typed,
-                declaration,
-                role,
-                &candidate.declaration_type,
-            ) {
-                invalid.push(candidate);
-                continue;
-            }
-            valid.push(candidate);
-        }
-
-        if let [single] = valid.as_slice() {
-            return Ok(single.clone());
-        }
-        if !valid.is_empty() {
-            return Err(DefaultTypeFormerResolutionError::Ambiguous);
-        }
-        if !invalid.is_empty() {
-            return Err(DefaultTypeFormerResolutionError::Invalid);
-        }
-        Err(DefaultTypeFormerResolutionError::Missing)
-    }
-
     pub fn from_file_ast(file: &FileAst) -> Self {
         Self::from_parse_ast(file, std::sync::Arc::new(file.clone()))
     }
@@ -813,47 +735,6 @@ fn reflectable_shape_from_tag(
         &schema,
         seen,
     ))
-}
-
-fn validate_default_type_former_contract(
-    typed: &TypedFileAst,
-    declaration: &ast::Declare,
-    role: ast::DefaultTypeFormerRole,
-    declaration_type: &crate::ty::Ty,
-) -> bool {
-    match role {
-        ast::DefaultTypeFormerRole::RawPointer => {
-            let Some(element_name) = declaration
-                .params
-                .as_ref()
-                .and_then(|params| params.keys().next())
-            else {
-                return false;
-            };
-            if declaration
-                .params
-                .as_ref()
-                .is_none_or(|params| params.len() != 1)
-            {
-                return false;
-            }
-            if !crate::representation::Repr::derive(declaration_type, Some(&typed.type_registry))
-                .is_ok_and(|repr| matches!(repr, crate::representation::Repr::Address { .. }))
-            {
-                return false;
-            }
-            typed
-                .type_registry
-                .resolved_definition_for_type(declaration_type)
-                .pointee_ty().is_some_and(
-                |pointee| matches!(pointee, crate::ty::Ty::Opaque(name) if name == element_name),
-            )
-        }
-        ast::DefaultTypeFormerRole::FixedArray => typed
-            .type_registry
-            .declaration_for_type(declaration_type)
-            .is_some_and(|declaration| declaration.fixed_array.is_some()),
-    }
 }
 
 fn provided_trait_field(

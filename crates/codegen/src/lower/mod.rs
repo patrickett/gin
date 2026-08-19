@@ -168,7 +168,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
 
         for (def_id, bind) in program.defs {
             let mut symtab = crate::ScopedSymbolTable::new();
-            let func_name = def_id.0.as_str();
+            let func_name = self.function_symbol_name(def_id);
             let declared_return_ty = program
                 .fn_return_types
                 .get(def_id)
@@ -557,7 +557,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
 
                 let loc = self.location();
 
-                let fn_name = target.0.as_str();
+                let fn_name = self.function_symbol_name(target);
 
                 if (args.is_none() || args.as_ref().is_none_or(|a| a.is_empty()))
                     && let Some(slot) = symtab.get(&target.0)

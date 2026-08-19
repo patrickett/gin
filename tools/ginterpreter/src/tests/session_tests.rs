@@ -2,8 +2,7 @@ use super::*;
 use std::time::{Duration, Instant};
 use test_fixtures::TempPackage;
 
-const PACKAGE_NUMBERS: &str = r#"#default(IntegerLiteral)
-Signed64 is in -9223372036854775808...9223372036854775807
+const PACKAGE_NUMBERS: &str = r#"Signed64 is in -9223372036854775808...9223372036854775807
 Small is in 0...255
 
 #intrinsic(BitsAdd)
@@ -25,8 +24,7 @@ impl NativeSession {
     fn new() -> Self {
         let mut session = InterpreterSession::default();
         let submit = session.submit(
-            r#"#default(IntegerLiteral)
-Signed64 is in -9223372036854775808...9223372036854775807
+            r#"Signed64 is in -9223372036854775808...9223372036854775807
 Small is in 0...255
 
 #intrinsic(BitsAdd)
@@ -92,7 +90,7 @@ fn native_integer_expression_evaluates() {
 fn expression_can_use_prior_zero_parameter_function() {
     let mut native = NativeSession::new();
     assert!(matches!(
-        native.session.submit("a: 1 + 1"),
+        native.session.submit("a() Signed64: 1 + 1"),
         Submission::DeclarationAccepted { .. }
     ));
 

@@ -59,7 +59,7 @@ return
 
 #[test]
 fn test_parse_typed_hidden_state_parameters() {
-    let src = "List(x, length PointerSize: ?, capacity PointerSize: ?, storage StorageIdentity: ?) has\n    pointer Pointer(x)\n";
+    let src = "List(x, length PointerSize: ?, capacity PointerSize: ?, storage StorageIdentity: ?) has\n    pointer @x\n";
     let output = src.parse_source_full();
     assert!(output.symptoms.is_empty(), "{:?}", output.symptoms);
     let declaration = output.ast.tags.get(&Intern::from_ref("List")).unwrap();

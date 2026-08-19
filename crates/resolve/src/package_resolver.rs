@@ -1121,6 +1121,21 @@ fn resolve_package_like_import(
         parts.join(".")
     };
 
+    let symbol_aliases = if module_import.alias.is_none() {
+        let alias = internment::Intern::new(
+            module_segs
+                .last()
+                .cloned()
+                .unwrap_or_else(|| root_name.to_string()),
+        );
+        vec![SymbolAlias {
+            alias,
+            target: Spanned::new(ModPath::new(mp.root, mp.segments.clone()), mp.span_id()),
+        }]
+    } else {
+        Vec::new()
+    };
+
     ResolvedModule {
         files: resolve_folder_module_files(
             module_loader,
@@ -1130,7 +1145,7 @@ fn resolve_package_like_import(
             env.span_id,
             env.symptoms,
         ),
-        symbol_aliases: Vec::new(),
+        symbol_aliases,
     }
 }
 

@@ -18,7 +18,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             return self.parse_in_range_expr();
         }
 
-        if matches!(self.peek(), Some(Token::Tag(_))) {
+        if matches!(self.peek(), Some(Token::At) | Some(Token::Tag(_))) {
             let sp = self.parse_type_expr(expr_parser)?;
             return Some(Spanned {
                 value: sp.value,

@@ -7,7 +7,7 @@ Int is in 0...4294967295
 
 write_spec := 4
 
-write(fd Int, buf Pointer(Int), len Int) Int:
+write(fd Int, buf @Int, len Int) Int:
     result := write_spec + fd + buf + len
     return result
 

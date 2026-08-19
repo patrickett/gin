@@ -154,7 +154,7 @@ return 0
 #[test]
 fn test_default_owned_non_copy_argument_moves() {
     let src = "\
-sink(pointer Pointer(Int)): eat pointer
+sink(pointer @Int): eat pointer
 main:
     value: 42
     pointer: @value
@@ -199,8 +199,8 @@ return r
 #[test]
 fn test_move_in_when_arm_does_not_poison_sibling_arm() {
     let src = "\
-sink(pointer Pointer(Int)) Int: eat pointer
-select(flag Int, pointer Pointer(Int)) Int:
+sink(pointer @Int) Int: eat pointer
+select(flag Int, pointer @Int) Int:
     when flag is
         0 then sink(pointer)
         else deref pointer
@@ -220,8 +220,8 @@ select(flag Int, pointer Pointer(Int)) Int:
 #[test]
 fn test_move_on_one_when_path_is_maybe_moved_after_join() {
     let src = "\
-sink(pointer Pointer(Int)) Int: eat pointer
-select(flag Int, pointer Pointer(Int)) Int:
+sink(pointer @Int) Int: eat pointer
+select(flag Int, pointer @Int) Int:
     when flag is
         0 then sink(pointer)
         else 0
@@ -242,8 +242,8 @@ return result
 #[test]
 fn test_loop_backedge_rejects_reusing_moved_value() {
     let src = "\
-sink(pointer Pointer(Int)): eat pointer
-repeat(pointer Pointer(Int)):
+sink(pointer @Int): eat pointer
+repeat(pointer @Int):
     while 1 is 1
         sink(pointer)
     loop
@@ -368,7 +368,7 @@ main:
 #[test]
 fn test_partial_record_destructure_discards_non_discardable_remainder() {
     let src = "
-Point has head Int, tail Pointer(Int)
+Point has head Int, tail @Int
 main:
     value: 42
     point := Point(head: value, tail: @value)
@@ -388,7 +388,7 @@ main:
 #[test]
 fn test_partial_record_destructure_with_nominal_remainder_reports_discard_error() {
     let src = "
-Point has head Int, tail Pointer(Int)
+Point has head Int, tail @Int
 main:
     ptr: @42
     point: Point(head: 1, tail: ptr)
@@ -429,7 +429,7 @@ main:
 #[test]
 fn test_sum_discardability_with_reachable_nominal_payload_and_proven_branch_is_allowed() {
     let src = "
-ValueCell has value Pointer(Int)
+ValueCell has value @Int
 CellMaybe is Some(ValueCell) or None
 main:
     cell: @42
@@ -491,7 +491,7 @@ return 0
 #[test]
 fn test_nominal_record_owned_param_not_consumed_reports_owned_value_not_consumed() {
     let src = "
-Point has head Int, tail Pointer(Int)
+Point has head Int, tail @Int
 consume(point Point) Int: 0
 main:
     value: 42
@@ -534,7 +534,7 @@ return 0
 #[test]
 fn test_explicit_consumption_parameter_with_eat_handle_discharge_at_callsite() {
     let src = "
-read_handle(eat handle Pointer(Int)) Int: 0
+read_handle(eat handle @Int) Int: 0
 main:
     p: @42
     read_handle(eat p)
@@ -570,7 +570,7 @@ return 0
 #[test]
 fn test_pattern_ownership_modes_in_when_subject() {
     let src = "
-Payload has value Pointer(Int)
+Payload has value @Int
 Option(Payload) is Some(Payload) or None
 
 observe_without_binding(value Option(Payload)) Int: when value is
@@ -1243,7 +1243,7 @@ return observed
 #[test]
 fn test_gate4_consumed_place_can_be_reinitialized() {
     let src = "\
-drop(eat value Pointer(Int)): 0
+drop(eat value @Int): 0
 main:
     value: @1
     drop(eat value)

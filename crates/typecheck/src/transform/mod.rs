@@ -52,9 +52,6 @@ pub struct TransformCtx {
     /// Function return types from other files: def name → return Ty.
     pub cross_file_fn_return_types: HashMap<DefId, crate::ty::Ty>,
     pub cross_file_callable_signatures: HashMap<DefId, TypedCallableSignature>,
-    pub integer_literal_defaults: Vec<crate::ty::Ty>,
-    pub raw_pointer_defaults: Vec<crate::ty::Ty>,
-    pub fixed_array_defaults: Vec<crate::ty::Ty>,
     /// Variant map entries from other files.
     pub cross_file_variant_map: HashMap<Intern<String>, Vec<VariantMapEntry>>,
     /// Merged package AST used to evaluate compile-time trait bodies.
@@ -73,9 +70,6 @@ impl TransformCtx {
             cross_file_tag_params: HashMap::new(),
             cross_file_fn_return_types: HashMap::new(),
             cross_file_callable_signatures: HashMap::new(),
-            integer_literal_defaults: Vec::new(),
-            raw_pointer_defaults: Vec::new(),
-            fixed_array_defaults: Vec::new(),
             cross_file_variant_map: HashMap::new(),
             compile_time_eval_ast: Arc::new(FileAst::empty_for_tests()),
             ide_package: false,
@@ -122,19 +116,6 @@ impl TransformCtx {
                     .insert(*tag_id, tag.resolved_ty.clone());
                 if let Some(params) = &tag.params {
                     ctx.cross_file_tag_params.insert(tag_id.0, params.clone());
-                }
-                if tag.attributes.default_literal == Some(ast::ty::LiteralKind::Integer) {
-                    ctx.integer_literal_defaults.push(tag.resolved_ty.clone());
-                }
-                if tag.attributes.default_type_former
-                    == Some(ast::DefaultTypeFormerRole::RawPointer)
-                {
-                    ctx.raw_pointer_defaults.push(tag.resolved_ty.clone());
-                }
-                if tag.attributes.default_type_former
-                    == Some(ast::DefaultTypeFormerRole::FixedArray)
-                {
-                    ctx.fixed_array_defaults.push(tag.resolved_ty.clone());
                 }
             }
             for (def_id, bind) in &ast.defs {

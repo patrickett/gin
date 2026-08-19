@@ -46,6 +46,16 @@ impl<'src, 't> TokenCursor<'src, 't> {
             self.eat(&Token::Indent);
 
             let (value, doc_after_value, mut provided_traits) = self.parse_is_rhs(expr_parser);
+            if params.as_ref().is_some_and(|params| !params.is_empty())
+                && let DeclareValue::Alias(alias) = &value
+                && matches!(alias.value, Expr::TakePtr(_))
+            {
+                self.error(
+                    "parse-removed-pointer-former",
+                    "generic raw-pointer formers have been removed; use @x directly",
+                    alias.span_id,
+                );
+            }
             provided_traits.extend(self.parse_provided_trait_clauses(expr_parser));
             self.eat(&Token::Dedent);
 

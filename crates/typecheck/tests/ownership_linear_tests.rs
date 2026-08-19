@@ -221,7 +221,7 @@ fn symbolic_anonymous_integer_is_not_rematerializable() {
 #[test]
 fn payload_alternative_still_moves() {
     let diagnostics = codes(
-        "Payload has value Pointer(Int)\nOption(Payload) is Some(Payload) or None\ntake(value x): 0\nmain:\n\tvalue: Some(Payload(value: @7))\n\ttake(value)\n\ttake(value)\n\treturn 0",
+        "Payload has value @Int\nOption(Payload) is Some(Payload) or None\ntake(value x): 0\nmain:\n\tvalue: Some(Payload(value: @7))\n\ttake(value)\n\ttake(value)\n\treturn 0",
     );
 
     assert!(
@@ -277,7 +277,7 @@ fn conversion_rematerializes_an_exact_anonymous_integer() {
 #[test]
 fn by_value_pattern_binding_moves_only_the_matching_path() {
     let diagnostics = codes(
-        "Payload has value Pointer(Int)\nOption(Payload) is Some(Payload) or None\ndrop(eat value Option(Payload)): 0\ninspect(value Option(Payload)):\n\twhen value is\n\t\tSome(payload) then drop(eat value)\n\t\tNone then drop(eat value)\n\treturn 0",
+        "Payload has value @Int\nOption(Payload) is Some(Payload) or None\ndrop(eat value Option(Payload)): 0\ninspect(value Option(Payload)):\n\twhen value is\n\t\tSome(payload) then drop(eat value)\n\t\tNone then drop(eat value)\n\treturn 0",
     );
 
     assert_eq!(
@@ -293,7 +293,7 @@ fn by_value_pattern_binding_moves_only_the_matching_path() {
 #[test]
 fn reference_pattern_binding_preserves_the_subject() {
     let diagnostics = codes(
-        "Payload has value Pointer(Int)\nOption(Payload) is Some(Payload) or None\ndrop(eat value Option(Payload)): 0\ninspect(value Option(Payload)):\n\twhen value is\n\t\tSome(ref payload) then drop(eat value)\n\t\tNone then drop(eat value)\n\treturn 0",
+        "Payload has value @Int\nOption(Payload) is Some(Payload) or None\ndrop(eat value Option(Payload)): 0\ninspect(value Option(Payload)):\n\twhen value is\n\t\tSome(ref payload) then drop(eat value)\n\t\tNone then drop(eat value)\n\treturn 0",
     );
 
     assert!(
@@ -305,7 +305,7 @@ fn reference_pattern_binding_preserves_the_subject() {
 #[test]
 fn mutable_pattern_binding_preserves_the_subject() {
     let diagnostics = codes(
-        "Payload has value Pointer(Int)\nOption(Payload) is Some(Payload) or None\ndrop(eat value Option(Payload)): 0\ninspect(value Option(Payload)):\n\twhen value is\n\t\tSome(mut payload) then drop(eat value)\n\t\tNone then drop(eat value)\n\treturn 0",
+        "Payload has value @Int\nOption(Payload) is Some(Payload) or None\ndrop(eat value Option(Payload)): 0\ninspect(value Option(Payload)):\n\twhen value is\n\t\tSome(mut payload) then drop(eat value)\n\t\tNone then drop(eat value)\n\treturn 0",
     );
 
     assert!(
@@ -317,7 +317,7 @@ fn mutable_pattern_binding_preserves_the_subject() {
 #[test]
 fn nonbinding_pattern_preserves_the_subject() {
     let diagnostics = codes(
-        "Payload has value Pointer(Int)\nOption(Payload) is Some(Payload) or None\ndrop(eat value Option(Payload)): 0\ninspect(value Option(Payload)):\n\twhen value is\n\t\tSome(_) then drop(eat value)\n\t\tNone then drop(eat value)\n\treturn 0",
+        "Payload has value @Int\nOption(Payload) is Some(Payload) or None\ndrop(eat value Option(Payload)): 0\ninspect(value Option(Payload)):\n\twhen value is\n\t\tSome(_) then drop(eat value)\n\t\tNone then drop(eat value)\n\treturn 0",
     );
 
     assert!(

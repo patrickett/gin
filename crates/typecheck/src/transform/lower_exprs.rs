@@ -29,8 +29,7 @@ use super::bounds_check::check_fn_call_bounds;
 use super::lower_kind::lower_expr_kind;
 use super::lower_tag::is_record_tag_call;
 use super::lower_ty::{
-    annotate_literal_union_literal, bind_explicit_ty_in_scope, materialize_raw_pointer,
-    resolve_expr_type,
+    annotate_literal_union_literal, bind_explicit_ty_in_scope, resolve_expr_type,
 };
 use super::lower_util::closest_name;
 
@@ -321,10 +320,7 @@ pub(crate) struct ExprLowerScope<'a> {
     pub(crate) operator_registry: &'a OperatorRegistry,
     pub(crate) tag_params: &'a HashMap<Intern<String>, Parameters>,
     pub(crate) tag_decls: &'a ast::TagMap,
-    pub(crate) integer_literal_defaults: &'a [Ty],
-    pub(crate) raw_pointer_defaults: &'a [Ty],
-    pub(crate) fixed_array_defaults: &'a [Ty],
-    pub(crate) allow_literal_default: bool,
+    pub(crate) allow_literal_materialization: bool,
     pub(crate) temporary_shadowing: bool,
 }
 
@@ -342,10 +338,7 @@ impl ExprLowerScope<'_> {
             operator_registry: self.operator_registry,
             tag_params: self.tag_params,
             tag_decls: self.tag_decls,
-            integer_literal_defaults: self.integer_literal_defaults,
-            raw_pointer_defaults: self.raw_pointer_defaults,
-            fixed_array_defaults: self.fixed_array_defaults,
-            allow_literal_default: true,
+            allow_literal_materialization: true,
             temporary_shadowing: self.temporary_shadowing,
         }
     }
@@ -362,10 +355,7 @@ impl ExprLowerScope<'_> {
             operator_registry: self.operator_registry,
             tag_params: self.tag_params,
             tag_decls: self.tag_decls,
-            integer_literal_defaults: self.integer_literal_defaults,
-            raw_pointer_defaults: self.raw_pointer_defaults,
-            fixed_array_defaults: self.fixed_array_defaults,
-            allow_literal_default: true,
+            allow_literal_materialization: true,
             temporary_shadowing: self.temporary_shadowing,
         }
     }
@@ -376,17 +366,16 @@ impl ExprLowerScope<'_> {
         child
     }
 
-    pub(crate) fn without_literal_default(&self) -> Self {
+    pub(crate) fn without_literal_materialization(&self) -> Self {
         Self {
-            allow_literal_default: false,
+            allow_literal_materialization: false,
             ..self.child()
         }
     }
 
-    pub(crate) fn with_anonymous_literal_default(&self) -> Self {
+    pub(crate) fn with_anonymous_literal_materialization(&self) -> Self {
         Self {
-            integer_literal_defaults: &[],
-            allow_literal_default: true,
+            allow_literal_materialization: true,
             temporary_shadowing: false,
             ..self.child()
         }
@@ -406,50 +395,6 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
     for (tid, ty) in &typed.tag_types {
         tag_types.insert(tid.0, ty.clone());
     }
-    let mut integer_literal_defaults = ctx.integer_literal_defaults.clone();
-    integer_literal_defaults.extend(
-        typed
-            .tags
-            .values()
-            .filter(|tag| tag.attributes.default_literal == Some(ast::ty::LiteralKind::Integer))
-            .map(|tag| tag.resolved_ty.clone()),
-    );
-    integer_literal_defaults.retain(|ty| {
-        crate::representation::Repr::derive(ty, Some(&typed.type_registry)).is_ok()
-            && typed.type_registry.integer_validity_for_type(ty).is_some()
-    });
-    integer_literal_defaults.dedup();
-    let mut raw_pointer_defaults = ctx.raw_pointer_defaults.clone();
-    raw_pointer_defaults.extend(
-        typed
-            .tags
-            .values()
-            .filter(|tag| {
-                tag.attributes.default_type_former == Some(ast::DefaultTypeFormerRole::RawPointer)
-            })
-            .map(|tag| tag.resolved_ty.clone()),
-    );
-    raw_pointer_defaults.retain(|ty| {
-        typed
-            .type_registry
-            .resolved_definition_for_type(ty)
-            .address_space()
-            .is_some()
-    });
-    raw_pointer_defaults.dedup();
-    let mut fixed_array_defaults = ctx.fixed_array_defaults.clone();
-    fixed_array_defaults.extend(
-        typed
-            .tags
-            .values()
-            .filter(|tag| {
-                tag.attributes.default_type_former == Some(ast::DefaultTypeFormerRole::FixedArray)
-            })
-            .map(|tag| tag.resolved_ty.clone()),
-    );
-    fixed_array_defaults.retain(|ty| ty.type_id().is_some());
-    fixed_array_defaults.dedup();
-
     // Collect variant_map reference before any mutable borrows (own + cross-file).
     let mut variant_map: VariantMap = typed.variant_map.clone();
     for (variant_name, entries) in &ctx.cross_file_variant_map {
@@ -649,12 +594,6 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
             }
         }
         if return_ty.is_none() {
-            let has_fixed_array_default = fixed_array_defaults.len() == 1
-                && file_ast.tags.values().any(|declare| {
-                    declare.attributes.default_type_former
-                        == Some(ast::DefaultTypeFormerRole::FixedArray)
-                        && declare.attributes.fixed_array.is_some()
-                });
             let inferred = match &bind.value {
                 BindValue::Expr(typed_expr) => Some(resolve_expr_type(
                     typed_expr.as_ref(),
@@ -686,14 +625,7 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
                 _ => None,
             };
             if let Some(ty) = inferred {
-                return_ty = Some(
-                    if has_fixed_array_default && matches!(ty, Ty::Array { .. }) {
-                        force_expected_return_ty = true;
-                        Ty::Opaque(Intern::from_ref("unresolved-array-construction"))
-                    } else {
-                        ty
-                    },
-                );
+                return_ty = Some(ty);
             }
         }
         let return_ty = return_ty;
@@ -710,10 +642,7 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
             operator_registry: &operator_registry,
             tag_params: &tag_params,
             tag_decls: &file_ast.tags,
-            integer_literal_defaults: &integer_literal_defaults,
-            raw_pointer_defaults: &raw_pointer_defaults,
-            fixed_array_defaults: &fixed_array_defaults,
-            allow_literal_default: true,
+            allow_literal_materialization: true,
             temporary_shadowing: false,
         };
 
@@ -912,10 +841,7 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
         operator_registry: &operator_registry,
         tag_params: &tag_params,
         tag_decls: &file_ast.tags,
-        integer_literal_defaults: &integer_literal_defaults,
-        raw_pointer_defaults: &raw_pointer_defaults,
-        fixed_array_defaults: &fixed_array_defaults,
-        allow_literal_default: true,
+        allow_literal_materialization: true,
         temporary_shadowing: false,
     };
     for (expr, span_id) in &file_ast.exprs {
@@ -1433,76 +1359,27 @@ pub(crate) fn lower_typed_expr(
             .at_span_id(expr.span_id, &typed.span_table),
         );
     }
-    if let TypedExprKind::TakePtr(inner) = &kind
+    if let TypedExprKind::TakePtr(_) = &kind
         && resolved_ty.is_unresolved_address()
     {
-        let pointee = typed.exprs.ty[inner.as_usize()].clone();
-        match scope.raw_pointer_defaults {
-            [default] => {
-                resolved_ty = materialize_raw_pointer(default, &pointee, &typed.type_registry)
-                    .unwrap_or(resolved_ty);
-            }
-            [] => flaws.push(
-                Diagnostic::new(
-                    "type-missing-default-raw-pointer",
-                    "address-taking needs an expected raw-pointer type or a visible default",
-                )
-                .at_span_id(expr.span_id, &typed.span_table),
-            ),
-            _ => flaws.push(
-                Diagnostic::new(
-                    "type-ambiguous-default-raw-pointer",
-                    "address-taking has multiple visible default raw-pointer type formers",
-                )
-                .at_span_id(expr.span_id, &typed.span_table),
-            ),
-        }
+        flaws.push(
+            Diagnostic::new(
+                "type-raw-pointer-requires-expected-type",
+                "address-taking requires an expected raw-pointer type",
+            )
+            .at_span_id(expr.span_id, &typed.span_table),
+        );
     }
     if matches!(kind, TypedExprKind::TupleAlloc { .. })
         && matches!(resolved_ty, Ty::Opaque(name) if name.as_str() == "unresolved-array-construction")
     {
-        match scope.fixed_array_defaults {
-            [default] => {
-                let contract = scope
-                    .tag_decls
-                    .values()
-                    .find(|declare| {
-                        declare.attributes.default_type_former
-                            == Some(ast::DefaultTypeFormerRole::FixedArray)
-                    })
-                    .and_then(|declare| declare.attributes.fixed_array.as_ref());
-                if let Some(contract) = contract {
-                    if let TypedExprKind::TupleAlloc { init, size } = &kind {
-                        resolved_ty = super::lower_ty::materialize_fixed_array(
-                            default,
-                            contract,
-                            &typed.exprs.ty[init.as_usize()],
-                            size.clone(),
-                        )
-                        .unwrap_or(resolved_ty);
-                    }
-                } else {
-                    flaws.push(Diagnostic::new(
-                        "type-invalid-default-array-former",
-                        "the visible default fixed-array former has no valid contract",
-                    ));
-                }
-            }
-            [] => flaws.push(
-                Diagnostic::new(
-                    "type-missing-default-fixed-array",
-                    "fixed-array construction needs an expected array type or a visible default",
-                )
-                .at_span_id(expr.span_id, &typed.span_table),
-            ),
-            _ => flaws.push(
-                Diagnostic::new(
-                    "type-ambiguous-default-fixed-array",
-                    "fixed-array construction has multiple visible default formers",
-                )
-                .at_span_id(expr.span_id, &typed.span_table),
-            ),
-        }
+        flaws.push(
+            Diagnostic::new(
+                "type-fixed-array-requires-expected-type",
+                "fixed-array construction requires an expected array type",
+            )
+            .at_span_id(expr.span_id, &typed.span_table),
+        );
     }
     if let TypedExprKind::TupleAlloc { size, .. } = &kind
         && let Ok(crate::representation::Repr::Array { length, .. }) =
@@ -1791,23 +1668,9 @@ pub(crate) fn lower_typed_expr(
             .current_def_id
             .and_then(|def_id| typed.defs.get(&def_id))
             .is_some_and(|bind| bind.is_constant);
-        let has_int_annotation = scope.expected_ty.is_some_and(|ty| {
-            matches!(
-                typed.type_registry.resolved_definition_for_type(ty),
-                Ty::Opaque(name) if name.as_str() == "Int"
-            )
-        });
         let selected = scope
             .expected_ty
-            .and_then(|expected| materialized_integer_expected(expected, &typed.type_registry))
-            .or_else(|| {
-                if has_int_annotation {
-                    return None;
-                }
-                scope.integer_literal_defaults.first().cloned().filter(|_| {
-                    scope.allow_literal_default && scope.integer_literal_defaults.len() == 1
-                })
-            });
+            .and_then(|expected| materialized_integer_expected(expected, &typed.type_registry));
         if let Some(expected) = selected {
             match crate::integer_literal::validate_with_registry(
                 *value,
@@ -1824,55 +1687,14 @@ pub(crate) fn lower_typed_expr(
                         .at_span_id(expr.span_id, &typed.span_table),
                 ),
             }
-        } else if scope.allow_literal_default {
+        } else if scope.allow_literal_materialization {
             if scope.expected_ty.is_none_or(|ty| {
                 matches!(ty, Ty::UnresolvedLiteral(_))
                     || is_generic_opaque_ty(ty, &typed.type_registry)
             }) {
-                let default = scope.integer_literal_defaults.first().cloned();
-                if let Some(default) = default {
-                    match crate::integer_literal::validate_with_registry(
-                        *value,
-                        &default,
-                        &typed.type_registry,
-                    ) {
-                        Ok(()) => final_ty = default,
-                        Err(error) => {
-                            if scope.integer_literal_defaults.len() == 1 {
-                                flaws.push(
-                                    crate::integer_literal::diagnostic(*value, &default, &error)
-                                        .at_span_id(expr.span_id, &typed.span_table),
-                                )
-                            } else {
-                                flaws.push(
-                                    Diagnostic::new(
-                                        "type-ambiguous-integer-literal-default",
-                                        format!(
-                                            "integer literal `{value}` has multiple visible defaults"
-                                        ),
-                                    )
-                                    .with_arg("value", value.to_string())
-                                    .at_span_id(expr.span_id, &typed.span_table),
-                                );
-                            }
-                        }
-                    }
-                } else {
-                    let width = integer_width_for_exact_value(*value);
-                    let signed = *value < i256::I256::from(0);
-                    final_ty = Ty::anonymous_integer_for_width(width, signed);
-                }
-            } else {
-                if scope.integer_literal_defaults.len() > 1 {
-                    flaws.push(
-                        Diagnostic::new(
-                            "type-ambiguous-integer-literal-default",
-                            format!("integer literal `{value}` has multiple visible defaults"),
-                        )
-                        .with_arg("value", value.to_string())
-                        .at_span_id(expr.span_id, &typed.span_table),
-                    );
-                }
+                let width = integer_width_for_exact_value(*value);
+                let signed = *value < i256::I256::from(0);
+                final_ty = Ty::anonymous_integer_for_width(width, signed);
             }
         }
     }

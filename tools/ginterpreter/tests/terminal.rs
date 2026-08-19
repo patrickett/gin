@@ -2,8 +2,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use test_fixtures::TempPackage;
 
-const NUMBERS: &str = r#"#default(IntegerLiteral)
-Signed64 is in -9223372036854775808...9223372036854775807
+const NUMBERS: &str = r#"Signed64 is in -9223372036854775808...9223372036854775807
 
 #intrinsic(BitsAdd)
 signed64_add_bits(eat lhs Signed64, eat rhs Signed64) Signed64 extern

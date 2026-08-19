@@ -2,7 +2,7 @@ mod support;
 
 #[test]
 fn library_defined_fixed_array_lowers_as_an_inline_aggregate() {
-    let source = r#"#default(Integer)
+    let source = r#"
 Byte is in 0...255
 #fixed_array(element, count)
 Buffer(element Type, count BigInt) has
@@ -105,7 +105,7 @@ main() Buffer(Byte, 3):
 
 #[test]
 fn compound_fixed_array_write_evaluates_the_index_once() {
-    let source = r#"#default(Integer)
+    let source = r#"
 Byte is in 0...255
 #fixed_array(element, count)
 Buffer(element Type, count BigInt) has

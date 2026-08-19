@@ -72,7 +72,7 @@ impl GinPackageExt for Path {
 
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.is_dir() {
+                if path.is_dir() && (path == self || !path.join("flask.jsonc").is_file()) {
                     queue.push_back(path);
                 }
             }

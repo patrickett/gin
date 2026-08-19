@@ -3,9 +3,7 @@ mod support;
 #[test]
 fn library_pointer_uses_address_load_store_and_gep_lowering() {
     let source = r#"Word is in 0...255
-#default(RawPointer)
-LibraryPointer(x) is @x
-PointerToWord is LibraryPointer(Word)
+PointerToWord is @Word
 #intrinsic(AddressLoad)
 read_addr(address PointerToWord) Word extern
 #intrinsic(AddressStore)

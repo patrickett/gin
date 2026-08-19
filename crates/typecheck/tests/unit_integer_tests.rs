@@ -270,7 +270,7 @@ fn layout_rejects_static_oversized_extent() {
 #[test]
 fn nullary_failure_cannot_discard_a_nominal_constructor_input() {
     let typed = transformed(
-        "Int is in 0...255\nCandidate has value Pointer(Int)\nconstruct(candidate Candidate):\n    if 1 = 1 is True\n        Valid(candidate)\n    return\n    return Invalid\n",
+        "Int is in 0...255\nCandidate has value @Int\nconstruct(candidate Candidate):\n    if 1 = 1 is True\n        Valid(candidate)\n    return\n    return Invalid\n",
     );
     let flaws = typed.all_flaws();
 
@@ -285,7 +285,7 @@ fn nullary_failure_cannot_discard_a_nominal_constructor_input() {
 #[test]
 fn failure_payload_discharges_a_nominal_constructor_input() {
     let typed = transformed(
-        "Int is in 0...255\nCandidate has value Pointer(Int)\nconstruct(candidate Candidate):\n    if 1 = 1 is True\n        Valid(candidate)\n    return\n    return Invalid(candidate)\n",
+        "Int is in 0...255\nCandidate has value @Int\nconstruct(candidate Candidate):\n    if 1 = 1 is True\n        Valid(candidate)\n    return\n    return Invalid(candidate)\n",
     );
     let flaws = typed.all_flaws();
 

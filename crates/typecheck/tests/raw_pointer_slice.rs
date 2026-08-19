@@ -28,16 +28,13 @@ fn flaw_codes(typed: &TypedFileAst) -> Vec<String> {
 }
 
 #[test]
-fn library_pointer_keeps_declaration_identity_and_pointee_argument() {
+fn explicit_pointer_types_preserve_the_pointee_argument() {
     let typed = check(
         "Word is in 0...255\n\
-         LibraryPointer(x) is @x\n\
-         make(value Word) LibraryPointer(Word): @value\n",
+         make(value Word) @Word: @value\n",
     );
-    let pointer = &typed.tags[&typecheck::TagId(Intern::from_ref("LibraryPointer"))].resolved_ty;
     let result = &typed.exprs.ty[body(&typed, "make").as_usize()];
 
-    assert_eq!(result.type_id(), pointer.type_id());
     assert_eq!(
         typed
             .type_registry
@@ -45,25 +42,19 @@ fn library_pointer_keeps_declaration_identity_and_pointee_argument() {
             .pointee_ty(),
         Some(&typed.tags[&typecheck::TagId(Intern::from_ref("Word"))].resolved_ty)
     );
-    assert_eq!(result.named_instance().unwrap().arguments.len(), 1);
     assert!(!flaw_codes(&typed).contains(&"type-raw-pointer-pointee-mismatch".to_string()));
 }
 
 #[test]
-fn transparent_alias_and_equal_representation_remain_nominal() {
+fn explicit_pointer_types_with_equal_pointees_share_representation() {
     let typed = check(
         "Word is in 0...255\n\
-         Left(x) is @x\n\
-         Right(x) is @x\n\
-         Alias is Left(Word)\n",
+         left(value Word) @Word: @value\n\
+         right(value Word) @Word: @value\n",
     );
-    let left = &typed.tags[&typecheck::TagId(Intern::from_ref("Left"))].resolved_ty;
-    let right = &typed.tags[&typecheck::TagId(Intern::from_ref("Right"))].resolved_ty;
-    let alias = &typed.tags[&typecheck::TagId(Intern::from_ref("Alias"))].resolved_ty;
+    let left = &typed.exprs.ty[body(&typed, "left").as_usize()];
+    let right = &typed.exprs.ty[body(&typed, "right").as_usize()];
 
-    assert_ne!(left.type_id(), right.type_id());
-    assert_eq!(left.type_id(), alias.type_id());
-    assert_eq!(alias.named_instance().unwrap().arguments.len(), 1);
     assert_eq!(
         typecheck::representation::Repr::derive(left, Some(&typed.type_registry)),
         typecheck::representation::Repr::derive(right, Some(&typed.type_registry))
@@ -90,19 +81,16 @@ fn safe_reference_alias_preserves_nominal_identity_and_generic_referent() {
 }
 
 #[test]
-fn expected_arguments_and_renamed_default_materialize_addresses() {
+fn expected_arguments_and_explicit_pointer_types_materialize_addresses() {
     let typed = check(
         "Word is in 0...255\n\
-         #default(RawPointer)\n\
-         RenamedPointer(x) is @x\n\
-         take(value RenamedPointer(Word)) Word: deref value\n\
-         make(value Word) RenamedPointer(Word): @value\n\
-         implicit(value Word): @value\n",
+         take(value @Word) Word: deref value\n\
+         make(value Word) @Word: @value\n\
+         explicit(value Word) @Word: @value\n",
     );
-    let _named = &typed.tags[&typecheck::TagId(Intern::from_ref("RenamedPointer"))].resolved_ty;
     let pointer_ty = &typed.exprs.ty[body(&typed, "make").as_usize()];
-    let implicit_ty = &typed.exprs.ty[body(&typed, "implicit").as_usize()];
-    assert_eq!(pointer_ty.type_id(), implicit_ty.type_id());
+    let explicit_ty = &typed.exprs.ty[body(&typed, "explicit").as_usize()];
+    assert_eq!(pointer_ty, explicit_ty);
     assert_eq!(
         typed
             .type_registry
@@ -126,15 +114,13 @@ fn record_named_pointer_does_not_receive_raw_address_behavior() {
         typecheck::representation::Repr::derive(record, Some(&typed.type_registry)),
         Ok(typecheck::representation::Repr::Product { .. })
     ));
-    assert!(flaw_codes(&typed).contains(&"type-missing-default-raw-pointer".to_string()));
+    assert!(flaw_codes(&typed).contains(&"type-raw-pointer-requires-expected-type".to_string()));
 }
 
 #[test]
-fn package_default_pointer_is_visible_outside_its_declaration_file() {
-    let declarations = TokenCursor::parse_source(
-        "Word is in 0...255\n#default(RawPointer)\nPackagePointer(x) is @x\n",
-    );
-    let consumer = TokenCursor::parse_source("make(value Word): @value\n");
+fn explicit_pointer_type_is_visible_outside_its_declaration_file() {
+    let declarations = TokenCursor::parse_source("Word is in 0...255\n");
+    let consumer = TokenCursor::parse_source("make(value Word) @Word: @value\n");
     let outputs = transform_package(
         &[(declarations, FileId(0)), (consumer, FileId(1))],
         &TransformCtx::new(),
@@ -170,8 +156,8 @@ fn cross_module_reference_alias_preserves_nominal_identity() {
 
 #[test]
 fn raw_pointer_does_not_satisfy_safe_reference_contract() {
-    let typed = check("Word is in 0...255\nLibraryPointer(x) is @x\n");
-    let pointer = &typed.tags[&typecheck::TagId(Intern::from_ref("LibraryPointer"))].resolved_ty;
+    let typed = check("Word is in 0...255\nmake(value Word) @Word: @value\n");
+    let pointer = &typed.exprs.ty[body(&typed, "make").as_usize()];
 
     assert!(!pointer.is_ref());
     assert!(!pointer.is_mutable_ref());
@@ -256,35 +242,6 @@ fn function_reference_return_requires_matching_target_group() {
 }
 
 #[test]
-fn renamed_reference_former_alias_preserves_nominal_identity() {
-    let typed = check(
-        "Word is in 0...255\n\
-         #default(RawPointer)\n\
-         CanonicalPointer(x) is @x\n\
-         AliasPointer is CanonicalPointer(Word)\n",
-    );
-    let canonical =
-        &typed.tags[&typecheck::TagId(Intern::from_ref("CanonicalPointer"))].resolved_ty;
-    let alias = &typed.tags[&typecheck::TagId(Intern::from_ref("AliasPointer"))].resolved_ty;
-
-    assert_eq!(canonical.type_id(), alias.type_id());
-    assert_eq!(
-        typed
-            .type_registry
-            .resolved_definition_for_type(canonical)
-            .pointee_ty(),
-        Some(&typecheck::ty::Ty::Opaque(Intern::from_ref("x")))
-    );
-    assert_eq!(
-        typed
-            .type_registry
-            .resolved_definition_for_type(alias)
-            .pointee_ty(),
-        Some(&typed.tags[&typecheck::TagId(Intern::from_ref("Word"))].resolved_ty),
-    );
-}
-
-#[test]
 fn recursive_type_rejected_when_defined_by_value_only() {
     let typed = check("Node has next Node\n");
 
@@ -355,10 +312,8 @@ fn aliases_in_any_order_do_not_change_recursive_alias_identity() {
 #[test]
 fn recursive_type_alias_with_reference_former_breaks_cycle() {
     let typed = check(
-        "#default(RawPointer)\n\
-         Pointer(x) is @x\n\
-         RefAlias(x) is ref x\n\
-         Node is Pointer(Node)\n\
+        "RefAlias(x) is ref x\n\
+         Node has next @Node\n\
          RefAliasNode is RefAlias(Node)\n",
     );
 
@@ -370,12 +325,8 @@ fn recursive_type_alias_with_reference_former_breaks_cycle() {
 }
 
 #[test]
-fn recursive_type_allowed_when_pointer_alias_breaks_cycle() {
-    let typed = check(
-        "#default(RawPointer)\n\
-         Link(x) is @x\n\
-         Node is Link(Node)\n",
-    );
+fn recursive_type_allowed_when_explicit_pointer_breaks_cycle() {
+    let typed = check("Node has next @Node\n");
 
     assert!(
         !flaw_codes(&typed)
@@ -385,12 +336,8 @@ fn recursive_type_allowed_when_pointer_alias_breaks_cycle() {
 }
 
 #[test]
-fn recursive_type_allowed_when_pointer_former_breaks_the_cycle() {
-    let typed = check(
-        "#default(RawPointer)\n\
-         Link(x) is @x\n\
-         Node has next Link(Node)\n",
-    );
+fn recursive_type_allowed_when_explicit_pointer_field_breaks_the_cycle() {
+    let typed = check("Node has next @Node\n");
 
     assert!(
         !flaw_codes(&typed)
@@ -430,18 +377,4 @@ fn consuming_one_possible_reference_target_invalidates_selected_union_reference(
         "unexpected flaws: {:?}",
         typed.all_flaws()
     );
-}
-
-#[test]
-fn ambiguous_default_raw_pointer_materialization() {
-    let typed = check(
-        "Word is in 0...255\n\
-         #default(RawPointer)\n\
-         FirstPointer(x) is @x\n\
-         #default(RawPointer)\n\
-         SecondPointer(x) is @x\n\
-         make(value Word): @value\n",
-    );
-
-    assert!(flaw_codes(&typed).contains(&"type-ambiguous-default-raw-pointer".to_string()));
 }

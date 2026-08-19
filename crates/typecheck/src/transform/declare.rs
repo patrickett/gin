@@ -1037,40 +1037,6 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
     }
 
     for declare in file_ast.tags.values() {
-        if let Some(role) = declare.attributes.invalid_default_literal {
-            typed.declaration_flaws.push((
-                declare.name_span,
-                Diagnostic::new(
-                    "type-unknown-literal-default-role",
-                    format!("unknown literal default role `{}`", role.as_str()),
-                )
-                .with_arg("role", role.as_str().to_string())
-                .at_span_id(
-                    declare
-                        .attributes
-                        .default_literal_span
-                        .unwrap_or(declare.name_span),
-                    &typed.span_table,
-                ),
-            ));
-        }
-        if let Some(role) = declare.attributes.invalid_default_type_former {
-            typed.declaration_flaws.push((
-                declare.name_span,
-                Diagnostic::new(
-                    "type-invalid-default-pointer-former-role",
-                    format!("unknown default type-former role `{}`", role.as_str()),
-                )
-                .with_arg("role", role.as_str().to_string())
-                .at_span_id(
-                    declare
-                        .attributes
-                        .default_type_former_span
-                        .unwrap_or(declare.name_span),
-                    &typed.span_table,
-                ),
-            ));
-        }
         for (role, span) in &declare.attributes.invalid_reflection_roles {
             typed.declaration_flaws.push((
                 *span,
@@ -1080,83 +1046,6 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                 )
                 .with_arg("role", role.as_str().to_string())
                 .at_span_id(*span, &typed.span_table),
-            ));
-        }
-        if declare.attributes.default_type_former == Some(ast::DefaultTypeFormerRole::RawPointer) {
-            let tag = typed.tags.get(&TagId(declare.name));
-            let parameter_name = declare
-                .params
-                .as_ref()
-                .and_then(|params| params.keys().next());
-            let valid = declare
-                .params
-                .as_ref()
-                .is_some_and(|params| params.len() == 1)
-                && tag.is_some_and(|tag| {
-                    crate::representation::Repr::derive(
-                        &tag.resolved_ty,
-                        Some(&typed.type_registry),
-                    )
-                    .is_ok_and(|repr| matches!(repr, crate::representation::Repr::Address { .. }))
-                        && parameter_name.is_some_and(|parameter_name| {
-                            typed
-                            .type_registry
-                            .resolved_definition_for_type(&tag.resolved_ty)
-                            .pointee_ty().is_some_and(
-                            |pointee| matches!(pointee, Ty::Opaque(name) if name == parameter_name),
-                        )
-                        })
-                });
-            if !valid {
-                typed.declaration_flaws.push((
-                    declare.name_span,
-                    Diagnostic::new(
-                        "type-invalid-default-pointer-former",
-                        "the default raw-pointer former must be a one-parameter address type",
-                    )
-                    .at_span_id(declare.name_span, &typed.span_table),
-                ));
-            }
-        }
-        if declare.attributes.default_type_former == Some(ast::DefaultTypeFormerRole::FixedArray) {
-            let valid = typed
-                .tags
-                .get(&TagId(declare.name))
-                .and_then(|tag| tag.resolved_ty.named_instance())
-                .and_then(|instance| typed.type_registry.declaration(instance.declaration))
-                .is_some_and(|declaration| declaration.fixed_array.is_some());
-            if !valid {
-                typed.declaration_flaws.push((
-                    declare.name_span,
-                    Diagnostic::new(
-                        "type-invalid-default-array-former",
-                        "the default fixed-array former must carry a valid fixed-array contract",
-                    )
-                    .at_span_id(declare.name_span, &typed.span_table),
-                ));
-            }
-        }
-        if declare.attributes.default_literal == Some(ast::ty::LiteralKind::Integer)
-            && typed.tags.get(&TagId(declare.name)).is_none_or(|tag| {
-                tag.resolved_ty.type_id().is_none()
-                    || crate::representation::Repr::derive(
-                        &tag.resolved_ty,
-                        Some(&typed.type_registry),
-                    )
-                    .is_err()
-                    || typed
-                        .type_registry
-                        .integer_validity_for_type(&tag.resolved_ty)
-                        .is_none()
-            })
-        {
-            typed.declaration_flaws.push((
-                declare.name_span,
-                Diagnostic::new(
-                    "type-invalid-integer-literal-default",
-                    "the integer literal default must be a named bits type with integer validity",
-                )
-                .at_span_id(declare.name_span, &typed.span_table),
             ));
         }
         for provided in &declare.provided_traits {

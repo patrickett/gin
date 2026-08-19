@@ -290,7 +290,7 @@ fn projected_rebind_cannot_write_through_immutable_root() {
 #[test]
 fn projected_rebind_must_discharge_non_discardable_old_value() {
     let typed = transform_prepared(
-        "Int is in 0...255\nPayload has pointer Pointer(Int)\nContainer has payload Payload\nmain:\n  pointer: @1\n  container: Container(payload: Payload(pointer: pointer))\n  container.payload:: Payload(pointer: @2)\n  return 0\n",
+        "Int is in 0...255\nPayload has pointer @Int\nContainer has payload Payload\nmain:\n  pointer: @1\n  container: Container(payload: Payload(pointer: pointer))\n  container.payload:: Payload(pointer: @2)\n  return 0\n",
     );
 
     assert!(typed.all_flaws().iter().any(|(_, flaw)| {

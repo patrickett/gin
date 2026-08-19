@@ -41,18 +41,13 @@ fn renamed_fixed_array_former_retains_named_application_and_array_repr() {
 }
 
 #[test]
-fn visible_fixed_array_default_materializes_uncontextualized_construction() {
+fn uncontextualized_fixed_array_construction_infers_structural_array() {
     let typed = check(
         "Byte is in 0...255\n\
          #fixed_array(element, count)\n\
-         #default(FixedArray)\n\
          LibraryBuffer(element Type, count BigInt) has\n\
          make(value Byte): (value; 4)\n",
     );
     let result = &typed.exprs.ty[body(&typed, "LibraryBuffer.make").as_usize()];
-
-    assert!(matches!(
-        typecheck::representation::Repr::derive(result, Some(&typed.type_registry)),
-        Ok(typecheck::representation::Repr::Array { length: 4, .. })
-    ));
+    assert!(matches!(result, typecheck::ty::Ty::Array { .. }));
 }

@@ -1,7 +1,7 @@
 use ast::ConstValue;
 use internment::Intern;
 use parser::cursor::TokenCursor;
-use typecheck::transform::{PackageTransformOptions, TransformCtx, transform, transform_package};
+use typecheck::transform::{TransformCtx, transform};
 use typecheck::ty::Ty;
 use typecheck::{BindBody, DefId, ExprId, FileId, TypedFileAst};
 
@@ -238,22 +238,18 @@ fn parameter_and_return_types_materialize_literals() {
 }
 
 #[test]
-fn renamed_default_materializes_unconstrained_literal() {
-    let source = "#default(IntegerLiteral)\nRenamed is in -128...127\nvalue: 42\n";
-    let parsed = TokenCursor::parse_source(source);
-    assert_eq!(
-        parsed.tags[&Intern::from_ref("Renamed")]
-            .attributes
-            .default_literal,
-        Some(ast::ty::LiteralKind::Integer)
+fn unconstrained_literal_materializes_as_anonymous_integer() {
+    let typed = transform(
+        &TokenCursor::parse_source("value: 42\n"),
+        FileId(0),
+        &TransformCtx::new(),
     );
-    let typed = transform(&parsed, FileId(0), &TransformCtx::new());
     let expr = body(&typed, "value");
-    let expected = typed.tags[&typecheck::TagId(Intern::from_ref("Renamed"))]
-        .resolved_ty
-        .type_id();
 
-    assert_eq!(typed.exprs.ty[expr.as_usize()].type_id(), expected);
+    assert!(matches!(
+        typed.exprs.ty[expr.as_usize()],
+        Ty::AnonymousInteger { .. }
+    ));
     assert_eq!(
         typed.exprs.const_value[expr.as_usize()],
         Some(ConstValue::Int(42.into()))
@@ -261,8 +257,8 @@ fn renamed_default_materializes_unconstrained_literal() {
 }
 
 #[test]
-fn compile_time_integer_preserves_i256_value_beyond_the_runtime_default() {
-    let source = "#default(IntegerLiteral)\nSignedDefault is in -9223372036854775808...9223372036854775807\nwide := 9223372036854775808\n";
+fn compile_time_integer_preserves_i256_value_beyond_runtime_width() {
+    let source = "wide := 9223372036854775808\n";
     let typed = transform(
         &TokenCursor::parse_source(source),
         FileId(0),
@@ -279,21 +275,6 @@ fn compile_time_integer_preserves_i256_value_beyond_the_runtime_default() {
         typed.exprs.ty[expr.as_usize()],
         Ty::AnonymousInteger { .. }
     ));
-}
-
-#[test]
-fn missing_and_ambiguous_defaults_are_diagnosed() {
-    let missing = check("value: 42\n");
-    assert!(!flaw_codes(&missing).contains(&"type-missing-integer-literal-default".to_string()));
-
-    let ambiguous = check(
-        "#default(IntegerLiteral)\nFirst is in 0...255\n\
-         #default(IntegerLiteral)\nSecond is in 0...255\n\
-         value: 42\n",
-    );
-    assert!(
-        !flaw_codes(&ambiguous).contains(&"type-ambiguous-integer-literal-default".to_string())
-    );
 }
 
 #[test]
@@ -357,10 +338,9 @@ fn bounded_source_refinement_normalizes_strict_endpoints() {
 }
 
 #[test]
-fn operator_operands_use_the_nominal_peer_or_visible_default() {
+fn operator_operands_use_the_nominal_peer_or_anonymous_integer() {
     let typed = check(
-        "#default(IntegerLiteral)\n\
-         Word is in 0...255\n\
+        "Word is in 0...255\n\
          #intrinsic(BitsAdd)\n\
          #operator(Add)\n\
          plus(left Word, right Word) Word extern\n\
@@ -389,32 +369,9 @@ fn operator_operands_use_the_nominal_peer_or_visible_default() {
     }
 
     let both = body(&typed, "both");
-    assert_eq!(typed.exprs.ty[both.as_usize()].type_id(), expected);
+    assert!(matches!(
+        typed.exprs.ty[both.as_usize()],
+        Ty::AnonymousInteger { .. }
+    ));
     assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
-}
-
-#[test]
-fn package_defined_default_materializes_in_another_file() {
-    let declarations =
-        TokenCursor::parse_source("#default(IntegerLiteral)\nPackageInteger is in 0...65535\n");
-    let consumer = TokenCursor::parse_source("value: 42\n");
-    let outputs = transform_package(
-        &[(declarations, FileId(10)), (consumer, FileId(11))],
-        &TransformCtx::new(),
-        PackageTransformOptions::FULL,
-    );
-    let expr = body(&outputs[1], "value");
-    let expected = outputs[0].tags[&typecheck::TagId(Intern::from_ref("PackageInteger"))]
-        .resolved_ty
-        .type_id();
-
-    assert_eq!(outputs[1].exprs.ty[expr.as_usize()].type_id(), expected);
-    assert!(
-        outputs.iter().all(|typed| typed.all_flaws().is_empty()),
-        "{:?}",
-        outputs
-            .iter()
-            .flat_map(TypedFileAst::all_flaws)
-            .collect::<Vec<_>>()
-    );
 }

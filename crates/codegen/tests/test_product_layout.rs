@@ -11,8 +11,7 @@ first(value Padded) Byte: value.first
 unit():
 return
 external(value Padded) Padded extern
-LibraryPointer(x) is @x
-PaddedPointer is LibraryPointer(Padded)
+PaddedPointer is @Padded
 #intrinsic(AddressOffset)
 offset(base PaddedPointer, index Byte) PaddedPointer extern
 entry(base PaddedPointer, index Byte) PaddedPointer: offset(base, index)

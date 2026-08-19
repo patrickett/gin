@@ -168,14 +168,14 @@ fn equality_rejects_distinct_nominal_types() {
 #[test]
 fn equality_rejects_pointer_values() {
     let typed = transform_source(
-        "Int is in 0...255\nBool is True or False\nPointer(x) is @x\nsame(a Pointer(Int), b Pointer(Int)) Bool: a = b\n",
+        "Int is in 0...255\nBool is True or False\nsame(a @Int, b @Int) Bool: a = b\n",
     );
 
     assert!(
         typed
             .all_flaws()
             .iter()
-            .any(|(_, flaw)| flaw.code.slug() == "type-nominal-operator-unavailable")
+            .any(|(_, flaw)| flaw.code.slug() == "type-no-visible-operator-contract")
     );
 }
 
@@ -334,8 +334,7 @@ fn bind_expr_const_value_removed(ast: &ast::FileAst, name: &str) -> bool {
 #[test]
 fn runtime_binary_with_variables_stays_dynamic() {
     let typed = transform_source(
-        "#default(IntegerLiteral)
-Int is in 0...255
+        "Int is in 0...255
 #operator(Add)
 add_int(a Int, b Int) Int: a
 x: 10\ny: 20\nmain: x + y",

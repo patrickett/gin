@@ -149,8 +149,7 @@ Int is in 0...4294967295
 
 Bool is True or False
 
-List(x) has pointer Pointer(x), length BigInt
-Pointer(x) is @x
+List(x) has pointer @x, length BigInt
 PointerSize is BigInt
 
 String has bytes List(BigInt)
@@ -187,8 +186,7 @@ Int is in 0...4294967295
 
 Bool is True or False
 
-List(x) has pointer Pointer(x), length BigInt
-Pointer(x) is @x
+List(x) has pointer @x, length BigInt
 PointerSize is BigInt
 
 String has bytes List(BigInt)

@@ -12,8 +12,7 @@ fn hover_f_shows_named_ty() {
     let src = "\
 Bool is True or False
 BigInt is in 0...1000
-Pointer(x) is @x
-List(x) has pointer Pointer(x), length BigInt
+List(x) has pointer @x, length BigInt
 NamedTy has name String, ty Type
 String has bytes List(Byte)
 Byte is in 0...255
@@ -46,8 +45,7 @@ fn hover_rest_shows_list_named_ty() {
     let src = "\
 Bool is True or False
 BigInt is in 0...1000
-Pointer(x) is @x
-List(x) has pointer Pointer(x), length BigInt
+List(x) has pointer @x, length BigInt
 NamedTy has name String, ty Type
 String has bytes List(Byte)
 Byte is in 0...255

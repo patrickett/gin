@@ -417,10 +417,35 @@ pub(crate) fn lower_expr_kind(
         Expr::Lit(lit) => TypedExprKind::Lit(lit.clone()),
 
         Expr::Binary(binary) => {
-            let lhs = lower_typed_expr(typed, &binary.lhs, &scope.without_literal_default(), env);
-            let rhs = lower_typed_expr(typed, &binary.rhs, &scope.without_literal_default(), env);
+            let lhs = lower_typed_expr(
+                typed,
+                &binary.lhs,
+                &scope.without_literal_materialization(),
+                env,
+            );
+            let rhs = lower_typed_expr(
+                typed,
+                &binary.rhs,
+                &scope.without_literal_materialization(),
+                env,
+            );
             let mut lhs_ty = typed.exprs.ty_of(lhs).cloned().unwrap_or(Ty::Unit);
             let mut rhs_ty = typed.exprs.ty_of(rhs).cloned().unwrap_or(Ty::Unit);
+            if let Some(expected) = scope.expected_ty
+                && typed
+                    .type_registry
+                    .integer_validity_for_type(expected)
+                    .is_some()
+            {
+                if matches!(lhs_ty, Ty::UnresolvedLiteral(_)) {
+                    materialize_integer_operand(typed, lhs, expected);
+                    lhs_ty = typed.exprs.ty_of(lhs).cloned().unwrap_or(Ty::Unit);
+                }
+                if matches!(rhs_ty, Ty::UnresolvedLiteral(_)) {
+                    materialize_integer_operand(typed, rhs, expected);
+                    rhs_ty = typed.exprs.ty_of(rhs).cloned().unwrap_or(Ty::Unit);
+                }
+            }
             if is_numeric_comparison_op(&binary.op) {
                 if matches!(rhs_ty, Ty::UnresolvedLiteral(_))
                     && lhs_ty
@@ -448,15 +473,6 @@ pub(crate) fn lower_expr_kind(
                 && !matches!(lhs_ty, Ty::UnresolvedLiteral(_))
             {
                 materialize_integer_operand(typed, rhs, &lhs_ty);
-                rhs_ty = typed.exprs.ty_of(rhs).cloned().unwrap_or(Ty::Unit);
-            } else if matches!(lhs_ty, Ty::UnresolvedLiteral(_))
-                && matches!(rhs_ty, Ty::UnresolvedLiteral(_))
-                && scope.integer_literal_defaults.len() == 1
-            {
-                let expected = &scope.integer_literal_defaults[0];
-                materialize_integer_operand(typed, lhs, expected);
-                materialize_integer_operand(typed, rhs, expected);
-                lhs_ty = typed.exprs.ty_of(lhs).cloned().unwrap_or(Ty::Unit);
                 rhs_ty = typed.exprs.ty_of(rhs).cloned().unwrap_or(Ty::Unit);
             } else if is_numeric_non_comparison_op(&binary.op)
                 && matches!(lhs_ty, Ty::UnresolvedLiteral(_))
@@ -1374,19 +1390,12 @@ pub(crate) fn lower_expr_kind(
                     return Some(value);
                 }
 
-                match init.value {
-                    ast::Expr::Lit(ast::Literal::Int(_) | ast::Literal::Number(_))
-                        if scope.integer_literal_defaults.len() == 1 =>
-                    {
-                        Some(scope.integer_literal_defaults[0].clone())
-                    }
-                    _ => None,
-                }
+                None
             })();
             let init_scope = init_expected
                 .as_ref()
                 .map(|ty| scope.with_expected(Some(ty)))
-                .unwrap_or_else(|| scope.without_literal_default());
+                .unwrap_or_else(|| scope.without_literal_materialization());
             let init_id = lower_typed_expr(typed, init, &init_scope, env);
             let size = as_tuple_alloc_size(&size.value)
                 .or_else(|| {
@@ -1591,8 +1600,12 @@ pub(crate) fn lower_expr_kind(
         Expr::Cast { expr, ty } => {
             let resolved_ty =
                 resolve_type_reference(ty, scope.tag_types, &env.types, Some(scope.tag_params));
-            let inner_id =
-                lower_typed_expr(typed, expr, &scope.with_anonymous_literal_default(), env);
+            let inner_id = lower_typed_expr(
+                typed,
+                expr,
+                &scope.with_anonymous_literal_materialization(),
+                env,
+            );
             TypedExprKind::Cast {
                 expr: inner_id,
                 ty: resolved_ty,

@@ -227,9 +227,8 @@ fn declaration_surface_has_members_uses_surface_types() {
                 qualifier: None,
                 name: intern("length"),
                 name_span: SpanId::INVALID,
-                ty: Some(Box::new(spanned_expr(expr_from_type(generic(
-                    "Pointer",
-                    vec![("Byte", nominal("Byte"))],
+                ty: Some(Box::new(spanned_expr(Expr::TakePtr(Box::new(
+                    Typed::infer(Expr::AnonymousTag(intern("Byte")), SpanId::INVALID),
                 ))))),
                 body: None,
                 doc_comment: None,
@@ -240,7 +239,7 @@ fn declaration_surface_has_members_uses_surface_types() {
 
     assert_eq!(
         declare.surface_text(),
-        "Allocator has\n    reserve(l Layout) Slice(Byte) or AllocError\n    length Pointer(Byte)"
+        "Allocator has\n    reserve(l Layout) Slice(Byte) or AllocError\n    length @Byte"
     );
 }
 

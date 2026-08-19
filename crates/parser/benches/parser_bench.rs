@@ -48,7 +48,7 @@ NamedTy has name String, ty Type
 VariantShape has name String, fields List(NamedTy)
 Bool is True or False
 BigInt is in 0...18446744073709551615
-List(x) has pointer Pointer(x), length BigInt
+List(x) has pointer @x, length BigInt
 String has bytes List(BigInt)
 
 Copy has can_copy Bool: is_copy(Self)
@@ -81,7 +81,7 @@ NamedTy has name String, ty Type
 VariantShape has name String, fields List(NamedTy)
 Bool is True or False
 BigInt is in 0...18446744073709551615
-List(x) has pointer Pointer(x), length BigInt
+List(x) has pointer @x, length BigInt
 String has bytes List(BigInt)
 
 Size is Const(BigInt) or Dynamic
@@ -121,11 +121,10 @@ max_size(a Size, b Size) Size := when (a, b) is
 /// IO pipeline fixture (~62 lines, ~1.6KB).
 const IO_GIN: &str = "\
 Int is in 0...4294967295
-Pointer(x) is @x
 
 write_spec := 'sink'
 
-write(fd Int, buf Pointer(Int), len Int) Int:
+write(fd Int, buf @Int, len Int) Int:
     result := process_output(write_spec, fd, buf, len)
     return result
 

@@ -3,7 +3,7 @@ use crate::expr::{BindValue, Expr, Typed};
 
 use crate::parameter::Parameters;
 use crate::span::SpanId;
-use crate::ty::{LiteralKind, PredicateExpr, Ty};
+use crate::ty::{PredicateExpr, Ty};
 use internment::Intern;
 use std::hash::{Hash, Hasher};
 
@@ -307,12 +307,6 @@ impl std::fmt::Display for HasMember {
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct DeclareAttributes {
-    pub default_literal: Option<LiteralKind>,
-    pub invalid_default_literal: Option<Intern<String>>,
-    pub default_literal_span: Option<SpanId>,
-    pub default_type_former: Option<DefaultTypeFormerRole>,
-    pub invalid_default_type_former: Option<Intern<String>>,
-    pub default_type_former_span: Option<SpanId>,
     pub fixed_array: Option<FixedArrayContract>,
     pub invalid_fixed_array: Option<Intern<String>>,
     pub bits: Option<Box<Typed<Expr>>>,
@@ -327,22 +321,6 @@ pub struct FixedArrayContract {
     pub element_parameter: Intern<String>,
     pub length_parameter: Intern<String>,
     pub span: SpanId,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum DefaultTypeFormerRole {
-    RawPointer,
-    FixedArray,
-}
-
-impl DefaultTypeFormerRole {
-    pub fn resolve(name: &str) -> Option<Self> {
-        match name {
-            "RawPointer" => Some(Self::RawPointer),
-            "FixedArray" => Some(Self::FixedArray),
-            _ => None,
-        }
-    }
 }
 
 impl DeclareAttributes {
@@ -386,27 +364,6 @@ impl DeclareAttributes {
                         // Keep all malformed reflection declarations so diagnostics can point
                         // to every attribute site.
                         self.invalid_reflection_roles.push((*name, *span));
-                    }
-                }
-                AttributeItem::Call { name, args, .. } if name.as_str() == "default" => {
-                    if let Some(Typed {
-                        value: Expr::AnonymousTag(role),
-                        span_id,
-                        ..
-                    }) = args.first()
-                    {
-                        if let Some(literal) = LiteralKind::resolve(role.as_str()) {
-                            self.default_literal = Some(literal);
-                        } else if let Some(default_type_former) =
-                            DefaultTypeFormerRole::resolve(role.as_str())
-                        {
-                            self.default_type_former = Some(default_type_former);
-                        } else {
-                            self.invalid_default_literal = Some(*role);
-                            self.invalid_default_type_former = Some(*role);
-                        }
-                        self.default_literal_span = Some(*span_id);
-                        self.default_type_former_span = Some(*span_id);
                     }
                 }
                 AttributeItem::Call {

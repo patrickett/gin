@@ -83,7 +83,6 @@ SignedSmallInt is in -32768...32767
 --- The 32-bit signed integer type.
 SignedInt is in -2147483648...2147483647
 --- The 64-bit signed integer type.
-#default(IntegerLiteral)
 SignedBigInt is in -9223372036854775808...9223372036854775807
 --- The 128-bit signed integer type.
 SignedLargeInt is in -170141183460469231731687303715884105728...170141183460469231731687303715884105727
@@ -103,18 +102,16 @@ LargeInt is in 0...340282366920938463463374607431768211455
 Byte is TinyInt
 "#;
 
-pub const LIST_GIN: &str = r#"use Pointer, PointerSize
+pub const LIST_GIN: &str = r#"use PointerSize
 
 --- A homogeneous list type.
 --- List literals use bracket syntax: ['linux', 'macos'].
 --- Generic over element type: `List(x)`.
-List(x) has pointer Pointer(x), length PointerSize
+List(x) has pointer @x, length PointerSize
 "#;
 
 pub const POINTER_GIN: &str = r#"use '../target/'.target
 use BigInt, Int
-
-Pointer(x) is @x
 
 --- The pointer-width unsigned integer type (8 bytes on 64-bit, 4 bytes on 32-bit).
 PointerSize is when target.arch is
@@ -186,10 +183,10 @@ max_size(a Size, b Size) Size := when (a, b) is
 union_size(variants List(ReflectionVariantShape)) Size := add(union_disc(variants), union_max_payload(variants))
 "#;
 
-pub const STRING_GIN: &str = r#"use core.primitive.(Byte, Pointer, PointerSize)
+pub const STRING_GIN: &str = r#"use core.primitive.(Byte, PointerSize)
 
 --- A UTF-8 string represented by a byte pointer and byte length.
-String has pointer Pointer(Byte), len PointerSize
+String has pointer @Byte, len PointerSize
 
 ToString has to_string String
 "#;

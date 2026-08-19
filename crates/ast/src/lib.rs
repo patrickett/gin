@@ -67,8 +67,8 @@ pub use doc_comment::DocComment;
 
 pub mod declare;
 pub use declare::{
-    Declare, DeclareAttributes, DeclareValue, DefaultTypeFormerRole, FixedArrayContract,
-    HasFunction, HasFunctionKind, HasMember, HasMemberBody, HasProperty, ProvidedTrait,
+    Declare, DeclareAttributes, DeclareValue, FixedArrayContract, HasFunction, HasFunctionKind,
+    HasMember, HasMemberBody, HasProperty, ProvidedTrait,
 };
 
 pub mod pattern;

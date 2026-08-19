@@ -11,6 +11,20 @@ fn parse_local_and_package_import_forms() {
 }
 
 #[test]
+fn pointer_types_are_valid_parameter_annotations() {
+    let out = "Byte is in 0...255\nwrite(buf @Byte) SignedBigInt extern\n".parse_source_full();
+    assert_eq!(count_errors(&out), 0, "symptoms: {:?}", out.symptoms);
+    assert!(has_def(&out, "write"));
+}
+
+#[test]
+fn pointer_bindings_accept_explicit_pointer_types() {
+    let out = "Byte is in 0...255\nvalue Byte := 1\npointer @Byte := @value\n".parse_source_full();
+    assert_eq!(count_errors(&out), 0, "symptoms: {:?}", out.symptoms);
+    assert!(has_def(&out, "pointer"));
+}
+
+#[test]
 fn for_loop_requires_loop_keyword() {
     let without_loop = "sum: for i in items\n    i\n".parse_source_full();
     assert!(

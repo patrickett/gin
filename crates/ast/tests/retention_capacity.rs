@@ -15,7 +15,7 @@ const SAMPLES: usize = 30;
 const WARMUPS: usize = 3;
 
 fn representative_source() -> String {
-    let mut source = String::from("#default(IntegerLiteral)\nInt is in 0...10000\n");
+    let mut source = String::from("Int is in 0...10000\n");
     for index in 0..200 {
         source.push_str(&format!(
             "value{index} := [{index}, {}, {}]\n",

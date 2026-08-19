@@ -1389,7 +1389,7 @@ pub struct TypedTag {
     /// Tag parameters (type variables, defaults), if any.
     pub params: Option<Parameters>,
     /// For record types (`has` bodies), field name → formatted type annotation surface
-    /// (e.g. `"pointer"` → `"Pointer(x)"`). Populated during stage_declare.
+    /// (e.g. `"pointer"` → `"@x"`). Populated during stage_declare.
     pub record_field_types: HashMap<Intern<String>, String>,
     /// For interface (`has`) bodies, method name → doc comment, if any.
     /// Only entries for members that have a doc are present.
@@ -2646,7 +2646,7 @@ impl TypedFileAst {
         }
 
         // 4. Word is a known tag name referenced inside a type annotation or tag
-        //    body (e.g. `Bool` in `has b Bool` or `Pointer` in `pointer Pointer(x)`).
+        //    body (e.g. `Bool` in `has b Bool` or `@x` in `pointer @x`).
         //    Route to tag declaration directly — checked before `tag_at_byte` so
         //    it wins over the containing tag's body hover.
         if self.tags.contains_key(&tag_id) {

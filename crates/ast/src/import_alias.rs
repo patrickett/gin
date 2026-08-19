@@ -203,14 +203,13 @@ impl Pattern {
 }
 
 impl ModPath {
-    /// Apply symbol alias to this mod path (rewrite root to qualified path when matched).
+    /// Apply a symbol alias to the root of this mod path.
     fn apply_alias(&mut self, alias_map: &AliasMap) -> Option<SpanId> {
-        if !self.segments.is_empty() {
-            return None;
-        }
         if let Some(target) = alias_map.get(&self.root) {
             self.root = target.root;
-            self.segments = target.segments.clone();
+            let mut segments = target.segments.clone();
+            segments.append(&mut self.segments);
+            self.segments = segments;
             return Some(target.span_id);
         }
         None

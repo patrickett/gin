@@ -224,6 +224,7 @@ impl TokenCursor<'_, '_> {
                 self.peek_at(start + 1),
                 Some(Token::Colon)
                     | Some(Token::ColonEq)
+                    | Some(Token::At)
                     | Some(Token::ParenOpen)
                     | Some(Token::Has)
                     | Some(Token::Dot)
@@ -270,12 +271,12 @@ impl TokenCursor<'_, '_> {
         match effective {
             Token::Tag(_) => self.dispatch_tag_element(expr_parser, start_offset),
             Token::Id(_) => {
-                // Deterministic dispatch: if next token after id is : or :=, it's definitely a bind.
+                // Deterministic dispatch: if next token after id starts a type annotation or is :/:=, it's definitely a bind.
                 // No checkpoint/rewind needed for the common case (x: expr, x := expr).
                 // For id(...) and id Tag, use speculative parsing only for the truly ambiguous cases.
                 if matches!(
                     self.peek_at(start_offset + 1),
-                    Some(Token::Colon) | Some(Token::ColonEq)
+                    Some(Token::At) | Some(Token::Colon) | Some(Token::ColonEq)
                 ) {
                     // id: or id:= → bind, no speculation needed
                     if let Some(bind) = self.parse_bind(expr_parser) {

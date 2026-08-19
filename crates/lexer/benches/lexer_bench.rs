@@ -45,7 +45,7 @@ NamedTy has name String, ty Type
 VariantShape has name String, fields List(NamedTy)
 Bool is True or False
 BigInt is in 0...18446744073709551615
-List(x) has pointer Pointer(x), length BigInt
+List(x) has pointer @x, length BigInt
 String has bytes List(BigInt)
 
 Copy has can_copy Bool: is_copy(Self)
@@ -78,7 +78,7 @@ NamedTy has name String, ty Type
 VariantShape has name String, fields List(NamedTy)
 Bool is True or False
 BigInt is in 0...18446744073709551615
-List(x) has pointer Pointer(x), length BigInt
+List(x) has pointer @x, length BigInt
 String has bytes List(BigInt)
 
 Size is Const(BigInt) or Dynamic

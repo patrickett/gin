@@ -19,7 +19,7 @@ fn marker_fixture_reuse_stays_bounded() {
     let snippet = "\
 Type is Primitive(width BigInt, signed Bool) or Record(name String, fields List(NamedTy))
 NamedTy has name String, ty Type
-List(x) has pointer Pointer(x), length BigInt
+List(x) has pointer @x, length BigInt
 BigInt is in 0...1000
 String has bytes List(Byte)
 Byte is in 0...255

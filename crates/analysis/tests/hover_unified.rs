@@ -447,32 +447,32 @@ fn hover_tag_name_in_another_tags_body_shows_tag_declaration() {
 }
 
 /// Hovering a record field name inside a tag body (e.g. `pointer` in
-/// `has pointer Pointer(x)`) should show the field and its type.
+/// `has pointer @x`) should show the field and its type.
 #[test]
 fn hover_record_field_in_tag_body_shows_field() {
     let pkg = TempPackage::new("field_hover");
     pkg.write_flask("field_hover");
-    let source = "Pointer(x) is @x\n\nContainer(x) has ptr Pointer(x)\n";
+    let source = "Container(x) has ptr @x\n";
     let path = pkg.write("main.gin", source);
 
     let engine = PackageCache::for_test();
     engine.add_file(path.clone()).unwrap();
 
-    // Hover on `ptr` in `has ptr Pointer(x)`
+    // Hover on `ptr` in `has ptr @x`
     let byte = source.rfind("ptr").expect("`ptr` in body") as u32;
     let HoverContent { markdown, .. } = engine.hover(&path, byte).expect("hover on `ptr` field");
 
     assert_eq!(
         markdown,
         "\
-```gin\nfield_hover.Container\n```\n\n```gin\nptr Pointer(x)\n```"
+```gin\nfield_hover.Container\n```\n\n```gin\nptr @x\n```"
     );
 }
 
 /// Hovering record fields when the named type is in the same file.
 #[test]
 fn hover_record_field_same_file_shows_named_type() {
-    let source = "Pointer(x) is @x\n\nContainer(x) has ptr Pointer(x)\n";
+    let source = "Container(x) has ptr @x\n";
     let pkg = TempPackage::new("same_file");
     pkg.write_flask("same_file");
     let path = pkg.write("main.gin", source);
@@ -487,18 +487,18 @@ fn hover_record_field_same_file_shows_named_type() {
     assert_eq!(
         markdown,
         "\
-```gin\nsame_file.Container\n```\n\n```gin\nptr Pointer(x)\n```"
+```gin\nsame_file.Container\n```\n\n```gin\nptr @x\n```"
     );
 }
 
 #[test]
 fn hover_narrowed_type_in_when_then_body() {
     let source = "\
-#default(IntegerLiteral)\nInt is in -9223372036854775808...9223372036854775807\n\nmain:\n    x := 42\n    when x is\n        Int then x + 1\n            else 0\n    return x\n";
+Int is in -9223372036854775808...9223372036854775807\n\nmain:\n    x := 42\n    when x is\n        Int then x + 1\n            else 0\n    return x\n";
     let HoverContent { markdown, .. } = hover_at(source, "x + 1", "narrowed");
     assert_eq!(
         markdown,
-        "x Int\nInt\ncurrent knowledge: exactly 42\nvalidity: -9223372036854775808...9223372036854775807\nruntime representation: i64\ninterpretation: Signed"
+        "x integer in 42...42\nanonymous integer\ncurrent knowledge: exactly 42\nvalidity: 42...42\nruntime representation: i6"
     );
 }
 
@@ -578,7 +578,7 @@ Allocator has
     --- Attempt to allocate.
     allocate(ref self, l Layout) Slice(Byte) or AllocError,
     --- Free a block.
-    deallocate(ref self, p Pointer(Byte), l Layout),
+    deallocate(ref self, p @Byte, l Layout),
 )
 "#;
     let pkg = TempPackage::new("interface_methods");
@@ -604,7 +604,7 @@ Allocator has
             "```gin",
             "Allocator has",
             "    allocate(ref self, l Layout) Slice(Byte) or AllocError",
-            "    deallocate(ref self, p Pointer(Byte), l Layout)",
+            "    deallocate(ref self, p @Byte, l Layout)",
             "```",
         ]
         .join("\n"),
@@ -619,7 +619,7 @@ Allocator has
     --- Attempt to allocate.
     reserve(ref self, l Layout) Slice(Byte) or AllocError,
     --- Free a block.
-    release(ref self, p Pointer(Byte), l Layout),
+    release(ref self, p @Byte, l Layout),
 )
 "#;
     let pkg = TempPackage::new("interface_method_hover");
@@ -642,7 +642,7 @@ Allocator has
             "```",
             "",
             "```gin",
-            "release(ref self, p Pointer(Byte), l Layout)",
+            "release(ref self, p @Byte, l Layout)",
             "```",
             "---",
             "",
@@ -664,7 +664,7 @@ Allocator has
     --- Attempt to allocate a block of memory.
     allocate(ref self, l Layout) Slice(Byte) or AllocError,
     --- Free a block of memory.
-    deallocate(ref self, p Pointer(Byte), l Layout),
+    deallocate(ref self, p @Byte, l Layout),
 )
 "#;
     let pkg = TempPackage::new("interface_member_doc");
@@ -777,11 +777,11 @@ fn hover_self_in_has_block_body_shows_ref_type() {
 #[test]
 fn hover_self_in_block_body_with_multiple_exprs_and_return() {
     let source = r#"Region has
-    base Pointer(Byte)
-    cursor Pointer(Byte)
-    end Pointer(Byte)
+    base @Byte
+    cursor @Byte
+    end @Byte
 
-    allocate(ref self, size PointerSize) Pointer(Byte):
+    allocate(ref self, size PointerSize) @Byte:
         self
         -- a comment
     return self.cursor

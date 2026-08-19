@@ -722,54 +722,6 @@ fn bind_refinement_ty(bind: &Bind) -> Option<Ty> {
     })
 }
 
-pub(crate) fn materialize_raw_pointer(
-    default: &Ty,
-    pointee: &Ty,
-    registry: &crate::TypeRegistry,
-) -> Option<Ty> {
-    let Ty::Named { instance, name } = default else {
-        return None;
-    };
-    let definition = registry.resolved_definition_for_type(default);
-    let pointee_param = match &definition {
-        Ty::Ptr { inner } => inner,
-        Ty::Address { pointee: inner, .. } => inner,
-        _ => return None,
-    };
-    let Ty::Opaque(parameter) = pointee_param.as_ref() else {
-        return None;
-    };
-    let mut instance = instance.clone();
-    instance.arguments = vec![(*parameter, ast::TyArg::Type(Box::new(pointee.clone())))];
-    Some(Ty::Named {
-        instance,
-        name: *name,
-    })
-}
-
-pub(crate) fn materialize_fixed_array(
-    default: &Ty,
-    contract: &ast::FixedArrayContract,
-    element: &Ty,
-    length: NormalExpr,
-) -> Option<Ty> {
-    let Ty::Named { instance, name } = default else {
-        return None;
-    };
-    let mut instance = instance.clone();
-    instance.arguments = vec![
-        (
-            contract.element_parameter,
-            ast::TyArg::Type(Box::new(element.clone())),
-        ),
-        (contract.length_parameter, ast::TyArg::Const(length)),
-    ];
-    Some(Ty::Named {
-        instance,
-        name: *name,
-    })
-}
-
 fn reference_referent_or_named(ty: &Ty) -> &Ty {
     match ty {
         Ty::Ref { inner, .. } => reference_referent_or_named(inner),

@@ -2,7 +2,7 @@ mod support;
 use internment::Intern;
 use parser::parse_from_str;
 
-const INTEGER_DEFAULT: &str = "#default(IntegerLiteral)\nDefaultInteger is in 0...255\n";
+const INTEGER_TYPES: &str = "DefaultInteger is in 0...255\n";
 const STRING_TYPES: &str = "Int is in -9223372036854775808...9223372036854775807\nByte is in 0...255\nString has pointer @Byte, len Int\n";
 
 #[test]
@@ -14,7 +14,7 @@ fn test_parse_string_literal() {
 
 #[test]
 fn test_compile_number_literal() {
-    let source = format!("{INTEGER_DEFAULT}hello_text: 42\n");
+    let source = format!("{INTEGER_TYPES}hello_text: 42\n");
     let (mlir_text, symptoms) = support::codegen_to_mlir_text(&source, "test.gin", false);
     assert!(
         symptoms.is_empty(),
@@ -25,7 +25,7 @@ fn test_compile_number_literal() {
 
 #[test]
 fn test_compile_empty_function() {
-    let source = format!("{INTEGER_DEFAULT}hello_text: 42\n");
+    let source = format!("{INTEGER_TYPES}hello_text: 42\n");
     let (mlir_text, symptoms) = support::codegen_to_mlir_text(&source, "test.gin", false);
     assert!(
         symptoms.is_empty(),
@@ -110,7 +110,7 @@ fn test_compile_lone_quote() {
 #[test]
 fn test_compile_const_union_string() {
     let src = format!(
-        "{INTEGER_DEFAULT}LogLevel is 'debug' or 'info' or 'warn' or 'error'
+        "{INTEGER_TYPES}LogLevel is 'debug' or 'info' or 'warn' or 'error'
 
 main:
     level LogLevel: 'debug'
@@ -134,7 +134,7 @@ return
 #[test]
 fn test_compile_const_union_function_arg() {
     let src = format!(
-        "{INTEGER_DEFAULT}LogLevel is 'debug' or 'info' or 'warn' or 'error'
+        "{INTEGER_TYPES}LogLevel is 'debug' or 'info' or 'warn' or 'error'
 
 set_log_level(level LogLevel):
     return 0
@@ -163,7 +163,7 @@ return
 fn test_when_basic_ternary() {
     // Basic single-line ternary with string payloads.
     let src = format!(
-        "{INTEGER_DEFAULT}{STRING_TYPES}
+        "{INTEGER_TYPES}{STRING_TYPES}
 main() String: when 1 < 2 is True and 2 < 3 is True then 'debug' else 'info'
 "
     );

@@ -47,8 +47,7 @@ fn declared_log_level_is_literal_union() {
 
 #[test]
 fn widened_string_bind_uses_nominal_string() {
-    let typed =
-        transform_source("String has pointer Pointer(Byte), len Int\n\nlabel String: 'John'\n");
+    let typed = transform_source("String has pointer @Byte, len Int\n\nlabel String: 'John'\n");
     let ty = bind_body_ty(&typed, "label");
     match typed.type_registry.resolved_definition_for_type(&ty) {
         Ty::Record { name, .. } if name.as_str() == "String" => {}
