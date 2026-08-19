@@ -1,0 +1,186 @@
+(* Gin token-level EBNF (parser contract) *)
+
+Source                = { UseDecl } { TopLevelElement | PrivateDecl } EOF ;
+TopLevelElement       = Declaration | ExpressionStmt ;
+ExpressionStmt        = Expression ;
+PrivateDecl           = Token::Private { TopLevelElement } ;
+
+(* Imports: `use` only *)
+UseDecl               = Token::Use ImportSource { Token::Comma ImportSource } ;
+ImportSource          = StringImport | PackageImport | CurrentModuleImport ;
+StringImport          = Token::String [ BundleMemberImport ] [ Alias ] ;
+BundleMemberImport    = Token::Dot BundleImport ;
+BundleImport          = Token::ParenOpen BundleMemberList Token::ParenClose ;
+BundleMemberList      = [ BundleMember { ItemSep BundleMember } ] ;
+BundleMember          = ImportName [ Alias ] ;
+PackageImport         = ImportRoot { Token::Dot ImportPathSegment } [ BundleMemberImport ] [ Alias ] ;
+ImportRoot            = Token::Id | Token::SelfInstance ;
+ImportPathSegment     = Token::Id | Token::Tag | Token::SelfInstance ;
+CurrentModuleImport   = Token::Tag [ Alias ] ;
+ImportName            = Token::Id | Token::Tag ;
+Alias                 = Token::As Token::Id ;
+
+(* Declarations *)
+Declaration           = BindDecl | TagDecl | MethodDecl ;
+
+BindDecl              = [ Token::Ref | Token::Mut ]
+                        Token::Id
+                        [ Params ]
+                        [ TypeConstraint ]
+                        [ ReturnSignature ]
+                        BindOperator
+                        BindValue ;
+Params                = Token::ParenOpen [ Param { ItemSep Param } ] Token::ParenClose ;
+Param                 = [ ParamConvention ]
+                        ( Token::Id | Token::Tag | Token::SelfInstance )
+                        [ Token::Is PredTypeExpr
+                        | Token::Colon [ TypeExpr | Expression | Token::Int | Token::Float | Token::Tag | Token::SelfTag | Token::String ]
+                        | Token::And PredTypeExpr ] ;
+ParamConvention       = Token::Eat | Token::Ref | Token::Mut | Token::CurlyOpen Token::Id { Token::Dot Token::Id } Token::CurlyClose ;
+ReturnSignature       = Token::Is ReturnTypeExpr
+                        [ Token::And ReturnTypeExpr ]
+                        [ (Token::Or | Token::Thus) AltResult ] ;
+AltResult             = Token::Tag [ Token::Thus PredTypeExpr ] ;
+TypeConstraint        = Token::Is (Token::Tag | TypeExpr) [ { Token::And (Token::Tag | TypeExpr) } ] ;
+ReturnTypeExpr        = Predicate | TagSpec | TypeExpr ;
+TagSpec               = Token::Tag | Token::SelfTag ;
+PredTypeExpr          = (Token::Tag | TypeExpr) ;
+
+BindOperator          = Token::ColonEq | Token::Colon | Token::ColonColon | CompoundAssign ;
+CompoundAssign        = (Token::Plus | Token::Minus | Token::Star | Token::Slash | Token::Percent
+                       | Token::Ampersand | Token::Pipe | Token::Caret
+                       | Token::ShiftLeft | Token::ShiftRight) Token::Colon ;
+BindValue             = Token::Extern
+                       | ReturnStmt
+                       | Expression ;
+ReturnStmt            = Token::Return [ Expression ]
+                       | Token::Indent BodyExprs Token::Dedent Token::Return [ Expression ]
+                       | BodyExprs Token::Return [ Expression ] ;
+BodyExprs             = Expression { ItemSep Expression } ;
+
+TagDecl               = Token::Tag TagId [ TypeParams ]
+                        ( Token::Is TagExpr | Token::Has TagMembers )
+                        [ Token::Extern ] ;
+TypeParams            = Token::ParenOpen [ TypeApplyArg { ItemSep TypeApplyArg } ] Token::ParenClose ;
+TagId                 = Token::Tag ;
+TagExpr               = TypeExpr | UnionExpr | TagMembersExpr ;
+UnionExpr             = UnionVariant { Token::Or UnionVariant } ;
+UnionVariant          = TypeExpr [ PredExpr ] | RecordPatternTuple ;
+RecordPatternTuple    = Token::ParenOpen Pattern { ItemSep Pattern } Token::ParenClose ;
+TagMembersExpr        = { HasMember } ;
+HasMember             = (Token::Id | Token::Tag)
+                        [ TypeParams ]
+                        [ TypeConstraint ]
+                        [ Token::Colon | Token::ColonEq | Token::ColonColon | CompoundAssign ] ;
+Pattern               = TypeExpr | Predicate | Token::Int | Token::Float | Token::String | Token::Tag | Token::SelfTag ;
+
+MethodDecl            = TypeExpr ( Token::Dot | Token::Colon Token::Colon ) BindDecl ;
+
+(* Expressions and precedence *)
+Expression            = OrExpr ;
+OrExpr                = AndExpr { Token::Or AndExpr } ;
+AndExpr               = CompareExpr { Token::And CompareExpr } ;
+CompareExpr           = RangeExpr { CompareOp RangeExpr } ;
+CompareOp             = Token::Eq | Token::Less | Token::LessEq | Token::Greater | Token::GreaterEq
+                        | Token::Ampersand | Token::Pipe | Token::Caret
+                        | Token::ShiftLeft | Token::ShiftRight ;
+RangeExpr             = AddExpr { Token::Infer AddExpr } ;
+AddExpr               = MulExpr { (Token::Plus | Token::Minus) MulExpr } ;
+MulExpr               = PrefixExpr { (Token::Star | Token::Slash | Token::Percent) PrefixExpr } ;
+PrefixExpr            = Token::Minus PrefixExpr | ControlExpr | AtomExpr ;
+AtomExpr              = (PathExpr | TagExprAtom | Literal | ListExpr | TupleExpr | GroupExpr | RecordExpr | FormatStringExpr | PrefixAtom) ;
+
+PrefixAtom            = Token::At PrefixExpr
+                      | Token::Pound
+                      | Token::Star PrefixExpr
+                      | Token::Ref PrefixExpr
+                      | Token::Mut PrefixExpr
+                      | Token::Eat PrefixExpr
+                      | Token::SelfInstance
+                      | Token::SelfTag
+                      | Token::Tag ;
+
+PathExpr              = Path [ ArgList ] ;
+Path                  = Token::Id { Token::Dot Token::Id } ;
+TagExprAtom           = Token::Tag [ Token::Dot (Token::Tag | Token::Id) ] [ ArgList ] ;
+GroupExpr             = Token::ParenOpen Expression Token::ParenClose ;
+ListExpr              = Token::BracketOpen [ Expression { ItemSep Expression } ] Token::BracketClose ;
+
+(* Tuple / record grammar in parenthesized form *)
+TupleExpr             = Token::ParenOpen
+                        ( Token::ParenClose
+                        | RecordOrTupleTail ) ;
+RecordOrTupleTail     = RecordExpr | TupleTail ;
+TupleTail             = Expression [ Token::ColonSemi Expression ]
+                        { ItemSep Expression } Token::ParenClose ;
+RecordExpr            = ( RecordField { ItemSep RecordField } ) Token::ParenClose ;
+RecordField           = Token::Id Token::Colon Expression ;
+
+FormatStringExpr      = Token::FormatStringDelim { FormatPart } Token::FormatStringDelim ;
+FormatPart            = Token::FormatStringText
+                        | Token::FormatInterpStart Expression Token::FormatInterpEnd ;
+Literal               = Token::Int | Token::Float | Token::String | Token::Tag | Token::SelfTag ;
+
+PostfixExpr           = AtomExpr { PostfixTail } ;
+PostfixTail           = Token::Dot Token::Int
+                        | Token::Dot Token::ParenOpen Expression Token::ParenClose
+                        | Token::Dot (Token::Id | Token::Tag) [ Token::ColonColon | CompoundAssign ]
+                        | Token::Dot (Token::Id | Token::Tag) ArgList
+                        | Token::As TypeReference ;
+ArgList               = Token::ParenOpen [ Expression { ItemSep Expression } ] Token::ParenClose ;
+
+(* Control flow *)
+ControlExpr           = IfExpr | WhenExpr | LoopExpr ;
+IfExpr                = Token::If Condition [ Token::Indent ] BodyExprs [ Token::Dedent ] Token::Return [ Expression ] ;
+WhenExpr              = Token::When ( WhenConditionForm | WhenSubjectForm ) ;
+WhenConditionForm     = Token::Not Condition Token::Then Expression [ Token::Else Expression ]
+                      | Condition Token::Then Expression [ Token::Else Expression ]
+                      | Condition (Token::Then Expression | Token::Else Expression)
+                      ;
+WhenSubjectForm       = Expression Token::Is PatternMatchSuite ;
+PatternMatchSuite     = Pattern { Token::Or Pattern }
+                        ( Token::Then Expression
+                        | Token::Colon Expression
+                        | IndentedWhenSuite ) ;
+IndentedWhenSuite     = Token::Indent WhenArm { WhenArm } Token::Dedent ;
+WhenArm               = Token::Is PatternWithThen
+                      | Token::Else Expression
+                      | Token::Or PatternWithThen ;
+PatternWithThen       = Pattern { Token::Or Pattern } (Token::Then Expression) ;
+
+LoopExpr              = Token::For ForPattern Token::In Expression [Token::Indent] BodyExprs [Token::Dedent] Token::Loop
+                      | Token::While Condition [Token::Indent] BodyExprs [Token::Dedent] Token::Loop ;
+ForPattern            = Token::Id | (Token::ParenOpen [ Pattern { ItemSep Pattern } ] Token::ParenClose) ;
+Condition             = ConditionAnd { Token::Or ConditionAnd } ;
+ConditionAnd          = ConditionAtom { Token::And ConditionAtom } ;
+ConditionAtom         = Token::Not ConditionAtom
+                      | Token::ParenOpen Condition Token::ParenClose
+                      | Expression Token::Is Pattern ;
+
+TypeExpr              = Token::In TypeRange
+                      | Token::At TypeExpr
+                      | TypeRef
+                      | Token::ParenOpen Token::ParenClose
+                      | TypeName [ TypeApply ] ;
+TypeRef               = (Token::Ref | Token::Mut)
+                        [ Token::CurlyOpen Token::Id { Token::Dot Token::Id } Token::CurlyClose ]
+                        TypeExpr ;
+TypeRange             = (Token::Int | Token::Float | Token::Tag | Token::SelfTag | TypeName) Token::Infer
+                        (Token::Int | Token::Float | Token::Tag | Token::SelfTag | TypeName) ;
+TypeApply             = Token::ParenOpen [ TypeApplyArg { ItemSep TypeApplyArg } ] Token::ParenClose ;
+TypeApplyArg          = TypeExpr | Expression ;
+TypeName              = Token::Tag | Token::SelfTag | Token::Id ;
+TypeReference         = Token::At TypeReference
+                      | Token::ParenOpen Token::ParenClose
+                      | (Token::Id | Token::Tag) [ TypeApply ] ;
+Predicate             = (Token::Id | Token::Tag | Token::Int | Token::Float | Token::String | TypeExpr)
+                        { Token::And (Token::Id | Token::Tag | Token::Int | Token::Float | Token::String | TypeExpr) } ;
+
+(* Layout separators *)
+ItemSep               = Token::Comma | NewlineSep ;
+NewlineSep            = Token::Newline { Token::Newline | Token::Indent | Token::Dedent } ;
+
+(* Parser boundary notes:
+   - Token::EqEq and Token::NotEq are tokenized but rejected by parser in infix position.
+   - `try`, `catch`, and other unsupported keywords are lexed as identifiers (Id) and are not control tokens.
+*)
