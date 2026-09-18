@@ -21,7 +21,7 @@ pub fn prepare_resolved_expressions(typed: &mut TypedFileAst) {
 
     let values: Vec<_> = (0..typed.exprs.kind.len())
         .map(|index| {
-            if typed.exprs.availability[index] != Availability::CompileTime {
+            if typed.exprs.facts.semantic_facts.availability[index] != Availability::CompileTime {
                 return None;
             }
             if matches!(
@@ -50,7 +50,7 @@ pub fn prepare_resolved_expressions(typed: &mut TypedFileAst) {
 
     for (index, value) in values.into_iter().enumerate() {
         if let Some(value) = value {
-            typed.exprs.const_value[index] = Some(value);
+            typed.exprs.facts.const_facts.const_value[index] = Some(value);
         }
     }
 }
@@ -66,7 +66,7 @@ fn validate_resolved_compile_time_binds(typed: &mut TypedFileAst) {
                 BindBody::Body { exprs, ret } => {
                     exprs.iter().copied().chain(ret.iter().copied()).collect()
                 }
-                BindBody::Extern => Vec::new(),
+                BindBody::Unlowered => Vec::new(),
             };
             (bind.name, roots)
         })
@@ -80,13 +80,13 @@ fn validate_resolved_compile_time_binds(typed: &mut TypedFileAst) {
             continue;
         };
         let index = runtime_expr.index();
-        if typed.exprs.flaws[index]
+        if typed.exprs.facts.semantic_facts.flaws[index]
             .iter()
             .any(|flaw| flaw.code.slug() == "compile-time-runtime-call")
         {
             continue;
         }
-        typed.exprs.flaws[index].push(
+        typed.exprs.facts.semantic_facts.flaws[index].push(
             Diagnostic::new(
                 "compile-time-runtime-call",
                 format!("runtime call in compile-time bind `{}`", bind_name.as_str()),
@@ -120,6 +120,11 @@ fn first_runtime_expr(typed: &TypedFileAst, root: ExprId) -> Option<ExprId> {
         {
             return Some(expr);
         }
+        if let Some(TypedExprKind::FnCall { target, .. }) = typed.exprs.kind_of(expr)
+            && typed.defs.get(target).is_some_and(|bind| !bind.is_constant)
+        {
+            return Some(expr);
+        }
         let _ = walk_expr_children_of(typed, expr, &mut |child| {
             pending.push(child);
             std::ops::ControlFlow::Continue(())
@@ -130,6 +135,21 @@ fn first_runtime_expr(typed: &TypedFileAst, root: ExprId) -> Option<ExprId> {
 
 fn validate_resolved_staging_calls(typed: &mut TypedFileAst) {
     for index in 0..typed.exprs.kind.len() {
+        if let TypedExprKind::Asm { specification, .. } = typed.exprs.kind[index].clone()
+            && typed.exprs.availability_of(specification) != Some(&Availability::CompileTime)
+            && !typed.exprs.facts.semantic_facts.flaws[index]
+                .iter()
+                .any(|flaw| flaw.code.slug() == "type-cannot-call-comptime-with-runtime-args")
+        {
+            typed.exprs.facts.semantic_facts.flaws[index].push(
+                Diagnostic::new(
+                    "type-cannot-call-comptime-with-runtime-args",
+                    "#asm specification must be available at compile time",
+                )
+                .with_arg("fn_name", "#asm")
+                .with_arg("detail", "runtime assembly specification"),
+            );
+        }
         let TypedExprKind::FnCall {
             target,
             args: Some(args),
@@ -158,11 +178,11 @@ fn validate_resolved_staging_calls(typed: &mut TypedFileAst) {
                         || is_runtime_form_type_argument(typed, *arg))
             });
         if invalid
-            && !typed.exprs.flaws[index]
+            && !typed.exprs.facts.semantic_facts.flaws[index]
                 .iter()
                 .any(|flaw| flaw.code.slug() == "type-cannot-call-comptime-with-runtime-args")
         {
-            typed.exprs.flaws[index].push(
+            typed.exprs.facts.semantic_facts.flaws[index].push(
                 Diagnostic::new(
                     "type-cannot-call-comptime-with-runtime-args",
                     format!(

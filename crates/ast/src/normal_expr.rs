@@ -139,7 +139,7 @@ impl fmt::Display for NormalExpr {
             NormalExpr::Value(v) => match v {
                 ConstValue::Int(i) => write!(f, "{i}"),
                 ConstValue::Float(hf) => write!(f, "{hf}"),
-                ConstValue::String(s) => write!(f, "\"{s}\""),
+                ConstValue::Text(s) => write!(f, "\"{s}\""),
                 ConstValue::Tag {
                     name,
                     qual_path,
@@ -175,7 +175,17 @@ impl fmt::Display for NormalExpr {
                     }
                     write!(f, " }}")
                 }
-                ConstValue::List(items) => {
+                ConstValue::ResultRow(items) => {
+                    write!(f, "{{ ")?;
+                    for (i, item) in items.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{}", NormalExpr::Value(item.clone()))?;
+                    }
+                    write!(f, " }}")
+                }
+                ConstValue::FixedArray(items) | ConstValue::Sequence(items) => {
                     write!(f, "[")?;
                     for (i, item) in items.iter().enumerate() {
                         if i > 0 {
@@ -184,6 +194,9 @@ impl fmt::Display for NormalExpr {
                         write!(f, "{}", NormalExpr::Value(item.clone()))?;
                     }
                     write!(f, "]")
+                }
+                ConstValue::SequenceRepeat { seed, count } => {
+                    write!(f, "[{}; {count}]", NormalExpr::Value((**seed).clone()))
                 }
             },
             NormalExpr::Var(name) => write!(f, "{}", name.as_str()),

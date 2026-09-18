@@ -7,6 +7,7 @@
 
 use crate::analysis::validate_consumption::stage_validate_consumption;
 use crate::staging;
+use diagnostic::Diagnostic;
 
 use ast::FileAst;
 use ast::prelude::*;
@@ -19,6 +20,7 @@ use std::sync::Arc;
 mod bounds_check;
 mod declare;
 mod effects;
+pub use effects::stage_infer_effects;
 mod flow;
 mod inline_comptime_calls;
 mod lower_exprs;
@@ -137,6 +139,8 @@ impl TransformCtx {
 /// forward references across files resolve regardless of compilation order.
 pub fn transform_finish(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &TransformCtx) {
     lower_file(typed, file_ast, ctx);
+    crate::assembly::populate_target_constants(typed, &ctx.compile_target);
+    crate::assembly::validate_assembly_expressions(typed, &ctx.compile_target);
     effects::stage_infer_effects(typed, &ctx.cross_file_callable_signatures);
     finish_lowered_file(typed, file_ast, ctx);
 }
@@ -149,20 +153,115 @@ fn lower_file(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &TransformCtx) 
             .or_insert_with(|| return_ty.clone());
     }
     stage_lower(typed, file_ast, ctx);
+    crate::machine::MachineDefinitions::validate_signatures(typed, file_ast);
+    lower_exprs::materialize_owned_sequence_literals(typed);
     place::stage_freeze_place_contracts(typed);
 }
 
 fn finish_lowered_file(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &TransformCtx) {
     stage_validate_consumption(typed);
     staging::analyze_availability(typed, &ctx.cross_file_callable_signatures);
-    staging::prepare_resolved_expressions(typed);
     crate::analysis::stage_rematerialize_owned_arguments(
         typed,
         &ctx.cross_file_callable_signatures,
     );
+    staging::prepare_resolved_expressions(typed);
     stage_flow(typed, &ctx.cross_file_callable_signatures);
     if !ctx.ide_package {
         inline_comptime_calls::stage_inline_comptime_calls(typed, file_ast, ctx);
+    }
+    crate::constant_object::collect_closed_constants(typed);
+    validate_static_sequence_mutation(typed, ctx);
+    validate_sequence_return_escapes(typed);
+}
+
+fn validate_sequence_return_escapes(typed: &mut TypedFileAst) {
+    let returns: Vec<crate::ExprId> = typed
+        .defs
+        .values()
+        .filter_map(|bind| match &bind.body {
+            crate::typed::BindBody::Expr(expr) => Some(*expr),
+            crate::typed::BindBody::Body {
+                ret: Some(expr), ..
+            } => Some(*expr),
+            _ => None,
+        })
+        .collect();
+    for expr in returns {
+        if !matches!(
+            typed.exprs.facts.semantic_facts.sequence_provenance[expr.as_usize()],
+            Some(crate::typed::SequenceProvenance::Scoped)
+        ) {
+            continue;
+        }
+        typed.exprs.facts.semantic_facts.flaws[expr.as_usize()].push(
+            Diagnostic::new(
+                "type-scoped-sequence-escapes",
+                "a scoped sequence view cannot escape through a function return",
+            )
+            .at_span_id(typed.exprs.span[expr.as_usize()], &typed.span_table),
+        );
+    }
+}
+
+fn validate_static_sequence_mutation(typed: &mut TypedFileAst, ctx: &TransformCtx) {
+    for index in 0..typed.exprs.kind.len() {
+        let crate::typed::TypedExprKind::FnCall {
+            target,
+            args: Some(args),
+            ..
+        } = &typed.exprs.kind[index]
+        else {
+            continue;
+        };
+        let conventions = typed
+            .defs
+            .get(target)
+            .map(|bind| bind.param_conventions.clone())
+            .or_else(|| {
+                ctx.cross_file_callable_signatures
+                    .get(target)
+                    .map(|signature| signature.param_conventions.clone())
+            });
+        let Some(conventions) = conventions else {
+            continue;
+        };
+        for (argument, convention) in args.iter().zip(conventions) {
+            if convention != ast::ParamConvention::Mutate {
+                continue;
+            }
+            let provenance = typed.exprs.facts.semantic_facts.sequence_provenance
+                [argument.as_usize()]
+            .or_else(|| match &typed.exprs.kind[argument.as_usize()] {
+                crate::typed::TypedExprKind::FnCall {
+                    target, args: None, ..
+                } => typed.defs.get(target).and_then(|bind| match &bind.body {
+                    crate::typed::BindBody::Expr(expr) => {
+                        typed.exprs.facts.semantic_facts.sequence_provenance[expr.as_usize()]
+                    }
+                    crate::typed::BindBody::Body {
+                        ret: Some(expr), ..
+                    } => typed.exprs.facts.semantic_facts.sequence_provenance[expr.as_usize()],
+                    _ => None,
+                }),
+                _ => None,
+            });
+            if matches!(
+                provenance,
+                Some(crate::typed::SequenceProvenance::Static(_))
+            ) {
+                typed.exprs.facts.semantic_facts.flaws[argument.as_usize()].push(
+                    Diagnostic::new(
+                        "type-static-sequence-mutated",
+                        "a statically backed sequence view cannot be passed to a mutating parameter",
+                    )
+                    .at_span_id(
+                        typed.exprs.span[argument.as_usize()],
+                        &typed.span_table,
+                    ),
+                );
+            }
+        }
     }
 }
 
@@ -234,9 +333,17 @@ pub fn transform_package(
     package_ctx: &TransformCtx,
     opts: PackageTransformOptions,
 ) -> Vec<TypedFileAst> {
-    let prepared_file_asts: Vec<FileAst> = file_asts
+    let machines = crate::machine::MachineDefinitions::new(
+        std::iter::once(package_ctx.compile_time_eval_ast.as_ref())
+            .chain(file_asts.iter().map(|(file, _)| file)),
+    );
+    let mut prepared_file_asts: Vec<FileAst> = file_asts
         .iter()
         .map(|(file_ast, _)| file_ast.clone())
+        .collect();
+    let machine_flaws: Vec<_> = prepared_file_asts
+        .iter_mut()
+        .map(|file| machines.lower(file, &opts.compile_target))
         .collect();
     let mut accumulated_ctx = TransformCtx {
         package_instance: package_ctx.package_instance.clone(),
@@ -248,14 +355,19 @@ pub fn transform_package(
     };
 
     let mut declared: Vec<TypedFileAst> = Vec::with_capacity(file_asts.len());
-    for ((_, file_id), prepared_file_ast) in file_asts.iter().zip(prepared_file_asts.iter()) {
-        let typed = stage_declare(prepared_file_ast, *file_id, &accumulated_ctx);
+    for (((_, file_id), prepared_file_ast), flaws) in file_asts
+        .iter()
+        .zip(prepared_file_asts.iter())
+        .zip(machine_flaws)
+    {
+        let mut typed = stage_declare(prepared_file_ast, *file_id, &accumulated_ctx);
+        crate::machine::MachineDefinitions::attach(&mut typed, flaws);
         merge_declared_file_into_ctx(&mut accumulated_ctx, &typed, prepared_file_ast);
         declared.push(typed);
     }
 
     // Per-file declare already runs a tag fixpoint with `accumulated_ctx`. A second
-    // package-wide fixpoint re-resolved every tag and blew memory/time on gin_core;
+    // A package-wide fixpoint re-resolves every tag and can blow up memory and time;
     // cross-file declare order + merged variant index covers IDE needs.
 
     let declared_refs: Vec<&TypedFileAst> = declared.iter().collect();
@@ -274,6 +386,16 @@ pub fn transform_package(
     for (typed, prepared_file_ast) in declared.iter_mut().zip(prepared_file_asts.iter()) {
         typed.type_registry = full_ctx.type_registry.clone();
         lower_file(typed, prepared_file_ast, &full_ctx);
+        for (id, ty) in &full_ctx.cross_file_tag_types {
+            typed.tag_types.entry(*id).or_insert_with(|| ty.clone());
+        }
+        crate::assembly::populate_target_constants(typed, &full_ctx.compile_target);
+    }
+    crate::assembly::populate_package_specifications(&mut declared, &full_ctx.compile_target);
+    for typed in &mut declared {
+        crate::assembly::validate_assembly_expressions(typed, &full_ctx.compile_target);
+        staging::analyze_availability(typed, &package_ctx.cross_file_callable_signatures);
+        staging::prepare_resolved_expressions(typed);
     }
 
     effects::stage_infer_package_effects(
@@ -297,6 +419,13 @@ pub fn transform_package(
     for (typed, prepared_file_ast) in declared.iter_mut().zip(prepared_file_asts.iter()) {
         typed.type_registry = converged_ctx.type_registry.clone();
         finish_lowered_file(typed, prepared_file_ast, &converged_ctx);
+    }
+
+    if !opts.ide_package {
+        inline_comptime_calls::stage_inline_package_calls(
+            &mut declared,
+            &converged_ctx.compile_target,
+        );
     }
 
     declared
@@ -327,8 +456,12 @@ pub fn transform_file(file_ast: FileAst, file_id: FileId) -> TypedFileAst {
 }
 
 pub fn transform(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) -> TypedFileAst {
-    let prepared = file_ast.clone();
+    let machines =
+        crate::machine::MachineDefinitions::new([ctx.compile_time_eval_ast.as_ref(), file_ast]);
+    let mut prepared = file_ast.clone();
+    let machine_flaws = machines.lower(&mut prepared, &ctx.compile_target);
     let mut typed = stage_declare(&prepared, file_id, ctx);
+    crate::machine::MachineDefinitions::attach(&mut typed, machine_flaws);
     // Propagate parse-level diagnostics from the AST.
     typed.parse_warnings = prepared.parse_warnings.clone();
     transform_finish(&mut typed, &prepared, ctx);

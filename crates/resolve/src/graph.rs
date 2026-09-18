@@ -45,8 +45,12 @@ pub(crate) fn build_import_closure(
     entry_files: Vec<ParsedFile>,
     dependencies: &HashMap<String, PathBuf>,
 ) -> (ResolveGraph, HashMap<PathBuf, ParsedFile>) {
-    let (graph, cache) =
-        build_import_closure_with_cache(entry_files, dependencies, ParsedModuleCache::default());
+    let (graph, cache) = build_import_closure_with_cache(
+        entry_files,
+        dependencies,
+        ParsedModuleCache::default(),
+        None,
+    );
     (graph, cache.files)
 }
 
@@ -54,12 +58,13 @@ pub(crate) fn build_import_closure_with_cache(
     entry_files: Vec<ParsedFile>,
     dependencies: &HashMap<String, PathBuf>,
     cache: ParsedModuleCache,
+    home: Option<&flask::GinHome>,
 ) -> (ResolveGraph, ParsedModuleCache) {
     let entry_paths: Vec<PathBuf> = entry_files.iter().map(|f| f.path.clone()).collect();
     let packages = entry_paths
         .first()
-        .map(|path| ResolvedPackageGraph::discover(path))
-        .unwrap_or_else(|| ResolvedPackageGraph::discover(Path::new(".")));
+        .map(|path| ResolvedPackageGraph::discover_with_home(path, home))
+        .unwrap_or_else(|| ResolvedPackageGraph::discover_with_home(Path::new("."), home));
     let inventory = ModuleInventory::discover(dependencies);
     let mut loader = ModuleLoader::with_cache(inventory, entry_files, cache);
     let graph = discovery_with_packages(&mut loader, &entry_paths, dependencies, packages);
@@ -136,6 +141,13 @@ fn discovery_with_packages(
         for import in &from_parsed.output.ast.uses {
             for module_import in &import.0 {
                 let span_id = HasSpanId::span_id(module_import);
+                let owner = packages.node(nodes[from_idx].package);
+                if !local_import_allowed(owner, &from_dir, &module_import.source) {
+                    symptoms.push((from_idx, Diagnostic::new("package-import-escapes-registry-source",
+                        "a registry package can only use local imports within its verified source directory")
+                        .at_span(spans.get(span_id))));
+                    continue;
+                }
                 let mut import_symptoms: Vec<Diagnostic> = Vec::new();
                 let resolved = resolve_module_import(
                     module_import,
@@ -213,8 +225,10 @@ fn discovery_with_packages(
                         i
                     };
 
+                    let file_import =
+                        matches!(&module_import.source, ast::ImportSource::LocalFile(..));
                     let cross_folder = from_folder.as_deref() != file_path.parent();
-                    if cross_folder {
+                    if cross_folder || file_import {
                         adj[from_idx].push(ImportEdge {
                             to: to_idx,
                             import_span: span_id,
@@ -255,3 +269,63 @@ fn discovery_with_packages(
 #[cfg(test)]
 #[path = "../tests/graph_tests.rs"]
 mod tests;
+
+fn local_import_allowed(
+    owner: &crate::ResolvedPackageNode,
+    from: &Path,
+    source: &ast::ImportSource,
+) -> bool {
+    if !matches!(
+        owner.instance.source,
+        ast::ty::PackageSourceKey::Registry { .. }
+    ) {
+        return true;
+    }
+    let local = match source {
+        ast::ImportSource::Local(path, _) | ast::ImportSource::LocalFile(path, _) => Some(path),
+        ast::ImportSource::LocalBundle(bundle) => bundle.local_path.as_ref(),
+        _ => None,
+    };
+    local.is_none_or(
+        |path| match (from.join(path).canonicalize(), owner.root.canonicalize()) {
+            (Ok(path), Ok(root)) => path.starts_with(root),
+            _ => false,
+        },
+    )
+}
+
+#[cfg(test)]
+mod registry_boundaries {
+    use super::*;
+
+    #[test]
+    fn registry_local_imports_cannot_reach_unverified_sources() {
+        let root = test_fixtures::TempPackage::new("registry_import_boundary");
+        let outside = test_fixtures::TempPackage::new("unverified_import_target");
+        let inside = root.write("nested/local.gin", "Choice is Left or Right\n");
+        let escape = outside.write("external.gin", "Secret is Hidden\n");
+        let mut instance = ast::ty::PackageInstanceKey::workspace("http", "1.0.0");
+        instance.source = ast::ty::PackageSourceKey::Registry {
+            registry: internment::Intern::new("flasks.io".to_owned()),
+        };
+        let owner = crate::ResolvedPackageNode {
+            instance,
+            root: root.path().to_path_buf(),
+            config: flask::FlaskConfig::new("http".into(), "1.0.0".into()),
+            dependencies: Vec::new(),
+        };
+        let import = |path| ast::ImportSource::LocalFile(path, ast::span::SpanId::default());
+        assert!(local_import_allowed(&owner, root.path(), &import(inside)));
+        assert!(!local_import_allowed(
+            &owner,
+            root.path(),
+            &import(escape.clone())
+        ));
+        #[cfg(unix)]
+        {
+            let alias = root.join("alias.gin");
+            std::os::unix::fs::symlink(&escape, &alias).unwrap();
+            assert!(!local_import_allowed(&owner, root.path(), &import(alias)));
+        }
+    }
+}

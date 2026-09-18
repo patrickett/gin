@@ -52,9 +52,6 @@ impl ParseError {
         Self::new("parse-expected-import-source", message, span)
     }
 
-    pub fn empty_import_bundle(message: impl Into<String>, span: SpanId) -> Self {
-        Self::new("parse-empty-import-bundle", message, span)
-    }
 }
 
 impl HasSpanId for ParseError {
@@ -268,12 +265,102 @@ impl<'src, 't> TokenCursor<'src, 't> {
         let Some(last_pos) = self.last_consumed_pos else {
             return false;
         };
+        if matches!(
+            self.tokens.get(last_pos).map(|(token, _)| token),
+            Some(Token::Newline)
+        ) {
+            return false;
+        }
         let Some((_, next_span_id)) = self.tokens.get(self.pos) else {
             return false;
         };
         let last_span = self.span_table.get(self.tokens[last_pos].1);
         let next_span = self.span_table.get(*next_span_id);
         next_span.start() > last_span.end()
+    }
+
+    pub fn blank_line_between_last_consumed_and_raw_peek_with_gap(&self) -> bool {
+        if self.blank_line_between_last_consumed_and_raw_peek() {
+            return true;
+        }
+
+        let Some(last_pos) = self.last_consumed_pos else {
+            return false;
+        };
+        if !matches!(
+            self.tokens.get(last_pos).map(|(token, _)| token),
+            Some(Token::Newline)
+        ) {
+            return false;
+        }
+
+        let Some((_, next_span_id)) = self.tokens.get(self.pos) else {
+            return false;
+        };
+        let last_span = self.span_table.get(self.tokens[last_pos].1);
+        let next_span = self.span_table.get(*next_span_id);
+        next_span.start() > last_span.end() + 1
+    }
+
+    pub fn last_consumed_newline_is_blank_lines(&self) -> bool {
+        let Some(last_pos) = self.last_consumed_pos else {
+            return false;
+        };
+        if !matches!(
+            self.tokens.get(last_pos).map(|(token, _)| token),
+            Some(Token::Newline)
+        ) {
+            return false;
+        }
+
+        let span = self.span_table.get(self.tokens[last_pos].1);
+        span.len() > 1
+    }
+
+    pub fn attribute_is_detached_from_next_token(&self) -> bool {
+        let last_pos = match self.last_consumed_pos {
+            Some(last_pos) => last_pos,
+            None => return false,
+        };
+        match self.tokens.get(last_pos) {
+            Some((Token::Newline, _)) => {}
+            _ => return false,
+        }
+
+        let first_span = self.get_span(self.span_at(last_pos));
+        if first_span.len() > 1 {
+            return true;
+        }
+
+        let mut pos = last_pos + 1;
+        let mut saw_layout = false;
+        while pos < self.pos {
+            if let Some((token, _)) = self.tokens.get(pos) {
+                if matches!(token, Token::Newline) {
+                    return true;
+                }
+                if matches!(token, Token::Indent | Token::Dedent) {
+                    saw_layout = true;
+                    pos += 1;
+                    continue;
+                }
+                if matches!(token, Token::Comment(_) | Token::DocComment(_)) {
+                    return true;
+                }
+                break;
+            }
+            pos += 1;
+        }
+        if saw_layout {
+            return false;
+        }
+
+        let next_pos = self.pos;
+        if next_pos >= self.tokens.len() {
+            return false;
+        }
+        let next_span = self.get_span(self.span_at(next_pos));
+        next_span.start().saturating_sub(first_span.end()) == 1
     }
 
     pub fn eof_span(&self) -> SpanId {

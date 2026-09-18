@@ -15,7 +15,7 @@ fn body(typed: &TypedFileAst, name: &str) -> typecheck::ExprId {
     match &typed.defs[&DefId(Intern::new(name.to_string()))].body {
         BindBody::Expr(expr) => *expr,
         BindBody::Body { exprs, ret } => ret.or_else(|| exprs.last().copied()).unwrap(),
-        BindBody::Extern => panic!("expected a body"),
+        BindBody::Unlowered => panic!("expected a body"),
     }
 }
 
@@ -30,7 +30,7 @@ fn flaw_codes(typed: &TypedFileAst) -> Vec<String> {
 #[test]
 fn explicit_pointer_types_preserve_the_pointee_argument() {
     let typed = check(
-        "Word is in 0...255\n\
+        "Word is in 0 to 255\n\
          make(value Word) @Word: @value\n",
     );
     let result = &typed.exprs.ty[body(&typed, "make").as_usize()];
@@ -48,7 +48,7 @@ fn explicit_pointer_types_preserve_the_pointee_argument() {
 #[test]
 fn explicit_pointer_types_with_equal_pointees_share_representation() {
     let typed = check(
-        "Word is in 0...255\n\
+        "Word is in 0 to 255\n\
          left(value Word) @Word: @value\n\
          right(value Word) @Word: @value\n",
     );
@@ -64,7 +64,7 @@ fn explicit_pointer_types_with_equal_pointees_share_representation() {
 #[test]
 fn safe_reference_alias_preserves_nominal_identity_and_generic_referent() {
     let typed = check(
-        "Word is in 0...255\n\
+        "Word is in 0 to 255\n\
          RefAlias(x) is ref x\n\
          Alias is RefAlias(Word)\n",
     );
@@ -83,7 +83,7 @@ fn safe_reference_alias_preserves_nominal_identity_and_generic_referent() {
 #[test]
 fn expected_arguments_and_explicit_pointer_types_materialize_addresses() {
     let typed = check(
-        "Word is in 0...255\n\
+        "Word is in 0 to 255\n\
          take(value @Word) Word: deref value\n\
          make(value Word) @Word: @value\n\
          explicit(value Word) @Word: @value\n",
@@ -104,7 +104,7 @@ fn expected_arguments_and_explicit_pointer_types_materialize_addresses() {
 #[test]
 fn record_named_pointer_does_not_receive_raw_address_behavior() {
     let typed = check(
-        "Word is in 0...255\n\
+        "Word is in 0 to 255\n\
          Pointer has value Word\n\
          take(value Word) Pointer: @value\n",
     );
@@ -119,7 +119,7 @@ fn record_named_pointer_does_not_receive_raw_address_behavior() {
 
 #[test]
 fn explicit_pointer_type_is_visible_outside_its_declaration_file() {
-    let declarations = TokenCursor::parse_source("Word is in 0...255\n");
+    let declarations = TokenCursor::parse_source("Word is in 0 to 255\n");
     let consumer = TokenCursor::parse_source("make(value Word) @Word: @value\n");
     let outputs = transform_package(
         &[(declarations, FileId(0)), (consumer, FileId(1))],
@@ -136,7 +136,7 @@ fn explicit_pointer_type_is_visible_outside_its_declaration_file() {
 
 #[test]
 fn cross_module_reference_alias_preserves_nominal_identity() {
-    let declarations = TokenCursor::parse_source("Word is in 0...255\nRefAlias(x) is ref x\n");
+    let declarations = TokenCursor::parse_source("Word is in 0 to 255\nRefAlias(x) is ref x\n");
     let consumer = TokenCursor::parse_source("Alias is RefAlias(Word)\n");
     let outputs = transform_package(
         &[(declarations, FileId(0)), (consumer, FileId(1))],
@@ -156,7 +156,7 @@ fn cross_module_reference_alias_preserves_nominal_identity() {
 
 #[test]
 fn raw_pointer_does_not_satisfy_safe_reference_contract() {
-    let typed = check("Word is in 0...255\nmake(value Word) @Word: @value\n");
+    let typed = check("Word is in 0 to 255\nmake(value Word) @Word: @value\n");
     let pointer = &typed.exprs.ty[body(&typed, "make").as_usize()];
 
     assert!(!pointer.is_ref());
@@ -164,10 +164,37 @@ fn raw_pointer_does_not_satisfy_safe_reference_contract() {
 }
 
 #[test]
+fn user_defined_generic_slice_indexes_through_its_pointer() {
+    let typed = check(
+        r#"Byte is in 0 to 255
+Count is in 0 to 18446744073709551615
+Slice(x) has pointer @x, length Count
+read(value Slice(Byte), index Count) Byte:
+return value.pointer.(index)
+"#,
+    );
+
+    assert!(
+        flaw_codes(&typed).is_empty(),
+        "unexpected flaws: {:?}",
+        flaw_codes(&typed)
+    );
+    let expression = body(&typed, "read");
+    assert!(matches!(
+        typed.exprs.kind[expression.as_usize()],
+        typecheck::TypedExprKind::BufGet { .. }
+    ));
+    assert_eq!(
+        typed.exprs.ty[expression.as_usize()],
+        typed.tags[&typecheck::TagId(Intern::from_ref("Byte"))].resolved_ty
+    );
+}
+
+#[test]
 fn shared_reference_arguments_allow_aliasing_without_conflict() {
     let typed = check(
-        "inspect(ref{shared} left x, ref{shared} right x): 0\n\
-         caller(mut x Word): inspect(ref x, ref x)\n",
+        "inspect(left ref{shared} x, right ref{shared} x): 0\n\
+         caller(x Word): inspect(x, x)\n",
     );
 
     assert!(
@@ -180,33 +207,25 @@ fn shared_reference_arguments_allow_aliasing_without_conflict() {
 #[test]
 fn shared_and_mut_reference_arguments_conflict_on_aliasing() {
     let typed = check(
-        "inspect(ref{shared} left x, mut{shared} right x): 0\n\
-         caller(mut x Word): inspect(ref x, mut x)\n",
+        "inspect(left ref{shared} x, right mut{shared} x): 0\n\
+         main(left mut Word, right mut Word): inspect(left, right)\n",
     );
-    let call = typed
-        .defs
-        .get(&typecheck::DefId(Intern::from_ref("caller")))
-        .unwrap();
-    let caller_body = match &call.body {
-        typecheck::BindBody::Expr(expr) => *expr,
-        typecheck::BindBody::Body { exprs, ret } => *ret
-            .as_ref()
-            .or_else(|| exprs.last())
-            .unwrap_or(&typecheck::ExprId(0)),
-        typecheck::BindBody::Extern => typecheck::ExprId(0),
-    };
-    let kind = &typed.exprs.kind[caller_body.as_usize()];
-    let args = match kind {
-        typecheck::TypedExprKind::FnCall {
-            args: Some(args), ..
-        } => args,
-        _ => panic!("did not find call body kind"),
-    };
+    let args = (0..typed.exprs.kind.len())
+        .find_map(|index| {
+            let kind = &typed.exprs.kind[index];
+            match kind {
+                typecheck::TypedExprKind::FnCall {
+                    args: Some(args), ..
+                } if args.len() == 2 => Some(args),
+                _ => None,
+            }
+        })
+        .unwrap_or_else(|| panic!("did not find typed call to inspect"));
     let arg_groups: Vec<_> = args
         .iter()
         .map(|arg| {
             (
-                typed.exprs.target_group[arg.as_usize()]
+                typed.exprs.facts.ownership_facts.target_group[arg.as_usize()]
                     .as_ref()
                     .map(|group| format!("{:?}", group)),
                 format!("{:?}", typed.exprs.ty[arg.as_usize()]),
@@ -224,7 +243,7 @@ fn shared_and_mut_reference_arguments_conflict_on_aliasing() {
 
 #[test]
 fn function_reference_return_requires_matching_target_group() {
-    let valid = check("selected(ref{a} value Int) ref Int: value\n");
+    let valid = check("selected(value ref{a} Int) ref Int: value\n");
 
     assert!(
         !flaw_codes(&valid)
@@ -237,7 +256,7 @@ fn function_reference_return_requires_matching_target_group() {
             .any(|code| code == "type-reference-return-local-target"),
     );
 
-    let invalid = check("wrong(ref{a} left Int, ref{b} right Int) ref{a} Int: right\n");
+    let invalid = check("wrong(left ref{a} Int, right ref{b} Int) ref{a} Int: right\n");
     assert!(flaw_codes(&invalid).contains(&"type-reference-return-wrong-target-group".to_string()));
 }
 
@@ -285,7 +304,7 @@ fn recursive_type_alias_rejected_by_named_identity_when_not_pointer() {
 
 #[test]
 fn recursive_type_alias_not_created_for_cross_file_name_aliases() {
-    let declarations = TokenCursor::parse_source("Node is in 0...255\n");
+    let declarations = TokenCursor::parse_source("Node is in 0 to 255\n");
     let consumer = TokenCursor::parse_source("Alias is Node\n");
     let outputs = transform_package(
         &[(declarations, FileId(0)), (consumer, FileId(1))],
@@ -360,12 +379,12 @@ fn recursive_type_allowed_when_reference_wrapper_breaks_the_cycle() {
 #[test]
 fn consuming_one_possible_reference_target_invalidates_selected_union_reference() {
     let typed = check(
-        r#"Word is in 0...255
-         choose(ref{r} left Word, ref{r} right Word) ref{r} Word: left
-         consume(value Word) Word extern
-         consume_ref(ref value Word) Word extern
-         main(mut left Word, mut right Word) Word:
-             ref selected Word: choose(ref left, ref right)
+        r#"Word is in 0 to 255
+         choose(left ref{r} Word, right ref{r} Word) ref{r} Word: left
+         consume(value Word) Word: value
+         consume_ref(value ref Word) Word: deref value
+         main(left mut Word, right mut Word) Word:
+             ref selected Word: choose(left, right)
              consume(left)
              return consume_ref(selected)
 "#,

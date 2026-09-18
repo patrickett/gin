@@ -57,6 +57,7 @@ pub struct CompTimeEvaluator<'a> {
     const_binds: &'a ConstEnv,
     ast: &'a FileAst,
     target_layout: Option<crate::layout::TargetLayout>,
+    target: Option<flask::TargetTriple>,
 }
 
 impl<'a> CompTimeEvaluator<'a> {
@@ -65,6 +66,7 @@ impl<'a> CompTimeEvaluator<'a> {
             const_binds,
             ast,
             target_layout: None,
+            target: None,
         }
     }
 
@@ -77,6 +79,10 @@ impl<'a> CompTimeEvaluator<'a> {
             const_binds,
             ast,
             target_layout: crate::layout::TargetLayout::from_compile_target(target).ok(),
+            target: match target {
+                flask::CompileTarget::Concrete(triple) => Some(triple.clone()),
+                flask::CompileTarget::Library => None,
+            },
         }
     }
 
@@ -86,9 +92,22 @@ impl<'a> CompTimeEvaluator<'a> {
             self.const_binds,
             self.ast,
             self.target_layout,
+            self.target.clone(),
             &mut call_stack,
         )
         .eval(expr)
+    }
+
+    pub fn eval_bind_call(&self, bind: &Bind, args: &[ConstValue]) -> Option<ConstValue> {
+        let mut call_stack = HashSet::new();
+        EvalFrame::new(
+            self.const_binds,
+            self.ast,
+            self.target_layout,
+            self.target.clone(),
+            &mut call_stack,
+        )
+        .eval_bind_call(bind, args, 0)
     }
 }
 
@@ -97,6 +116,7 @@ struct EvalFrame<'a, 'b> {
     const_binds: &'a ConstEnv,
     ast: &'a FileAst,
     target_layout: Option<crate::layout::TargetLayout>,
+    target: Option<flask::TargetTriple>,
     depth: usize,
     call_stack: &'b mut HashSet<ComptimeCall>,
 }
@@ -106,12 +126,14 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
         const_binds: &'a ConstEnv,
         ast: &'a FileAst,
         target_layout: Option<crate::layout::TargetLayout>,
+        target: Option<flask::TargetTriple>,
         call_stack: &'b mut HashSet<ComptimeCall>,
     ) -> Self {
         Self {
             const_binds,
             ast,
             target_layout,
+            target,
             depth: 0,
             call_stack,
         }
@@ -125,12 +147,42 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
     pub fn eval(&mut self, expr: &Expr) -> Option<ConstValue> {
         self.check_depth().ok()?;
         match expr {
+            Expr::Target => {
+                let target = self.target.as_ref()?;
+                Some(ConstValue::Record {
+                    fields: vec![
+                        (
+                            Intern::from_ref("arch"),
+                            ConstValue::Text(target.arch.as_str().into()),
+                        ),
+                        (
+                            Intern::from_ref("vendor"),
+                            ConstValue::Text(target.vendor.clone()),
+                        ),
+                        (
+                            Intern::from_ref("os"),
+                            ConstValue::Text(target.os.as_str().into()),
+                        ),
+                        (
+                            Intern::from_ref("triple"),
+                            ConstValue::Text(target.raw.clone()),
+                        ),
+                    ]
+                    .into(),
+                })
+            }
             Expr::Lit(lit) => match lit {
                 Literal::Int(n) => Some(ConstValue::Int(*n)),
                 Literal::Float(HashFloat(f)) => Some(ConstValue::Float(HashFloat(*f))),
-                Literal::String(s) => Some(ConstValue::String(s.clone())),
+                Literal::String(s) => Some(ConstValue::Text(s.clone())),
                 Literal::Number(n) => Some(ConstValue::Int((*n as u128).into())),
             },
+            Expr::FormatString(_) => None,
+            Expr::ResultValues(items) => items
+                .iter()
+                .map(|item| self.eval(&item.value))
+                .collect::<Option<Vec<_>>>()
+                .map(|items| ConstValue::ResultRow(items.into())),
             Expr::AnonymousTag(name) => self
                 .const_binds
                 .get(name)
@@ -185,23 +237,37 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
             }
             Expr::RecordSet { .. } | Expr::Destructure { .. } => None,
             Expr::RecordGet { base, field } => match self.eval(&base.value)? {
+                ConstValue::Text(text) if field.as_str() == "len" => {
+                    Some(ConstValue::Int((text.len() as u64).into()))
+                }
                 ConstValue::Record { fields } => fields
                     .iter()
                     .find(|(n, _)| n == field)
                     .map(|(_, v)| v.clone()),
                 ConstValue::Tag { name, args, .. } => {
-                    let idx = self
-                        .ast
-                        .tags
-                        .get(&name)
+                    let declaration = self.ast.tags.get(&name).or_else(|| {
+                        self.ast.tags.values().find(|decl| {
+                            decl.name.as_str().rsplit(['.', ':']).next() == Some(name.as_str())
+                        })
+                    });
+                    let idx = declaration
                         .and_then(|decl| decl.params.as_ref())
                         .and_then(|params| params.keys().position(|param_name| param_name == field))
+                        .or_else(|| {
+                            declaration.and_then(|decl| match &decl.value {
+                                ast::DeclareValue::Has(members) => members.iter().position(|member| {
+                                    matches!(member, ast::HasMember::Property(property) if property.name == *field)
+                                }),
+                                _ => None,
+                            })
+                        })
                         .or_else(|| match name.as_str() {
                             "Target" => ["arch", "vendor", "os"]
                                 .iter()
                                 .position(|field_name| *field_name == field.as_str()),
                             _ => None,
                         })?;
+
                     args.get(idx).cloned()
                 }
                 _ => None,
@@ -215,16 +281,28 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
                 {
                     return Some(cv);
                 }
-                None
+                let bind = self.resolve_bind(b.name)?.clone();
+                if !bind.is_constant() && !bind.attributes.inline_always {
+                    return None;
+                }
+                self.check_arity(&bind, &[]).ok()?;
+                self.eval_bind_call(&bind, &[], self.depth + 1)
             }
-            Expr::TupleLit(elems) | Expr::List(elems) => {
+            Expr::ArrayLit(elems) => {
                 let items: Vec<ConstValue> =
                     elems.iter().filter_map(|e| self.eval(&e.value)).collect();
-                if items.len() == elems.len() {
-                    Some(ConstValue::List(items.into()))
-                } else {
-                    None
-                }
+                (items.len() == elems.len()).then(|| ConstValue::FixedArray(items.into()))
+            }
+            Expr::List(elems) | Expr::SequenceLiteral(ast::SequenceLiteral::Elements(elems)) => {
+                let items: Vec<ConstValue> =
+                    elems.iter().filter_map(|e| self.eval(&e.value)).collect();
+                (items.len() == elems.len()).then(|| ConstValue::Sequence(items.into()))
+            }
+            Expr::SequenceLiteral(ast::SequenceLiteral::Repeat { seed, count }) => {
+                Some(ConstValue::SequenceRepeat {
+                    seed: Box::new(self.eval(&seed.value)?),
+                    count: Box::new(sequence_count_expr(&count.value)?),
+                })
             }
             Expr::Negate(inner) => {
                 let inner_value = self.eval(&inner.value)?;
@@ -236,6 +314,11 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
             Expr::Binary(bin) => {
                 let lhs = self.eval(&bin.lhs.value)?;
                 let rhs = self.eval(&bin.rhs.value)?;
+                if matches!(bin.op, ast::BinOp::Add)
+                    && let (ConstValue::Text(lhs), ConstValue::Text(rhs)) = (&lhs, &rhs)
+                {
+                    return Some(ConstValue::Text(format!("{lhs}{rhs}")));
+                }
                 lhs.eval_binop(&bin.op, &rhs)
             }
             Expr::TargetQuery { kind, operand } => {
@@ -244,18 +327,76 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
                 Some(ConstValue::Int(i256::I256::from(value)))
             }
             Expr::When(when) => {
-                let subject = when.subject.as_ref().and_then(|s| self.eval(&s.value))?;
+                let subject = when
+                    .subject
+                    .as_ref()
+                    .and_then(|s| self.eval(&s.value))
+                    .unwrap_or(ConstValue::ZERO);
                 self.eval_matching_when_arm(&when.arms, &subject)
             }
             Expr::FnCall(call) if call.args.is_none() && call.path.value.segments.is_empty() => {
-                self.const_binds
-                    .get(&call.path.value.root)
-                    .and_then(|cv| cv.clone())
+                let name = call.path.value.root;
+                if let Some(cv) = self.const_binds.get(&name).and_then(|cv| cv.clone()) {
+                    return Some(cv);
+                }
+                let final_name = call
+                    .path
+                    .value
+                    .segments
+                    .last()
+                    .unwrap_or(&call.path.value.root);
+                let bind = self
+                    .ast
+                    .defs
+                    .get(&name)
+                    .or_else(|| self.ast.defs.get(final_name))
+                    .or_else(|| {
+                        self.ast.defs.values().find(|bind| {
+                            bind.name.as_str().rsplit(['.', ':']).next()
+                                == Some(final_name.as_str())
+                        })
+                    })?;
+                if !bind.is_constant() && !bind.attributes.inline_always {
+                    return None;
+                }
+                self.check_arity(bind, &[]).ok()?;
+                self.eval_bind_call(bind, &[], self.depth + 1)
             }
             Expr::FnCall(call) if call.args.is_none() && !call.path.value.segments.is_empty() => {
                 let fq_name = self.qualified_name(&call.path.value);
                 if let Some(cv) = self.const_binds.get(&fq_name).and_then(|cv| cv.clone()) {
                     return Some(cv);
+                }
+                if call.path.value.root.as_str() == "target"
+                    && let Some(target) = &self.target
+                {
+                    let field = call.path.value.segments.last()?.as_str();
+                    let value = match field {
+                        "arch" => Some(ConstValue::Text(target.arch.as_str().into())),
+                        "vendor" => Some(ConstValue::Text(target.vendor.clone())),
+                        "os" => Some(ConstValue::Text(target.os.as_str().into())),
+                        "triple" => Some(ConstValue::Text(target.raw.clone())),
+                        _ => None,
+                    };
+                    if value.is_some() {
+                        return value;
+                    }
+                }
+                let final_name = call.path.value.segments.last().expect("qualified call");
+                let bind = self
+                    .ast
+                    .defs
+                    .get(&fq_name)
+                    .or_else(|| self.ast.defs.get(final_name))
+                    .or_else(|| {
+                        self.ast.defs.values().find(|bind| {
+                            bind.name.as_str().rsplit(['.', ':']).next()
+                                == Some(final_name.as_str())
+                        })
+                    });
+                if let Some(bind) = bind {
+                    self.check_arity(bind, &[]).ok()?;
+                    return self.eval_bind_call(bind, &[], self.depth + 1);
                 }
                 if call.path.value.segments.len() != 1 {
                     return None;
@@ -284,22 +425,50 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
                 if let Some(cv) = self.eval_helper(name.as_str(), &args) {
                     return Some(cv);
                 }
-                let bind = self.ast.defs.get(&name)?;
-                if !bind.is_constant() {
-                    return None;
+                let bind = self.resolve_bind(name)?.clone();
+                self.check_arity(&bind, &args).ok()?;
+                self.eval_bind_call(&bind, &args, self.depth + 1)
+            }
+            Expr::FnCall(call) => {
+                let name = self.qualified_name(&call.path.value);
+                let args = self.eval_args(call.args.as_deref())?;
+                if let Some(Some(cv)) = self.const_binds.get(&name) {
+                    return Some(cv.clone());
                 }
+                let final_name = call
+                    .path
+                    .value
+                    .segments
+                    .last()
+                    .unwrap_or(&call.path.value.root);
+                let bind = self
+                    .ast
+                    .defs
+                    .get(&name)
+                    .or_else(|| self.ast.defs.get(final_name))
+                    .or_else(|| {
+                        self.ast.defs.values().find(|bind| {
+                            bind.name.as_str().rsplit(['.', ':']).next()
+                                == Some(final_name.as_str())
+                        })
+                    })?;
                 self.check_arity(bind, &args).ok()?;
                 self.eval_bind_call(bind, &args, self.depth + 1)
             }
-            Expr::FnCall(_) => None,
             _ => None,
         }
     }
 
     fn eval_in_env(&mut self, env: &ConstEnv, depth: usize, expr: &Expr) -> Option<ConstValue> {
-        EvalFrame::new(env, self.ast, self.target_layout, self.call_stack)
-            .with_depth(depth)
-            .eval(expr)
+        EvalFrame::new(
+            env,
+            self.ast,
+            self.target_layout,
+            self.target.clone(),
+            self.call_stack,
+        )
+        .with_depth(depth)
+        .eval(expr)
     }
 
     fn eval_args(&mut self, args: Option<&[Typed<Expr>]>) -> Option<Vec<ConstValue>> {
@@ -331,22 +500,50 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
     ) -> Option<ConstValue> {
         for arm in arms {
             match arm {
+                WhenArm::Cond {
+                    condition, body, ..
+                } => {
+                    let matches = self.eval_condition(condition)?;
+                    if matches {
+                        return self.eval(&body.value);
+                    }
+                }
                 WhenArm::Is { pattern, body, .. } => {
-                    if crate::analysis::pattern::pattern_matches_public(&pattern.value, subject) {
+                    let matches =
+                        crate::analysis::pattern::pattern_matches_public(&pattern.value, subject);
+                    if matches {
                         let mut arm_env = self.const_binds.clone();
                         let mut flat = HashMap::new();
                         collect_pattern_bindings(&pattern.value, subject, &mut flat);
                         for (k, v) in flat {
                             arm_env.insert(k, Some(v));
                         }
-                        return self.eval_in_env(&arm_env, self.depth, &body.value);
+                        let result = self.eval_in_env(&arm_env, self.depth, &body.value);
+                        return result;
                     }
                 }
                 WhenArm::Else(body, _) => return self.eval(&body.value),
-                WhenArm::Cond { .. } => return None,
             }
         }
         None
+    }
+
+    fn eval_condition(&mut self, condition: &ast::Condition) -> Option<bool> {
+        match condition {
+            ast::Condition::Is { subject, pattern } => {
+                let value = self.eval(&subject.value)?;
+                let result =
+                    crate::analysis::pattern::pattern_matches_public(&pattern.value, &value);
+                Some(result)
+            }
+            ast::Condition::Not(inner) => Some(!self.eval_condition(inner)?),
+            ast::Condition::And(left, right) => {
+                Some(self.eval_condition(left)? && self.eval_condition(right)?)
+            }
+            ast::Condition::Or(left, right) => {
+                Some(self.eval_condition(left)? || self.eval_condition(right)?)
+            }
+        }
     }
 
     pub(crate) fn eval_bind_call(
@@ -384,13 +581,25 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
                         let _ = self.eval_in_env(&env, depth, &expr.value);
                     }
                 }
-                ret.value
-                    .as_ref()
-                    .and_then(|ret| self.eval_in_env(&env, depth, &ret.value))
+                if !ret.values.is_empty() {
+                    let values = ret
+                        .values
+                        .iter()
+                        .map(|ret| self.eval_in_env(&env, depth, &ret.value))
+                        .collect::<Option<Vec<_>>>()?;
+                    match values.as_slice() {
+                        [] => None,
+                        [value] => Some(value.clone()),
+                        _ => Some(ConstValue::ResultRow(values.into())),
+                    }
+                } else {
+                    ret.values
+                        .first()
+                        .and_then(|ret| self.eval_in_env(&env, depth, &ret.value))
+                }
             }
-            BindValue::Extern | BindValue::Unassigned => None,
+            BindValue::Unassigned => None,
         };
-
         self.call_stack.remove(&call_key);
         result
     }
@@ -424,5 +633,72 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
         let mut parts = vec![path.root.as_str()];
         parts.extend(path.segments.iter().map(|segment| segment.as_str()));
         Intern::new(parts.join("."))
+    }
+
+    fn resolve_bind(&self, name: Intern<String>) -> Option<&Bind> {
+        let final_name = name.as_str().rsplit(['.', ':']).next()?;
+        self.ast
+            .defs
+            .get(&name)
+            .or_else(|| self.ast.defs.get(&Intern::from_ref(final_name)))
+            .or_else(|| {
+                self.ast
+                    .defs
+                    .values()
+                    .find(|bind| bind.name.as_str().rsplit(['.', ':']).next() == Some(final_name))
+            })
+    }
+}
+
+fn sequence_count_expr(expr: &Expr) -> Option<ast::NormalExpr> {
+    match expr {
+        Expr::Lit(Literal::Int(value)) => Some(ast::NormalExpr::from(*value)),
+        Expr::Lit(Literal::Number(value)) => Some(ast::NormalExpr::from(*value as i128)),
+        Expr::FnCall(call) if call.args.is_none() => {
+            Some(ast::NormalExpr::Var(call.path.value.root))
+        }
+        Expr::Binary(binary) => {
+            let lhs = Box::new(sequence_count_expr(&binary.lhs.value)?);
+            let rhs = Box::new(sequence_count_expr(&binary.rhs.value)?);
+            match binary.op {
+                ast::BinOp::Add => Some(ast::NormalExpr::Add(lhs, rhs)),
+                ast::BinOp::Subtract => Some(ast::NormalExpr::Sub(lhs, rhs)),
+                ast::BinOp::Multiply => Some(ast::NormalExpr::Mul(lhs, rhs)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ast::NormalExpr;
+    use parser::cursor::TokenCursor;
+
+    fn evaluate(source: &str) -> ConstValue {
+        let parsed = TokenCursor::parse_source(&format!("value: {source}\n"));
+        let bind = parsed.defs.get(&Intern::from_ref("value")).expect("value");
+        let BindValue::Expr(expr) = &bind.value else {
+            panic!("value must have an expression body");
+        };
+        CompTimeEvaluator::new(&ConstEnv::default(), &parsed)
+            .eval(&expr.value)
+            .expect("constant value")
+    }
+
+    #[test]
+    fn aggregate_constants_preserve_semantic_literal_category() {
+        assert!(matches!(
+            evaluate("[1, 2]"),
+            ConstValue::Sequence(items) if items.len() == 2
+        ));
+        assert!(matches!(
+            evaluate("[1; count]"),
+            ConstValue::SequenceRepeat { seed, count }
+                if seed == Box::new(ConstValue::Int(1.into()))
+                    && count.as_ref() == &NormalExpr::Var(Intern::from_ref("count"))
+        ));
     }
 }

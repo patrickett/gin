@@ -57,6 +57,39 @@ target Target
             .iter()
             .find(|(name, _)| name.as_str() == "arch")
             .map(|(_, value)| value),
-        Some(&ConstValue::String("wasm32".into()))
+        Some(&ConstValue::Text("wasm32".into()))
+    );
+}
+
+#[test]
+fn cached_analysis_cannot_hide_new_unverified_registry_dependencies() {
+    let root = test_fixtures::TempPackage::new("registry_analysis_refresh");
+    let manifest = root.path().join("flask.jsonc");
+    let source = root.path().join("main.gin");
+    std::fs::write(
+        &manifest,
+        r#"{"name":"app","version":"1.0.0","authors":[]}"#,
+    )
+    .unwrap();
+    std::fs::write(&source, "Choice is Left or Right\n").unwrap();
+    let cache = PackageCache::for_test();
+    cache.add_file(source.clone()).unwrap();
+    let old = cache
+        .get_or_compute_package(std::slice::from_ref(&source))
+        .unwrap();
+    std::fs::write(
+        &manifest,
+        r#"{"name":"app","version":"1.0.0","authors":[],"dependencies":{"http":{"version":"^1"}}}"#,
+    )
+    .unwrap();
+    let new = cache
+        .get_or_compute_package(std::slice::from_ref(&source))
+        .unwrap();
+    assert!(!std::sync::Arc::ptr_eq(&old, &new));
+    assert!(
+        new.import_diags
+            .values()
+            .flatten()
+            .any(|d| d.code.slug() == "package-registry-verification-failed")
     );
 }

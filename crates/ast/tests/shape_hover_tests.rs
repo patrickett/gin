@@ -14,7 +14,7 @@ use support::transform_source;
 #[test]
 fn tag_name_in_shape_literal_shows_record_type() {
     let src = "\
-Int is in 1...400
+Int is in 1 to 400
 
 Coord has x Int, y Int, z Int
 origin := Coord(x: 0, y: 0, z: 0)";
@@ -40,7 +40,7 @@ Coord has x Int, y Int, z Int
 #[test]
 fn bind_to_shape_literal_shows_type() {
     let src = "\
-Int is in 1...400
+Int is in 1 to 400
 
 Coord has x Int, y Int, z Int
 origin := Coord(x: 0, y: 0, z: 0)";
@@ -67,7 +67,7 @@ origin
 #[test]
 fn shorthand_field_x_in_call_shows_bind_value() {
     let src = "\
-Int is in 1...400
+Int is in 1 to 400
 
 Coord has x Int, y Int, z Int
 x := 1
@@ -98,7 +98,7 @@ x 1
 #[test]
 fn shorthand_field_y_in_call_shows_bind_value() {
     let src = "\
-Int is in 1...400
+Int is in 1 to 400
 
 Coord has x Int, y Int, z Int
 x := 1
@@ -128,7 +128,7 @@ y 2
 #[test]
 fn field_access_x_shows_field_type() {
     let src = "\
-Int is in 1...400
+Int is in 1 to 400
 
 Coord has x Int, y Int, z Int
 p := Coord(x: 1, y: 2, z: 3)
@@ -155,7 +155,7 @@ x Int
 #[test]
 fn field_access_p_receiver_shows_definition_surface() {
     let src = "\
-Int is in 1...400
+Int is in 1 to 400
 
 Coord has x Int, y Int, z Int
 p := Coord(x: 1, y: 2, z: 3)

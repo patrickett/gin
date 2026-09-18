@@ -27,89 +27,169 @@ impl Default for LexContext {
     }
 }
 
-#[derive(Debug, PartialEq, Clone, Copy)]
-pub enum Token<'src> {
-    Ampersand,
-    And,
-    ArrowLeft,
-    As,
-    At,
-    BracketClose,
-    BracketOpen,
-    Break,
-    Caret,
-    Colon,
-    ColonColon,
-    ColonEq,
-    ColonSemi,
-    Comma,
-    Deref,
-    Eat,
-    Comment(&'src str),
-    Continue,
-    CurlyClose,
-    CurlyOpen,
-    Dedent,
-    DocComment(&'src str),
-    ModuleDocComment(&'src str),
-    Dot,
-    Else,
-    Eq,
-    Not,
-    // Operators
-    EqEq,
-    Extern,
-    Float(f64),
-    For,
-    FormatInterpEnd,
-    FormatInterpStart,
-    FormatStringDelim,
-    FormatStringText(&'src str),
-    Greater,
-    GreaterEq,
-    Has,
-    Id(&'src str),
-    If,
-    In,
-    Indent,
-    Infer,
-    Int(i256::I256),
-    Is,
-    Less,
-    LessEq,
-    Loop,
-    Mut,
-    Minus,
-    Newline,
-    NotEq,
-    Of,
-    Or,
-    ParenClose,
-    ParenOpen,
-    Percent,
-    Pipe,
-    Plus,
-    Pound,
-    Private,
-    Question,
-    Ref,
-    Return,
-    SelfInstance,
-    SelfTag,
-    ShiftLeft,
-    ShiftRight,
-    Slash,
-    SlashOr,
-    Star,
-    String(&'src str),
-    // String-bearing variants
-    Tag(&'src str),
-    Then,
-    Thus,
-    UnterminatedFormatString,
-    UnterminatedString(&'src str),
-    Use,
+macro_rules! define_tokens {
+    (
+        keywords { $( $keyword:ident => $spelling:literal, )* }
+        other { $( $variant:ident $( ( $field:ident : $payload:ty ) )? => $format:literal, )* }
+    ) => {
+        #[derive(Debug, PartialEq, Clone, Copy)]
+        pub enum Token<'src> {
+            $( $keyword, )*
+            $( $variant $( ( $payload ) )?, )*
+        }
 
-    When,
-    While,
+        impl std::fmt::Display for Token<'_> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self {
+                    $( Self::$keyword => write!(f, "[{}]", $spelling), )*
+                    $( Self::$variant $( ( $field ) )? => write!(f, $format), )*
+                }
+            }
+        }
+
+        impl<'src> Token<'src> {
+            pub const KEYWORDS: &'static [Token<'static>] = &[$(Token::$keyword,)*];
+
+            pub fn from_keyword(word: &str) -> Option<Self> {
+                match word {
+                    $( $spelling => Some(Self::$keyword), )*
+                    _ => None,
+                }
+            }
+
+            pub fn keyword(self) -> Option<&'static str> {
+                match self {
+                    $( Self::$keyword => Some($spelling), )*
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+define_tokens! {
+    keywords {
+        Extern => "extern",
+        Continue => "continue",
+        Private => "private",
+        Return => "return",
+        Break => "break",
+        Loop => "loop",
+        Ref => "ref",
+        Mut => "mut",
+        Own => "own",
+        Deref => "deref",
+        Then => "then",
+        To => "to",
+        Thus => "thus",
+        When => "when",
+        Else => "else",
+        SelfInstance => "self",
+        For => "for",
+        While => "while",
+        Use => "use",
+        Has => "has",
+        And => "and",
+        As => "as",
+        If => "if",
+        In => "in",
+        Is => "is",
+        Of => "of",
+        Not => "not",
+        Or => "or",
+        SelfTag => "Self",
+    }
+    other {
+        Ampersand => "[&]",
+        ArrowLeft => "[<-]",
+        At => "[@]",
+        BracketClose => "[]]",
+        BracketOpen => "[[]",
+        Caret => "[^]",
+        Colon => "[:]",
+        ColonColon => "[::]",
+        ColonEq => "[:=]",
+        ColonSemi => "[;]",
+        Comma => "[,]",
+        Comment(s: &'src str) => "[comment: \"{s}\"]",
+        CurlyClose => "[}}]",
+        CurlyOpen => "[{{]",
+        Dedent => "[dedent]",
+        DocComment(s: &'src str) => "[doc-comment: \"{s}\"]",
+        ModuleDocComment(s: &'src str) => "[module-doc-comment: \"{s}\"]",
+        Dot => "[.]",
+        Eq => "[=]",
+        EqEq => "[==]",
+        Float(n: f64) => "[float: {n}]",
+        FormatInterpEnd => "[interp-end]",
+        FormatInterpStart => "[interp-start]",
+        FormatStringDelim => "[format-delim]",
+        FormatStringText(s: &'src str) => "[format-text: \"{s}\"]",
+        Greater => "[>]",
+        GreaterEq => "[>=]",
+        Id(s: &'src str) => "[id: \"{s}\"]",
+        Indent => "[indent]",
+        Infer => "[...]",
+        Int(n: i256::I256) => "[int: {n}]",
+        Less => "[<]",
+        LessEq => "[<=]",
+        Minus => "[-]",
+        Newline => "[\\n]",
+        NotEq => "[/=]",
+        ParenClose => "[)]",
+        ParenOpen => "[(]",
+        Percent => "[%]",
+        Pipe => "[|]",
+        Plus => "[+]",
+        Pound => "[#]",
+        Question => "[?]",
+        ShiftLeft => "[<<]",
+        ShiftRight => "[>>]",
+        Slash => "[/]",
+        SlashOr => "[\\]",
+        Star => "[*]",
+        String(s: &'src str) => "[string: \"{s}\"]",
+        Tag(s: &'src str) => "[tag: \"{s}\"]",
+        UnterminatedFormatString => "[unterminated-format]",
+        UnterminatedString(s: &'src str) => "[unterminated-string: \"{s}\"]",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Token;
+    use crate::Lexer;
+
+    #[test]
+    fn every_keyword_lexes_and_displays_its_declared_spelling() {
+        let mut spellings = std::collections::HashSet::new();
+        for token in Token::KEYWORDS {
+            let word = token.keyword().unwrap();
+            assert!(spellings.insert(word), "duplicate keyword: {word}");
+            let mut lexer = Lexer::new(word);
+            assert_eq!(lexer.next_raw().unwrap().0, *token, "{word}");
+            assert_eq!(token.to_string(), format!("[{word}]"));
+            assert_eq!(Token::from_keyword(word), Some(*token));
+        }
+    }
+
+    #[test]
+    fn contextual_words_and_keyword_prefixes_are_not_reserved() {
+        for word in [
+            "asm",
+            "target",
+            "register",
+            "return_value",
+            "owned",
+            "reference",
+        ] {
+            assert_eq!(Token::from_keyword(word), None);
+            assert_eq!(Lexer::new(word).next_raw().unwrap().0, Token::Id(word));
+        }
+        for token in Token::KEYWORDS {
+            let word = format!("{}value", token.keyword().unwrap());
+            assert_eq!(Token::from_keyword(&word), None);
+            assert!(Lexer::new(&word).next_raw().unwrap().0.keyword().is_none());
+        }
+    }
 }

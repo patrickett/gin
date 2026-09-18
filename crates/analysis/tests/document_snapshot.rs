@@ -77,7 +77,7 @@ fn document_snapshot_uses_cached_line_index() {
 #[test]
 fn document_snapshot_line_index_consistent_with_sourceext() {
     let dir = unique_temp_dir("consistency");
-    let content = "use core.true\n\nmain:\n    core.true\n    check(core.true)\nreturn\n";
+    let content = "use core true\n\nmain:\n    core.true\n    check(core.true)\nreturn\n";
     let path = make_test_file(&dir, "main.gin", content);
 
     let engine = PackageCache::for_test();

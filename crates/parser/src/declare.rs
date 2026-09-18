@@ -24,6 +24,13 @@ impl<'src, 't> TokenCursor<'src, 't> {
             self.skip_newlines();
         }
         let attrs = self.parse_declare_attributes();
+        if attrs.is_some() && self.attribute_is_detached_from_next_token() {
+            self.error(
+                "parse-detached-attribute",
+                "attribute must be on the line directly above the item it attaches to",
+                self.current_span(),
+            );
+        }
         self.eat(&Token::Indent);
 
         let (name, name_span) = match self.peek()? {
@@ -161,6 +168,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             // Doc comment attached to this member (skip newlines first)
             self.skip_newlines();
             let member_doc = self.parse_doc_comment();
+            let member_attributes = self.parse_bind_attributes().unwrap_or_default();
 
             let (qualifier, member_name) = match self.peek() {
                 Some(Token::Id(n)) => {
@@ -215,7 +223,12 @@ impl<'src, 't> TokenCursor<'src, 't> {
             };
 
             // Parse optional return type and error type
-            let (return_ty, error_ty) = self.parse_method_return_type(expr_parser);
+            let (mut return_ty, error_ty) = self.parse_method_return_type(expr_parser, is_function);
+            let anonymous_result_alternatives = if is_function {
+                self.parse_result_alternatives(&mut return_ty)
+            } else {
+                Vec::new()
+            };
 
             // Parse optional refinement predicate: `and < n`, `and > 0 and < n`, etc.
             let refinement = if self.eat(&Token::And) {
@@ -259,10 +272,12 @@ impl<'src, 't> TokenCursor<'src, 't> {
                     param_refinements: Box::new(param_refinements),
                     return_ty,
                     error_ty,
+                    anonymous_result_alternatives,
                     body,
                     doc_comment: member_doc,
                     refinement,
                     kind,
+                    attributes: member_attributes,
                 }))
             } else {
                 HasMember::Property(HasProperty {
@@ -307,7 +322,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
                     self.rewind(checkpoint);
                     break;
                 }
-                if self.checkpoint() != checkpoint {
+                if self.checkpoint() != checkpoint || self.previous_token_was_newline_separator() {
                     continue;
                 }
             }
@@ -335,7 +350,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
     /// line from params), we skip return type parsing entirely. This prevents
     /// consuming the next member's name as a bare-Id return type when there's
     /// no explicit separator, which enables newline-separated interface members.
-    fn parse_method_return_type(&mut self, expr_parser: ExprFn) -> ParseResultType {
+    fn parse_method_return_type(
+        &mut self,
+        expr_parser: ExprFn,
+        is_function: bool,
+    ) -> ParseResultType {
         // If the return type would be on a different line from the params,
         // there's no return type — the real return type must be on the same
         // line. This prevents consuming the next member name as a bare-Id
@@ -347,13 +366,14 @@ impl<'src, 't> TokenCursor<'src, 't> {
         // Check if the next token could start a return type.
         // `parse_type_expr` handles: `@T`, `ref T`, `mut T`, `()`, `Tag`, `Tag(...)`, `Qual.Path`.
         // But in interface method position, `(` followed by something other than `)` could be
-        // a tuple type — skip unit check since parse_type_expr handles it.
+        // An aggregate type — skip unit check since parse_type_expr handles it.
         let can_start = matches!(
             self.peek(),
             Some(Token::Tag(_) | Token::SelfTag)
                 | Some(Token::Ref)
                 | Some(Token::Mut)
                 | Some(Token::At)
+                | Some(Token::BracketOpen)
         ) || matches!(self.peek(), Some(Token::ParenOpen) if self.peek_at(1) == Some(&Token::ParenClose));
 
         if !can_start {
@@ -366,13 +386,21 @@ impl<'src, 't> TokenCursor<'src, 't> {
                     value: Expr::AnonymousTag(name),
                     span_id: span,
                 };
-                return self.check_or_error(expr_parser, Some(Box::new(sp)));
+                return if is_function && matches!(sp.value, Expr::AnonymousTag(_)) {
+                    (Some(Box::new(sp)), None)
+                } else {
+                    self.check_or_error(expr_parser, Some(Box::new(sp)))
+                };
             }
             return (None, None);
         }
 
         if let Some(sp) = self.parse_type_expr(expr_parser) {
-            return self.check_or_error(expr_parser, Some(Box::new(sp)));
+            return if is_function && matches!(sp.value, Expr::AnonymousTag(_)) {
+                (Some(Box::new(sp)), None)
+            } else {
+                self.check_or_error(expr_parser, Some(Box::new(sp)))
+            };
         }
 
         (None, None)
@@ -418,7 +446,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             return (DeclareValue::When(Box::new(when)), None, Vec::new());
         }
 
-        // InRange: `in` N...M
+        // InRange: `in` N to M
         if self.eat(&Token::In) {
             let checkpoint = self.checkpoint();
             if let Some((a, b)) = self.parse_int_range() {
@@ -450,7 +478,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             );
         }
 
-        // Range: [-]Int...[-]Int
+        // Range: [-]Int to [-]Int
         if matches!(self.peek(), Some(Token::Int(_)) | Some(Token::Minus)) {
             let checkpoint = self.checkpoint();
             if let Some((a, b)) = self.parse_int_range() {
@@ -936,7 +964,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
         self.parse_trait_chain_after_has(expr_parser)
     }
 
-    fn parse_trait_chain_after_has(&mut self, expr_parser: ExprFn) -> Vec<ProvidedTrait> {
+    pub(crate) fn parse_trait_chain_after_has(
+        &mut self,
+        expr_parser: ExprFn,
+    ) -> Vec<ProvidedTrait> {
         let mut traits = Vec::new();
 
         loop {
@@ -1052,19 +1083,8 @@ impl<'src, 't> TokenCursor<'src, 't> {
             ));
         }
 
-        // Named: id [Tag | id | : TypeExpr]
-        let name = match self.peek() {
-            Some(Token::Id(n)) => {
-                let name_span = self.peek_span()?;
-                let id = self.intern(n);
-                // Consume the parameter identifier token after capturing its span.
-                self.advance();
-                (id, name_span)
-            }
-            _ => return None,
-        };
-
-        let (name, name_span) = name;
+        let name_span = self.peek_span()?;
+        let name = self.parse_name()?;
         // In declaration (type-level) position, `:` introduces a type default,
         // not a value default. This is how `Box(x, a: LibcAllocator)` works.
         if self.eat(&Token::Colon) {
@@ -1266,7 +1286,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
     pub(crate) fn parse_symbolic_range(&mut self) -> Option<(NormalExpr, NormalExpr)> {
         let start = self.parse_symbolic_integer_atom()?;
-        if !self.eat(&Token::Infer) {
+        if !self.eat(&Token::To) {
             return None;
         }
         let end = self.parse_symbolic_integer_atom()?;

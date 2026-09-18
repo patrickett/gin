@@ -11,11 +11,11 @@ use support::transform_source;
 fn hover_f_shows_named_ty() {
     let src = "\
 Bool is True or False
-BigInt is in 0...1000
+BigInt is in 0 to 1000
 List(x) has pointer @x, length BigInt
 NamedTy has name String, ty Type
 String has bytes List(Byte)
-Byte is in 0...255
+Byte is in 0 to 255
 Type is Primitive(width BigInt, signed Bool) or Record(name String, fields List(NamedTy))
 
 all_copy(fields List(NamedTy)) Bool := when fields is
@@ -44,11 +44,11 @@ all_copy(fields List(NamedTy)) Bool := when fields is
 fn hover_rest_shows_list_named_ty() {
     let src = "\
 Bool is True or False
-BigInt is in 0...1000
+BigInt is in 0 to 1000
 List(x) has pointer @x, length BigInt
 NamedTy has name String, ty Type
 String has bytes List(Byte)
-Byte is in 0...255
+Byte is in 0 to 255
 Type is Primitive(width BigInt, signed Bool) or Record(name String, fields List(NamedTy))
 
 all_copy(fields List(NamedTy)) Bool := when fields is

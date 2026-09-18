@@ -4,7 +4,7 @@
 //! and calling `Range.new(12, 1200)`, asserting the resulting record's
 //! `.start` field can be returned from main and observed as the exit code.
 //!
-//! Multi-file tests use the same `Range` definitions inline (gin-core-shaped).
+//! Multi-file tests use the same capability-focused `Range` definitions inline.
 
 mod common;
 
@@ -40,7 +40,7 @@ main:
 return
 ";
 
-/// Gin-core-shaped `Range` definitions.
+/// Capability-focused `Range` definitions.
 const GIN_CORE_RANGE_GIN: &str =
     "Range(x) has\n    start x\n    end x\n\n    new(start x, end x) Range(x): Self(start, end)\n";
 
@@ -60,16 +60,16 @@ fn range_new_compiles_and_runs() {
     .assert_exit_code(12);
 }
 
-/// Gin-core-shaped `Range` definitions plus a caller in one translation unit.
+/// Capability-focused `Range` definitions plus a caller in one translation unit.
 #[test]
-fn range_new_single_file_uses_gin_core_range_gin_text() {
+fn range_new_single_file_uses_range_fixture_text() {
     let src = format!(
         "{GIN_CORE_RANGE_GIN}\n\nmain:\n    r : Range.new(12, 1200)\n    return r.start\nreturn\n"
     );
     compile_and_run_with_options(
         &src,
         Options {
-            test_name: "range_new_from_gin_core_range_gin".into(),
+            test_name: "range_new_from_range_fixture".into(),
             ..Default::default()
         },
     )
@@ -102,13 +102,13 @@ fn write_pkg_file(path: &std::path::Path, contents: &str) {
     fs::write(path, contents).unwrap();
 }
 
-/// Compiles a flask **folder module** (single `main.gin` with gin-core-shaped `Range`).
+/// Compiles a flask **folder module** (single `main.gin` with capability-focused `Range`).
 /// Emits MLIR and checks `Range.new` is present.
 ///
 /// Multi-file `use Range` without `resolve_and_prepare` does not merge sibling files;
 /// cross-file package MLIR is covered once directory resolve is wired for dep-less pkgs.
 #[test]
-fn range_new_pkg_folder_emits_mlir_with_gin_core_range_gin() {
+fn range_new_pkg_folder_emits_mlir_with_range_fixture() {
     let dir = unique_temp_pkg("range_pkg_mlir");
     let _ = fs::remove_dir_all(&dir);
 

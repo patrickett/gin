@@ -81,9 +81,9 @@ fn record_projection_rebind_parses_as_record_set() {
 }
 
 #[test]
-fn tuple_projection_rebind_parses_as_tuple_set() {
+fn indexed_projection_rebind_parses_as_aggregate_set() {
     let expressions = body_expressions("main:\n    tuple.0:: 1\n    return 0");
-    assert!(matches!(expressions[0], Expr::TupleSet { .. }));
+    assert!(matches!(expressions[0], Expr::AggregateSet { .. }));
 }
 
 #[test]
@@ -136,7 +136,7 @@ fn projected_compound_rebind_retains_the_operator() {
     ));
     assert!(matches!(
         exprs[1].value,
-        Expr::TupleSet {
+        Expr::AggregateSet {
             operator: Some(ast::BinOp::Subtract),
             ..
         }

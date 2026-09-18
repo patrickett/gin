@@ -1,4 +1,4 @@
-//! Hover for an `Architecture` string-literal const union (canonical gin_core arch fixture).
+//! Hover for an `Architecture` string-literal const union fixture.
 
 use ast::source::SourceExt;
 use internment::Intern;

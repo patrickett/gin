@@ -15,7 +15,7 @@ mod support;
 #[test]
 fn test_i128_constant_not_truncated() {
     // Value: 170141183460469231731687303715884105727 (2^127 - 1)
-    let source = "Signed128 is in -170141183460469231731687303715884105728...170141183460469231731687303715884105727\nmain Signed128: 170141183460469231731687303715884105727\n";
+    let source = "Signed128 is in -170141183460469231731687303715884105728 to 170141183460469231731687303715884105727\nmain Signed128: 170141183460469231731687303715884105727\n";
     let (mlir_text, symptoms) = support::codegen_to_mlir_text(source, "test.gin", false);
 
     if !symptoms.is_empty() {
@@ -36,7 +36,7 @@ fn test_negative_i128_constant() {
     // Value: -20000000000000000000 (-2e19, below i64::MIN of -9223372036854775808)
     // Note: -2^127 can't be used because the lexer parses the positive literal first,
     // and 2^127 overflows i128 (max is 2^127 - 1).
-    let source = "Signed128 is in -170141183460469231731687303715884105728...170141183460469231731687303715884105727\nmain Signed128: -20000000000000000000\n";
+    let source = "Signed128 is in -170141183460469231731687303715884105728 to 170141183460469231731687303715884105727\nmain Signed128: -20000000000000000000\n";
     let (mlir_text, symptoms) = support::codegen_to_mlir_text(source, "test.gin", false);
 
     if !symptoms.is_empty() {
@@ -54,7 +54,7 @@ fn test_negative_i128_constant() {
 #[test]
 fn test_i64_constant_fast_path() {
     // A value that fits in i64 should still work correctly
-    let source = "Signed64 is in -9223372036854775808...9223372036854775807\nmain Signed64: 42\n";
+    let source = "Signed64 is in -9223372036854775808 to 9223372036854775807\nmain Signed64: 42\n";
     let (mlir_text, symptoms) = support::codegen_to_mlir_text(source, "test.gin", false);
 
     if !symptoms.is_empty() {

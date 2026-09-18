@@ -4,7 +4,7 @@ mod support;
 fn integer_equality_lowers_to_i1_comparison() {
     let source = "\
 Bool is True or False
-Int is in 0...4294967295
+Int is in 0 to 4294967295
 same := 1 = 2
 ";
     let (mlir, symptoms) = support::codegen_to_mlir_text(source, "equality.gin", false);

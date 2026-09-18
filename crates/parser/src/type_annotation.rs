@@ -12,13 +12,16 @@ use crate::expr::ExprFn;
 impl<'src, 't> TokenCursor<'src, 't> {
     /// Parse a type annotation where the parameter/bind name was already consumed.
     ///
-    /// Recognises `in N...M`, `in Tag`, `Tag`, `Tag(...)`, and lowercase `id` type variables (`start x`).
+    /// Recognises `in N to M`, `in Tag`, `Tag`, `Tag(...)`, and lowercase `id` type variables (`start x`).
     pub fn parse_type_annotation(&mut self, expr_parser: ExprFn) -> Option<Spanned<Expr>> {
         if self.eat(&Token::In) {
             return self.parse_in_range_expr();
         }
 
-        if matches!(self.peek(), Some(Token::At) | Some(Token::Tag(_))) {
+        if matches!(
+            self.peek(),
+            Some(Token::At | Token::Tag(_) | Token::SelfTag | Token::BracketOpen)
+        ) {
             let sp = self.parse_type_expr(expr_parser)?;
             return Some(Spanned {
                 value: sp.value,

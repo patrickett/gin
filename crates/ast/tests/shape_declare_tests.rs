@@ -17,7 +17,7 @@ use support::transform_source;
 
 #[test]
 fn simple_shape_with_fields() {
-    let src = "Int is in 1...400\n\nCoord has x Int, y Int, z Int";
+    let src = "Int is in 1 to 400\n\nCoord has x Int, y Int, z Int";
     let typed = transform_source(src);
 
     let coord_id = TagId(Intern::new("Coord".to_string()));
@@ -57,7 +57,7 @@ fn simple_shape_with_fields() {
 #[test]
 fn has_method_does_not_become_record_field() {
     let src =
-        "Int is in 1...400\n\nRange(x) has start x, end x, contains(ref self, value x) Bool\n";
+        "Int is in 1 to 400\n\nRange(x) has start x, end x, contains(ref self, value x) Bool\n";
     let typed = transform_source(src);
 
     let range_id = TagId(Intern::new("Range".to_string()));
@@ -204,7 +204,7 @@ Allocator has
 #[test]
 fn unified_trait_impl_does_not_crash() {
     let src = "\
-Int is in 1...400
+Int is in 1 to 400
 Default has default Self
 Coord has Default
     x Int
@@ -229,7 +229,7 @@ Coord has Default
 #[test]
 fn trait_impl_in_unified_declaration() {
     let src = "\
-Int is in 1...400
+Int is in 1 to 400
 Coord has Default
     x Int
     y Int
@@ -266,7 +266,7 @@ Coord has Default
 #[test]
 fn explicit_copy_provision() {
     let src = "\
-Int is in 1...400
+Int is in 1 to 400
 Copy has can_copy Bool
 UniqueId has Copy
     id Int
@@ -295,7 +295,7 @@ fn union_with_named_variant_fields() {
     // `Int` is declared so it resolves; `String` is an undeclared tag
     // so it will produce an unknown-symbol flaw.
     let src = "\
-Int is in 1...400
+Int is in 1 to 400
 Status is
     Pending(eta Int, message String) or
     Complete";
@@ -383,7 +383,7 @@ fn union_with_generic_variant() {
 #[test]
 fn variant_construction_with_named_args() {
     let src = "\
-Int is in 1...400
+Int is in 1 to 400
 Status is Pending(eta Int, message String) or Complete
 s := Status.Pending(eta: 1, message: \"starting\")
 d := Status.Complete";
@@ -402,7 +402,7 @@ d := Status.Complete";
 #[test]
 fn namespaced_method() {
     let src = "\
-Int is in 1...400
+Int is in 1 to 400
 Coord has x Int, y Int
 Coord.new(x Int, y Int) Int: 0";
     let typed = transform_source(src);
@@ -429,7 +429,7 @@ Coord.new(x Int, y Int) Int: 0";
 #[test]
 fn receiver_method_with_explicit_self() {
     let src = "\
-Int is in 1...400
+Int is in 1 to 400
 Coord has x Int, y Int
 Coord.length(self Int) Int: self";
     let typed = transform_source(src);
@@ -454,7 +454,7 @@ Coord.length(self Int) Int: self";
 #[test]
 fn unit_return_method() {
     let src = "\
-Int is in 1...400
+Int is in 1 to 400
 Coord has x Int, y Int
 Coord.reset(self Int):
     self + 0";

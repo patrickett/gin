@@ -2,13 +2,15 @@ use super::*;
 use std::time::{Duration, Instant};
 use test_fixtures::TempPackage;
 
-const PACKAGE_NUMBERS: &str = r#"Signed64 is in -9223372036854775808...9223372036854775807
-Small is in 0...255
+const PACKAGE_NUMBERS: &str = r#"Signed64 is in -9223372036854775808 to 9223372036854775807
+Small is in 0 to 255
 
-#intrinsic(BitsAdd)
-signed64_add_bits(eat lhs Signed64, eat rhs Signed64) Signed64 extern
-#operator(Add)
-signed64_add(lhs Signed64, rhs Signed64) Signed64: signed64_add_bits(eat lhs, eat rhs)
+signed64_add_bits(lhs Signed64, rhs Signed64) Signed64:
+    left is in -9223372036854775808 to 9223372036854775807: lhs
+    right is in -9223372036854775808 to 9223372036854775807: rhs
+return (left + right) as Signed64
+#infix('+')
+signed64_add(lhs Signed64, rhs Signed64) Signed64: signed64_add_bits(lhs, rhs)
 "#;
 
 struct NativeSession {
@@ -24,14 +26,16 @@ impl NativeSession {
     fn new() -> Self {
         let mut session = InterpreterSession::default();
         let submit = session.submit(
-            r#"Signed64 is in -9223372036854775808...9223372036854775807
-Small is in 0...255
+            r#"Signed64 is in -9223372036854775808 to 9223372036854775807
+Small is in 0 to 255
 
-#intrinsic(BitsAdd)
-signed64_add_bits(eat lhs Signed64, eat rhs Signed64) Signed64 extern
-#operator(Add)
+signed64_add_bits(lhs Signed64, rhs Signed64) Signed64:
+    left is in -9223372036854775808 to 9223372036854775807: lhs
+    right is in -9223372036854775808 to 9223372036854775807: rhs
+return (left + right) as Signed64
+#infix('+')
 #inline
-signed64_add(lhs Signed64, rhs Signed64) Signed64: signed64_add_bits(eat lhs, eat rhs)
+signed64_add(lhs Signed64, rhs Signed64) Signed64: signed64_add_bits(lhs, rhs)
 "#,
         );
         match submit {
@@ -54,7 +58,7 @@ impl PackageSession {
         let context = InterpreterContext::load(package.path()).expect("package context");
         let mut session = InterpreterSession::with_context(context);
         let imported =
-            session.submit("use 'numbers'.(Signed64, Small, signed64_add_bits, signed64_add)");
+            session.submit("use 'numbers' Signed64, Small, signed64_add_bits, signed64_add");
         assert!(
             matches!(imported, Submission::DeclarationAccepted { .. }),
             "package imports should be accepted: {imported:?}"
@@ -83,6 +87,57 @@ fn native_integer_expression_evaluates() {
             }
         ),
         "unexpected submission: {submission:?}"
+    );
+}
+
+#[test]
+fn ordinary_double_quoted_text_uses_byte_array_operations() {
+    let mut native = NativeSession::new();
+    let submission = native.session.submit(r#""Z".(0) as Signed64"#);
+    assert!(
+        matches!(
+            submission,
+            Submission::Evaluated {
+                value: RuntimeValue {
+                    storage: RuntimeStorage::Int64(90),
+                    ..
+                },
+                ..
+            }
+        ),
+        "unexpected submission: {submission:?}"
+    );
+}
+
+#[test]
+fn template_expression_is_rejected_until_library_defined_formatting_is_supported() {
+    let mut native = NativeSession::new();
+    let generations = native
+        .session
+        .live_runtime
+        .generations()
+        .iter()
+        .map(|generation| generation.id)
+        .collect::<Vec<_>>();
+    let submission = native.session.submit(r#""value \(42)""#);
+    let Submission::Rejected { diagnostics } = submission else {
+        panic!("unexpected submission: {submission:?}");
+    };
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.diagnostic().code.slug() == "parse-template-strings-not-supported"
+        }),
+        "{diagnostics:?}"
+    );
+    assert_eq!(
+        native
+            .session
+            .live_runtime
+            .generations()
+            .iter()
+            .map(|generation| generation.id)
+            .collect::<Vec<_>>(),
+        generations
     );
 }
 
@@ -447,15 +502,11 @@ fn function_redefinition_rejects_incompatible_param_count() {
 fn function_redefinition_rejects_incompatible_param_convention() {
     let mut native = NativeSession::new();
     assert!(matches!(
-        native
-            .session
-            .submit("double(x Signed64) Signed64:\n    return x"),
+        native.session.submit("double(x Signed64) Signed64: x"),
         Submission::DeclarationAccepted { .. }
     ));
 
-    let response = native
-        .session
-        .submit("double(ref x Signed64) Signed64:\n    return x");
+    let response = native.session.submit("double(x ref Signed64) Signed64: 0");
     match response {
         Submission::Rejected { diagnostics } => {
             assert!(
@@ -474,9 +525,7 @@ fn function_redefinition_rejects_incompatible_param_convention() {
 fn function_redefinition_rejects_value_kind_mismatch() {
     let mut native = NativeSession::new();
     assert!(matches!(
-        native
-            .session
-            .submit("double(x Signed64) Signed64:\n    return x"),
+        native.session.submit("double(x Signed64) Signed64: x"),
         Submission::DeclarationAccepted { .. }
     ));
     let response = native.session.submit("double Signed64 := 12");

@@ -53,7 +53,7 @@ pub(crate) type LocalVarTypes = HashMap<Intern<String>, Ty>;
 
 /// Local types plus names introduced with `:=` (immutable).
 #[derive(Clone, Default)]
-pub(crate) struct LocalEnv {
+pub(crate) struct FlowState {
     pub(crate) types: LocalVarTypes,
     /// Names declared in the current scope (for reassignment detection).
     pub(crate) locals: HashSet<Intern<String>>,
@@ -69,19 +69,126 @@ pub(crate) struct LocalEnv {
     pub(crate) target_groups: HashMap<Intern<String>, ReferenceTargetSet>,
     pub(crate) local_callable_returns: HashMap<Intern<String>, Ty>,
     pub(crate) result_evidence: HashMap<Intern<String>, crate::typed::ResultEvidence>,
+    pub(crate) union_members: HashMap<crate::typed::PlaceVersionId, (usize, Ty)>,
+    pub(crate) integer_domains: HashMap<crate::typed::PlaceVersionId, ast::integer::IntegerDomain>,
     pub(crate) projected_result_evidence:
         HashMap<Intern<String>, crate::typed::ProjectedResultEvidence>,
+    /// Result labels carried by local bindings initialized from callable rows.
+    pub(crate) result_names: HashMap<Intern<String>, Vec<Intern<String>>>,
+    /// Per-field ownership targets carried by stored callable result rows.
+    pub(crate) result_target_groups: HashMap<Intern<String>, Vec<Option<ReferenceTargetSet>>>,
+}
+
+impl FlowState {
+    fn invalidate_value_evidence(&mut self, typed: &mut TypedFileAst, call: ExprId) {
+        self.integer_domains.clear();
+        self.union_members.clear();
+        for (name, place) in self.places.clone() {
+            let ty = typed.places[place.0 as usize].ty.clone();
+            let version = typed.add_place_version(
+                place,
+                crate::typed::PlaceVersionOrigin::Mutation(call),
+                ty,
+                None,
+            );
+            self.set_place_version(name, version);
+        }
+        self.projected_versions.clear();
+    }
+
+    pub(crate) fn place_version(
+        &self,
+        name: &Intern<String>,
+    ) -> Option<crate::typed::PlaceVersionId> {
+        self.place_versions.get(name).copied()
+    }
+
+    pub(crate) fn set_place_version(
+        &mut self,
+        name: Intern<String>,
+        version: crate::typed::PlaceVersionId,
+    ) {
+        self.place_versions.insert(name, version);
+    }
+
+    pub(crate) fn set_target_group(
+        &mut self,
+        name: Intern<String>,
+        targets: Option<ReferenceTargetSet>,
+    ) {
+        if let Some(targets) = targets {
+            self.target_groups.insert(name, targets);
+        } else {
+            self.target_groups.remove(&name);
+        }
+    }
+
+    pub(crate) fn set_result_target_groups(
+        &mut self,
+        name: Intern<String>,
+        targets: Option<Vec<Option<ReferenceTargetSet>>>,
+    ) {
+        if let Some(targets) = targets.filter(|targets| !targets.is_empty()) {
+            self.result_target_groups.insert(name, targets);
+        } else {
+            self.result_target_groups.remove(&name);
+        }
+    }
+
+    pub(crate) fn projected_place(
+        &self,
+        parent: crate::typed::PlaceId,
+        projection: &crate::typed::PlaceProjection,
+    ) -> Option<crate::typed::PlaceId> {
+        self.projected_places
+            .get(&(parent, projection.clone()))
+            .copied()
+    }
+
+    pub(crate) fn set_projected_place(
+        &mut self,
+        parent: crate::typed::PlaceId,
+        projection: crate::typed::PlaceProjection,
+        place: crate::typed::PlaceId,
+    ) {
+        self.projected_places.insert((parent, projection), place);
+    }
+
+    pub(crate) fn projected_version(
+        &self,
+        place: crate::typed::PlaceId,
+    ) -> Option<crate::typed::PlaceVersionId> {
+        self.projected_versions.get(&place).copied()
+    }
+
+    pub(crate) fn set_projected_version(
+        &mut self,
+        place: crate::typed::PlaceId,
+        version: crate::typed::PlaceVersionId,
+    ) {
+        self.projected_versions.insert(place, version);
+    }
 }
 
 pub(crate) fn join_place_versions(
     typed: &mut TypedFileAst,
-    env: &mut LocalEnv,
-    incoming: &LocalEnv,
-    branches: &[LocalEnv],
+    env: &mut FlowState,
+    incoming: &FlowState,
+    branches: &[FlowState],
     include_incoming: bool,
 ) {
+    env.union_members.retain(|version, member| {
+        branches
+            .iter()
+            .all(|branch| branch.union_members.get(version) == Some(member))
+    });
+    env.integer_domains.retain(|version, domain| {
+        branches
+            .iter()
+            .all(|branch| branch.integer_domains.get(version) == Some(domain))
+    });
     for (name, place) in &incoming.places {
-        let Some(incoming_version) = incoming.place_versions.get(name).copied() else {
+        let Some(incoming_version) = incoming.place_version(name) else {
             continue;
         };
         let mut predecessors = Vec::new();
@@ -103,17 +210,16 @@ pub(crate) fn join_place_versions(
             }
         }
         if predecessors.len() == 1 {
-            env.place_versions.insert(*name, predecessors[0]);
+            env.set_place_version(*name, predecessors[0]);
             continue;
         }
-        let version = crate::typed::PlaceVersionId(typed.place_versions.len() as u32);
-        typed.place_versions.push(crate::typed::TypedPlaceVersion {
-            place: *place,
-            origin: crate::typed::PlaceVersionOrigin::Join(predecessors),
-            ty: typed.places[place.0 as usize].ty.clone(),
-            integer_knowledge: None,
-        });
-        env.place_versions.insert(*name, version);
+        let version = typed.add_place_version(
+            *place,
+            crate::typed::PlaceVersionOrigin::Join(predecessors),
+            typed.places[place.0 as usize].ty.clone(),
+            None,
+        );
+        env.set_place_version(*name, version);
     }
     let projected_keys = incoming
         .projected_places
@@ -138,20 +244,18 @@ pub(crate) fn join_place_versions(
         else {
             continue;
         };
-        let incoming_version = if let Some(version) = incoming.projected_versions.get(&place) {
-            *version
+        let incoming_version = if let Some(version) = incoming.projected_version(place) {
+            version
         } else {
             let Some(base) = current_version_for_place(typed, incoming, parent) else {
                 continue;
             };
-            let version = crate::typed::PlaceVersionId(typed.place_versions.len() as u32);
-            typed.place_versions.push(crate::typed::TypedPlaceVersion {
+            typed.add_place_version(
                 place,
-                origin: crate::typed::PlaceVersionOrigin::Projection { base },
-                ty: typed.places[place.0 as usize].ty.clone(),
-                integer_knowledge: None,
-            });
-            version
+                crate::typed::PlaceVersionOrigin::Projection { base },
+                typed.places[place.0 as usize].ty.clone(),
+                None,
+            )
         };
         let mut predecessors = Vec::new();
         if include_incoming {
@@ -170,28 +274,26 @@ pub(crate) fn join_place_versions(
         let version = if predecessors.len() == 1 {
             predecessors[0]
         } else {
-            let version = crate::typed::PlaceVersionId(typed.place_versions.len() as u32);
-            typed.place_versions.push(crate::typed::TypedPlaceVersion {
+            typed.add_place_version(
                 place,
-                origin: crate::typed::PlaceVersionOrigin::Join(predecessors),
-                ty: typed.places[place.0 as usize].ty.clone(),
-                integer_knowledge: None,
-            });
-            version
+                crate::typed::PlaceVersionOrigin::Join(predecessors),
+                typed.places[place.0 as usize].ty.clone(),
+                None,
+            )
         };
-        env.projected_places.insert((parent, projection), place);
-        env.projected_versions.insert(place, version);
+        env.set_projected_place(parent, projection, place);
+        env.set_projected_version(place, version);
     }
 }
 
 pub(crate) fn join_loop_place_versions(
     typed: &mut TypedFileAst,
-    env: &mut LocalEnv,
-    incoming: &LocalEnv,
-    body: &LocalEnv,
+    env: &mut FlowState,
+    incoming: &FlowState,
+    body: &FlowState,
 ) {
     for (name, place) in &incoming.places {
-        let Some(incoming_version) = incoming.place_versions.get(name).copied() else {
+        let Some(incoming_version) = incoming.place_version(name) else {
             continue;
         };
         let backedge = if body.places.get(name) == Some(place) {
@@ -200,37 +302,34 @@ pub(crate) fn join_loop_place_versions(
             None
         };
         let Some(backedge) = backedge.filter(|version| *version != incoming_version) else {
-            env.place_versions.insert(*name, incoming_version);
+            env.set_place_version(*name, incoming_version);
             continue;
         };
-        let version = crate::typed::PlaceVersionId(typed.place_versions.len() as u32);
-        typed.place_versions.push(crate::typed::TypedPlaceVersion {
-            place: *place,
-            origin: crate::typed::PlaceVersionOrigin::LoopPhi {
+        let version = typed.add_place_version(
+            *place,
+            crate::typed::PlaceVersionOrigin::LoopPhi {
                 incoming: incoming_version,
                 backedges: vec![backedge],
             },
-            ty: typed.places[place.0 as usize].ty.clone(),
-            integer_knowledge: None,
-        });
+            typed.places[place.0 as usize].ty.clone(),
+            None,
+        );
         close_loop_version_cycle(typed, backedge, incoming_version, version, *place);
-        env.place_versions.insert(*name, version);
+        env.set_place_version(*name, version);
     }
     for ((parent, projection), place) in &body.projected_places {
-        let incoming_version = if let Some(version) = incoming.projected_versions.get(place) {
-            *version
+        let incoming_version = if let Some(version) = incoming.projected_version(*place) {
+            version
         } else {
             let Some(base) = current_version_for_place(typed, incoming, *parent) else {
                 continue;
             };
-            let version = crate::typed::PlaceVersionId(typed.place_versions.len() as u32);
-            typed.place_versions.push(crate::typed::TypedPlaceVersion {
-                place: *place,
-                origin: crate::typed::PlaceVersionOrigin::Projection { base },
-                ty: typed.places[place.0 as usize].ty.clone(),
-                integer_knowledge: None,
-            });
-            version
+            typed.add_place_version(
+                *place,
+                crate::typed::PlaceVersionOrigin::Projection { base },
+                typed.places[place.0 as usize].ty.clone(),
+                None,
+            )
         };
         let Some(backedge) = body
             .projected_versions
@@ -240,23 +339,22 @@ pub(crate) fn join_loop_place_versions(
         else {
             env.projected_places
                 .insert((*parent, projection.clone()), *place);
-            env.projected_versions.insert(*place, incoming_version);
+            env.set_projected_version(*place, incoming_version);
             continue;
         };
-        let version = crate::typed::PlaceVersionId(typed.place_versions.len() as u32);
-        typed.place_versions.push(crate::typed::TypedPlaceVersion {
-            place: *place,
-            origin: crate::typed::PlaceVersionOrigin::LoopPhi {
+        let version = typed.add_place_version(
+            *place,
+            crate::typed::PlaceVersionOrigin::LoopPhi {
                 incoming: incoming_version,
                 backedges: vec![backedge],
             },
-            ty: typed.places[place.0 as usize].ty.clone(),
-            integer_knowledge: None,
-        });
+            typed.places[place.0 as usize].ty.clone(),
+            None,
+        );
         close_loop_version_cycle(typed, backedge, incoming_version, version, *place);
         env.projected_places
             .insert((*parent, projection.clone()), *place);
-        env.projected_versions.insert(*place, version);
+        env.set_projected_version(*place, version);
     }
 }
 
@@ -300,7 +398,8 @@ fn close_loop_version_cycle(
             }
             crate::typed::PlaceVersionOrigin::Parameter
             | crate::typed::PlaceVersionOrigin::Declared
-            | crate::typed::PlaceVersionOrigin::Initializer(_) => {}
+            | crate::typed::PlaceVersionOrigin::Initializer(_)
+            | crate::typed::PlaceVersionOrigin::Mutation(_) => {}
             crate::typed::PlaceVersionOrigin::Projection { base } => pending.push(*base),
         }
     }
@@ -472,10 +571,17 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
             continue;
         };
         let receiver_type = receiver_types.get(def_id).and_then(|r| r.as_ref());
+        let mut method_tag_types = std::borrow::Cow::Borrowed(&tag_types);
+        if let Some(receiver) = receiver_type {
+            method_tag_types
+                .to_mut()
+                .insert(Intern::from_ref("Self"), receiver.clone());
+        }
+        let tag_types = method_tag_types;
         let empty_locals = HashSet::new();
         let locals: &HashSet<Intern<String>> = param_sets.get(def_id).unwrap_or(&empty_locals);
 
-        let mut env = LocalEnv::default();
+        let mut env = FlowState::default();
         if let Some(typed_bind) = typed.defs.get(def_id) {
             let params = typed_bind.params.clone();
             let groups = typed_bind.param_groups.clone();
@@ -505,15 +611,13 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
                 let target = group
                     .map(ReferenceTargetGroup::Param)
                     .unwrap_or(ReferenceTargetGroup::Local(place));
-                env.target_groups
-                    .insert(*name, ReferenceTargetSet::singleton(target));
-                let version = crate::typed::PlaceVersionId(typed.place_versions.len() as u32);
-                typed.place_versions.push(crate::typed::TypedPlaceVersion {
+                env.set_target_group(*name, Some(ReferenceTargetSet::singleton(target)));
+                let version = typed.add_place_version(
                     place,
-                    origin: crate::typed::PlaceVersionOrigin::Parameter,
-                    ty: ty.clone(),
-                    integer_knowledge: None,
-                });
+                    crate::typed::PlaceVersionOrigin::Parameter,
+                    ty.clone(),
+                    None,
+                );
                 env.place_versions.insert(*name, version);
             }
         }
@@ -539,6 +643,8 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
         }
         let mut force_expected_return_ty = bind.return_tag.is_some()
             || bind.return_type_name.is_some()
+            || bind.type_annotation.is_some()
+            || !bind.named_results.is_empty()
             || !bind.anonymous_result_alternatives.is_empty()
             || matches!(return_ty, Some(Ty::ResultFamily { .. }));
         if let Some(receiver_type) = receiver_type
@@ -580,9 +686,7 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
                     matches!(&typed_expr.value, ast::Expr::TagCall(call) if call.name.as_str() == "Self")
                 }
                 BindValue::Body { ret, .. } => {
-                    ret.value
-                        .as_ref()
-                        .is_some_and(|ret_expr| {
+                    ret.values.first().is_some_and(|ret_expr| {
                             matches!(&ret_expr.value, ast::Expr::TagCall(call) if call.name.as_str() == "Self")
                         })
                 }
@@ -605,12 +709,13 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
                     &typed.fn_return_types,
                     &typed.type_registry,
                 )),
-                BindValue::Body { ret, .. } => Some(
-                    ret.value
-                        .as_ref()
+                BindValue::Body { ret, .. } => Some(if !ret.values.is_empty() {
+                    let types = ret
+                        .values
+                        .iter()
                         .map(|typed_expr| {
                             resolve_expr_type(
-                                typed_expr.as_ref(),
+                                typed_expr,
                                 &tag_types,
                                 &variant_map,
                                 receiver_type,
@@ -620,12 +725,158 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
                                 &typed.type_registry,
                             )
                         })
-                        .unwrap_or(Ty::Unit),
-                ),
+                        .collect::<Vec<_>>();
+                    if bind.named_results.len() == types.len() && types.len() > 1 {
+                        Ty::ResultRow(
+                            bind.named_results
+                                .iter()
+                                .zip(types)
+                                .map(|(result, ty)| ast::ty::ResultElement {
+                                    name: result.name,
+                                    ty: Box::new(ty),
+                                })
+                                .collect(),
+                        )
+                    } else if let [ty] = types.as_slice() {
+                        ty.clone()
+                    } else {
+                        Ty::Opaque(Intern::from_ref("unnamed-multiple-results"))
+                    }
+                } else {
+                    ret.values
+                        .first()
+                        .map(|typed_expr| {
+                            resolve_expr_type(
+                                typed_expr,
+                                &tag_types,
+                                &variant_map,
+                                receiver_type,
+                                None,
+                                &env.types,
+                                &typed.fn_return_types,
+                                &typed.type_registry,
+                            )
+                        })
+                        .unwrap_or(Ty::Unit)
+                }),
                 _ => None,
             };
             if let Some(ty) = inferred {
                 return_ty = Some(ty);
+            }
+        }
+        if let BindValue::Body { ret, .. } = &bind.value
+            && ret.values.len() > 1
+            && bind.named_results.is_empty()
+            && let Some(typed_bind) = typed.defs.get_mut(def_id)
+        {
+            typed_bind.flaws.push(Diagnostic::new(
+                "type-unnamed-multiple-results",
+                "multiple return values require named result declarations",
+            ));
+        }
+        if let (Some(Ty::ResultRow(fields)), BindValue::Body { exprs, ret }) =
+            (return_ty.as_ref(), &bind.value)
+        {
+            let expected_fields = fields.clone();
+            let mut validate_values = |values: &[Typed<ast::Expr>]| {
+                if values.is_empty() {
+                    return;
+                }
+                if values.len() != expected_fields.len() {
+                    if let Some(typed_bind) = typed.defs.get_mut(def_id) {
+                        typed_bind.flaws.push(
+                            Diagnostic::new(
+                                "type-return-arity",
+                                format!(
+                                    "returned {} values, but the callable declares {} results",
+                                    values.len(),
+                                    expected_fields.len()
+                                ),
+                            )
+                            .at_span_id(values[0].span_id, &typed.span_table),
+                        );
+                    }
+                    return;
+                }
+                for (value, field) in values.iter().zip(&expected_fields) {
+                    let actual = resolve_expr_type(
+                        value,
+                        &tag_types,
+                        &variant_map,
+                        receiver_type,
+                        None,
+                        &env.types,
+                        &typed.fn_return_types,
+                        &typed.type_registry,
+                    );
+                    if !matches!(actual, Ty::UnresolvedLiteral(_) | Ty::ResultRow(_))
+                        && actual != *field.ty
+                        && let Some(typed_bind) = typed.defs.get_mut(def_id)
+                    {
+                        typed_bind.flaws.push(
+                            Diagnostic::new(
+                                "type-return-mismatch",
+                                "returned value does not match its declared result type",
+                            )
+                            .at_span_id(value.span_id, &typed.span_table),
+                        );
+                    }
+                }
+            };
+            for expr in exprs {
+                if let ast::Expr::If(if_expr) = &expr.value {
+                    validate_values(&if_expr.body);
+                    validate_values(&if_expr.ret.values);
+                }
+            }
+            if let [value] = ret.values.as_slice() {
+                let actual = resolve_expr_type(
+                    value,
+                    &tag_types,
+                    &variant_map,
+                    receiver_type,
+                    None,
+                    &env.types,
+                    &typed.fn_return_types,
+                    &typed.type_registry,
+                );
+                if matches!(actual, Ty::ResultRow(_))
+                    && actual != *return_ty.as_ref().unwrap()
+                    && let Some(typed_bind) = typed.defs.get_mut(def_id)
+                {
+                    typed_bind.flaws.push(
+                        Diagnostic::new(
+                            "type-return-mismatch",
+                            "forwarded result row does not match the declared result row",
+                        )
+                        .at_span_id(value.span_id, &typed.span_table),
+                    );
+                }
+            }
+            for (value, field) in ret.values.iter().zip(fields) {
+                let actual = resolve_expr_type(
+                    value,
+                    &tag_types,
+                    &variant_map,
+                    receiver_type,
+                    None,
+                    &env.types,
+                    &typed.fn_return_types,
+                    &typed.type_registry,
+                );
+                if !matches!(actual, Ty::UnresolvedLiteral(_) | Ty::ResultRow(_))
+                    && actual != *field.ty
+                    && let Some(typed_bind) = typed.defs.get_mut(def_id)
+                {
+                    typed_bind.flaws.push(
+                        Diagnostic::new(
+                            "type-return-mismatch",
+                            "returned value does not match its declared result type",
+                        )
+                        .at_span_id(value.span_id, &typed.span_table),
+                    );
+                }
             }
         }
         let return_ty = return_ty;
@@ -678,6 +929,11 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
                         );
                     }
                     typed.exprs.ty[id.as_usize()] = explicit.clone();
+                    retarget_literal_materialization(
+                        &mut typed.exprs.facts.const_facts.literal_materialization[id.as_usize()],
+                        &explicit,
+                        &typed.type_registry,
+                    );
                     let literal_values = typed
                         .type_registry
                         .resolved_definition_for_type(&explicit)
@@ -686,10 +942,15 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
                     if let Some(values) = literal_values {
                         annotate_literal_union_literal(typed, id, &explicit, &values);
                     } else if !matches!(
-                        typed.exprs.const_value[id.as_usize()],
-                        Some(ast::ConstValue::Int(_) | ast::ConstValue::ResultAlternative { .. })
+                        typed.exprs.facts.const_facts.const_value[id.as_usize()],
+                        Some(
+                            ast::ConstValue::Int(_)
+                                | ast::ConstValue::ResultAlternative { .. }
+                                | ast::ConstValue::Record { .. }
+                                | ast::ConstValue::Text(_),
+                        )
                     ) {
-                        typed.exprs.const_value[id.as_usize()] = None;
+                        typed.exprs.facts.const_facts.const_value[id.as_usize()] = None;
                     }
                 }
                 BindBody::Expr(id)
@@ -705,16 +966,29 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
                     };
                     lowered_exprs.push(lower_typed_expr(typed, expr, expr_scope, &mut env));
                 }
-                let ret_id = ret
-                    .value
-                    .as_ref()
-                    .map(|ret_expr| lower_typed_expr(typed, ret_expr, &scope, &mut env));
+                let ret_id = if !ret.values.is_empty() {
+                    let values = ret.values.clone();
+                    let span_id = ret.span_id;
+                    let ret_expr = if values.len() == 1
+                        && (!matches!(scope.expected_ty, Some(Ty::ResultRow(_)))
+                            || !matches!(values[0].value, Expr::FnCall(_)))
+                    {
+                        values.into_iter().next().expect("one return value")
+                    } else {
+                        Typed::infer(Expr::ResultValues(values), span_id)
+                    };
+                    Some(lower_typed_expr(typed, &ret_expr, &scope, &mut env))
+                } else {
+                    ret.values
+                        .first()
+                        .map(|ret_expr| lower_typed_expr(typed, ret_expr, &scope, &mut env))
+                };
                 BindBody::Body {
                     exprs: lowered_exprs,
                     ret: ret_id,
                 }
             }
-            BindValue::Extern | BindValue::Unassigned => BindBody::Extern,
+            BindValue::Unassigned => BindBody::Unlowered,
         };
         let return_expr_id = match &body {
             BindBody::Expr(expr)
@@ -722,22 +996,26 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
                 ret: Some(expr), ..
             } => Some(*expr),
             BindBody::Body { ret: None, .. } => None,
-            BindBody::Extern => None,
+            BindBody::Unlowered => None,
         };
         let inferred_return_type = if bind.return_tag.is_none()
             && bind.return_type_name.is_none()
+            && bind.type_annotation.is_none()
+            && bind.named_results.is_empty()
             && bind.anonymous_result_alternatives.is_empty()
         {
-            match &body {
-                BindBody::Expr(expr)
-                | BindBody::Body {
-                    ret: Some(expr), ..
-                } => typed.exprs.ty.get(expr.as_usize()).and_then(|expr_ty| {
-                    infer_fixed_array_return_type(typed, *expr, expr_ty)
-                        .or_else(|| Some(expr_ty.clone()))
-                }),
-                BindBody::Body { ret: None, .. } => Some(Ty::Unit),
-                BindBody::Extern => None,
+            {
+                match &body {
+                    BindBody::Expr(expr)
+                    | BindBody::Body {
+                        ret: Some(expr), ..
+                    } => typed.exprs.ty.get(expr.as_usize()).and_then(|expr_ty| {
+                        infer_fixed_array_return_type(typed, *expr, expr_ty)
+                            .or_else(|| Some(expr_ty.clone()))
+                    }),
+                    BindBody::Body { ret: None, .. } => Some(Ty::Unit),
+                    BindBody::Unlowered => None,
+                }
             }
         } else {
             None
@@ -772,28 +1050,22 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
             && let Some(stored) = typed.exprs.ty.get_mut(return_expr_id.as_usize())
             && stored != return_type
         {
-            if let (
-                Ty::Named {
-                    instance: actual, ..
-                },
-                Ty::Named {
-                    instance: expected, ..
-                },
-            ) = (&*stored, return_type)
-                && (actual.declaration != expected.declaration
-                    || (!named_instance_has_symbolic_argument(actual)
-                        && actual.arguments != expected.arguments))
-                && let Some(typed_bind) = typed.defs.get_mut(def_id)
-            {
+            if let Some(typed_bind) = typed.defs.get_mut(def_id) {
                 typed_bind.flaws.push(
                     Diagnostic::new(
                         "type-return-mismatch",
-                        "returned nominal type does not match the declared return type",
+                        "returned value does not match the declared return type",
                     )
                     .at_span_id(bind.name_span, &typed.span_table),
                 );
             }
             *stored = return_type.clone();
+            retarget_literal_materialization(
+                &mut typed.exprs.facts.const_facts.literal_materialization
+                    [return_expr_id.as_usize()],
+                return_type,
+                &typed.type_registry,
+            );
         }
         if force_expected_return_ty
             && let Some(explicit_return_type) = return_ty.as_ref()
@@ -805,6 +1077,55 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
             typed
                 .fn_return_types
                 .insert(*def_id, explicit_return_type.clone());
+            let supplied_count = match &bind.value {
+                BindValue::Expr(_) => return_expr_id
+                    .and_then(|id| match typed.exprs.ty_of(id) {
+                        Some(Ty::ResultRow(fields)) => Some(fields.len()),
+                        _ => None,
+                    })
+                    .unwrap_or(1),
+                BindValue::Body { ret, .. } if ret.values.len() == 1 => return_expr_id
+                    .and_then(|id| match typed.exprs.ty_of(id) {
+                        Some(Ty::ResultRow(fields)) => Some(fields.len()),
+                        _ => None,
+                    })
+                    .unwrap_or(1),
+                BindValue::Body { ret, .. } if !ret.values.is_empty() => ret.values.len(),
+                BindValue::Body { ret, .. } => usize::from(!ret.values.is_empty()),
+                BindValue::Unassigned => 0,
+            };
+            let expected_count = match explicit_return_type {
+                Ty::ResultRow(fields) => fields.len(),
+                Ty::Unit => 0,
+                _ => 1,
+            };
+            if !matches!(bind.value, BindValue::Unassigned)
+                && supplied_count != expected_count
+                && let Some(typed_bind) = typed.defs.get_mut(def_id)
+            {
+                typed_bind.flaws.push(
+                    Diagnostic::new(
+                        "type-return-arity",
+                        format!(
+                            "returned {} values, but the callable declares {} results",
+                            supplied_count, expected_count
+                        ),
+                    )
+                    .at_span_id(bind.name_span, &typed.span_table),
+                );
+            }
+            if let Some(return_expr_id) = return_expr_id
+                && typed.exprs.ty_of(return_expr_id) != Some(explicit_return_type)
+                && let Some(typed_bind) = typed.defs.get_mut(def_id)
+            {
+                typed_bind.flaws.push(
+                    Diagnostic::new(
+                        "type-return-mismatch",
+                        "returned value does not match the declared return type",
+                    )
+                    .at_span_id(bind.name_span, &typed.span_table),
+                );
+            }
             if let Some(typed_bind) = typed.defs.get_mut(def_id) {
                 typed_bind.return_type = explicit_return_type.clone();
             }
@@ -829,7 +1150,7 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
 
     // Lower top-level expressions.
     let empty_locals = HashSet::new();
-    let mut env = LocalEnv::default();
+    let mut env = FlowState::default();
     let scope = ExprLowerScope {
         tag_types: &tag_types,
         variant_map: &variant_map,
@@ -899,7 +1220,7 @@ fn result_family_exit_owners(
                 collect_result_family_exit_owners(typed, *exit, &mut owners);
             }
         }
-        BindBody::Extern => {}
+        BindBody::Unlowered => {}
     }
     owners
 }
@@ -959,8 +1280,10 @@ fn refresh_result_evidence_summaries(typed: &mut TypedFileAst, max_passes: usize
                 }
                 _ => result_evidence_for(&kind, &ty, typed),
             };
-            if evidence.is_some() && typed.exprs.result_evidence[index] != evidence {
-                typed.exprs.result_evidence[index] = evidence;
+            if evidence.is_some()
+                && typed.exprs.facts.semantic_facts.result_evidence[index] != evidence
+            {
+                typed.exprs.facts.semantic_facts.result_evidence[index] = evidence;
                 changed = true;
             }
         }
@@ -970,7 +1293,7 @@ fn refresh_result_evidence_summaries(typed: &mut TypedFileAst, max_passes: usize
                 | BindBody::Body {
                     ret: Some(expr), ..
                 } => typed.exprs.result_evidence_of(*expr).cloned().flatten(),
-                BindBody::Body { ret: None, .. } | BindBody::Extern => None,
+                BindBody::Body { ret: None, .. } | BindBody::Unlowered => None,
             };
             if returned.is_some() && bind.return_evidence != returned {
                 bind.return_evidence = returned;
@@ -1000,6 +1323,8 @@ fn infer_fixed_array_return_type(
     let arg_len_expr = args.get(1)?;
     let Some(ast::ConstValue::Int(length)) = typed
         .exprs
+        .facts
+        .const_facts
         .const_value
         .get(arg_len_expr.as_usize())?
         .as_ref()
@@ -1012,13 +1337,14 @@ fn infer_fixed_array_return_type(
         return None;
     };
     let declaration = typed.type_registry.declaration_for_instance(instance)?;
-    let former = declaration.fixed_array.as_ref()?;
+    let former = declaration.sequence_literal.as_ref()?;
+    let length_parameter = former.fixed_array_length_parameter()?;
 
     let mut instance = instance.clone();
     let mut saw_length = false;
     let mut saw_element = false;
     for (parameter, argument) in &mut instance.arguments {
-        if *parameter == former.length_parameter {
+        if *parameter == length_parameter {
             *argument = ast::TyArg::Const(ast::NormalExpr::from(length as i128));
             saw_length = true;
         } else if *parameter == former.element_parameter {
@@ -1040,8 +1366,27 @@ pub(crate) fn lower_typed_expr(
     typed: &mut TypedFileAst,
     expr: &Typed<Expr>,
     scope: &ExprLowerScope<'_>,
-    env: &mut LocalEnv,
+    env: &mut FlowState,
 ) -> ExprId {
+    if let Expr::FnCall(call) = &expr.value
+        && call.args.is_none()
+        && call.path.segments.is_empty()
+        && (scope.expected_ty.is_none() || scope.expected_ty != env.types.get(&call.path.root))
+        && let Some(version) = env.place_versions.get(&call.path.root).copied()
+        && let Some((variant, ty)) = env.union_members.remove(&version)
+    {
+        let source = lower_typed_expr(typed, expr, &scope.child(), env);
+        env.union_members.insert(version, (variant, ty.clone()));
+        return append_union_expr(
+            typed,
+            source,
+            TypedExprKind::UnionPayload {
+                expr: source,
+                variant,
+            },
+            ty,
+        );
+    }
     let shadowed_place = match &expr.value {
         Expr::Bind(bind) if !bind.is_rebind() && !scope.temporary_shadowing => {
             env.places.get(&bind.name).copied()
@@ -1058,6 +1403,12 @@ pub(crate) fn lower_typed_expr(
         &typed.fn_return_types,
         &typed.type_registry,
     );
+    if matches!(resolved_ty, Ty::UnresolvedLiteral(_))
+        && let Some(expected) = scope.expected_ty
+        && expected.is_int()
+    {
+        resolved_ty = expected.clone();
+    }
     // Infer const_value from literals and known value refs at parse time (before const-folding runs).
     let mut const_val = expr.const_value.clone().or_else(|| match &expr.value {
         Expr::FnCall(call) if call.args.is_none() => {
@@ -1117,7 +1468,7 @@ pub(crate) fn lower_typed_expr(
             ast::Literal::Number(n) => ast::ConstValue::Int((*n as u128).into()),
             ast::Literal::Int(n) => ast::ConstValue::Int(*n),
             ast::Literal::Float(HashFloat(f)) => ast::ConstValue::Float(HashFloat(*f)),
-            ast::Literal::String(s) => ast::ConstValue::String(s.clone()),
+            ast::Literal::String(s) => ast::ConstValue::Text(s.clone()),
         }),
         Expr::Bind(bind) => match &bind.value {
             // For `x := 1`, look at the inner literal directly.
@@ -1126,7 +1477,7 @@ pub(crate) fn lower_typed_expr(
                     ast::Literal::Number(n) => ast::ConstValue::Int((*n as u128).into()),
                     ast::Literal::Int(n) => ast::ConstValue::Int(*n),
                     ast::Literal::Float(HashFloat(f)) => ast::ConstValue::Float(HashFloat(*f)),
-                    ast::Literal::String(s) => ast::ConstValue::String(s.clone()),
+                    ast::Literal::String(s) => ast::ConstValue::Text(s.clone()),
                 }),
                 _ => None,
             },
@@ -1186,18 +1537,125 @@ pub(crate) fn lower_typed_expr(
             .push(TypedExprKind::Lit(Literal::Number(0)));
         typed.exprs.ty.push(Ty::Unit);
         typed.exprs.span.push(expr.span_id);
-        typed.exprs.const_value.push(None);
-        typed.exprs.integer_knowledge.push(None);
-        typed.exprs.result_evidence.push(None);
-        typed.exprs.projected_result_evidence.push(HashMap::new());
-        typed.exprs.availability.push(Availability::Unknown);
-        typed.exprs.target_group.push(None);
-        typed.exprs.place.push(None);
-        typed.exprs.place_version.push(None);
-        typed.exprs.flaws.push(Vec::new());
+        typed.exprs.facts.const_facts.const_value.push(None);
+        typed.exprs.facts.const_facts.const_object.push(None);
+        typed
+            .exprs
+            .facts
+            .semantic_facts
+            .sequence_provenance
+            .push(None);
+        typed.exprs.facts.const_facts.sequence_literal.push(None);
+        typed
+            .exprs
+            .facts
+            .const_facts
+            .literal_materialization
+            .push(None);
+        typed
+            .exprs
+            .facts
+            .semantic_facts
+            .integer_knowledge
+            .push(None);
+        typed.exprs.facts.semantic_facts.result_evidence.push(None);
+        typed
+            .exprs
+            .facts
+            .semantic_facts
+            .projected_result_evidence
+            .push(HashMap::new());
+        typed
+            .exprs
+            .facts
+            .semantic_facts
+            .availability
+            .push(Availability::Unknown);
+        typed
+            .exprs
+            .push_ownership_facts(None, Vec::new(), None, None);
+        typed.exprs.facts.semantic_facts.flaws.push(Vec::new());
         expr_id
     });
-    let kind = lower_expr_kind(typed, expr, scope, env, reserved_expr_id);
+    if matches!(expr.value, Expr::Loop(_)) {
+        env.integer_domains.clear();
+        env.union_members.clear();
+    }
+    let mut kind = lower_expr_kind(typed, expr, scope, env, reserved_expr_id);
+    if let TypedExprKind::TargetQuery {
+        kind: ast::TargetQueryKind::Size,
+        operand,
+    } = &kind
+        && let Ok(crate::representation::Repr::Array { element, length }) =
+            crate::representation::Repr::derive(operand, Some(&typed.type_registry))
+        && matches!(
+            element.as_ref(),
+            crate::representation::Repr::Bits { width: 8 }
+        )
+    {
+        let value = i256::I256::from(length);
+        resolved_ty = Ty::AnonymousInteger {
+            validity: ast::integer::IntegerValidity::new(
+                ast::integer::IntegerDomain::bounded(value, value).unwrap(),
+            ),
+        };
+        const_val = Some(ConstValue::Int(value));
+        kind = TypedExprKind::Lit(Literal::Int(value));
+    }
+    if matches!(
+        &kind,
+        TypedExprKind::Reassign { .. }
+            | TypedExprKind::RecordSet { .. }
+            | TypedExprKind::AggregateSet { .. }
+            | TypedExprKind::BufSet { .. }
+    ) {
+        env.integer_domains.clear();
+        env.union_members.clear();
+        if matches!(&kind, TypedExprKind::Reassign { .. }) {
+            env.projected_versions.clear();
+        }
+    }
+    if let TypedExprKind::FnCall { target, .. } = &kind
+        && !env.places.contains_key(&target.0)
+    {
+        let conventions = typed
+            .defs
+            .get(target)
+            .map(|bind| &bind.param_conventions)
+            .or_else(|| {
+                scope
+                    .callable_signatures
+                    .get(target)
+                    .map(|signature| &signature.param_conventions)
+            });
+        if conventions.is_none_or(|conventions| conventions.contains(&ast::ParamConvention::Mutate))
+        {
+            let call = reserved_expr_id.unwrap_or(ExprId(typed.exprs.kind.len() as u32));
+            env.invalidate_value_evidence(typed, call);
+        }
+    }
+
+    // A named result projection is parsed as a record-style member access, then
+    // lowered to AggregateGet once the callable result label resolves. Its
+    // source-level type resolver cannot recover that label from structural
+    // Recover the selected aggregate field type from the lowered base.
+    if let TypedExprKind::AggregateGet { base, index } = kind
+        && let Some(base_ty) = typed.exprs.ty_of(base)
+    {
+        match typed.type_registry.resolved_definition_for_type(base_ty) {
+            Ty::Record { fields, .. } => {
+                if let Some((_, field_ty)) = fields.get(index) {
+                    resolved_ty = (**field_ty).clone();
+                }
+            }
+            Ty::ResultRow(fields) => {
+                if let Some(field) = fields.get(index) {
+                    resolved_ty = (*field.ty).clone();
+                }
+            }
+            _ => {}
+        }
+    }
 
     if let TypedExprKind::IntrinsicCall { op, args } = &kind
         && matches!(
@@ -1266,7 +1724,7 @@ pub(crate) fn lower_typed_expr(
                 TypedWhenArm::Cond { body, .. } | TypedWhenArm::Is { body, .. } => *body,
                 TypedWhenArm::Else(body, _) => *body,
             };
-            typed.exprs.const_value[body_id.as_usize()]
+            typed.exprs.facts.const_facts.const_value[body_id.as_usize()]
                 .clone()
                 .or(const_val)
         } else {
@@ -1281,7 +1739,7 @@ pub(crate) fn lower_typed_expr(
     {
         let values = args
             .iter()
-            .map(|argument| typed.exprs.const_value[argument.as_usize()].clone())
+            .map(|argument| typed.exprs.facts.const_facts.const_value[argument.as_usize()].clone())
             .collect::<Option<Vec<_>>>();
         let width = args
             .iter()
@@ -1342,6 +1800,104 @@ pub(crate) fn lower_typed_expr(
     }
 
     let mut flaws: Vec<Diagnostic> = Vec::new();
+    if let TypedExprKind::TagCall {
+        field_names,
+        args: Some(args),
+        ..
+    } = &kind
+    {
+        match super::lower_tag::infer_record_arguments(&resolved_ty, field_names, args, typed) {
+            Ok(Some(inferred)) => resolved_ty = inferred,
+            Ok(None) => {}
+            Err(message) => flaws.push(Diagnostic::new("type-record-type-arguments", message)),
+        }
+    }
+
+    if matches!(expr.value, Expr::FormatString(_)) {
+        flaws.push(
+            Diagnostic::new(
+                "type-template-strings-not-supported",
+                "template strings are not supported yet",
+            )
+            .with_help("use ordinary text literals and explicit library calls"),
+        );
+    }
+    if let (
+        Expr::SequenceLiteral(ast::SequenceLiteral::Elements(_)),
+        TypedExprKind::ArrayLit(items),
+    ) = (&expr.value, &kind)
+    {
+        if let Some(first) = items
+            .first()
+            .and_then(|id| typed.exprs.ty.get(id.as_usize()))
+        {
+            if items.iter().skip(1).any(|id| {
+                typed
+                    .exprs
+                    .ty
+                    .get(id.as_usize())
+                    .is_some_and(|ty| ty != first)
+            }) {
+                flaws.push(
+                    Diagnostic::new(
+                        "type-sequence-elements-must-unify",
+                        "sequence literal elements must have one common type",
+                    )
+                    .at_span_id(expr.span_id, &typed.span_table),
+                );
+            }
+        }
+    }
+    if let Expr::SequenceLiteral(ast::SequenceLiteral::Elements(items)) = &expr.value {
+        let numeric = |item: &Typed<Expr>| {
+            matches!(item.value, Expr::Lit(Literal::Int(_) | Literal::Number(_)))
+        };
+        if items.first().is_some_and(numeric) && items.iter().skip(1).any(|item| !numeric(item)) {
+            flaws.push(
+                Diagnostic::new(
+                    "type-sequence-elements-must-unify",
+                    "sequence literal elements must have one common type",
+                )
+                .at_span_id(expr.span_id, &typed.span_table),
+            );
+        }
+    }
+    if let Expr::SequenceLiteral(ast::SequenceLiteral::Repeat { count, .. }) = &expr.value
+        && scope.expected_ty.is_none()
+        && !matches!(count.value, Expr::Lit(Literal::Int(_) | Literal::Number(_)))
+    {
+        flaws.push(
+            Diagnostic::new(
+                "type-sequence-repeat-requires-context",
+                "a runtime-count repeat requires an expected dynamic collection type",
+            )
+            .at_span_id(expr.span_id, &typed.span_table),
+        );
+    }
+    if matches!(&expr.value, Expr::SequenceLiteral(ast::SequenceLiteral::Elements(items)) if items.is_empty())
+        && scope.expected_ty.is_none()
+    {
+        flaws.push(
+            Diagnostic::new(
+                "type-sequence-literal-requires-context",
+                "empty sequence literal requires an expected aggregate type",
+            )
+            .at_span_id(expr.span_id, &typed.span_table),
+        );
+    }
+    if matches!(expr.value, Expr::Lit(ast::Literal::String(_)))
+        && let Some(expected) = scope.expected_ty
+        && !matches!(expected, Ty::Opaque(_))
+        && expected != &resolved_ty
+    {
+        flaws.push(
+            Diagnostic::new(
+                "type-text-literal-mismatch",
+                "a text literal is a byte array; construct the desired value explicitly",
+            )
+            .at_span_id(expr.span_id, &typed.span_table),
+        );
+    }
     if let Some(place) = shadowed_place
         && let Some(old_place) = typed.places.get(place.0 as usize)
         && !old_place.ty.is_structurally_discardable()
@@ -1370,7 +1926,7 @@ pub(crate) fn lower_typed_expr(
             .at_span_id(expr.span_id, &typed.span_table),
         );
     }
-    if matches!(kind, TypedExprKind::TupleAlloc { .. })
+    if matches!(kind, TypedExprKind::FixedArrayAlloc { .. })
         && matches!(resolved_ty, Ty::Opaque(name) if name.as_str() == "unresolved-array-construction")
     {
         flaws.push(
@@ -1381,7 +1937,7 @@ pub(crate) fn lower_typed_expr(
             .at_span_id(expr.span_id, &typed.span_table),
         );
     }
-    if let TypedExprKind::TupleAlloc { size, .. } = &kind
+    if let TypedExprKind::FixedArrayAlloc { size, .. } = &kind
         && let Ok(crate::representation::Repr::Array { length, .. }) =
             crate::representation::Repr::derive(&resolved_ty, Some(&typed.type_registry))
     {
@@ -1398,11 +1954,24 @@ pub(crate) fn lower_typed_expr(
             );
         }
     }
+    if let TypedExprKind::ArrayLit(items) = &kind
+        && let Ok(crate::representation::Repr::Array { length, .. }) =
+            crate::representation::Repr::derive(&resolved_ty, Some(&typed.type_registry))
+        && length != items.len() as u64
+    {
+        flaws.push(
+            Diagnostic::new(
+                "type-fixed-array-length-mismatch",
+                "fixed-array literal length does not match the selected array type",
+            )
+            .at_span_id(expr.span_id, &typed.span_table),
+        );
+    }
 
     let expr_id = reserved_expr_id.unwrap_or(ExprId(typed.exprs.kind.len() as u32));
 
     if let TypedExprKind::InvalidOperator {
-        role,
+        op,
         lhs,
         rhs,
         error,
@@ -1420,17 +1989,17 @@ pub(crate) fn lower_typed_expr(
         let rhs_is_anonymous_int = rhs_ty.is_int() && !rhs_is_nominal;
         let one_nominal = lhs_is_nominal || rhs_is_nominal;
         let is_comparison = matches!(
-            role,
-            ast::prelude::OperatorRole::Less
-                | ast::prelude::OperatorRole::LessOrEqual
-                | ast::prelude::OperatorRole::Greater
-                | ast::prelude::OperatorRole::GreaterOrEqual
-                | ast::prelude::OperatorRole::Equal
+            op,
+            ast::BinOp::Less
+                | ast::BinOp::LessOrEqual
+                | ast::BinOp::Greater
+                | ast::BinOp::GreaterOrEqual
+                | ast::BinOp::Equal
         );
         let mixed_anonymous_nominal_comparison = is_comparison
             && ((lhs_is_nominal && rhs_is_anonymous_int)
                 || (rhs_is_nominal && lhs_is_anonymous_int));
-        let incompatible_result_families = matches!(role, ast::OperatorRole::Equal)
+        let incompatible_result_families = matches!(op, ast::BinOp::Equal)
             && matches!(lhs_ty, Ty::ResultFamily { .. })
             && matches!(rhs_ty, Ty::ResultFamily { .. })
             && lhs_ty != rhs_ty;
@@ -1457,13 +2026,17 @@ pub(crate) fn lower_typed_expr(
                         (
                             "type-nominal-operator-unavailable",
                             format!(
-                                "nominal operator {role:?} is not provided for `{lhs_ty:?}` and `{rhs_ty:?}`"
+                                "nominal operator `{}` is not provided for `{lhs_ty:?}` and `{rhs_ty:?}`",
+                                op.symbol()
                             ),
                         )
                     } else {
                         (
                             "type-no-visible-operator-contract",
-                            format!("no visible operator contract is registered for {role:?}"),
+                            format!(
+                                "no visible operator contract is registered for `{}`",
+                                op.symbol()
+                            ),
                         )
                     }
                 }
@@ -1472,27 +2045,32 @@ pub(crate) fn lower_typed_expr(
                         (
                             "type-nominal-operator-unavailable",
                             format!(
-                                "nominal operator {role:?} is not provided for `{lhs_ty:?}` and `{rhs_ty:?}`",
+                                "nominal operator `{}` is not provided for `{lhs_ty:?}` and `{rhs_ty:?}`",
+                                op.symbol(),
                             ),
                         )
                     } else {
                         (
                             "type-operator-not-provided",
                             format!(
-                                "operator {role:?} is not provided for `{lhs_ty:?}` and `{rhs_ty:?}`"
+                                "operator `{}` is not provided for `{lhs_ty:?}` and `{rhs_ty:?}`",
+                                op.symbol()
                             ),
                         )
                     }
                 }
                 crate::operator::OperatorResolutionError::Ambiguous => (
                     "type-ambiguous-operator",
-                    format!("multiple visible {role:?} implementations apply to these operands"),
+                    format!(
+                        "multiple visible `{}` implementations apply to these operands",
+                        op.symbol()
+                    ),
                 ),
             }
         };
         flaws.push(
             Diagnostic::new(code, message)
-                .with_arg("role", format!("{role:?}"))
+                .with_arg("operator", op.symbol().to_string())
                 .with_arg("left_type", format!("{lhs_ty:?}"))
                 .with_arg("right_type", format!("{rhs_ty:?}")),
         );
@@ -1516,8 +2094,8 @@ pub(crate) fn lower_typed_expr(
             && anonymous_intrinsic_operand_call
             && args.len() == 2
             && let (Some(lhs), Some(rhs)) = (
-                typed.exprs.const_value[args[0].as_usize()].as_ref(),
-                typed.exprs.const_value[args[1].as_usize()].as_ref(),
+                typed.exprs.facts.const_facts.const_value[args[0].as_usize()].as_ref(),
+                typed.exprs.facts.const_facts.const_value[args[1].as_usize()].as_ref(),
             )
         {
             let binary = match op {
@@ -1537,7 +2115,7 @@ pub(crate) fn lower_typed_expr(
             } else {
                 let values: Option<Vec<_>> = args
                     .iter()
-                    .map(|arg| typed.exprs.const_value[arg.as_usize()].clone())
+                    .map(|arg| typed.exprs.facts.const_facts.const_value[arg.as_usize()].clone())
                     .collect();
                 let source_width = operand_types
                     .first()
@@ -1557,8 +2135,8 @@ pub(crate) fn lower_typed_expr(
     if let TypedExprKind::Binary { op, lhs, rhs } = &kind
         && *op == BinOp::Equal
         && let (Some(lhs), Some(rhs)) = (
-            typed.exprs.const_value[lhs.as_usize()].as_ref(),
-            typed.exprs.const_value[rhs.as_usize()].as_ref(),
+            typed.exprs.facts.const_facts.const_value[lhs.as_usize()].as_ref(),
+            typed.exprs.facts.const_facts.const_value[rhs.as_usize()].as_ref(),
         )
     {
         const_val = lhs.eval_binop(op, rhs);
@@ -1626,6 +2204,20 @@ pub(crate) fn lower_typed_expr(
     // If the expression has a substituted type (from const-generic param resolution),
     // use it instead of the inferred type.
     let mut final_ty = match &kind {
+        TypedExprKind::Ref(inner) if matches!(expr.value, Expr::Ref { .. }) => {
+            let Expr::Ref { mutable, .. } = &expr.value else {
+                unreachable!()
+            };
+            Ty::Ref {
+                inner: Box::new(typed.exprs.ty[inner.as_usize()].clone()),
+                mutable: *mutable,
+            }
+        }
+        TypedExprKind::ResultRow(_) => scope
+            .expected_ty
+            .filter(|ty| matches!(ty, Ty::ResultRow(_)))
+            .cloned()
+            .unwrap_or_else(|| resolved_ty.clone()),
         TypedExprKind::TagCall { .. } if contextual_result_ty.is_some() => {
             contextual_result_ty.cloned().unwrap()
         }
@@ -1687,15 +2279,15 @@ pub(crate) fn lower_typed_expr(
                         .at_span_id(expr.span_id, &typed.span_table),
                 ),
             }
-        } else if scope.allow_literal_materialization {
-            if scope.expected_ty.is_none_or(|ty| {
+        } else if scope.allow_literal_materialization
+            && scope.expected_ty.is_none_or(|ty| {
                 matches!(ty, Ty::UnresolvedLiteral(_))
                     || is_generic_opaque_ty(ty, &typed.type_registry)
-            }) {
-                let width = integer_width_for_exact_value(*value);
-                let signed = *value < i256::I256::from(0);
-                final_ty = Ty::anonymous_integer_for_width(width, signed);
-            }
+            })
+        {
+            let width = integer_width_for_exact_value(*value);
+            let signed = *value < i256::I256::from(0);
+            final_ty = Ty::anonymous_integer_for_width(width, signed);
         }
     }
     if matches!(
@@ -1712,11 +2304,66 @@ pub(crate) fn lower_typed_expr(
             *value < i256::I256::from(0),
         );
     }
+    let injection = scope.expected_ty.and_then(|expected| {
+        let Ty::Union { name, variants, .. } =
+            typed.type_registry.resolved_definition_for_type(expected)
+        else {
+            return None;
+        };
+        let mut candidates = variants.iter().enumerate().filter(|(_, variant)| {
+            variant.kind == ast::ty::UnionVariantKind::Type
+                && variant
+                    .fields
+                    .first()
+                    .is_some_and(|(_, ty)| **ty == final_ty)
+        });
+        let (index, variant) = candidates.next()?;
+        candidates
+            .next()
+            .is_none()
+            .then_some((name, index, variant.name, expected.clone()))
+    });
+    if let Some(expected) = scope.expected_ty
+        && final_ty != *expected
+        && injection.is_none()
+        && (matches!(
+            typed.type_registry.resolved_definition_for_type(&final_ty),
+            Ty::Union { .. }
+        ) || matches!(
+            typed.type_registry.resolved_definition_for_type(expected),
+            Ty::Union { .. }
+        ))
+    {
+        flaws.push(
+            Diagnostic::new(
+                "type-incompatible-union-value",
+                "value does not match the expected union or its proven member",
+            )
+            .at_span_id(expr.span_id, &typed.span_table),
+        );
+    }
     let target_group = target_group_for_kind(&kind, typed, scope, env, &mut flaws);
+    let result_target_groups = result_target_groups_for_kind(&kind, typed, scope, env);
     let place = place_for_kind(&kind, &final_ty, typed, env);
     let place_version = place_version_for_kind(&kind, place, typed, env);
-    let integer_knowledge =
-        integer_knowledge_for(&final_ty, const_val.as_ref(), &typed.type_registry);
+    if let Some(version) = place_version
+        && let Some(value) = match &kind {
+            TypedExprKind::Bind { body, .. } => Some(*body),
+            TypedExprKind::Reassign { value, .. } => Some(*value),
+            _ => None,
+        }
+        && let Some(domain) = typed
+            .exprs
+            .integer_knowledge_of(value)
+            .and_then(Option::as_ref)
+            .and_then(super::place::knowledge_domain)
+    {
+        env.integer_domains.insert(version, domain);
+    }
+    let integer_knowledge = place_version
+        .and_then(|version| env.integer_domains.get(&version).cloned())
+        .map(ast::integer::IntegerKnowledge::Domain)
+        .or_else(|| integer_knowledge_for(&final_ty, const_val.as_ref(), &typed.type_registry));
     let result_evidence = match &kind {
         TypedExprKind::Bind { body, .. } => {
             typed.exprs.result_evidence_of(*body).cloned().flatten()
@@ -1724,43 +2371,102 @@ pub(crate) fn lower_typed_expr(
         TypedExprKind::FnCall {
             target, args: None, ..
         } if env.locals.contains(&target.0) => env.result_evidence.get(&target.0).cloned(),
-        TypedExprKind::TupleGet { base, index } => typed
+        TypedExprKind::AggregateGet { base, index } => typed
             .exprs
             .projected_result_evidence_of(*base)
             .and_then(|evidence| evidence.get(&vec![*index]).cloned()),
         _ => result_evidence_for(&kind, &final_ty, typed),
     };
     let projected_result_evidence = projected_result_evidence_for(&kind, typed, env);
+    let sequence_literal = typed_sequence_literal(&expr.value, &kind);
+    let literal_materialization =
+        sequence_literal_materialization_plan(&expr.value, &kind, &final_ty, &typed.type_registry);
+    let sequence_provenance = match &kind {
+        TypedExprKind::Bind { body, .. } => typed
+            .exprs
+            .facts
+            .semantic_facts
+            .sequence_provenance
+            .get(body.as_usize())
+            .copied()
+            .flatten(),
+        _ => None,
+    };
     if reserved_expr_id.is_some() {
         let index = expr_id.as_usize();
         typed.exprs.kind[index] = kind;
         typed.exprs.ty[index] = final_ty;
         typed.exprs.span[index] = expr.span_id;
-        typed.exprs.const_value[index] = const_val;
-        typed.exprs.integer_knowledge[index] = integer_knowledge;
-        typed.exprs.result_evidence[index] = result_evidence;
-        typed.exprs.projected_result_evidence[index] = projected_result_evidence;
-        typed.exprs.availability[index] = Availability::Unknown;
-        typed.exprs.target_group[index] = target_group;
-        typed.exprs.place[index] = place;
-        typed.exprs.place_version[index] = place_version;
-        typed.exprs.flaws[index] = flaws;
+        typed.exprs.facts.const_facts.const_value[index] = const_val;
+        typed.exprs.facts.const_facts.const_object[index] = None;
+        typed.exprs.facts.semantic_facts.sequence_provenance[index] = sequence_provenance;
+        typed.exprs.facts.const_facts.sequence_literal[index] = sequence_literal;
+        typed.exprs.facts.const_facts.literal_materialization[index] = literal_materialization;
+        typed.exprs.facts.semantic_facts.integer_knowledge[index] = integer_knowledge;
+        typed.exprs.facts.semantic_facts.result_evidence[index] = result_evidence;
+        typed.exprs.facts.semantic_facts.projected_result_evidence[index] =
+            projected_result_evidence;
+        typed.exprs.facts.semantic_facts.availability[index] = Availability::Unknown;
+        typed.exprs.set_ownership_facts(
+            index,
+            target_group,
+            result_target_groups,
+            place,
+            place_version,
+        );
+        typed.exprs.facts.semantic_facts.flaws[index] = flaws;
     } else {
         typed.exprs.kind.push(kind);
         typed.exprs.ty.push(final_ty);
         typed.exprs.span.push(expr.span_id);
-        typed.exprs.const_value.push(const_val);
-        typed.exprs.integer_knowledge.push(integer_knowledge);
-        typed.exprs.result_evidence.push(result_evidence);
+        typed.exprs.facts.const_facts.const_value.push(const_val);
+        typed.exprs.facts.const_facts.const_object.push(None);
         typed
             .exprs
+            .facts
+            .semantic_facts
+            .sequence_provenance
+            .push(sequence_provenance);
+        typed
+            .exprs
+            .facts
+            .const_facts
+            .sequence_literal
+            .push(sequence_literal);
+        typed
+            .exprs
+            .facts
+            .const_facts
+            .literal_materialization
+            .push(literal_materialization);
+        typed
+            .exprs
+            .facts
+            .semantic_facts
+            .integer_knowledge
+            .push(integer_knowledge);
+        typed
+            .exprs
+            .facts
+            .semantic_facts
+            .result_evidence
+            .push(result_evidence);
+        typed
+            .exprs
+            .facts
+            .semantic_facts
             .projected_result_evidence
             .push(projected_result_evidence);
-        typed.exprs.availability.push(Availability::Unknown);
-        typed.exprs.target_group.push(target_group);
-        typed.exprs.place.push(place);
-        typed.exprs.place_version.push(place_version);
-        typed.exprs.flaws.push(flaws);
+        typed
+            .exprs
+            .facts
+            .semantic_facts
+            .availability
+            .push(Availability::Unknown);
+        typed
+            .exprs
+            .push_ownership_facts(target_group, result_target_groups, place, place_version);
+        typed.exprs.facts.semantic_facts.flaws.push(flaws);
     }
 
     if expr.span_id.is_valid() {
@@ -1771,41 +2477,594 @@ pub(crate) fn lower_typed_expr(
             .or_insert(expr_id);
     }
 
+    if let Some((union, discriminant, name, ty)) = injection {
+        return append_union_expr(
+            typed,
+            expr_id,
+            TypedExprKind::TagCall {
+                variant_id: crate::typed::VariantId {
+                    union: TagId(union),
+                    name,
+                },
+                discriminant,
+                args: Some(vec![expr_id]),
+                field_names: vec![Intern::from_ref("value")],
+            },
+            ty,
+        );
+    }
     expr_id
+}
+
+fn append_union_expr(
+    typed: &mut TypedFileAst,
+    source: ExprId,
+    kind: TypedExprKind,
+    ty: Ty,
+) -> ExprId {
+    let projection = matches!(kind, TypedExprKind::UnionPayload { .. });
+    let id = ExprId(typed.exprs.kind.len() as u32);
+    typed.exprs.push(crate::typed::TypedExpr {
+        kind,
+        ty: ty.clone(),
+        span: typed.exprs.span[source.as_usize()],
+        facts: crate::typed::ExprFacts {
+            const_facts: crate::typed::ConstFacts {
+                const_value: None,
+                const_object: None,
+                sequence_literal: None,
+                literal_materialization: None,
+            },
+            semantic_facts: crate::typed::SemanticFacts {
+                sequence_provenance: None,
+                integer_knowledge: integer_knowledge_for(&ty, None, &typed.type_registry),
+                result_evidence: None,
+                projected_result_evidence: Default::default(),
+                availability: Availability::Unknown,
+                flaws: Vec::new(),
+            },
+            ownership_facts: crate::typed::OwnershipFacts {
+                target_group: typed.exprs.target_group_of(source).cloned().flatten(),
+                result_target_groups: Vec::new(),
+                place: projection
+                    .then(|| typed.exprs.place_of(source).flatten())
+                    .flatten(),
+                place_version: projection
+                    .then(|| typed.exprs.place_version_of(source).flatten())
+                    .flatten(),
+            },
+        },
+    });
+    id
+}
+
+fn typed_sequence_literal(
+    source: &Expr,
+    kind: &TypedExprKind,
+) -> Option<crate::typed::TypedSequenceLiteral> {
+    match (source, kind) {
+        (
+            Expr::SequenceLiteral(ast::SequenceLiteral::Elements(_)),
+            TypedExprKind::ArrayLit(items),
+        ) => Some(crate::typed::TypedSequenceLiteral::Elements(items.clone())),
+        (
+            Expr::SequenceLiteral(ast::SequenceLiteral::Repeat { .. }),
+            TypedExprKind::FixedArrayAlloc { init, size },
+        ) => Some(crate::typed::TypedSequenceLiteral::Repeat {
+            seed: *init,
+            count: size.clone(),
+        }),
+        _ => None,
+    }
+}
+
+fn sequence_literal_materialization_plan(
+    source: &Expr,
+    kind: &TypedExprKind,
+    ty: &Ty,
+    registry: &crate::TypeRegistry,
+) -> Option<crate::typed::LiteralMaterializationPlan> {
+    if !matches!(source, Expr::SequenceLiteral(_)) {
+        return None;
+    }
+    let length = match kind {
+        TypedExprKind::ArrayLit(items) => ast::NormalExpr::from(items.len() as i128),
+        TypedExprKind::FixedArrayAlloc { size, .. } => size.clone(),
+        _ => return None,
+    };
+    sequence_literal_materialization_plan_for_length(length, ty, registry)
+}
+
+fn sequence_literal_materialization_plan_for_length(
+    length: ast::NormalExpr,
+    ty: &Ty,
+    registry: &crate::TypeRegistry,
+) -> Option<crate::typed::LiteralMaterializationPlan> {
+    match Ty::without_reference_wrappers(ty) {
+        Ty::Array { elem, .. } => Some(crate::typed::LiteralMaterializationPlan::FixedArray {
+            declaration: None,
+            element: elem.as_ref().clone(),
+            length,
+        }),
+        Ty::Named { instance, .. } => {
+            let declaration = registry.declaration_for_instance(instance)?;
+            let former = declaration.sequence_literal.as_ref()?;
+            let element = instance
+                .arguments
+                .iter()
+                .find_map(|(parameter, argument)| {
+                    (*parameter == former.element_parameter).then_some(argument)
+                })?;
+            let ast::TyArg::Type(element) = element else {
+                return None;
+            };
+            match former.materialization {
+                crate::SequenceLiteralMaterialization::FixedArray { .. } => {
+                    Some(crate::typed::LiteralMaterializationPlan::FixedArray {
+                        declaration: Some(instance.declaration),
+                        element: element.as_ref().clone(),
+                        length,
+                    })
+                }
+                crate::SequenceLiteralMaterialization::OwnedBuilder {
+                    empty_member,
+                    push_member,
+                } => Some(crate::typed::LiteralMaterializationPlan::OwnedSequence {
+                    declaration: instance.declaration,
+                    element: element.as_ref().clone(),
+                    empty: crate::DefId(Intern::new(format!(
+                        "{}.{}",
+                        declaration.display_name.as_str(),
+                        empty_member.as_str()
+                    ))),
+                    push: crate::DefId(Intern::new(format!(
+                        "{}.{}",
+                        declaration.display_name.as_str(),
+                        push_member.as_str()
+                    ))),
+                }),
+                crate::SequenceLiteralMaterialization::BorrowStatic => {
+                    Some(crate::typed::LiteralMaterializationPlan::BorrowedSequence {
+                        declaration: instance.declaration,
+                        element: element.as_ref().clone(),
+                        backing: None,
+                    })
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn contextualize_local_literal(
+    typed: &mut TypedFileAst,
+    expression: ExprId,
+    expected: &Ty,
+    env: &mut FlowState,
+) {
+    let Some(version) = typed.exprs.place_version_of(expression).flatten() else {
+        return;
+    };
+    let Some(crate::typed::TypedPlaceVersion {
+        place,
+        origin: crate::typed::PlaceVersionOrigin::Initializer(initializer),
+        ..
+    }) = typed.place_versions.get(version.0 as usize)
+    else {
+        return;
+    };
+    let place = *place;
+    let initializer = *initializer;
+    if typed.places[place.0 as usize].explicit_contract {
+        return;
+    }
+    if !contextualize_literal_value(typed, initializer, expected) {
+        return;
+    }
+
+    typed.exprs.ty[expression.as_usize()] = expected.clone();
+    typed.places[place.0 as usize].ty = expected.clone();
+    typed.place_versions[version.0 as usize].ty = expected.clone();
+    let name = typed.places[place.0 as usize].name;
+    env.types.insert(name, expected.clone());
+
+    for index in 0..typed.exprs.kind.len() {
+        if matches!(
+            typed.exprs.kind[index],
+            TypedExprKind::Bind { body, .. } if body == initializer
+        ) {
+            typed.exprs.ty[index] = expected.clone();
+        }
+    }
+}
+
+fn contextualize_literal_value(
+    typed: &mut TypedFileAst,
+    expression: ExprId,
+    expected: &Ty,
+) -> bool {
+    if let Some(ConstValue::Int(value)) =
+        typed.exprs.facts.const_facts.const_value[expression.as_usize()].as_ref()
+        && typed
+            .type_registry
+            .integer_validity_for_type(expected)
+            .is_some()
+    {
+        let value = *value;
+        if let Err(error) =
+            crate::integer_literal::validate_with_registry(value, expected, &typed.type_registry)
+        {
+            typed.exprs.facts.semantic_facts.flaws[expression.as_usize()].push(
+                crate::integer_literal::diagnostic(value, expected, &error)
+                    .at_span_id(typed.exprs.span[expression.as_usize()], &typed.span_table),
+            );
+            return false;
+        }
+        typed.exprs.ty[expression.as_usize()] = expected.clone();
+        typed.exprs.facts.semantic_facts.integer_knowledge[expression.as_usize()] =
+            integer_knowledge_for(
+                expected,
+                Some(&ConstValue::Int(value)),
+                &typed.type_registry,
+            );
+        return true;
+    }
+
+    let literal = typed.exprs.facts.const_facts.sequence_literal[expression.as_usize()].clone();
+    let Some(literal) = literal else {
+        return false;
+    };
+    let length = match &literal {
+        crate::typed::TypedSequenceLiteral::Elements(items) => {
+            ast::NormalExpr::from(items.len() as i128)
+        }
+        crate::typed::TypedSequenceLiteral::Repeat { count, .. } => count.clone(),
+    };
+    let Some(plan) =
+        sequence_literal_materialization_plan_for_length(length, expected, &typed.type_registry)
+    else {
+        return false;
+    };
+    let element = match &plan {
+        crate::typed::LiteralMaterializationPlan::FixedArray { element, .. }
+        | crate::typed::LiteralMaterializationPlan::OwnedSequence { element, .. }
+        | crate::typed::LiteralMaterializationPlan::BorrowedSequence { element, .. } => {
+            element.clone()
+        }
+    };
+    let elements = match literal {
+        crate::typed::TypedSequenceLiteral::Elements(items) => items,
+        crate::typed::TypedSequenceLiteral::Repeat { seed, .. } => vec![seed],
+    };
+    if !elements
+        .into_iter()
+        .all(|item| contextualize_literal_value(typed, item, &element))
+    {
+        return false;
+    }
+    typed.exprs.facts.const_facts.literal_materialization[expression.as_usize()] = Some(plan);
+    contextualized_literal_type(typed, expression, expected);
+    true
+}
+
+fn contextualized_literal_type(typed: &mut TypedFileAst, expression: ExprId, expected: &Ty) {
+    typed.exprs.ty[expression.as_usize()] = expected.clone();
+    typed.exprs.facts.semantic_facts.flaws[expression.as_usize()].retain(|flaw| {
+        !matches!(
+            flaw.code.slug(),
+            "type-sequence-literal-requires-context" | "type-text-literal-requires-context"
+        )
+    });
+}
+
+fn retarget_literal_materialization(
+    plan: &mut Option<crate::typed::LiteralMaterializationPlan>,
+    ty: &Ty,
+    registry: &crate::TypeRegistry,
+) {
+    if plan.is_none() {
+        return;
+    }
+    let Ty::Named { instance, .. } = Ty::without_reference_wrappers(ty) else {
+        return;
+    };
+    let Some(semantics) = registry.declaration_for_instance(instance) else {
+        return;
+    };
+    let Some(former) = semantics.sequence_literal.as_ref() else {
+        return;
+    };
+    let Some(ast::TyArg::Type(contextual_element)) =
+        instance.arguments.iter().find_map(|(parameter, argument)| {
+            (*parameter == former.element_parameter).then_some(argument)
+        })
+    else {
+        return;
+    };
+    match former.materialization {
+        crate::SequenceLiteralMaterialization::FixedArray { .. } => {
+            if let Some(crate::typed::LiteralMaterializationPlan::FixedArray {
+                declaration,
+                element,
+                ..
+            }) = plan
+            {
+                *declaration = Some(instance.declaration);
+                *element = contextual_element.as_ref().clone();
+            }
+        }
+        crate::SequenceLiteralMaterialization::OwnedBuilder {
+            empty_member,
+            push_member,
+        } => {
+            *plan = Some(crate::typed::LiteralMaterializationPlan::OwnedSequence {
+                declaration: instance.declaration,
+                element: contextual_element.as_ref().clone(),
+                empty: crate::DefId(Intern::new(format!(
+                    "{}.{}",
+                    semantics.display_name.as_str(),
+                    empty_member.as_str()
+                ))),
+                push: crate::DefId(Intern::new(format!(
+                    "{}.{}",
+                    semantics.display_name.as_str(),
+                    push_member.as_str()
+                ))),
+            });
+        }
+        crate::SequenceLiteralMaterialization::BorrowStatic => {
+            *plan = Some(crate::typed::LiteralMaterializationPlan::BorrowedSequence {
+                declaration: instance.declaration,
+                element: contextual_element.as_ref().clone(),
+                backing: None,
+            });
+        }
+    }
+}
+
+pub(crate) fn materialize_owned_sequence_literals(typed: &mut TypedFileAst) {
+    let expression_count = typed.exprs.kind.len();
+    for index in 0..expression_count {
+        let Some(crate::typed::LiteralMaterializationPlan::OwnedSequence { empty, push, .. }) =
+            typed.exprs.facts.const_facts.literal_materialization[index].clone()
+        else {
+            continue;
+        };
+        let Some(literal) = typed.exprs.facts.const_facts.sequence_literal[index].clone() else {
+            continue;
+        };
+        let items = match literal {
+            crate::typed::TypedSequenceLiteral::Elements(items) => items,
+            crate::typed::TypedSequenceLiteral::Repeat { seed, count } => {
+                let Some(count) = count
+                    .as_const_int()
+                    .and_then(|value| usize::try_from(value).ok())
+                else {
+                    typed.exprs.facts.semantic_facts.flaws[index].push(
+                        Diagnostic::new(
+                            "type-sequence-builder-repeat-requires-constant-count",
+                            "owned sequence builders require a compile-time repeat count",
+                        )
+                        .at_span_id(typed.exprs.span[index], &typed.span_table),
+                    );
+                    continue;
+                };
+                if count == 0 {
+                    Vec::new()
+                } else {
+                    let Some(constant) =
+                        typed.exprs.facts.const_facts.const_value[seed.as_usize()].clone()
+                    else {
+                        typed.exprs.facts.semantic_facts.flaws[index].push(
+                        Diagnostic::new(
+                            "type-sequence-repeat-seed-not-copyable",
+                            "repeated owned sequence seed must be compile-time rematerializable",
+                        )
+                        .at_span_id(typed.exprs.span[index], &typed.span_table),
+                    );
+                        continue;
+                    };
+                    let mut items = Vec::with_capacity(count);
+                    items.push(seed);
+                    for _ in 1..count {
+                        items.push(append_sequence_builder_rematerialize(
+                            typed,
+                            seed,
+                            constant.clone(),
+                        ));
+                    }
+                    items
+                }
+            }
+        };
+        let ty = typed.exprs.ty[index].clone();
+        let span = typed.exprs.span[index];
+        let mut current = append_sequence_builder_call(typed, empty, Vec::new(), ty.clone(), span);
+        if let Some((last, prefix)) = items.split_last() {
+            for item in prefix {
+                current = append_sequence_builder_call(
+                    typed,
+                    push,
+                    vec![current, *item],
+                    ty.clone(),
+                    span,
+                );
+            }
+            typed.exprs.kind[index] = TypedExprKind::FnCall {
+                target: push,
+                args: Some(vec![current, *last]),
+                substituted_ty: Some(ty),
+            };
+        } else {
+            typed.exprs.kind[index] = TypedExprKind::FnCall {
+                target: empty,
+                args: Some(Vec::new()),
+                substituted_ty: Some(ty),
+            };
+        }
+        typed.exprs.facts.const_facts.const_value[index] = None;
+        typed.exprs.facts.const_facts.const_object[index] = None;
+        typed.exprs.facts.semantic_facts.sequence_provenance[index] =
+            Some(crate::typed::SequenceProvenance::Scoped);
+    }
+}
+
+fn append_sequence_builder_call(
+    typed: &mut TypedFileAst,
+    target: DefId,
+    args: Vec<ExprId>,
+    ty: Ty,
+    span: SpanId,
+) -> ExprId {
+    let id = ExprId(typed.exprs.kind.len() as u32);
+    typed.exprs.kind.push(TypedExprKind::FnCall {
+        target,
+        args: Some(args),
+        substituted_ty: Some(ty.clone()),
+    });
+    typed.exprs.ty.push(ty);
+    typed.exprs.span.push(span);
+    typed.exprs.facts.const_facts.const_value.push(None);
+    typed.exprs.facts.const_facts.const_object.push(None);
+    typed
+        .exprs
+        .facts
+        .semantic_facts
+        .sequence_provenance
+        .push(None);
+    typed.exprs.facts.const_facts.sequence_literal.push(None);
+    typed
+        .exprs
+        .facts
+        .const_facts
+        .literal_materialization
+        .push(None);
+    typed
+        .exprs
+        .facts
+        .semantic_facts
+        .integer_knowledge
+        .push(None);
+    typed.exprs.facts.semantic_facts.result_evidence.push(None);
+    typed
+        .exprs
+        .facts
+        .semantic_facts
+        .projected_result_evidence
+        .push(HashMap::new());
+    typed
+        .exprs
+        .facts
+        .semantic_facts
+        .availability
+        .push(Availability::Unknown);
+    typed
+        .exprs
+        .push_ownership_facts(None, Vec::new(), None, None);
+    typed.exprs.facts.semantic_facts.flaws.push(Vec::new());
+    id
+}
+
+fn append_sequence_builder_rematerialize(
+    typed: &mut TypedFileAst,
+    source: ExprId,
+    constant: ast::ConstValue,
+) -> ExprId {
+    let id = ExprId(typed.exprs.kind.len() as u32);
+    typed.exprs.kind.push(TypedExprKind::Rematerialize {
+        source,
+        constant: constant.clone(),
+    });
+    typed
+        .exprs
+        .ty
+        .push(typed.exprs.ty[source.as_usize()].clone());
+    typed.exprs.span.push(typed.exprs.span[source.as_usize()]);
+    typed
+        .exprs
+        .facts
+        .const_facts
+        .const_value
+        .push(Some(constant));
+    typed.exprs.facts.const_facts.const_object.push(None);
+    typed
+        .exprs
+        .facts
+        .semantic_facts
+        .sequence_provenance
+        .push(None);
+    typed.exprs.facts.const_facts.sequence_literal.push(None);
+    typed
+        .exprs
+        .facts
+        .const_facts
+        .literal_materialization
+        .push(None);
+    typed
+        .exprs
+        .facts
+        .semantic_facts
+        .integer_knowledge
+        .push(typed.exprs.facts.semantic_facts.integer_knowledge[source.as_usize()].clone());
+    typed
+        .exprs
+        .facts
+        .semantic_facts
+        .result_evidence
+        .push(typed.exprs.facts.semantic_facts.result_evidence[source.as_usize()].clone());
+    typed
+        .exprs
+        .facts
+        .semantic_facts
+        .projected_result_evidence
+        .push(HashMap::new());
+    typed
+        .exprs
+        .facts
+        .semantic_facts
+        .availability
+        .push(Availability::CompileTime);
+    typed
+        .exprs
+        .push_ownership_facts(None, Vec::new(), None, None);
+    typed.exprs.facts.semantic_facts.flaws.push(Vec::new());
+    id
 }
 
 fn place_version_for_kind(
     kind: &TypedExprKind,
     place: Option<crate::typed::PlaceId>,
     typed: &mut TypedFileAst,
-    env: &mut LocalEnv,
+    env: &mut FlowState,
 ) -> Option<crate::typed::PlaceVersionId> {
     let projected_write = match kind {
         TypedExprKind::RecordSet { value, .. }
-        | TypedExprKind::TupleSet { value, .. }
+        | TypedExprKind::AggregateSet { value, .. }
         | TypedExprKind::BufSet { value, .. } => Some(*value),
         _ => None,
     };
     if let (Some(place), Some(value)) = (place, projected_write) {
         let predecessor = current_version_for_place(typed, env, place);
-        let version = crate::typed::PlaceVersionId(typed.place_versions.len() as u32);
-        typed.place_versions.push(crate::typed::TypedPlaceVersion {
+        let version = typed.add_place_version(
             place,
-            origin: crate::typed::PlaceVersionOrigin::Rebind { value, predecessor },
-            ty: typed.places[place.0 as usize].ty.clone(),
-            integer_knowledge: typed.exprs.integer_knowledge_of(value).cloned().flatten(),
-        });
-        env.projected_versions.insert(place, version);
+            crate::typed::PlaceVersionOrigin::Rebind { value, predecessor },
+            typed.places[place.0 as usize].ty.clone(),
+            typed.exprs.integer_knowledge_of(value).cloned().flatten(),
+        );
+        env.set_projected_version(place, version);
         return Some(version);
     }
     match kind {
         TypedExprKind::FnCall {
             target, args: None, ..
         } => env.place_versions.get(&target.0).copied(),
+        TypedExprKind::SelfRef { .. } => env.place_versions.get(&Intern::from_ref("self")).copied(),
         TypedExprKind::Bind { name, .. } | TypedExprKind::Reassign { name, .. } => {
             env.place_versions.get(name).copied()
         }
-        TypedExprKind::TupleGet { .. } | TypedExprKind::BufGet { .. } | TypedExprKind::Deref(_) => {
+        TypedExprKind::AggregateGet { .. }
+        | TypedExprKind::BufGet { .. }
+        | TypedExprKind::Deref(_) => {
             place.and_then(|place| current_version_for_place(typed, env, place))
         }
         _ => None,
@@ -1821,8 +3080,8 @@ fn typed_kind_consumes_place(
     let _ = crate::typed::walk_expr_children(kind, &mut |child| {
         if matches!(
             typed.exprs.kind_of(child),
-            Some(TypedExprKind::Eat(inner) | TypedExprKind::ConsumeArg(inner))
-                if typed.exprs.place[inner.as_usize()] == Some(place)
+            Some(TypedExprKind::Ref(inner))
+                if typed.exprs.place_of(*inner) == Some(Some(place))
         ) || typed
             .exprs
             .kind_of(child)
@@ -1841,21 +3100,30 @@ fn place_for_kind(
     kind: &TypedExprKind,
     ty: &Ty,
     typed: &mut TypedFileAst,
-    env: &mut LocalEnv,
+    env: &mut FlowState,
 ) -> Option<crate::typed::PlaceId> {
     match kind {
         TypedExprKind::FnCall {
             target, args: None, ..
         } => env.places.get(&target.0).copied(),
+        TypedExprKind::SelfRef { .. } => env.places.get(&Intern::from_ref("self")).copied(),
         TypedExprKind::Bind { name, .. } | TypedExprKind::Reassign { name, .. } => {
             env.places.get(name).copied()
         }
-        TypedExprKind::TupleGet { base, index } | TypedExprKind::TupleSet { base, index, .. } => {
+        TypedExprKind::AggregateGet { base, index }
+        | TypedExprKind::AggregateSet { base, index, .. } => {
             let base_definition = typed
                 .type_registry
                 .resolved_definition_for_type(typed.exprs.ty_of(*base)?);
             let projection_ty = match base_definition {
-                Ty::Tuple(fields) => fields.get(*index).cloned().unwrap_or_else(|| ty.clone()),
+                Ty::Record { fields, .. } => fields
+                    .get(*index)
+                    .map(|(_, field)| (**field).clone())
+                    .unwrap_or_else(|| ty.clone()),
+                Ty::ResultRow(fields) => fields
+                    .get(*index)
+                    .map(|field| (*field.ty).clone())
+                    .unwrap_or_else(|| ty.clone()),
                 Ty::Array { elem, .. } => elem.as_ref().clone(),
                 _ => ty.clone(),
             };
@@ -1888,12 +3156,10 @@ fn place_for_kind(
             )
         }
         TypedExprKind::BufGet { buf, index } | TypedExprKind::BufSet { buf, index, .. } => {
-            let projection_ty = typed
-                .exprs
-                .ty_of(*buf)
-                .and_then(Ty::pointee_ty)
-                .cloned()
-                .unwrap_or_else(|| ty.clone());
+            let projection_ty = super::lower_ty::extract_element_type(
+                typed.exprs.ty_of(*buf)?,
+                Some(&typed.type_registry),
+            );
             projected_place(
                 typed,
                 env,
@@ -1923,23 +3189,16 @@ fn place_for_kind(
 
 fn projected_place(
     typed: &mut TypedFileAst,
-    env: &mut LocalEnv,
+    env: &mut FlowState,
     base: ExprId,
     projection: crate::typed::PlaceProjection,
     ty: Ty,
 ) -> Option<crate::typed::PlaceId> {
-    let parent = typed.exprs.place.get(base.as_usize()).copied().flatten()?;
+    let parent = typed.exprs.place_of(base).flatten()?;
     let parent_place = typed.places[parent.0 as usize].clone();
-    let base_version = typed
-        .exprs
-        .place_version
-        .get(base.as_usize())
-        .copied()
-        .flatten()?;
+    let base_version = typed.exprs.place_version_of(base).flatten()?;
     let place = env
-        .projected_places
-        .get(&(parent, projection.clone()))
-        .copied()
+        .projected_place(parent, &projection)
         .or_else(|| {
             typed.places.iter().enumerate().find_map(|(index, place)| {
                 (place.parent == Some(parent) && place.projection.as_ref() == Some(&projection))
@@ -1959,26 +3218,25 @@ fn projected_place(
             });
             place
         });
-    env.projected_places.insert((parent, projection), place);
-    if let std::collections::hash_map::Entry::Vacant(entry) = env.projected_versions.entry(place) {
-        let version = crate::typed::PlaceVersionId(typed.place_versions.len() as u32);
-        typed.place_versions.push(crate::typed::TypedPlaceVersion {
+    env.set_projected_place(parent, projection, place);
+    if env.projected_version(place).is_none() {
+        let version = typed.add_place_version(
             place,
-            origin: crate::typed::PlaceVersionOrigin::Projection { base: base_version },
+            crate::typed::PlaceVersionOrigin::Projection { base: base_version },
             ty,
-            integer_knowledge: None,
-        });
-        entry.insert(version);
+            None,
+        );
+        env.set_projected_version(place, version);
     }
     Some(place)
 }
 
 fn current_version_for_place(
     typed: &TypedFileAst,
-    env: &LocalEnv,
+    env: &FlowState,
     place: crate::typed::PlaceId,
 ) -> Option<crate::typed::PlaceVersionId> {
-    env.projected_versions.get(&place).copied().or_else(|| {
+    env.projected_version(place).or_else(|| {
         let place = typed.places.get(place.0 as usize)?;
         place
             .parent
@@ -1991,7 +3249,7 @@ fn current_version_for_place(
 fn projected_result_evidence_for(
     kind: &TypedExprKind,
     typed: &TypedFileAst,
-    env: &LocalEnv,
+    env: &FlowState,
 ) -> crate::typed::ProjectedResultEvidence {
     match kind {
         TypedExprKind::Bind { body, .. } => typed
@@ -2006,7 +3264,7 @@ fn projected_result_evidence_for(
             .get(&target.0)
             .cloned()
             .unwrap_or_default(),
-        TypedExprKind::TupleLit(items) => {
+        TypedExprKind::ResultRow(items) | TypedExprKind::ArrayLit(items) => {
             let mut projected = crate::typed::ProjectedResultEvidence::new();
             for (index, item) in items.iter().enumerate() {
                 if let Some(evidence) = typed.exprs.result_evidence_of(*item).cloned().flatten() {
@@ -2023,7 +3281,7 @@ fn projected_result_evidence_for(
             }
             projected
         }
-        TypedExprKind::TupleGet { base, index } => typed
+        TypedExprKind::AggregateGet { base, index } => typed
             .exprs
             .projected_result_evidence_of(*base)
             .into_iter()
@@ -2074,7 +3332,7 @@ fn result_evidence_for(
             | BindBody::Body {
                 ret: Some(expr), ..
             } => Some(*expr),
-            BindBody::Body { ret: None, .. } | BindBody::Extern => None,
+            BindBody::Body { ret: None, .. } | BindBody::Unlowered => None,
         }
         && let Some(TypedExprKind::FnCall {
             target: returned_parameter,
@@ -2096,7 +3354,7 @@ fn result_evidence_for(
         ..
     } = kind
         && let Some(bind) = typed.defs.get(target)
-        && !bind.is_extern
+        && !matches!(bind.body, crate::typed::BindBody::Unlowered)
         && let Ty::ResultFamily {
             owner,
             alternatives,
@@ -2157,7 +3415,7 @@ fn result_evidence_for(
         ..
     } = kind
         && let Some(bind) = typed.defs.get(target)
-        && !bind.is_extern
+        && !matches!(bind.body, crate::typed::BindBody::Unlowered)
         && let Some(evidence) = &bind.return_evidence
     {
         let substitute = |operand: ExprId| {
@@ -2250,10 +3508,7 @@ fn integer_knowledge_for(
             ast::integer::CanonicalIntegerExpr::Value(*value),
         ));
     }
-    if registry.nominal_integer_semantics_for_type(ty).is_some() {
-        return Some(ast::integer::IntegerKnowledge::Unknown);
-    }
-    if let Some(validity) = ty.anonymous_integer_validity() {
+    if let Some(validity) = registry.integer_validity_for_type(ty) {
         return Some(ast::integer::IntegerKnowledge::Domain(
             validity.domain().clone(),
         ));
@@ -2292,6 +3547,16 @@ fn materialized_integer_expected(
     expected: &Ty,
     registry: &crate::type_registry::TypeRegistry,
 ) -> Option<Ty> {
+    if let Ty::Union { variants, .. } = registry.resolved_definition_for_type(expected) {
+        let mut candidates = variants.iter().filter_map(|variant| {
+            (variant.kind == ast::ty::UnionVariantKind::Type)
+                .then(|| variant.fields.first().map(|(_, ty)| ty.as_ref()))
+                .flatten()
+                .filter(|ty| registry.integer_validity_for_type(ty).is_some())
+        });
+        let selected = candidates.next()?;
+        return candidates.next().is_none().then(|| selected.clone());
+    }
     match expected {
         Ty::UnresolvedLiteral(_) => None,
         Ty::Opaque(name) if name.as_str() == "Int" => None,
@@ -2314,19 +3579,13 @@ fn target_group_for_kind(
     kind: &TypedExprKind,
     typed: &TypedFileAst,
     scope: &ExprLowerScope<'_>,
-    env: &LocalEnv,
+    env: &FlowState,
     _flaws: &mut Vec<Diagnostic>,
 ) -> Option<ReferenceTargetSet> {
-    let child_group = |id: ExprId| {
-        typed
-            .exprs
-            .target_group
-            .get(id.as_usize())
-            .cloned()
-            .flatten()
-    };
+    let child_group = |id: ExprId| typed.exprs.target_group_of(id).cloned().flatten();
 
     match kind {
+        TypedExprKind::SelfRef { .. } => env.target_groups.get(&Intern::from_ref("self")).cloned(),
         TypedExprKind::FnCall { target, args, .. } if args.as_ref().is_none_or(Vec::is_empty) => {
             env.target_groups.get(&target.0).cloned()
         }
@@ -2339,27 +3598,31 @@ fn target_group_for_kind(
             let signature = local_signature
                 .as_ref()
                 .or_else(|| scope.callable_signatures.get(target))?;
-            let return_group = signature.return_group?;
+            let return_group = signature.result_groups.first().copied().flatten()?;
             typed
                 .apply_target_groups(args, signature)
                 .targets(return_group)
                 .cloned()
         }
-        TypedExprKind::Ref(inner)
-        | TypedExprKind::TakePtr(inner)
-        | TypedExprKind::ConsumeArg(inner)
-        | TypedExprKind::Eat(inner) => child_group(*inner),
+        TypedExprKind::Ref(inner) | TypedExprKind::TakePtr(inner) => child_group(*inner),
         TypedExprKind::Reassign { name, .. } => env.target_groups.get(name).cloned(),
         TypedExprKind::Bind { name, .. } => env.target_groups.get(name).cloned(),
         TypedExprKind::Deref(inner) => child_group(*inner).map(|targets| {
             targets.projected(|target| ReferenceTargetGroup::Deref(Box::new(target.clone())))
         }),
-        TypedExprKind::TupleGet { base, index } => child_group(*base).map(|targets| {
-            targets.projected(|target| ReferenceTargetGroup::Field {
-                base: Box::new(target.clone()),
-                index: *index,
-            })
-        }),
+        TypedExprKind::AggregateGet { base, index } => typed
+            .exprs
+            .result_target_groups_of(*base)
+            .and_then(|fields| fields.get(*index))
+            .and_then(Clone::clone)
+            .or_else(|| {
+                child_group(*base).map(|targets| {
+                    targets.projected(|target| ReferenceTargetGroup::Field {
+                        base: Box::new(target.clone()),
+                        index: *index,
+                    })
+                })
+            }),
         TypedExprKind::BufGet { buf, index } => {
             let index = target_index_for_expr(typed, *index);
             child_group(*buf).map(|targets| {
@@ -2373,9 +3636,49 @@ fn target_group_for_kind(
     }
 }
 
+fn result_target_groups_for_kind(
+    kind: &TypedExprKind,
+    typed: &TypedFileAst,
+    scope: &ExprLowerScope<'_>,
+    env: &FlowState,
+) -> Vec<Option<ReferenceTargetSet>> {
+    let TypedExprKind::FnCall { target, args, .. } = kind else {
+        return Vec::new();
+    };
+    if args.is_none() {
+        return env
+            .result_target_groups
+            .get(&target.0)
+            .cloned()
+            .unwrap_or_default();
+    }
+    let Some(args) = args else { return Vec::new() };
+    let Some(signature) = typed
+        .defs
+        .get(target)
+        .map(TypedCallableSignature::from)
+        .or_else(|| scope.callable_signatures.get(target).cloned())
+    else {
+        return Vec::new();
+    };
+    let application = typed.apply_target_groups(args, &signature);
+    signature
+        .result_groups
+        .iter()
+        .map(|group| group.and_then(|group| application.targets(group).cloned()))
+        .collect()
+}
+
 pub(crate) fn target_index_for_expr(typed: &TypedFileAst, expr_id: ExprId) -> TargetIndex {
     let idx = expr_id.as_usize();
-    if let Some(value) = typed.exprs.const_value.get(idx).and_then(Clone::clone) {
+    if let Some(value) = typed
+        .exprs
+        .facts
+        .const_facts
+        .const_value
+        .get(idx)
+        .and_then(Clone::clone)
+    {
         return TargetIndex::Symbolic(ast::NormalExpr::Value(value));
     }
     let Some(kind) = typed.exprs.kind.get(idx) else {
@@ -2388,11 +3691,7 @@ pub(crate) fn target_index_for_expr(typed: &TypedFileAst, expr_id: ExprId) -> Ta
         TypedExprKind::Lit(Literal::Number(value)) => {
             ast::NormalExpr::Value(ast::ConstValue::Int((*value as u128).into()))
         }
-        TypedExprKind::Ref(inner)
-        | TypedExprKind::TakePtr(inner)
-        | TypedExprKind::ConsumeArg(inner)
-        | TypedExprKind::Eat(inner)
-        | TypedExprKind::Deref(inner) => {
+        TypedExprKind::Ref(inner) | TypedExprKind::TakePtr(inner) | TypedExprKind::Deref(inner) => {
             return target_index_for_expr(typed, *inner);
         }
         TypedExprKind::Cast { expr, .. } => return target_index_for_expr(typed, *expr),
@@ -2462,6 +3761,7 @@ fn when_pattern_key(pattern: &ast::Pattern) -> String {
 
 fn pattern_surface(pattern: &ast::Pattern) -> String {
     match pattern {
+        ast::Pattern::Invalid => "<invalid>".to_string(),
         ast::Pattern::Nominal(name, _) => name.as_str().to_string(),
         ast::Pattern::Qualified(path) => {
             let mut out = path.value.root.as_str().to_string();
@@ -2514,14 +3814,6 @@ fn pattern_surface(pattern: &ast::Pattern) -> String {
                 pattern_surface(&tail.value)
             )
         }
-        ast::Pattern::Tuple(elems) => format!(
-            "({})",
-            elems
-                .iter()
-                .map(|elem| pattern_surface(&elem.value))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
         ast::Pattern::InRange { bounds, .. } => format!("in {bounds}"),
     }
 }
@@ -2544,7 +3836,7 @@ fn const_for_def_id(def_id: DefId, typed: &TypedFileAst) -> Option<ast::ConstVal
         let ast::BindValue::Expr(expr) = &source_bind.value else {
             return None;
         };
-        let const_binds = const_env_from_prepared_ast(eval_ast);
+        let const_binds = const_env_from_prepared_ast(eval_ast, None);
         let evaluator = crate::analysis::CompTimeEvaluator::new(&const_binds, eval_ast);
         return expr
             .const_value
@@ -2554,8 +3846,17 @@ fn const_for_def_id(def_id: DefId, typed: &TypedFileAst) -> Option<ast::ConstVal
     let BindBody::Expr(body) = bind.body else {
         return None;
     };
+    let mut evaluator = crate::eval::Evaluator::new(
+        typed.resolved_program(),
+        crate::eval::CompileTimeHost::new(&flask::CompileTarget::Library),
+    );
+    if let Ok(crate::eval::EvalOutcome::Complete(value)) = evaluator.eval(body) {
+        return Some(value);
+    }
     typed
         .exprs
+        .facts
+        .const_facts
         .const_value
         .get(body.as_usize())?
         .clone()
@@ -2572,6 +3873,8 @@ fn const_for_def_id(def_id: DefId, typed: &TypedFileAst) -> Option<ast::ConstVal
                             .filter_map(|arg| {
                                 typed
                                     .exprs
+                                    .facts
+                                    .const_facts
                                     .const_value
                                     .get(arg.as_usize())
                                     .cloned()
@@ -2594,7 +3897,7 @@ fn param_kind_const(kind: &ParameterKind) -> Option<ast::ConstValue> {
             ast::Expr::Lit(lit) => match lit {
                 ast::Literal::Int(n) => Some(ast::ConstValue::Int(*n)),
                 ast::Literal::Number(n) => Some(ast::ConstValue::Int((*n as u128).into())),
-                ast::Literal::String(s) => Some(ast::ConstValue::String(s.clone())),
+                ast::Literal::String(s) => Some(ast::ConstValue::Text(s.clone())),
                 ast::Literal::Float(HashFloat(f)) => Some(ast::ConstValue::Float(HashFloat(*f))),
             },
             _ => None,
@@ -2909,11 +4212,11 @@ fn validate_record_fields(
 fn types_are_incompatible(arg_ty: &Ty, field_ty: &Ty) -> bool {
     match (arg_ty, field_ty) {
         // String literal assigned to Int field
-        (Ty::Literal(ConstValue::String(_)), Ty::AnonymousInteger { .. }) => true,
+        (Ty::Literal(ConstValue::Text(_)), Ty::AnonymousInteger { .. }) => true,
         // Int literal assigned to non-Int field like Bool (union)
         (Ty::Literal(ConstValue::Int(_)), Ty::Union { .. }) => true,
         // String literal assigned to union (Bool is True/False)
-        (Ty::Literal(ConstValue::String(_)), Ty::Union { .. }) => true,
+        (Ty::Literal(ConstValue::Text(_)), Ty::Union { .. }) => true,
         (Ty::Opaque(actual), Ty::Opaque(expected)) => actual != expected,
         _ => false,
     }
@@ -2929,7 +4232,7 @@ fn check_type_flaws(
     flaws: &mut Vec<Diagnostic>,
 ) {
     match kind {
-        TypedExprKind::TupleAlloc { init, .. } => {
+        TypedExprKind::FixedArrayAlloc { init, .. } => {
             if let Some((element, _)) =
                 crate::representation::Repr::array_parts(ty, Some(&typed.type_registry))
                 && let Some(initializer) = typed.exprs.ty.get(init.as_usize())
@@ -2940,6 +4243,24 @@ fn check_type_flaws(
                     "type-fixed-array-element-mismatch",
                     "fixed-array initializer does not match the selected element type",
                 ));
+            }
+        }
+        TypedExprKind::ArrayLit(items) => {
+            if let Some((element, _)) =
+                crate::representation::Repr::array_parts(ty, Some(&typed.type_registry))
+            {
+                for initializer in items
+                    .iter()
+                    .filter_map(|item| typed.exprs.ty.get(item.as_usize()))
+                {
+                    if initializer != &element && !matches!(initializer, Ty::UnresolvedLiteral(_)) {
+                        flaws.push(Diagnostic::new(
+                            "type-fixed-array-element-mismatch",
+                            "fixed-array element does not match the selected element type",
+                        ));
+                        break;
+                    }
+                }
             }
         }
         TypedExprKind::FnCall {
@@ -2990,7 +4311,7 @@ fn check_type_flaws(
             args,
             ..
         } => {
-            let is_record = is_record_tag_call(variant_id, typed);
+            let is_record = is_record_tag_call(variant_id, ty, typed);
 
             // Unknown symbol: bare tag that isn't a known record
             let is_result_alternative = matches!(
@@ -3017,10 +4338,8 @@ fn check_type_flaws(
                     .get(&TagId(variant_id.name))
                     .is_none_or(|tag| tag.record_field_refinements.is_empty())
             {
-                let tag_id = TagId(variant_id.name);
-                if let Some(record_ty) = typed.tag_types.get(&tag_id)
-                    && let Ty::Record { fields, .. } =
-                        typed.type_registry.resolved_definition_for_type(record_ty)
+                if let Ty::Record { fields, .. } =
+                    typed.type_registry.resolved_definition_for_type(ty)
                 {
                     validate_record_fields(
                         &variant_id.name,
@@ -3085,6 +4404,29 @@ fn check_type_flaws(
         }
         TypedExprKind::When(when_expr) => {
             validate_when_arm_shape(&when_expr.arms, when_expr.subject.is_some(), typed, flaws);
+            // Result rows are structural values: every arm must preserve the
+            // semantic names and order, even when the physical aggregates match.
+            let arm_types = when_expr.arms.iter().filter_map(|arm| {
+                let body = match arm {
+                    TypedWhenArm::Cond { body, .. } | TypedWhenArm::Is { body, .. } => *body,
+                    TypedWhenArm::Else(body, _) => *body,
+                };
+                typed.exprs.ty.get(body.as_usize())
+            });
+            if let Some(first) = arm_types.clone().find(|ty| matches!(ty, Ty::ResultRow(_))) {
+                if arm_types
+                    .filter(|ty| matches!(ty, Ty::ResultRow(_)))
+                    .any(|ty| {
+                        crate::equality::validate_with_registry(first, ty, &typed.type_registry)
+                            .is_err()
+                    })
+                {
+                    flaws.push(Diagnostic::new(
+                        "type-incompatible-result-names",
+                        "when arms must produce compatible named results in the same order",
+                    ));
+                }
+            }
             let has_else = when_expr
                 .arms
                 .iter()
@@ -3108,7 +4450,16 @@ fn check_type_flaws(
             // Subject-value reachability: if the subject has a known compile-time value,
             // check which arms match and flag unmatched/after-match arms as unreachable.
             if let Some(subject_id) = when_expr.subject
-                && let Some(Some(subject_cv)) = typed.exprs.const_value.get(subject_id.as_usize())
+                && !matches!(
+                    typed.exprs.kind_of(subject_id),
+                    Some(TypedExprKind::TargetField(_))
+                )
+                && let Some(Some(subject_cv)) = typed
+                    .exprs
+                    .facts
+                    .const_facts
+                    .const_value
+                    .get(subject_id.as_usize())
             {
                 let mut matching_arm_found = false;
                 for arm in &when_expr.arms {
@@ -3161,6 +4512,18 @@ fn check_type_flaws(
         }
         TypedExprKind::Cast { expr, ty } => {
             let source = typed.exprs.ty.get(expr.as_usize());
+            if source.is_some_and(|source| {
+                source != ty
+                    && matches!(
+                        typed.type_registry.resolved_definition_for_type(source),
+                        Ty::Union { .. }
+                    )
+            }) {
+                flaws.push(Diagnostic::new(
+                    "type-incompatible-union-value",
+                    "exclude the other union alternatives before converting its member",
+                ));
+            }
             let source_space = source.and_then(Ty::address_space);
             let target_space = ty.address_space();
             let source_width = source.and_then(|ty| typed.type_registry.integer_width_for_type(ty));
@@ -3172,7 +4535,10 @@ fn check_type_flaws(
                     .integer_validity_for_type(source)
                     .is_some()
             {
-                let actual = match typed.exprs.integer_knowledge[expr.as_usize()].as_ref() {
+                let actual = match typed.exprs.facts.semantic_facts.integer_knowledge
+                    [expr.as_usize()]
+                .as_ref()
+                {
                     Some(ast::integer::IntegerKnowledge::Exact(
                         ast::integer::CanonicalIntegerExpr::Value(value),
                     )) => ast::integer::IntegerDomain::bounded(*value, *value),
@@ -3231,8 +4597,9 @@ fn check_type_flaws(
         }
         TypedExprKind::TakePtr(inner) => {
             let pointee = typed.exprs.ty.get(inner.as_usize());
-            if let Some(address_space) = ty.address_space() {
-                if let Some(expected_pointee) = ty.pointee_ty()
+            let resolved_ty = typed.type_registry.resolved_definition_for_type(ty);
+            if let Some(address_space) = resolved_ty.address_space() {
+                if let Some(expected_pointee) = resolved_ty.pointee_ty()
                     && pointee.is_some_and(|actual| actual != expected_pointee)
                 {
                     flaws.push(
@@ -3251,12 +4618,14 @@ fn check_type_flaws(
             }
         }
         TypedExprKind::Deref(inner) => {
-            if typed
-                .exprs
-                .ty
-                .get(inner.as_usize())
-                .is_none_or(|inner_ty| inner_ty.pointee_ty().is_none())
-            {
+            if typed.exprs.ty.get(inner.as_usize()).is_none_or(|inner_ty| {
+                reference_pointee_for_type(inner_ty, Some(&typed.type_registry)).is_none()
+                    && typed
+                        .type_registry
+                        .resolved_definition_for_type(inner_ty)
+                        .pointee_ty()
+                        .is_none()
+            }) {
                 flaws.push(Diagnostic::new(
                     "type-deref-non-address",
                     "cannot dereference a value without raw address representation",
@@ -3328,7 +4697,7 @@ fn check_type_flaws(
                 let body = match &bind.body {
                     BindBody::Expr(expr) => Some(*expr),
                     BindBody::Body { exprs, ret } => (*ret).or_else(|| exprs.last().copied()),
-                    BindBody::Extern => None,
+                    BindBody::Unlowered => None,
                 }?;
                 let TypedExprKind::TagCall { variant_id, .. } =
                     typed.exprs.kind.get(body.as_usize())?

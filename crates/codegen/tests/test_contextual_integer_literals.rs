@@ -9,7 +9,7 @@ fn materialized_constants_use_the_selected_bits_width() {
         (32, "4294967295"),
         (127, "170141183460469231731687303715884105727"),
     ] {
-        let source = format!("Selected is in 0...{max}\nvalue Selected: 42\n");
+        let source = format!("Selected is in 0 to {max}\nvalue Selected: 42\n");
         let (mlir, symptoms) = support::codegen_to_mlir_text(&source, "literal.gin", false);
 
         assert!(

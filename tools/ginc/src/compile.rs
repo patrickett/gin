@@ -5,6 +5,7 @@ use crate::driver::{
     CheckedFile, CheckedPackage, CompilePackage, CompilerDriver, CompilerDriverError,
     LoweredFileDiagnostics, ParsedPackage, SourceFile, SourcePackage,
 };
+use crate::reporting::{CheckOptions, DiagnosticReporter};
 use diagnostic::{Category, Diagnostic, DiagnosticPathExt};
 use flask::TargetTriple;
 use flask::{CompileTarget, FlaskConfig};
@@ -17,14 +18,18 @@ struct CompilationTimings {
     enabled: bool,
     total_start: std::time::Instant,
     phases: Vec<(&'static str, std::time::Duration)>,
+    json_path: Option<PathBuf>,
+    object_cache_hit: Option<bool>,
 }
 
 impl CompilationTimings {
-    fn new(enabled: bool) -> Self {
+    fn new(enabled: bool, json_path: Option<PathBuf>) -> Self {
         Self {
             enabled,
             total_start: std::time::Instant::now(),
             phases: Vec::new(),
+            json_path,
+            object_cache_hit: None,
         }
     }
 
@@ -33,44 +38,50 @@ impl CompilationTimings {
     }
 
     fn run<T>(&mut self, name: &'static str, action: impl FnOnce() -> T) -> T {
+        if !self.enabled && self.json_path.is_none() {
+            return action();
+        }
         let start = std::time::Instant::now();
         let value = action();
-        if self.enabled {
+        if self.enabled || self.json_path.is_some() {
             self.phases.push((name, start.elapsed()));
         }
         value
     }
 
     fn report(&self) {
+        let elapsed = self.total_start.elapsed();
+        if let Some(path) = &self.json_path {
+            let phases: Vec<_> = self.phases.iter().map(|(name, duration)| {
+                serde_json::json!({"name": name, "seconds": duration.as_secs_f64()})
+            }).collect();
+            let report = serde_json::json!({
+                "schema_version": 1,
+                "total_seconds": elapsed.as_secs_f64(),
+                "object_cache_hit": self.object_cache_hit,
+                "phases": phases,
+            });
+            if let Err(error) = std::fs::write(path, report.to_string()) {
+                eprintln!("could not write timings to {}: {error}", path.display());
+            }
+        }
         if !self.enabled {
             return;
         }
 
-        let mut total = std::time::Duration::ZERO;
-        let mut phase_parts = Vec::with_capacity(self.phases.len());
-        for (name, duration) in &self.phases {
-            total += *duration;
-            phase_parts.push(format!("{name}:{duration:?}"));
-        }
-
-        eprintln!(
-            "[ginc-timings] total:{:?} {}",
-            self.total_start.elapsed(),
-            phase_parts.join(" ")
-        );
-        if total != self.total_start.elapsed() {
-            eprintln!(
-                "[ginc-timings] measured_sum:{:?} total:{:?}",
-                total,
-                self.total_start.elapsed()
-            );
-        }
+        crate::build_output::timings(&self.phases, elapsed, self.object_cache_hit);
     }
 
     fn record(&mut self, name: &'static str, duration: std::time::Duration) {
-        if self.enabled {
+        if self.enabled || self.json_path.is_some() {
             self.phases.push((name, duration));
         }
+    }
+}
+
+impl Drop for CompilationTimings {
+    fn drop(&mut self) {
+        self.report();
     }
 }
 
@@ -100,6 +111,8 @@ pub enum CompileFailure {
     /// Parse stage produced a fatal flaw.
     #[error("parse failed")]
     ParseFailed,
+    #[error("type checking failed")]
+    TypecheckFailed,
     /// Compiler input violated a structural driver invariant.
     #[error("compiler driver failed: {0}")]
     Driver(CompilerDriverError),
@@ -109,6 +122,10 @@ pub enum CompileFailure {
     /// Entry package did not define a concrete target.
     #[error("entry package must set `target` to a full target triple")]
     MissingEntryTarget,
+    #[error("artifact storage failed: {0}")]
+    ArtifactStorage(std::io::Error),
+    #[error("{0}")]
+    Resolution(flask::ResolutionError),
     /// Emission or linking failed.
     #[error("{stage} failed")]
     EmissionFailed {
@@ -135,6 +152,13 @@ pub enum CompileEmitStage {
 }
 
 impl GinCompiler {
+    pub fn compile_cli(args: &mut Args) -> CompileResult {
+        let output = crate::build_output::BuildOutput::new(args);
+        let result = Self::compile(args);
+        output.finish(&result, args);
+        result
+    }
+
     /// Compile a Gin project through a staged pipeline.
     ///
     /// **Binary mode** (input is a `.gin` file):
@@ -145,16 +169,39 @@ impl GinCompiler {
     /// All `.gin` files are treated as a single compilation unit with a
     /// shared type environment, compiled into one object file.
     pub fn compile(args: &'_ mut Args) -> CompileResult {
-        let path = args.input.to_owned();
-        let mut timings = CompilationTimings::new(args.timings || CompilationTimings::enabled());
+        let mut reporter = DiagnosticReporter::new(&args.input, CheckOptions::default());
+        Self::run(args, false, &mut reporter)
+    }
 
-        let file_paths = timings.run("collect", || path.collect_gin_files());
+    pub fn check(args: &mut Args, options: CheckOptions) -> CompileResult {
+        let mut reporter = DiagnosticReporter::new(&args.input, options);
+        let result = Self::run(args, true, &mut reporter);
+        if let CompileResult::Failed(error) = &result
+            && !matches!(
+                error,
+                CompileFailure::ParseFailed | CompileFailure::TypecheckFailed
+            )
+        {
+            reporter.failure(&error.to_string());
+        }
+        reporter.finish(result.is_success());
+        result
+    }
+
+    fn run(args: &mut Args, check_only: bool, reporter: &mut DiagnosticReporter) -> CompileResult {
+        let path = args.input.to_owned();
+        let mut timings = CompilationTimings::new(
+            args.timings || CompilationTimings::enabled(),
+            args.timings_json.clone(),
+        );
+
+        let file_paths = timings.run("discover-sources", || path.collect_gin_files());
         if file_paths.is_empty() {
             return CompileResult::Failed(CompileFailure::NoInputFiles { path });
         }
 
         let is_library = path.is_dir();
-        let sources = match timings.run("collect", || read_sources(&file_paths)) {
+        let sources = match timings.run("read-sources", || read_sources(&file_paths)) {
             Ok(sources) => sources,
             Err(error) => return CompileResult::Failed(error),
         };
@@ -166,7 +213,7 @@ impl GinCompiler {
             Ok(parsed) => parsed,
             Err(error) => return CompileResult::Failed(CompileFailure::Driver(error)),
         };
-        if print_parse_diagnostics(&parsed) {
+        if print_parse_diagnostics(&parsed, reporter) {
             return CompileResult::Failed(CompileFailure::ParseFailed);
         }
 
@@ -181,6 +228,11 @@ impl GinCompiler {
                 .unwrap_or_default()
         };
         let flask_config = FlaskConfig::find_package_config(&entry_dir).map(|(cfg, _)| cfg);
+        if let Some(config) = &flask_config
+            && let Err(error) = config.validate_resolution()
+        {
+            return CompileResult::Failed(CompileFailure::Resolution(error));
+        }
         if args.dependencies.is_empty() {
             args.dependencies = primary_path.flask_path_dependencies();
         }
@@ -223,12 +275,14 @@ impl GinCompiler {
         let checked = timings.run("front-end", || {
             driver.check(
                 CompilePackage::new(parsed, compile_target)
+                    .with_gin_home(args.gin_home.clone())
                     .with_dependencies(args.dependencies.clone())
                     .with_import_resolution(use_package_resolver),
             )
         });
 
-        if print_diagnostics(&checked) {
+        let has_front_end_flaws = print_diagnostics(&checked, reporter);
+        if has_front_end_flaws && !check_only {
             return CompileResult::Failed(CompileFailure::ParseFailed);
         }
 
@@ -238,7 +292,19 @@ impl GinCompiler {
         // Type flaws are printed but do NOT gate compilation — type checking is
         // best-effort diagnostics; codegen may still succeed for code the checker
         // doesn't fully understand yet (e.g. template unions).
-        let has_typecheck_flaws = timings.run("typecheck", || print_type_diagnostics(&checked));
+        let has_typecheck_flaws = timings.run("typecheck-diagnostics", || {
+            print_type_diagnostics(&checked, reporter)
+        });
+
+        if check_only {
+            return if has_front_end_flaws {
+                CompileResult::Failed(CompileFailure::ParseFailed)
+            } else if has_typecheck_flaws {
+                CompileResult::Failed(CompileFailure::TypecheckFailed)
+            } else {
+                CompileResult::Success { output: None }
+            };
+        }
 
         let emit_result = match args.emit {
             crate::cli::Emit::Mlir => emit_mlir_typed(&driver, &checked, Some(&mut timings)),
@@ -248,14 +314,11 @@ impl GinCompiler {
                 &checked,
                 NativeEmitOptions {
                     args,
-                    path: &path,
-                    is_library,
                     fast_llvm,
                     timings: Some(&mut timings),
                 },
             ),
         };
-        timings.report();
 
         let output = match emit_result {
             Ok(output) => output,
@@ -269,7 +332,7 @@ impl GinCompiler {
         CompileResult::Success { output }
     }
 
-    fn fast_llvm_enabled() -> bool {
+    pub(crate) fn fast_llvm_enabled() -> bool {
         env_flag_enabled("GINC_FAST_LLVM")
     }
 }
@@ -325,19 +388,18 @@ fn read_sources(paths: &[PathBuf]) -> Result<Vec<SourceFile>, CompileFailure> {
 ///
 /// Each file's symptoms are printed with its own span table and source text.
 /// Returns `true` if any fatal diagnostics were found.
-fn print_parse_diagnostics(package: &ParsedPackage) -> bool {
+fn print_parse_diagnostics(package: &ParsedPackage, reporter: &mut DiagnosticReporter) -> bool {
     let mut has_flaws = false;
     for file in package.files() {
-        has_flaws |= print_file_diagnostics(&file.path, &file.source, &file.output.symptoms);
+        has_flaws |= reporter.emit(&file.path, &file.source, &file.output.symptoms);
     }
     has_flaws
 }
 
-fn print_diagnostics(package: &CheckedPackage) -> bool {
+fn print_diagnostics(package: &CheckedPackage, reporter: &mut DiagnosticReporter) -> bool {
     let mut has_flaws = false;
     for file in package.files() {
-        has_flaws |=
-            print_file_diagnostics(file.path(), file.source(), file.front_end_diagnostics());
+        has_flaws |= reporter.emit(file.path(), file.source(), file.front_end_diagnostics());
     }
     has_flaws
 }
@@ -353,14 +415,11 @@ fn print_file_diagnostics(path: &Path, source: &str, diagnostics: &[Diagnostic])
 }
 
 /// Print type-check flaws from the typed AST for every file.
-fn print_type_diagnostics(package: &CheckedPackage) -> bool {
+fn print_type_diagnostics(package: &CheckedPackage, reporter: &mut DiagnosticReporter) -> bool {
     let mut has_flaws = false;
     for file in package.files() {
-        let filename = file.path().diagnostic_report_path_from_cwd();
-        for flaw in file.typecheck_diagnostics() {
-            flaw.clone().print(file.source(), &filename);
-            has_flaws = true;
-        }
+        has_flaws |= reporter.emit(file.path(), file.source(), file.typecheck_diagnostics());
+        reporter.emit(file.path(), file.source(), file.typed().all_warnings());
     }
     has_flaws
 }
@@ -423,8 +482,6 @@ fn emit_mlir_typed(
 
 struct NativeEmitOptions<'a> {
     args: &'a Args,
-    path: &'a Path,
-    is_library: bool,
     fast_llvm: bool,
     timings: Option<&'a mut CompilationTimings>,
 }
@@ -436,94 +493,108 @@ fn emit_native_typed(
 ) -> Result<Option<PathBuf>, CompileFailure> {
     let NativeEmitOptions {
         args,
-        path,
-        is_library,
         fast_llvm,
         mut timings,
     } = options;
-    let obj_path = if is_library {
-        // Folder packages reuse `args.output` only for `-o exe`/`link` destinations.
-        // When emitting Exe we always stage `.o` under `<pkg>/target/` so `-o foo`
-        // is never scribbled onto as raw object contents (which corrupts linkage).
-        if matches!(args.emit, crate::cli::Emit::Exe) {
-            let pkg_name = path.file_name().unwrap_or_default().to_string_lossy();
-            path.join("target").join(format!("{pkg_name}.o"))
-        } else {
-            args.output.clone().unwrap_or_else(|| {
-                let pkg_name = path.file_name().unwrap_or_default().to_string_lossy();
-                path.join("target").join(format!("{}.o", pkg_name))
-            })
-        }
-    } else if matches!(args.emit, crate::cli::Emit::Exe) {
-        args.output
-            .clone()
-            .unwrap_or_else(|| path.with_extension(""))
-            .with_extension("o")
+    let dir = if let Some(timings) = timings.as_mut() {
+        timings.run("artifact-key", || artifact_directory(package, args))
     } else {
-        args.output
-            .clone()
-            .unwrap_or_else(|| path.with_extension("o"))
-    };
+        artifact_directory(package, args)
+    }?;
+    let staging = tempfile::tempdir_in(&dir).map_err(CompileFailure::ArtifactStorage)?;
+    let obj_path = staging.path().join("module.o");
 
-    if let Some(parent) = obj_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-
-    let profile = args.profile;
-
-    let compiler = codegen::emit::NativeCompiler::default();
-    let context = codegen::emit::NativeCompiler::create_context();
-    let lowered = if let Some(timings) = timings.as_mut() {
-        timings.run("mlir-lowering", || driver.lower_package(&context, package))
+    let identity = if args.no_cache {
+        None
+    } else if let Some(timings) = timings.as_mut() {
+        timings.run(
+            "toolchain-identity",
+            codegen::emit::NativeCompiler::object_cache_identity,
+        )
     } else {
-        driver.lower_package(&context, package)
+        codegen::emit::NativeCompiler::object_cache_identity()
     };
-    print_package_codegen_diagnostics(package, &lowered.diagnostics);
-    let mut symptoms: Vec<_> = lowered
-        .diagnostics
-        .into_iter()
-        .flat_map(|file| file.diagnostics)
-        .collect();
-    let Some(module) = lowered.module else {
-        return Err(CompileFailure::EmissionFailed {
-            stage: CompileEmitStage::Codegen,
-            diagnostics: symptoms,
-        });
+    let cached_object = dir.join("module.o");
+    let receipt = dir.join("module.o.sha256");
+    let lookup = || {
+        identity.as_ref().is_some_and(|identity| {
+            verified_object(&cached_object, &receipt, identity, &obj_path).unwrap_or(false)
+        })
     };
-    let (ok, more, native_timings) =
-        compiler.native_from_module_with_timings(&module, &obj_path, profile, fast_llvm);
+    let reused = if let Some(timings) = timings.as_mut() {
+        timings.run("object-cache-lookup", lookup)
+    } else {
+        lookup()
+    };
     if let Some(timings) = timings.as_mut() {
-        timings.record("mlir-optimization", native_timings.optimization);
-        timings.record("llvm-lowering", native_timings.lowering);
-        timings.record("object-emission", native_timings.object_emission);
+        timings.object_cache_hit = Some(reused);
     }
-    if !ok {
-        print_codegen_diagnostics(package.primary_file(), &more);
-        symptoms.extend(more);
-        return Err(CompileFailure::EmissionFailed {
-            stage: CompileEmitStage::ObjectEmission,
-            diagnostics: symptoms,
-        });
+    if !reused {
+        let profile = args.profile;
+
+        let compiler = codegen::emit::NativeCompiler::default();
+        let context = codegen::emit::NativeCompiler::create_context();
+        let lowered = if let Some(timings) = timings.as_mut() {
+            timings.run("mlir-lowering", || driver.lower_package(&context, package))
+        } else {
+            driver.lower_package(&context, package)
+        };
+        print_package_codegen_diagnostics(package, &lowered.diagnostics);
+        let mut symptoms: Vec<_> = lowered
+            .diagnostics
+            .into_iter()
+            .flat_map(|file| file.diagnostics)
+            .collect();
+        let Some(module) = lowered.module else {
+            return Err(CompileFailure::EmissionFailed {
+                stage: CompileEmitStage::Codegen,
+                diagnostics: symptoms,
+            });
+        };
+        let (ok, more, native_timings) = compiler.native_from_module_with_timings_for_target(
+            &module,
+            &obj_path,
+            profile,
+            fast_llvm,
+            package.target().triple_raw(),
+        );
+        if let Some(timings) = timings.as_mut() {
+            timings.record("mlir-optimization", native_timings.optimization);
+            timings.record("llvm-lowering", native_timings.lowering);
+            timings.record("object-emission", native_timings.object_emission);
+        }
+        if !ok {
+            print_codegen_diagnostics(package.primary_file(), &more);
+            symptoms.extend(more);
+            return Err(CompileFailure::EmissionFailed {
+                stage: CompileEmitStage::ObjectEmission,
+                diagnostics: symptoms,
+            });
+        }
+
+        if symptoms.is_empty() && more.is_empty() {
+            if let Some(identity) = &identity {
+                cache_object(&obj_path, &cached_object, &receipt, identity)
+                    .map_err(CompileFailure::ArtifactStorage)?;
+            }
+        }
     }
 
     if matches!(args.emit, crate::cli::Emit::Exe) {
-        let exe_path = args
-            .output
-            .clone()
-            .unwrap_or_else(|| path.with_extension(""));
+        let exe_path = staging.path().join("module");
         let (linked, link_symptoms) = if let Some(timings) = timings.as_mut() {
             timings.run("linking", || {
                 codegen::emit::NativeCompiler::link_executable(
                     &obj_path,
                     &exe_path,
-                    args.target.as_deref(),
+                    package.target().triple_raw(),
                 )
             })
         } else {
             codegen::emit::NativeCompiler::link_executable(
                 &obj_path,
                 &exe_path,
-                args.target.as_deref(),
+                package.target().triple_raw(),
             )
         };
         if !linked {
@@ -533,58 +604,165 @@ fn emit_native_typed(
                 diagnostics: link_symptoms,
             });
         }
-        let _ = std::fs::remove_file(&obj_path);
-        Ok(Some(exe_path))
+        publish_output(&exe_path, &dir.join("module"), args)
     } else {
-        println!("Compiled to {}", obj_path.display());
-        Ok(Some(obj_path))
+        publish_output(&obj_path, &dir.join("module.o"), args)
     }
+}
+
+fn object_digest(bytes: &[u8], identity: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(b"gin.object-cache.v1\0");
+    hash.update(identity);
+    hash.update(bytes);
+    format!("{:x}", hash.finalize())
+}
+
+fn verified_object(
+    cached: &Path,
+    receipt: &Path,
+    identity: &[u8],
+    staged: &Path,
+) -> std::io::Result<bool> {
+    let bytes = std::fs::read(cached)?;
+    if std::fs::read_to_string(receipt)? != object_digest(&bytes, identity) {
+        return Ok(false);
+    }
+    std::fs::write(staged, bytes)?;
+    Ok(true)
+}
+
+fn cache_object(
+    staged: &Path,
+    cached: &Path,
+    receipt: &Path,
+    identity: &[u8],
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let bytes = std::fs::read(staged)?;
+    let parent = cached
+        .parent()
+        .ok_or_else(|| std::io::Error::other("object has no cache directory"))?;
+    let mut object = tempfile::NamedTempFile::new_in(parent)?;
+    object.write_all(&bytes)?;
+    let mut record = tempfile::NamedTempFile::new_in(parent)?;
+    record.write_all(object_digest(&bytes, identity).as_bytes())?;
+    object.persist(cached).map_err(|e| e.error)?;
+    record.persist(receipt).map_err(|e| e.error)?;
+    Ok(())
 }
 
 fn emit_interface(
     package: &CheckedPackage,
     args: &Args,
 ) -> Result<Option<PathBuf>, CompileFailure> {
-    let is_library = args.input.is_dir();
-    let interface_path = if is_library {
-        let pkg_name = args.input.file_name().unwrap_or_default().to_string_lossy();
-        args.output
-            .clone()
-            .unwrap_or_else(|| args.input.join("target").join(format!("{pkg_name}.ginif")))
-    } else {
-        args.output
-            .clone()
-            .unwrap_or_else(|| args.input.with_extension("ginif"))
-    };
-
-    if let Some(parent) = interface_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-
-    let temp_path = interface_path.with_extension("ginif.tmp");
-    if let Err(error) = std::fs::write(&temp_path, package.public_interface().canonical_bytes()) {
+    if package.files().iter().any(|file| {
+        file.typecheck_diagnostics()
+            .iter()
+            .any(|d| d.category == Category::Flaw)
+    }) {
         return Err(CompileFailure::EmissionFailed {
             stage: CompileEmitStage::InterfaceEmission,
             diagnostics: vec![Diagnostic::new(
-                "interface-write-failed",
-                format!("failed to write temporary interface artifact: {error}"),
+                "interface-invalid-package",
+                "cannot emit an authoritative interface for a package with type errors",
             )],
         });
     }
-    if let Err(error) = std::fs::rename(&temp_path, &interface_path) {
-        let cleanup = std::fs::remove_file(&temp_path);
-        if cleanup.is_err() {
-            // Ignore cleanup failures; keep the primary error as authoritative.
+    let dir = artifact_directory(package, args)?;
+    let staging = tempfile::tempdir_in(&dir).map_err(CompileFailure::ArtifactStorage)?;
+    let path = staging.path().join("module.ginif");
+    std::fs::write(&path, package.public_interface().canonical_bytes())
+        .map_err(CompileFailure::ArtifactStorage)?;
+    publish_output(&path, &dir.join("module.ginif"), args)
+}
+
+fn artifact_directory(package: &CheckedPackage, args: &Args) -> Result<PathBuf, CompileFailure> {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    static COMPILER: std::sync::OnceLock<Result<Vec<u8>, String>> = std::sync::OnceLock::new();
+    let compiler = COMPILER
+        .get_or_init(|| {
+            use std::io::Read;
+            let mut file = std::fs::File::open(std::env::current_exe().map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+            let mut hash = Sha256::new();
+            let mut buffer = [0u8; 65536];
+            loop {
+                let n = file.read(&mut buffer).map_err(|e| e.to_string())?;
+                if n == 0 {
+                    break;
+                }
+                hash.update(&buffer[..n]);
+            }
+            Ok(hash.finalize().to_vec())
+        })
+        .as_ref()
+        .map_err(|e| CompileFailure::ArtifactStorage(std::io::Error::other(e.clone())))?;
+    hash.update(compiler);
+    hash.update(package.public_interface().canonical_bytes());
+    let mut files: Vec<_> = package.files().iter().collect();
+    files.sort_by_key(|file| file.path());
+    let mut manifests = std::collections::BTreeSet::new();
+    for file in files {
+        if let Some((_, root)) = FlaskConfig::find_package_config(file.path()) {
+            manifests.insert(root.join(flask::PACKAGE_CONFIG_NAME));
         }
-        return Err(CompileFailure::EmissionFailed {
-            stage: CompileEmitStage::InterfaceEmission,
-            diagnostics: vec![Diagnostic::new(
-                "interface-write-failed",
-                format!("failed to publish interface artifact: {error}"),
-            )],
-        });
+        for bytes in [
+            file.path().as_os_str().as_encoded_bytes(),
+            file.source().as_bytes(),
+        ] {
+            hash.update((bytes.len() as u64).to_le_bytes());
+            hash.update(bytes);
+        }
     }
+    for manifest in manifests {
+        let bytes = std::fs::read(manifest).map_err(CompileFailure::ArtifactStorage)?;
+        hash.update((bytes.len() as u64).to_le_bytes());
+        hash.update(bytes);
+    }
+    hash.update([u8::from(args.fast_llvm || GinCompiler::fast_llvm_enabled())]);
+    let home = args
+        .gin_home
+        .clone()
+        .map(Ok)
+        .unwrap_or_else(flask::GinHome::discover)
+        .map_err(CompileFailure::ArtifactStorage)?;
+    let dir = home
+        .artifacts(
+            &args.input,
+            &hash.finalize(),
+            args.profile.as_str(),
+            package.target().triple_raw().unwrap_or("library"),
+        )
+        .map_err(CompileFailure::ArtifactStorage)?;
+    std::fs::create_dir_all(&dir).map_err(CompileFailure::ArtifactStorage)?;
+    Ok(dir)
+}
 
-    println!("Wrote interface artifact {}", interface_path.display());
-    Ok(Some(interface_path))
+fn publish_output(
+    staged: &Path,
+    cached: &Path,
+    args: &Args,
+) -> Result<Option<PathBuf>, CompileFailure> {
+    std::fs::rename(staged, cached).map_err(CompileFailure::ArtifactStorage)?;
+    let output = if let Some(export) = &args.output {
+        if export != cached {
+            let parent = export
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            std::fs::create_dir_all(parent).map_err(CompileFailure::ArtifactStorage)?;
+            let tmp =
+                tempfile::NamedTempFile::new_in(parent).map_err(CompileFailure::ArtifactStorage)?;
+            std::fs::copy(cached, tmp.path()).map_err(CompileFailure::ArtifactStorage)?;
+            tmp.persist(export)
+                .map_err(|e| CompileFailure::ArtifactStorage(e.error))?;
+        }
+        export.clone()
+    } else {
+        cached.to_path_buf()
+    };
+    Ok(Some(output))
 }

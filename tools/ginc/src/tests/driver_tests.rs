@@ -171,7 +171,7 @@ fn driver_reuses_cached_imports_between_checks() {
     fs::write(core.join("flask.jsonc"), "{}").unwrap();
     let main_path = root.join("main.gin");
     let int_path = core.join("int.gin");
-    let main_source = "use core.Int\n";
+    let main_source = "use core Int\n";
     fs::write(&main_path, main_source).unwrap();
     fs::write(&int_path, "Int is Unit\n").unwrap();
     let dependencies = HashMap::from([("core".to_string(), core)]);
@@ -229,4 +229,85 @@ fn lowering_builds_one_module_from_every_checked_file() {
     assert!(mlir.contains("@provider"));
     assert!(mlir.contains("@consumer"));
     assert_eq!(lowered.diagnostics.len(), 2);
+}
+
+#[test]
+fn unresolved_builder_chain_is_lowered_once_and_preserves_independent_errors() {
+    for length in [2, 8, 16] {
+        let chain = ".missing_step('argument')".repeat(length);
+        let source = format!(
+            "Builder has value Int\nstart() Builder: Builder(value: 1)\nresult: start(){chain}\nother: independent_missing\n"
+        );
+        let package = check(
+            &mut CompilerDriver::default(),
+            "/virtual/chain.gin",
+            vec![("/virtual/chain.gin", &source)],
+        );
+        let file = package.primary_file();
+        assert!(
+            !package.has_front_end_flaws(),
+            "{:?}",
+            file.front_end_diagnostics()
+        );
+        let errors = file.typecheck_diagnostics();
+        assert_eq!(
+            errors
+                .iter()
+                .filter(|d| d.arg("name") == Some("missing_step"))
+                .count(),
+            length,
+            "{errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|d| d.arg("name") == Some("independent_missing")),
+            "{errors:?}"
+        );
+        assert!(
+            !errors
+                .iter()
+                .any(|d| d.code.slug() == "type-text-literal-requires-context"),
+            "{errors:?}"
+        );
+        assert!(file.typed().exprs.kind.len() < length * 4 + 20);
+        for error in errors
+            .iter()
+            .filter(|d| d.arg("name") == Some("missing_step"))
+        {
+            assert_eq!(
+                &source[error.span.start()..error.span.end()],
+                "missing_step"
+            );
+        }
+    }
+}
+
+#[test]
+fn valid_builder_chain_retains_receiver_types_and_argument_diagnostics() {
+    let source = "Builder has value Int\nBuilder.new() Builder: Builder(value: 1)\nBuilder.step(self) Builder: Builder(value: self.value)\nresult: Builder.new().step().step()\n";
+    let package = check(
+        &mut CompilerDriver::default(),
+        "/virtual/valid.gin",
+        vec![("/virtual/valid.gin", source)],
+    );
+    assert!(
+        !package.has_typecheck_flaws(),
+        "{:?}",
+        package.primary_file().typecheck_diagnostics()
+    );
+    let source = "result: missing_function(missing_argument, 'text')\nother: 'needs context'\n";
+    let package = check(
+        &mut CompilerDriver::default(),
+        "/virtual/invalid.gin",
+        vec![("/virtual/invalid.gin", source)],
+    );
+    let errors = package.primary_file().typecheck_diagnostics();
+    for name in ["missing_function", "missing_argument"] {
+        assert!(
+            errors.iter().any(|d| d.arg("name") == Some(name)),
+            "{errors:?}"
+        );
+    }
+    assert_eq!(errors.len(), 2, "{errors:?}");
 }

@@ -17,7 +17,7 @@ struct Workload {
 }
 
 fn expression_heavy_source() -> String {
-    let mut source = String::from("Int is in 0...10000\nvalues := [");
+    let mut source = String::from("Int is in 0 to 10000\nvalues := [");
     for value in 0..500 {
         if value != 0 {
             source.push_str(", ");
@@ -29,7 +29,7 @@ fn expression_heavy_source() -> String {
 }
 
 fn bind_heavy_source() -> String {
-    let mut source = String::from("Int is in 0...10000\n");
+    let mut source = String::from("Int is in 0 to 10000\n");
     for value in 0..200 {
         source.push_str(&format!("value{value} := {value}\n"));
     }
@@ -42,7 +42,7 @@ fn bind_heavy_source() -> String {
 fn declaration_heavy_source() -> String {
     let mut source = String::new();
     for index in 0..200 {
-        source.push_str(&format!("Range{index} is in {index}...{}\n", index + 1000));
+        source.push_str(&format!("Range{index} is in {index} to {}\n", index + 1000));
     }
     for index in 0..100 {
         source.push_str(&format!(
@@ -55,7 +55,7 @@ fn declaration_heavy_source() -> String {
 fn range_declarations(count: usize) -> String {
     let mut source = String::new();
     for index in 0..count {
-        source.push_str(&format!("Range{index} is in {index}...{}\n", index + 1000));
+        source.push_str(&format!("Range{index} is in {index} to {}\n", index + 1000));
     }
     source
 }
@@ -190,7 +190,14 @@ fn report_ast_locality_baseline() {
         let parsed = TokenCursor::parse_source(&workload.source);
         let typed = transform(&parsed, FileId(0), &TransformCtx::new());
         let typed_exprs = typed.exprs.len();
-        let flaws = typed.exprs.flaws.iter().map(Vec::len).sum::<usize>()
+        let flaws = typed
+            .exprs
+            .facts
+            .semantic_facts
+            .flaws
+            .iter()
+            .map(Vec::len)
+            .sum::<usize>()
             + typed.warnings.len()
             + typed.declaration_flaws.len()
             + typed.parse_warnings.len();

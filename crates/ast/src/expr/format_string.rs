@@ -4,7 +4,7 @@ use crate::span::SpanId;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FormatPart {
-    Text(String),
+    Text(String, SpanId),
     Expr(Box<Typed<Expr>>, SpanId),
 }
 

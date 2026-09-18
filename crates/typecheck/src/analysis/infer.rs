@@ -50,7 +50,7 @@ pub trait TyInfer {
 }
 
 impl TyInfer for Literal {
-    fn infer_ty(&self, env: &TyInferEnv) -> Ty {
+    fn infer_ty(&self, _env: &TyInferEnv) -> Ty {
         match self {
             Literal::Int(_) | Literal::Number(_) => {
                 Ty::UnresolvedLiteral(ast::ty::LiteralKind::Integer)
@@ -58,18 +58,13 @@ impl TyInfer for Literal {
             Literal::Float(HashFloat(f)) => Ty::Float {
                 value: Some(HashFloat(*f)),
             },
-            Literal::String(_) => env
-                .tag_types
-                .get(&Intern::<String>::from_ref("String"))
-                .cloned()
-                .unwrap_or(Ty::Opaque(Intern::<String>::from_ref("String"))),
+            Literal::String(text) => Ty::Array {
+                elem: Box::new(Ty::u8()),
+                size: ast::NormalExpr::from(text.len() as i128),
+            },
         }
     }
 }
-
-#[cfg(test)]
-#[path = "../../tests/analysis_infer_tests.rs"]
-mod tests;
 
 impl TyInfer for Binary {
     fn infer_ty(&self, env: &TyInferEnv) -> Ty {
@@ -215,11 +210,37 @@ impl TyInfer for Bind {
         };
         match &self.value {
             BindValue::Expr(expr) => expr.infer_ty(&bind_env),
-            BindValue::Body { ret, .. } => match &ret.value {
-                Some(expr) => expr.infer_ty(&bind_env),
-                None => Ty::Unit,
-            },
-            BindValue::Extern | BindValue::Unassigned => {
+            BindValue::Body { ret, .. } => {
+                if !ret.values.is_empty() {
+                    let types = ret
+                        .values
+                        .iter()
+                        .map(|expr| expr.infer_ty(&bind_env))
+                        .collect::<Vec<_>>();
+                    if self.named_results.len() == types.len() {
+                        match types.as_slice() {
+                            [ty] => ty.clone(),
+                            _ => Ty::ResultRow(
+                                self.named_results
+                                    .iter()
+                                    .zip(types)
+                                    .map(|(result, ty)| ast::ty::ResultElement {
+                                        name: result.name,
+                                        ty: Box::new(ty),
+                                    })
+                                    .collect(),
+                            ),
+                        }
+                    } else {
+                        Ty::Opaque(Intern::from_ref("unnamed-multiple-results"))
+                    }
+                } else {
+                    ret.values
+                        .first()
+                        .map_or(Ty::Unit, |expr| expr.infer_ty(&bind_env))
+                }
+            }
+            BindValue::Unassigned => {
                 // For unassigned binds, return unit as placeholder.
                 // The type is determined by the return_tag annotation.
                 Ty::Unit
@@ -276,6 +297,7 @@ impl TyInfer for WhenExpr {
 impl TyInfer for Expr {
     fn infer_ty(&self, env: &TyInferEnv) -> Ty {
         match self {
+            Expr::Asm { .. } => Ty::Opaque(Intern::<String>::from_ref("assembly-result")),
             Expr::Lit(lit) => lit.infer_ty(env),
             Expr::Binary(bin) => bin.infer_ty(env),
             Expr::FnCall(call) => call.infer_ty(env),
@@ -284,11 +306,12 @@ impl TyInfer for Expr {
             Expr::When(w) => w.infer_ty(env),
 
             Expr::AnonymousTag(name) => Ty::Opaque(*name),
-            Expr::FormatString(_) => Ty::Opaque(Intern::<String>::from_ref("format_string")),
+            Expr::Register(inner) => inner.value.infer_ty(env),
+            Expr::FormatString(_) => Ty::Unit,
             Expr::Loop(_) => Ty::Unit,
             Expr::If(_) => Ty::Unit,
             Expr::Range(_) => Ty::Opaque(Intern::<String>::from_ref("range_expr")),
-            Expr::TupleSet { value, .. } => value.infer_ty(env),
+            Expr::AggregateSet { value, .. } => value.infer_ty(env),
             Expr::BufSet { value, .. } => value.infer_ty(env),
             Expr::Cast { ty, .. } => ty.head_name().map(Ty::Opaque).unwrap_or_else(|| match ty {
                 ast::TypeReference::Unit => Ty::Unit,
@@ -297,6 +320,7 @@ impl TyInfer for Expr {
                 },
                 _ => unreachable!(),
             }),
+            Expr::Target => Ty::Opaque(Intern::<String>::from_ref("Target")),
             Expr::TargetQuery { kind, operand } => Ty::AnonymousInteger {
                 validity: ast::integer::IntegerValidity::new(
                     ast::integer::IntegerDomain::symbolic(ast::NormalExpr::TargetQuery {
@@ -311,7 +335,7 @@ impl TyInfer for Expr {
                 .get_type(&Intern::<String>::from_ref("self"))
                 .unwrap_or_else(|| Ty::Opaque(Intern::<String>::from_ref("Self"))),
 
-            Expr::TupleAlloc { init, size } => {
+            Expr::FixedArrayAlloc { init, size } => {
                 let elem = init.infer_ty(env);
                 let size = as_size_normal_expr_with_arithmetic(&size.value).unwrap_or_else(|| {
                     NormalExpr::Var(Intern::new(format!(
@@ -325,25 +349,30 @@ impl TyInfer for Expr {
                 }
             }
 
-            Expr::TupleGet { base, index } => match base.infer_ty(env) {
+            Expr::AggregateGet { base, index } => match base.infer_ty(env) {
                 Ty::Array { elem, .. } => *elem,
-                Ty::Tuple(fields) => fields
+                Ty::Record { fields, .. } => fields
                     .into_iter()
                     .nth(*index)
-                    .unwrap_or(Ty::Opaque(Intern::from_ref("unresolved-tuple-element"))),
+                    .map(|(_, field)| *field)
+                    .unwrap_or(Ty::Opaque(Intern::from_ref("unresolved-value-row-element"))),
+                Ty::ResultRow(fields) => fields
+                    .into_iter()
+                    .nth(*index)
+                    .map(|field| *field.ty)
+                    .unwrap_or(Ty::Opaque(Intern::from_ref(
+                        "unresolved-result-row-element",
+                    ))),
                 _ => Ty::Opaque(Intern::from_ref("unresolved-array-element")),
             },
 
             Expr::Destructure { value, .. } => value.infer_ty(env),
             Expr::RecordSet { value, .. } => value.infer_ty(env),
-            Expr::RecordGet { base, field } => match base.infer_ty(env) {
-                Ty::Record { fields, .. } => fields
-                    .iter()
-                    .find(|(n, _)| n == field)
-                    .map(|(_, t)| t.as_ref().clone())
-                    .unwrap_or_else(|| Ty::Opaque(*field)),
-                _ => Ty::Opaque(*field),
-            },
+            Expr::RecordGet { base, field } => base
+                .infer_ty(env)
+                .named_field(*field)
+                .map(|(_, ty)| ty)
+                .unwrap_or_else(|| Ty::Opaque(*field)),
 
             Expr::BufGet { buf, .. } => {
                 let buffer_ty = buf.infer_ty(env);
@@ -367,15 +396,12 @@ impl TyInfer for Expr {
                 mutable: *mutable,
             },
 
-            Expr::ConsumeArg(inner) => inner.infer_ty(env),
-
-            Expr::Eat(inner) => inner.infer_ty(env),
-
-            Expr::Deref(inner) => inner
-                .infer_ty(env)
-                .pointee_ty()
-                .cloned()
-                .unwrap_or(Ty::Unit),
+            Expr::Deref(inner) => {
+                let ty = inner.infer_ty(env);
+                crate::ty::reference_pointee_for_type(&ty, None)
+                    .or_else(|| ty.pointee_ty().cloned())
+                    .unwrap_or(Ty::Unit)
+            }
 
             Expr::Negate(inner) => match inner.infer_ty(env) {
                 Ty::Float {
@@ -386,12 +412,54 @@ impl TyInfer for Expr {
                 other => other,
             },
 
-            Expr::RecordLit(fields) => {
-                let tys = fields.iter().map(|(_, e)| e.infer_ty(env)).collect();
-                Ty::Tuple(tys)
+            Expr::RecordLit(fields) => Ty::Record {
+                name: Intern::from_ref("Record"),
+                fields: fields
+                    .iter()
+                    .map(|(name, expr)| (*name, Box::new(expr.infer_ty(env))))
+                    .collect(),
+                resolved_params: None,
+            },
+            Expr::Invalid(_) => Ty::Opaque(Intern::from_ref("invalid-expression")),
+            Expr::ResultValues(_) => Ty::Opaque(Intern::from_ref("result-values")),
+            Expr::SequenceLiteral(ast::SequenceLiteral::Elements(elems)) => Ty::Array {
+                elem: Box::new(elems.first().map(|e| e.infer_ty(env)).unwrap_or(Ty::Unit)),
+                size: NormalExpr::from(elems.len() as i128),
+            },
+            Expr::SequenceLiteral(ast::SequenceLiteral::Repeat { seed, count }) => {
+                let length =
+                    as_size_normal_expr_with_arithmetic(&count.value).unwrap_or_else(|| {
+                        NormalExpr::Var(Intern::new(format!(
+                            "_unsupported_sequence_length_{:?}",
+                            count.span_id
+                        )))
+                    });
+                let element = seed.infer_ty(env);
+                let literal_length = match &count.value {
+                    Expr::Lit(ast::Literal::Number(value)) => Some(*value as u64),
+                    Expr::Lit(ast::Literal::Int(value)) => ast::integer::to_u64(*value),
+                    _ => None,
+                };
+                if let Some(length) = literal_length {
+                    Ty::Array {
+                        elem: Box::new(element),
+                        size: NormalExpr::from(length as i128),
+                    }
+                } else {
+                    Ty::UnresolvedSequence {
+                        element: Some(Box::new(element)),
+                        length,
+                    }
+                }
             }
-            Expr::TupleLit(elems) => Ty::Tuple(elems.iter().map(|e| e.infer_ty(env)).collect()),
-            Expr::List(_) => Ty::Opaque(Intern::<String>::from_ref("List")),
+            Expr::ArrayLit(elems) => Ty::Array {
+                elem: Box::new(elems.first().map(|e| e.infer_ty(env)).unwrap_or(Ty::Unit)),
+                size: NormalExpr::from(elems.len() as i128),
+            },
+            Expr::List(items) => Ty::UnresolvedSequence {
+                element: items.first().map(|item| Box::new(item.infer_ty(env))),
+                length: NormalExpr::from(items.len() as i128),
+            },
         }
     }
 }
@@ -413,6 +481,97 @@ fn as_size_normal_expr_with_arithmetic(expr: &Expr) -> Option<NormalExpr> {
             })
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ast::{BindValue, SequenceLiteral};
+    use parser::cursor::TokenCursor;
+
+    fn infer_expression(source: &str) -> Ty {
+        let parsed = TokenCursor::parse_source(&format!("value: {source}\n"));
+        let bind = parsed.defs.get(&Intern::from_ref("value")).expect("value");
+        let BindValue::Expr(expr) = &bind.value else {
+            panic!("value must have an expression body");
+        };
+        let tags = HashMap::new();
+        let returns = HashMap::new();
+        let locals = HashMap::new();
+        expr.infer_ty(&TyInferEnv {
+            tag_types: &tags,
+            fn_return_types: &returns,
+            locals: &locals,
+            tag_params: None,
+        })
+    }
+
+    #[test]
+    fn sequence_inference_preserves_element_and_length_shape() {
+        assert_eq!(
+            infer_expression("[]"),
+            Ty::Array {
+                elem: Box::new(Ty::Unit),
+                size: NormalExpr::from(0)
+            }
+        );
+        assert_eq!(
+            infer_expression("[1, 2]"),
+            Ty::Array {
+                elem: Box::new(Ty::UnresolvedLiteral(ast::ty::LiteralKind::Integer)),
+                size: NormalExpr::from(2)
+            }
+        );
+        assert_eq!(
+            infer_expression("[[1], [2]]"),
+            Ty::Array {
+                elem: Box::new(Ty::Array {
+                    elem: Box::new(Ty::UnresolvedLiteral(ast::ty::LiteralKind::Integer)),
+                    size: NormalExpr::from(1),
+                }),
+                size: NormalExpr::from(2),
+            }
+        );
+        assert_eq!(
+            infer_expression("[1; count]"),
+            Ty::UnresolvedSequence {
+                element: Some(Box::new(Ty::UnresolvedLiteral(
+                    ast::ty::LiteralKind::Integer,
+                ))),
+                length: NormalExpr::Var(Intern::from_ref("count")),
+            }
+        );
+
+        let parsed = TokenCursor::parse_source("value: [1; count]\n");
+        let BindValue::Expr(expr) = &parsed.defs[&Intern::from_ref("value")].value else {
+            panic!("value must have an expression body");
+        };
+        assert!(matches!(
+            &expr.value,
+            Expr::SequenceLiteral(SequenceLiteral::Repeat { .. })
+        ));
+    }
+
+    #[test]
+    fn compiler_sequence_values_do_not_infer_a_nominal_list() {
+        let tags = HashMap::new();
+        let returns = HashMap::new();
+        let locals = HashMap::new();
+        let inferred = Expr::List(Vec::new()).infer_ty(&TyInferEnv {
+            tag_types: &tags,
+            fn_return_types: &returns,
+            locals: &locals,
+            tag_params: None,
+        });
+
+        assert_eq!(
+            inferred,
+            Ty::UnresolvedSequence {
+                element: None,
+                length: NormalExpr::from(0),
+            }
+        );
     }
 }
 

@@ -2,6 +2,7 @@ use indexmap::IndexMap;
 use internment::Intern;
 
 use crate::GroupPath;
+use crate::ProvidedTrait;
 use crate::expr::{Expr, Typed};
 use crate::span::SpanId;
 use crate::span::Spanned;
@@ -10,10 +11,10 @@ use crate::ty_state::TyState;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ParamConvention {
     #[default]
+    Terminal,
     Own,
     Observe,
     Mutate,
-    Consume,
 }
 
 /// Compatibility view derived from grouped parameter reference types.
@@ -37,11 +38,29 @@ pub struct Parameter {
     pub kind: ParameterKind,
     /// Span for the declaration identifier.
     pub name_span: SpanId,
+    pub constraints: Vec<ProvidedTrait>,
 }
 
 impl Parameter {
     pub fn new(name_span: SpanId, kind: ParameterKind) -> Self {
-        Self { kind, name_span }
+        Self {
+            kind,
+            name_span,
+            constraints: Vec::new(),
+        }
+    }
+
+    pub fn with_constraints(mut self, constraints: Vec<ProvidedTrait>) -> Self {
+        self.constraints = constraints;
+        self
+    }
+
+    pub fn constraints_surface(&self) -> String {
+        self.constraints
+            .iter()
+            .map(|constraint| constraint.trait_name.as_str())
+            .collect::<Vec<_>>()
+            .join(" and ")
     }
 }
 

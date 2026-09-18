@@ -1,7 +1,7 @@
 use crate::token::{LexContext, MAX_INDENT_DEPTH, Token};
 use diagnostic::Diagnostic;
 use i256::I256;
-use memchr::{memchr, memchr2, memchr3};
+use memchr::{memchr, memchr2};
 use span::{Span, SpanId, SpanTable};
 
 struct FormatStringState<'src> {
@@ -200,36 +200,7 @@ impl<'src> Lexer<'src> {
         let text = self.slice_from(start);
         let range = self.current_span(start);
         let span = self.insert_span(range);
-        let tok = match text {
-            "extern" => Token::Extern,
-            "continue" => Token::Continue,
-            "private" => Token::Private,
-            "return" => Token::Return,
-            "break" => Token::Break,
-            "loop" => Token::Loop,
-            "ref" => Token::Ref,
-            "mut" => Token::Mut,
-            "deref" => Token::Deref,
-            "eat" => Token::Eat,
-            "then" => Token::Then,
-            "thus" => Token::Thus,
-            "when" => Token::When,
-            "else" => Token::Else,
-            "self" => Token::SelfInstance,
-            "for" => Token::For,
-            "while" => Token::While,
-            "use" => Token::Use,
-            "has" => Token::Has,
-            "and" => Token::And,
-            "as" => Token::As,
-            "if" => Token::If,
-            "in" => Token::In,
-            "is" => Token::Is,
-            "of" => Token::Of,
-            "not" => Token::Not,
-            "or" => Token::Or,
-            _ => Token::Id(text),
-        };
+        let tok = Token::from_keyword(text).unwrap_or(Token::Id(text));
         (tok, span)
     }
 
@@ -245,11 +216,7 @@ impl<'src> Lexer<'src> {
         let range = self.current_span(start);
         let span = self.insert_span(range);
 
-        if text == "Self" {
-            (Token::SelfTag, span)
-        } else {
-            (Token::Tag(text), span)
-        }
+        (Token::from_keyword(text).unwrap_or(Token::Tag(text)), span)
     }
 
     fn parse_float_bytes(bytes: &[u8]) -> Option<f64> {
@@ -495,7 +462,7 @@ impl<'src> Lexer<'src> {
             self.ensure_line_end();
 
             let special = if self.pos < self.line_end {
-                memchr3(b'"', b'(', b'\\', &bytes[self.pos..self.line_end])
+                memchr2(b'"', b'\\', &bytes[self.pos..self.line_end])
             } else {
                 None
             };
@@ -521,7 +488,12 @@ impl<'src> Lexer<'src> {
                 Some(b'\\') => {
                     let esc_start = self.pos;
                     self.pos += 1;
-                    if self.advance().is_some() {
+                    if self.peek() == Some(b'(') {
+                        self.pos += 1;
+                        let span = self.insert_span(esc_start..self.pos);
+                        tokens.push((Token::FormatInterpStart, span));
+                        self.lex_format_interp(&mut tokens);
+                    } else if self.advance().is_some() {
                         let span = self.insert_span(esc_start..self.pos);
                         tokens.push((Token::FormatStringText(self.slice_from(esc_start)), span));
                     }

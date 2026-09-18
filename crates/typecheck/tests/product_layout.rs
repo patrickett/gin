@@ -13,10 +13,10 @@ fn check(source: &str) -> TypedFileAst {
 }
 
 #[test]
-fn library_record_and_nested_tuple_use_product_representation() {
+fn library_record_and_nested_value_row_use_product_representation() {
     let typed = check(
-        "Byte is in 0...255\n\
-         Word is in 0...18446744073709551615\n\
+        "Byte is in 0 to 255\n\
+         Word is in 0 to 18446744073709551615\n\
          Inner has item Byte\n\
          Outer has first Inner, second Word\n",
     );
@@ -37,7 +37,7 @@ fn library_record_and_nested_tuple_use_product_representation() {
 #[test]
 fn equal_product_representations_keep_record_identity() {
     let typed = check(
-        "Byte is in 0...255\n\
+        "Byte is in 0 to 255\n\
          Left has value Byte\n\
          Right has value Byte\n",
     );
@@ -53,8 +53,8 @@ fn equal_product_representations_keep_record_identity() {
 #[test]
 fn product_layout_is_padded_in_declaration_order_and_pointer_stride_uses_it() {
     let typed = check(
-        "Byte is in 0...255\n\
-         Word is in 0...18446744073709551615\n\
+        "Byte is in 0 to 255\n\
+         Word is in 0 to 18446744073709551615\n\
          Padded has first Byte, second Word\n",
     );
     let padded = &typed.tags[&TagId(Intern::from_ref("Padded"))].resolved_ty;

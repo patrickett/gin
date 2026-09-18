@@ -248,10 +248,9 @@ impl FileAst {
                     set.insert(m.flat_name());
                 }
             }
-            ImportSource::LocalMember(m) => {
-                set.insert(m.member.alias.unwrap_or(m.member.export));
-            }
-            ImportSource::Package(_) | ImportSource::Local(_, _) => {
+            ImportSource::Package(_)
+            | ImportSource::Local(_, _)
+            | ImportSource::LocalFile(_, _) => {
                 if let Some(alias) = mi.alias {
                     set.insert(alias);
                 } else {
@@ -413,13 +412,6 @@ impl FileAst {
                             return Some(mspan.start()..mspan.end());
                         }
                     }
-                    crate::ImportSource::LocalMember(m) => {
-                        let imported = m.member.alias.unwrap_or(m.member.export);
-                        if imported == key {
-                            let mspan = span_table.get(m.member.span);
-                            return Some(mspan.start()..mspan.end());
-                        }
-                    }
                     _ => {
                         let imported = mi
                             .alias
@@ -479,12 +471,8 @@ impl FileAst {
                 Self::collect_refs_pattern(&head.value, name, span_table, out);
                 Self::collect_refs_pattern(&tail.value, name, span_table, out);
             }
-            crate::Pattern::Tuple(elems) => {
-                for elem in elems {
-                    Self::collect_refs_pattern(&elem.value, name, span_table, out);
-                }
-            }
-            crate::Pattern::Nominal(..)
+            crate::Pattern::Invalid
+            | crate::Pattern::Nominal(..)
             | crate::Pattern::Qualified(..)
             | crate::Pattern::Literal(..)
             | crate::Pattern::Unit
@@ -545,11 +533,10 @@ impl FileAst {
                 for e in exprs {
                     Self::collect_refs_expr(&e.value, name, span_table, out);
                 }
-                if let Some(r) = &ret.value {
+                for r in &ret.values {
                     Self::collect_refs_expr(&r.value, name, span_table, out);
                 }
             }
-            crate::BindValue::Extern => {}
             crate::BindValue::Unassigned => {}
         }
     }
@@ -681,14 +668,18 @@ impl FileAst {
                         return self.find_expr_at_byte(&e.value, e.span_id(), byte_pos);
                     }
                 }
-                if let Some(ret_expr) = &ret.value
-                    && st.contains(ret_expr.span_id(), byte_pos)
-                {
-                    return self.find_expr_at_byte(&ret_expr.value, ret_expr.span_id(), byte_pos);
+                for ret_expr in &ret.values {
+                    if st.contains(ret_expr.span_id(), byte_pos) {
+                        return self.find_expr_at_byte(
+                            &ret_expr.value,
+                            ret_expr.span_id(),
+                            byte_pos,
+                        );
+                    }
                 }
                 None
             }
-            BindValue::Extern | BindValue::Unassigned => None,
+            BindValue::Unassigned => None,
         }
     }
 }

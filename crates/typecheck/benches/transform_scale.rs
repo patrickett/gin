@@ -5,13 +5,21 @@ use typecheck::transform::{PackageTransformOptions, transform_package_with_share
 
 fn registry_source(file: usize, declarations: usize) -> String {
     (0..declarations)
-        .map(|index| format!("Type{file}_{index} is in 0...255\n"))
+        .map(|index| format!("Type{file}_{index} is in 0 to 255\n"))
         .collect()
 }
 
 fn operator_source(expressions: usize) -> String {
     let mut source = String::from(
-        "Word is in 0...255\n#intrinsic(BitsAdd)\nadd_bits(a Word, b Word) Word extern\n#operator(Add)\n#inline\nword_add(a Word, b Word) Word: add_bits(a, b)\n",
+        r#"Word is in 0 to 255
+add_bits(a Word, b Word) Word:
+    left is in 0 to 255: a
+    right is in 0 to 255: b
+return (left + right) as Word
+#infix('+')
+#inline
+word_add(a Word, b Word) Word: add_bits(a, b)
+"#,
     );
     for index in 0..expressions {
         source.push_str(&format!(
@@ -22,7 +30,7 @@ fn operator_source(expressions: usize) -> String {
 }
 
 fn alias_source(depth: usize, shared: usize) -> String {
-    let mut source = String::from("Base is in 0...255\nAlias0 is Base\n");
+    let mut source = String::from("Base is in 0 to 255\nAlias0 is Base\n");
     for index in 1..depth {
         source.push_str(&format!("Alias{index} is Alias{}\n", index - 1));
     }

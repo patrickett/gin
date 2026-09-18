@@ -200,7 +200,7 @@ impl TokenCursor<'_, '_> {
 
     fn parse_imports(&mut self) -> Vec<ast::Import> {
         let mut imports = Vec::new();
-        while self.is_at(&Token::Use) {
+        while self.is_at(&Token::Use) && !self.starts_reserved_binding() {
             self.advance_push();
             match self.parse_import() {
                 Some(import) => {
@@ -219,7 +219,7 @@ impl TokenCursor<'_, '_> {
     fn can_start_top_level_after_dedent(&self) -> bool {
         let start = self.skip_metadata_offset();
         match self.peek_at(start) {
-            Some(Token::Tag(_)) => true,
+            Some(Token::Tag(_) | Token::Pound) => true,
             Some(Token::Id(_)) => matches!(
                 self.peek_at(start + 1),
                 Some(Token::Colon)
@@ -256,6 +256,12 @@ impl TokenCursor<'_, '_> {
                 return self.parse_top_level_element(expr_parser);
             }
             return None;
+        }
+
+        if self.starts_reserved_binding() {
+            return self
+                .parse_bind(expr_parser)
+                .map(|bind| TopLevelValue::Bind(Box::new(bind)));
         }
 
         match self.peek() {
@@ -335,16 +341,17 @@ impl TokenCursor<'_, '_> {
                 }
                 Some(TopLevelValue::Expr(Box::new(expr)))
             }
-            Token::Pound => match self.peek_at(start_offset) {
-                Some(Token::Tag(_)) => self.dispatch_tag_element(expr_parser, start_offset),
-                Some(Token::Id(_)) => self
-                    .parse_bind(expr_parser)
-                    .map(|bind| TopLevelValue::Bind(Box::new(bind))),
-                _ => {
-                    let expr = expr_parser(self);
-                    Some(TopLevelValue::Expr(Box::new(expr)))
+            Token::Pound => {
+                let checkpoint = self.checkpoint();
+                if let Some(bind) = self.parse_bind(expr_parser) {
+                    return Some(TopLevelValue::Bind(Box::new(bind)));
                 }
-            },
+                self.rewind(checkpoint);
+                if let Some(decl) = self.parse_declare(expr_parser) {
+                    return Some(TopLevelValue::Tag(Box::new(decl)));
+                }
+                Some(TopLevelValue::Expr(Box::new(expr_parser(self))))
+            }
             _ => {
                 let expr = expr_parser(self);
                 Some(TopLevelValue::Expr(Box::new(expr)))
@@ -600,11 +607,13 @@ impl TokenCursor<'_, '_> {
                 let mut bind = Bind::new(bind_name, function.name_span, value)
                     .with_params(Some(function.params.as_ref().clone()))
                     .with_receiver_type(Some(Box::new(receiver.clone())))
-                    .with_doc(function.doc_comment.clone());
+                    .with_doc(function.doc_comment.clone())
+                    .with_attributes(function.attributes.clone());
                 bind.param_conventions = function.conventions.as_ref().clone();
                 bind.param_groups = function.param_groups.as_ref().clone();
                 bind.param_refinements = function.param_refinements.as_ref().clone();
                 bind.return_tag = function.return_ty.clone();
+                bind.anonymous_result_alternatives = function.anonymous_result_alternatives.clone();
                 bind.operator = if matches!(body, ast::HasMemberBody::Final(_)) {
                     ast::BindOperator::FreshImmutable
                 } else {
@@ -731,28 +740,7 @@ impl TokenCursor<'_, '_> {
                     offset += 1;
                 }
                 Some(Token::Pound) => {
-                    offset += 1;
-                    if matches!(self.peek_at(offset), Some(Token::BracketOpen)) {
-                        if let Some(after_group) = self.skip_balanced_brackets_offset(offset) {
-                            offset = after_group;
-                            continue;
-                        }
-                        return offset;
-                    }
-                    match self.peek_at(offset) {
-                        Some(Token::Id(_)) | Some(Token::Tag(_)) => offset += 1,
-                        _ => return offset,
-                    }
-                    if matches!(self.peek_at(offset), Some(Token::ParenOpen)) {
-                        if let Some(after_args) = self.skip_balanced_parens_offset(offset) {
-                            offset = after_args;
-                        } else {
-                            return offset;
-                        }
-                    }
-                    if matches!(self.peek_at(offset), Some(Token::Comma)) {
-                        offset += 1;
-                    }
+                    return offset;
                 }
                 _ => return offset,
             }
@@ -796,7 +784,7 @@ impl TokenCursor<'_, '_> {
             ast::Expr::Ref { inner, .. } | ast::Expr::TakePtr(inner) => {
                 Self::collect_expr_type_surface_tags(&inner.value, tags)
             }
-            ast::Expr::TupleLit(values) | ast::Expr::List(values) => {
+            ast::Expr::ArrayLit(values) | ast::Expr::List(values) => {
                 for value in values {
                     Self::collect_expr_type_surface_tags(&value.value, tags);
                 }

@@ -14,7 +14,7 @@ fn body(typed: &TypedFileAst, name: &str) -> ExprId {
     match &typed.defs[&DefId(Intern::new(name.to_string()))].body {
         BindBody::Expr(expr) => *expr,
         BindBody::Body { exprs, ret } => ret.or_else(|| exprs.last().copied()).unwrap(),
-        BindBody::Extern => panic!("expected body"),
+        BindBody::Unlowered => panic!("expected body"),
     }
 }
 
@@ -28,7 +28,7 @@ fn flaw_codes(typed: &TypedFileAst) -> Vec<String> {
 
 #[test]
 fn annotation_materializes_literal_with_nominal_identity_and_value() {
-    let typed = check("LibraryInt is in 0...255\nvalue LibraryInt: 42\n");
+    let typed = check("LibraryInt is in 0 to 255\nvalue LibraryInt: 42\n");
     let expr = body(&typed, "value");
     let declared = &typed.tags[&typecheck::TagId(Intern::from_ref("LibraryInt"))].resolved_ty;
 
@@ -37,7 +37,7 @@ fn annotation_materializes_literal_with_nominal_identity_and_value() {
         declared.type_id()
     );
     assert_eq!(
-        typed.exprs.const_value[expr.as_usize()],
+        typed.exprs.facts.const_facts.const_value[expr.as_usize()],
         Some(ConstValue::Int(42.into()))
     );
     assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
@@ -45,7 +45,7 @@ fn annotation_materializes_literal_with_nominal_identity_and_value() {
 
 #[test]
 fn nominal_integer_metadata_separates_validity_interpretation_and_representation() {
-    let typed = check("LibraryInt is in 250...260\n");
+    let typed = check("LibraryInt is in 250 to 260\n");
     let declared = &typed.tags[&typecheck::TagId(Intern::from_ref("LibraryInt"))].resolved_ty;
     let semantics = typed
         .type_registry
@@ -70,7 +70,7 @@ fn nominal_integer_metadata_separates_validity_interpretation_and_representation
 
 #[test]
 fn bits_attribute_selects_exact_width_without_changing_validity() {
-    let typed = check("#bits(16)\nWide is in 0...256\n");
+    let typed = check("#bits(16)\nWide is in 0 to 256\n");
     let declared = &typed.tags[&typecheck::TagId(Intern::from_ref("Wide"))].resolved_ty;
     let semantics = typed
         .type_registry
@@ -87,28 +87,28 @@ fn bits_attribute_selects_exact_width_without_changing_validity() {
 
 #[test]
 fn bits_attribute_rejects_width_smaller_than_validity() {
-    let typed = check("#bits(8)\nWide is in 0...256\n");
+    let typed = check("#bits(8)\nWide is in 0 to 256\n");
 
     assert!(flaw_codes(&typed).contains(&"type-integer-representation-too-small".to_string()));
 }
 
 #[test]
 fn bits_attribute_rejects_zero_width() {
-    let typed = check("#bits(0)\nZero is in 0...1\n");
+    let typed = check("#bits(0)\nZero is in 0 to 1\n");
 
     assert!(flaw_codes(&typed).contains(&"type-integer-representation-width-invalid".to_string()));
 }
 
 #[test]
 fn bits_attribute_rejects_runtime_width_above_128() {
-    let typed = check("#bits(129)\nWide is in 0...1\n");
+    let typed = check("#bits(129)\nWide is in 0 to 1\n");
 
     assert!(flaw_codes(&typed).contains(&"type-integer-runtime-width-unsupported".to_string()));
 }
 
 #[test]
 fn bits_attribute_rejects_unresolved_width() {
-    let typed = check("#bits(width)\nWide is in 0...1\n");
+    let typed = check("#bits(width)\nWide is in 0 to 1\n");
 
     assert!(flaw_codes(&typed).contains(&"type-integer-representation-width-invalid".to_string()));
 }
@@ -116,7 +116,7 @@ fn bits_attribute_rejects_unresolved_width() {
 #[test]
 fn occurrence_integer_knowledge_is_separate_from_nominal_type_identity() {
     let typed = check(
-        "Window is in 0...10\n\
+        "Window is in 0 to 10\n\
          known Window: 5\n\
          passthrough(value Window) Window: value\n",
     );
@@ -126,7 +126,7 @@ fn occurrence_integer_knowledge_is_separate_from_nominal_type_identity() {
 
     assert_eq!(typed.exprs.ty[known.as_usize()].type_id(), window.type_id());
     assert!(matches!(
-        &typed.exprs.integer_knowledge[known.as_usize()],
+        &typed.exprs.facts.semantic_facts.integer_knowledge[known.as_usize()],
         Some(ast::integer::IntegerKnowledge::Exact(
             ast::integer::CanonicalIntegerExpr::Value(value)
         )) if *value == i256::I256::from(5)
@@ -136,19 +136,21 @@ fn occurrence_integer_knowledge_is_separate_from_nominal_type_identity() {
         window.type_id()
     );
     assert_eq!(
-        typed.exprs.integer_knowledge[passthrough.as_usize()],
-        Some(ast::integer::IntegerKnowledge::Unknown)
+        typed.exprs.facts.semantic_facts.integer_knowledge[passthrough.as_usize()],
+        Some(ast::integer::IntegerKnowledge::Domain(
+            ast::integer::IntegerDomain::bounded(0.into(), 10.into()).unwrap()
+        ))
     );
 }
 
 #[test]
 fn positive_occurrence_knowledge_does_not_change_nominal_signed_interpretation() {
-    let typed = check("Signed is in -10...10\nvalue Signed: 5\n");
+    let typed = check("Signed is in -10 to 10\nvalue Signed: 5\n");
     let declared = &typed.tags[&typecheck::TagId(Intern::from_ref("Signed"))].resolved_ty;
     let expr = body(&typed, "value");
 
     assert!(matches!(
-        typed.exprs.integer_knowledge[expr.as_usize()],
+        typed.exprs.facts.semantic_facts.integer_knowledge[expr.as_usize()],
         Some(ast::integer::IntegerKnowledge::Exact(
             ast::integer::CanonicalIntegerExpr::Value(value)
         )) if value == 5.into()
@@ -173,11 +175,11 @@ fn compile_time_literal_above_128_bits_preserves_exact_value() {
     let expected = i256::I256::from_str_radix(literal, 10).expect("I256 literal");
 
     assert_eq!(
-        typed.exprs.const_value[expr.as_usize()],
+        typed.exprs.facts.const_facts.const_value[expr.as_usize()],
         Some(ConstValue::Int(expected))
     );
     assert!(matches!(
-        typed.exprs.integer_knowledge[expr.as_usize()],
+        typed.exprs.facts.semantic_facts.integer_knowledge[expr.as_usize()],
         Some(ast::integer::IntegerKnowledge::Exact(
             ast::integer::CanonicalIntegerExpr::Value(value)
         )) if value == expected
@@ -188,7 +190,7 @@ fn compile_time_literal_above_128_bits_preserves_exact_value() {
 fn runtime_materialization_of_wide_source_integer_is_rejected() {
     let literal = "1606938044258990275541962092341162602522202993782792835301376";
     let typed = check(&format!(
-        "Wide is in 0...{literal}\nvalue Wide: {literal}\n"
+        "Wide is in 0 to {literal}\nvalue Wide: {literal}\n"
     ));
 
     assert!(flaw_codes(&typed).contains(&"type-integer-runtime-width-unsupported".to_string()));
@@ -200,7 +202,7 @@ fn compile_time_addition_uses_mathematical_result_width() {
     let expr = body(&typed, "sum");
 
     assert!(matches!(
-        typed.exprs.integer_knowledge[expr.as_usize()],
+        typed.exprs.facts.semantic_facts.integer_knowledge[expr.as_usize()],
         Some(ast::integer::IntegerKnowledge::Exact(
             ast::integer::CanonicalIntegerExpr::Value(value)
         )) if value == 260.into()
@@ -214,7 +216,7 @@ fn compile_time_addition_uses_mathematical_result_width() {
 #[test]
 fn parameter_and_return_types_materialize_literals() {
     let typed = check(
-        "LibraryInt is in 0...255\n\
+        "LibraryInt is in 0 to 255\n\
          take(value LibraryInt) LibraryInt: value\n\
          result LibraryInt: take(42)\n\
          make() LibraryInt: 43\n",
@@ -251,7 +253,7 @@ fn unconstrained_literal_materializes_as_anonymous_integer() {
         Ty::AnonymousInteger { .. }
     ));
     assert_eq!(
-        typed.exprs.const_value[expr.as_usize()],
+        typed.exprs.facts.const_facts.const_value[expr.as_usize()],
         Some(ConstValue::Int(42.into()))
     );
 }
@@ -268,7 +270,7 @@ fn compile_time_integer_preserves_i256_value_beyond_runtime_width() {
 
     assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
     assert_eq!(
-        typed.exprs.const_value[expr.as_usize()],
+        typed.exprs.facts.const_facts.const_value[expr.as_usize()],
         Some(ConstValue::Int(i256::I256::from(1_u128 << 63)))
     );
     assert!(matches!(
@@ -279,27 +281,27 @@ fn compile_time_integer_preserves_i256_value_beyond_runtime_width() {
 
 #[test]
 fn bounds_and_negative_validity_are_diagnosed() {
-    let out_of_range = check("Tiny is in 0...255\nvalue Tiny: 256\n");
+    let out_of_range = check("Tiny is in 0 to 255\nvalue Tiny: 256\n");
     assert!(flaw_codes(&out_of_range).contains(&"type-integer-literal-out-of-range".to_string()));
 
-    let unsigned_negative = check("Tiny is in 0...255\nvalue Tiny: -1\n");
+    let unsigned_negative = check("Tiny is in 0 to 255\nvalue Tiny: -1\n");
     assert!(
         flaw_codes(&unsigned_negative)
             .contains(&"type-negative-integer-literal-rejected".to_string())
     );
 
-    let signed = check("SignedTiny is in -128...127\nvalue SignedTiny: -1\n");
+    let signed = check("SignedTiny is in -128 to 127\nvalue SignedTiny: -1\n");
     let expr = body(&signed, "value");
     assert_eq!(
-        signed.exprs.const_value[expr.as_usize()],
+        signed.exprs.facts.const_facts.const_value[expr.as_usize()],
         Some(ConstValue::Int((-1).into()))
     );
     assert!(signed.all_flaws().is_empty(), "{:?}", signed.all_flaws());
 
-    let empty = check("Invalid is in 10...2\nvalue Invalid: 1\n");
+    let empty = check("Invalid is in 10 to 2\nvalue Invalid: 1\n");
     assert!(
         flaw_codes(&empty).contains(&"type-integer-domain-empty".to_string()),
-        "expected empty-domain diagnostic for 10...2 declaration"
+        "expected empty-domain diagnostic for 10 to 2 declaration"
     );
 }
 
@@ -340,13 +342,13 @@ fn bounded_source_refinement_normalizes_strict_endpoints() {
 #[test]
 fn operator_operands_use_the_nominal_peer_or_anonymous_integer() {
     let typed = check(
-        "Word is in 0...255\n\
-         #intrinsic(BitsAdd)\n\
-         #operator(Add)\n\
-         plus(left Word, right Word) Word extern\n\
-         right(value Word) Word: value + 1\n\
-         left(value Word) Word: 1 + value\n\
-         both := 1 + 2\n",
+        r#"Word is in 0 to 255
+#infix('+')
+plus(left Word, right Word) Word: left
+right(value Word) Word: value + 1
+left(value Word) Word: 1 + value
+both := 1 + 2
+"#,
     );
     let expected = typed.tags[&typecheck::TagId(Intern::from_ref("Word"))]
         .resolved_ty

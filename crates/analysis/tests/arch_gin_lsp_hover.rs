@@ -1,9 +1,9 @@
-//! LSP-style hover for an `Architecture` const union (canonical gin_core arch fixture).
+//! LSP-style hover for an `Architecture` const union fixture.
 
 use analysis::PackageCache;
 use parser::query::SourceParseExt;
 use test_fixtures::TempPackage;
-use test_fixtures::gin_core::{BOOL_GIN, COPY_GIN, SIZED_GIN, TYPE_GIN};
+use test_fixtures::semantic_fixtures::{BOOL_GIN, COPY_GIN, SIZED_GIN, TYPE_GIN};
 
 const ARCH_GIN: &str = r#"--- Target CPU architectures for conditional compilation.
 Architecture is 'x86_64'

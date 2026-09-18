@@ -1,6 +1,6 @@
 //! Audit binder conventions for `:=` (constant) vs `:` (rebindable), comptime vs runtime.
 //!
-//! Sources are inlined to avoid depending on external `gin_core` files that are
+//! Sources are inlined to avoid depending on external library files that are
 //! still being worked on. Each inline snippet reproduces just enough of the
 //! original to exercise the convention being audited.
 
@@ -26,7 +26,7 @@ fn marker_copy_is_constant_comptime_fn() {
     let source = "\
 Type is Primitive(width BigInt, signed Bool) or Ptr(inner Type)
 Bool is True or False
-BigInt is in 0...18446744073709551615
+BigInt is in 0 to 18446744073709551615
 
 is_copy(x Type) Bool := when x is
     Primitive(_, _)     then True
@@ -42,7 +42,7 @@ fn marker_sized_helpers_are_constant_comptime_fns() {
     let source = "\
 Type is Primitive(width BigInt, signed Bool)
 Bool is True or False
-BigInt is in 0...18446744073709551615
+BigInt is in 0 to 18446744073709551615
 Size is Const(BigInt) or Dynamic
 
 compute_size(x Type) Size := when x is
@@ -85,7 +85,7 @@ true  := Bool.True
 #[test]
 fn io_write_runtime_write_spec_foldable() {
     let source = "\
-Int is in 0...4294967295
+Int is in 0 to 4294967295
 
 write_spec := 4
 

@@ -1,5 +1,6 @@
 use internment::Intern;
 use parser::cursor::TokenCursor;
+use parser::query::SourceParseExt;
 use typecheck::FileId;
 use typecheck::transform::{TransformCtx, transform as do_transform};
 use typecheck::{BindBody, DefId};
@@ -26,29 +27,42 @@ fn result_ty(source: &str, name: &str) -> ast::Ty {
 
 #[test]
 fn nominal_operator_missing_reports_nominal_operator_unavailable() {
-    let source = "
-Word is in 0...255
-Small is in 0...31
-#intrinsic(AddSmallWord)
-add_small_word(eat lhs Small, eat rhs Word) Word extern
-#operator(Add)
+    let source = r#"
+Word is in 0 to 255
+Small is in 0 to 31
+add_small_word(lhs own Small, rhs own Word) Word: rhs
+#infix('+')
 #inline
-right_only(lhs Small, rhs Word) Word: add_small_word(eat lhs, eat rhs)
+right_only(lhs Small, rhs Word) Word: add_small_word(lhs, rhs)
 left: Word: 1
 right: Word: 2
 bad_op: left + right
-";
+"#;
     let codes = flaws(source);
     assert!(codes.contains(&"type-nominal-operator-unavailable".to_string()));
 }
 
 #[test]
+fn infix_declaration_requires_exactly_two_value_parameters() {
+    let source = "
+Word is in 0 to 10
+#infix('+')
+unary(value Word) Word: value
+";
+    let codes = flaws(source);
+    assert!(
+        codes.contains(&"type-invalid-infix-declaration".to_string()),
+        "expected infix arity diagnostic, got {codes:?}"
+    );
+}
+
+#[test]
 fn nominal_comparison_dispatch_preserves_declared_result_and_owned_conventions() {
     let source = "
-Word is in 0...255
+Word is in 0 to 255
 Decision is Lower or NotLower
-#operator(Less)
-less(eat lhs Word, eat rhs Word) Decision: Decision.Lower
+#infix('<')
+less(lhs own Word, rhs own Word) Decision: Decision.Lower
 left Word: 1
 right Word: 2
 result: left < right
@@ -62,7 +76,15 @@ result: left < right
     assert_eq!(
         codes
             .iter()
-            .filter(|code| *code == "type-consume-required")
+            .filter(|code| *code == "type-owned-value-not-consumed")
+            .count(),
+        2,
+        "{codes:?}"
+    );
+    assert_eq!(
+        codes
+            .iter()
+            .filter(|code| *code == "type-owned-param-not-consumed")
             .count(),
         2,
         "{codes:?}"
@@ -72,10 +94,10 @@ result: left < right
 #[test]
 fn nominal_comparison_ref_conventions_observe_without_consuming() {
     let source = "
-Word is in 0...255
+Word is in 0 to 255
 Decision is Lower or NotLower
-#operator(Less)
-less(ref lhs Word, ref rhs Word) Decision: Decision.Lower
+#infix('<')
+less(lhs ref Word, rhs ref Word) Decision: Decision.Lower
 left Word: 1
 right Word: 2
 result: left < right
@@ -95,9 +117,9 @@ result: left < right
 #[test]
 fn nominal_left_operand_contextualizes_unresolved_literal_rhs() {
     let source = "
-Word is in 0...255
+Word is in 0 to 255
 Decision is Lower or NotLower
-#operator(Less)
+#infix('<')
 less(lhs Word, rhs Word) Decision: Decision.Lower
 left Word: 1
 result: left < 10
@@ -208,7 +230,7 @@ fn structural_less_records_true_and_false_evidence_on_the_value() {
         BindBody::Expr(expression) => *expression,
         _ => panic!("expected expression body"),
     };
-    let evidence = typed.exprs.result_evidence[body.as_usize()]
+    let evidence = typed.exprs.facts.semantic_facts.result_evidence[body.as_usize()]
         .as_ref()
         .expect("structural comparison evidence");
 
@@ -240,7 +262,7 @@ fn structural_less_records_true_and_false_evidence_on_the_value() {
 #[test]
 fn mixed_anonymous_nominal_comparison_is_rejected_in_both_directions() {
     let source = "
-Int is in 0...255
+Int is in 0 to 255
 value Int: 10
 from_named: 1 < value
 to_named: value < (2 + 0)
@@ -258,7 +280,7 @@ to_named: value < (2 + 0)
 
 #[test]
 fn anonymous_left_nominal_right_comparison_is_rejected() {
-    let codes = flaws("Int is in 0...255\nvalue Int: 10\nbad: 1 < value\n");
+    let codes = flaws("Int is in 0 to 255\nvalue Int: 10\nbad: 1 < value\n");
     assert!(
         codes
             .iter()
@@ -269,7 +291,7 @@ fn anonymous_left_nominal_right_comparison_is_rejected() {
 
 #[test]
 fn nominal_left_anonymous_right_comparison_is_rejected() {
-    let codes = flaws("Int is in 0...255\nvalue Int: 10\nbad: value < (1 + 1)\n");
+    let codes = flaws("Int is in 0 to 255\nvalue Int: 10\nbad: value < (1 + 1)\n");
     assert!(
         codes
             .iter()
@@ -281,11 +303,11 @@ fn nominal_left_anonymous_right_comparison_is_rejected() {
 #[test]
 fn is_in_range_pattern_bypasses_nominal_comparison_dispatch() {
     let source = "
-Word is in 0...255
+Word is in 0 to 255
 Decision is Inside or Outside
-#operator(Equal)
-equal(ref lhs Word, ref rhs Word) Decision: Decision.Inside
-classify(value Word) Word: when value is in 0...127 then 1
+#infix('=')
+equal(lhs ref Word, rhs ref Word) Decision: Decision.Inside
+classify(value Word) Word: when value is in 0 to 127 then 1
                               else 2
 ";
     let typed = do_transform(
@@ -315,4 +337,53 @@ classify(value Word) Word: when value is in 0...127 then 1
         typecheck::TypedExprKind::FnCall { target, .. }
             if target.0.as_str() == "equal"
     )));
+}
+
+#[test]
+fn shift_operator_can_return_an_explicit_error_union() {
+    let source = "
+Word is in 0 to 255
+ShiftResult is Value(value Word) or InvalidShift
+#infix('<<')
+shift(lhs Word, rhs Word) ShiftResult: InvalidShift
+left Word: 1
+right Word: 8
+result: left << right
+";
+    let codes = flaws(source);
+    assert!(
+        !codes.contains(&"type-invalid-operator-result".to_string()),
+        "{codes:?}"
+    );
+    assert!(
+        matches!(result_ty(source, "result"), ast::Ty::Named { name, .. } if name.as_str() == "ShiftResult")
+    );
+}
+
+#[test]
+fn self_in_numeric_methods_resolves_parameters_results_and_casts() {
+    let source = r#"
+Word is in 0 to 255
+Word has
+    #infix('+')
+    add(lhs Self, rhs Self) Self:
+        left is in 0 to 255: lhs
+        right is in 0 to 255: rhs
+    return (left + right) as Self
+    copy(value ref Self) Self:
+        bits is in 0 to 255: value
+    return bits as Self
+    replace(previous Self, next Self) Self:
+        discarded is in 0 to 255: previous
+    return next
+
+use_word(lhs Word, rhs Word) Word: lhs + rhs
+"#;
+    let parsed = source.parse_source_full();
+    assert!(parsed.symptoms.is_empty(), "{:?}", parsed.symptoms);
+    let codes = flaws(source);
+    assert!(codes.is_empty(), "{codes:?}");
+    assert!(
+        matches!(result_ty(source, "use_word"), ast::Ty::Named { name, .. } if name.as_str() == "Word")
+    );
 }

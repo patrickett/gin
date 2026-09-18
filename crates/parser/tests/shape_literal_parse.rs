@@ -12,7 +12,7 @@ use support::*;
 
 #[test]
 fn top_level_record_field_write_parses_as_record_set() {
-    let out = "Int is in 1...400\n\nCoord has x Int, y Int, z Int\np: Coord(x: 1, y: 2, z: 3)\np.x:: 10\n"
+    let out = "Int is in 1 to 400\n\nCoord has x Int, y Int, z Int\np: Coord(x: 1, y: 2, z: 3)\np.x:: 10\n"
         .parse_source_full();
     assert!(
         out.symptoms

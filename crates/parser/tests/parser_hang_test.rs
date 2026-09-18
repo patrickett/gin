@@ -225,7 +225,7 @@ fn bisect_bare_bind_with_unindented_if_then_another_bind() {
     // Also verifies `parse_source_full` reports no parse flaws on this input.
     let source = "Maybe(x) is Some(x) or None
 
-Int is in 1...400
+Int is in 1 to 400
 
 
 -- is_empty(v Maybe(x)) Bool: when v is None then True else False
@@ -327,7 +327,7 @@ fn doc_comment_survives_full_regression_fixture() {
     let src = "\
 Maybe(x) is Some(x) or None
 
-Int is in 1...400
+Int is in 1 to 400
 
 
 -- is_empty(v Maybe(x)) Bool: when v is None then True else False
@@ -485,7 +485,7 @@ fn interface_composition_uses_is_and() {
 
 #[test]
 fn composed_interface_accepts_qualified_method_body() {
-    let source = "TraitA has run(ref self) Int\nTraitB has stop(ref self) Int\nCombined has TraitA and TraitB\n    ordinary(ref self) Int: 0\n    TraitA.run(ref self) Int: 1\n";
+    let source = "TraitA has run(self ref) Int\nTraitB has stop(self ref) Int\nCombined has TraitA and TraitB\n    ordinary(self ref) Int: 0\n    TraitA.run(self ref) Int: 1\n";
     let ast = assert_handwritten_parses(source);
     let decl = ast
         .tags
@@ -521,7 +521,7 @@ fn composed_interface_accepts_qualified_method_body() {
 
 #[test]
 fn qualified_conflicting_methods_have_distinct_canonical_names() {
-    let source = "TraitA has run(ref self) Int\nTraitB has run(ref self) Int\nCombined has TraitA and TraitB\n    TraitA.run(ref self) Int: 1\n    TraitB.run(ref self) Int: 2\n";
+    let source = "TraitA has run(self ref) Int\nTraitB has run(self ref) Int\nCombined has TraitA and TraitB\n    TraitA.run(self ref) Int: 1\n    TraitB.run(self ref) Int: 2\n";
     let ast = assert_handwritten_parses(source);
 
     assert!(
@@ -620,7 +620,7 @@ fn partial_dangling_binary_op() {
 
 #[test]
 fn partial_dangling_range_op() {
-    assert_handwritten_parses("main:\n    r: 1...\nreturn 0\n");
+    assert_handwritten_parses("main:\n    r: 1 to\nreturn 0\n");
 }
 
 #[test]

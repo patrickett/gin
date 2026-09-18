@@ -9,9 +9,10 @@ use typecheck::transform::{
     transform_package_with_shared_context_and_package,
 };
 
-use crate::{ImportDependencyGraph, ParsedFile, ParsedModuleCache, resolve_imports_with_graph};
+use crate::{ImportDependencyGraph, ParsedFile, ParsedModuleCache, resolve_imports_with_home};
 
 pub struct PackageFrontEndOptions {
+    pub gin_home: Option<flask::GinHome>,
     pub compile_target: CompileTarget,
     pub transform: PackageTransformOptions,
     pub resolve_imports: bool,
@@ -34,7 +35,8 @@ pub fn run_package_front_end(
     options: PackageFrontEndOptions,
 ) -> PackageFrontEndOutput {
     let (mut files, cache, import_graph) = if options.resolve_imports {
-        let resolved = resolve_imports_with_graph(files, dependencies, cache);
+        let resolved =
+            resolve_imports_with_home(files, dependencies, cache, options.gin_home.as_ref());
         let mut files_by_path: HashMap<PathBuf, ParsedFile> = resolved
             .files
             .iter()

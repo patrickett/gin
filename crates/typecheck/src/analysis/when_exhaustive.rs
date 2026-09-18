@@ -5,7 +5,6 @@ use std::collections::HashSet;
 use crate::analysis::pattern::pattern_matches_public;
 use crate::ty::Ty;
 use crate::typed::TypedWhenArm;
-use ast::ConstValue;
 use ast::Pattern;
 use ast::WhenArm;
 
@@ -84,10 +83,39 @@ fn union_variants_covered(ty: &Ty, patterns: &[&Pattern]) -> bool {
 
 /// Check whether all integer values in `[min, max]` are covered by the given patterns.
 fn integer_range_covered(min: i128, max: i128, patterns: &[&Pattern]) -> bool {
-    (min..=max).all(|v| {
-        let cv = ConstValue::Int(v.into());
-        patterns.iter().any(|p| pattern_matches_public(p, &cv))
-    })
+    let mut intervals: Vec<_> = patterns
+        .iter()
+        .filter_map(|pattern| match pattern {
+            Pattern::InRange {
+                bounds: ast::InRangeBounds::Literal(low, high),
+                ..
+            } => Some((*low, *high)),
+            Pattern::Literal(ast::Literal::Int(value), _) => Some((*value, *value)),
+            Pattern::Literal(ast::Literal::Number(value), _) => {
+                let value = i256::I256::from(*value as u128);
+                Some((value, value))
+            }
+            _ => None,
+        })
+        .collect();
+    intervals.sort_unstable();
+    let mut next = i256::I256::from(min);
+    let max = i256::I256::from(max);
+    for (low, high) in intervals {
+        if next > max {
+            return true;
+        }
+        if low > next {
+            return false;
+        }
+        if high >= max {
+            return true;
+        }
+        if high >= next {
+            next = high + i256::I256::from(1);
+        }
+    }
+    next > max
 }
 
 fn literal_union_values_covered(ty: &Ty, patterns: &[&Pattern]) -> bool {

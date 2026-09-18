@@ -43,7 +43,7 @@ pub enum TypeExpr {
     },
     /// The unit type `()`.
     Unit,
-    /// Scalar in an inclusive range: `x in 0...10` or `week_num in WeekRange`.
+    /// Scalar in an inclusive range: `x in 0 to 10` or `week_num in WeekRange`.
     InRange { bounds: InRangeBounds, span: SpanId },
 }
 
@@ -81,8 +81,8 @@ impl fmt::Display for InRangeBounds {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "in ")?;
         match self {
-            InRangeBounds::Literal(min, max) => write!(f, "{min}...{max}"),
-            InRangeBounds::LiteralToTag(min, max) => write!(f, "{min}...{max}"),
+            InRangeBounds::Literal(min, max) => write!(f, "{min} to {max}"),
+            InRangeBounds::LiteralToTag(min, max) => write!(f, "{min} to {max}"),
             InRangeBounds::Tag(name) => write!(f, "{}", name.as_str()),
         }
     }
@@ -151,6 +151,18 @@ pub(crate) fn payload_fields_for_variant(
     subject_ty: Option<&Ty>,
     variant_map: &VariantMap,
 ) -> Option<Vec<(Intern<String>, Ty)>> {
+    if let Some(Ty::Union { variants, .. }) = subject_ty {
+        return variants
+            .iter()
+            .find(|variant| variant.name == variant_name)
+            .map(|variant| {
+                variant
+                    .fields
+                    .iter()
+                    .map(|(name, ty)| (*name, (**ty).clone()))
+                    .collect()
+            });
+    }
     let entries = variant_map.get(&variant_name)?;
     let subject_union = match subject_ty {
         Some(Ty::Union { name, .. }) => Some(*name),

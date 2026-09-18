@@ -7,6 +7,7 @@
 
 use diagnostic::Diagnostic;
 use melior::{Context, dialect::DialectRegistry, ir::Module, pass, utility};
+use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 use strum::Display;
@@ -20,6 +21,33 @@ pub enum Profile {
     #[strum(to_string = "release")]
     Release,
 }
+
+const GIN_RUNTIME_C: &str = r#"
+#include <stdio.h>
+
+long long runtime_read_int(void) {
+    long long value = 0;
+    if (scanf("%lld", &value) != 1) {
+        return 0;
+    }
+    return value;
+}
+
+long long runtime_print_int(long long value) {
+    printf("%lld\n", value);
+    return 0;
+}
+
+long long runtime_echo(void) {
+    int value;
+    while ((value = getchar()) != EOF) {
+        if (putchar(value) == EOF) {
+            return 1;
+        }
+    }
+    return 0;
+}
+"#;
 
 impl Profile {
     pub fn as_str(&self) -> &'static str {
@@ -112,6 +140,17 @@ impl NativeCompiler {
         profile: Profile,
         fast: bool,
     ) -> (bool, Vec<Diagnostic>, NativeCodegenTimings) {
+        self.native_from_module_with_timings_for_target(module, obj_path, profile, fast, None)
+    }
+
+    pub fn native_from_module_with_timings_for_target(
+        &self,
+        module: &Module,
+        obj_path: &Path,
+        profile: Profile,
+        fast: bool,
+        target: Option<&str>,
+    ) -> (bool, Vec<Diagnostic>, NativeCodegenTimings) {
         let mut symptoms = Vec::new();
         let mut timings = NativeCodegenTimings::default();
         let mut fixed_module = match self.reparse_for_backend(module) {
@@ -145,7 +184,14 @@ impl NativeCompiler {
         timings.lowering += start.elapsed();
 
         let start = std::time::Instant::now();
-        let ok = Self::compile_llvm_ir_to_object(&llvm_ir, obj_path, profile, fast, &mut symptoms);
+        let ok = Self::compile_llvm_ir_to_object(
+            &llvm_ir,
+            obj_path,
+            profile,
+            fast,
+            target,
+            &mut symptoms,
+        );
         timings.object_emission = start.elapsed();
         (ok, symptoms, timings)
     }
@@ -302,9 +348,97 @@ impl NativeCompiler {
         let Some(cc) = Self::find_cc(&mut symptoms) else {
             return (false, symptoms);
         };
+        let Some(needs_runtime) = Self::needs_legacy_runtime(obj_path, &mut symptoms) else {
+            return (false, symptoms);
+        };
+
+        let runtime_object = output.with_extension(format!(
+            "gin-runtime-{}-{}.o",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos())
+        ));
+        if needs_runtime {
+            let mut runtime_compile = Command::new(&cc);
+            runtime_compile
+                .arg("-x")
+                .arg("c")
+                .arg("-c")
+                .arg("-o")
+                .arg(&runtime_object)
+                .arg("-");
+            if let Some(triple) = target {
+                runtime_compile.arg(format!("--target={triple}"));
+            }
+            let mut runtime_compile =
+                match runtime_compile.stdin(std::process::Stdio::piped()).spawn() {
+                    Ok(child) => child,
+                    Err(error) => {
+                        symptoms.push(
+                            Diagnostic::new(
+                                "codegen-internal",
+                                format!("Failed to run runtime compiler '{cc}': {error}"),
+                            )
+                            .with_help("an internal compiler error occurred")
+                            .at_span(diagnostic::Span::new(0, 0)),
+                        );
+                        return (false, symptoms);
+                    }
+                };
+            if let Err(error) = runtime_compile
+                .stdin
+                .take()
+                .expect("runtime compiler stdin was piped")
+                .write_all(GIN_RUNTIME_C.as_bytes())
+            {
+                let _ = runtime_compile.wait();
+                let _ = std::fs::remove_file(&runtime_object);
+                symptoms.push(
+                    Diagnostic::new(
+                        "codegen-internal",
+                        format!("Failed to provide Gin runtime source: {error}"),
+                    )
+                    .with_help("an internal compiler error occurred")
+                    .at_span(diagnostic::Span::new(0, 0)),
+                );
+                return (false, symptoms);
+            }
+            let runtime_result = match runtime_compile.wait_with_output() {
+                Ok(result) => result,
+                Err(error) => {
+                    let _ = std::fs::remove_file(&runtime_object);
+                    symptoms.push(
+                        Diagnostic::new(
+                            "codegen-internal",
+                            format!("Failed to compile the Gin runtime: {error}"),
+                        )
+                        .with_help("an internal compiler error occurred")
+                        .at_span(diagnostic::Span::new(0, 0)),
+                    );
+                    return (false, symptoms);
+                }
+            };
+            if !runtime_result.status.success() {
+                let stderr = String::from_utf8_lossy(&runtime_result.stderr);
+                let _ = std::fs::remove_file(&runtime_object);
+                symptoms.push(
+                    Diagnostic::new(
+                        "codegen-internal",
+                        format!("Compiling the Gin runtime failed:\n{stderr}"),
+                    )
+                    .with_help("an internal compiler error occurred")
+                    .at_span(diagnostic::Span::new(0, 0)),
+                );
+                return (false, symptoms);
+            }
+        }
 
         let mut cmd = Command::new(&cc);
         cmd.arg("-o").arg(output).arg(obj_path);
+        if needs_runtime {
+            cmd.arg(&runtime_object);
+        }
         if let Some(triple) = target {
             cmd.arg(format!("--target={triple}"));
         }
@@ -312,6 +446,7 @@ impl NativeCompiler {
         let result = match cmd.output() {
             Ok(o) => o,
             Err(e) => {
+                let _ = std::fs::remove_file(&runtime_object);
                 symptoms.push(
                     Diagnostic::new(
                         "codegen-internal",
@@ -326,6 +461,7 @@ impl NativeCompiler {
 
         if !result.status.success() {
             let stderr = String::from_utf8_lossy(&result.stderr);
+            let _ = std::fs::remove_file(&runtime_object);
             symptoms.push(
                 Diagnostic::new(
                     "codegen-internal",
@@ -340,7 +476,91 @@ impl NativeCompiler {
             return (false, symptoms);
         }
 
+        let _ = std::fs::remove_file(&runtime_object);
         (true, symptoms)
+    }
+
+    fn needs_legacy_runtime(obj_path: &Path, symptoms: &mut Vec<Diagnostic>) -> Option<bool> {
+        let nm = Self::find_tool("llvm-nm", symptoms)?;
+        let output = match Command::new(&nm)
+            .args(["--undefined-only", "--just-symbol-name"])
+            .arg(obj_path)
+            .output()
+        {
+            Ok(output) if output.status.success() => output,
+            result => {
+                let reason = match result {
+                    Ok(output) => String::from_utf8_lossy(&output.stderr).into_owned(),
+                    Err(error) => error.to_string(),
+                };
+                symptoms.push(
+                    Diagnostic::new(
+                        "codegen-object-symbols",
+                        format!("Failed to inspect object symbols with '{nm}': {reason}"),
+                    )
+                    .at_span(diagnostic::Span::new(0, 0)),
+                );
+                return None;
+            }
+        };
+        Some(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|symbol| {
+                    matches!(
+                        symbol.strip_prefix('_').unwrap_or(symbol),
+                        "runtime_read_int" | "runtime_print_int" | "runtime_echo"
+                    )
+                }),
+        )
+    }
+
+    pub fn object_cache_identity() -> Option<Vec<u8>> {
+        use sha2::{Digest, Sha256};
+        use std::io::Read;
+        if std::env::var_os("CC").is_some() {
+            return None;
+        }
+        let mut diagnostics = Vec::new();
+        let tools = [
+            Self::find_cc(&mut diagnostics)?,
+            Self::find_tool("mlir-translate", &mut diagnostics)?,
+        ];
+        let mut hash = Sha256::new();
+        for tool in tools {
+            let path = if Path::new(&tool).is_absolute() {
+                std::path::PathBuf::from(&tool)
+            } else {
+                std::env::split_paths(&std::env::var_os("PATH")?)
+                    .map(|p| p.join(&tool))
+                    .find(|p| p.is_file())?
+            };
+            let path = std::fs::canonicalize(path).ok()?;
+            hash.update(path.as_os_str().as_encoded_bytes());
+            let mut file = std::fs::File::open(&path).ok()?;
+            let mut buffer = [0u8; 65536];
+            loop {
+                let size = file.read(&mut buffer).ok()?;
+                if size == 0 {
+                    break;
+                }
+                hash.update(&buffer[..size]);
+            }
+            let version = Command::new(&path).arg("--version").output().ok()?;
+            if !version.status.success() {
+                return None;
+            }
+            hash.update(version.stdout);
+            hash.update(version.stderr);
+        }
+        let environment: std::collections::BTreeMap<_, _> = std::env::vars_os().collect();
+        for (key, value) in environment {
+            for bytes in [key.as_encoded_bytes(), value.as_encoded_bytes()] {
+                hash.update((bytes.len() as u64).to_le_bytes());
+                hash.update(bytes);
+            }
+        }
+        Some(hash.finalize().to_vec())
     }
 
     /// Find an LLVM/MLIR tool on PATH or in common Homebrew locations.
@@ -495,6 +715,7 @@ impl NativeCompiler {
         obj_path: &Path,
         profile: Profile,
         fast: bool,
+        target: Option<&str>,
         symptoms: &mut Vec<Diagnostic>,
     ) -> bool {
         let ll_path = obj_path.with_extension("ll");
@@ -522,14 +743,17 @@ impl NativeCompiler {
             }
         };
 
-        let result = match Command::new(&cc)
+        let mut command = Command::new(&cc);
+        command
             .arg("-c")
             .arg(opt_flag)
             .arg(&ll_path)
             .arg("-o")
-            .arg(obj_path)
-            .output()
-        {
+            .arg(obj_path);
+        if let Some(triple) = target {
+            command.arg(format!("--target={triple}"));
+        }
+        let result = match command.output() {
             Ok(o) => o,
             Err(e) => {
                 symptoms.push(

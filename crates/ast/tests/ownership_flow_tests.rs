@@ -12,7 +12,7 @@
 //!
 //! Tests are grouped by the diagnostic they expect.
 //!
-//! NOTE: gin_core modules are NOT loaded in these tests. User-defined types
+//! NOTE: standard-library modules are NOT loaded in these tests. User-defined types
 //! resolve to Ty::Opaque (8 bytes, ≤ 16, Copy) when they can't be found.
 //! LinValueNotConsumed flow tests are therefore limited — the copyability unit
 //! tests in `test_copy_inference_*` directly verify the size-based rule.
@@ -21,8 +21,8 @@ use internment::Intern;
 use typecheck::FileId;
 use typecheck::transform::transform_file;
 
-/// `Int` tag so ownership tests can type parameters without loading gin_core.
-const INT_TAG: &str = "Int is in 1...400\n\n";
+/// `Int` tag so ownership tests can type parameters without loading a library.
+const INT_TAG: &str = "Int is in 1 to 400\n\n";
 
 fn ownership_source(body: &str) -> String {
     format!("{INT_TAG}{body}")
@@ -43,10 +43,10 @@ fn collect_ownership_diagnostics(source: &str) -> Vec<diagnostic::Diagnostic> {
 fn test_use_after_move_produces_diagnostic() {
     // Consume via `eat` at call site — subsequent use should produce UseOfMovedValue.
     let src = "\
-drop(eat x Int) Int: 0
+drop(x Int) Int: 0
 main:
     val: 42
-    drop(eat val)
+    drop(val)
     result: val
 return 0
 ";
@@ -65,11 +65,11 @@ return 0
 fn test_double_consume_produces_diagnostic() {
     // Two consecutive `eat` on the same value — second is UseOfMovedValue.
     let src = "\
-drop(eat x Int) Int: 0
+drop(x Int) Int: 0
 main:
     val: 42
-    drop(eat val)
-    drop(eat val)
+    drop(val)
+    drop(val)
 return 0
 ";
     let diags = collect_ownership_diagnostics(src);
@@ -103,10 +103,10 @@ return 0
 fn test_consume_via_eat_no_false_positive() {
     // `eat` at call site matched with `eat` param — no diagnostic.
     let src = "\
-drop(eat x Int) Int: 0
+drop(x Int) Int: 0
 main:
     val: 42
-    drop(eat val)
+    drop(val)
 return 0
 ";
     let diags = collect_ownership_diagnostics(src);
@@ -120,10 +120,10 @@ return 0
 fn test_use_after_consume_via_eat_detected() {
     // Consume via `eat`, then use — should be an error.
     let src = "\
-drop(eat x Int) Int: 0
+drop(x Int) Int: 0
 main:
     val: 42
-    drop(eat val)
+    drop(val)
     result: val
 return 0
 ";
@@ -131,7 +131,7 @@ return 0
     let has_moved = diags
         .iter()
         .any(|d| d.code.slug() == "type-use-of-moved-value");
-    assert!(has_moved, "use after eat consume: {:?}", diags);
+    assert!(has_moved, "use after consume: {:?}", diags);
 }
 
 #[test]
@@ -154,7 +154,7 @@ return 0
 #[test]
 fn test_default_owned_non_copy_argument_moves() {
     let src = "\
-sink(pointer @Int): eat pointer
+sink(pointer @Int): pointer
 main:
     value: 42
     pointer: @value
@@ -199,7 +199,7 @@ return r
 #[test]
 fn test_move_in_when_arm_does_not_poison_sibling_arm() {
     let src = "\
-sink(pointer @Int) Int: eat pointer
+sink(pointer @Int) Int: pointer
 select(flag Int, pointer @Int) Int:
     when flag is
         0 then sink(pointer)
@@ -220,7 +220,7 @@ select(flag Int, pointer @Int) Int:
 #[test]
 fn test_move_on_one_when_path_is_maybe_moved_after_join() {
     let src = "\
-sink(pointer @Int) Int: eat pointer
+sink(pointer @Int) Int: pointer
 select(flag Int, pointer @Int) Int:
     when flag is
         0 then sink(pointer)
@@ -242,7 +242,7 @@ return result
 #[test]
 fn test_loop_backedge_rejects_reusing_moved_value() {
     let src = "\
-sink(pointer @Int): eat pointer
+sink(pointer @Int): pointer
 repeat(pointer @Int):
     while 1 is 1
         sink(pointer)
@@ -264,7 +264,7 @@ return
 fn test_reference_invalidated_on_one_when_path_is_maybe_invalid_after_join() {
     let src = "\
 Cell has value Int
-sink(cell Cell): eat cell
+sink(cell Cell): cell
 check(flag Int, cell Cell) Int:
     ref saved Cell: cell
     when flag is
@@ -295,11 +295,11 @@ return result
 fn test_observe_then_consume() {
     let src = "\
 read(ref x Int) Int: x
-drop(eat y Int) Int: 0
+drop(y Int) Int: 0
 main:
     val: 42
     read(ref val)
-    drop(eat val)
+    drop(val)
 return 0
 ";
     let diags = collect_ownership_diagnostics(src);
@@ -313,35 +313,40 @@ return 0
 fn test_default_owned_copy_and_eat_arguments_can_be_mixed() {
     // Mix a default-owned Copy parameter with an explicitly consumed parameter.
     let src = "\
-pair(a Int, eat b Int) Int: a + b
+pair(a Int, b Int) Int: a + b
 main:
     x: 10
     y: 20
-    pair(x, eat y)
+    pair(x, y)
 return 0
 ";
     let diags = collect_ownership_diagnostics(src);
     let has_moved = diags
         .iter()
         .any(|d| d.code.slug() == "type-use-of-moved-value");
-    assert!(!has_moved, "mixed eat and bare: {:?}", diags);
+    assert!(!has_moved, "mixed and bare: {:?}", diags);
 }
 
 #[test]
-fn test_eat_param_returned_is_error() {
+fn test_terminal_param_returned_is_error() {
     // Returning a `eat` param is invalid (it's auto-dropped at scope exit).
     let src = "\
-consume(eat x Int) Int: x
+consume(x Int) Int: x
 main:
 return 0
 ";
     let diags = collect_ownership_diagnostics(src);
-    let has_return_consumed = diags
-        .iter()
-        .any(|d| d.code.slug() == "type-return-consumed-param");
+    let has_return_error = diags.iter().any(|d| {
+        matches!(
+            d.code.slug(),
+            "type-owned-param-not-consumed"
+                | "type-owned-value-not-consumed"
+                | "type-argument-mode-mismatch"
+        )
+    });
     assert!(
-        has_return_consumed,
-        "expected ReturnConsumedParam, got: {:?}",
+        has_return_error,
+        "expected terminal return error, got: {:?}",
         diags
     );
 }
@@ -349,18 +354,18 @@ return 0
 #[test]
 fn test_eat_param_returned_reports_consuming_parameter_escapes() {
     let src = "\
-consume(eat x Int) Int: x
+consume(x Int) Int: x
 main:
     consume(eat 42)
     return 0
 ";
     let diags = collect_ownership_diagnostics(src);
-    let has_escape = diags
+    let has_remove_consume_diagnostic = diags
         .iter()
-        .any(|d| d.code.slug() == "type-consuming-parameter-escapes");
+        .any(|d| d.code.slug() == "parse-removed-consume-arg-syntax");
     assert!(
-        has_escape,
-        "expected consuming-parameter-escape diagnostic, got: {:?}",
+        has_remove_consume_diagnostic,
+        "expected call-site consume syntax rejection, got: {:?}",
         diags
     );
 }
@@ -449,22 +454,21 @@ main:
 }
 
 #[test]
-fn test_eat_argument_on_default_owned_param_is_error() {
-    // `eat` does not match a default-owned parameter.
+fn test_default_owned_argument_is_valid_without_callsite_marker() {
     let src = "\
 read(x Int) Int: x
 main:
     val: 42
-    read(eat val)
+    read(val)
 return 0
 ";
     let diags = collect_ownership_diagnostics(src);
     let has_mode_mismatch = diags
         .iter()
-        .any(|d| d.code.slug() == "type-consume-arg-on-owned-param");
+        .any(|d| d.code.slug() == "type-argument-mode-mismatch");
     assert!(
-        has_mode_mismatch,
-        "expected consume-on-owned diagnostic, got: {:?}",
+        !has_mode_mismatch,
+        "did not expect mode mismatch with plain default argument, got: {:?}",
         diags
     );
 }
@@ -473,7 +477,7 @@ return 0
 fn test_eat_param_unused_is_valid() {
     // `eat` param that is never used in the body — auto-dropped, no diagnostic.
     let src = "\
-leaky(eat x Int) Int: 0
+leaky(x Int) Int: 0
 main:
 return 0
 ";
@@ -483,7 +487,7 @@ return 0
         .any(|d| d.code.slug() == "type-lin-value-not-consumed");
     assert!(
         !has_lin,
-        "eat param unconsumed should be valid (auto-dropped), got: {:?}",
+        "param unconsumed should be valid (auto-dropped), got: {:?}",
         diags
     );
 }
@@ -534,19 +538,19 @@ return 0
 #[test]
 fn test_explicit_consumption_parameter_with_eat_handle_discharge_at_callsite() {
     let src = "
-read_handle(eat handle @Int) Int: 0
+read_handle(handle @Int) Int: 0
 main:
     p: @42
-    read_handle(eat p)
+    read_handle(p)
 return 0
 ";
     let diags = collect_ownership_diagnostics(src);
     let has_escape = diags
         .iter()
-        .any(|d| d.code.slug() == "type-consuming-parameter-escapes");
+        .any(|d| d.code.slug() == "type-argument-mode-mismatch");
     assert!(
         !has_escape,
-        "calling eat param should not leak ownership: {:?}",
+        "explicit by-value parameter should not be mode mismatch: {:?}",
         diags
     );
     let has_owned_not_consumed = diags
@@ -734,11 +738,11 @@ return 0
 #[test]
 fn test_consuming_different_fixed_array_item_preserves_reference() {
     let src = "\
-drop(eat value Int) Int: 0
+drop(value Int) Int: 0
 main:
     items: (0; 2)
     ref saved Int: items.(0)
-    drop(eat items.(1))
+    drop(items.(1))
     result: saved
 return 0
 ";
@@ -816,10 +820,10 @@ main: 0
 #[test]
 fn test_parameter_refinement_proves_symbolic_array_items_disjoint() {
     let src = "\
-drop(eat value Int) Int: 0
+drop(value Int) Int: 0
 visit(ref items x, i Int, j Int and > i) Int:
     ref saved Int: items.(i)
-    drop(eat items.(j))
+    drop(items.(j))
     result: saved
 return 0
 main: 0
@@ -837,10 +841,10 @@ main: 0
 #[test]
 fn test_unrelated_symbolic_array_items_conservatively_overlap() {
     let src = "\
-drop(eat value Int) Int: 0
+drop(value Int) Int: 0
 visit(ref items x, i Int, j Int) Int:
     ref saved Int: items.(i)
-    drop(eat items.(j))
+    drop(items.(j))
     result: saved
 return 0
 main: 0
@@ -858,11 +862,11 @@ main: 0
 #[test]
 fn test_consuming_same_fixed_array_item_invalidates_reference() {
     let src = "\
-drop(eat value Int) Int: 0
+drop(value Int) Int: 0
 main:
     items: (0; 2)
     ref saved Int: items.(0)
-    drop(eat items.(0))
+    drop(items.(0))
     result: saved
 return 0
 ";
@@ -879,11 +883,11 @@ return 0
 #[test]
 fn test_eat_invalidates_existing_reference_on_later_use() {
     let src = "\
-drop(eat x Int) Int: 0
+drop(x Int) Int: 0
 main:
     value: 42
     ref reference Int: value
-    drop(eat value)
+    drop(value)
     result: reference
 return 0
 ";
@@ -972,14 +976,13 @@ return counter
 
 #[test]
 fn test_gate4_rebind_transfers_non_discardable_old_value() {
-    let src = "\
-IntPair has head Int, tail Int
-reopen(eat old IntPair) IntPair extern
+    let src = r#"IntPair has head Int, tail Int
+reopen(old IntPair) IntPair: old
 main:
     buffer: IntPair(head: 1, tail: 2)
-    buffer:: reopen(eat buffer)
+    buffer:: reopen(buffer)
 return 0
-";
+"#;
     let diags = collect_ownership_diagnostics(src);
     assert!(
         !diags
@@ -1009,14 +1012,13 @@ return 0
 
 #[test]
 fn test_gate4_shadow_initializer_can_transfer_old_value() {
-    let src = "\
-IntPair has head Int, tail Int
-reopen(eat old IntPair) IntPair extern
+    let src = r#"IntPair has head Int, tail Int
+reopen(old IntPair) IntPair: old
 main:
     buffer: IntPair(head: 1, tail: 2)
-    buffer: reopen(eat buffer)
+    buffer: reopen(buffer)
 return 0
-";
+"#;
     let diags = collect_ownership_diagnostics(src);
     assert!(
         !diags
@@ -1048,15 +1050,14 @@ return 0
 
 #[test]
 fn test_gate4_rebind_target_not_found_reports_error() {
-    let src = "\
-bad(value Int) ref Int extern
-Small is in 0...255
+    let src = r#"bad(value Int) ref Int: 0
+Small is in 0 to 255
 main:
     missing ref Small: bad(1)
     value Small: 1
     missing:: value
 return
-";
+"#;
     let diags = collect_ownership_diagnostics(src);
     assert!(
         diags
@@ -1069,16 +1070,15 @@ return
 
 #[test]
 fn test_gate4_rebind_crosses_callable_boundary() {
-    let src = "\
-next(x Int) Int: x
-bad(value Int) ref Int extern
-Small is in 0...255
+    let src = r#"next(x Int) Int: x
+bad(value Int) ref Int: 0
+Small is in 0 to 255
 main:
     value Small: 1
     next ref Small: bad(1)
     next:: value
 return
-";
+"#;
     let diags = collect_ownership_diagnostics(src);
     assert!(
         diags
@@ -1092,7 +1092,7 @@ return
 #[test]
 fn test_gate4_rebind_violates_validity_reports_error() {
     let src = "\
-Small is in 0...2
+Small is in 0 to 2
 main:
     counter Small: 2
     counter:: 3
@@ -1111,7 +1111,7 @@ return 0
 #[test]
 fn test_gate4_rebind_violates_validity_with_proof_succeeds() {
     let src = "\
-Small2 is in 0...3
+Small2 is in 0 to 3
 main:
     counter Small2: 0
     counter:: 2
@@ -1131,13 +1131,13 @@ return 0
 #[test]
 fn test_gate4_branch_proof_allows_bounded_increment_rebind() {
     let src = "\
-Small is in 0...3
-#operator(Add)
+Small is in 0 to 3
+#infix('+')
 #inline
 small_add(a Small, b Small) Int: (a as Int) + (b as Int)
 advance(counter Small):
     if counter is < 3
-        counter:: (eat counter) + 1
+        counter:: (counter) + 1
     return
 return
 ";
@@ -1153,12 +1153,12 @@ return
 #[test]
 fn test_gate4_unproven_increment_rebind_violates_validity() {
     let src = "\
-Small is in 0...3
-#operator(Add)
+Small is in 0 to 3
+#infix('+')
 #inline
 small_add(a Small, b Small) Int: (a as Int) + (b as Int)
 advance(counter Small):
-    counter:: (eat counter) + 1
+    counter:: (counter) + 1
 return
 ";
     let diags = collect_ownership_diagnostics(src);
@@ -1243,10 +1243,10 @@ return observed
 #[test]
 fn test_gate4_consumed_place_can_be_reinitialized() {
     let src = "\
-drop(eat value @Int): 0
+drop(value @Int): 0
 main:
     value: @1
-    drop(eat value)
+    drop(value)
     value:: @2
     observed: deref value
 return observed

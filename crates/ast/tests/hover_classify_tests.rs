@@ -43,8 +43,8 @@ fn self_in_has_method_body_classified_as_selfref() {
 #[test]
 fn ref_and_mut_self_in_has_method_body_include_modifier() {
     let cases = [
-        ("Region has\n    reset(ref self) Region: self\n", "ref self"),
-        ("Region has\n    reset(mut self) Region: self\n", "mut self"),
+        ("Region has\n    reset(self ref) Region: self\n", "self ref"),
+        ("Region has\n    reset(self mut) Region: self\n", "self mut"),
     ];
 
     for (source, expected_name) in cases {
@@ -165,7 +165,7 @@ fn tag_name_classified() {
 
 #[test]
 fn tag_body_classified() {
-    let source = "Small is in 0...100\n";
+    let source = "Small is in 0 to 100\n";
     // Cursor on '100' (the tag body, not the name 'Small')
     let target = classify(source, 0, 17).expect("classify on tag body");
     assert!(
@@ -233,7 +233,7 @@ fn tag_name_wins_over_expr() {
 /// Cursor on a non-final segment of an import path should classify as ModulePath.
 #[test]
 fn module_path_classified() {
-    let source = "use core.maybe.Some\n\nmain:\n    return 0\n";
+    let source = "use core.maybe Some\n\nmain:\n    return 0\n";
     let typed = transform_source(source);
     // Cursor on 'maybe' in 'core.maybe.Some'
     let byte_offset = source.position_to_byte_offset(0, 9).unwrap();
@@ -248,7 +248,7 @@ fn module_path_classified() {
 /// Cursor on the final segment of an import path should NOT classify as ModulePath.
 #[test]
 fn module_path_not_classified_for_final_segment() {
-    let source = "use core.maybe.Some\n\nmain:\n    return 0\n";
+    let source = "use core.maybe Some\n\nmain:\n    return 0\n";
     let typed = transform_source(source);
     // Cursor on 'Some' (final segment of import)
     let byte_offset = source.position_to_byte_offset(0, 15).unwrap();
@@ -264,7 +264,7 @@ fn module_path_not_classified_for_final_segment() {
 /// Cursor on 'core' (root of a multi-segment import path) should classify as ModulePath.
 #[test]
 fn module_path_root_classified() {
-    let source = "use core.maybe.Some\n\nmain:\n    return 0\n";
+    let source = "use core.maybe Some\n\nmain:\n    return 0\n";
     let typed = transform_source(source);
     // Cursor on 'core' in 'core.maybe.Some'
     let byte_offset = source.position_to_byte_offset(0, 4).unwrap();

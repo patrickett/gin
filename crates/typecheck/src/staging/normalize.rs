@@ -38,7 +38,7 @@ pub enum NormalExpr {
         target: DefId,
         args: Vec<NormalExpr>,
     },
-    /// A tuple/record field access in residual form.
+    /// An aggregate/record field access in residual form.
     FieldGet { base: Box<NormalExpr>, index: usize },
     TargetQuery {
         kind: ast::TargetQueryKind,
@@ -190,7 +190,7 @@ impl<'a> NormalizeContext<'a> {
                         self.assign_expr_owner(owner, *ret);
                     }
                 }
-                BindBody::Extern => {}
+                BindBody::Unlowered => {}
             }
         }
     }
@@ -300,21 +300,14 @@ fn dependent_binary_to_result(
     let rhs = dependent_expr_to_result(rhs);
     match (lhs, rhs) {
         (NormalizeResult::Value(lhs), NormalizeResult::Value(rhs)) => {
-            match (op.clone(), lhs, rhs) {
-                (BinOp::Add, ConstValue::Int(lhs), ConstValue::Int(rhs)) => {
-                    NormalizeResult::Value(ConstValue::Int(lhs.wrapping_add(rhs)))
-                }
-                (BinOp::Subtract, ConstValue::Int(lhs), ConstValue::Int(rhs)) => {
-                    NormalizeResult::Value(ConstValue::Int(lhs.wrapping_sub(rhs)))
-                }
-                (BinOp::Multiply, ConstValue::Int(lhs), ConstValue::Int(rhs)) => {
-                    NormalizeResult::Value(ConstValue::Int(lhs.wrapping_mul(rhs)))
-                }
-                (_, lhs, rhs) => NormalizeResult::Residual(NormalExpr::Binary {
+            if let Some(value) = lhs.eval_binop(&op, &rhs) {
+                NormalizeResult::Value(value)
+            } else {
+                NormalizeResult::Residual(NormalExpr::Binary {
                     op,
                     lhs: Box::new(NormalExpr::Value(lhs)),
                     rhs: Box::new(NormalExpr::Value(rhs)),
-                }),
+                })
             }
         }
         (lhs, rhs) => {
@@ -369,7 +362,9 @@ fn normalize_expr(
     substitutions: &HashMap<DependentArgId, NormalizeResult>,
 ) -> NormalizeResult {
     context.with_depth(expr_id, |context| {
-        if let Some(value) = context.program.exprs.const_value[expr_id.as_usize()].clone() {
+        if let Some(value) =
+            context.program.exprs.facts.const_facts.const_value[expr_id.as_usize()].clone()
+        {
             return NormalizeResult::Value(value);
         }
         let Some(expr) = context.program.exprs.kind.get(expr_id.as_usize()) else {
@@ -377,6 +372,20 @@ fn normalize_expr(
         };
 
         match expr {
+            TypedExprKind::Asm {
+                state: crate::assembly::AssemblyState::Checked(assembly),
+                ..
+            } => {
+                let Some(method) = assembly.evaluation else {
+                    return NormalizeResult::RuntimeDependency(expr_id);
+                };
+                let operands: Vec<_> = assembly
+                    .operands
+                    .iter()
+                    .map(|(_, operand)| *operand)
+                    .collect();
+                normalize_call(method, &operands, expr_id, context, substitutions)
+            }
             TypedExprKind::Lit(Literal::Int(value)) => {
                 NormalizeResult::Value(ConstValue::Int(*value))
             }
@@ -386,6 +395,11 @@ fn normalize_expr(
             TypedExprKind::SelfRef { target } => {
                 NormalizeResult::Residual(NormalExpr::Var(target.0))
             }
+            TypedExprKind::FnCall {
+                target,
+                args: Some(args),
+                ..
+            } => normalize_call(*target, args, expr_id, context, substitutions),
             TypedExprKind::FnCall {
                 target, args: None, ..
             } => {
@@ -457,11 +471,6 @@ fn normalize_expr(
                     _ => NormalizeResult::Unsupported(expr_id),
                 }
             }
-            TypedExprKind::FnCall {
-                target,
-                args: Some(call_args),
-                ..
-            } => normalize_call(*target, call_args, expr_id, context, substitutions),
             TypedExprKind::Negate(inner) => {
                 let inner = normalize_expr(*inner, context, substitutions);
                 match inner {
@@ -494,7 +503,7 @@ fn normalize_expr(
                 qual_path: None,
                 args: Vec::new().into(),
             }),
-            TypedExprKind::TupleLit(items) | TypedExprKind::List(items) => {
+            TypedExprKind::ResultRow(items) => {
                 let mut arg_values = Vec::with_capacity(items.len());
                 for item in items {
                     match normalize_expr(*item, context, substitutions) {
@@ -510,18 +519,52 @@ fn normalize_expr(
                         }
                     }
                 }
-                NormalizeResult::Value(ConstValue::List(arg_values.into()))
+                NormalizeResult::Value(ConstValue::ResultRow(arg_values.into()))
             }
-            TypedExprKind::TupleGet { base, index } => {
-                normalize_tuple_get(*base, *index, expr_id, context, substitutions)
+            TypedExprKind::ArrayLit(items) => {
+                let mut arg_values = Vec::with_capacity(items.len());
+                for item in items {
+                    match normalize_expr(*item, context, substitutions) {
+                        NormalizeResult::RuntimeDependency(expr) => {
+                            return NormalizeResult::RuntimeDependency(expr);
+                        }
+                        NormalizeResult::Unsupported(expr) => {
+                            return NormalizeResult::Unsupported(expr);
+                        }
+                        NormalizeResult::Value(value) => arg_values.push(value),
+                        NormalizeResult::Residual(_) => {
+                            return NormalizeResult::Unsupported(expr_id);
+                        }
+                    }
+                }
+                NormalizeResult::Value(ConstValue::FixedArray(arg_values.into()))
+            }
+            TypedExprKind::List(items) => {
+                let mut arg_values = Vec::with_capacity(items.len());
+                for item in items {
+                    match normalize_expr(*item, context, substitutions) {
+                        NormalizeResult::RuntimeDependency(expr) => {
+                            return NormalizeResult::RuntimeDependency(expr);
+                        }
+                        NormalizeResult::Unsupported(expr) => {
+                            return NormalizeResult::Unsupported(expr);
+                        }
+                        NormalizeResult::Value(value) => arg_values.push(value),
+                        NormalizeResult::Residual(_) => {
+                            return NormalizeResult::Unsupported(expr_id);
+                        }
+                    }
+                }
+                NormalizeResult::Value(ConstValue::Sequence(arg_values.into()))
+            }
+            TypedExprKind::AggregateGet { base, index } => {
+                normalize_aggregate_get(*base, *index, expr_id, context, substitutions)
             }
             TypedExprKind::BufGet { buf, index } => {
                 normalize_buf_get(*buf, *index, expr_id, context, substitutions)
             }
             TypedExprKind::Ref(inner)
             | TypedExprKind::TakePtr(inner)
-            | TypedExprKind::ConsumeArg(inner)
-            | TypedExprKind::Eat(inner)
             | TypedExprKind::Deref(inner) => normalize_expr(*inner, context, substitutions),
             _ => NormalizeResult::Unsupported(expr_id),
         }
@@ -672,13 +715,14 @@ fn normalize_tag_call(
 fn field_from_const_value(base: &ConstValue, index: usize) -> Option<ConstValue> {
     match base {
         ConstValue::Tag { args, .. } => args.get(index).cloned(),
-        ConstValue::List(items) => items.get(index).cloned(),
+        ConstValue::Text(text) if index == 1 => Some(ConstValue::Int((text.len() as u64).into())),
+        ConstValue::ResultRow(items) => items.get(index).cloned(),
         ConstValue::Record { fields } => fields.get(index).map(|(_, value)| value.clone()),
         _ => None,
     }
 }
 
-fn normalize_tuple_get(
+fn normalize_aggregate_get(
     base_id: ExprId,
     index: usize,
     expr_id: ExprId,
@@ -770,11 +814,19 @@ fn try_evaluate_pure_call(
     if bind.params.len() != arg_values.len() && !type_only_call {
         return None;
     }
+    let target_context = flask::CompileTarget::Library;
+    let mut evaluator = crate::eval::Evaluator::new(
+        context.program,
+        crate::eval::CompileTimeHost::new(&target_context),
+    );
+    if let Ok(value) = evaluator.call(target, arg_values) {
+        return Some(NormalizeResult::Value(value));
+    }
 
     let return_expr = match &bind.body {
         BindBody::Expr(expr) => Some(*expr),
-        BindBody::Body { exprs, ret, .. } => ret.or_else(|| exprs.last().copied()),
-        BindBody::Extern => None,
+        BindBody::Body { exprs, ret } if exprs.is_empty() => *ret,
+        BindBody::Body { .. } | BindBody::Unlowered => None,
     };
     let return_expr = return_expr?;
 
@@ -803,6 +855,7 @@ fn try_evaluate_pure_call(
 fn has_runtime_effects(program: ResolvedProgram<'_>, target: DefId) -> bool {
     program.defs.get(&target).is_some_and(|bind| {
         bind.call_capability == CallCapability::RuntimeOnly
+            || bind.effects.unknown_memory
             || !bind.effects.reads.is_empty()
             || !bind.effects.writes.is_empty()
             || !bind.effects.invalidates.is_empty()

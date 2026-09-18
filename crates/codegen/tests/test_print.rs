@@ -9,14 +9,15 @@ fn assert_no_symptoms(symptoms: &[Diagnostic]) {
 }
 
 // Self-contained print program with all dependencies defined inline.
-const PRINT_PROGRAM: &str = "\
-Int is in -9223372036854775808...9223372036854775807
-Byte is in 0...255
+const PRINT_PROGRAM: &str = r#"Int is in -9223372036854775808 to 9223372036854775807
+Byte is in 0 to 255
 String has pointer @Byte, len Int
 
-#intrinsic(BitsAdd)
-add_bits(lhs Int, rhs Int) Int extern
-#operator(Add)
+add_bits(lhs Int, rhs Int) Int:
+    left is in -9223372036854775808 to 9223372036854775807: lhs
+    right is in -9223372036854775808 to 9223372036854775807: rhs
+return (left + right) as Int
+#infix('+')
 add_int(lhs Int, rhs Int) Int: add_bits(lhs, rhs)
 
 sys_write Int := 4
@@ -30,9 +31,9 @@ print(s String):
 return
 
 main:
-    print('hello world')
+    print(String(pointer: (@'hello world') as @Byte, len: 11))
 return
-";
+"#;
 
 #[test]
 fn test_print_produces_extractvalue() {
@@ -89,13 +90,12 @@ fn test_print_has_all_functions() {
 // Tests for the string global constant.
 
 #[test]
-fn test_string_global_has_null_terminator() {
+fn test_string_global_has_no_implicit_null_terminator() {
     let (mlir_text, symptoms) = support::codegen_to_mlir_text(PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
-    // MLIR represents the null terminator as \\00 in the value attribute.
     assert!(
-        mlir_text.contains("hello world\\00"),
-        "string global should be null-terminated:\n{mlir_text}"
+        !mlir_text.contains("hello world\\00"),
+        "string global should contain only the literal bytes:\n{mlir_text}"
     );
 }
 
@@ -103,10 +103,9 @@ fn test_string_global_has_null_terminator() {
 fn test_string_global_has_correct_array_size() {
     let (mlir_text, symptoms) = support::codegen_to_mlir_text(PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
-    // "hello world" is 11 chars + 1 null = 12 bytes.
     assert!(
-        mlir_text.contains("array<12 x i8>"),
-        "string global should be array<12 x i8> (11 chars + null):\n{mlir_text}"
+        mlir_text.contains("array<11 x i8>"),
+        "string global should be array<11 x i8> (11 bytes):\n{mlir_text}"
     );
 }
 
@@ -155,12 +154,12 @@ fn test_main_emits_correct_string_length() {
 // Tests for function signatures.
 
 #[test]
-fn test_main_function_signature_is_unit_to_unit() {
+fn test_main_function_returns_process_exit_status() {
     let (mlir_text, symptoms) = support::codegen_to_mlir_text(PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     assert!(
-        mlir_text.contains("function_type = () -> (), sym_name = \"main\""),
-        "main should have type () -> ():\n{mlir_text}"
+        mlir_text.contains("function_type = () -> i64, sym_name = \"main\""),
+        "main should return an i64 process exit status:\n{mlir_text}"
     );
 }
 
@@ -276,14 +275,15 @@ fn test_string_struct_type_is_ptr_and_i64() {
 
 // Test with multiple print calls.
 
-const MULTI_PRINT_PROGRAM: &str = "\
-Int is in -9223372036854775808...9223372036854775807
-Byte is in 0...255
+const MULTI_PRINT_PROGRAM: &str = r#"Int is in -9223372036854775808 to 9223372036854775807
+Byte is in 0 to 255
 String has pointer @Byte, len Int
 
-#intrinsic(BitsAdd)
-add_bits(lhs Int, rhs Int) Int extern
-#operator(Add)
+add_bits(lhs Int, rhs Int) Int:
+    left is in -9223372036854775808 to 9223372036854775807: lhs
+    right is in -9223372036854775808 to 9223372036854775807: rhs
+return (left + right) as Int
+#infix('+')
 add_int(lhs Int, rhs Int) Int: add_bits(lhs, rhs)
 
 write(fd Int, buf Int, len Int) Int:
@@ -295,10 +295,10 @@ print(s String):
 return
 
 main:
-    print('hello')
-    print('world')
+    print(String(pointer: (@'hello') as @Byte, len: 5))
+    print(String(pointer: (@'world') as @Byte, len: 5))
 return
-";
+"#;
 
 #[test]
 fn test_multiple_prints_produce_separate_globals() {
@@ -319,51 +319,49 @@ fn test_multiple_prints_have_distinct_content() {
         support::codegen_to_mlir_text(MULTI_PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
     assert!(
-        mlir_text.contains("hello\\00"),
+        mlir_text.contains("hello"),
         "should contain 'hello' string global:\n{mlir_text}"
     );
     assert!(
-        mlir_text.contains("world\\00"),
+        mlir_text.contains("world"),
         "should contain 'world' string global:\n{mlir_text}"
     );
 }
 
 #[test]
-fn test_hello_string_is_six_bytes() {
+fn test_hello_string_is_five_bytes() {
     let (mlir_text, symptoms) =
         support::codegen_to_mlir_text(MULTI_PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
-    // "hello" = 5 chars + 1 null = 6 bytes.
     assert!(
-        mlir_text.contains("array<6 x i8>"),
-        "'hello' global should be array<6 x i8>:\n{mlir_text}"
+        mlir_text.contains("array<5 x i8>"),
+        "'hello' global should be array<5 x i8>:\n{mlir_text}"
     );
 }
 
 #[test]
-fn test_world_string_is_six_bytes() {
+fn test_world_string_is_five_bytes() {
     let (mlir_text, symptoms) =
         support::codegen_to_mlir_text(MULTI_PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
-    // "world" = 5 chars + 1 null = 6 bytes.
-    // Both globals should have array<6 x i8>.
-    let count = mlir_text.matches("array<6 x i8>").count();
+    let count = mlir_text.matches("array<5 x i8>").count();
     assert!(
         count >= 2,
-        "both 'hello' and 'world' should produce array<6 x i8>, found {count}:\n{mlir_text}"
+        "both 'hello' and 'world' should produce array<5 x i8>, found {count}:\n{mlir_text}"
     );
 }
 
 // Test with an empty string.
 
-const EMPTY_STRING_PRINT_PROGRAM: &str = "\
-Int is in -9223372036854775808...9223372036854775807
-Byte is in 0...255
+const EMPTY_STRING_PRINT_PROGRAM: &str = r#"Int is in -9223372036854775808 to 9223372036854775807
+Byte is in 0 to 255
 String has pointer @Byte, len Int
 
-#intrinsic(BitsAdd)
-add_bits(lhs Int, rhs Int) Int extern
-#operator(Add)
+add_bits(lhs Int, rhs Int) Int:
+    left is in -9223372036854775808 to 9223372036854775807: lhs
+    right is in -9223372036854775808 to 9223372036854775807: rhs
+return (left + right) as Int
+#infix('+')
 add_int(lhs Int, rhs Int) Int: add_bits(lhs, rhs)
 
 sys_write Int := 4
@@ -377,9 +375,9 @@ print(s String):
 return
 
 main:
-    print('')
+    print(String(pointer: (@'') as @Byte, len: 0))
 return
-";
+"#;
 
 #[test]
 fn test_empty_string_print_has_length_zero() {
@@ -393,13 +391,12 @@ fn test_empty_string_print_has_length_zero() {
 }
 
 #[test]
-fn test_empty_string_global_is_one_byte() {
+fn test_empty_string_global_has_zero_bytes() {
     let (mlir_text, symptoms) =
         support::codegen_to_mlir_text(EMPTY_STRING_PRINT_PROGRAM, "test.gin", false);
     assert_no_symptoms(&symptoms);
-    // Empty string = 0 chars + 1 null = 1 byte.
     assert!(
-        mlir_text.contains("array<1 x i8>"),
-        "empty string global should be array<1 x i8> (null terminator only):\n{mlir_text}"
+        mlir_text.contains("array<0 x i8>"),
+        "empty string global should be array<0 x i8> (no implicit terminator):\n{mlir_text}"
     );
 }

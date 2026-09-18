@@ -29,19 +29,19 @@ fn pointer_fixture() -> &'static str {
 
 fn pointer_fixture_with_else() -> &'static str {
     r#"
-use '../target/'.target
+use '../target/' target
 use BigInt, Int
 
 PointerSize is when target.arch is
     'x86_64' or 'arm64' then BigInt
     'wasm32'            then Int
-    else in 0...0
+    else in 0 to 0
 "#
 }
 
 fn pointer_fixture_without_else() -> &'static str {
     r#"
-use '../target/'.target
+use '../target/' target
 use BigInt, Int
 
 PointerSize is when target.arch is
@@ -52,7 +52,7 @@ PointerSize is when target.arch is
 
 fn pointer_fixture_partial_without_else() -> &'static str {
     r#"
-use '../target/'.target
+use '../target/' target
 use BigInt, Int
 
 PointerSize is when target.arch is
@@ -113,7 +113,7 @@ fn entry_merge_sets_target_arch_from_triple() {
     };
     assert_eq!(
         arch,
-        Some(ConstValue::String("wasm32".to_string())),
+        Some(ConstValue::Text("wasm32".to_string())),
         "entry merge should override arch for wasm32 triple"
     );
 }

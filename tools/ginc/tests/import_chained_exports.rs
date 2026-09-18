@@ -37,10 +37,7 @@ fn chained_nested_dep_a_b_loads_package_at_b() {
     );
     write_file(&dir.join("dep/a/b/x.gin"), "x: 1\n");
 
-    write_file(
-        &dir.join("main.gin"),
-        "use dep.a.b\n\nmain:\n    return 0\n",
-    );
+    write_file(&dir.join("main.gin"), "use dep.a.b\n\nmain: 0\n");
 
     let exe = dir.join("out.exe");
     let mut args = Args {
@@ -49,9 +46,11 @@ fn chained_nested_dep_a_b_loads_package_at_b() {
         output: Some(exe.clone()),
         profile: Profile::Debug,
         target: Some(host_target_triple()),
+        no_cache: true,
         ..Default::default()
     };
-    GinCompiler::compile(&mut args);
+    let result = GinCompiler::compile(&mut args);
+    assert!(result.is_success(), "{result:?}");
 
     assert!(
         exe.exists(),
@@ -94,10 +93,7 @@ fn chained_exports_dep_a_b_imports_folder_module_sources() {
     );
     write_file(&dir.join("dep/a/b/c.gin"), "y: 2\n");
 
-    write_file(
-        &dir.join("main.gin"),
-        "use dep.a.b\n\nmain:\n    return 0\n",
-    );
+    write_file(&dir.join("main.gin"), "use dep.a.b\n\nmain: 0\n");
 
     let exe = dir.join("out.exe");
     let mut args = Args {
@@ -106,9 +102,11 @@ fn chained_exports_dep_a_b_imports_folder_module_sources() {
         output: Some(exe.clone()),
         profile: Profile::Debug,
         target: Some(host_target_triple()),
+        no_cache: true,
         ..Default::default()
     };
-    GinCompiler::compile(&mut args);
+    let result = GinCompiler::compile(&mut args);
+    assert!(result.is_success(), "{result:?}");
 
     assert!(
         exe.exists(),
@@ -141,7 +139,7 @@ fn missing_nested_package_is_a_fatal_import_flaw() {
         &dir.join("dep/flask.jsonc"),
         r#"{"name":"dep","version":"0.0.0","authors":[]}"#,
     );
-    write_file(&dir.join("main.gin"), "use dep.io\n\nmain:\n    return 0\n");
+    write_file(&dir.join("main.gin"), "use dep.io\n\nmain: 0\n");
 
     let exe = dir.join("out.exe");
     let mut args = Args {
@@ -150,6 +148,7 @@ fn missing_nested_package_is_a_fatal_import_flaw() {
         output: Some(exe.clone()),
         profile: Profile::Debug,
         target: Some(host_target_triple()),
+        no_cache: true,
         ..Default::default()
     };
     GinCompiler::compile(&mut args);
@@ -199,8 +198,7 @@ fn chained_dep_utils_a_does_not_conflict_with_use_utils() {
 use utils
 use utils.a
 
-main:
-    return 0
+main: 0
 "#,
     );
 
@@ -211,9 +209,11 @@ main:
         output: Some(exe.clone()),
         profile: Profile::Debug,
         target: Some(host_target_triple()),
+        no_cache: true,
         ..Default::default()
     };
-    GinCompiler::compile(&mut args);
+    let result = GinCompiler::compile(&mut args);
+    assert!(result.is_success(), "{result:?}");
 
     assert!(
         exe.exists(),
@@ -221,4 +221,39 @@ main:
     );
 
     let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn nested_import_binds_its_module_name_for_calls() {
+    let dir = unique_temp_dir("nested_module_call");
+    write_file(
+        &dir.join("flask.jsonc"),
+        r#"{"name":"app","version":"0","authors":[],"dependencies":{"package":{"path":"dep"}}}"#,
+    );
+    write_file(
+        &dir.join("dep/flask.jsonc"),
+        r#"{"name":"library","version":"0","authors":[]}"#,
+    );
+    write_file(&dir.join("dep/math/ops.gin"), "Word is in 0 to 255\nanswer Word: 42\n");
+    for source in [
+        "use package.math\nmain: math.answer\n",
+        "use package.math as numbers\nmain: numbers.answer\n",
+        "use package.math answer\nmain: answer\n",
+    ] {
+        write_file(&dir.join("main.gin"), source);
+        let exe = dir.join("out");
+        let result = GinCompiler::compile(&mut Args {
+            input: dir.join("main.gin"),
+            output: Some(exe.clone()),
+            target: Some(host_target_triple()),
+            gin_home: Some(flask::GinHome::new(dir.join("gin-home"))),
+            no_cache: true,
+            ..Default::default()
+        });
+        assert!(result.is_success(), "{source}: {result:?}");
+        assert!(!result.has_typecheck_diagnostics(), "{source}: {result:?}");
+        let status = std::process::Command::new(exe).status().unwrap();
+        assert_eq!(status.code(), Some(42), "{source}");
+    }
+    fs::remove_dir_all(dir).unwrap();
 }

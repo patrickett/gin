@@ -2,7 +2,7 @@ mod support;
 
 #[test]
 fn rematerialized_conversions_emit_constants_without_ownership_helpers() {
-    let source = "Tiny is in 0...7\nmain:\n    value: 7\n    first: value as Tiny\n    second: value as Tiny\n    return 0";
+    let source = "Tiny is in 0 to 7\nmain:\n    value: 7\n    first: value as Tiny\n    second: value as Tiny\n    return 0";
     let (mlir, diagnostics) = support::codegen_to_mlir_text(source, "rematerialize.gin", false);
 
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
@@ -21,11 +21,11 @@ fn rematerialized_conversions_emit_constants_without_ownership_helpers() {
 #[test]
 fn test_linear_ownership_paths_do_not_emit_copy_or_drop_helpers() {
     let source = "\
-Int is in 1...400
+Int is in 1 to 400
 
 IntPair has a Int, b Int
 
-consume_pair(eat value IntPair) Int: 0
+consume_pair(value IntPair) Int: 0
 
 main:
     pair: IntPair(a: 1, b: 2)
@@ -53,18 +53,21 @@ main:
 
 #[test]
 fn test_inferred_integer_backend_matrix_contains_expected_widths_and_predicates() {
-    let source = "\
-I1 is in 0...1
-I2 is in 0...2
-I9 is in 0...256
-I128 is in -170141183460469231731687303715884105728...170141183460469231731687303715884105727
-Signed128 is in -128...127
+    let source = r#"I1 is in 0 to 1
+I2 is in 0 to 2
+I9 is in 0 to 256
+I128 is in -170141183460469231731687303715884105728 to 170141183460469231731687303715884105727
+Signed128 is in -128 to 127
 Decision is Lower or Upper
 
-#intrinsic(BitsUnsignedLess)
-unsigned_less_bits(a I2, b I2) False or True extern
-#intrinsic(BitsSignedLess)
-signed_less_bits(a Signed128, b Signed128) False or True extern
+unsigned_less_bits(a I2, b I2) False or True:
+    left is in 0 to 2: a
+    right is in 0 to 2: b
+return left < right
+signed_less_bits(a Signed128, b Signed128) False or True:
+    left is in -128 to 127: a
+    right is in -128 to 127: b
+return left < right
 
 main:
     i1_zero: I1: 0
@@ -86,7 +89,7 @@ main:
     comparison_family: Decision: when compare_u2 then Decision.Lower else Decision.Upper
     sum_projection: when comparison_family is Decision.Lower then True else False
     sum_projection
-";
+"#;
 
     let (mlir, diagnostics) = support::codegen_to_mlir_text(source, "backend_matrix.gin", false);
 
@@ -123,7 +126,23 @@ main:
 
 #[test]
 fn inferred_integer_widths_and_comparisons_reach_exact_llvm_forms() {
-    let source = "I1 is in 0...1\nI2 is in 0...2\nI9 is in 0...256\nI128 is in -170141183460469231731687303715884105728...170141183460469231731687303715884105727\nSigned is in -128...127\nkeep_i1(value I1) I1: value\nkeep_i2(value I2) I2: value\nkeep_i9(value I9) I9: value\nkeep_i128(value I128) I128: value\n#intrinsic(BitsUnsignedLess)\nunsigned_less(a I2, b I2) False or True extern\n#intrinsic(BitsSignedLess)\nsigned_less(a Signed, b Signed) False or True extern";
+    let source = r#"I1 is in 0 to 1
+I2 is in 0 to 2
+I9 is in 0 to 256
+I128 is in -170141183460469231731687303715884105728 to 170141183460469231731687303715884105727
+Signed is in -128 to 127
+keep_i1(value I1) I1: value
+keep_i2(value I2) I2: value
+keep_i9(value I9) I9: value
+keep_i128(value I128) I128: value
+unsigned_less(a I2, b I2) False or True:
+    left is in 0 to 2: a
+    right is in 0 to 2: b
+return left < right
+signed_less(a Signed, b Signed) False or True:
+    left is in -128 to 127: a
+    right is in -128 to 127: b
+return left < right"#;
     let (llvm, diagnostics) = support::codegen_to_llvm_ir(source, "exact_backend.gin");
 
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
@@ -132,8 +151,8 @@ fn inferred_integer_widths_and_comparisons_reach_exact_llvm_forms() {
         "define i2 @keep_i2(i2",
         "define i9 @keep_i9(i9",
         "define i128 @keep_i128(i128",
-        "declare i1 @unsigned_less(i2, i2)",
-        "declare i1 @signed_less(i8, i8)",
+        "define i1 @unsigned_less(i2 %0, i2 %1)",
+        "define i1 @signed_less(i8 %0, i8 %1)",
     ] {
         assert!(llvm.contains(signature), "missing `{signature}`:\n{llvm}");
     }
@@ -150,7 +169,7 @@ fn inferred_integer_widths_and_comparisons_reach_exact_llvm_forms() {
 
 #[test]
 fn straight_line_rebind_replaces_the_ssa_place_version() {
-    let source = "Byte is in 0...255\nmain:\n    value Byte: 1\n    value :: 2\n    value";
+    let source = "Byte is in 0 to 255\nmain:\n    value Byte: 1\n    value :: 2\n    value";
     let (mlir, diagnostics) = support::codegen_to_mlir_text(source, "ssa_rebind.gin", false);
 
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
@@ -166,12 +185,12 @@ fn straight_line_rebind_replaces_the_ssa_place_version() {
 
 #[test]
 fn conditional_rebind_lowers_the_place_join_as_an_scf_result() {
-    let source = "Byte is in 0...255\nmain() Byte:\n    value Byte: 1\n    if 1 < 2 is True\n        value :: 2\n    return\nreturn value";
+    let source = "Byte is in 0 to 255\nmain() Byte:\n    value Byte: 1\n    if 1 < 2 is True\n        value :: 2\n    return\nreturn value";
     let (mlir, diagnostics) = support::codegen_to_mlir_text(source, "ssa_join.gin", false);
 
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
     assert!(mlir.contains("scf.if"), "{mlir}");
-    assert!(mlir.contains(": (i1) -> (!llvm.struct<()>, i8)"), "{mlir}");
+    assert!(mlir.contains(": (i1) -> i8"), "{mlir}");
     assert!(mlir.contains("value = 1 : i8"), "{mlir}");
     assert!(mlir.contains("value = 2 : i8"), "{mlir}");
     assert!(
@@ -184,7 +203,7 @@ fn conditional_rebind_lowers_the_place_join_as_an_scf_result() {
 
 #[test]
 fn multi_arm_rebind_lowers_the_place_join_as_a_when_result() {
-    let source = "Byte is in 0...255\nFlag is Left or Right\nmain(condition Flag) Byte:\n    value Byte: 1\n    choice Byte: when condition is\n        Flag.Left then value :: 2\n                  else value :: 3\nreturn value";
+    let source = "Byte is in 0 to 255\nFlag is Left or Right\nmain(condition Flag) Byte:\n    value Byte: 1\n    choice Byte: when condition is\n        Flag.Left then value :: 2\n                  else value :: 3\nreturn value";
     let (mlir, diagnostics) = support::codegen_to_mlir_text(source, "ssa_when_join.gin", false);
 
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
@@ -201,7 +220,7 @@ fn multi_arm_rebind_lowers_the_place_join_as_a_when_result() {
 
 #[test]
 fn loop_rebind_lowers_the_place_version_as_a_while_iteration_argument() {
-    let source = "Small is in 0...2\nFlag is True or False\nmain(flag Flag) Small:\n    value Small: 0\n    while flag is Flag.True\n        value :: 1\n    loop\nreturn value";
+    let source = "Small is in 0 to 2\nFlag is True or False\nmain(flag Flag) Small:\n    value Small: 0\n    while flag is Flag.True\n        value :: 1\n    loop\nreturn value";
     let (mlir, diagnostics) = support::codegen_to_mlir_text(source, "ssa_loop_phi.gin", false);
 
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
@@ -217,7 +236,7 @@ fn loop_rebind_lowers_the_place_version_as_a_while_iteration_argument() {
 
 #[test]
 fn for_rebind_lowers_the_place_version_as_an_iteration_argument() {
-    let source = "Small is in 0...2\nmain() Small:\n    value Small: 0\n    for index in 0...2\n        value :: 1\n    loop\nreturn value";
+    let source = "Small is in 0 to 2\nmain() Small:\n    value Small: 0\n    for index in 0 to 2\n        value :: 1\n    loop\nreturn value";
     let (mlir, diagnostics) = support::codegen_to_mlir_text(source, "ssa_for_phi.gin", false);
 
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
@@ -228,5 +247,17 @@ fn for_rebind_lowers_the_place_version_as_an_iteration_argument() {
             && !mlir.contains("llvm.store")
             && !mlir.contains("llvm.load"),
         "for-loop `::` should lower through a loop-carried SSA value\n{mlir}"
+    );
+}
+
+#[test]
+fn fixed_array_for_loop_unrolls_structural_elements() {
+    let source = "main:\n    for value in [1, 2, 3]\n    loop\n";
+    let (mlir, diagnostics) = support::codegen_to_mlir_text(source, "array_for.gin", false);
+
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert!(
+        !mlir.contains("fixed-array iteration is not lowered yet"),
+        "{mlir}"
     );
 }

@@ -415,6 +415,6 @@ fn body_expr_id(typed: &TypedFileAst, def_name: &str) -> Option<ExprId> {
                 exprs.last().copied()
             }
         }
-        BindBody::Extern => None,
+        BindBody::Unlowered => None,
     }
 }

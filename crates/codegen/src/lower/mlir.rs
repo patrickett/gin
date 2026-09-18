@@ -13,19 +13,6 @@ use melior::ir::Region;
 use melior::ir::operation::OperationBuilder;
 
 impl<'a, 'c> CodegenContext<'a, 'c> {
-    pub(crate) fn build_string_value(
-        &self,
-        block: &BlockRef<'c, 'c>,
-        ptr: Value<'c, 'c>,
-        len: Value<'c, 'c>,
-        string_ty: &ast::Ty,
-        loc: Location<'c>,
-    ) -> Value<'c, 'c> {
-        let undef = block.append_op(self.mlir.llvm_undef(self.ty_to_mlir(string_ty), loc));
-        let with_ptr = block.append_op(self.mlir.llvm_insertvalue(undef, ptr, 0, loc));
-        block.append_op(self.mlir.llvm_insertvalue(with_ptr, len, 1, loc))
-    }
-
     /// This returns a pointer to the global that can be used in function calls.
     pub fn addressof_string_global(
         &self,
@@ -59,9 +46,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         for (symbol_name, value) in self.strings.iter_symbols() {
             let loc = self.location();
 
-            // Null-terminated string bytes
-            let with_nul = format!("{}\0", value);
-            let Ok(byte_len) = u32::try_from(with_nul.len()) else {
+            let Ok(byte_len) = u32::try_from(value.len()) else {
                 continue;
             };
 
@@ -85,7 +70,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     ),
                     (
                         Identifier::new(self.mlir, "value"),
-                        melior::ir::attribute::StringAttribute::new(self.mlir, &with_nul).into(),
+                        melior::ir::attribute::StringAttribute::new(self.mlir, &value).into(),
                     ),
                     (Identifier::new(self.mlir, "linkage"), linkage_attr),
                     (
@@ -133,8 +118,10 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 self.mlir.f64(),
                 self.location(),
             ))),
-            ConstValue::String(s) => {
-                Some(block.const_string_with_ctx(self, s, ty, self.location()))
+            ConstValue::Text(s) => {
+                let name = self.register_string(s);
+                let ptr = self.addressof_string_global(block, &name, self.location())?;
+                block.load_typed(self, ptr, self.ty_to_mlir(ty), self.location())
             }
             _ => None,
         }

@@ -159,7 +159,7 @@ pub fn stage_flow(
                     v.extend(ret);
                     v
                 }
-                crate::typed::BindBody::Extern => return None,
+                crate::typed::BindBody::Unlowered => return None,
             };
             Some((def_id, ids))
         })
@@ -188,7 +188,9 @@ pub fn stage_flow(
                     .zip(&bind.param_conventions)
                     .enumerate()
                     .filter_map(|(slot, ((name, ty), convention))| {
-                        if *convention != ParamConvention::Own || is_reference_type(typed, ty) {
+                        if !matches!(convention, ParamConvention::Own)
+                            || is_reference_type(typed, ty)
+                        {
                             return None;
                         }
                         let binder = ast::BinderId::new(
@@ -213,7 +215,8 @@ pub fn stage_flow(
             .map(|bind| match &bind.body {
                 crate::typed::BindBody::Expr(id) => vec![*id],
                 crate::typed::BindBody::Body { ret: Some(id), .. } => vec![*id],
-                crate::typed::BindBody::Body { ret: None, .. } | crate::typed::BindBody::Extern => {
+                crate::typed::BindBody::Body { ret: None, .. }
+                | crate::typed::BindBody::Unlowered => {
                     vec![]
                 }
             })
@@ -318,9 +321,13 @@ fn emit_unassigned_bindings(typed: &mut TypedFileAst, flow_ctx: &FlowContext) {
                 name,
                 unassigned: true,
                 ..
-            } if typed.exprs.place[idx].is_some_and(|place| {
-                matches!(flow_ctx.place_state(place), Some(VarState::Declared))
-            }) =>
+            } if typed
+                .exprs
+                .place_of(ExprId(idx as u32))
+                .flatten()
+                .is_some_and(|place| {
+                    matches!(flow_ctx.place_state(place), Some(VarState::Declared))
+                }) =>
             {
                 Some((idx, *name))
             }
@@ -328,10 +335,10 @@ fn emit_unassigned_bindings(typed: &mut TypedFileAst, flow_ctx: &FlowContext) {
         })
         .collect();
     for (idx, name) in unassigned {
-        if !typed.exprs.flaws[idx].iter().any(|f| {
+        if !typed.exprs.facts.semantic_facts.flaws[idx].iter().any(|f| {
             f.code.slug() == "type-unassigned-binding" && f.arg("name") == Some(name.as_str())
         }) {
-            typed.exprs.flaws[idx].push(
+            typed.exprs.facts.semantic_facts.flaws[idx].push(
                 Diagnostic::new(
                     "type-unassigned-binding",
                     format!("binding `{}` is declared but never assigned", name.as_str()),
@@ -681,7 +688,7 @@ fn reference_instance(ty: &Ty, type_registry: &crate::TypeRegistry) -> Option<(T
 }
 
 fn mark_consumed_if_local_ref(typed: &TypedFileAst, expr_id: ExprId, flow_ctx: &mut FlowContext) {
-    let Some(place) = typed.exprs.place.get(expr_id.as_usize()).copied().flatten() else {
+    let Some(place) = typed.exprs.place_of(expr_id).flatten() else {
         return;
     };
     flow_ctx.set_place_state(place, VarState::Consumed);
@@ -696,17 +703,15 @@ fn is_explicit_rebind_consumption(
         return false;
     };
     match kind {
-        TypedExprKind::ConsumeArg(inner) | TypedExprKind::Eat(inner) => {
-            expr_consumes_target(typed, *inner, target_name)
-        }
         TypedExprKind::Ref(inner)
         | TypedExprKind::TakePtr(inner)
         | TypedExprKind::Deref(inner)
         | TypedExprKind::Negate(inner)
-        | TypedExprKind::Cast { expr: inner, .. } => {
+        | TypedExprKind::Cast { expr: inner, .. }
+        | TypedExprKind::UnionPayload { expr: inner, .. } => {
             expr_consumes_target(typed, *inner, target_name)
         }
-        TypedExprKind::TupleGet { base, .. } | TypedExprKind::BufGet { buf: base, .. } => {
+        TypedExprKind::AggregateGet { base, .. } | TypedExprKind::BufGet { buf: base, .. } => {
             expr_consumes_target(typed, *base, target_name)
         }
         TypedExprKind::FnCall {
@@ -734,43 +739,53 @@ fn expr_consumes_target(
     match kind {
         TypedExprKind::Ref(inner)
         | TypedExprKind::TakePtr(inner)
-        | TypedExprKind::TupleGet { base: inner, .. }
+        | TypedExprKind::AggregateGet { base: inner, .. }
         | TypedExprKind::BufGet { buf: inner, .. }
         | TypedExprKind::Negate(inner)
-        | TypedExprKind::Cast { expr: inner, .. } => {
+        | TypedExprKind::Cast { expr: inner, .. }
+        | TypedExprKind::UnionPayload { expr: inner, .. } => {
             expr_consumes_target(typed, *inner, target_name)
         }
         TypedExprKind::FnCall { target, .. } if target.0 == target_name => true,
-        TypedExprKind::ConsumeArg(inner) | TypedExprKind::Eat(inner) => {
-            expr_consumes_target(typed, *inner, target_name)
-        }
         _ => false,
     }
 }
 
 fn expression_consumes_place(
     typed: &TypedFileAst,
+    signatures: &HashMap<DefId, TypedCallableSignature>,
     expression: ExprId,
     place: crate::typed::PlaceId,
 ) -> bool {
     let Some(kind) = typed.exprs.kind_of(expression) else {
         return false;
     };
-    if let TypedExprKind::ConsumeArg(inner) | TypedExprKind::Eat(inner) = kind
-        && typed.exprs.place[inner.as_usize()] == Some(place)
-    {
-        return true;
-    }
-    let mut consumes = false;
-    let _ = crate::typed::walk_expr_children(kind, &mut |child| {
-        if expression_consumes_place(typed, child, place) {
-            consumes = true;
-            std::ops::ControlFlow::Break(())
-        } else {
-            std::ops::ControlFlow::Continue(())
+    match kind {
+        TypedExprKind::FnCall {
+            target,
+            args: Some(args),
+            ..
+        } => {
+            let Some(signature) = signatures.get(target) else {
+                return false;
+            };
+            args.iter()
+                .zip(&signature.param_conventions)
+                .any(|(arg, convention)| {
+                    (matches!(convention, ParamConvention::Own | ParamConvention::Terminal)
+                        && !matches!(
+                            typed.exprs.kind_of(*arg),
+                            Some(TypedExprKind::Ref(_) | TypedExprKind::TakePtr(_))
+                        )
+                        && typed.exprs.place_of(*arg).flatten() == Some(place))
+                        || expression_consumes_place(typed, signatures, *arg, place)
+                })
         }
-    });
-    consumes
+        TypedExprKind::Cast { expr, .. } | TypedExprKind::Negate(expr) => {
+            expression_consumes_place(typed, signatures, *expr, place)
+        }
+        _ => false,
+    }
 }
 
 fn is_reference_type(typed: &TypedFileAst, ty: &Ty) -> bool {
@@ -788,15 +803,39 @@ struct WalkExprCtx<'a> {
     callable_signatures: &'a HashMap<DefId, TypedCallableSignature>,
 }
 
+#[derive(Clone)]
+struct FlowSnapshot {
+    flow_ctx: FlowContext,
+    ref_tracker: RefTracker,
+    const_bindings: HashMap<Intern<String>, bool>,
+    local_const_values: HashMap<Intern<String>, ConstValue>,
+}
+
 impl<'a> WalkExprCtx<'a> {
+    fn snapshot(&self) -> FlowSnapshot {
+        FlowSnapshot {
+            flow_ctx: self.flow_ctx.clone(),
+            ref_tracker: self.ref_tracker.clone(),
+            const_bindings: self.const_bindings.clone(),
+            local_const_values: self.local_const_values.clone(),
+        }
+    }
+
+    fn restore(&mut self, snapshot: FlowSnapshot) {
+        *self.flow_ctx = snapshot.flow_ctx;
+        *self.ref_tracker = snapshot.ref_tracker;
+        *self.const_bindings = snapshot.const_bindings;
+        *self.local_const_values = snapshot.local_const_values;
+    }
+
     fn validate_projected_write(&mut self, expression: ExprId, value: ExprId) {
         let index = expression.as_usize();
-        let Some(place_id) = self.typed.exprs.place[index] else {
+        let Some(place_id) = self.typed.exprs.place_of(expression).flatten() else {
             return;
         };
         let place = &self.typed.places[place_id.0 as usize];
         if !place.mutable {
-            self.typed.exprs.flaws[index].push(
+            self.typed.exprs.facts.semantic_facts.flaws[index].push(
                 Diagnostic::new(
                     "type-rebind-immutable",
                     format!("cannot rebind immutable value `{}`", place.name.as_str()),
@@ -806,9 +845,9 @@ impl<'a> WalkExprCtx<'a> {
         }
         if !place.ty.is_structurally_discardable()
             && !is_reference_type(self.typed, &place.ty)
-            && !expression_consumes_place(self.typed, value, place_id)
+            && !expression_consumes_place(self.typed, self.callable_signatures, value, place_id)
         {
-            self.typed.exprs.flaws[index].push(
+            self.typed.exprs.facts.semantic_facts.flaws[index].push(
                 Diagnostic::new(
                     "type-rebind-would-discard-value",
                     format!(
@@ -856,25 +895,16 @@ impl<'a> WalkExprCtx<'a> {
         branch: &[ExprId],
         ownership_paths: &[HashSet<ExprId>],
     ) {
-        let incoming_flow = self.flow_ctx.clone();
-        let incoming_refs = self.ref_tracker.clone();
-        let incoming_bindings = self.const_bindings.clone();
-        let incoming_values = self.local_const_values.clone();
+        let snapshot = self.snapshot();
         self.apply_condition_ownership_join(ownership_paths);
         for expr in branch {
             self.walk(*expr);
         }
-        *self.flow_ctx = incoming_flow;
-        *self.ref_tracker = incoming_refs;
-        *self.const_bindings = incoming_bindings;
-        *self.local_const_values = incoming_values;
+        self.restore(snapshot);
     }
 
     fn walk_repeating_body(&mut self, body: &[ExprId], backedge: Option<Vec<ExprId>>) {
-        let incoming_flow = self.flow_ctx.clone();
-        let incoming_refs = self.ref_tracker.clone();
-        let incoming_bindings = self.const_bindings.clone();
-        let incoming_values = self.local_const_values.clone();
+        let snapshot = self.snapshot();
 
         for expr in body {
             self.walk(*expr);
@@ -891,14 +921,17 @@ impl<'a> WalkExprCtx<'a> {
             self.walk(*expr);
         }
 
+        let incoming_flow = snapshot.flow_ctx.clone();
+        let incoming_refs = snapshot.ref_tracker.clone();
         *self.flow_ctx = incoming_flow.clone();
         self.flow_ctx
             .merge_branch_states(&[incoming_flow, first_flow]);
         *self.ref_tracker = incoming_refs.clone();
         self.ref_tracker
             .merge_branch_validity(&[incoming_refs, first_refs]);
-        *self.const_bindings = incoming_bindings;
-        *self.local_const_values = incoming_values;
+        self.const_bindings.clone_from(&snapshot.const_bindings);
+        self.local_const_values
+            .clone_from(&snapshot.local_const_values);
     }
 
     fn walk(&mut self, expr_id: ExprId) {
@@ -907,10 +940,42 @@ impl<'a> WalkExprCtx<'a> {
             return;
         };
 
-        // Save context for this expression
-        let current_const_value = self.typed.exprs.const_value[idx].clone();
-        self.typed.exprs.const_value[idx] = current_const_value;
         match kind {
+            TypedExprKind::Register(inner) => self.walk(inner),
+            TypedExprKind::Invalid => {}
+            TypedExprKind::Asm {
+                state,
+                specification,
+                operands,
+                ..
+            } => {
+                self.walk(specification);
+                for (_, operand) in &operands {
+                    self.walk(*operand);
+                }
+                if let crate::assembly::AssemblyState::Checked(assembly) = state {
+                    for (pointer, _) in assembly.memory.writes {
+                        let Some((_, operand)) =
+                            operands.iter().find(|(name, _)| name.as_str() == pointer)
+                        else {
+                            continue;
+                        };
+                        if !self.typed.exprs.ty_of(*operand).is_some_and(Ty::is_ref) {
+                            continue;
+                        }
+                        if let Some(targets) = self
+                            .typed
+                            .exprs
+                            .target_group_of(*operand)
+                            .cloned()
+                            .flatten()
+                        {
+                            self.ref_tracker
+                                .permanently_invalidate(&targets, self.flow_ctx);
+                        }
+                    }
+                }
+            }
             TypedExprKind::Lit(_) | TypedExprKind::Rematerialize { .. } => {}
             TypedExprKind::Binary { lhs, rhs, .. }
             | TypedExprKind::InvalidOperator { lhs, rhs, .. } => {
@@ -931,7 +996,7 @@ impl<'a> WalkExprCtx<'a> {
                 let result_ty = self.typed.exprs.ty_of(expr_id).unwrap_or(&Ty::Unit);
                 let is_anonymous_result_int = matches!(result_ty, Ty::AnonymousInteger { .. });
                 if all_operands_anonymous_int && is_anonymous_result_int {
-                    self.typed.exprs.const_value[idx] = None;
+                    self.typed.exprs.facts.const_facts.const_value[idx] = None;
                 }
             }
             TypedExprKind::FnCall {
@@ -943,21 +1008,25 @@ impl<'a> WalkExprCtx<'a> {
                 if args.as_ref().is_none_or(|a| a.is_empty())
                     && let Some(cv) = self.local_const_values.get(&target.0).cloned()
                 {
-                    self.typed.exprs.const_value[idx] = Some(cv);
+                    self.typed.exprs.facts.const_facts.const_value[idx] = Some(cv);
                 }
                 if args.as_ref().is_none_or(|a| a.is_empty()) {
-                    match self.typed.exprs.place[idx]
+                    match self
+                        .typed
+                        .exprs
+                        .place_of(expr_id)
+                        .flatten()
                         .and_then(|place| self.flow_ctx.place_state(place))
                     {
                         Some(VarState::Consumed) => {
-                            self.typed.exprs.flaws[idx].push(
+                            self.typed.exprs.facts.semantic_facts.flaws[idx].push(
                                 Diagnostic::new(
                                     "type-use-of-moved-value",
                                     format!("use of moved value `{}`", target.0.as_str()),
                                 )
                                 .with_arg("name", target.0.as_str().to_string()),
                             );
-                            self.typed.exprs.flaws[idx].push(
+                            self.typed.exprs.facts.semantic_facts.flaws[idx].push(
                                 Diagnostic::new(
                                     "type-use-after-move",
                                     format!("use of moved value `{}`", target.0.as_str()),
@@ -966,7 +1035,7 @@ impl<'a> WalkExprCtx<'a> {
                             );
                         }
                         Some(VarState::MaybeConsumed) => {
-                            self.typed.exprs.flaws[idx].push(
+                            self.typed.exprs.facts.semantic_facts.flaws[idx].push(
                                 Diagnostic::new(
                                     "type-use-of-maybe-moved-value",
                                     format!(
@@ -978,7 +1047,7 @@ impl<'a> WalkExprCtx<'a> {
                             );
                         }
                         Some(VarState::Invalidated) => {
-                            self.typed.exprs.flaws[idx].push(
+                            self.typed.exprs.facts.semantic_facts.flaws[idx].push(
                                 Diagnostic::new(
                                     "type-use-of-invalidated-reference",
                                     format!("use of invalidated reference `{}`", target.0.as_str()),
@@ -987,7 +1056,7 @@ impl<'a> WalkExprCtx<'a> {
                             );
                         }
                         Some(VarState::MaybeInvalidated) => {
-                            self.typed.exprs.flaws[idx].push(
+                            self.typed.exprs.facts.semantic_facts.flaws[idx].push(
                                 Diagnostic::new(
                                     "type-use-of-maybe-invalidated-reference",
                                     format!(
@@ -999,7 +1068,7 @@ impl<'a> WalkExprCtx<'a> {
                             );
                         }
                         Some(VarState::Declared) => {
-                            self.typed.exprs.flaws[idx].push(
+                            self.typed.exprs.facts.semantic_facts.flaws[idx].push(
                                 Diagnostic::new(
                                     "type-use-before-assign",
                                     format!("use before assign `{}`", target.0.as_str()),
@@ -1016,7 +1085,7 @@ impl<'a> WalkExprCtx<'a> {
                                 .defs
                                 .get(&target)
                                 .or_else(|| {
-                                    let place = self.typed.exprs.place[idx]?;
+                                    let place = self.typed.exprs.place_of(expr_id).flatten()?;
                                     let binder = self.typed.places.get(place.0 as usize)?.binder;
                                     self.typed
                                         .defs
@@ -1034,23 +1103,20 @@ impl<'a> WalkExprCtx<'a> {
                                     span: self.typed.span_table.get(bind.name_span),
                                     label: "declared without an initializer".to_string(),
                                 });
-                            } else if let Some(place) = self.typed.exprs.place[idx]
+                            } else if let Some(place) = self.typed.exprs.place_of(expr_id).flatten()
                                 && let Some((expression, _)) = self
                                     .typed
                                     .exprs
-                                    .place
-                                    .iter()
-                                    .enumerate()
-                                    .find(|(_, candidate)| **candidate == Some(place))
-                                && let Some(span) =
-                                    self.typed.exprs.span_of(ExprId(expression as u32))
+                                    .place_entries()
+                                    .find(|(_, candidate)| *candidate == Some(place))
+                                && let Some(span) = self.typed.exprs.span_of(expression)
                             {
                                 diagnostic.related.push(RelatedSpan {
                                     span: self.typed.span_table.get(span),
                                     label: "declared without an initializer".to_string(),
                                 });
                             }
-                            if let Some(place) = self.typed.exprs.place[idx] {
+                            if let Some(place) = self.typed.exprs.place_of(expr_id).flatten() {
                                 for version in self
                                     .typed
                                     .place_versions
@@ -1069,7 +1135,7 @@ impl<'a> WalkExprCtx<'a> {
                                     }
                                 }
                             }
-                            self.typed.exprs.flaws[idx].push(diagnostic);
+                            self.typed.exprs.facts.semantic_facts.flaws[idx].push(diagnostic);
                         }
                         _ => {}
                     }
@@ -1083,12 +1149,15 @@ impl<'a> WalkExprCtx<'a> {
                     for (param_idx, arg_id) in arg_ids.iter().enumerate() {
                         self.walk(*arg_id);
                         let convention = conventions.get(param_idx);
-                        if convention != Some(&ParamConvention::Own) {
+                        if !matches!(
+                            convention,
+                            Some(&ParamConvention::Own | &ParamConvention::Terminal)
+                        ) {
                             continue;
                         }
                         if matches!(
                             self.typed.exprs.kind_of(*arg_id),
-                            Some(TypedExprKind::Ref(_) | TypedExprKind::ConsumeArg(_))
+                            Some(TypedExprKind::Ref(_))
                         ) {
                             continue;
                         }
@@ -1110,7 +1179,7 @@ impl<'a> WalkExprCtx<'a> {
                             substituted_ty.as_ref(),
                             &self.flow_ctx.constraint_env,
                         );
-                        self.typed.exprs.flaws[idx].extend(refinement_flaws);
+                        self.typed.exprs.facts.semantic_facts.flaws[idx].extend(refinement_flaws);
                         let application = self.typed.apply_target_groups(&arg_ids, &signature);
                         for (group, ancestor) in application
                             .invalid_derived_groups(&signature, &self.flow_ctx.constraint_env)
@@ -1125,7 +1194,7 @@ impl<'a> WalkExprCtx<'a> {
                                 .as_ref()
                                 .map(ToString::to_string)
                                 .unwrap_or_else(|| format!("group{}", ancestor.0));
-                            self.typed.exprs.flaws[idx].push(
+                            self.typed.exprs.facts.semantic_facts.flaws[idx].push(
                                 Diagnostic::new(
                                     "type-invalid-derived-target-group-argument",
                                     format!(
@@ -1149,7 +1218,7 @@ impl<'a> WalkExprCtx<'a> {
                             };
                             let left_name = group_name(left);
                             let right_name = group_name(right);
-                            self.typed.exprs.flaws[idx].push(
+                            self.typed.exprs.facts.semantic_facts.flaws[idx].push(
                                 Diagnostic::new(
                                     "type-overlapping-target-group-arguments",
                                     format!(
@@ -1228,15 +1297,15 @@ impl<'a> WalkExprCtx<'a> {
                     .const_value_of(body)
                     .cloned()
                     .flatten()
-                    .or_else(|| self.typed.exprs.const_value[idx].clone());
-                self.typed.exprs.const_value[idx] = bind_const.clone();
+                    .or_else(|| self.typed.exprs.facts.const_facts.const_value[idx].clone());
+                self.typed.exprs.facts.const_facts.const_value[idx] = bind_const.clone();
                 if let Some(cv) = bind_const {
                     self.const_bindings.insert(name, true);
                     self.local_const_values.insert(name, cv);
                 } else {
                     self.local_const_values.remove(&name);
                 }
-                let place = self.typed.exprs.place[idx];
+                let place = self.typed.exprs.place_of(expr_id).flatten();
                 if unassigned {
                     if let Some(place) = place {
                         self.flow_ctx.set_place_state(place, VarState::Declared);
@@ -1268,7 +1337,7 @@ impl<'a> WalkExprCtx<'a> {
                     .cloned()
                 else {
                     if self.typed.defs.contains_key(&crate::typed::DefId(name)) {
-                        self.typed.exprs.flaws[idx].push(
+                        self.typed.exprs.facts.semantic_facts.flaws[idx].push(
                             Diagnostic::new(
                                 "type-rebind-crosses-callable-boundary",
                                 format!(
@@ -1279,7 +1348,7 @@ impl<'a> WalkExprCtx<'a> {
                             .with_arg("name", name.as_str().to_string()),
                         );
                     } else {
-                        self.typed.exprs.flaws[idx].push(
+                        self.typed.exprs.facts.semantic_facts.flaws[idx].push(
                             Diagnostic::new(
                                 "type-rebind-target-not-found",
                                 format!("unknown rebind target `{}`", name.as_str()),
@@ -1290,11 +1359,15 @@ impl<'a> WalkExprCtx<'a> {
                     return;
                 };
 
-                let target_place = self.typed.exprs.place[idx];
+                let target_place = self.typed.exprs.place_of(expr_id).flatten();
                 let target_initialized = target_place
                     .and_then(|place| self.flow_ctx.place_state(place))
                     .is_some_and(|state| matches!(state, VarState::Declared));
-                let target_ty = self.typed.exprs.place[idx]
+                let target_ty = self
+                    .typed
+                    .exprs
+                    .place_of(expr_id)
+                    .flatten()
                     .and_then(|place| self.typed.places.get(place.0 as usize))
                     .map(|place| &place.ty)
                     .or_else(|| self.local_var_types.get(&name));
@@ -1304,7 +1377,7 @@ impl<'a> WalkExprCtx<'a> {
                     && !is_reference_type(self.typed, ty)
                     && !is_explicit_rebind_consumption(self.typed, value, name)
                 {
-                    self.typed.exprs.flaws[idx].push(
+                    self.typed.exprs.facts.semantic_facts.flaws[idx].push(
                         Diagnostic::new(
                             "type-rebind-would-discard-value",
                             format!(
@@ -1343,9 +1416,10 @@ impl<'a> WalkExprCtx<'a> {
                         .is_some_and(|validity| refinement_divides_storage_max(validity.domain()))
                 });
                 if let Some((min, max)) = validity
+                    && !rebind_result_within_integer_bounds(self.typed, value, min, max)
                     && !rebind_rhs_within_integer_max(
                         &self.typed.exprs.kind,
-                        &self.typed.exprs.const_value,
+                        &self.typed.exprs.facts.const_facts.const_value,
                         self.local_const_values,
                         name,
                         value,
@@ -1355,21 +1429,13 @@ impl<'a> WalkExprCtx<'a> {
                         &self.flow_ctx.constraint_env,
                     )
                 {
-                    self.typed.exprs.flaws[idx].push(
+                    self.typed.exprs.facts.semantic_facts.flaws[idx].push(
                         Diagnostic::new(
                             "type-rebind-violates-validity",
                             format!("rebind `{}` exceeds maximum bound", name.as_str()),
                         )
                         .with_arg("name", name.as_str().to_string()),
                     );
-                }
-            }
-            TypedExprKind::Eat(inner) => {
-                self.walk(inner);
-                mark_consumed_if_local_ref(self.typed, inner, self.flow_ctx);
-                if let Some(source) = self.typed.exprs.target_group_of(inner).cloned().flatten() {
-                    self.ref_tracker
-                        .permanently_invalidate(&source, self.flow_ctx);
                 }
             }
             TypedExprKind::TakePtr(inner) | TypedExprKind::Ref(inner) => {
@@ -1387,6 +1453,12 @@ impl<'a> WalkExprCtx<'a> {
                         .cloned()
                 });
                 let mut selected_body = None;
+                let target_selection = when_expr.subject.is_some_and(|subject| {
+                    matches!(
+                        self.typed.exprs.kind_of(subject),
+                        Some(TypedExprKind::TargetField(_))
+                    )
+                });
                 if let Some(subject_value) = subject_value.as_ref() {
                     for arm in &when_expr.arms {
                         match arm {
@@ -1406,10 +1478,14 @@ impl<'a> WalkExprCtx<'a> {
                                     selected_body = Some(*body);
                                     break;
                                 }
-                                self.typed.exprs.flaws[idx].push(Diagnostic::new(
-                                    "type-unreachable-when-arm",
-                                    "when arm is unreachable",
-                                ));
+                                if !target_selection {
+                                    self.typed.exprs.facts.semantic_facts.flaws[idx].push(
+                                        Diagnostic::new(
+                                            "type-unreachable-when-arm",
+                                            "when arm is unreachable",
+                                        ),
+                                    );
+                                }
                             }
                             TypedWhenArm::Else(body, _) => {
                                 selected_body = Some(*body);
@@ -1431,24 +1507,18 @@ impl<'a> WalkExprCtx<'a> {
                 }
                 if let Some(body) = selected_body {
                     self.walk(body);
-                    self.typed.exprs.const_value[idx] = self
+                    self.typed.exprs.facts.const_facts.const_value[idx] = self
                         .typed
                         .exprs
                         .const_value_of(body)
                         .cloned()
                         .unwrap_or(None);
                 } else {
-                    let incoming_flow = self.flow_ctx.clone();
-                    let incoming_refs = self.ref_tracker.clone();
-                    let incoming_bindings = self.const_bindings.clone();
-                    let incoming_values = self.local_const_values.clone();
+                    let snapshot = self.snapshot();
                     let mut branch_flows = Vec::with_capacity(when_expr.arms.len());
                     let mut branch_refs = Vec::with_capacity(when_expr.arms.len());
                     for arm in &when_expr.arms {
-                        *self.flow_ctx = incoming_flow.clone();
-                        *self.ref_tracker = incoming_refs.clone();
-                        *self.const_bindings = incoming_bindings.clone();
-                        *self.local_const_values = incoming_values.clone();
+                        self.restore(snapshot.clone());
                         let body = match arm {
                             TypedWhenArm::Cond {
                                 condition, body, ..
@@ -1476,12 +1546,15 @@ impl<'a> WalkExprCtx<'a> {
                         branch_flows.push(self.flow_ctx.clone());
                         branch_refs.push(self.ref_tracker.clone());
                     }
+                    let incoming_flow = snapshot.flow_ctx.clone();
+                    let incoming_refs = snapshot.ref_tracker.clone();
                     *self.flow_ctx = incoming_flow;
                     self.flow_ctx.merge_branch_states(&branch_flows);
                     *self.ref_tracker = incoming_refs;
                     self.ref_tracker.merge_branch_validity(&branch_refs);
-                    *self.const_bindings = incoming_bindings;
-                    *self.local_const_values = incoming_values;
+                    self.const_bindings.clone_from(&snapshot.const_bindings);
+                    self.local_const_values
+                        .clone_from(&snapshot.local_const_values);
                 }
             }
             TypedExprKind::If(if_expr) => {
@@ -1563,6 +1636,7 @@ impl<'a> WalkExprCtx<'a> {
                     TypedLoopKind::ForIn {
                         variable: _,
                         iterable,
+                        ..
                     } => {
                         self.walk(iterable);
                         None
@@ -1572,7 +1646,32 @@ impl<'a> WalkExprCtx<'a> {
                 self.flow_ctx.constraint_env.known_lt.truncate(saved_lt_len);
                 self.flow_ctx.constraint_env.known_le.truncate(saved_le_len);
             }
-            TypedExprKind::TupleGet { base, .. } => {
+            TypedExprKind::AggregateGet { base, .. }
+            | TypedExprKind::UnionPayload { expr: base, .. } => {
+                if let Some(place) = self.typed.exprs.place_of(expr_id).flatten()
+                    && let Some(state) = self.flow_ctx.place_state(place)
+                    && matches!(state, VarState::Consumed | VarState::MaybeConsumed)
+                    && let Some(place_info) = self.typed.places.get(place.0 as usize)
+                {
+                    let (code, message) = match state {
+                        VarState::Consumed => (
+                            "type-use-of-moved-value",
+                            format!("use of moved value `{}`", place_info.name.as_str()),
+                        ),
+                        VarState::MaybeConsumed => (
+                            "type-use-of-maybe-moved-value",
+                            format!(
+                                "value `{}` may have been moved on another control-flow path",
+                                place_info.name.as_str()
+                            ),
+                        ),
+                        _ => unreachable!(),
+                    };
+                    self.typed.exprs.facts.semantic_facts.flaws[idx].push(
+                        Diagnostic::new(code, message)
+                            .with_arg("name", place_info.name.as_str().to_string()),
+                    );
+                }
                 self.walk(base);
             }
             TypedExprKind::Destructure {
@@ -1613,7 +1712,7 @@ impl<'a> WalkExprCtx<'a> {
                 );
 
                 if !remainder_discardable {
-                    self.typed.exprs.flaws[idx].push(
+                    self.typed.exprs.facts.semantic_facts.flaws[idx].push(
                         Diagnostic::new(
                             "type-pattern-would-discard-value",
                             format!(
@@ -1646,7 +1745,7 @@ impl<'a> WalkExprCtx<'a> {
                     }
                 }
             }
-            TypedExprKind::TupleSet {
+            TypedExprKind::AggregateSet {
                 base, index, value, ..
             } => {
                 self.walk(base);
@@ -1670,10 +1769,13 @@ impl<'a> WalkExprCtx<'a> {
                 self.walk(start);
                 self.walk(end);
             }
-            TypedExprKind::TupleAlloc { init, .. } => {
+            TypedExprKind::FixedArrayAlloc { init, .. } => {
                 self.walk(init);
             }
-            TypedExprKind::TupleLit(items) | TypedExprKind::List(items) => {
+            TypedExprKind::RecordValue(items)
+            | TypedExprKind::ResultRow(items)
+            | TypedExprKind::ArrayLit(items)
+            | TypedExprKind::List(items) => {
                 for item_id in items {
                     self.walk(item_id);
                     if !expr_is_rematerializable(self.typed, item_id) {
@@ -1720,27 +1822,13 @@ impl<'a> WalkExprCtx<'a> {
                     }
                 }
             }
-            TypedExprKind::ConsumeArg(inner) => {
-                self.walk(inner);
-                mark_consumed_if_local_ref(self.typed, inner, self.flow_ctx);
-                if let Some(source) = self.typed.exprs.target_group_of(inner).cloned().flatten() {
-                    self.ref_tracker
-                        .permanently_invalidate(&source, self.flow_ctx);
-                }
-            }
             TypedExprKind::Deref(inner) | TypedExprKind::Negate(inner) => {
                 self.walk(inner);
             }
-            TypedExprKind::FormatString(fs) => {
-                for part in &fs.parts {
-                    if let ast::FormatPart::Expr(_typed_expr, _) = part {
-                        // _typed_expr.value is ast::Expr — not an ExprId, so we skip
-                        // walking children here. The FormatString's inner expressions
-                        // are untyped and won't have flow context attached.
-                    }
-                }
-            }
-            TypedExprKind::SelfRef { .. } | TypedExprKind::TargetQuery { .. } => {}
+            TypedExprKind::SelfRef { .. }
+            | TypedExprKind::TargetQuery { .. }
+            | TypedExprKind::Target => {}
+            TypedExprKind::TargetField(_) => {}
         }
     }
 
@@ -1780,7 +1868,7 @@ impl<'a> WalkExprCtx<'a> {
                 if let Some(fname) = fname
                     && let Some(value) = expr_to_normal_expr(
                         &self.typed.exprs.kind,
-                        &self.typed.exprs.const_value,
+                        &self.typed.exprs.facts.const_facts.const_value,
                         self.local_const_values,
                         *arg_id,
                     )
@@ -1805,7 +1893,7 @@ impl<'a> WalkExprCtx<'a> {
             };
             let Some(field_value) = expr_to_normal_expr(
                 &self.typed.exprs.kind,
-                &self.typed.exprs.const_value,
+                &self.typed.exprs.facts.const_facts.const_value,
                 self.local_const_values,
                 *arg_id,
             ) else {
@@ -1827,7 +1915,7 @@ impl<'a> WalkExprCtx<'a> {
                     let Some(span) = self.typed.exprs.span_of(*arg_id) else {
                         continue;
                     };
-                    self.typed.exprs.flaws[arg_id.index()].push(
+                    self.typed.exprs.facts.semantic_facts.flaws[arg_id.index()].push(
                         Diagnostic::new(
                             "dep-refinement-failed",
                             format!(
@@ -1843,7 +1931,7 @@ impl<'a> WalkExprCtx<'a> {
                     let Some(span) = self.typed.exprs.span_of(*arg_id) else {
                         continue;
                     };
-                    self.typed.exprs.flaws[arg_id.index()].push(
+                    self.typed.exprs.facts.semantic_facts.flaws[arg_id.index()].push(
                         Diagnostic::new(
                             "dep-refinement-unproven",
                             format!(
@@ -1904,11 +1992,9 @@ fn expr_to_normal_expr(
                 }
                 _ => None,
             }),
-        TypedExprKind::Ref(inner)
-        | TypedExprKind::TakePtr(inner)
-        | TypedExprKind::ConsumeArg(inner)
-        | TypedExprKind::Eat(inner)
-        | TypedExprKind::Deref(inner) => expr_to_normal_expr(kinds, const_values, lcv, *inner),
+        TypedExprKind::Ref(inner) | TypedExprKind::TakePtr(inner) | TypedExprKind::Deref(inner) => {
+            expr_to_normal_expr(kinds, const_values, lcv, *inner)
+        }
         TypedExprKind::Cast { expr, .. } => expr_to_normal_expr(kinds, const_values, lcv, *expr),
         TypedExprKind::Rematerialize { source, .. } => {
             expr_to_normal_expr(kinds, const_values, lcv, *source)
@@ -1983,11 +2069,7 @@ fn expr_to_target_index(
         TypedExprKind::Lit(Literal::Number(value)) => {
             ast::NormalExpr::Value(ast::ConstValue::Int((*value as u128).into()))
         }
-        TypedExprKind::Ref(inner)
-        | TypedExprKind::TakePtr(inner)
-        | TypedExprKind::ConsumeArg(inner)
-        | TypedExprKind::Eat(inner)
-        | TypedExprKind::Deref(inner) => {
+        TypedExprKind::Ref(inner) | TypedExprKind::TakePtr(inner) | TypedExprKind::Deref(inner) => {
             return expr_to_target_index(kinds, const_values, _lcv, *inner);
         }
         TypedExprKind::Cast { expr, .. } => {
@@ -2079,6 +2161,35 @@ fn type_reference_for_ty(ty: &Ty) -> Option<ast::TypeReference> {
 }
 
 #[allow(clippy::too_many_arguments)]
+fn rebind_result_within_integer_bounds(
+    typed: &TypedFileAst,
+    value: ExprId,
+    min: i128,
+    max: i128,
+) -> bool {
+    if let Some(Some(ConstValue::Int(value))) = typed.exprs.const_value_of(value) {
+        return I256::from(min) <= *value && *value <= I256::from(max);
+    }
+    match typed.exprs.kind_of(value) {
+        Some(TypedExprKind::FnCall { .. }) => typed.exprs.ty_of(value).is_some_and(|ty| {
+            typed
+                .type_registry
+                .integer_validity_for_type(ty)
+                .or_else(|| ty.anonymous_integer_validity())
+                .and_then(|validity| validity.domain().storage_hull())
+                .is_some_and(|hull| I256::from(min) <= hull.min() && hull.max() <= I256::from(max))
+        }),
+        Some(TypedExprKind::When(branches)) => branches.arms.iter().all(|arm| {
+            let body = match arm {
+                TypedWhenArm::Cond { body, .. } | TypedWhenArm::Is { body, .. } => *body,
+                TypedWhenArm::Else(body, _) => *body,
+            };
+            rebind_result_within_integer_bounds(typed, body, min, max)
+        }),
+        _ => false,
+    }
+}
+
 fn rebind_rhs_within_integer_max(
     kinds: &[TypedExprKind],
     const_values: &[Option<ConstValue>],
@@ -2216,7 +2327,7 @@ fn condition_comparison_facts(
             } = alternative.proposition;
             let Some(lhs) = expr_to_normal_expr(
                 &expressions.kind,
-                &expressions.const_value,
+                &expressions.facts.const_facts.const_value,
                 local_values,
                 lhs,
             ) else {
@@ -2224,7 +2335,7 @@ fn condition_comparison_facts(
             };
             let Some(rhs) = expr_to_normal_expr(
                 &expressions.kind,
-                &expressions.const_value,
+                &expressions.facts.const_facts.const_value,
                 local_values,
                 rhs,
             ) else {
@@ -2334,11 +2445,11 @@ fn pattern_moves_subject(pattern: &ast::Pattern) -> bool {
                 && name.as_str().chars().next().is_some_and(char::is_lowercase)
         }),
         ast::Pattern::Pointer(inner) => pattern_moves_subject(&inner.value),
-        ast::Pattern::Tuple(items) => items.iter().any(|item| pattern_moves_subject(&item.value)),
         ast::Pattern::ListCons { head, tail } => {
             pattern_moves_subject(&head.value) || pattern_moves_subject(&tail.value)
         }
-        ast::Pattern::Ref { .. }
+        ast::Pattern::Invalid
+        | ast::Pattern::Ref { .. }
         | ast::Pattern::Qualified(_)
         | ast::Pattern::Literal(_, _)
         | ast::Pattern::Unit
@@ -2364,10 +2475,17 @@ mod comparison_evidence_tests {
                 (head, Box::new(Ty::anonymous_integer_for_width(8, false))),
                 (
                     tail,
-                    Box::new(Ty::Tuple(vec![
-                        Ty::anonymous_integer_for_width(8, false),
-                        Ty::Unit,
-                    ])),
+                    Box::new(Ty::Record {
+                        name: Intern::from_ref(""),
+                        fields: vec![
+                            (
+                                Intern::from_ref("0"),
+                                Box::new(Ty::anonymous_integer_for_width(8, false)),
+                            ),
+                            (Intern::from_ref("1"), Box::new(Ty::Unit)),
+                        ],
+                        resolved_params: None,
+                    }),
                 ),
             ],
             resolved_params: None,
@@ -2467,7 +2585,7 @@ mod comparison_evidence_tests {
     #[test]
     fn terminating_condition_move_does_not_leak_into_rejected_continuation() {
         let parsed = TokenCursor::parse_source(
-            "Int is in 0...255\nChoice is Some(Int) or None\nkeep(value Choice) Choice:\n    if value is Some(payload)\n        Choice.None\n    return\n    return value",
+            "Int is in 0 to 255\nChoice is Some(Int) or None\nkeep(value Choice) Choice:\n    if value is Some(payload)\n        Choice.None\n    return\n    return value",
         );
         let typed = transform(&parsed, FileId(0), &TransformCtx::new());
         let codes = typed
@@ -2485,7 +2603,7 @@ mod comparison_evidence_tests {
     #[test]
     fn successful_by_value_condition_binding_moves_subject_inside_branch() {
         let parsed = TokenCursor::parse_source(
-            "Int is in 0...255\nChoice is Some(Int) or None\nbad(value Choice) Choice:\n    if value is Some(payload)\n        value\n    return\n    return value",
+            "Int is in 0 to 255\nChoice is Some(Int) or None\nbad(value Choice) Choice:\n    if value is Some(payload)\n        value\n    return\n    return value",
         );
         let typed = transform(&parsed, FileId(0), &TransformCtx::new());
         let codes = typed

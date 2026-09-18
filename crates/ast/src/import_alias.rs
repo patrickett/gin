@@ -1,10 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 
 use internment::Intern;
 
 use crate::{
-    Expr, FileAst, FnCall, Pattern, TagCall, WhenArm,
+    Bind, Expr, FileAst, FnCall, ImportSource, Pattern, TagCall, WhenArm,
     folder::*,
     path::ModPath,
     span::{SpanId, Spanned},
@@ -21,8 +21,27 @@ impl FileAst {
             return;
         }
         let alias_map = self.build_alias_map();
+        let namespaces = self
+            .uses
+            .iter()
+            .flat_map(|import| &import.0)
+            .filter(|module| {
+                matches!(
+                    module.source,
+                    ImportSource::Package(_)
+                        | ImportSource::Local(..)
+                        | ImportSource::LocalFile(..)
+                )
+            })
+            .map(|module| {
+                module
+                    .alias
+                    .unwrap_or_else(|| Intern::new(module.effective_name()))
+            })
+            .collect();
         let mut folder = ImportAliasFolder {
             alias_map,
+            namespaces,
             alias_spans: Vec::new(),
         };
         let _ = walk_file_ast_mut(&mut folder, self);
@@ -42,6 +61,7 @@ impl FileAst {
 
 struct ImportAliasFolder {
     alias_map: AliasMap,
+    namespaces: HashSet<Intern<String>>,
     alias_spans: Vec<SpanId>,
 }
 
@@ -67,10 +87,8 @@ impl Expr {
             Expr::Ref { inner, .. }
             | Expr::TakePtr(inner)
             | Expr::Deref(inner)
-            | Expr::Negate(inner)
-            | Expr::ConsumeArg(inner)
-            | Expr::Eat(inner) => inner.value.apply_alias(alias_map),
-            Expr::TupleLit(values) | Expr::List(values) => {
+            | Expr::Negate(inner) => inner.value.apply_alias(alias_map),
+            Expr::ArrayLit(values) | Expr::List(values) => {
                 for value in values {
                     value.value.apply_alias(alias_map);
                 }
@@ -81,7 +99,45 @@ impl Expr {
 }
 
 impl Folder for ImportAliasFolder {
+    fn visit_bind(&mut self, bind: &mut Bind) -> ControlFlow<()> {
+        for attribute in bind.attributes.raw_attributes.iter_mut().flatten() {
+            if let crate::AttributeItem::Call { name, args, .. } = attribute
+                && matches!(name.as_str(), "machine")
+            {
+                for arg in args {
+                    self.visit_expr(arg)?;
+                }
+            }
+        }
+        let mut aliases = Vec::new();
+        let mut namespaces = Vec::new();
+        if let Some(params) = &bind.params {
+            for name in params.keys() {
+                if let Some(target) = self.alias_map.remove(name) {
+                    aliases.push((*name, target));
+                }
+                if self.namespaces.remove(name) {
+                    namespaces.push(*name);
+                }
+            }
+        }
+        let result = walk_bind_mut(self, bind);
+        self.alias_map.extend(aliases);
+        self.namespaces.extend(namespaces);
+        result
+    }
+
     fn visit_expr(&mut self, expr: &mut Expr) -> ControlFlow<()> {
+        if let Expr::RecordGet { base, field } = expr
+            && let Expr::FnCall(call) = &base.value
+            && call.args.is_none()
+            && call.path.segments.is_empty()
+            && self.namespaces.contains(&call.path.root)
+        {
+            let mut call = call.clone();
+            call.path.segments.push(*field);
+            *expr = Expr::FnCall(call);
+        }
         match expr {
             Expr::AnonymousTag(name) => {
                 if let Some(_target) = self.alias_map.get(name) {
@@ -191,13 +247,11 @@ impl Pattern {
                 head.value.apply_alias(alias_map);
                 tail.value.apply_alias(alias_map);
             }
-            Pattern::Tuple(elems) => {
-                for elem in elems {
-                    elem.value.apply_alias(alias_map);
-                }
-            }
-            Pattern::Literal(..) | Pattern::Unit | Pattern::ListEmpty | Pattern::InRange { .. } => {
-            }
+            Pattern::Invalid
+            | Pattern::Literal(..)
+            | Pattern::Unit
+            | Pattern::ListEmpty
+            | Pattern::InRange { .. } => {}
         }
     }
 }

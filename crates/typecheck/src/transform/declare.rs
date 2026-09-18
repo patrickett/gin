@@ -41,6 +41,79 @@ use ast::{
 use ast_format::declare::{BindFormatExt, DeclareFormatExt};
 use ast_format::type_expr::{ExprFormatExt, PatternFormatExt};
 
+fn duplicate_parameter_name_diagnostics(
+    params: &Parameters,
+    span_table: &ast::SpanTable,
+) -> Vec<(ast::SpanId, Diagnostic)> {
+    let duplicated: Vec<_> = params
+        .iter()
+        .filter_map(|(name, parameter)| {
+            let type_name = match &parameter.kind {
+                ParameterKind::Tagged(type_expr)
+                | ParameterKind::ValueParam { ty: type_expr }
+                | ParameterKind::Inferred { ty: type_expr } => match &type_expr.value {
+                    ast::Expr::FnCall(call) if call.path.segments.is_empty() => {
+                        Some(call.path.root)
+                    }
+                    ast::Expr::TagCall(call) if call.qual_path.is_none() => Some(call.name),
+                    _ => None,
+                },
+                ParameterKind::Generic | ParameterKind::Default(_) => None,
+            }?;
+            name.as_str()
+                .eq_ignore_ascii_case(type_name.as_str())
+                .then_some((*name, type_name, parameter.name_span))
+        })
+        .collect();
+
+    duplicated
+        .iter()
+        .enumerate()
+        .map(|(index, (name, type_name, span))| {
+            let shorthand = (1..=type_name.as_str().chars().count())
+                .map(|length| type_name.as_str().chars().take(length).collect::<String>())
+                .find(|candidate| {
+                    duplicated
+                        .iter()
+                        .enumerate()
+                        .all(|(other_index, (_, other, _))| {
+                            other_index == index
+                                || !other
+                                    .as_str()
+                                    .to_ascii_lowercase()
+                                    .starts_with(&candidate.to_ascii_lowercase())
+                        })
+                })
+                .unwrap_or_else(|| {
+                    format!(
+                        "{}{}",
+                        type_name.as_str().chars().next().unwrap_or('p'),
+                        duplicated[..index]
+                            .iter()
+                            .filter(|(_, other, _)| *other == *type_name)
+                            .count()
+                            + 1
+                    )
+                })
+                .to_ascii_lowercase();
+            (
+                *span,
+                Diagnostic::new(
+                    "style-duplicate-parameter-name",
+                    format!(
+                        "parameter `{}` repeats its type name; consider `{shorthand}`",
+                        name.as_str()
+                    ),
+                )
+                .with_arg("parameter", name.as_str().to_string())
+                .with_arg("suggestion", shorthand)
+                .with_help("use a short role-based name when the type already provides the context")
+                .at_span_id(*span, span_table),
+            )
+        })
+        .collect()
+}
+
 fn nominal_integer_semantics(
     ty: &Ty,
     attributes: &ast::DeclareAttributes,
@@ -121,6 +194,9 @@ impl TypedTag {
                         let ty = TypeEnv::new(tag_types).resolve_expr(&ty.value);
                         ParamKind::Value(Box::new(ty))
                     }
+                    ParameterKind::Default(expr) if expr_is_type_surface(&expr.value) => {
+                        ParamKind::Type
+                    }
                     ParameterKind::Default(expr) => {
                         let env = TyInferEnv {
                             tag_types,
@@ -169,10 +245,10 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                 ast::HasMemberBody::Overrideable(value) | ast::HasMemberBody::Final(value) => value,
             };
             let modifier = match function.conventions.get(&self_name) {
-                Some(ast::ParamConvention::Observe) => "ref self",
-                Some(ast::ParamConvention::Mutate) => "mut self",
-                Some(ast::ParamConvention::Consume) => "eat self",
-                Some(ast::ParamConvention::Own) | None => "self",
+                Some(ast::ParamConvention::Observe) => "self ref",
+                Some(ast::ParamConvention::Mutate) => "self mut",
+                Some(ast::ParamConvention::Own) => "self own",
+                Some(ast::ParamConvention::Terminal) | None => "self",
             };
             let mut spans = Vec::new();
             collect_bind_value_self_ref_spans(value, &mut spans);
@@ -249,7 +325,8 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                     .map(|parameters| parameters.keys().copied().collect())
                     .unwrap_or_default(),
                 definition: definition.clone(),
-                fixed_array: validated_fixed_array_former(declare),
+                sequence_literal: validated_sequence_literal_acceptance(declare),
+
                 reference: None,
                 integer: nominal_integer_semantics(definition, &declare.attributes),
             },
@@ -303,7 +380,7 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                 Diagnostic::new(
                     "type-integer-domain-empty",
                     format!(
-                        "integer domain `{start}...{end}` is empty",
+                        "integer domain `{start} to {end}` is empty",
                         start = start,
                         end = end
                     ),
@@ -314,7 +391,7 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
             ));
         }
 
-        let fixed_array = validated_fixed_array_former(declare);
+        let sequence_literal = validated_sequence_literal_acceptance(declare);
         let integer = nominal_integer_semantics(&definition, &declare.attributes);
         if declare.attributes.bits_span.is_some()
             && !target_dependent_names
@@ -394,7 +471,8 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                             .map(|parameters| parameters.keys().copied().collect())
                             .unwrap_or_default(),
                         definition: definition.clone(),
-                        fixed_array,
+                        sequence_literal,
+
                         reference,
                         integer,
                     },
@@ -405,7 +483,7 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                     && typed
                         .type_registry
                         .declaration(instance)
-                        .is_some_and(|declaration| declaration.fixed_array.is_none()))
+                        .is_some_and(|declaration| declaration.sequence_literal.is_none()))
             {
                 typed.declaration_flaws.push((
                     declare.name_span,
@@ -421,7 +499,7 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
             let has_generic_parameters = declare.params.as_ref().is_some_and(|params| {
                 params
                     .values()
-                    .any(|parameter| matches!(parameter.kind, ParameterKind::Generic))
+                    .any(|parameter| is_type_parameter(&parameter.kind))
             });
             if !has_generic_parameters
                 && !target_dependent_names
@@ -531,15 +609,44 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                         .push(crate::typed::TypedExprKind::Lit(ast::Literal::Number(0)));
                     typed.exprs.ty.push(expr_ty);
                     typed.exprs.span.push(expr.span_id);
-                    typed.exprs.const_value.push(None);
-                    typed.exprs.integer_knowledge.push(None);
-                    typed.exprs.result_evidence.push(None);
-                    typed.exprs.projected_result_evidence.push(HashMap::new());
-                    typed.exprs.availability.push(Availability::Unknown);
-                    typed.exprs.target_group.push(None);
-                    typed.exprs.place.push(None);
-                    typed.exprs.place_version.push(None);
-                    typed.exprs.flaws.push(Vec::new());
+                    typed.exprs.facts.const_facts.const_value.push(None);
+                    typed.exprs.facts.const_facts.const_object.push(None);
+                    typed
+                        .exprs
+                        .facts
+                        .semantic_facts
+                        .sequence_provenance
+                        .push(None);
+                    typed.exprs.facts.const_facts.sequence_literal.push(None);
+                    typed
+                        .exprs
+                        .facts
+                        .const_facts
+                        .literal_materialization
+                        .push(None);
+                    typed
+                        .exprs
+                        .facts
+                        .semantic_facts
+                        .integer_knowledge
+                        .push(None);
+                    typed.exprs.facts.semantic_facts.result_evidence.push(None);
+                    typed
+                        .exprs
+                        .facts
+                        .semantic_facts
+                        .projected_result_evidence
+                        .push(HashMap::new());
+                    typed
+                        .exprs
+                        .facts
+                        .semantic_facts
+                        .availability
+                        .push(Availability::Unknown);
+                    typed
+                        .exprs
+                        .push_ownership_facts(None, Vec::new(), None, None);
+                    typed.exprs.facts.semantic_facts.flaws.push(Vec::new());
                     let span = typed.span_table.get(expr.span_id);
                     typed
                         .span_to_expr
@@ -604,20 +711,6 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                                         ty_surface.push_str(", ");
                                     }
                                     first = false;
-                                    if let Some(conv) = f.conventions.get(param_name) {
-                                        match conv {
-                                            ast::ParamConvention::Observe => {
-                                                ty_surface.push_str("ref ")
-                                            }
-                                            ast::ParamConvention::Mutate => {
-                                                ty_surface.push_str("mut ")
-                                            }
-                                            ast::ParamConvention::Consume => {
-                                                ty_surface.push_str("eat ")
-                                            }
-                                            ast::ParamConvention::Own => {}
-                                        }
-                                    }
                                     let _ = write!(&mut ty_surface, "{}", param_name.as_str());
                                     match &kind.kind {
                                         ast::ParameterKind::Tagged(sp) => {
@@ -637,6 +730,20 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                                             let _ = write!(&mut ty_surface, ": {:?}", expr);
                                         }
                                         ast::ParameterKind::Generic => {}
+                                    }
+                                    if let Some(conv) = f.conventions.get(param_name) {
+                                        match conv {
+                                            ast::ParamConvention::Observe => {
+                                                ty_surface.push_str(" ref")
+                                            }
+                                            ast::ParamConvention::Mutate => {
+                                                ty_surface.push_str(" mut")
+                                            }
+                                            ast::ParamConvention::Own => {
+                                                ty_surface.push_str(" own")
+                                            }
+                                            ast::ParamConvention::Terminal => {}
+                                        }
                                     }
                                 }
                                 ty_surface.push(')');
@@ -823,7 +930,7 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
             &method_typevar_subst,
         );
 
-        let param_kinds = declare
+        let param_kinds: Vec<ParamKind> = declare
             .params
             .as_ref()
             .map(|params| {
@@ -831,7 +938,9 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                     .iter()
                     .zip(&param_types)
                     .map(|((name, parameter), (_, ty))| {
-                        if declare.param_refinements.contains_key(name) {
+                        if declare.param_refinements.contains_key(name)
+                            || (name.as_str() == "self" && receiver_type.is_some())
+                        {
                             ParamKind::Value(Box::new(ty.clone()))
                         } else {
                             param_kind_from_parameter_kind(&parameter.kind, &tag_types_by_name)
@@ -866,7 +975,7 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                     .collect()
             })
             .unwrap_or_default();
-        let (param_groups, groups, return_group) = resolve_target_groups(
+        let (param_groups, groups, result_groups) = resolve_target_groups(
             declare,
             &param_types,
             &param_conventions,
@@ -875,11 +984,15 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
         );
         let param_count = param_types.len();
 
-        let intrinsic = declare
-            .attributes
-            .intrinsic
-            .and_then(|name| crate::typed::IntrinsicOp::resolve(name.as_str()).ok());
         let mut bind_flaws = Vec::new();
+        if let Some(params) = &declare.params {
+            typed
+                .declaration_flaws
+                .extend(duplicate_parameter_name_diagnostics(
+                    params,
+                    &typed.span_table,
+                ));
+        }
         if param_types
             .iter()
             .any(|(_, ty)| contains_unresolved_result_label(ty, &anonymous_result_labels))
@@ -896,43 +1009,44 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
             &mut bind_flaws,
             &typed.span_table,
         );
-        if let Some(role) = declare.attributes.invalid_operator_role {
+        if let Some(symbol) = declare.attributes.infix_symbol
+            && ast::BinOp::from_symbol(symbol.as_str()).is_none()
+        {
             bind_flaws.push(
                 Diagnostic::new(
-                    "type-unknown-operator-role",
-                    format!("unknown operator role `{}`", role.as_str()),
+                    "type-unknown-infix-operator",
+                    format!("unknown infix operator `{}`", symbol.as_str()),
                 )
-                .with_arg("role", role.as_str().to_string())
+                .with_arg("operator", symbol.as_str().to_string())
                 .at_span_id(
                     declare
                         .attributes
-                        .operator_role_span
+                        .infix_symbol_span
                         .unwrap_or(declare.name_span),
                     &typed.span_table,
                 ),
             );
         }
-        if declare.attributes.operator_role.is_some() && param_types.len() != 2 {
+        let value_param_count = param_kinds
+            .iter()
+            .filter(|kind| matches!(kind, ParamKind::Value(_)))
+            .count();
+        if declare.attributes.infix_symbol.is_some() && value_param_count != 2 {
             bind_flaws.push(
                 Diagnostic::new(
-                    "type-invalid-operator-declaration",
-                    "an operator implementation must have exactly two value parameters",
+                    "type-invalid-infix-declaration",
+                    "an infix declaration must have exactly two value parameters",
                 )
                 .at_span_id(declare.name_span, &typed.span_table),
             );
         }
         if matches!(
-            declare.attributes.operator_role,
-            Some(
-                OperatorRole::Add
-                    | OperatorRole::Subtract
-                    | OperatorRole::Multiply
-                    | OperatorRole::BitAnd
-                    | OperatorRole::BitOr
-                    | OperatorRole::BitXor
-                    | OperatorRole::ShiftLeft
-                    | OperatorRole::ShiftRight
-            )
+            declare
+                .attributes
+                .infix_symbol
+                .as_ref()
+                .map(|symbol| symbol.as_str()),
+            Some("+") | Some("-") | Some("*") | Some("&") | Some("|") | Some("^")
         ) && param_types
             .first()
             .is_some_and(|(_, operand)| operand != &return_ty)
@@ -945,36 +1059,12 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                 .at_span_id(declare.name_span, &typed.span_table),
             );
         }
-        if let Some(name) = declare.attributes.intrinsic
-            && let Err(error) = crate::typed::IntrinsicOp::resolve(name.as_str())
-        {
-            bind_flaws.push(
-                error
-                    .diagnostic()
-                    .at_span_id(declare.name_span, &typed.span_table),
-            );
-        }
-        if let Some(intrinsic) = intrinsic
-            && let Err(error) = intrinsic.validate_signature(
-                &param_types
-                    .iter()
-                    .map(|(_, ty)| ty.clone())
-                    .collect::<Vec<_>>(),
-                &return_ty,
-                Some(&typed.type_registry),
-            )
-        {
-            bind_flaws.push(
-                intrinsic
-                    .diagnostic(&error)
-                    .at_span_id(declare.name_span, &typed.span_table),
-            );
-        }
         let typed_bind = TypedBind {
             name: *name,
             dependent_binder,
             name_span: declare.name_span,
             return_type: return_ty.clone(),
+            named_results: declare.named_results.clone(),
             declared_return_type: return_ty.clone(),
             return_evidence: None,
             params: param_types,
@@ -983,21 +1073,20 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
             param_groups,
             param_refinements,
             groups,
-            return_group,
+            result_groups,
             effects: Default::default(),
             receiver_type,
             unassigned_decl: matches!(declare.value, BindValue::Unassigned),
-            is_extern: matches!(declare.value, BindValue::Extern),
             is_constant: declare.is_constant(),
-            body: crate::typed::BindBody::Extern,
+            body: crate::typed::BindBody::Unlowered,
             flaws: bind_flaws,
             param_requirements: vec![AvailabilityRequirement::Any; param_count],
             call_capability: CallCapability::StagePolymorphic,
+            definition_stage: crate::typed::DefinitionStage::StagePolymorphic,
             signature_surface: declare.signature_surface(),
             doc_comment: declare.doc_comment.clone(),
             attributes: declare.attributes.clone(),
-            intrinsic,
-            operator_role: declare.attributes.operator_role,
+            infix_symbol: declare.attributes.infix_symbol,
         };
         if declare.params.is_some() {
             typed.fn_return_types.insert(def_id, return_ty.clone());
@@ -1248,9 +1337,12 @@ fn unsaturated_type_name(
         | Ty::Ptr { inner: elem }
         | Ty::Address { pointee: elem, .. }
         | Ty::Ref { inner: elem, .. } => unsaturated_type_name(elem, registry),
-        Ty::Tuple(fields) => fields
+        Ty::UnresolvedSequence { element, .. } => element
+            .as_deref()
+            .and_then(|element| unsaturated_type_name(element, registry)),
+        Ty::ResultRow(fields) => fields
             .iter()
-            .find_map(|field| unsaturated_type_name(field, registry)),
+            .find_map(|field| unsaturated_type_name(&field.ty, registry)),
         Ty::ResultFamily { .. }
         | Ty::AnonymousInteger { .. }
         | Ty::UnresolvedLiteral(_)
@@ -1272,8 +1364,19 @@ fn unsaturated_type_surface(
             .then_some(*name),
         Expr::TagCall(call) => tag_params
             .get(&call.name)
-            .is_some_and(|parameters| parameters.len() != call.args.len())
-            .then_some(call.name)
+            .filter(|parameters| {
+                let required = parameters
+                    .values()
+                    .take_while(|parameter| {
+                        !matches!(
+                            parameter.kind,
+                            ParameterKind::Default(_) | ParameterKind::Inferred { .. }
+                        )
+                    })
+                    .count();
+                call.args.len() < required || call.args.len() > parameters.len()
+            })
+            .map(|_| call.name)
             .or_else(|| {
                 call.args
                     .iter()
@@ -1379,8 +1482,11 @@ fn declaration_ty_refers_to_name(
         Ty::Array { elem, .. } => {
             declaration_ty_refers_to_name(elem, declarations, resolved_tags, recursion_stack)
         }
-        Ty::Tuple(elements) => elements.iter().any(|ty| {
-            declaration_ty_refers_to_name(ty, declarations, resolved_tags, recursion_stack)
+        Ty::UnresolvedSequence { element, .. } => element.as_deref().is_some_and(|element| {
+            declaration_ty_refers_to_name(element, declarations, resolved_tags, recursion_stack)
+        }),
+        Ty::ResultRow(elements) => elements.iter().any(|element| {
+            declaration_ty_refers_to_name(&element.ty, declarations, resolved_tags, recursion_stack)
         }),
         Ty::AnonymousInteger { .. }
         | Ty::ResultFamily { .. }
@@ -1447,12 +1553,16 @@ fn declaration_has_symbolic_fixed_array_length_with_seen(
             stack.push(instance.clone());
 
             let definition = &declaration.definition;
-            let symbolic = if let Some(former) = declaration.fixed_array.as_ref() {
+            let symbolic = if let Some(former) = declaration.sequence_literal.as_ref() {
+                let Some(length_parameter) = former.fixed_array_length_parameter() else {
+                    stack.pop();
+                    return false;
+                };
                 let element = instance.arguments.iter().find_map(|(parameter, argument)| {
                     (*parameter == former.element_parameter).then_some(argument)
                 });
                 let length = instance.arguments.iter().find_map(|(parameter, argument)| {
-                    (*parameter == former.length_parameter).then_some(argument)
+                    (*parameter == length_parameter).then_some(argument)
                 });
                 if let Some(ast::TyArg::Type(_)) = element {
                     if let Some(ast::TyArg::Const(expr)) = length {
@@ -1482,8 +1592,8 @@ fn declaration_has_symbolic_fixed_array_length_with_seen(
         Ty::Record { fields, .. } => fields.iter().any(|(_, field)| {
             declaration_has_symbolic_fixed_array_length_with_seen(field, registry, stack)
         }),
-        Ty::Tuple(fields) => fields.iter().any(|field| {
-            declaration_has_symbolic_fixed_array_length_with_seen(field, registry, stack)
+        Ty::ResultRow(fields) => fields.iter().any(|field| {
+            declaration_has_symbolic_fixed_array_length_with_seen(&field.ty, registry, stack)
         }),
         Ty::Union { variants, .. } => variants.iter().any(|variant| {
             variant.fields.iter().any(|(_, field)| {
@@ -1528,6 +1638,7 @@ fn declaration_representation_type(ty: &Ty) -> Ty {
             variants: variants
                 .iter()
                 .map(|variant| UnionVariant {
+                    kind: variant.kind,
                     name: variant.name,
                     fields: variant
                         .fields
@@ -1548,9 +1659,15 @@ fn declaration_representation_type(ty: &Ty) -> Ty {
             literal_values: literal_values.clone(),
             resolved_params: resolved_params.clone(),
         },
-        Ty::Tuple(fields) => {
-            Ty::Tuple(fields.iter().map(declaration_representation_type).collect())
-        }
+        Ty::ResultRow(elements) => Ty::ResultRow(
+            elements
+                .iter()
+                .map(|element| ast::ty::ResultElement {
+                    name: element.name,
+                    ty: Box::new(declaration_representation_type(&element.ty)),
+                })
+                .collect(),
+        ),
         Ty::Array { elem, size } => Ty::Array {
             elem: Box::new(declaration_representation_type(elem)),
             size: size.clone(),
@@ -1701,6 +1818,7 @@ fn preserve_self_reference_with_instance(
             variants: variants
                 .iter()
                 .map(|variant| UnionVariant {
+                    kind: variant.kind,
                     name: variant.name,
                     fields: variant
                         .fields
@@ -1753,6 +1871,16 @@ fn preserve_self_reference_with_instance(
             )),
             size: size.clone(),
         },
+        Ty::UnresolvedSequence { element, length } => Ty::UnresolvedSequence {
+            element: element.as_deref().map(|element| {
+                Box::new(preserve_self_reference_with_instance(
+                    element,
+                    declaration_name,
+                    instance,
+                ))
+            }),
+            length: length.clone(),
+        },
         Ty::Ptr { inner } => Ty::Ptr {
             inner: Box::new(preserve_self_reference_with_instance(
                 inner,
@@ -1771,11 +1899,12 @@ fn preserve_self_reference_with_instance(
             )),
             address_space: *address_space,
         },
-        Ty::Tuple(elements) => Ty::Tuple(
+        Ty::ResultRow(elements) => Ty::ResultRow(
             elements
                 .iter()
-                .map(|element| {
-                    preserve_self_reference_with_instance(element, declaration_name, instance)
+                .map(|element| ast::ty::ResultElement {
+                    name: element.name,
+                    ty: Box::new(declaration_representation_type(&element.ty)),
                 })
                 .collect(),
         ),
@@ -1813,10 +1942,9 @@ fn collect_import_scope_names(mi: &Import, names: &mut HashSet<Intern<String>>) 
                     names.insert(m.flat_name());
                 }
             }
-            ImportSource::LocalMember(m) => {
-                names.insert(m.member.alias.unwrap_or(m.member.export));
-            }
-            ImportSource::Package(_) | ImportSource::Local(_, _) => {
+            ImportSource::Package(_)
+            | ImportSource::Local(_, _)
+            | ImportSource::LocalFile(_, _) => {
                 if let Some(alias) = m.alias {
                     names.insert(alias);
                 } else {
@@ -2085,7 +2213,7 @@ fn check_has_associated_method_self(
                     "no-self-in-associated-method",
                     "associated method has no `self` parameter",
                 )
-                .with_help("add a `self`, `ref self`, or `mut self` parameter, or call through an explicit value"),
+                .with_help("add a `self`, `self ref`, or `self mut` parameter, or call through an explicit value"),
             );
         }
     }
@@ -2098,11 +2226,11 @@ pub(crate) fn collect_bind_value_self_ref_spans(value: &BindValue, spans: &mut V
             for expr in exprs {
                 collect_self_ref_spans(expr, spans);
             }
-            if let Some(expr) = &ret.value {
+            for expr in &ret.values {
                 collect_self_ref_spans(expr, spans);
             }
         }
-        BindValue::Extern | BindValue::Unassigned => {}
+        BindValue::Unassigned => {}
     }
 }
 
@@ -2234,9 +2362,12 @@ fn references_nominal_type(ty: &Ty, target: Intern<String>) -> bool {
         Ty::Array { elem, .. } | Ty::Ptr { inner: elem } | Ty::Address { pointee: elem, .. } => {
             references_nominal_type(elem, target)
         }
-        Ty::Tuple(elements) => elements
+        Ty::UnresolvedSequence { element, .. } => element
+            .as_deref()
+            .is_some_and(|element| references_nominal_type(element, target)),
+        Ty::ResultRow(elements) => elements
             .iter()
-            .any(|element| references_nominal_type(element, target)),
+            .any(|element| references_nominal_type(&element.ty, target)),
         Ty::AnonymousInteger { .. }
         | Ty::ResultFamily { .. }
         | Ty::Float { .. }
@@ -2398,7 +2529,7 @@ fn push_union_variants_to_map(
 
 fn literal_const_from_type_expr(expr: &Pattern) -> Option<ConstValue> {
     match expr {
-        Pattern::Literal(Literal::String(s), _) => Some(ConstValue::String(s.clone())),
+        Pattern::Literal(Literal::String(s), _) => Some(ConstValue::Text(s.clone())),
         Pattern::Literal(Literal::Int(n), _) => Some(ConstValue::Int(*n)),
         Pattern::Literal(Literal::Number(n), _) => Some(ConstValue::Int((*n as u128).into())),
         Pattern::Literal(Literal::Float(HashFloat(f)), _) => Some(ConstValue::Float(HashFloat(*f))),
@@ -2447,6 +2578,11 @@ fn resolve_declare_value(
                                             env.resolve_expr(&ty.value)
                                         }
                                         ParameterKind::Generic => Ty::Opaque(*name),
+                                        ParameterKind::Default(expr)
+                                            if expr_is_type_surface(&expr.value) =>
+                                        {
+                                            env.resolve_expr(&expr.value)
+                                        }
                                         ParameterKind::Default(expr) => {
                                             let infer_env = TyInferEnv {
                                                 tag_types: env.tag_types,
@@ -2463,7 +2599,12 @@ fn resolve_declare_value(
                             (*name, fields)
                         }
                         Pattern::Nominal(name, _) => {
-                            (*name, Vec::<(Intern<String>, Box<Ty>)>::new())
+                            let fields = env
+                                .tag_types
+                                .get(name)
+                                .map(|ty| vec![(Intern::from_ref("value"), Box::new(ty.clone()))])
+                                .unwrap_or_default();
+                            (*name, fields)
                         }
                         _ => (
                             Intern::new(String::new()),
@@ -2472,6 +2613,12 @@ fn resolve_declare_value(
                     };
                     let result_ty = v.result_ty().map(|rt| env.resolve_expr(&rt.value));
                     UnionVariant {
+                        kind: if matches!(shape.value, Pattern::Nominal(_, _)) && !fields.is_empty()
+                        {
+                            ast::ty::UnionVariantKind::Type
+                        } else {
+                            ast::ty::UnionVariantKind::Constructor
+                        },
                         name,
                         fields,
                         result_ty,
@@ -2580,7 +2727,7 @@ fn resolve_target_groups(
     param_conventions: &[ParamConvention],
     type_registry: &crate::type_registry::TypeRegistry,
     flaws: &mut Vec<(SpanId, Diagnostic)>,
-) -> (Vec<Option<GroupId>>, Vec<TypedGroup>, Option<GroupId>) {
+) -> (Vec<Option<GroupId>>, Vec<TypedGroup>, Vec<Option<GroupId>>) {
     let mut named: HashMap<ast::GroupPath, GroupId> = HashMap::new();
     let mut groups: Vec<TypedGroup> = Vec::new();
     let param_groups = param_types
@@ -2734,7 +2881,24 @@ fn resolve_target_groups(
         None => None,
     };
 
-    (param_groups, groups, return_group)
+    let result_groups = bind
+        .named_results
+        .iter()
+        .map(|result| match &result.ty.value {
+            Expr::Ref {
+                group: Some(name), ..
+            } => named.get(name).copied(),
+            Expr::Ref { group: None, .. } if groups.len() == 1 => Some(GroupId(0)),
+            _ => None,
+        })
+        .collect();
+
+    let result_groups = if bind.named_results.is_empty() {
+        vec![return_group]
+    } else {
+        result_groups
+    };
+    (param_groups, groups, result_groups)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2785,7 +2949,11 @@ impl GroupPathCursor {
     fn into_type(self) -> Ty {
         match self {
             Self::Type(ty) => ty,
-            Self::Variant(fields) => Ty::Tuple(fields.into_iter().map(|(_, ty)| *ty).collect()),
+            Self::Variant(fields) => Ty::Record {
+                name: Intern::from_ref("Record"),
+                fields,
+                resolved_params: None,
+            },
         }
     }
 
@@ -2952,6 +3120,25 @@ fn resolve_return_type(
                 .collect(),
         };
     }
+    if !bind.named_results.is_empty() {
+        let env = TypeEnv::new(tag_types)
+            .with_subst(typevar_subst)
+            .with_tag_params(tag_params)
+            .with_tag_decls(tag_decls)
+            .with_dependent_binder(dependent_binder);
+        let elements = bind
+            .named_results
+            .iter()
+            .map(|result| ast::ty::ResultElement {
+                name: result.name,
+                ty: Box::new(env.resolve_expr(&result.ty.value)),
+            })
+            .collect::<Vec<_>>();
+        return match elements.as_slice() {
+            [element] => (*element.ty).clone(),
+            _ => Ty::ResultRow(elements),
+        };
+    }
     if let Some(predicate) = &bind.return_refinement {
         return Ty::AnonymousInteger {
             validity: ast::integer::IntegerValidity::new(
@@ -3052,11 +3239,25 @@ fn resolve_return_type(
             }
             resolve_type_from_typed_expr(expr, tag_types)
         }
-        BindValue::Body { ret, .. } => ret
-            .value
-            .as_ref()
-            .map(|e| resolve_type_from_typed_expr(e, tag_types))
-            .unwrap_or(Ty::Unit),
+        BindValue::Body { ret, .. } => {
+            if !ret.values.is_empty() {
+                let fields = ret
+                    .values
+                    .iter()
+                    .enumerate()
+                    .map(|(index, expr)| ast::ty::ResultElement {
+                        name: Intern::new(index.to_string()),
+                        ty: Box::new(resolve_type_from_typed_expr(expr, tag_types)),
+                    })
+                    .collect();
+                Ty::ResultRow(fields)
+            } else {
+                ret.values
+                    .first()
+                    .map(|e| resolve_type_from_typed_expr(e, tag_types))
+                    .unwrap_or(Ty::Unit)
+            }
+        }
         _ => Ty::Unit,
     }
 }
@@ -3073,11 +3274,11 @@ fn inferred_result_alternatives(value: &BindValue, tag_decls: &ast::TagMap) -> V
                     collect_result_exit_alternatives(&expr.value, tag_decls, &mut alternatives);
                 }
             }
-            if let Some(ret) = &ret.value {
+            for ret in &ret.values {
                 collect_result_exit_alternatives(&ret.value, tag_decls, &mut alternatives);
             }
         }
-        BindValue::Extern | BindValue::Unassigned => {}
+        BindValue::Unassigned => {}
     }
     alternatives
 }
@@ -3120,15 +3321,6 @@ fn validate_result_proof_surfaces(
                 .at_span_id(alternative.span_id, span_table),
             );
         }
-        if matches!(bind.value, BindValue::Extern) {
-            flaws.push(
-                Diagnostic::new(
-                    "type-extern-proof-contract-untrusted",
-                    "an extern callable cannot assert an unverified proof contract",
-                )
-                .at_span_id(alternative.span_id, span_table),
-            );
-        }
         let mut names = HashSet::new();
         proof_proposition_names(proposition, &mut names);
         for name in names.difference(&allowed_names) {
@@ -3161,7 +3353,7 @@ fn verify_result_constructions(
                 .map(|proposition| (alternative.value.label, proposition))
         })
         .collect::<HashMap<_, _>>();
-    if contracts.is_empty() || matches!(bind.value, BindValue::Extern | BindValue::Unassigned) {
+    if contracts.is_empty() || matches!(bind.value, BindValue::Unassigned) {
         return;
     }
     let mut facts = Vec::new();
@@ -3178,11 +3370,11 @@ fn verify_result_constructions(
                     facts.extend(proof_facts_for_condition(&if_expr.condition, false));
                 }
             }
-            if let Some(exit) = &ret.value {
+            for exit in &ret.values {
                 verify_result_exit(exit, &facts, &contracts, flaws, span_table);
             }
         }
-        BindValue::Extern | BindValue::Unassigned => {}
+        BindValue::Unassigned => {}
     }
 }
 
@@ -3564,7 +3756,7 @@ fn collect_result_exit_alternatives(
             if let Some(exit) = if_expr.body.last() {
                 collect_result_exit_alternatives(&exit.value, tag_decls, alternatives);
             }
-            if let Some(exit) = &if_expr.ret.value {
+            for exit in &if_expr.ret.values {
                 collect_result_exit_alternatives(&exit.value, tag_decls, alternatives);
             }
         }
@@ -3611,6 +3803,23 @@ fn resolve_param_types(
                         .with_dependent_binder(dependent_binder)
                         .resolve_expr(&ty.value)
                 }
+                ParameterKind::Generic if name.as_str() == "self" && bind.is_method() => {
+                    let receiver = tag_types
+                        .get(&Intern::from_ref("Self"))
+                        .cloned()
+                        .unwrap_or(Ty::Opaque(Intern::from_ref("Self")));
+                    match bind.param_conventions.get(name) {
+                        Some(ParamConvention::Observe) => Ty::Ref {
+                            inner: Box::new(receiver),
+                            mutable: false,
+                        },
+                        Some(ParamConvention::Mutate) => Ty::Ref {
+                            inner: Box::new(receiver),
+                            mutable: true,
+                        },
+                        _ => receiver,
+                    }
+                }
                 ParameterKind::Generic => bind
                     .param_refinements
                     .get(name)
@@ -3635,37 +3844,64 @@ fn resolve_param_types(
         .collect()
 }
 
-fn validated_fixed_array_former(declare: &ast::Declare) -> Option<crate::FixedArrayFormer> {
-    let contract = declare.attributes.fixed_array.as_ref()?;
+fn validated_sequence_literal_acceptance(
+    declare: &ast::Declare,
+) -> Option<crate::SequenceLiteralAcceptance> {
     let params = declare.params.as_ref()?;
-    if contract.element_parameter == contract.length_parameter {
-        return None;
+    let element_is_type = |element_parameter: Intern<String>| {
+        params
+            .get(&element_parameter)
+            .is_some_and(|parameter| match &parameter.kind {
+                ParameterKind::Generic => true,
+                ParameterKind::Tagged(ty) => is_type_param_marker(&ty.value),
+                ParameterKind::ValueParam { ty } | ParameterKind::Inferred { ty } => {
+                    is_type_param_marker(&ty.value)
+                }
+                _ => false,
+            })
+    };
+    if let Some(contract) = declare.attributes.fixed_array.as_ref() {
+        if contract.element_parameter == contract.length_parameter {
+            return None;
+        }
+        let length_is_const = params
+            .get(&contract.length_parameter)
+            .is_some_and(|parameter| {
+                matches!(
+                    parameter.kind,
+                    ParameterKind::Tagged(_)
+                        | ParameterKind::ValueParam { .. }
+                        | ParameterKind::Inferred { .. }
+                        | ParameterKind::Default(_)
+                )
+            });
+        return (element_is_type(contract.element_parameter) && length_is_const).then_some(
+            crate::SequenceLiteralAcceptance {
+                element_parameter: contract.element_parameter,
+                materialization: crate::SequenceLiteralMaterialization::FixedArray {
+                    length_parameter: contract.length_parameter,
+                },
+            },
+        );
     }
-    let element_is_type = params
-        .get(&contract.element_parameter)
-        .is_some_and(|parameter| match &parameter.kind {
-            ParameterKind::Generic => true,
-            ParameterKind::Tagged(ty) => is_type_param_marker(&ty.value),
-            ParameterKind::ValueParam { ty } | ParameterKind::Inferred { ty } => {
-                is_type_param_marker(&ty.value)
-            }
-            _ => false,
-        });
-    let length_is_const = params
-        .get(&contract.length_parameter)
-        .is_some_and(|parameter| {
-            matches!(
-                parameter.kind,
-                ParameterKind::Tagged(_)
-                    | ParameterKind::ValueParam { .. }
-                    | ParameterKind::Inferred { .. }
-                    | ParameterKind::Default(_)
-            )
-        });
-    (element_is_type && length_is_const).then_some(crate::FixedArrayFormer {
-        element_parameter: contract.element_parameter,
-        length_parameter: contract.length_parameter,
-    })
+    if let Some(contract) = declare.attributes.sequence_view.as_ref() {
+        return params.contains_key(&contract.element_parameter).then_some(
+            crate::SequenceLiteralAcceptance {
+                element_parameter: contract.element_parameter,
+                materialization: crate::SequenceLiteralMaterialization::BorrowStatic,
+            },
+        );
+    }
+    let contract = declare.attributes.sequence_builder.as_ref()?;
+    params
+        .contains_key(&contract.element_parameter)
+        .then_some(crate::SequenceLiteralAcceptance {
+            element_parameter: contract.element_parameter,
+            materialization: crate::SequenceLiteralMaterialization::OwnedBuilder {
+                empty_member: contract.empty_member,
+                push_member: contract.push_member,
+            },
+        })
 }
 
 fn is_type_param_marker(ty: &Expr) -> bool {
@@ -3687,6 +3923,7 @@ fn param_kind_from_parameter_kind(
             let ty = TypeEnv::new(tag_types).resolve_expr(&ty.value);
             ParamKind::Value(Box::new(ty))
         }
+        ParameterKind::Default(expr) if expr_is_type_surface(&expr.value) => ParamKind::Type,
         ParameterKind::Default(expr) => {
             let env = TyInferEnv {
                 tag_types,
@@ -3696,6 +3933,16 @@ fn param_kind_from_parameter_kind(
             };
             ParamKind::Value(Box::new(expr.infer_ty(&env)))
         }
+    }
+}
+
+fn is_type_parameter(kind: &ParameterKind) -> bool {
+    match kind {
+        ParameterKind::Generic => true,
+        ParameterKind::Tagged(ty)
+        | ParameterKind::ValueParam { ty }
+        | ParameterKind::Inferred { ty } => is_type_param_marker(&ty.value),
+        ParameterKind::Default(expr) => expr_is_type_surface(&expr.value),
     }
 }
 

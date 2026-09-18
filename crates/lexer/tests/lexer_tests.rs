@@ -2,7 +2,7 @@ use lexer::{Lexer, Token};
 
 #[test]
 fn test_keywords() {
-    let src = "use if else for as is in of or and has when then loop continue break return private ref mut deref eat";
+    let src = "use if else for as is in of or and has when then loop continue break return private ref mut own deref";
 
     let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
@@ -27,8 +27,16 @@ fn test_keywords() {
     assert!(matches!(tokens[17], Token::Private));
     assert!(matches!(tokens[18], Token::Ref));
     assert!(matches!(tokens[19], Token::Mut));
-    assert!(matches!(tokens[20], Token::Deref));
-    assert!(matches!(tokens[21], Token::Eat));
+    assert!(matches!(tokens[20], Token::Own));
+    assert!(matches!(tokens[21], Token::Deref));
+}
+
+#[test]
+fn lexes_own_as_keyword() {
+    let mut lexer = Lexer::new("own");
+    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+
+    assert!(matches!(tokens[0], Token::Own));
 }
 
 #[test]
@@ -554,7 +562,7 @@ fn test_unicode_identifiers_rejected() {
 
 #[test]
 fn test_format_string_interpolation() {
-    let src = r#""hello (name)""#;
+    let src = r#""hello \(name)""#;
     let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
@@ -574,7 +582,7 @@ fn test_format_string_interpolation() {
 
 #[test]
 fn test_format_string_nested_parens() {
-    let src = r#""result (foo(x, y))""#;
+    let src = r#""result \(foo(x, y))""#;
     let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
@@ -599,7 +607,7 @@ fn test_format_string_nested_parens() {
 
 #[test]
 fn test_format_string_unterminated_interp() {
-    let src = r#""hello (name"#;
+    let src = r#""hello \(name"#;
     let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
 
@@ -610,6 +618,26 @@ fn test_format_string_unterminated_interp() {
             .any(|t| matches!(t, Token::UnterminatedFormatString))
     );
     assert!(!lexer.errors.is_empty());
+}
+
+#[test]
+fn test_format_string_parentheses_are_text_and_escapes_are_text() {
+    let src = r#""call(a) \\(literal)""#;
+    let mut lexer = Lexer::new(src);
+    let tokens: Vec<_> = lexer.by_ref().map(|(tok, _)| tok).collect();
+
+    assert!(
+        tokens
+            .iter()
+            .any(|t| matches!(t, Token::FormatStringText(s) if s.contains("call(a)")))
+    );
+    assert!(
+        tokens
+            .iter()
+            .any(|t| matches!(t, Token::FormatStringText(s) if s.contains("(literal)")))
+    );
+    assert!(!tokens.iter().any(|t| matches!(t, Token::FormatInterpStart)));
+    assert!(lexer.errors.is_empty());
 }
 
 #[test]
@@ -627,7 +655,7 @@ fn test_format_string_empty() {
 
 #[test]
 fn test_range_tokens() {
-    let src = "TinyInt is 0...255";
+    let src = "TinyInt is 0 to 255";
     let mut lexer = Lexer::new(src);
     let tokens: Vec<_> = lexer.by_ref().collect();
     let errors = std::mem::take(&mut lexer.errors);

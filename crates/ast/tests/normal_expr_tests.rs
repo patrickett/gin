@@ -48,7 +48,7 @@ fn value_float_displays() {
 
 #[test]
 fn value_string_displays() {
-    let expr = NormalExpr::Value(ConstValue::String("hello".into()));
+    let expr = NormalExpr::Value(ConstValue::Text("hello".into()));
     assert_eq!(expr.to_string(), r#""hello""#);
 }
 

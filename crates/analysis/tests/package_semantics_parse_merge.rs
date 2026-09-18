@@ -3,7 +3,7 @@
 use analysis::{FileSemanticOutput, PackageCache};
 use diagnostic::{Category, Diagnostic};
 use std::path::PathBuf;
-use test_fixtures::gin_core::STRING_GIN_SOURCE;
+use test_fixtures::semantic_fixtures::STRING_GIN_SOURCE;
 
 fn is_unexpected_equals_token(diag: &Diagnostic) -> bool {
     diag.code.slug() == "parse-unexpected-token"

@@ -19,6 +19,10 @@ use ast::type_decl::TypeNameExt;
 use ast::{Bind, BindValue, FileAst, WhenArm};
 use ast::{ConstValue, HashFloat};
 
+#[cfg(test)]
+#[path = "prepare_target_tests.rs"]
+mod tests;
+
 /// Fill unassigned binds whose type declares `has Default(default: …)`.
 pub fn materialize_default_binds(ast: &mut FileAst) -> Vec<Diagnostic> {
     let names: Vec<_> = ast.defs.keys().copied().collect();
@@ -98,9 +102,9 @@ pub fn apply_entry_target_merge(ast: &mut FileAst, entry: &CompileTarget) -> Vec
             let mut new_fields: Vec<_> = fields.iter().cloned().collect();
             for (key, value) in triple.field_overrides() {
                 if let Some((_, slot)) = new_fields.iter_mut().find(|(n, _)| n.as_str() == key) {
-                    *slot = ConstValue::String(value);
+                    *slot = ConstValue::Text(value);
                 } else {
-                    new_fields.push((Intern::from_ref(key), ConstValue::String(value)));
+                    new_fields.push((Intern::from_ref(key), ConstValue::Text(value)));
                 }
             }
             *fields = new_fields.into();
@@ -124,7 +128,7 @@ pub fn apply_entry_target_merge(ast: &mut FileAst, entry: &CompileTarget) -> Vec
                 if let Some(idx) = field_names.iter().position(|field| field.as_str() == key)
                     && idx < new_args.len()
                 {
-                    new_args[idx] = ConstValue::String(value);
+                    new_args[idx] = ConstValue::Text(value);
                 }
             }
             *args = new_args.into();
@@ -262,11 +266,11 @@ fn materialize_type_static_access_in_bind(bind: &mut Bind, expansions: &TypeStat
             for e in exprs {
                 materialize_type_static_access_typed(e, expansions);
             }
-            if let Some(r) = &mut ret.value {
+            for r in &mut ret.values {
                 materialize_type_static_access_typed(r, expansions);
             }
         }
-        BindValue::Extern | BindValue::Unassigned => {}
+        BindValue::Unassigned => {}
     }
 }
 
@@ -358,7 +362,7 @@ fn materialize_type_static_access_expr(expr: &mut Expr, expansions: &TypeStaticE
             for e in &mut i.body {
                 materialize_type_static_access_typed(e, expansions);
             }
-            if let Some(r) = &mut i.ret.value {
+            for r in &mut i.ret.values {
                 materialize_type_static_access_typed(r, expansions);
             }
         }
@@ -375,7 +379,7 @@ fn materialize_type_static_access_expr(expr: &mut Expr, expansions: &TypeStaticE
                 materialize_type_static_access_typed(a, expansions);
             }
         }
-        Expr::TupleLit(elems) | Expr::List(elems) => {
+        Expr::ArrayLit(elems) | Expr::List(elems) => {
             for e in elems {
                 materialize_type_static_access_typed(e, expansions);
             }
@@ -387,7 +391,7 @@ fn materialize_type_static_access_expr(expr: &mut Expr, expansions: &TypeStaticE
 fn default_expr_value_expr(cv: &ConstValue, span_id: SpanId) -> Expr {
     match cv {
         ConstValue::ResultAlternative { label, .. } => Expr::AnonymousTag(*label),
-        ConstValue::String(s) => Expr::Lit(Literal::String(s.clone())),
+        ConstValue::Text(s) => Expr::Lit(Literal::String(s.clone())),
         ConstValue::Int(n) => Expr::Lit(Literal::Int(*n)),
         ConstValue::Float(HashFloat(f)) => Expr::Lit(Literal::Float(HashFloat(*f))),
         ConstValue::Tag { name, args, .. } if args.is_empty() => Expr::AnonymousTag(*name),
@@ -421,12 +425,36 @@ fn default_expr_value_expr(cv: &ConstValue, span_id: SpanId) -> Expr {
                     .collect(),
             )
         }
-        ConstValue::List(items) => Expr::List(
+        ConstValue::ResultRow(items) => Expr::ResultValues(
             items
                 .iter()
-                .map(|i| Typed::infer(default_expr_value_expr(i, span_id), span_id))
+                .map(|item| Typed::infer(default_expr_value_expr(item, span_id), span_id))
                 .collect(),
         ),
+        ConstValue::FixedArray(items) => Expr::ArrayLit(
+            items
+                .iter()
+                .map(|item| Typed::infer(default_expr_value_expr(item, span_id), span_id))
+                .collect(),
+        ),
+        ConstValue::Sequence(items) => Expr::SequenceLiteral(ast::SequenceLiteral::Elements(
+            items
+                .iter()
+                .map(|item| Typed::infer(default_expr_value_expr(item, span_id), span_id))
+                .collect(),
+        )),
+        ConstValue::SequenceRepeat { seed, count } => {
+            Expr::SequenceLiteral(ast::SequenceLiteral::Repeat {
+                seed: Box::new(Typed::infer(
+                    default_expr_value_expr(seed, span_id),
+                    span_id,
+                )),
+                count: Box::new(Typed::infer(
+                    crate::reflect::normal_expr_to_expr(count),
+                    span_id,
+                )),
+            })
+        }
     }
 }
 
@@ -438,7 +466,7 @@ fn propagate_target_fields_in_ast(ast: &mut FileAst) {
             for e in exprs {
                 propagate_record_fields_typed(e);
             }
-            if let Some(r) = &mut ret.value {
+            for r in &mut ret.values {
                 propagate_record_fields_typed(r);
             }
         }
@@ -446,53 +474,42 @@ fn propagate_target_fields_in_ast(ast: &mut FileAst) {
 }
 
 /// Compile-time bind values from a prepared package AST (for cross-file `when` subjects).
-pub(crate) fn const_env_from_prepared_ast(ast: &FileAst) -> ConstEnv {
+pub(crate) fn const_env_from_prepared_ast(
+    ast: &FileAst,
+    target: Option<&CompileTarget>,
+) -> ConstEnv {
     let mut const_binds: ConstEnv = ast.defs.keys().map(|n| (*n, None)).collect();
     for _ in 0..ast.defs.len().max(1) {
-        let names: Vec<_> = ast.defs.keys().copied().collect();
-        for name in names {
-            if const_binds.get(&name).and_then(|v| v.as_ref()).is_some() {
+        let mut changed = false;
+        for (name, bind) in &ast.defs {
+            if const_binds.get(name).and_then(Option::as_ref).is_some() {
                 continue;
             }
-            let Some(bind) = ast.defs.get(&name) else {
-                continue;
-            };
             let cv = match &bind.value {
                 BindValue::Expr(e) => {
-                    let evaluator = CompTimeEvaluator::new(&const_binds, ast);
+                    let evaluator = match target {
+                        Some(target) => CompTimeEvaluator::for_target(&const_binds, ast, target),
+                        None => CompTimeEvaluator::new(&const_binds, ast),
+                    };
                     e.const_value.clone().or_else(|| evaluator.eval(&e.value))
                 }
                 _ => None,
             };
             if let Some(cv) = cv {
-                const_binds.insert(name, Some(cv));
+                const_binds.insert(*name, Some(cv));
+                changed = true;
             }
+        }
+        if !changed {
+            break;
         }
     }
     const_binds
 }
 
 pub fn materialize_target_dependent_constants(ast: &mut FileAst, target: &CompileTarget) {
-    let mut const_binds: ConstEnv = ast.defs.keys().map(|name| (*name, None)).collect();
+    let const_binds = const_env_from_prepared_ast(ast, Some(target));
     let target_dependent = target_dependent_bind_names(ast);
-    for _ in 0..ast.defs.len().max(1) {
-        for (name, bind) in &ast.defs {
-            if const_binds.get(name).and_then(Option::as_ref).is_some() {
-                continue;
-            }
-            let BindValue::Expr(expr) = &bind.value else {
-                continue;
-            };
-            let evaluator = CompTimeEvaluator::for_target(&const_binds, ast, target);
-            if let Some(value) = expr
-                .const_value
-                .clone()
-                .or_else(|| evaluator.eval(&expr.value))
-            {
-                const_binds.insert(*name, Some(value));
-            }
-        }
-    }
 
     for (name, bind) in &mut ast.defs {
         if !target_dependent.contains(name) {
@@ -724,9 +741,9 @@ fn literal_union_ty_from_tag(name: Intern<String>, tags: &ast::TagMap) -> Option
     for variant in variants {
         let shape = variant.shape();
         if let ast::Pattern::Literal(Literal::String(s), _) = &shape.value {
-            lit_values.push(ConstValue::String(s.clone()));
+            lit_values.push(ConstValue::Text(s.clone()));
             if lit_base.is_none() {
-                lit_base = Some(Ty::Opaque(Intern::<String>::from_ref("String")));
+                lit_base = Some(Ty::UnresolvedLiteral(ast::ty::LiteralKind::Text));
             }
         } else if let ast::Pattern::Literal(lit, _) = &shape.value {
             if let Some(cv) = const_value_from_literal(lit) {
@@ -745,7 +762,7 @@ fn literal_union_ty_from_tag(name: Intern<String>, tags: &ast::TagMap) -> Option
 
 fn const_value_from_literal(lit: &Literal) -> Option<ConstValue> {
     match lit {
-        Literal::String(s) => Some(ConstValue::String(s.clone())),
+        Literal::String(s) => Some(ConstValue::Text(s.clone())),
         Literal::Int(n) => Some(ConstValue::Int(*n)),
         Literal::Float(HashFloat(f)) => Some(ConstValue::Float(HashFloat(*f))),
         Literal::Number(n) => Some(ConstValue::Int((*n as u128).into())),
@@ -793,7 +810,7 @@ pub fn validate_when_declare_exhaustiveness(
 
 /// Fold `when` declare subjects (e.g. `target.arch`) using defs from the whole prepared package.
 pub fn materialize_when_declare_subjects_from_package(ast: &mut FileAst, package: &FileAst) {
-    let const_binds = const_env_from_prepared_ast(package);
+    let const_binds = const_env_from_prepared_ast(package, None);
     for decl in ast.tags.values_mut() {
         if let DeclareValue::When(w) = &mut decl.value
             && let Some(subject) = &mut w.subject
@@ -877,7 +894,7 @@ fn propagate_record_fields_typed(expr: &mut Typed<Expr>) {
             for e in &mut i.body {
                 propagate_record_fields_typed(e);
             }
-            if let Some(r) = &mut i.ret.value {
+            for r in &mut i.ret.values {
                 propagate_record_fields_typed(r);
             }
         }
@@ -894,7 +911,7 @@ fn propagate_record_fields_typed(expr: &mut Typed<Expr>) {
                 propagate_record_fields_typed(a);
             }
         }
-        Expr::TupleLit(elems) | Expr::List(elems) => {
+        Expr::ArrayLit(elems) | Expr::List(elems) => {
             for e in elems {
                 propagate_record_fields_typed(e);
             }

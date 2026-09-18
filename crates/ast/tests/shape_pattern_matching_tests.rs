@@ -23,7 +23,7 @@ use support::transform_source;
 #[test]
 fn when_record_pattern_with_field_binders() {
     let src = "\
-Int is in 1...400
+Int is in 1 to 400
 Bool is True or False
 
 Coord has x Int, y Int, z Int
@@ -55,7 +55,7 @@ process(p Coord) Int:
 #[test]
 fn when_record_pattern_with_literal_guard() {
     let src = "\
-Int is in 1...400
+Int is in 1 to 400
 Bool is True or False
 
 Coord has x Int, y Int, z Int
@@ -97,7 +97,7 @@ process(p Coord) Int:
 #[test]
 fn when_record_pattern_omits_fields() {
     let src = "\
-Int is in 1...400
+Int is in 1 to 400
 Bool is True or False
 
 Coord has x Int, y Int, z Int
@@ -127,7 +127,7 @@ process(p Coord) Int:
 #[test]
 fn when_union_variant_pattern() {
     let src = "\
-Int is in 1...400
+Int is in 1 to 400
 Maybe(x) is Some(x) or None
 
 process(m Maybe(Int)) Int:
@@ -175,7 +175,7 @@ pick(b Bool) Int:
 #[test]
 fn when_union_variant_with_typed_fields() {
     let src = "\
-Int is in 1...400
+Int is in 1 to 400
 Bool is True or False
 
 Primitive has width Int, signed Bool
@@ -206,7 +206,7 @@ process(ty Type) Int:
 fn when_union_variant_with_wildcard() {
     let src = "\
 Bool is True or False
-Int is in 1...400
+Int is in 1 to 400
 
 Primitive has width Int, signed Bool
 Type is Primitive(width Int, signed Bool) or Other
@@ -248,7 +248,7 @@ process(ty Type) Int:
 #[test]
 fn destructure_bind() {
     let src = "\
-Int is in 1...400
+Int is in 1 to 400
 Coord has x Int, y Int, z Int
 
 p := Coord(x: 1, y: 2, z: 3)
@@ -277,7 +277,7 @@ Coord(x: px, y: py, z: pz) := p
 #[test]
 fn shorthand_destructure() {
     let src = "\
-Int is in 1...400
+Int is in 1 to 400
 Coord has x Int, y Int, z Int
 
 p := Coord(x: 1, y: 2, z: 3)
@@ -306,7 +306,7 @@ Coord(x, y, z) := p
 #[test]
 fn when_pattern_with_record_field_dot_access() {
     let src = "\
-Int is in 1...400
+Int is in 1 to 400
 
 Coord has x Int, y Int, z Int
 

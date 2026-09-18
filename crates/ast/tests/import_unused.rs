@@ -27,7 +27,7 @@ fn unused_bundle_member_names(import: &Import, body: &str) -> Vec<String> {
 #[test]
 fn dotted_bundle_members_not_unused_when_flat_name_used_in_body() {
     let source = "\
-use core.(default.Default, target.arch.Architecture, target.os.OperatingSystem, target.vendor.Vendor)
+use core default.Default, target.arch.Architecture, target.os.OperatingSystem, target.vendor.Vendor
 
 Target has Default
     arch Architecture
@@ -47,7 +47,7 @@ Target has Default
 
 #[test]
 fn bound_name_spans_use_flat_names() {
-    let source = "use core.(target.arch.Architecture)\n";
+    let source = "use core target.arch.Architecture\n";
     let output = source.parse_source_full();
     let mi = &output.ast.uses[0].0[0];
     let names: Vec<_> = mi

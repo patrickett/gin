@@ -2,7 +2,7 @@ use ast::{AttributeItem, DeclareValue, NormalExpr, PredicateExpr};
 use parser::query::SourceParseExt;
 
 fn assert_call_directive(name: &str) {
-    let source = format!("#{name}(8)\nValue is in 0...255\n");
+    let source = format!("#{name}(8)\nValue is in 0 to 255\n");
     let output = source.as_str().parse_source_full();
     assert!(
         output
@@ -56,7 +56,7 @@ fn phantom_directive_is_structured() {
 
 #[test]
 fn inclusive_refinement_is_structured_as_a_range() {
-    let output = "Window is in 250...260\n".parse_source_full();
+    let output = "Window is in 250 to 260\n".parse_source_full();
     assert!(output.symptoms.is_empty(), "{:?}", output.symptoms);
     let declaration = output
         .ast
@@ -70,7 +70,7 @@ fn inclusive_refinement_is_structured_as_a_range() {
 
 #[test]
 fn binding_range_refinement_expands_to_inclusive_bounds() {
-    let output = "index is in 0...255: 0\n".parse_source_full();
+    let output = "index is in 0 to 255: 0\n".parse_source_full();
     assert!(
         output
             .symptoms

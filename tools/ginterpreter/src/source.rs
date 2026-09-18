@@ -92,27 +92,21 @@ impl RuntimeDeclaration {
             return declaration;
         }
 
-        let mut locals = String::new();
+        let locals = String::new();
         let mut args = Vec::new();
         for (index, name) in self.param_names.iter().enumerate() {
             let convention = self
                 .param_conventions
                 .get(index)
                 .copied()
-                .unwrap_or(ParamConvention::Own);
+                .unwrap_or(ParamConvention::Terminal);
             match convention {
-                ParamConvention::Own => {
-                    let local_name = format!("__gin_dispatch_arg_{index}_{name}");
-                    locals.push_str("    ");
-                    locals.push_str(&local_name);
-                    locals.push_str(" := eat ");
-                    locals.push_str(name);
-                    locals.push('\n');
-                    args.push(local_name);
+                ParamConvention::Own
+                | ParamConvention::Terminal
+                | ParamConvention::Observe
+                | ParamConvention::Mutate => {
+                    args.push(name.to_string());
                 }
-                ParamConvention::Consume => args.push(format!("eat {name}")),
-                ParamConvention::Observe => args.push(format!("ref {name}")),
-                ParamConvention::Mutate => args.push(format!("mut {name}")),
             }
         }
 

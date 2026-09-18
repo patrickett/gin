@@ -3,7 +3,7 @@
 use parser::query::SourceParseExt;
 
 const IO_SRC: &str = "\
-Int is in 0...4294967295
+Int is in 0 to 4294967295
 
 write_spec := 4
 

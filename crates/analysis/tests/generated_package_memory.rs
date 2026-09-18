@@ -1,7 +1,7 @@
-//! Memory regression test: loads `gin_core` and asserts the resident set stays
+//! Memory regression test: loads a large package and asserts the resident set stays
 //! within a sane budget through semantic analysis and a couple of revisions.
 //!
-//! Run with `cargo test --release -p analysis memory_baseline -- --nocapture`.
+//! Run with `cargo test --release -p analysis stdlib_independence_memory -- --nocapture`.
 //!
 //! The 2025 baseline (before fixing exponential variant_map duplication) was
 //! ~2.7 GB after `package_semantics` on a 32-file package. The fixed pipeline
@@ -9,36 +9,26 @@
 //! still catching another exponential regression early.
 
 use analysis::PackageCache;
-use std::path::PathBuf;
+use test_fixtures::TempPackage;
 
 const MAX_RSS_AFTER_SEMANTICS: usize = 320 * 1024 * 1024;
 const MAX_RSS_AFTER_REVISIONS: usize = 384 * 1024 * 1024;
 
 #[test]
 fn full_package_load_memory() {
-    let modules_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("modules/gin_core");
-
-    if !modules_dir.exists() {
-        eprintln!("skip: gin_core modules not present at {modules_dir:?}");
-        return;
+    let package = TempPackage::new("memory_baseline");
+    let mut paths = Vec::new();
+    for index in 0..32 {
+        let source = format!("Type{index} is Unit\nvalue_{index} := Type{index}\n");
+        paths.push(package.write(&format!("module_{index}.gin"), &source));
     }
 
     let rss_before = process_rss_bytes();
 
     let engine = PackageCache::for_test();
-    let mut paths: Vec<PathBuf> = Vec::new();
-    for entry in walkdir(&modules_dir) {
-        if entry.extension().is_some_and(|e| e == "gin") {
-            engine.add_file(entry.clone()).ok();
-            paths.push(entry);
-        }
+    for path in &paths {
+        engine.add_file(path.clone()).ok();
     }
-    paths.sort();
 
     let rss_after_load = process_rss_bytes();
     let _ = engine.package_semantics(&paths);
@@ -93,21 +83,6 @@ fn full_package_load_memory() {
         revisions_delta,
         MAX_RSS_AFTER_REVISIONS,
     );
-}
-
-fn walkdir(dir: &std::path::Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if let Ok(read) = std::fs::read_dir(dir) {
-        for entry in read.flatten() {
-            let p = entry.path();
-            if p.is_dir() {
-                out.extend(walkdir(&p));
-            } else {
-                out.push(p);
-            }
-        }
-    }
-    out
 }
 
 #[cfg(target_os = "macos")]

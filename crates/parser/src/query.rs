@@ -24,9 +24,26 @@ pub trait SourceParseExt {
 impl SourceParseExt for str {
     fn parse_source_full(&self) -> ParseOutput {
         let mut lexer = Lexer::new(self);
-        let tokens: Vec<_> = lexer.by_ref().collect();
+        let tokens: Vec<_> = std::iter::from_fn(|| lexer.next_raw()).collect();
         let lex_errors = std::mem::take(&mut lexer.errors);
         let mut span_table = lexer.take_span_table();
+
+        let mut comments = Vec::new();
+        let mut depth = 0usize;
+        let mut line_start = true;
+        for (token, span) in &tokens {
+            match token {
+                Token::Indent => depth += 1,
+                Token::Dedent => depth = depth.saturating_sub(1),
+                Token::Newline => line_start = true,
+                Token::Comment(text) => comments.push(SourceComment {
+                    text: (*text).to_owned(),
+                    span: *span,
+                    top_level: depth == 0 && line_start,
+                }),
+                _ => line_start = false,
+            }
+        }
 
         // Filter out comments for the handwritten parser
         let filtered_tokens: Vec<_> = tokens
@@ -61,7 +78,7 @@ impl SourceParseExt for str {
                     "unnecessary-comma" => {
                         symptoms.push(
                             Diagnostic::new("parse-unnecessary-comma", "unnecessary comma")
-                                .with_category(Category::Help)
+                                .with_category(Category::Warn)
                                 .with_help(
                                     "this comma is not needed since Gin uses newlines \
                                  to separate items; you can remove it",
@@ -69,19 +86,26 @@ impl SourceParseExt for str {
                                 .at_span_id(err.span(), &span_table),
                         );
                     }
-                    hint => {
+                    _hint => {
                         symptoms.push(
-                            Diagnostic::new("parse-indented-return", hint)
-                                .with_category(Category::Help)
-                                .at_span_id(err.span(), &span_table),
+                            Diagnostic::new(
+                                "parse-indented-return",
+                                "return is indented inside the if body",
+                            )
+                            .with_category(Category::Warn)
+                            .with_help("dedent this return so it closes the if expression")
+                            .at_span_id(err.span(), &span_table),
                         );
                     }
                 }
             } else {
-                symptoms.push(
-                    Diagnostic::new(err.code(), err.message().to_string())
-                        .at_span_id(err.span(), &span_table),
-                );
+                let mut diagnostic = Diagnostic::new(err.code(), err.message().to_string())
+                    .at_span_id(err.span(), &span_table);
+                if err.code() == "parse-reserved-name" {
+                    diagnostic = diagnostic
+                        .with_help("choose a different name, such as `value` or `result`");
+                }
+                symptoms.push(diagnostic);
             }
         }
 
@@ -101,7 +125,7 @@ impl SourceParseExt for str {
                         symptoms.push(
                             Diagnostic::new(
                                 "parse-unsupported-import-alias",
-                                "`as` alias on `use pkg.(...)` is not supported; use `export as alias` inside the list",
+                                "alias individual exports with `export as alias`, rather than aliasing the whole import list",
                             )
                             .at_span_id(b.span_id(), spans),
                         );
@@ -118,9 +142,7 @@ impl SourceParseExt for str {
                             .at_span_id(*span, spans),
                         );
                     }
-                    ImportSource::LocalBundle(b) => {
-                        TokenCursor::collect_prefer_member_import_hints(b, spans, &mut symptoms);
-                    }
+                    ImportSource::LocalFile(_, _) => {}
                     _ => {}
                 }
             }
@@ -130,7 +152,7 @@ impl SourceParseExt for str {
             symptoms.push(
                 Diagnostic::new("parse-empty-parens", "unnecessary parentheses")
                     .with_help(["use ", suggested, " instead of ", suggested, "()"].concat())
-                    .with_category(Category::Help)
+                    .with_category(Category::Warn)
                     .at_span_id(*span_id, spans),
             );
         }
@@ -140,14 +162,15 @@ impl SourceParseExt for str {
             symptoms.push(
                 Diagnostic::new("parse-unused-value", ["unused value ", &value].concat())
                     .with_arg("value", value.clone())
-                    .with_category(Category::Info)
+                    .with_category(Category::Help)
                     .at_span_id(span_id, spans),
             );
         }
 
-        let is_incomplete = tokens_are_incomplete(&tokens);
+        let is_incomplete = tokens_are_incomplete(&filtered_tokens);
         ParseOutput {
             ast,
+            comments,
             symptoms,
             is_incomplete,
         }
@@ -216,11 +239,19 @@ fn tokens_are_incomplete(tokens: &[(Token<'_>, SpanId)]) -> bool {
         )
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct SourceComment {
+    pub text: String,
+    pub span: SpanId,
+    pub top_level: bool,
+}
+
 /// Full output from parsing source text, including all diagnostic info.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ParseOutput {
     /// The parsed abstract syntax tree.
     pub ast: FileAst,
+    pub comments: Vec<SourceComment>,
     /// All diagnostics collected during lexing and parsing.
     pub symptoms: Vec<Diagnostic>,
     is_incomplete: bool,
@@ -275,7 +306,7 @@ impl FileAstHintExt for FileAst {
 
 pub(crate) mod hints {
     use ast::FnCall;
-    use ast::folder::{Folder, walk_fn_call_mut};
+    use ast::folder::{Folder, walk_bind_mut, walk_fn_call_mut};
     use ast::span::SpanId;
     use std::ops::ControlFlow;
 
@@ -296,6 +327,13 @@ pub(crate) mod hints {
     }
 
     impl Folder for EmptyParenCollector {
+        fn visit_bind(&mut self, bind: &mut ast::Bind) -> ControlFlow<()> {
+            if bind.params.as_ref().is_some_and(|params| params.is_empty()) {
+                self.hints.push((bind.name.to_string(), bind.name_span));
+            }
+            walk_bind_mut(self, bind)
+        }
+
         fn visit_fn_call(&mut self, call: &mut ast::FnCall) -> ControlFlow<()> {
             if let Some(args) = &call.args
                 && args.is_empty()
@@ -304,51 +342,6 @@ pub(crate) mod hints {
             }
             walk_fn_call_mut(self, call)
         }
-    }
-}
-
-impl TokenCursor<'_, '_> {
-    /// Collect hints for preferring member import over single-item bundle imports.
-    fn collect_prefer_member_import_hints(
-        b: &ast::LocalBundleImport,
-        span_table: &ast::span::SpanTable,
-        symptoms: &mut Vec<Diagnostic>,
-    ) {
-        if b.members.len() != 1 {
-            return;
-        }
-        let member = &b.members[0];
-        if member.alias.is_some() {
-            return;
-        }
-        let path_prefix = if let Some(p) = &b.local_path {
-            ["'", &p.to_string_lossy(), "'"].concat()
-        } else {
-            b.qualifier_prefix()
-        };
-        let symbol = member.export.to_string();
-        let message = [
-            "prefer use ",
-            &path_prefix,
-            ".",
-            &symbol,
-            " over a single-item .(...) bundle",
-        ]
-        .concat();
-        let help = [
-            "use use ",
-            &path_prefix,
-            ".",
-            &symbol,
-            " for a single import; reserve .(...) for multiple symbols",
-        ]
-        .concat();
-        symptoms.push(
-            Diagnostic::new("use-prefer-member-import", message)
-                .with_help(help)
-                .with_category(Category::Help)
-                .at_span_id(member.span, span_table),
-        );
     }
 }
 
@@ -364,14 +357,14 @@ impl TokenCursor<'_, '_> {
 pub trait FileAstQueryExt {
     /// Extract locally-imported `.gin` file paths from the AST (quoted `use '...gin'` only).
     ///
-    /// Package imports, dependency bundles (`use dep.(...)`), and unquoted local roots are not included here.
+    /// Package imports, dependency bundles (`use dep ...`), and unquoted local roots are not included here.
     fn extract_local_import_paths(&self, base_dir: &Path) -> Vec<(PathBuf, SpanId)>;
 
     /// Resolve package imports (e.g. `use core`, `use core.subpkg`) against a dependency map.
     ///
     /// - `use dep`: every `*.gin` in `dep/` next to `flask.jsonc` (non-recursive).
     /// - `use dep.a.b`: nested folder modules `dep/a/b/` with `flask.jsonc`, then flat `*.gin` there.
-    /// - `use dep.(a, b)`: each listed name is a nested folder module under `dep/`.
+    /// - `use dep a, b`: each listed name is a nested folder module under `dep/`.
     ///
     /// Returns `(path, span)` pairs for each resolved `.gin` file.
     fn extract_package_import_paths(
@@ -389,7 +382,6 @@ impl FileAstQueryExt for FileAst {
                 match &module_import.source {
                     ImportSource::Package(_path) => {}
                     ImportSource::LocalBundle(_b) => {}
-                    ImportSource::LocalMember(_) => {}
                     ImportSource::CurrentModule { .. } => {}
                     ImportSource::Local(path, span) => {
                         let p = base_dir.join(path);
@@ -399,6 +391,12 @@ impl FileAstQueryExt for FileAst {
                             for g in p.list_package_gin_files() {
                                 paths.push((g, *span));
                             }
+                        }
+                    }
+                    ImportSource::LocalFile(path, span) => {
+                        let p = base_dir.join(path);
+                        if p.is_file() {
+                            paths.push((p, *span));
                         }
                     }
                 }
@@ -469,7 +467,7 @@ impl FileAstQueryExt for FileAst {
                         }
                     }
                     ImportSource::Local(_, _) => {}
-                    ImportSource::LocalMember(_) => {}
+                    ImportSource::LocalFile(_, _) => {}
                     ImportSource::CurrentModule { .. } => {}
                 }
             }

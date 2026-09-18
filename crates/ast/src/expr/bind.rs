@@ -41,6 +41,7 @@ pub struct Bind {
     /// Populated during type resolution. Empty for non-method binds.
     pub receiver_typevars: HashMap<Intern<String>, TyState>,
     pub return_type_name: Option<Intern<String>>,
+    pub named_results: Vec<NamedResult>,
     /// Explicit return type annotation stored as an ordinary expression.
     pub return_tag: Option<Box<Spanned<Expr>>>,
     pub return_refinement: Option<PredicateExpr>,
@@ -73,6 +74,7 @@ impl Bind {
             receiver_type: None,
             receiver_typevars: HashMap::new(),
             return_type_name: None,
+            named_results: Vec::new(),
             return_tag: None,
             return_refinement: None,
             anonymous_result_alternatives: Vec::new(),
@@ -85,6 +87,11 @@ impl Bind {
 
     pub fn with_return_type_name(mut self, name: Option<Intern<String>>) -> Self {
         self.return_type_name = name;
+        self
+    }
+
+    pub fn with_named_results(mut self, results: Vec<NamedResult>) -> Self {
+        self.named_results = results;
         self
     }
 
@@ -167,6 +174,13 @@ impl Bind {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NamedResult {
+    pub name: Intern<String>,
+    pub name_span: SpanId,
+    pub ty: Box<Spanned<Expr>>,
+}
+
 impl std::hash::Hash for Bind {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.doc_comment.hash(state);
@@ -187,6 +201,7 @@ impl std::hash::Hash for Bind {
         self.return_refinement.hash(state);
         self.anonymous_result_alternatives.hash(state);
         self.return_type_name.hash(state);
+        self.named_results.hash(state);
         self.type_annotation.hash(state);
         self.type_annotation_qual.hash(state);
         self.value.hash(state);
@@ -320,20 +335,36 @@ pub enum AttributeItem {
     },
 }
 
+pub const COMPILER_QUERY_NAMES: &[&str] = &[
+    "asm",
+    "bits",
+    "complexity",
+    "debug",
+    "fixed_array",
+    "infix",
+    "inline",
+    "machine",
+    "size",
+    "alignment",
+    "index_bits",
+    "phantom",
+    "reflection",
+    "test",
+];
+
 #[derive(Default, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BindAttributes {
     /// Always run in tests (`#[test]`).
     pub test: bool,
     /// Always inline (`#[inline]`).
     pub inline_always: bool,
+    pub machine: bool,
     /// Strip in release builds (`#[debug]`).
     pub debug_only: bool,
     /// Time complexity annotation (`#complexity(...)`). `None` means unannotated.
     pub complexity: Option<Complexity>,
-    pub intrinsic: Option<Intern<String>>,
-    pub operator_role: Option<OperatorRole>,
-    pub invalid_operator_role: Option<Intern<String>>,
-    pub operator_role_span: Option<SpanId>,
+    pub infix_symbol: Option<Intern<String>>,
+    pub infix_symbol_span: Option<SpanId>,
     /// Raw parsed attributes before semantic extraction.
     /// `None` means no attributes were present.
     pub raw_attributes: Option<Vec<AttributeItem>>,
@@ -354,32 +385,25 @@ impl BindAttributes {
         for item in items {
             match item {
                 AttributeItem::Call { name, args, .. } => {
-                    if name.as_str() == "complexity" {
+                    if name.as_str() == "machine" {
+                        self.machine = true;
+                    } else if name.as_str() == "complexity" {
                         self.complexity = Complexity::extract(args);
-                    } else if name.as_str() == "intrinsic"
+                    } else if name.as_str() == "infix"
                         && let Some(Typed {
-                            value: Expr::AnonymousTag(intrinsic),
+                            value: Expr::Lit(crate::Literal::String(symbol)),
                             ..
                         }) = args.first()
                     {
-                        self.intrinsic = Some(*intrinsic);
-                    } else if name.as_str() == "operator"
-                        && let Some(Typed {
-                            value: Expr::AnonymousTag(role),
-                            ..
-                        }) = args.first()
-                    {
-                        self.operator_role = role.as_str().parse().ok();
-                        if self.operator_role.is_none() {
-                            self.invalid_operator_role = Some(*role);
-                        }
-                        self.operator_role_span = Some(args[0].span_id);
+                        self.infix_symbol = Some(Intern::new(symbol.clone()));
+                        self.infix_symbol_span = Some(args[0].span_id);
                     }
                 }
                 AttributeItem::Flag { name, .. } => match name.as_str() {
                     "debug" => self.debug_only = true,
                     "test" => self.test = true,
                     "inline" => self.inline_always = true,
+                    "machine" => self.machine = true,
                     _ => {}
                 },
             }
@@ -469,8 +493,6 @@ pub enum BindValue {
         exprs: Vec<Typed<Expr>>,
         ret: Return,
     },
-    /// External function declaration — no body, provided by the C runtime or linker.
-    Extern,
     /// A variable declared with a type but no assigned value yet.
     /// e.g. `value Int` (on its own line) declares `value` of type `Int` without assignment.
     /// Assignment happens later via `name: value` which becomes `TypedExprKind::Reassign`.

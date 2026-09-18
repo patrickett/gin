@@ -88,9 +88,12 @@ fn unify_ty(
             Ok(())
         }
         (Ty::Union { name: n1, .. }, Ty::Union { name: n2, .. }) if n1 == n2 => Ok(()),
-        (Ty::Tuple(e1), Ty::Tuple(e2)) if e1.len() == e2.len() => {
-            for (et, at) in e1.iter().zip(e2.iter()) {
-                unify_ty(et, at, subst, type_registry)?;
+        (Ty::ResultRow(e1), Ty::ResultRow(e2)) if e1.len() == e2.len() => {
+            for (expected, actual) in e1.iter().zip(e2) {
+                if expected.name != actual.name {
+                    return Err("named result names or order do not match".to_string());
+                }
+                unify_ty(&expected.ty, &actual.ty, subst, type_registry)?;
             }
             Ok(())
         }

@@ -3,7 +3,7 @@
 use internment::Intern;
 use std::collections::HashMap;
 
-use crate::{ConstValue, HashFloat, NormalExpr};
+use crate::{ConstValue, HashFloat, NormalExpr, SpanId};
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -147,7 +147,7 @@ impl fmt::Display for ProofProposition {
                 relation,
                 right,
             } => write!(f, "{left} {relation} {right}"),
-            Self::InRange { value, start, end } => write!(f, "{value} in {start}...{end}"),
+            Self::InRange { value, start, end } => write!(f, "{value} in {start} to {end}"),
             Self::Not(inner) => write!(f, "not ({inner})"),
             Self::And(left, right) => write!(f, "({left}) and ({right})"),
             Self::Or(left, right) => write!(f, "({left}) or ({right})"),
@@ -210,6 +210,7 @@ pub use crate::integer::IntegerInterpretation;
 /// One union variant with an optional indexed result type.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UnionVariant {
+    pub kind: UnionVariantKind,
     pub name: Intern<String>,
     pub fields: Vec<(Intern<String>, Box<Ty>)>,
     /// Result type with const-generic indices, e.g. `Vec(x, 0)` for `Nil`.
@@ -217,9 +218,16 @@ pub struct UnionVariant {
     pub result_ty: Option<Ty>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UnionVariantKind {
+    Constructor,
+    Type,
+}
+
 impl UnionVariant {
     pub fn new(name: Intern<String>, fields: Vec<(Intern<String>, Box<Ty>)>) -> Self {
         Self {
+            kind: UnionVariantKind::Constructor,
             name,
             fields,
             result_ty: None,
@@ -251,12 +259,14 @@ pub enum TyArg {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LiteralKind {
     Integer,
+    Text,
 }
 
 impl LiteralKind {
     pub fn resolve(name: &str) -> Option<Self> {
         match name {
             "IntegerLiteral" => Some(Self::Integer),
+            "TextLiteral" => Some(Self::Text),
             _ => None,
         }
     }
@@ -301,6 +311,10 @@ pub enum Ty {
         alternatives: Vec<ResultAlternative>,
     },
     UnresolvedLiteral(LiteralKind),
+    UnresolvedSequence {
+        element: Option<Box<Ty>>,
+        length: NormalExpr,
+    },
     Float {
         /// Known compile-time value when constant-folded, otherwise `None`.
         value: Option<HashFloat>,
@@ -334,8 +348,8 @@ pub enum Ty {
         inner: Box<Ty>,
         mutable: bool,
     },
-    /// Positional tuple VALUE — used for tuple literals `(e1, e2, …)`. Maps to an LLVM struct.
-    Tuple(Vec<Ty>),
+    /// Ordered, named results produced by a callable.
+    ResultRow(Vec<ResultElement>),
     /// A single compile-time-known literal (`'John'`, `42`, …) from a site bind.
     Literal(ConstValue),
     /// Tagged union. When [`Self::literal_values`] is set, every variant is a unit literal
@@ -349,6 +363,31 @@ pub enum Ty {
         /// `(param_name, TyArg)` pairs, preserving declaration order.
         resolved_params: Option<Vec<(Intern<String>, TyArg)>>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RowTypeElement {
+    pub name: Intern<String>,
+    pub name_span: SpanId,
+    pub ty: Box<Ty>,
+    pub ty_span: SpanId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResultElement {
+    pub name: Intern<String>,
+    pub ty: Box<Ty>,
+}
+
+impl RowTypeElement {
+    pub fn new(name: Intern<String>, name_span: SpanId, ty: Ty, ty_span: SpanId) -> Self {
+        Self {
+            name,
+            name_span,
+            ty: Box::new(ty),
+            ty_span,
+        }
+    }
 }
 
 impl Ty {
@@ -538,7 +577,7 @@ impl Ty {
             Ty::AnonymousInteger { validity, .. } => validity
                 .domain()
                 .storage_hull()
-                .map(|hull| format!("integer in {}...{}", hull.min(), hull.max()))
+                .map(|hull| format!("integer in {} to {}", hull.min(), hull.max()))
                 .unwrap_or_else(|| "integer".to_string()),
             Ty::ResultFamily {
                 owner,
@@ -553,6 +592,14 @@ impl Ty {
                     .join(" or ")
             ),
             Ty::UnresolvedLiteral(LiteralKind::Integer) => "integer literal".to_string(),
+            Ty::UnresolvedLiteral(LiteralKind::Text) => "text literal".to_string(),
+            Ty::UnresolvedSequence { element, length } => match element {
+                Some(element) => format!(
+                    "sequence literal [{}; {length}]",
+                    element.format_for_hover()
+                ),
+                None => format!("empty sequence literal [_; {length}]"),
+            },
             Ty::Float { value } => {
                 if let Some(HashFloat(v)) = value {
                     format!("f64 = {}", v)
@@ -560,7 +607,6 @@ impl Ty {
                     "f64".to_string()
                 }
             }
-            Ty::Unit => "()".to_string(),
             Ty::Record { fields, .. } => {
                 let parts: Vec<String> = fields
                     .iter()
@@ -583,14 +629,22 @@ impl Ty {
                 let prefix = if *mutable { "mut " } else { "ref " };
                 format!("{}{}", prefix, inner.format_for_hover())
             }
-            Ty::Tuple(tys) => {
-                let parts: Vec<String> = tys.iter().map(|t| t.format_for_hover()).collect();
-                format!("({})", parts.join(", "))
-            }
+            Ty::ResultRow(elements) => elements
+                .iter()
+                .map(|element| {
+                    format!(
+                        "{} {}",
+                        element.name.as_str(),
+                        element.ty.format_for_hover()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
             Ty::Literal(cv) => match cv {
-                ConstValue::String(s) => format!("'{}'", s),
+                ConstValue::Text(s) => format!("'{}'", s),
                 other => other.to_hover_string(),
             },
+            Ty::Unit => "()".to_string(),
         }
     }
 
@@ -617,6 +671,22 @@ impl Ty {
         .unwrap_or_else(crate::integer::IntegerDomain::empty);
         Ty::AnonymousInteger {
             validity: crate::integer::IntegerValidity::new(domain),
+        }
+    }
+
+    pub fn named_field(&self, name: Intern<String>) -> Option<(usize, Ty)> {
+        match self {
+            Ty::Record { fields, .. } => fields
+                .iter()
+                .enumerate()
+                .find(|(_, (field, _))| *field == name)
+                .map(|(index, (_, ty))| (index, (**ty).clone())),
+            Ty::ResultRow(fields) => fields
+                .iter()
+                .enumerate()
+                .find(|(_, field)| field.name == name)
+                .map(|(index, field)| (index, (*field.ty).clone())),
+            _ => None,
         }
     }
 
@@ -703,6 +773,7 @@ impl Ty {
                             .map(|(n, t)| (*n, Box::new(t.substitute(subst))))
                             .collect();
                         UnionVariant {
+                            kind: v.kind,
                             name: v.name,
                             fields: new_fields,
                             result_ty: v.result_ty.as_ref().map(|rt| rt.substitute(subst)),
@@ -713,7 +784,15 @@ impl Ty {
                 resolved_params: resolved_params.clone(),
             },
             Ty::Literal(v) => Ty::Literal(v.clone()),
-            Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|t| t.substitute(subst)).collect()),
+            Ty::ResultRow(elements) => Ty::ResultRow(
+                elements
+                    .iter()
+                    .map(|element| ResultElement {
+                        name: element.name,
+                        ty: Box::new(element.ty.substitute(subst)),
+                    })
+                    .collect(),
+            ),
             Ty::Array { elem, size } => Ty::Array {
                 elem: Box::new(elem.substitute(subst)),
                 size: size.clone(),
@@ -732,7 +811,7 @@ impl Ty {
         }
     }
 
-    /// If this type is an array or tuple, return the element type.
+    /// If this type is an array or aggregate row, return the element type.
     /// Otherwise, look up the `List` type in `tag_types` and extract its `pointer` field.
     pub fn list_elem_ty(&self, tag_types: &HashMap<Intern<String>, Ty>) -> Option<Ty> {
         if let Some(instance) = self.named_instance()
@@ -745,7 +824,6 @@ impl Ty {
         }
         match self {
             Ty::Array { elem, .. } => Some(*elem.clone()),
-            Ty::Tuple(elems) if !elems.is_empty() => Some(elems[0].clone()),
             _ => tag_types
                 .get(&Intern::from_ref("List"))
                 .and_then(|list_ty| {

@@ -46,7 +46,6 @@ const KEYWORD_DOCS: &[(&str, &str)] = &[
         "Defines properties for an interface (interfaces are compositional)",
     ),
     ("ref", "Immutable borrow"),
-    ("eat", "Consume parameter"),
     ("mut", "Mutable reference"),
     ("when", "Pattern matching expression"),
     ("then", "Then branch in pattern matching"),
@@ -60,5 +59,4 @@ const KEYWORD_DOCS: &[(&str, &str)] = &[
     ("continue", "Skip to next iteration"),
     ("as", "Type cast"),
     ("private", "Private declaration"),
-    ("extern", "External function declaration"),
 ];

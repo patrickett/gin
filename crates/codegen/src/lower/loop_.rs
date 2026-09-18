@@ -17,6 +17,12 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 let phis = loop_expr
                     .place_phis
                     .iter()
+                    .filter(|version| {
+                        let place = typed.place_versions[version.0 as usize].place;
+                        symtab
+                            .get(&typed.places[place.0 as usize].name)
+                            .is_none_or(|binding| !binding.is_slot)
+                    })
                     .map(|version| {
                         let place = typed.place_versions[version.0 as usize].place;
                         let place = &typed.places[place.0 as usize];
@@ -87,7 +93,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 }
                 self.bind_typed_condition_patterns(condition, &after_block, &mut body_symtab)?;
                 for statement in &loop_expr.stmts {
-                    self.lower_typed_expr(*statement, &after_block, &mut body_symtab)?;
+                    self.lower_typed_values(*statement, &after_block, &mut body_symtab)?;
                 }
                 let mut backedges = Vec::with_capacity(phis.len());
                 for (name, ty, _) in &phis {
@@ -119,12 +125,53 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 }
                 Some(block.const_i64(self.mlir, 0, loc))
             }
-            typecheck::TypedLoopKind::ForIn { variable, iterable } => {
+            typecheck::TypedLoopKind::ForIn {
+                variable,
+                iterable,
+                plan,
+            } => {
                 let index_ty = Type::index(self.mlir);
                 let typed = self.program;
+
+                if let typecheck::IterationPlan::FixedArray { element, length } = plan {
+                    let Some(length) = length
+                        .as_const_int()
+                        .and_then(|value| usize::try_from(value).ok())
+                    else {
+                        self.emit_internal("fixed-array iteration requires a constant length");
+                        return None;
+                    };
+                    let Some(array) = self.lower_typed_expr(*iterable, block, symtab) else {
+                        self.emit_internal("fixed-array iterable did not lower to a value");
+                        return None;
+                    };
+                    let element_ty = self.ty_to_mlir(element);
+                    symtab.push_scope();
+                    for index in 0..length {
+                        let value = block.append_op(self.mlir.llvm_extractvalue(
+                            array,
+                            i64::try_from(index).ok()?,
+                            element_ty,
+                            loc,
+                        ));
+                        symtab.insert(*variable, value, element.clone(), false);
+                        for stmt in &loop_expr.stmts {
+                            self.lower_typed_values(*stmt, block, symtab)?;
+                        }
+                    }
+                    symtab.pop_scope();
+                    return Some(block.const_i64(self.mlir, 0, loc));
+                }
+
                 let phis = loop_expr
                     .place_phis
                     .iter()
+                    .filter(|version| {
+                        let place = typed.place_versions[version.0 as usize].place;
+                        symtab
+                            .get(&typed.places[place.0 as usize].name)
+                            .is_none_or(|binding| !binding.is_slot)
+                    })
                     .map(|version| {
                         let place = typed.place_versions[version.0 as usize].place;
                         let place = &typed.places[place.0 as usize];
@@ -151,29 +198,50 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     .map(|(_, _, incoming)| *incoming)
                     .collect::<Vec<_>>();
 
-                let (start_i64, end_i64) = if let Some(expr_ref) = self.program.expr(*iterable) {
-                    match &expr_ref.kind {
-                        typecheck::TypedExprKind::Range { start, end } => {
-                            let s = self.lower_typed_expr(*start, block, symtab)?;
-                            let e = self.lower_typed_expr(*end, block, symtab)?;
-                            (s, e)
-                        }
-                        _ => {
-                            self.emit_internal(
-                                "for-in loops currently only support range iterators (start...end)",
-                            );
+                let (start_idx, end_idx) = match plan {
+                    typecheck::IterationPlan::Range => {
+                        let Some(expr_ref) = self.program.expr(*iterable) else {
+                            self.emit_internal("for-in: iterable expression not found");
                             return None;
-                        }
+                        };
+                        let typecheck::TypedExprKind::Range { start, end } = &expr_ref.kind else {
+                            self.emit_internal("range iteration plan has a non-range source");
+                            return None;
+                        };
+                        let mut lower_bound = |expr| {
+                            let value = self.lower_typed_expr(expr, block, symtab)?;
+                            let interpretation = self
+                                .program
+                                .type_registry
+                                .integer_operation_interpretation_for_type(
+                                    self.program.expr(expr)?.ty,
+                                );
+                            let operation =
+                                if interpretation == Some(ast::ty::IntegerInterpretation::Signed) {
+                                    "arith.index_cast"
+                                } else {
+                                    "arith.index_castui"
+                                };
+                            let operation = OperationBuilder::new(operation, loc)
+                                .add_operands(&[value])
+                                .add_results(&[index_ty])
+                                .build()
+                                .ok()?;
+                            Some(block.append_op(operation))
+                        };
+                        (lower_bound(*start)?, lower_bound(*end)?)
                     }
-                } else {
-                    self.emit_internal("for-in: iterable expression not found");
-                    return None;
+                    typecheck::IterationPlan::FixedArray { .. } => {
+                        self.emit_internal("fixed-array iteration is not lowered yet");
+                        return None;
+                    }
+                    typecheck::IterationPlan::Unresolved => {
+                        self.emit_internal("for-in source has no resolved iteration plan");
+                        return None;
+                    }
                 };
 
                 let step_i64 = block.const_i64(self.mlir, 1, loc);
-                let start_idx =
-                    block.append_op(arith_dialect::index_cast(start_i64, index_ty, loc));
-                let end_idx = block.append_op(arith_dialect::index_cast(end_i64, index_ty, loc));
                 let step_idx = block.append_op(arith_dialect::index_cast(step_i64, index_ty, loc));
 
                 let loop_region = Region::new();
@@ -202,7 +270,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     }
 
                     for stmt_id in &loop_expr.stmts {
-                        self.lower_typed_expr(*stmt_id, &loop_blk_ref, &mut loop_symtab)?;
+                        self.lower_typed_values(*stmt_id, &loop_blk_ref, &mut loop_symtab)?;
                     }
 
                     let mut backedges = Vec::with_capacity(phis.len());

@@ -29,7 +29,7 @@ fn main_body_exprs(typed: &typecheck::TypedFileAst) -> Vec<ExprId> {
             }
             ids
         }
-        BindBody::Extern => panic!("main should not be extern"),
+        BindBody::Unlowered => panic!(r#"main should not be: 0"#),
     }
 }
 
@@ -74,7 +74,7 @@ fn literal_string_values_for_name<'a>(
                 _ => None,
             };
             if let Some(id) = value_id
-                && let Some(cv) = &typed.exprs.const_value[id.as_usize()]
+                && let Some(cv) = &typed.exprs.facts.const_facts.const_value[id.as_usize()]
             {
                 out.push(cv);
             }
@@ -127,8 +127,8 @@ fn rebindable_string_literal_updates_const_value() {
     let roots = main_body_exprs(&typed);
     let values = literal_string_values_for_name(&typed, &roots, "name");
     assert_eq!(values.len(), 2);
-    assert!(matches!(&values[0], ConstValue::String(s) if s == "John"));
-    assert!(matches!(&values[1], ConstValue::String(s) if s == "Jane"));
+    assert!(matches!(&values[0], ConstValue::Text(s) if s == "John"));
+    assert!(matches!(&values[1], ConstValue::Text(s) if s == "Jane"));
 }
 
 #[test]
@@ -143,7 +143,7 @@ fn comptime_fn_inlined_returning_negative_int() {
     let mut inline_values = 0usize;
     for root in roots {
         walk_exprs(&typed, root, &mut |id, kind| {
-            if let Some(cv) = &typed.exprs.const_value[id.as_usize()]
+            if let Some(cv) = &typed.exprs.facts.const_facts.const_value[id.as_usize()]
                 && matches!(cv, ConstValue::Int(value) if *value == (-1).into())
             {
                 inline_values += 1;

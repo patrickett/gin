@@ -57,11 +57,11 @@ impl<'src, 't> TokenCursor<'src, 't> {
             ));
         }
 
-        if matches!(self.peek(), Some(Token::Ref) | Some(Token::Mut)) {
-            let sp = self.parse_type_expr(expr_parser)?;
+        if self.eat(&Token::Has) {
+            let constraints = self.parse_trait_chain_after_has(expr_parser);
             return Some((
                 name,
-                Parameter::new(name_span, ParameterKind::Tagged(Box::new(sp))),
+                Parameter::new(name_span, ParameterKind::Generic).with_constraints(constraints),
             ));
         }
 

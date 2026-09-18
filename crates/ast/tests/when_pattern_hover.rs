@@ -10,8 +10,8 @@ fn hover_wildcard_in_record_pattern() {
 Type is Primitive(width BigInt, signed Bool) or Record(name Str, fields List(NamedTy))
 NamedTy has name Str, ty Type
 List(x) has pointer @x, length BigInt
-BigInt is in 0...1000
-Str is in 0...255
+BigInt is in 0 to 1000
+Str is in 0 to 255
 Bool is True or False
 Pointer(x) has addr BigInt
 
@@ -38,13 +38,13 @@ fn reflect_type_record_variant_map_resolves_forward_refs() {
     use internment::Intern;
     use typecheck::ty::Ty;
 
-    // Self-contained: no gin_core fixture load (avoids multi-GB Reflectable shape materialization).
+    // Self-contained: no large fixture load (avoids materializing a large reflection shape).
     let src = "\
 NamedTy has name String, ty Type
 List(x) has pointer @x, length BigInt
-BigInt is in 0...1000
+BigInt is in 0 to 1000
 String has bytes List(Byte)
-Byte is in 0...255
+Byte is in 0 to 255
 Bool is True or False
 Pointer(x) has addr BigInt
 Type is Primitive(width BigInt, signed Bool) or Record(name String, fields List(NamedTy))
@@ -87,9 +87,9 @@ fn record_pattern_fields_hover_matches_reflect_type() {
     let src = "\
 NamedTy has name String, ty Type
 List(x) has pointer @x, length BigInt
-BigInt is in 0...1000
+BigInt is in 0 to 1000
 String has bytes List(Byte)
-Byte is in 0...255
+Byte is in 0 to 255
 Bool is True or False
 Pointer(x) has addr BigInt
 Type is Primitive(width BigInt, signed Bool) or Record(name String, fields List(NamedTy))
@@ -128,8 +128,8 @@ fn hover_record_variant_head_in_pattern() {
 Type is Primitive(width BigInt, signed Bool) or Record(name Str, fields List(NamedTy))
 NamedTy has name Str, ty Type
 List(x) has pointer @x, length BigInt
-BigInt is in 0...1000
-Str is in 0...255
+BigInt is in 0 to 1000
+Str is in 0 to 255
 Bool is True or False
 Pointer(x) has addr BigInt
 
@@ -154,7 +154,7 @@ fn hover_false_in_ref_pattern_matches_bool_variant() {
     // Minimal: just need Ref variant + Bool for hover on `False` in pattern.
     let src = "\
 Bool is True or False
-BigInt is in 0...18446744073709551615
+BigInt is in 0 to 18446744073709551615
 
 Type is Primitive(width BigInt, signed Bool)
      or Ref(inner Type, mutable Bool)
@@ -184,7 +184,7 @@ fn hover_true_in_then_body_shows_qualified_union_path() {
     // Minimal: just need Ref variant, Bool, and `True` in then-body for hover module prefix.
     let src = "\
 Bool is True or False
-BigInt is in 0...18446744073709551615
+BigInt is in 0 to 18446744073709551615
 
 Type is Primitive(width BigInt, signed Bool)
      or Ref(inner Type, mutable Bool)
@@ -219,11 +219,11 @@ is_copy(x Type) Bool := when x is
 fn hover_list_pattern_variables_not_bool() {
     let src = "\
 List(x) has pointer @x, length BigInt\n\
-BigInt is in 0...1000\n\
+BigInt is in 0 to 1000\n\
 Bool is True or False\n\
 NamedTy has name String, ty Type\n\
 String has bytes List(Byte)\n\
-Byte is in 0...255\n\
+Byte is in 0 to 255\n\
 Type is Primitive(width BigInt, signed Bool) or Record(name String, fields List(NamedTy))\n\
 \
 all_copy(fields List(NamedTy)) Bool := when fields is\n\

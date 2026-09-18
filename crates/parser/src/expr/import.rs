@@ -4,8 +4,8 @@ use internment::Intern;
 use lexer::Token;
 
 use ast::{
-    BundleExportImport, Import, ImportSource, LocalBundleImport, LocalMemberImport, ModPath,
-    ModuleImport, Spanned,
+    BundleExportImport, HasSpanId, Import, ImportSource, LocalBundleImport, ModPath, ModuleImport,
+    Spanned,
 };
 use span::SpanId;
 
@@ -48,109 +48,69 @@ impl<'src, 't> TokenCursor<'src, 't> {
     }
 
     fn parse_import_source(&mut self) -> Option<(ImportSource, Option<Intern<String>>)> {
-        let source = match self.peek()? {
+        let mut source = match self.peek()? {
             Token::String(s) => {
                 let span_id = self.peek_span()?;
                 let path_str = *s;
                 if path_str.ends_with(".gin") {
                     self.advance();
+                    if self.eat(&Token::As) {
+                        let alias = self.parse_id()?;
+                        if self.is_at(&Token::Dot) {
+                            self.errors.push(crate::cursor::ParseError::invalid_import_target(
+                                "`.gin` file imports use the namespace alias; member syntax is not allowed",
+                                span_id));
+                            return None;
+                        }
+                        return Some((
+                            ImportSource::LocalFile(PathBuf::from(path_str), span_id),
+                            Some(alias),
+                        ));
+                    }
                     self.errors
                         .push(crate::cursor::ParseError::invalid_import_target(
-                            "imports target folder modules, not `.gin` files",
+                            "`.gin` file imports require an alias (use `as Alias`)",
                             span_id,
                         ));
                     return None;
                 }
                 let path = PathBuf::from(path_str);
                 self.advance();
-                if self.eat(&Token::Dot) {
-                    if self.is_at(&Token::ParenOpen) {
-                        self.advance();
-                        let members = self.parse_bundle_export_list()?;
-                        self.expect(&Token::ParenClose)?;
-                        let end_span = self.last_consumed_span();
-                        let span = self.merge_span(span_id, end_span);
-                        ImportSource::LocalBundle(LocalBundleImport {
-                            root: Intern::<String>::from_ref(""),
-                            path_segments: Vec::new(),
-                            members,
-                            span,
-                            local_path: Some(path),
-                        })
-                    } else {
-                        let member = self.parse_single_bundle_member()?;
-                        let end_span = self.last_consumed_span();
-                        let span = self.merge_span(span_id, end_span);
-                        ImportSource::LocalMember(LocalMemberImport {
-                            local_path: Some(path),
-                            member,
-                            span,
-                        })
-                    }
-                } else {
-                    ImportSource::Local(path, span_id)
+                if self.is_at(&Token::Dot) {
+                    self.error(
+                        "parse-legacy-import-selection",
+                        "select exports after a space: use 'module' name, other",
+                        self.current_span(),
+                    );
+                    return None;
                 }
+                ImportSource::Local(path, span_id)
             }
+
             Token::Id(_) | Token::SelfInstance => {
                 let start_span = self.peek_span()?;
                 let (root_name, root_span) = self.parse_import_root()?;
-                if self.eat(&Token::Dot) {
+                let mut segments = Vec::new();
+                let mut segment_spans = Vec::new();
+                while self.eat(&Token::Dot) {
                     if self.is_at(&Token::ParenOpen) {
-                        self.advance();
-                        let members = self.parse_bundle_export_list()?;
-                        self.expect(&Token::ParenClose)?;
-                        let end_span = self.last_consumed_span();
-                        let span = self.merge_span(start_span, end_span);
-                        ImportSource::LocalBundle(LocalBundleImport {
-                            root: root_name,
-                            path_segments: Vec::new(),
-                            members,
-                            span,
-                            local_path: None,
-                        })
-                    } else {
-                        let mut segments = Vec::new();
-                        let mut segment_spans = Vec::new();
-                        loop {
-                            let seg_span = self.peek_span()?;
-                            segments.push(self.parse_export_name()?);
-                            segment_spans.push(seg_span);
-                            if !self.eat(&Token::Dot) {
-                                break;
-                            }
-                            // Nested bundle: `root.seg1.seg2.(item1, item2)`
-                            if self.is_at(&Token::ParenOpen) {
-                                self.advance(); // eat (
-                                let members = self.parse_bundle_export_list()?;
-                                self.expect(&Token::ParenClose)?;
-                                let end_span = self.last_consumed_span();
-                                let span = self.merge_span(start_span, end_span);
-                                return Some((
-                                    ImportSource::LocalBundle(LocalBundleImport {
-                                        root: root_name,
-                                        path_segments: segments,
-                                        members,
-                                        span,
-                                        local_path: None,
-                                    }),
-                                    None,
-                                ));
-                            }
-                        }
-                        let end_span = self.last_consumed_span();
-                        let span = self.merge_span(start_span, end_span);
-                        ImportSource::Package(Spanned::new(
-                            ModPath::new_with_spans(root_name, root_span, segments, segment_spans),
-                            span,
-                        ))
+                        self.error(
+                            "parse-legacy-import-selection",
+                            "select exports after a space: use module name, other",
+                            self.current_span(),
+                        );
+                        return None;
                     }
-                } else {
-                    ImportSource::Package(Spanned::new(
-                        ModPath::new_with_spans(root_name, root_span, Vec::new(), Vec::new()),
-                        start_span,
-                    ))
+                    segment_spans.push(self.peek_span()?);
+                    segments.push(self.parse_export_name()?);
                 }
+                let span = self.merge_span(start_span, self.last_consumed_span());
+                ImportSource::Package(Spanned::new(
+                    ModPath::new_with_spans(root_name, root_span, segments, segment_spans),
+                    span,
+                ))
             }
+
             Token::Tag(name) => {
                 let export_span = self.peek_span()?;
                 let export = self.intern(name);
@@ -183,6 +143,32 @@ impl<'src, 't> TokenCursor<'src, 't> {
             }
         };
 
+        if matches!(source, ImportSource::Local(..) | ImportSource::Package(..))
+            && (self.is_at(&Token::Indent)
+                || matches!(self.peek_at(0), Some(Token::Id(_) | Token::Tag(_))))
+        {
+            let start = source.span_id();
+            let members = self.parse_import_members();
+            let span = self.merge_span(start, self.last_consumed_span());
+            source = match source {
+                ImportSource::Local(path, _) => ImportSource::LocalBundle(LocalBundleImport {
+                    root: Intern::from_ref(""),
+                    path_segments: Vec::new(),
+                    members,
+                    span,
+                    local_path: Some(path),
+                }),
+                ImportSource::Package(path) => ImportSource::LocalBundle(LocalBundleImport {
+                    root: path.root,
+                    path_segments: path.segments.clone(),
+                    members,
+                    span,
+                    local_path: None,
+                }),
+                _ => unreachable!(),
+            };
+        }
+
         let alias = if self.is_at(&Token::As) {
             self.advance();
             self.parse_id()
@@ -193,9 +179,41 @@ impl<'src, 't> TokenCursor<'src, 't> {
         Some((source, alias))
     }
 
-    /// Parse an export name inside a bundle import `dep.(...)`.
-    /// Accepts both `Id` and `Tag` tokens since exported symbols can start with
-    /// either lowercase or uppercase letters.
+    fn parse_import_members(&mut self) -> Vec<BundleExportImport> {
+        let block = self.eat(&Token::Indent);
+        let mut members = Vec::new();
+        loop {
+            if block && self.eat(&Token::Dedent) {
+                break;
+            }
+            let Some(member) = self.parse_single_bundle_member() else {
+                self.error(
+                    "parse-expected-import-export",
+                    "expected an export name after the module",
+                    self.current_span(),
+                );
+                break;
+            };
+            members.push(member);
+            if matches!(self.peek_at(0), Some(Token::Comma)) {
+                self.advance_raw();
+                continue;
+            }
+            if block && matches!(self.peek_at(0), Some(Token::Newline | Token::Dedent)) {
+                continue;
+            }
+            if matches!(self.peek_at(0), Some(Token::Id(_) | Token::Tag(_))) {
+                self.error(
+                    "parse-expected-export-separator",
+                    "expected ',' or newline between exports",
+                    self.current_span(),
+                );
+            }
+            break;
+        }
+        members
+    }
+
     fn parse_export_name(&mut self) -> Option<Intern<String>> {
         match self.peek()? {
             Token::Id(name) | Token::Tag(name) => {
@@ -207,7 +225,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
         }
     }
 
-    /// `folder.Symbol` inside `use dep.(folder.Symbol, …)`.
+    /// `folder.Symbol` inside `use dep folder.Symbol, …`.
     fn parse_bundle_export_name(&mut self) -> Option<Intern<String>> {
         let first = self.parse_export_name()?;
         let mut path = first.to_string();
@@ -235,65 +253,6 @@ impl<'src, 't> TokenCursor<'src, 't> {
             alias,
             span,
         })
-    }
-
-    fn parse_bundle_export_list(&mut self) -> Option<Vec<BundleExportImport>> {
-        let mut members = Vec::new();
-
-        self.skip_layout();
-
-        if self.is_at(&Token::ParenClose) {
-            let span = self.peek_span().unwrap_or(SpanId::INVALID);
-            self.errors
-                .push(crate::cursor::ParseError::empty_import_bundle(
-                    "expected at least one export inside `.(...)`",
-                    span,
-                ));
-            return Some(members);
-        }
-
-        loop {
-            if self.is_at(&Token::ParenClose) {
-                break;
-            }
-
-            let export_span = self.peek_span()?;
-            let export = self.parse_bundle_export_name()?;
-            let alias = if self.is_at(&Token::As) {
-                self.advance();
-                Some(self.parse_export_name()?)
-            } else {
-                None
-            };
-            let end_span = self.last_consumed_span();
-            let span = self.merge_span(export_span, end_span);
-            members.push(BundleExportImport {
-                export,
-                alias,
-                span,
-            });
-
-            if self.is_at(&Token::ParenClose) {
-                break;
-            }
-
-            if self.eat_list_separator() {
-                if self.is_at(&Token::ParenClose) {
-                    break;
-                }
-                continue;
-            }
-
-            self.error(
-                "parse-expected-export-separator",
-                "expected ',' or newline between exports",
-                self.current_span(),
-            );
-            break;
-        }
-
-        self.skip_layout();
-        Some(members)
     }
 }
 #[cfg(test)]

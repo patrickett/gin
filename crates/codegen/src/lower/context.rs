@@ -6,7 +6,7 @@
 
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt,
 };
 
@@ -149,6 +149,7 @@ pub struct CodegenContext<'a, 'c> {
     pub mlir: &'c Context,
     pub program: ResolvedProgram<'a>,
     pub target_layout: TargetLayout,
+    pub(super) addressed_binders: HashSet<ast::BinderId>,
     pub strings: StringRegistry,
     pub symptoms: SymptomCollector,
     pub current_span: Cell<SpanId>,
@@ -182,10 +183,28 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         source_map: CodegenSourceMap<'a>,
         string_prefix: &str,
     ) -> Self {
+        let addressed_binders = program
+            .exprs
+            .kind
+            .iter()
+            .filter_map(|kind| {
+                let (typecheck::TypedExprKind::Ref(inner)
+                | typecheck::TypedExprKind::TakePtr(inner)) = kind
+                else {
+                    return None;
+                };
+                let mut place = program.exprs.place_of(*inner).flatten()?;
+                while let Some(parent) = program.places[place.0 as usize].parent {
+                    place = parent;
+                }
+                Some(program.places[place.0 as usize].binder)
+            })
+            .collect();
         Self {
             mlir,
             program,
             target_layout,
+            addressed_binders,
             strings: StringRegistry::with_prefix(string_prefix),
             symptoms: SymptomCollector::new(),
             current_span: Cell::new(SpanId::INVALID),
@@ -210,20 +229,6 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
 
     pub fn register_string(&self, s: &str) -> String {
         self.strings.register(s)
-    }
-
-    pub fn function_symbol_name<'d>(&self, def_id: &'d typecheck::DefId) -> &'d str {
-        let name = def_id.0.as_str();
-        if self
-            .program
-            .defs
-            .get(def_id)
-            .is_some_and(|bind| bind.is_extern)
-        {
-            name.rsplit('.').next().unwrap_or(name)
-        } else {
-            name
-        }
     }
 
     pub fn emit_symptom(&self, code: &str, message: String) {
@@ -262,10 +267,11 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     .program
                     .type_registry
                     .declaration_for_instance(instance)
-                    .and_then(|declaration| declaration.fixed_array.as_ref())
+                    .and_then(|declaration| declaration.sequence_literal.as_ref())
+                    .and_then(|acceptance| acceptance.fixed_array_length_parameter())
                     .is_none(),
                 Ty::Unit => true,
-                Ty::Tuple(fields) => fields.is_empty(),
+                Ty::ResultRow(fields) => fields.is_empty(),
                 Ty::Record { fields, .. } => fields.is_empty(),
                 _ => false,
             };
@@ -473,6 +479,39 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
 
     /// Shared between `if_` pattern conditions and `when` pattern arms.
     /// Bind pattern payload fields from a subject value into the symbol table.
+    pub(crate) fn sum_payload_offset(&self, ty: &Ty, variant: usize, field: usize) -> Option<u64> {
+        let (_, layout) = self.sum_layout(ty)?;
+        let LayoutKind::Sum {
+            payload_offset,
+            variant_layouts,
+            ..
+        } = &layout.kind
+        else {
+            return None;
+        };
+        let LayoutKind::Product { field_offsets } = &variant_layouts.get(variant)?.kind else {
+            return None;
+        };
+        Some(*payload_offset + *field_offsets.get(field)?)
+    }
+
+    pub(crate) fn lower_sum_payload(
+        &self,
+        block: &BlockRef<'c, 'c>,
+        value: Value<'c, 'c>,
+        sum_ty: &Ty,
+        variant: usize,
+        field: usize,
+        field_ty: &Ty,
+    ) -> Option<Value<'c, 'c>> {
+        let offset = self.sum_payload_offset(sum_ty, variant, field)?;
+        let storage = block.alloca_typed(self.mlir, value.r#type(), self.location());
+        block.store_typed(self, storage, value, self.location())?;
+        let offset = block.const_i64(self.mlir, offset as i64, self.location());
+        let ptr = block.gep_i8(self, storage, offset, self.location())?;
+        block.load_typed(self, ptr, self.ty_to_mlir(field_ty), self.location())
+    }
+
     pub fn bind_pattern_payload_fields(
         &self,
         block: &BlockRef<'c, 'c>,
@@ -492,105 +531,37 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
             {
                 symtab.insert(*name, subject_val, subject_ty.clone(), false);
             }
-            Pattern::Generic { params, .. } => {
-                let variant_name = Intern::<String>::from_ref(pattern.surface_mangle_name());
-                let Some((_union, variant_index, _lookup_fields)) =
-                    self.lookup_variant(variant_name)
-                else {
-                    self.emit_symptom(
-                        "invalid-field-projection",
-                        "cannot resolve tagged-sum payload fields".to_string(),
-                    );
-                    return;
-                };
-                let Some((repr, layout)) = self.sum_layout(subject_ty) else {
-                    return;
-                };
-                let LayoutKind::Sum {
-                    payload_offset,
-                    variant_layouts,
-                    ..
-                } = &layout.kind
-                else {
-                    return;
-                };
-                let Some(variant_layout) = variant_layouts.get(variant_index) else {
-                    return;
-                };
-                let LayoutKind::Product { field_offsets } = &variant_layout.kind else {
-                    return;
-                };
-                let Repr::Sum { variants } = &repr else {
-                    return;
-                };
-                let Some(Repr::Product {
-                    fields: field_reprs,
-                }) = variants.get(variant_index)
-                else {
-                    return;
-                };
-                let resolved_subject = self
+            Pattern::Generic { name, params, .. } => {
+                let resolved = self
                     .program
                     .type_registry
                     .resolved_definition_for_type(subject_ty);
-                let Some(payload_fields) = (match &resolved_subject {
-                    Ty::Union { variants, .. } => variants
-                        .get(variant_index)
-                        .map(|variant| variant.fields.as_slice()),
-                    _ => None,
-                }) else {
-                    self.emit_symptom(
-                        "invalid-field-projection",
-                        "tagged-sum payload fields are unavailable for this application"
-                            .to_string(),
-                    );
+                let Ty::Union { variants, .. } = &resolved else {
                     return;
                 };
-                let storage = block.alloca_typed(self.mlir, subject_val.r#type(), self.location());
-                if block
-                    .store_typed(self, storage, subject_val, self.location())
-                    .is_none()
-                {
+                let Some((index, variant)) = variants
+                    .iter()
+                    .enumerate()
+                    .find(|(_, variant)| variant.name == *name)
+                else {
                     return;
-                }
-                for (slot, (param_name, _)) in params.iter().enumerate() {
-                    if param_name.as_str() == "_" {
+                };
+                for (slot, (param, _)) in params.iter().enumerate() {
+                    if param.as_str() == "_" {
                         continue;
                     }
-                    let Some((_, field_ty)) = payload_fields.get(slot) else {
-                        self.emit_symptom(
-                            "invalid-field-projection",
-                            "tagged-sum payload field is missing".to_string(),
-                        );
-                        continue;
+                    let Some((_, ty)) = variant.fields.get(slot) else {
+                        return;
                     };
-                    let Some(field_offset) = field_offsets.get(slot) else {
-                        continue;
-                    };
-                    let Some(field_repr) = field_reprs.get(slot) else {
-                        continue;
-                    };
-                    let _ = field_repr;
-                    let offset = block.const_i64(
-                        self.mlir,
-                        (*payload_offset + *field_offset) as i64,
-                        self.location(),
-                    );
-                    let Some(field_ptr) = block.gep_i8(self, storage, offset, self.location())
+                    let Some(value) =
+                        self.lower_sum_payload(block, subject_val, subject_ty, index, slot, ty)
                     else {
-                        continue;
+                        return;
                     };
-                    let Some(extracted) = block.load_typed(
-                        self,
-                        field_ptr,
-                        self.ty_to_mlir(field_ty),
-                        self.location(),
-                    ) else {
-                        continue;
-                    };
-                    symtab.insert(*param_name, extracted, field_ty.as_ref().clone(), false);
+                    symtab.insert(*param, value, (**ty).clone(), false);
                 }
             }
+
             _ => {}
         }
     }

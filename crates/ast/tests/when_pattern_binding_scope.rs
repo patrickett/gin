@@ -60,7 +60,7 @@ fn is_copy_record_fields_not_unknown_symbol() {
 }
 
 #[test]
-fn is_copy_tuple_elems_not_unknown_symbol() {
+fn is_copy_value_row_elems_not_unknown_symbol() {
     let typed = copy_typed();
 
     let unknown: Vec<_> = typed
@@ -84,8 +84,8 @@ fn list_cons_head_variable_f_is_not_unknown_symbol() {
     // Use a simpler file with just a when-expression and a direct reference
     // to the bound variable, avoiding recursive calls.
     let source = r#"
-use core.reflect/.(NamedTy, Type)
-use core.primitive.(List, Bool)
+use core.reflect NamedTy, Type
+use core.primitive List, Bool
 
 all_copy(fields List(NamedTy)) Bool := when fields is
     []                  then True
@@ -114,8 +114,8 @@ fn list_cons_rest_variable_is_not_unknown_symbol() {
     // Use a simpler file with just a when-expression and a direct reference
     // to the bound variable, avoiding recursive calls.
     let source = r#"
-use core.reflect/.(NamedTy, Type)
-use core.primitive.(List, Bool)
+use core.reflect NamedTy, Type
+use core.primitive List, Bool
 
 all_copy(fields List(NamedTy)) Bool := when fields is
     []                  then True

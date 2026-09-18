@@ -249,7 +249,7 @@ fn explicit_empty_params_classify_associated_function() {
 
 #[test]
 fn has_method_preserves_parameter_refinements_in_the_callable_bind() {
-    let out = "Box has\n    new(value is in 1...8) Self: Self\n".parse_source_full();
+    let out = "Box has\n    new(value is in 1 to 8) Self: Self\n".parse_source_full();
     assert!(out.symptoms.is_empty(), "symptoms: {:?}", out.symptoms);
     let boxed = out.ast.tags.get(&intern("Box")).expect("Box");
     let DeclareValue::Has(members) = &boxed.value else {
@@ -268,7 +268,7 @@ fn has_method_preserves_parameter_refinements_in_the_callable_bind() {
 
 #[test]
 fn has_extension_after_refinement_registers_its_methods() {
-    let out = "Alignment is in 1...8\nAlignment has\n    new(value is in 1...8) Self: value as Alignment\n"
+    let out = "Alignment is in 1 to 8\nAlignment has\n    new(value is in 1 to 8) Self: value as Alignment\n"
         .parse_source_full();
     assert!(out.symptoms.is_empty(), "symptoms: {:?}", out.symptoms);
     assert!(out.ast.defs.contains_key(&intern("Alignment.new")));
@@ -325,7 +325,7 @@ fn has_member_classifies_property_and_instance_method() {
 #[test]
 fn has_block_body_retains_receiver_and_self_expression() {
     let out =
-        "Region has\n    reset(ref self) Region:\n        self\n    return\n".parse_source_full();
+        "Region has\n    reset(self ref) Region:\n        self\n    return\n".parse_source_full();
     assert!(out.symptoms.is_empty(), "symptoms: {:?}", out.symptoms);
     let region = out.ast.tags.get(&intern("Region")).expect("Region");
     let DeclareValue::Has(members) = &region.value else {
@@ -342,7 +342,24 @@ fn has_block_body_retains_receiver_and_self_expression() {
         panic!("reset should have a block body");
     };
     assert!(matches!(exprs.as_slice(), [body] if matches!(body.value, Expr::SelfRef)));
-    assert!(ret.value.is_none());
+    assert!(ret.values.is_empty());
+}
+
+#[test]
+fn has_multiline_methods_preserve_member_separators_and_scope() {
+    let out = "Packet has\n    value Int\n\n    new(value Int) Packet:\n        result: Packet(value: value)\n    return result\n\n    from_value(value Int) Packet:\n        result: Packet.new(value)\n    return result\n\n    inspect(self ref):\n        self.value\n    return\n\n    release(self own):\n        Packet(value: value) := self\n    return\n\nfinish:\nreturn\n".parse_source_full();
+    assert!(out.symptoms.is_empty(), "symptoms: {:?}", out.symptoms);
+    for name in ["new", "from_value", "inspect", "release"] {
+        let key = intern(&format!("Packet.{name}"));
+        assert!(
+            out.ast.defs.contains_key(&key),
+            "defs: {:?}",
+            out.ast.defs.keys().collect::<Vec<_>>()
+        );
+        assert!(!out.ast.defs.contains_key(&intern(name)));
+    }
+    assert!(out.ast.defs.contains_key(&intern("finish")));
+    assert!(!out.ast.defs.contains_key(&intern("Packet.finish")));
 }
 
 #[test]
@@ -378,7 +395,7 @@ fn method_with_body_after_colon_parses() {
 #[test]
 fn range_gin_method_form_parses() {
     let src = "\
-use '../'.Bounded
+use '../' Bounded
 
 --- Range utilities.
 Range(x) has Bounded
@@ -427,4 +444,53 @@ fn standalone_dot_trait_provision_is_not_attached_to_the_type() {
         "Range has start Int, end Int\nRange.Bounded has min: self.start\n".parse_source_full();
     let range = out.ast.tags.get(&intern("Range")).expect("Range");
     assert!(range.provided_traits.is_empty());
+}
+
+#[test]
+fn parameter_constraints_parse_after_the_parameter_name() {
+    let out =
+        "ToString has to_string String\nformat(value has ToString): value\n".parse_source_full();
+    assert!(out.symptoms.is_empty(), "symptoms: {:?}", out.symptoms);
+
+    let format = out.ast.defs.get(&intern("format")).expect("format");
+    let value = format
+        .params
+        .as_ref()
+        .and_then(|params| params.get(&intern("value")))
+        .expect("value parameter");
+    assert!(matches!(value.kind, ParameterKind::Generic));
+    assert_eq!(value.constraints.len(), 1);
+    assert_eq!(value.constraints[0].trait_name.as_str(), "ToString");
+}
+
+#[test]
+fn infix_attributes_parse_on_has_methods() {
+    let out = "Int has\n    #infix('<')\n    less_than(self Int, rhs Int) Int: self\n"
+        .parse_source_full();
+    assert!(out.symptoms.is_empty(), "symptoms: {:?}", out.symptoms);
+
+    let int = out.ast.tags.get(&intern("Int")).expect("Int");
+    let DeclareValue::Has(members) = &int.value else {
+        panic!("expected a has body");
+    };
+    let Some(HasMember::Function(method)) = members.first() else {
+        panic!("expected a has method");
+    };
+    assert_eq!(
+        method.attributes.raw_attributes.as_ref().and_then(|attrs| {
+            attrs.first().and_then(|attr| match attr {
+                ast::AttributeItem::Call { name, args, .. } if name.as_str() == "infix" => {
+                    args.first().and_then(|arg| {
+                        if let ast::Expr::Lit(ast::Literal::String(symbol)) = &arg.value {
+                            Some(symbol.as_str().to_owned())
+                        } else {
+                            None
+                        }
+                    })
+                }
+                _ => None,
+            })
+        }),
+        Some("<".to_owned())
+    );
 }

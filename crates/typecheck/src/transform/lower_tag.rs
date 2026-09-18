@@ -9,7 +9,7 @@ use internment::Intern;
 use std::collections::HashMap;
 
 use crate::ty::Ty;
-use crate::typed::{TagId, TypedFileAst, VariantId, VariantMap};
+use crate::typed::{ExprId, TagId, TypedFileAst, VariantId, VariantMap};
 
 /// Resolve a tag call to the most likely [`VariantId`] given the available
 /// variant map, tag types, and an optional expected return type.
@@ -20,6 +20,18 @@ pub(crate) fn resolve_tag_call_variant(
     expected_ty: Option<&Ty>,
 ) -> VariantId {
     let name = tag_call.name;
+    if let Some(Ty::Union {
+        name: union,
+        variants,
+        ..
+    }) = expected_ty
+        && variants.iter().any(|variant| variant.name == name)
+    {
+        return VariantId {
+            union: TagId(*union),
+            name,
+        };
+    }
     if let Some(qual_path) = &tag_call.qual_path {
         // `qual_path` includes the variant as the last segment.
         // For `Bool.False`: root="Bool", segments=["False"] → union is root.
@@ -88,6 +100,21 @@ pub(crate) fn resolve_tag_call_type(
     variant_map: &VariantMap,
     expected_ty: Option<&Ty>,
 ) -> Ty {
+    if let Some(expected @ Ty::Union { variants, .. }) = expected_ty
+        && variants.iter().any(|variant| variant.name == *name)
+    {
+        return expected.clone();
+    }
+    if let (
+        Some(expected @ Ty::Named { instance, .. }),
+        Some(Ty::Named {
+            instance: declared, ..
+        }),
+    ) = (expected_ty, tag_types.get(name))
+        && instance.declaration == declared.declaration
+    {
+        return expected.clone();
+    }
     if let Some(expected @ Ty::ResultFamily { alternatives, .. }) = expected_ty
         && alternatives
             .iter()
@@ -158,14 +185,58 @@ pub(crate) fn union_name_from_ty(ty: &Ty) -> Option<Intern<String>> {
     }
 }
 
-/// Check whether a [`VariantId`] refers to a record tag (as opposed to a
-/// union variant) by looking it up in the typed AST's tag index.
-pub(crate) fn is_record_tag_call(variant_id: &VariantId, typed: &TypedFileAst) -> bool {
+pub(crate) fn is_record_tag_call(variant_id: &VariantId, ty: &Ty, typed: &TypedFileAst) -> bool {
     let tag_id = TagId(variant_id.name);
-    typed.tag_types.get(&tag_id).is_some_and(|ty| {
+    let declared = typed.tag_types.get(&tag_id);
+    let matching_declaration = declared.is_some_and(|declared| declared.type_id() == ty.type_id())
+        || typed
+            .type_registry
+            .declaration_for_type(ty)
+            .is_some_and(|declaration| declaration.display_name == variant_id.name);
+    let receiver = if matching_declaration {
+        Some(ty)
+    } else {
+        declared
+    };
+    receiver.is_some_and(|receiver| {
         matches!(
-            typed.type_registry.resolved_definition_for_type(ty),
+            typed.type_registry.resolved_definition_for_type(receiver),
             Ty::Record { .. }
         )
     })
+}
+
+pub(crate) fn infer_record_arguments(
+    ty: &Ty,
+    names: &[Intern<String>],
+    args: &[ExprId],
+    typed: &TypedFileAst,
+) -> Result<Option<Ty>, String> {
+    let Ty::Named { instance, .. } = ty else {
+        return Ok(None);
+    };
+    if !instance.arguments.iter().any(|(_, argument)| {
+        matches!(argument, ast::TyArg::Type(ty) if matches!(ty.as_ref(), Ty::Opaque(_)))
+    }) {
+        return Ok(None);
+    }
+    let Ty::Record { fields, .. } = typed.type_registry.resolved_definition_for_type(ty) else {
+        return Ok(None);
+    };
+    let mut expected = Vec::new();
+    let mut actual = Vec::new();
+    for (index, argument) in args.iter().enumerate() {
+        let Some(name) = names.get(index) else {
+            continue;
+        };
+        let Some((_, field)) = fields.iter().find(|(field, _)| field == name) else {
+            continue;
+        };
+        expected.push(ast::TyArg::Type(field.clone()));
+        actual.push(ast::TyArg::Type(Box::new(
+            typed.exprs.ty[argument.as_usize()].clone(),
+        )));
+    }
+    crate::analysis::unify_type_args_with_registry(&expected, &actual, Some(&typed.type_registry))
+        .map(|substitution| Some(substitution.apply_to_ty(ty)))
 }

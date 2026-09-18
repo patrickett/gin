@@ -26,7 +26,8 @@ fn nominal_integer(interpretation: IntegerInterpretation) -> (Ty, TypeRegistry) 
             display_name: name,
             parameters: Vec::new(),
             definition: Ty::anonymous_integer_for_width(8, false),
-            fixed_array: None,
+            sequence_literal: None,
+
             reference: None,
             integer: Some(NominalIntegerSemantics {
                 validity,

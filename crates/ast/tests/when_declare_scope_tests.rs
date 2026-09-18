@@ -89,7 +89,7 @@ PointerSize is when target.arch is
 #[test]
 fn when_subject_resolves_with_target_member_import() {
     let source = r#"
-use '../target/'.target
+use '../target/' target
 
 Architecture is 'x86_64' or 'wasm32'
 
@@ -104,7 +104,7 @@ PointerSize is when target.arch is
             .declaration_flaws
             .iter()
             .any(|(_, f)| f.code.slug() == "type-unknown-symbol" && f.arg("name") == Some("target")),
-        "`use '../target/'.target` should bring `target` into scope: {:?}",
+        "`use '../target/' target` should bring `target` into scope: {:?}",
         typed.declaration_flaws
     );
 }

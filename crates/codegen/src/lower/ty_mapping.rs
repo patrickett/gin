@@ -4,6 +4,53 @@ use typecheck::layout::LayoutKind;
 use typecheck::representation::Repr;
 
 impl<'a, 'c> CodegenContext<'a, 'c> {
+    pub(crate) fn result_types_to_mlir(&self, ty: &Ty) -> Vec<Type<'c>> {
+        match ty {
+            Ty::ResultRow(fields) => fields
+                .iter()
+                .map(|field| self.ty_to_mlir(&field.ty))
+                .collect(),
+            ty if self.is_empty_product(ty) => Vec::new(),
+            ty => vec![self.ty_to_mlir(ty)],
+        }
+    }
+
+    pub(crate) fn convert_integer_value(
+        &self,
+        value: Value<'c, 'c>,
+        source: &Ty,
+        target: Type<'c>,
+        block: &BlockRef<'c, 'c>,
+    ) -> Option<Value<'c, 'c>> {
+        if value.r#type() == target {
+            return Some(value);
+        }
+        let source_width = IntegerType::try_from(value.r#type()).ok()?.width();
+        let target_width = IntegerType::try_from(target).ok()?.width();
+        let signed = self
+            .program
+            .type_registry
+            .nominal_integer_interpretation_for_type(source)
+            .or_else(|| source.anonymous_operation_interpretation())
+            == Some(ast::ty::IntegerInterpretation::Signed);
+        let operation = if source_width > target_width {
+            "arith.trunci"
+        } else if signed {
+            "arith.extsi"
+        } else {
+            "arith.extui"
+        };
+        let operation = OperationBuilder::new(operation, self.location())
+            .add_operands(&[value])
+            .add_results(&[target])
+            .build()
+            .map_err(|error| {
+                self.emit_internal(format!("integer representation conversion: {error}"))
+            })
+            .ok()?;
+        Some(block.append_op(operation))
+    }
+
     /// Convert a resolved `Ty` to its MLIR `Type` representation.
     pub fn ty_to_mlir(&self, ty: &Ty) -> Type<'c> {
         let mlir_ctx = self.mlir;
@@ -47,7 +94,22 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 r#type::r#struct(mlir_ctx, &[], false)
             }
             Ty::UnresolvedLiteral(_) => mlir_ctx.i1(),
+            Ty::UnresolvedSequence { .. } => {
+                self.emit_symptom(
+                    "sequence-representation-unavailable",
+                    "unresolved sequence reached codegen before materialization".to_string(),
+                );
+                r#type::r#struct(mlir_ctx, &[], false)
+            }
+            Ty::Literal(ast::ConstValue::Text(_)) => {
+                self.emit_symptom(
+                    "text-literal-requires-representation",
+                    "compile-time text must be materialized as a byte array".into(),
+                );
+                r#type::r#struct(mlir_ctx, &[], false)
+            }
             Ty::Literal(_) => mlir_ctx.i64(),
+            Ty::ResultRow(_) => panic!("result rows require multi-value lowering"),
             ty if ty.union_literal_values().is_some() => {
                 let n = ty.union_literal_values().unwrap().len();
                 if n <= 256 {
@@ -62,7 +124,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     mlir_ctx.i64()
                 }
             }
-            Ty::Record { .. } | Ty::Tuple(_) | Ty::Unit => {
+            Ty::Record { .. } | Ty::Unit => {
                 self.emit_symptom(
                     "product-representation-missing",
                     "product representation is unavailable during codegen".to_string(),

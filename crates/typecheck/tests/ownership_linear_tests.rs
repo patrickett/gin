@@ -21,7 +21,13 @@ fn codes(source: &str) -> Vec<String> {
 #[test]
 fn non_singleton_anonymous_integer_moves_at_owned_call() {
     let diagnostics = codes(
-        "source() is in 0...10 extern\ntake(value x): 0\nmain:\n\tvalue: source()\n\ttake(value)\n\ttake(value)\n\treturn 0",
+        r#"source() is in 0 to 10: 0
+take(value x): 0
+main:
+	value: source()
+	take(value)
+	take(value)
+	return 0"#,
     );
 
     assert!(
@@ -75,7 +81,14 @@ fn exact_anonymous_integer_can_be_rematerialized_at_owned_calls() {
 fn equal_singleton_join_can_be_rematerialized() {
     let typed = transform(
         &TokenCursor::parse_source(
-            "Bool is True or False\ncoin() Bool extern\ntake(value x): 0\nmain:\n\tvalue: when coin() is True then 7 else 7\n\ttake(value)\n\ttake(value)\n\treturn 0",
+            r#"Bool is True or False
+coin() Bool: 0
+take(value x): 0
+main:
+	value: when coin() is True then 7 else 7
+	take(value)
+	take(value)
+	return 0"#,
         ),
         FileId(0),
         &TransformCtx::new(),
@@ -105,7 +118,16 @@ fn equal_singleton_join_can_be_rematerialized() {
 fn flow_singleton_can_be_rematerialized_inside_the_proven_branch() {
     let typed = transform(
         &TokenCursor::parse_source(
-            "Bool is True or False\ncoin() Bool extern\ntake(value x): 0\nmain:\n\tvalue: when coin() is True then 1 else 2\n\tif value is 1\n\t\ttake(value)\n\t\ttake(value)\n\treturn\n\treturn 0",
+            r#"Bool is True or False
+coin() Bool: 0
+take(value x): 0
+main:
+	value: when coin() is True then 1 else 2
+	if value is 1
+		take(value)
+		take(value)
+	return
+	return 0"#,
         ),
         FileId(0),
         &TransformCtx::new(),
@@ -164,19 +186,8 @@ fn folded_control_expression_can_be_rematerialized() {
 #[test]
 fn nominal_singleton_is_never_rematerializable() {
     let diagnostics = codes(
-        "Only is in 1...1\ntake(value x): 0\nmain(value Only):\n\ttake(value)\n\ttake(value)\n\treturn 0",
+        "Only is in 1 to 1\ntake(value x): 0\nmain(value Only):\n\ttake(value)\n\ttake(value)\n\treturn 0",
     );
-
-    assert!(
-        diagnostics.contains(&"type-use-after-move".to_string()),
-        "{diagnostics:?}"
-    );
-}
-
-#[test]
-fn exact_anonymous_aggregate_still_moves() {
-    let diagnostics =
-        codes("take(value x): 0\nmain:\n\tvalue: (1, 2)\n\ttake(value)\n\ttake(value)\n\treturn 0");
 
     assert!(
         diagnostics.contains(&"type-use-after-move".to_string()),
@@ -187,7 +198,14 @@ fn exact_anonymous_aggregate_still_moves() {
 #[test]
 fn different_singleton_join_still_moves() {
     let diagnostics = codes(
-        "Bool is True or False\ncoin() Bool extern\ntake(value x): 0\nmain:\n\tvalue: when coin() is True then 1 else 2\n\ttake(value)\n\ttake(value)\n\treturn 0",
+        r#"Bool is True or False
+coin() Bool: 0
+take(value x): 0
+main:
+	value: when coin() is True then 1 else 2
+	take(value)
+	take(value)
+	return 0"#,
     );
 
     assert!(
@@ -206,8 +224,8 @@ fn symbolic_anonymous_integer_is_not_rematerializable() {
     let BindBody::Expr(expression) = typed.defs[&DefId(Intern::from_ref("main"))].body else {
         panic!("expected expression body");
     };
-    typed.exprs.const_value[expression.as_usize()] = None;
-    typed.exprs.integer_knowledge[expression.as_usize()] = Some(
+    typed.exprs.facts.const_facts.const_value[expression.as_usize()] = None;
+    typed.exprs.facts.semantic_facts.integer_knowledge[expression.as_usize()] = Some(
         ast::integer::IntegerKnowledge::Exact(ast::integer::CanonicalIntegerExpr::Symbolic(
             ast::NormalExpr::Var(Intern::from_ref("value")),
         )),
@@ -231,9 +249,40 @@ fn payload_alternative_still_moves() {
 }
 
 #[test]
+fn moving_named_result_field_twice_is_rejected() {
+    let diagnostics = codes(
+        "Int is in 0 to 255\nPayload has pointer @Int\npair() left Payload, right Payload:\n\treturn Payload(pointer: @1), Payload(pointer: @2)\ndrop(value Payload): 0\nmain:\n\tresult: pair()\n\tdrop(result.left)\n\tdrop(result.left)\n\treturn 0",
+    );
+
+    assert!(
+        diagnostics.contains(&"type-use-of-moved-value".to_string()),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn moving_named_result_field_preserves_its_sibling() {
+    let diagnostics = codes(
+        "Int is in 0 to 255\nPayload has pointer @Int\npair() left Payload, right Payload:\n\treturn Payload(pointer: @1), Payload(pointer: @2)\ndrop(value Payload): 0\nmain:\n\tresult: pair()\n\tdrop(result.left)\n\tdrop(result.right)\n\treturn 0",
+    );
+
+    assert!(
+        !diagnostics.iter().any(|code| code.contains("move")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
 fn conversion_consumes_a_nonrematerializable_anonymous_integer() {
     let diagnostics = codes(
-        "Bool is True or False\nTiny is in 0...5\ncoin() Bool extern\nmain:\n\tvalue: when coin() is True then 1 else 2\n\tfirst: value as Tiny\n\tsecond: value as Tiny\n\treturn 0",
+        r#"Bool is True or False
+Tiny is in 0 to 5
+coin() Bool: 0
+main:
+	value: when coin() is True then 1 else 2
+	first: value as Tiny
+	second: value as Tiny
+	return 0"#,
     );
 
     assert!(
@@ -246,7 +295,7 @@ fn conversion_consumes_a_nonrematerializable_anonymous_integer() {
 fn conversion_rematerializes_an_exact_anonymous_integer() {
     let typed = transform(
         &TokenCursor::parse_source(
-            "Tiny is in 0...7\nmain:\n\tvalue: 7\n\tfirst: value as Tiny\n\tsecond: value as Tiny\n\treturn 0",
+            "Tiny is in 0 to 7\nmain:\n\tvalue: 7\n\tfirst: value as Tiny\n\tsecond: value as Tiny\n\treturn 0",
         ),
         FileId(0),
         &TransformCtx::new(),
@@ -277,7 +326,7 @@ fn conversion_rematerializes_an_exact_anonymous_integer() {
 #[test]
 fn by_value_pattern_binding_moves_only_the_matching_path() {
     let diagnostics = codes(
-        "Payload has value @Int\nOption(Payload) is Some(Payload) or None\ndrop(eat value Option(Payload)): 0\ninspect(value Option(Payload)):\n\twhen value is\n\t\tSome(payload) then drop(eat value)\n\t\tNone then drop(eat value)\n\treturn 0",
+        "Payload has value @Int\nOption(Payload) is Some(Payload) or None\ndrop(value Option(Payload)): 0\ninspect(value Option(Payload)):\n\twhen value is\n\t\tSome(payload) then drop(value)\n\t\tNone then drop(value)\n\treturn 0",
     );
 
     assert_eq!(
@@ -293,7 +342,7 @@ fn by_value_pattern_binding_moves_only_the_matching_path() {
 #[test]
 fn reference_pattern_binding_preserves_the_subject() {
     let diagnostics = codes(
-        "Payload has value @Int\nOption(Payload) is Some(Payload) or None\ndrop(eat value Option(Payload)): 0\ninspect(value Option(Payload)):\n\twhen value is\n\t\tSome(ref payload) then drop(eat value)\n\t\tNone then drop(eat value)\n\treturn 0",
+        "Payload has value @Int\nOption(Payload) is Some(Payload) or None\ndrop(value Option(Payload)): 0\ninspect(value Option(Payload)):\n\twhen value is\n\t\tSome(ref payload) then drop(value)\n\t\tNone then drop(value)\n\treturn 0",
     );
 
     assert!(
@@ -305,7 +354,7 @@ fn reference_pattern_binding_preserves_the_subject() {
 #[test]
 fn mutable_pattern_binding_preserves_the_subject() {
     let diagnostics = codes(
-        "Payload has value @Int\nOption(Payload) is Some(Payload) or None\ndrop(eat value Option(Payload)): 0\ninspect(value Option(Payload)):\n\twhen value is\n\t\tSome(mut payload) then drop(eat value)\n\t\tNone then drop(eat value)\n\treturn 0",
+        "Payload has value @Int\nOption(Payload) is Some(Payload) or None\ndrop(value Option(Payload)): 0\ninspect(value Option(Payload)):\n\twhen value is\n\t\tSome(mut payload) then drop(value)\n\t\tNone then drop(value)\n\treturn 0",
     );
 
     assert!(
@@ -317,7 +366,7 @@ fn mutable_pattern_binding_preserves_the_subject() {
 #[test]
 fn nonbinding_pattern_preserves_the_subject() {
     let diagnostics = codes(
-        "Payload has value @Int\nOption(Payload) is Some(Payload) or None\ndrop(eat value Option(Payload)): 0\ninspect(value Option(Payload)):\n\twhen value is\n\t\tSome(_) then drop(eat value)\n\t\tNone then drop(eat value)\n\treturn 0",
+        "Payload has value @Int\nOption(Payload) is Some(Payload) or None\ndrop(value Option(Payload)): 0\ninspect(value Option(Payload)):\n\twhen value is\n\t\tSome(_) then drop(value)\n\t\tNone then drop(value)\n\treturn 0",
     );
 
     assert!(
@@ -327,11 +376,21 @@ fn nonbinding_pattern_preserves_the_subject() {
 }
 
 #[test]
-fn anonymous_products_are_discardable_but_nominal_records_are_not() {
-    let anonymous = Ty::Tuple(vec![
-        Ty::anonymous_integer_for_width(8, false),
-        Ty::anonymous_integer_for_width(8, false),
-    ]);
+fn structural_records_are_discardable_but_nominal_records_are_not() {
+    let anonymous = Ty::Record {
+        name: Intern::from_ref(""),
+        fields: vec![
+            (
+                Intern::from_ref("0"),
+                Box::new(Ty::anonymous_integer_for_width(8, false)),
+            ),
+            (
+                Intern::from_ref("1"),
+                Box::new(Ty::anonymous_integer_for_width(8, false)),
+            ),
+        ],
+        resolved_params: None,
+    };
     let nominal = Ty::Named {
         instance: NamedTypeInstance::new(TypeId {
             file: 0,

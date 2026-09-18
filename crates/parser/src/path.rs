@@ -15,6 +15,27 @@ impl<'src, 't> TokenCursor<'src, 't> {
         }
     }
 
+    pub(crate) fn parse_name(&mut self) -> Option<Intern<String>> {
+        if let Some(name) = self.peek().and_then(|token| token.keyword()) {
+            self.error(
+                "parse-reserved-name",
+                format!("`{name}` is a reserved keyword and cannot be used as a name"),
+                self.peek_span()?,
+            );
+            self.advance();
+            return Some(self.intern(name));
+        }
+        self.parse_id()
+    }
+
+    pub(crate) fn starts_reserved_binding(&self) -> bool {
+        self.peek().and_then(|token| token.keyword()).is_some()
+            && ((self.peek_at(1) == Some(&Token::ParenOpen) && self.looks_like_bind())
+                || matches!(self.peek_at(1), Some(Token::Colon | Token::ColonEq))
+                || (matches!(self.peek_at(1), Some(Token::Tag(_)))
+                    && matches!(self.peek_at(2), Some(Token::Colon | Token::ColonEq))))
+    }
+
     /// Internal: parse a dotted path where the root token is accepted by
     /// `accept_root` and subsequent path segments (after `.`) are accepted by
     /// `accept_segment`.

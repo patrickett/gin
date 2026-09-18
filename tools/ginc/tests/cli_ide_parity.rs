@@ -48,7 +48,7 @@ fn cli_and_ide_match_hover_flaws_warnings_target_and_stale_interface_state() {
     )
     .expect("Flask config");
     let path = root.join("main.gin");
-    let source = "index_bits := #index_bits(@())\n#bits(index_bits)\nIndex is in 0...4294967295\nbadName() Index:\n    return missing\n";
+    let source = "index_bits := #index_bits(@())\n#bits(index_bits)\nIndex is in 0 to 4294967295\nbadName() Index:\n    return missing\n";
     std::fs::write(&path, source).expect("Gin source");
     let target = CompileTarget::Concrete(
         TargetTriple::parse("wasm32-unknown-unknown").expect("target triple"),

@@ -378,13 +378,13 @@ fn eval_normal_expr(expr: &NormalExpr) -> Option<I256> {
     match expr {
         NormalExpr::Value(crate::ConstValue::Int(value)) => Some(*value),
         NormalExpr::Add(left, right) => {
-            Some(eval_normal_expr(left)?.wrapping_add(eval_normal_expr(right)?))
+            eval_normal_expr(left)?.checked_add(eval_normal_expr(right)?)
         }
         NormalExpr::Sub(left, right) => {
-            Some(eval_normal_expr(left)?.wrapping_sub(eval_normal_expr(right)?))
+            eval_normal_expr(left)?.checked_sub(eval_normal_expr(right)?)
         }
         NormalExpr::Mul(left, right) => {
-            Some(eval_normal_expr(left)?.wrapping_mul(eval_normal_expr(right)?))
+            eval_normal_expr(left)?.checked_mul(eval_normal_expr(right)?)
         }
         NormalExpr::Value(_)
         | NormalExpr::Var(_)
@@ -473,10 +473,7 @@ fn collect_refinement_bounds(
 ) -> bool {
     use crate::ty::PredicateExpr;
 
-    let value = |expr: &NormalExpr| match expr {
-        NormalExpr::Value(crate::ConstValue::Int(value)) => Some(*value),
-        _ => None,
-    };
+    let value = eval_normal_expr;
     match predicate {
         PredicateExpr::Gt(expr) => value(expr)
             .and_then(|value| value.checked_add(I256::from(1)))
@@ -721,4 +718,36 @@ pub fn resolve_runtime_representation(
         ));
     }
     Ok(representation)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ty::PredicateExpr;
+
+    #[test]
+    fn constant_arithmetic_bounds_establish_a_finite_signed_domain() {
+        let negative = NormalExpr::Sub(Box::new(0_i128.into()), Box::new(128_i128.into()));
+        let upper = NormalExpr::Sub(Box::new(128_i128.into()), Box::new(1_i128.into()));
+        let domain = IntegerDomain::from_refinement(&PredicateExpr::And(vec![
+            PredicateExpr::Ge(negative),
+            PredicateExpr::Le(upper),
+        ]));
+        let hull = domain.storage_hull().expect("constant bounds");
+        assert_eq!(hull.min(), I256::from(-128));
+        assert_eq!(hull.max(), I256::from(127));
+        assert!(domain.contains(I256::from(-3)));
+        assert!(!domain.contains(I256::from(128)));
+    }
+
+    #[test]
+    fn overflowing_bound_arithmetic_does_not_prove_a_wrapped_domain() {
+        let overflow = NormalExpr::Add(Box::new(I256::MAX.into()), Box::new(1_i128.into()));
+        assert_eq!(eval_normal_expr(&overflow), None);
+        let domain = IntegerDomain::from_refinement(&PredicateExpr::And(vec![
+            PredicateExpr::Ge(overflow),
+            PredicateExpr::Le(127_i128.into()),
+        ]));
+        assert!(domain.storage_hull().is_none());
+    }
 }

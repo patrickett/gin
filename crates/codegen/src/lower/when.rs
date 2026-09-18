@@ -14,10 +14,31 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         block: &BlockRef<'c, 'c>,
         symtab: &mut ScopedSymbolTable<'c>,
     ) -> Option<Value<'c, 'c>> {
+        let values = self.lower_typed_when_values(when_expr, expr_ty, block, symtab)?;
+        if self.is_empty_product(expr_ty) {
+            Some(block.unit_value(self, self.location()))
+        } else {
+            values.single()
+        }
+    }
+
+    pub(crate) fn lower_typed_when_values(
+        &self,
+        when_expr: &typecheck::TypedWhenExpr,
+        expr_ty: &Ty,
+        block: &BlockRef<'c, 'c>,
+        symtab: &mut ScopedSymbolTable<'c>,
+    ) -> Option<LoweredValue<'c>> {
         let typed_ast = self.program;
         let joins = when_expr
             .place_joins
             .iter()
+            .filter(|version| {
+                let place = typed_ast.place_versions[version.0 as usize].place;
+                symtab
+                    .get(&typed_ast.places[place.0 as usize].name)
+                    .is_none_or(|binding| !binding.is_slot)
+            })
             .map(|version| {
                 let place = typed_ast.place_versions[version.0 as usize].place;
                 let place = &typed_ast.places[place.0 as usize];
@@ -36,48 +57,42 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
             })
             .collect::<Option<Vec<_>>>()?;
 
-        let result_mlir = self.ty_to_mlir(expr_ty);
+        let result_types = self.result_types_to_mlir(expr_ty);
 
         let lowered = match when_expr.subject {
             Some(subject_id) => {
                 let subject = self.lower_typed_expr(subject_id, block, symtab)?;
                 if let Some(expr_ref) = typed_ast.expr(subject_id) {
-                    let subject_definition = self
-                        .program
-                        .type_registry
-                        .resolved_definition_for_type(expr_ref.ty);
-                    let disc = if let Some(values) = subject_definition.union_literal_values() {
-                        self.emit_discriminant_extend(block, subject, values.len())
-                    } else {
-                        self.sum_discriminant_i64(block, subject, expr_ref.ty)?
-                    };
                     self.lower_typed_pattern_when(
                         block,
                         symtab,
                         subject,
-                        disc,
                         expr_ref.ty,
                         &when_expr.arms,
-                        result_mlir,
+                        &result_types,
                         &joins,
                     )
                 } else {
                     None
                 }
             }
-            None => self.lower_typed_boolean_when(block, symtab, &when_expr.arms, &joins),
+            None => {
+                self.lower_typed_boolean_when(block, symtab, &when_expr.arms, &result_types, &joins)
+            }
         }?;
         for (index, (name, ty, _)) in joins.iter().enumerate() {
             symtab.assign(
                 name,
                 crate::Slot {
-                    value: lowered[index + 1],
+                    value: lowered[result_types.len() + index],
                     ty: ty.clone(),
                     is_slot: false,
                 },
             );
         }
-        Some(lowered[0])
+        Some(LoweredValue::new(
+            lowered.into_iter().take(result_types.len()).collect(),
+        ))
     }
 
     fn lower_typed_boolean_when(
@@ -85,23 +100,24 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         outer_block: &BlockRef<'c, 'c>,
         symtab: &mut ScopedSymbolTable<'c>,
         arms: &[TypedWhenArm],
+        result_types: &[Type<'c>],
         joins: &[WhenJoin<'c>],
     ) -> Option<Vec<Value<'c, 'c>>> {
         let loc = self.location();
 
         let Some(head) = arms.first() else {
-            let value = outer_block.const_i64(self.mlir, 0, loc);
-            return Some(
-                std::iter::once(value)
-                    .chain(joins.iter().map(|(_, _, incoming)| *incoming))
-                    .collect(),
-            );
+            let mut values = result_types
+                .iter()
+                .map(|ty| outer_block.append_op(self.mlir.llvm_undef(*ty, loc)))
+                .collect::<Vec<_>>();
+            values.extend(joins.iter().map(|(_, _, incoming)| *incoming));
+            return Some(values);
         };
 
         match head {
             TypedWhenArm::Else(body, _) => {
-                let value = self.lower_typed_expr(*body, outer_block, symtab)?;
-                self.when_yield_values(value, outer_block, symtab, joins)
+                let value = self.lower_typed_values(*body, outer_block, symtab)?;
+                self.when_yield_values(value, *body, result_types, outer_block, symtab, joins)
             }
             TypedWhenArm::Is { .. } => {
                 self.emit_internal("Is arm in boolean when — use 'when subject is ...' form");
@@ -119,8 +135,15 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     TypedWhenArm::Cond { body, .. } => *body,
                     _ => unreachable!(),
                 };
-                let value = self.lower_typed_expr(body, &then_block, &mut then_symbols)?;
-                let yielded = self.when_yield_values(value, &then_block, &then_symbols, joins)?;
+                let value = self.lower_typed_values(body, &then_block, &mut then_symbols)?;
+                let yielded = self.when_yield_values(
+                    value,
+                    body,
+                    result_types,
+                    &then_block,
+                    &then_symbols,
+                    joins,
+                )?;
                 then_block.append_operation(scf_dialect::r#yield(&yielded, loc));
 
                 let else_region = Region::new();
@@ -131,6 +154,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     &else_block,
                     &mut symtab.clone(),
                     &arms[1..],
+                    result_types,
                     joins,
                 )?;
                 else_block.append_operation(scf_dialect::r#yield(&yielded, loc));
@@ -153,27 +177,26 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         outer_block: &BlockRef<'c, 'c>,
         symtab: &mut ScopedSymbolTable<'c>,
         subject: Value<'c, 'c>,
-        disc: Value<'c, 'c>,
         subject_ty: &typecheck::ty::Ty,
         arms: &[TypedWhenArm],
-        result_ty: Type<'c>,
+        result_types: &[Type<'c>],
         joins: &[WhenJoin<'c>],
     ) -> Option<Vec<Value<'c, 'c>>> {
         let loc = self.location();
 
         let Some((head, tail)) = arms.split_first() else {
-            let value = outer_block.const_i64(self.mlir, 0, loc);
-            return Some(
-                std::iter::once(value)
-                    .chain(joins.iter().map(|(_, _, incoming)| *incoming))
-                    .collect(),
-            );
+            let mut values = result_types
+                .iter()
+                .map(|ty| outer_block.append_op(self.mlir.llvm_undef(*ty, loc)))
+                .collect::<Vec<_>>();
+            values.extend(joins.iter().map(|(_, _, incoming)| *incoming));
+            return Some(values);
         };
 
         match head {
             TypedWhenArm::Else(body, _) => {
-                let value = self.lower_typed_expr(*body, outer_block, symtab)?;
-                self.when_yield_values(value, outer_block, symtab, joins)
+                let value = self.lower_typed_values(*body, outer_block, symtab)?;
+                self.when_yield_values(value, *body, result_types, outer_block, symtab, joins)
             }
             TypedWhenArm::Cond { .. } => {
                 self.emit_internal(
@@ -200,25 +223,20 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                         subject_ty,
                         &mut inner_symtab,
                     );
-                    let value = self.lower_typed_expr(*body, outer_block, &mut inner_symtab)?;
-                    return self.when_yield_values(value, outer_block, &inner_symtab, joins);
+                    let value = self.lower_typed_values(*body, outer_block, &mut inner_symtab)?;
+                    return self.when_yield_values(
+                        value,
+                        *body,
+                        result_types,
+                        outer_block,
+                        &inner_symtab,
+                        joins,
+                    );
                 }
-                let expected_disc: i64 = {
-                    let variant_name =
-                        Intern::<String>::from_ref(pattern.value.surface_mangle_name());
-                    let (_, disc_val, _) = self.lookup_variant(variant_name)?;
-                    disc_val as i64
-                };
+                let cond =
+                    self.lower_pattern_condition(outer_block, subject, subject_ty, &pattern.value)?;
 
-                let expected_val = outer_block.const_i64(self.mlir, expected_disc, loc);
-                let cond = outer_block.append_op(self.mlir.build_cmpi(
-                    Predicates::EQ,
-                    disc,
-                    expected_val,
-                    loc,
-                ));
-
-                let mut result_tys = vec![result_ty];
+                let mut result_tys = result_types.to_vec();
                 result_tys.extend(joins.iter().map(|(_, ty, _)| self.ty_to_mlir(ty)));
 
                 let then_region = Region::new();
@@ -236,8 +254,15 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                         &mut inner_symtab,
                     );
 
-                    let val = self.lower_typed_expr(*body, &blk_ref, &mut inner_symtab)?;
-                    let yielded = self.when_yield_values(val, &blk_ref, &inner_symtab, joins)?;
+                    let val = self.lower_typed_values(*body, &blk_ref, &mut inner_symtab)?;
+                    let yielded = self.when_yield_values(
+                        val,
+                        *body,
+                        result_types,
+                        &blk_ref,
+                        &inner_symtab,
+                        joins,
+                    )?;
                     blk_ref.append_operation(scf_dialect::r#yield(&yielded, loc));
                 }
 
@@ -250,10 +275,9 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                         &blk_ref,
                         &mut symtab.clone(),
                         subject,
-                        disc,
                         subject_ty,
                         tail,
-                        result_ty,
+                        result_types,
                         joins,
                     )?;
                     blk_ref.append_operation(scf_dialect::r#yield(&val, loc));
@@ -268,12 +292,26 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
 
     fn when_yield_values(
         &self,
-        value: Value<'c, 'c>,
+        value: LoweredValue<'c>,
+        body: typecheck::ExprId,
+        result_types: &[Type<'c>],
         block: &BlockRef<'c, 'c>,
         symtab: &ScopedSymbolTable<'c>,
         joins: &[WhenJoin<'c>],
     ) -> Option<Vec<Value<'c, 'c>>> {
-        let mut values = vec![value];
+        let mut values = value.into_values();
+        let ty = self.program.expr(body)?.ty;
+        if values.len() != result_types.len() {
+            self.emit_internal("when arm result count differs from its expression type");
+            return None;
+        }
+        for (index, (value, target)) in values.iter_mut().zip(result_types).enumerate() {
+            let source = match ty {
+                Ty::ResultRow(fields) => &fields.get(index)?.ty,
+                _ => ty,
+            };
+            *value = self.convert_integer_value(*value, source, *target, block)?;
+        }
         for (name, ty, _) in joins {
             let binding = symtab.get(name)?;
             values.push(if binding.is_slot {

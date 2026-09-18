@@ -11,18 +11,14 @@ pub enum ImportTarget {
     DepRoot {
         dep_name: String,
     },
-    DepSymbol {
+    DepModule {
         dep_name: String,
-        symbol: String,
+        path_segments: Vec<String>,
     },
-    /// `use dep.folder.(sym)` — symbol inside a dependency folder module.
+    /// `use dep.folder sym` — symbol inside a dependency folder module.
     DepBundleMember {
         dep_name: String,
         path_segments: Vec<String>,
-        symbol: String,
-    },
-    BodySymbol {
-        dep_name: String,
         symbol: String,
     },
     LocalBundleSymbol {
@@ -75,20 +71,12 @@ pub fn resolve_import_at(ast: &FileAst, source: &str, byte_pos: usize) -> Option
                     return None;
                 }
 
-                let symbol = mp.segments[seg_idx].as_str().to_string();
-                if seg_idx + 1 == mp.segments.len() {
-                    return Some(ImportTarget::DepBundleMember {
-                        dep_name: mp.root.as_str().to_string(),
-                        path_segments: mp.segments[..seg_idx]
-                            .iter()
-                            .map(ToString::to_string)
-                            .collect(),
-                        symbol,
-                    });
-                }
-                return Some(ImportTarget::DepSymbol {
-                    dep_name: mp.root.as_str().to_string(),
-                    symbol,
+                return Some(ImportTarget::DepModule {
+                    dep_name: mp.root.to_string(),
+                    path_segments: mp.segments[..=seg_idx]
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect(),
                 });
             }
 
@@ -131,9 +119,12 @@ pub fn resolve_import_at(ast: &FileAst, source: &str, byte_pos: usize) -> Option
                     }
                     let seg_idx = part.saturating_sub(1);
                     if seg_idx < b.path_segments.len() {
-                        return Some(ImportTarget::DepSymbol {
+                        return Some(ImportTarget::DepModule {
                             dep_name: b.root.to_string(),
-                            symbol: b.path_segments[seg_idx].to_string(),
+                            path_segments: b.path_segments[..=seg_idx]
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect(),
                         });
                     }
                 }
@@ -149,21 +140,6 @@ pub fn resolve_import_at(ast: &FileAst, source: &str, byte_pos: usize) -> Option
                         .map(|a| a.to_string())
                         .unwrap_or_else(|| member.export.to_string());
                     return Some(ImportTarget::CurrentModuleSymbol { symbol });
-                }
-            }
-
-            if let ImportSource::LocalMember(m) = &mi.source {
-                let local_path = m.local_path.clone()?;
-                let span_table = &ast.span_table;
-                let mspan = span_table.get(m.member.span);
-                if byte_pos >= mspan.start() && byte_pos <= mspan.end() {
-                    let symbol = m
-                        .member
-                        .alias
-                        .as_ref()
-                        .map(|a| a.to_string())
-                        .unwrap_or_else(|| m.member.export.to_string());
-                    return Some(ImportTarget::LocalBundleSymbol { local_path, symbol });
                 }
             }
         }
@@ -183,15 +159,13 @@ pub fn resolve_import_at(ast: &FileAst, source: &str, byte_pos: usize) -> Option
                     .unwrap_or_else(|| mi.effective_name());
                 if imported_name == word
                     && let ImportSource::Package(mp) = &mi.source
-                    && mp.segments.len() == 1
                 {
-                    return Some(ImportTarget::BodySymbol {
-                        dep_name: mp.root.as_str().to_string(),
-                        symbol: mp.segments[0].as_str().to_string(),
+                    return Some(ImportTarget::DepModule {
+                        dep_name: mp.root.to_string(),
+                        path_segments: mp.segments.iter().map(ToString::to_string).collect(),
                     });
                 }
 
-                // Check LocalBundle members for body-word matches.
                 if let ImportSource::LocalBundle(b) = &mi.source {
                     for member in &b.members {
                         if member.flat_name().as_str() != word {
@@ -223,17 +197,6 @@ pub fn resolve_import_at(ast: &FileAst, source: &str, byte_pos: usize) -> Option
                         });
                     }
                 }
-
-                if let ImportSource::LocalMember(m) = &mi.source {
-                    let member_name = m.member.alias.unwrap_or(m.member.export).to_string();
-                    if member_name == word {
-                        let local_path = m.local_path.clone()?;
-                        return Some(ImportTarget::LocalBundleSymbol {
-                            local_path,
-                            symbol: m.member.export.to_string(),
-                        });
-                    }
-                }
             }
         }
     }
@@ -261,9 +224,22 @@ pub fn hover_for_import_target(
 ) -> Option<String> {
     match target {
         ImportTarget::DepRoot { dep_name } => resolve_dep_hover(file_path, &dep_name),
-        ImportTarget::DepSymbol { dep_name, symbol }
-        | ImportTarget::BodySymbol { dep_name, symbol } => {
-            resolve_symbol_hover(file_path, &dep_name, &symbol, file_reader)
+        ImportTarget::DepModule {
+            dep_name,
+            path_segments,
+        } => {
+            let dir = resolve_dep_dir(file_path, &dep_name)?;
+            crate::resolve_logical_module_dir(
+                &dir,
+                &path_segments.iter().map(String::as_str).collect::<Vec<_>>(),
+            )?;
+            Some(format!(
+                "```gin\nuse {}\n```",
+                std::iter::once(dep_name.as_str())
+                    .chain(path_segments.iter().map(String::as_str))
+                    .collect::<Vec<_>>()
+                    .join(".")
+            ))
         }
         ImportTarget::DepBundleMember {
             dep_name,
@@ -311,10 +287,7 @@ pub fn def_span_for_import_target(
             }
             None
         }
-        ImportTarget::DepSymbol { dep_name, symbol }
-        | ImportTarget::BodySymbol { dep_name, symbol } => {
-            resolve_symbol_def_span(file_path, &dep_name, &symbol, file_reader)
-        }
+        ImportTarget::DepModule { .. } => None,
         ImportTarget::DepBundleMember {
             dep_name,
             path_segments,
@@ -470,8 +443,12 @@ pub fn resolve_local_symbol_def_span(
 }
 
 /// Walk up from `file_path` to find the package root (containing `flask.jsonc`).
-pub fn find_package_root(file_path: &Path) -> Option<PathBuf> {
-    let mut search = file_path.parent()?.to_path_buf();
+pub fn find_package_root(path: &Path) -> Option<PathBuf> {
+    let mut search = if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent()?.to_path_buf()
+    };
     loop {
         let candidate = search.join(flask::PACKAGE_CONFIG_NAME);
         if candidate.exists() {

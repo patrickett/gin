@@ -201,6 +201,21 @@ pub mod when;
 pub use when::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AsmOperandBinding {
+    pub name: Intern<String>,
+    pub value: Typed<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SequenceLiteral {
+    Elements(Vec<Typed<Expr>>),
+    Repeat {
+        seed: Box<Typed<Expr>>,
+        count: Box<Typed<Expr>>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Expr {
     Loop(Loop),
     Binary(Binary),
@@ -218,17 +233,17 @@ pub enum Expr {
     AnonymousTag(Intern<String>),
     /// Stack-allocate an array: `(init_expr; size_expr)` — emits
     /// `llvm.alloca N×sizeof(elem)`. `size_expr` must be compile-time-known.
-    TupleAlloc {
+    FixedArrayAlloc {
         init: Box<Typed<Expr>>,
         size: Box<Typed<Expr>>,
     },
     /// Positional element read: `arr.N` — emits GEP + load.
-    TupleGet {
+    AggregateGet {
         base: Box<Typed<Expr>>,
         index: usize,
     },
     /// Positional element write: `arr.N:: val` — emits GEP + store.
-    TupleSet {
+    AggregateSet {
         base: Box<Typed<Expr>>,
         index: usize,
         value: Box<Typed<Expr>>,
@@ -242,6 +257,12 @@ pub enum Expr {
     TargetQuery {
         kind: crate::TargetQueryKind,
         operand: crate::TypeReference,
+    },
+    Target,
+    Register(Box<Typed<Expr>>),
+    Asm {
+        specification: Box<Typed<Expr>>,
+        operands: Vec<AsmOperandBinding>,
     },
     /// Dynamic buffer element read: `buf.(i)` — emits GEP(i * elem_bytes) + load.
     BufGet {
@@ -270,10 +291,6 @@ pub enum Expr {
     /// Unary negation: `-expr`.
     Negate(Box<Typed<Expr>>),
 
-    /// Argument passed with `eat` at call site: `eat expr` — explicit consume.
-    ConsumeArg(Box<Typed<Expr>>),
-    /// Explicit consume: `eat expr`. Used standalone, not at call site.
-    Eat(Box<Typed<Expr>>),
     /// Record field read: `base.field` (compile-time when `base` is a const record).
     RecordGet {
         base: Box<Typed<Expr>>,
@@ -288,13 +305,16 @@ pub enum Expr {
     },
     /// Record literal: `(name: val, …)` — named fields, behaves as a record value.
     RecordLit(Vec<(Intern<String>, Typed<Expr>)>),
-    /// Tuple literal: `(e1, e2, …)` — at least two elements.
-    TupleLit(Vec<Typed<Expr>>),
-    /// List literal: `[e1, e2, …]` — homogeneous compile-time list.
+    /// Syntax-recovery node for an expression rejected during parsing.
+    Invalid(SpanId),
+    /// Multiple return expressions constructed by result-aware lowering.
+    ResultValues(Vec<Typed<Expr>>),
+    SequenceLiteral(SequenceLiteral),
+    /// Fixed array literal: `[e1, e2, …]` — elements are stored inline.
+    ArrayLit(Vec<Typed<Expr>>),
+    /// Compile-time list value used by staging and reflection.
     ///
-    /// TODO: Evolve into a general-purpose sequential type with automatic
-    /// stack (Ty::Array) vs heap (vec) inference based on usage (mutation,
-    /// runtime size, escaping scope). Flow analysis already tracks this.
+    /// Runtime bracket literals use [`Expr::ArrayLit`].
     List(Vec<Typed<Expr>>),
     /// Destructure bind: `Tag(field: bind, …) := expr`
     Destructure {

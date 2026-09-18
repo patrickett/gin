@@ -15,7 +15,7 @@ fn invokes_caller_with_definition_from_another_typed_file() {
     let sources = [
         (
             "provider.gin",
-            "Signed64 is in -9223372036854775808...9223372036854775807\nhelper() Signed64: 42",
+            "Signed64 is in -9223372036854775808 to 9223372036854775807\nhelper() Signed64: 42",
         ),
         ("caller.gin", "answer() Signed64: helper()"),
     ];
@@ -75,11 +75,12 @@ fn invokes_caller_with_definition_from_another_typed_file() {
 }
 
 #[test]
-fn ordinary_extern_call_uses_the_declared_signature() {
+fn ordinary_call_uses_the_defined_signature() {
     let sources = [
         (
             "provider.gin",
-            "Signed64 is in -9223372036854775808...9223372036854775807\nexternal(value Signed64) Signed64 extern",
+            r#"Signed64 is in -9223372036854775808 to 9223372036854775807
+external(value Signed64) Signed64: value"#,
         ),
         ("caller.gin", "answer() Signed64: external(42)"),
     ];
@@ -98,7 +99,13 @@ fn ordinary_extern_call_uses_the_declared_signature() {
         artifacts
             .typed_asts
             .iter()
-            .all(|typed| typed.all_flaws().is_empty())
+            .all(|typed| typed.all_flaws().is_empty()),
+        "{:?}",
+        artifacts
+            .typed_asts
+            .iter()
+            .flat_map(typecheck::TypedFileAst::all_flaws)
+            .collect::<Vec<_>>()
     );
     let inputs: Vec<_> = artifacts
         .typed_asts
@@ -122,10 +129,10 @@ fn ordinary_extern_call_uses_the_declared_signature() {
     let declaration = mlir
         .lines()
         .find(|line| line.contains("func.func") && line.contains("@external"))
-        .expect("external declaration");
+        .expect("function definition");
 
     assert!(declaration.contains("-> i64"), "{declaration}");
-    assert!(!declaration.contains('{'), "{declaration}");
+    assert!(declaration.contains('{'), "{declaration}");
 }
 
 #[test]
@@ -133,7 +140,7 @@ fn duplicate_function_symbols_return_an_invalid_module_diagnostic() {
     let sources = [
         (
             "first.gin",
-            "Signed64 is in -9223372036854775808...9223372036854775807\nduplicate() Signed64: 1",
+            "Signed64 is in -9223372036854775808 to 9223372036854775807\nduplicate() Signed64: 1",
         ),
         ("second.gin", "duplicate() Signed64: 2"),
     ];
@@ -177,9 +184,18 @@ fn string_globals_use_deterministic_internal_namespaces() {
     let sources = [
         (
             "first.gin",
-            "Signed64 is in -9223372036854775808...9223372036854775807\nfirst(): 'first'\nanswer() Signed64: 42",
+            r#"Signed64 is in -9223372036854775808 to 9223372036854775807
+Byte is in 0 to 255
+String has pointer @Byte, len Signed64
+first() String: String(pointer: (@'first') as @Byte, len: 5)
+answer() Signed64: 42"#,
         ),
-        ("second.gin", "second(): 'second'"),
+        (
+            "second.gin",
+            r#"Byte is in 0 to 255
+String has pointer @Byte, len Signed64
+second() String: String(pointer: (@'second') as @Byte, len: 6)"#,
+        ),
     ];
     let asts = sources
         .iter()

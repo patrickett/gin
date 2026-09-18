@@ -1,5 +1,3 @@
-use ast::prelude::OperatorRole;
-
 use crate::ty::Ty;
 use crate::typed::{DefId, TypedCallableSignature};
 
@@ -27,14 +25,19 @@ impl OperatorRegistry {
 
     pub fn resolve(
         &self,
-        role: OperatorRole,
+        symbol: &str,
         lhs: &Ty,
         rhs: &Ty,
     ) -> Result<(DefId, TypedCallableSignature), OperatorResolutionError> {
         let registered: Vec<_> = self
             .entries
             .iter()
-            .filter(|(_, signature)| signature.operator_role == Some(role))
+            .filter(|(_, signature)| {
+                signature
+                    .infix_symbol
+                    .as_ref()
+                    .is_some_and(|registered| registered.as_str() == symbol)
+            })
             .collect();
         if registered.is_empty() {
             return Err(OperatorResolutionError::NoVisibleContract);

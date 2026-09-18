@@ -39,6 +39,9 @@ impl DeclareFormatExt for Declare {
                     }
                     kind => write!(&mut out, "{}{kind}", k.as_str()),
                 };
+                if !v.constraints.is_empty() {
+                    let _ = write!(&mut out, " has {}", v.constraints_surface());
+                }
             }
             out.push(')');
         }
@@ -79,21 +82,22 @@ impl BindFormatExt for Bind {
         if let Some(params) = &self.params {
             sig.push('(');
             let mut first = true;
-            for (name, kind) in params {
+            for (name, parameter) in params {
                 if !first {
                     sig.push_str(", ");
                 }
                 first = false;
-                let kind = &kind.kind;
+                let kind = &parameter.kind;
                 match kind {
                     ParameterKind::Tagged(sp) => {
                         if let ast::Expr::Ref { inner, mutable, .. } = &sp.value {
+                            sig.push_str(name.as_str());
+                            sig.push(' ');
                             if *mutable {
-                                sig.push_str("mut");
+                                sig.push_str("mut ");
                             } else {
-                                sig.push_str("ref");
+                                sig.push_str("ref ");
                             }
-                            let _ = write!(&mut sig, " {} ", name.as_str());
                             sig.push_str(&inner.value.format_surface());
                         } else {
                             sig.push_str(name.as_str());
@@ -118,11 +122,34 @@ impl BindFormatExt for Bind {
                         sig.push_str(&format!(": {:?}", expr.value));
                     }
                 }
+                if !parameter.constraints.is_empty() {
+                    let _ = write!(&mut sig, " has {}", parameter.constraints_surface());
+                }
             }
             sig.push(')');
-            if let Some(sp) = &self.return_tag {
+            if !self.named_results.is_empty() {
+                sig.push(' ');
+                for (index, result) in self.named_results.iter().enumerate() {
+                    if index > 0 {
+                        sig.push_str(", ");
+                    }
+                    sig.push_str(result.name.as_str());
+                    sig.push(' ');
+                    sig.push_str(&result.ty.value.format_surface());
+                }
+            } else if let Some(sp) = &self.return_tag {
                 sig.push(' ');
                 sig.push_str(&sp.value.format_surface());
+            }
+        } else if !self.named_results.is_empty() {
+            sig.push(' ');
+            for (index, result) in self.named_results.iter().enumerate() {
+                if index > 0 {
+                    sig.push_str(", ");
+                }
+                sig.push_str(result.name.as_str());
+                sig.push(' ');
+                sig.push_str(&result.ty.value.format_surface());
             }
         } else if let Some(sp) = &self.return_tag {
             sig.push(' ');
@@ -225,6 +252,15 @@ impl DeclareValueFormatExt for DeclareValue {
                             }
                             HasMember::Function(f) => {
                                 let _ = write!(inline, "{}", f.name.as_str());
+                                for (index, alternative) in
+                                    f.anonymous_result_alternatives.iter().enumerate()
+                                {
+                                    inline.push_str(if index == 0 { " " } else { " or " });
+                                    inline.push_str(alternative.value.label.as_str());
+                                    if let Some(proposition) = &alternative.value.proposition {
+                                        let _ = write!(&mut inline, " thus {proposition}");
+                                    }
+                                }
                                 if let Some(rt) = &f.return_ty {
                                     let _ = write!(inline, " {}", rt.value.format_surface());
                                 }
@@ -265,14 +301,6 @@ impl DeclareValueFormatExt for DeclareValue {
                                         out.push_str(", ");
                                     }
                                     first = false;
-                                    if let Some(conv) = f.conventions.get(k) {
-                                        match conv {
-                                            ast::ParamConvention::Observe => out.push_str("ref "),
-                                            ast::ParamConvention::Mutate => out.push_str("mut "),
-                                            ast::ParamConvention::Consume => out.push_str("eat "),
-                                            ast::ParamConvention::Own => {}
-                                        }
-                                    }
                                     out.push_str(k.as_str());
                                     match &v.kind {
                                         ast::ParameterKind::Tagged(sp) => {
@@ -287,8 +315,25 @@ impl DeclareValueFormatExt for DeclareValue {
                                             let _ = write!(&mut out, "{kind}");
                                         }
                                     }
+                                    if let Some(conv) = f.conventions.get(k) {
+                                        match conv {
+                                            ast::ParamConvention::Observe => out.push_str(" ref"),
+                                            ast::ParamConvention::Mutate => out.push_str(" mut"),
+                                            ast::ParamConvention::Own => out.push_str(" own"),
+                                            ast::ParamConvention::Terminal => {}
+                                        }
+                                    }
                                 }
                                 out.push(')');
+                            }
+                            for (index, alternative) in
+                                f.anonymous_result_alternatives.iter().enumerate()
+                            {
+                                out.push_str(if index == 0 { " " } else { " or " });
+                                out.push_str(alternative.value.label.as_str());
+                                if let Some(proposition) = &alternative.value.proposition {
+                                    let _ = write!(&mut out, " thus {proposition}");
+                                }
                             }
                             if let Some(rt) = &f.return_ty {
                                 out.push(' ');
@@ -305,8 +350,8 @@ impl DeclareValueFormatExt for DeclareValue {
                 out
             }
             DeclareValue::Set() => " is set".to_string(),
-            DeclareValue::Range(start, end) => format!(" is {start}...{end}"),
-            DeclareValue::InRange(start, end) => format!(" is in {start}...{end}"),
+            DeclareValue::Range(start, end) => format!(" is {start} to {end}"),
+            DeclareValue::InRange(start, end) => format!(" is in {start} to {end}"),
             DeclareValue::Refinement(predicate) => format!(" is {predicate:?}"),
         }
     }

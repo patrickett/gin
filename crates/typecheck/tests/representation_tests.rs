@@ -22,7 +22,8 @@ fn nominal_integer(name: &'static str, min: I256, max: I256) -> (Ty, TypeRegistr
             display_name: name,
             parameters: Vec::new(),
             definition: Ty::Unit,
-            fixed_array: None,
+            sequence_literal: None,
+
             reference: None,
             integer: Some(NominalIntegerSemantics {
                 validity: IntegerValidity::new(IntegerDomain::bounded(min, max).unwrap()),
@@ -82,5 +83,24 @@ fn two_alternative_structural_result_family_uses_one_bit_sum_discriminant() {
             discriminant: Repr::Bits { width: 1 },
             ..
         }
+    ));
+}
+
+#[test]
+fn result_rows_do_not_have_a_single_physical_representation() {
+    let ty = Ty::ResultRow(vec![
+        ast::ty::ResultElement {
+            name: Intern::from_ref("first"),
+            ty: Box::new(Ty::anonymous_integer_for_width(8, false)),
+        },
+        ast::ty::ResultElement {
+            name: Intern::from_ref("second"),
+            ty: Box::new(Ty::anonymous_integer_for_width(8, false)),
+        },
+    ]);
+
+    assert!(matches!(
+        Repr::derive(&ty, None),
+        Err(RepresentationError::Unsupported { .. })
     ));
 }

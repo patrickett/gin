@@ -89,21 +89,7 @@ pub enum IntrinsicValidationError {
     InvalidAddressConversionWidth { width: u32 },
     UnsupportedAddressSpace { address_space: u32 },
     PointerTypeMismatch,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IntrinsicResolutionError {
-    pub name: String,
-}
-
-impl IntrinsicResolutionError {
-    pub fn diagnostic(&self) -> Diagnostic {
-        Diagnostic::new(
-            "type-unknown-intrinsic",
-            format!("unknown intrinsic `{}`", self.name),
-        )
-        .with_arg("name", self.name.clone())
-    }
+    InvalidAddressStoreResult,
 }
 
 const MAX_SUPPORTED_ADDRESS_SPACE: u32 = u8::MAX as u32;
@@ -182,15 +168,6 @@ impl IntrinsicOp {
             predicate: ComparisonPredicate::Equal,
         },
     ];
-
-    pub fn resolve(name: &str) -> Result<Self, IntrinsicResolutionError> {
-        Self::ALL
-            .into_iter()
-            .find(|op| op.name() == name)
-            .ok_or_else(|| IntrinsicResolutionError {
-                name: name.to_string(),
-            })
-    }
 
     pub const fn name(self) -> &'static str {
         match self {
@@ -379,6 +356,32 @@ impl IntrinsicOp {
         result: &Ty,
         registry: Option<&crate::TypeRegistry>,
     ) -> Result<(), IntrinsicValidationError> {
+        let resolved_operands = registry.map(|registry| {
+            operands
+                .iter()
+                .enumerate()
+                .map(|(index, ty)| {
+                    if index != 0 {
+                        return ty.clone();
+                    }
+                    let resolved = registry.resolved_definition_for_type(ty);
+                    resolved
+                        .address_space()
+                        .is_some()
+                        .then_some(resolved)
+                        .unwrap_or_else(|| ty.clone())
+                })
+                .collect::<Vec<_>>()
+        });
+        let operands = resolved_operands.as_deref().unwrap_or(operands);
+        let resolved_result = registry.and_then(|registry| {
+            if !matches!(self, Self::AddressOffset | Self::BitsToAddress) {
+                return None;
+            }
+            let resolved = registry.resolved_definition_for_type(result);
+            resolved.address_space().is_some().then_some(resolved)
+        });
+        let result = resolved_result.as_ref().unwrap_or(result);
         match self {
             Self::AddressLoad => {
                 validate_address_space(&operands[0])?;
@@ -390,6 +393,9 @@ impl IntrinsicOp {
                 }
             }
             Self::AddressStore => {
+                if result != &Ty::Unit {
+                    return Err(IntrinsicValidationError::InvalidAddressStoreResult);
+                }
                 validate_address_space(&operands[0])?;
                 let pointee = operands[0]
                     .pointee_ty()
@@ -474,6 +480,9 @@ impl IntrinsicOp {
                 "type-unsupported-address-space"
             }
             IntrinsicValidationError::PointerTypeMismatch => "type-pointer-type-mismatch",
+            IntrinsicValidationError::InvalidAddressStoreResult => {
+                "type-invalid-address-store-result"
+            }
         };
         let diagnostic = Diagnostic::new(
             code,
@@ -508,6 +517,7 @@ impl IntrinsicOp {
             | IntrinsicValidationError::PointeeMismatch
             | IntrinsicValidationError::InvalidAddressOffsetIndex
             | IntrinsicValidationError::PointerTypeMismatch => diagnostic,
+            IntrinsicValidationError::InvalidAddressStoreResult => diagnostic,
             IntrinsicValidationError::NonAddressOperand { index } => {
                 diagnostic.with_arg("operand", index.to_string())
             }
@@ -551,9 +561,9 @@ impl IntrinsicOp {
         let values: Vec<u128> = args
             .iter()
             .map(|value| match value {
-                ConstValue::Int(value) => {
-                    ast::integer::to_u128(*value).map(|value| value & Self::mask(source_width))
-                }
+                ConstValue::Int(value) => ast::integer::to_u128(*value)
+                    .or_else(|| ast::integer::to_i128(*value).map(|value| value as u128))
+                    .map(|value| value & Self::mask(source_width)),
                 _ => None,
             })
             .collect::<Option<_>>()

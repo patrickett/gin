@@ -14,21 +14,21 @@ Maybe(x) is
 /// Range declares with doc comments (~24 lines).
 const INT_GIN: &str = "\
 --- The 8-bit signed integer type.
-SignedTinyInt is in -128...127
+SignedTinyInt is in -128 to 127
 --- The 16-bit signed integer type.
-SignedSmallInt is in -32768...32767
+SignedSmallInt is in -32768 to 32767
 --- The 32-bit signed integer type.
-SignedInt is in -2147483648...2147483647
+SignedInt is in -2147483648 to 2147483647
 --- The 64-bit signed integer type.
-SignedBigInt is in -9223372036854775808...9223372036854775807
+SignedBigInt is in -9223372036854775808 to 9223372036854775807
 --- The 8-bit unsigned integer type.
-TinyInt is in 0...255
+TinyInt is in 0 to 255
 --- The 16-bit unsigned integer type.
-SmallInt is in 0...65535
+SmallInt is in 0 to 65535
 --- The 32-bit unsigned integer type.
-Int is in 0...4294967295
+Int is in 0 to 4294967295
 --- The 64-bit unsigned integer type.
-BigInt is in 0...18446744073709551615
+BigInt is in 0 to 18446744073709551615
 --- Alias for the 8-bit unsigned integer type.
 Byte is TinyInt
 ";
@@ -44,7 +44,7 @@ Type is Primitive(width BigInt, signed Bool)
 NamedTy has name String, ty Type
 VariantShape has name String, fields List(NamedTy)
 Bool is True or False
-BigInt is in 0...18446744073709551615
+BigInt is in 0 to 18446744073709551615
 List(x) has pointer @x, length BigInt
 String has bytes List(BigInt)
 
@@ -77,7 +77,7 @@ Type is Primitive(width BigInt, signed Bool)
 NamedTy has name String, ty Type
 VariantShape has name String, fields List(NamedTy)
 Bool is True or False
-BigInt is in 0...18446744073709551615
+BigInt is in 0 to 18446744073709551615
 List(x) has pointer @x, length BigInt
 String has bytes List(BigInt)
 
@@ -117,7 +117,7 @@ max_size(a Size, b Size) Size := when (a, b) is
 
 /// Value pipeline + format strings (~60 lines).
 const IO_GIN: &str = "\
-Int is in 0...4294967295
+Int is in 0 to 4294967295
 
 Counter has value Int, step Int
 
@@ -217,7 +217,7 @@ fn bundle_source() -> String {
 
 fn large_int_source() -> String {
     let mut src = String::with_capacity(64 * 1024);
-    src.push_str("Int is in 0...18446744073709551615\n");
+    src.push_str("Int is in 0 to 18446744073709551615\n");
     for i in 0..400 {
         src.push_str("let a");
         src.push_str(&i.to_string());

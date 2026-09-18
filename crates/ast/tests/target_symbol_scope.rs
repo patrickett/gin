@@ -1,4 +1,4 @@
-//! `target Target` in gin_core/target/target.gin: `Target` must resolve (same-file declare).
+//! A target declaration must resolve (same-file declare).
 
 use flask::CompileTarget;
 use parser::cursor::TokenCursor;

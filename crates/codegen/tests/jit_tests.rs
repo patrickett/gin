@@ -58,6 +58,31 @@ fn invokes_zero_argument_i64_function() {
 }
 
 #[test]
+fn loads_non_i64_export_for_generic_abi_callbacks() {
+    let context = NativeCompiler::create_context();
+    let module = Module::parse(
+        &context,
+        r#"
+            module {
+                func.func @render() -> i32 {
+                    %result = arith.constant 1 : i32
+                    return %result : i32
+                }
+            }
+            "#,
+    )
+    .expect("valid MLIR syntax");
+
+    let engine = NativeEngine::new_with_export_abi(module, "render").expect("JIT engine");
+    assert!(
+        !engine
+            .lookup_export_address()
+            .expect("render address")
+            .is_null()
+    );
+}
+
+#[test]
 fn reports_missing_export() {
     let context = NativeCompiler::create_context();
     let module = Module::parse(

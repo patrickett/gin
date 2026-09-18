@@ -99,7 +99,7 @@ Allocator has
 #[test]
 fn record_with_constructor() {
     let src = "\
-Int is in 1...400
+Int is in 1 to 400
 String has bytes List(Byte)
 Coord has x Int, y Int
 Coord.make(x Int, y Int) Coord: Coord(x, y)";

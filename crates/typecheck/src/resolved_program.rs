@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 
+use ast::ConstValue;
+use internment::Intern;
+
 use crate::ty::Ty;
 use crate::typed::{
     DefId, ExprId, FileId, TagId, TypedBind, TypedExprRef, TypedExprVec, TypedFileAst, TypedPlace,
@@ -23,6 +26,30 @@ pub struct ResolvedProgram<'a> {
 }
 
 impl ResolvedProgram<'_> {
+    pub(crate) fn tag_id_for_value(&self, value: &ConstValue) -> Option<TagId> {
+        let ConstValue::Tag {
+            name, qual_path, ..
+        } = value
+        else {
+            return None;
+        };
+        let declared = |name: &str| {
+            let id = TagId(Intern::from_ref(name));
+            (self.tag_types.contains_key(&id) || self.tags.contains_key(&id)).then_some(id)
+        };
+        if name.contains('.') {
+            if let Some(id) = declared(name) {
+                return Some(id);
+            }
+        }
+        if let Some(path) = qual_path {
+            if let Some(id) = declared(&format!("{path}.{name}")).or_else(|| declared(path)) {
+                return Some(id);
+            }
+        }
+        declared(name)
+    }
+
     pub fn expr(&self, id: ExprId) -> Option<TypedExprRef<'_>> {
         self.exprs.get(id.as_usize())
     }

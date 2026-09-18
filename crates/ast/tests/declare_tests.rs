@@ -191,6 +191,7 @@ fn declaration_surface_has_members_uses_surface_types() {
                     "Slice",
                     vec![("Byte", nominal("Byte"))],
                 ))))),
+                anonymous_result_alternatives: Vec::new(),
                 error_ty: Some(Box::new(spanned_expr(expr_from_type(nominal(
                     "AllocError",
                 ))))),
@@ -198,6 +199,7 @@ fn declaration_surface_has_members_uses_surface_types() {
                 doc_comment: None,
                 refinement: None,
                 kind: HasFunctionKind::Instance,
+                attributes: Default::default(),
             })),
             HasMember::Function(Box::new(HasFunction {
                 qualifier: None,
@@ -215,6 +217,7 @@ fn declaration_surface_has_members_uses_surface_types() {
                 param_groups: Default::default(),
                 param_refinements: Default::default(),
                 return_ty: Some(Box::new(spanned_expr(expr_from_type(nominal("Self"))))),
+                anonymous_result_alternatives: Vec::new(),
                 error_ty: None,
                 body: Some(HasMemberBody::Overrideable(BindValue::Expr(Box::new(
                     Typed::infer(Expr::AnonymousTag(intern("Self")), SpanId::INVALID),
@@ -222,6 +225,7 @@ fn declaration_surface_has_members_uses_surface_types() {
                 doc_comment: None,
                 refinement: None,
                 kind: HasFunctionKind::Associated,
+                attributes: Default::default(),
             })),
             HasMember::Property(HasProperty {
                 qualifier: None,

@@ -2,17 +2,23 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use test_fixtures::TempPackage;
 
-const NUMBERS: &str = r#"Signed64 is in -9223372036854775808...9223372036854775807
+const NUMBERS: &str = r#"Signed64 is in -9223372036854775808 to 9223372036854775807
 
-#intrinsic(BitsAdd)
-signed64_add_bits(eat lhs Signed64, eat rhs Signed64) Signed64 extern
-#operator(Add)
-signed64_add(lhs Signed64, rhs Signed64) Signed64: signed64_add_bits(eat lhs, eat rhs)
+signed64_add_bits(lhs Signed64, rhs Signed64) Signed64:
+    left is in -9223372036854775808 to 9223372036854775807: lhs
+    right is in -9223372036854775808 to 9223372036854775807: rhs
+return (left + right) as Signed64
+#infix('+')
+signed64_add(lhs Signed64, rhs Signed64) Signed64: signed64_add_bits(lhs, rhs)
 "#;
 
 #[test]
 fn standalone_terminal_evaluates_integer_addition() {
+    let package = TempPackage::new("interpreter_terminal_standalone");
+    package.write_flask("interpreter_terminal_standalone");
+    package.write("numbers/defs.gin", NUMBERS);
     let mut child = Command::new(env!("CARGO_BIN_EXE_ginterpreter"))
+        .arg(package.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -22,7 +28,7 @@ fn standalone_terminal_evaluates_integer_addition() {
         .stdin
         .take()
         .expect("interpreter stdin")
-        .write_all(b"2 + 2\n#q\n")
+        .write_all(b"use 'numbers' Signed64, signed64_add_bits, signed64_add\n2 + 2\n#q\n")
         .expect("terminal submissions");
 
     let output = child.wait_with_output().expect("interpreter output");
@@ -50,7 +56,7 @@ fn terminal_recovers_after_diagnostic_and_executes_again() {
         .take()
         .expect("interpreter stdin")
         .write_all(
-            b"use 'numbers'.(Signed64, signed64_add_bits, signed64_add)\n40 + 2\nmissing + 2\n40 + 2\n#q\n",
+            b"use 'numbers' Signed64, signed64_add_bits, signed64_add\n40 + 2\nmissing + 2\n40 + 2\n#q\n",
         )
         .expect("terminal submissions");
 

@@ -23,8 +23,13 @@ fn resolved_definition_substitutes_instance_arguments() {
             key,
             display_name: name,
             parameters: vec![parameter],
-            definition: Ty::Tuple(vec![Ty::Opaque(parameter)]),
-            fixed_array: None,
+            definition: Ty::Record {
+                name,
+                fields: vec![(Intern::from_ref("value"), Box::new(Ty::Opaque(parameter)))],
+                resolved_params: None,
+            },
+            sequence_literal: None,
+
             reference: None,
             integer: None,
         },
@@ -39,6 +44,10 @@ fn resolved_definition_substitutes_instance_arguments() {
 
     assert_eq!(
         registry.resolved_definition_for_type(&instance),
-        Ty::Tuple(vec![Ty::Unit])
+        Ty::Record {
+            name,
+            fields: vec![(Intern::from_ref("value"), Box::new(Ty::Unit))],
+            resolved_params: Some(vec![(parameter, TyArg::Type(Box::new(Ty::Unit)))]),
+        }
     );
 }

@@ -1,4 +1,4 @@
-//! `use core.(folder.Symbol, …)` must typecheck like quoted sibling imports in target/.
+//! `use core folder.Symbol, …` must typecheck like quoted sibling imports in target/.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -67,7 +67,7 @@ fn core_bundle_import_types_like_target_gin() {
     pkg.write("target/os/os.gin", "OperatingSystem is 'linux'\n");
     pkg.write("target/vendor/vendor.gin", "Vendor is 'unknown'\n");
     const TARGET: &str = "\
-use core.(default.Default, target.arch.Architecture, target.os.OperatingSystem, target.vendor.Vendor)
+use core default.Default, target.arch.Architecture, target.os.OperatingSystem, target.vendor.Vendor
 
 Target has Default
     arch Architecture

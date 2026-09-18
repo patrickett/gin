@@ -78,6 +78,14 @@ impl<'src, 't> TokenCursor<'src, 't> {
         let mut exprs = Vec::new();
         loop {
             self.skip_expr_body_trivia();
+            if self.starts_reserved_binding()
+                && let Some(bind) = self.parse_bind(expr_parser)
+            {
+                let span = self.merge_span(bind.name_span, self.last_consumed_span());
+                exprs.push(Typed::infer(Expr::Bind(Box::new(bind)), span));
+                self.try_consume_body_comma();
+                continue;
+            }
             match self.peek() {
                 Some(t) if Self::can_start_expr(t) => {
                     // Fast path: in body context, Id followed by : or := is always a bind.

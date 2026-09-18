@@ -1,4 +1,4 @@
-//! Hover on `false := Bool.False` / `true := Bool.True` in `modules/gin_core/primitive/bool.gin`.
+//! Hover on boolean variant bindings in a semantic package fixture.
 //!
 //! These constant value binds have no explicit type annotation; their "type" is
 //! the const RHS variant. The LSP hover popup must surface that variant so the
@@ -6,7 +6,7 @@
 
 use analysis::{HoverContent, PackageCache};
 use test_fixtures::TempPackage;
-use test_fixtures::gin_core::BOOL_GIN;
+use test_fixtures::semantic_fixtures::BOOL_GIN;
 
 #[test]
 fn hover_false_shows_bool_false_variant() {

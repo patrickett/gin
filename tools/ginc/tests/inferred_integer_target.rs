@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use ginc::cli::{Args, Emit, Profile};
 use ginc::compile::{CompileResult, GinCompiler};
 
@@ -8,8 +6,13 @@ use common::cra;
 
 #[test]
 fn concrete_target_cli_preserves_wide_compile_time_integer_constants() {
-    let input =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../modules/gin_core/alloc/count.gin");
+    let package = test_fixtures::TempPackage::new("wide_integer_constants");
+    let count = test_fixtures::semantic_fixtures::COUNT_GIN
+        .lines()
+        .skip(1)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let input = package.write("main.gin", &format!("Byte is in 0 to 255\n{count}"));
     let output = std::env::temp_dir().join(format!(
         "gin-count-{}-{}.ginif",
         std::process::id(),
@@ -22,6 +25,7 @@ fn concrete_target_cli_preserves_wide_compile_time_integer_constants() {
         emit: Emit::Interface,
         profile: Profile::Debug,
         no_cache: true,
+        gin_home: None,
         timings: false,
         fast_llvm: false,
         verbose: None,
@@ -48,10 +52,10 @@ fn alignment_runtime_constructor_rejects_non_power_of_two() {
 }
 
 fn assert_alignment_invalid(candidate: &str, test_name: &str) {
-    let count = include_str!("../../../modules/gin_core/alloc/count.gin");
+    let count = test_fixtures::semantic_fixtures::COUNT_GIN;
     let count = count.lines().skip(1).collect::<Vec<_>>().join("\n");
     let source = format!(
-        "Byte is in 0...255\n{count}\n\nmain:\n    if Alignment.try_new({candidate}) is Invalid\n        0\n    return\n    return 1\n"
+        "Byte is in 0 to 255\n{count}\n\nmain:\n    if Alignment.try_new({candidate}) is Invalid\n        0\n    return\n    return 1\n"
     );
 
     cra(test_name, &source)

@@ -37,7 +37,7 @@ fn removed_condition_attribute_does_not_create_a_condition_contract() {
 
 #[test]
 fn removed_auto_attribute_is_rejected() {
-    let parse_output = "#auto\nBad is in 0...255".parse_source_full();
+    let parse_output = "#auto\nBad is in 0 to 255".parse_source_full();
     let codes: Vec<_> = parse_output
         .symptoms
         .iter()
@@ -63,4 +63,27 @@ fn if_without_condition_pattern_is_rejected_by_parser() {
         "expected condition pattern requirement, got: {:?}",
         codes
     );
+}
+
+#[test]
+fn intrinsic_attributes_and_external_bodies_are_rejected() {
+    for (source, expected) in [
+        (
+            "#intrinsic(BitsAdd)\nadd(a Int, b Int) Int: a\n",
+            "parse-removed-intrinsic",
+        ),
+        ("#intrinsic\nvalue: 0\n", "parse-removed-intrinsic"),
+        ("value() Int extern\n", "parse-removed-extern"),
+        ("value() Int: extern\n", "parse-removed-extern"),
+    ] {
+        let parsed = TokenCursor::parse_source(source);
+        assert!(
+            parsed
+                .parse_warnings
+                .iter()
+                .any(|flaw| flaw.code.slug() == expected),
+            "{source}: {:?}",
+            parsed.parse_warnings
+        );
+    }
 }

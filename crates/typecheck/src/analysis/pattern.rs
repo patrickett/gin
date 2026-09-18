@@ -81,7 +81,7 @@ pub(crate) fn find_matching_when_body<'a>(
 /// Core pattern matching — does a `Pattern` match a `ConstValue`?
 pub(crate) fn pattern_matches(pattern: &Pattern, cv: &ConstValue) -> bool {
     match (pattern, cv) {
-        (Pattern::Literal(Literal::String(s), _), ConstValue::String(cv_s)) => s == cv_s,
+        (Pattern::Literal(Literal::String(s), _), ConstValue::Text(cv_s)) => s == cv_s,
         (Pattern::Literal(Literal::Int(n), _), ConstValue::Int(cv_n)) => *n == *cv_n,
         (Pattern::Literal(Literal::Float(HashFloat(f)), _), ConstValue::Float(HashFloat(cv_f))) => {
             f.to_bits() == cv_f.to_bits()
@@ -137,26 +137,17 @@ pub(crate) fn pattern_matches(pattern: &Pattern, cv: &ConstValue) -> bool {
                         pattern_param_matches(pname, kind, arg)
                     })
         }
-        (Pattern::ListCons { head, tail }, ConstValue::List(items)) => {
+        (Pattern::ListCons { head, tail }, ConstValue::Sequence(items)) => {
             if items.is_empty() {
                 return false;
             }
             if !pattern_matches(&head.value, &items[0]) {
                 return false;
             }
-            let rest = ConstValue::List(items[1..].to_vec().into());
+            let rest = ConstValue::Sequence(items[1..].to_vec().into());
             pattern_matches(&tail.value, &rest)
         }
-        (Pattern::ListEmpty, ConstValue::List(items)) => items.is_empty(),
-        (Pattern::Tuple(patterns), ConstValue::List(items)) => {
-            if patterns.len() != items.len() {
-                return false;
-            }
-            patterns
-                .iter()
-                .zip(items.iter())
-                .all(|(p, i)| pattern_matches(&p.value, i))
-        }
+        (Pattern::ListEmpty, ConstValue::Sequence(items)) => items.is_empty(),
         (Pattern::Nominal(tag_name, _), ConstValue::Tag { name: cv_name, .. }) => {
             tag_name == cv_name
         }
@@ -166,7 +157,7 @@ pub(crate) fn pattern_matches(pattern: &Pattern, cv: &ConstValue) -> bool {
         }
         (Pattern::ListEmpty, cv) => {
             // `[]` — empty list pattern
-            matches!(cv, ConstValue::List(items) if items.is_empty())
+            matches!(cv, ConstValue::Sequence(items) if items.is_empty())
         }
         _ => false,
     }
@@ -203,7 +194,7 @@ fn default_expr_matches(expr: &Expr, cv: &ConstValue) -> bool {
         (Expr::Lit(Literal::Float(HashFloat(f))), ConstValue::Float(HashFloat(cv_f))) => {
             f.to_bits() == cv_f.to_bits()
         }
-        (Expr::Lit(Literal::String(s)), ConstValue::String(cv_s)) => s == cv_s,
+        (Expr::Lit(Literal::String(s)), ConstValue::Text(cv_s)) => s == cv_s,
         _ => false,
     }
 }
@@ -267,18 +258,12 @@ fn collect_pattern_bindings_inner(
                 collect_pattern_param_binding(pname, kind, arg, env);
             }
         }
-        (Pattern::ListCons { head, tail }, ConstValue::List(items)) if !items.is_empty() => {
+        (Pattern::ListCons { head, tail }, ConstValue::Sequence(items)) if !items.is_empty() => {
             collect_pattern_bindings_inner(&head.value, &items[0], env);
-            let rest = ConstValue::List(items[1..].into());
+            let rest = ConstValue::Sequence(items[1..].into());
             collect_pattern_bindings_inner(&tail.value, &rest, env);
         }
         (Pattern::ListEmpty, _) => {}
-        (Pattern::Tuple(patterns), ConstValue::List(items)) => {
-            for (p, i) in patterns.iter().zip(items.iter()) {
-                collect_pattern_bindings_inner(&p.value, i, env);
-            }
-        }
-        // Note: `ConstValue` has no `Tuple` variant; tuple patterns match `ConstValue::List`.
         (
             Pattern::Nominal(tag_name, _),
             ConstValue::Tag {

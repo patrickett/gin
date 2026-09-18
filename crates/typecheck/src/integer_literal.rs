@@ -19,7 +19,9 @@ pub fn materialize(
     expression: ExprId,
     expected: &Ty,
 ) -> Result<(), IntegerLiteralMaterializationError> {
-    let Some(ast::ConstValue::Int(value)) = typed.exprs.const_value[expression.as_usize()] else {
+    let Some(ast::ConstValue::Int(value)) =
+        typed.exprs.facts.const_facts.const_value[expression.as_usize()]
+    else {
         return Ok(());
     };
     validate_with_registry(value, expected, &typed.type_registry)?;
@@ -104,7 +106,7 @@ pub fn diagnostic(
         IntegerLiteralMaterializationError::NegativeRejected { min, max } => Diagnostic::new(
             "type-negative-integer-literal-rejected",
             format!(
-                "negative integer literal `{value}` is outside `{}` bounds {min}...{max}",
+                "negative integer literal `{value}` is outside `{}` bounds {min} to {max}",
                 expected.format_for_hover()
             ),
         )
@@ -113,7 +115,7 @@ pub fn diagnostic(
         IntegerLiteralMaterializationError::OutsideValidity { min, max } => Diagnostic::new(
             "type-integer-literal-out-of-range",
             format!(
-                "integer literal `{value}` is outside `{}` bounds {min}...{max}",
+                "integer literal `{value}` is outside `{}` bounds {min} to {max}",
                 expected.format_for_hover()
             ),
         )

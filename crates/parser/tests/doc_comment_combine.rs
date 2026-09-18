@@ -290,7 +290,7 @@ fn doc_on_single_has_member() {
     let src = "\
 MyType has
     --- allocate doc
-    allocate(ref self)
+    allocate(self ref)
 ";
     let out = src.parse_source_full();
     let flaws: Vec<_> = out
@@ -328,10 +328,10 @@ MyType has
     --- Multi-line doc for the allocate method.
     ---
     --- Returns the allocated bytes on success, or `AllocError` on failure.
-    allocate(ref self) Slice(Byte) or AllocError
+    allocate(self ref) Slice(Byte) or AllocError
 
     --- Single-line doc for deallocate.
-    deallocate(ref self)
+    deallocate(self ref)
 ";
     let out = src.parse_source_full();
     let flaws: Vec<_> = out

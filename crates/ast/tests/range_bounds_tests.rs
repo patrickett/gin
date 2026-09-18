@@ -34,7 +34,7 @@ fn bounded_int_widths_match_expected_values() {
         assert_eq!(
             ty.anonymous_integer_width(),
             Some(width),
-            "width for {min}...{max}"
+            "width for {min} to {max}"
         );
     }
 }

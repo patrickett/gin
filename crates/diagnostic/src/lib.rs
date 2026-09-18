@@ -215,6 +215,7 @@ impl Diagnostic {
     /// Pretty-print this diagnostic using ariadne with source context.
     pub fn print(&self, source: &str, filename: &str) {
         use ariadne::{Label, Report, ReportKind, Source};
+        use std::io::IsTerminal;
         use std::ops::Range;
 
         let start = self.span.start();
@@ -230,7 +231,13 @@ impl Diagnostic {
         let span: Range<usize> = start..end;
 
         let msg = format!("[{}] {}", self.error_code(), self.message);
-        let mut builder = Report::build(kind, (filename, span.clone())).with_message(msg);
+        let mut builder = Report::build(kind, (filename, span.clone()))
+            .with_config(
+                ariadne::Config::default()
+                    .with_color(std::io::stderr().is_terminal())
+                    .with_index_type(ariadne::IndexType::Byte),
+            )
+            .with_message(msg);
 
         // Let custom rendering handle this if needed (e.g. unclosed strings).
         if self.render_custom(source, filename) {
@@ -340,6 +347,7 @@ impl Diagnostic {
     /// suggestion into the displayed source.
     fn render_unclosed_string(&self, source: &str, filename: &str) -> bool {
         use ariadne::{Label, Report, ReportKind, Source};
+        use std::io::IsTerminal;
         use std::ops::Range;
 
         let len = source.len();
@@ -360,6 +368,11 @@ impl Diagnostic {
         let span_range: Range<usize> = start..end;
         let msg = format!("[{}] {}", self.error_code(), self.message);
         let builder = Report::build(kind, (filename, span_range))
+            .with_config(
+                ariadne::Config::default()
+                    .with_color(std::io::stderr().is_terminal())
+                    .with_index_type(ariadne::IndexType::Byte),
+            )
             .with_message(&msg)
             .with_label(
                 Label::new((filename, quote_span))

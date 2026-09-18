@@ -14,7 +14,7 @@ use crate::span::SubSpan;
 /// OR like a range
 /// ```gin
 /// main:
-///     for i in 1...50
+///     for i in 1 to 50
 ///     loop
 /// return
 /// ```

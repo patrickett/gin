@@ -48,6 +48,7 @@ pub struct AdHocPackageId(u64);
 
 /// Cached output for a fully analyzed package.
 pub struct PackageEntry {
+    registry_resolution: Option<flask::PackageResolution>,
     pub typed_asts: Vec<TypedFileAst>,
     pub public_interface: interface::PublicInterface,
     pub package_index: PackageSemanticIndex,
@@ -303,14 +304,44 @@ impl PackageCache {
 
         let package = self.file_identity(&paths[0])?;
 
-        if let Some(entry) = self.packages.lock().unwrap().get(&package) {
-            return Some(Arc::clone(entry));
+        let config = FlaskConfig::find_package_config(&paths[0]).map(|(config, _)| config);
+        let resolution = config.as_ref().and_then(|config| config.resolution.clone());
+        let registry_valid = config.as_ref().is_none_or(|config| {
+            if !config
+                .dependencies()
+                .values()
+                .any(|dep| matches!(dep.kind, flask::DependencyKind::Version { .. }))
+            {
+                return true;
+            }
+            let verified = (|| -> std::io::Result<()> {
+                let client = flask::RegistryClient::load(flask::GinHome::discover()?)?;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(std::io::Error::other)?
+                    .as_secs();
+                client.verify_cached(config, now)?;
+                Ok(())
+            })();
+            verified.is_ok()
+        });
+        if registry_valid {
+            if let Some(entry) = self.packages.lock().unwrap().get(&package) {
+                if entry.registry_resolution == resolution {
+                    return Some(Arc::clone(entry));
+                }
+            }
+        }
+        if !registry_valid || resolution.is_some() {
+            self.module_caches.lock().unwrap().remove(&package);
         }
 
         // Slow path: compute using all registered files in the package.
         let all_files = self.package_file_paths(&paths[0])?;
         let entry = self.compute_package(&package, &all_files)?;
 
+        let mut entry = entry;
+        entry.registry_resolution = resolution;
         let entry = Arc::new(entry);
         self.packages
             .lock()
@@ -338,6 +369,7 @@ impl PackageCache {
         let (typecheck_outputs, prepare_diags) =
             self.stage_derive_diagnostics(&typed_asts, &prepare_diags);
         Some(PackageEntry {
+            registry_resolution: None,
             typed_asts,
             public_interface,
             package_index,
@@ -415,6 +447,7 @@ impl PackageCache {
             &deps,
             cache,
             resolve::PackageFrontEndOptions {
+                gin_home: None,
                 compile_target,
                 transform: PackageTransformOptions::IDE,
                 resolve_imports,
@@ -452,6 +485,7 @@ impl PackageCache {
             trait_registry,
             public_interface,
             interface_publication,
+            implementation_fingerprint,
         } = front_end.artifacts;
         let mut typed_asts_by_path = resolved
             .iter()
@@ -522,6 +556,7 @@ impl PackageCache {
                 trait_registry,
                 public_interface,
                 interface_publication,
+                implementation_fingerprint,
             },
         })
     }
@@ -664,7 +699,7 @@ impl PackageCache {
 
         // 1. Parse-only hover (keywords, literals)
         // Skip `self` — the typed hover provides the receiver type (e.g. `self Type`,
-        // `ref self Type`, `mut self Type`) which is more useful than a generic keyword doc.
+        // `self ref Type`, `self mut Type`) which is more useful than a generic keyword doc.
         if word != "self"
             && let Some(h) = crate::hover::HoverSnippet::keyword(source, byte_pos)
         {

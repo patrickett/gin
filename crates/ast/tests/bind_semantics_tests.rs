@@ -70,8 +70,10 @@ fn fresh_shadow_initializer_resolves_before_new_place() {
     else {
         panic!("expected function body");
     };
-    let first_place = typed.exprs.place[exprs[0].as_usize()].expect("first place");
-    let second_place = typed.exprs.place[exprs[1].as_usize()].expect("second place");
+    let first_place =
+        typed.exprs.facts.ownership_facts.place[exprs[0].as_usize()].expect("first place");
+    let second_place =
+        typed.exprs.facts.ownership_facts.place[exprs[1].as_usize()].expect("second place");
     let typecheck::TypedExprKind::Bind { body, .. } = typed.exprs.kind[exprs[1].as_usize()] else {
         panic!("expected second bind");
     };
@@ -81,7 +83,10 @@ fn fresh_shadow_initializer_resolves_before_new_place() {
         typed.places[first_place.0 as usize].binder,
         typed.places[second_place.0 as usize].binder
     );
-    assert_eq!(typed.exprs.place[body.as_usize()], Some(first_place));
+    assert_eq!(
+        typed.exprs.facts.ownership_facts.place[body.as_usize()],
+        Some(first_place)
+    );
 }
 
 #[test]
@@ -94,8 +99,10 @@ fn explicit_rebind_creates_a_new_version_of_the_same_place() {
     else {
         panic!("expected function body");
     };
-    let initial = typed.exprs.place_version[exprs[0].as_usize()].expect("initial version");
-    let replacement = typed.exprs.place_version[exprs[1].as_usize()].expect("replacement version");
+    let initial = typed.exprs.facts.ownership_facts.place_version[exprs[0].as_usize()]
+        .expect("initial version");
+    let replacement = typed.exprs.facts.ownership_facts.place_version[exprs[1].as_usize()]
+        .expect("replacement version");
     let initial_value = &typed.place_versions[initial.0 as usize];
     let replacement_value = &typed.place_versions[replacement.0 as usize];
 
@@ -109,7 +116,7 @@ fn explicit_rebind_creates_a_new_version_of_the_same_place() {
         } if version == initial
     ));
     assert_eq!(
-        typed.exprs.place_version[returned.as_usize()],
+        typed.exprs.facts.ownership_facts.place_version[returned.as_usize()],
         Some(replacement)
     );
     assert_ne!(
@@ -128,13 +135,15 @@ fn conditional_rebind_joins_incoming_and_written_versions() {
     else {
         panic!("expected function body");
     };
-    let initial = typed.exprs.place_version[exprs[0].as_usize()].expect("initial version");
+    let initial = typed.exprs.facts.ownership_facts.place_version[exprs[0].as_usize()]
+        .expect("initial version");
     let typecheck::TypedExprKind::Bind { body: observed, .. } =
         typed.exprs.kind[exprs[2].as_usize()]
     else {
         panic!("expected observed bind");
     };
-    let joined = typed.exprs.place_version[observed.as_usize()].expect("joined version");
+    let joined = typed.exprs.facts.ownership_facts.place_version[observed.as_usize()]
+        .expect("joined version");
     let typecheck::PlaceVersionOrigin::Join(predecessors) =
         &typed.place_versions[joined.0 as usize].origin
     else {
@@ -159,13 +168,15 @@ fn loop_rebind_creates_zero_iteration_phi() {
     else {
         panic!("expected function body");
     };
-    let initial = typed.exprs.place_version[exprs[0].as_usize()].expect("initial version");
+    let initial = typed.exprs.facts.ownership_facts.place_version[exprs[0].as_usize()]
+        .expect("initial version");
     let typecheck::TypedExprKind::Bind { body: observed, .. } =
         typed.exprs.kind[exprs[2].as_usize()]
     else {
         panic!("expected observed bind");
     };
-    let phi = typed.exprs.place_version[observed.as_usize()].expect("loop phi");
+    let phi =
+        typed.exprs.facts.ownership_facts.place_version[observed.as_usize()].expect("loop phi");
 
     let typecheck::PlaceVersionOrigin::LoopPhi {
         incoming,
@@ -228,7 +239,7 @@ fn unannotated_loop_carried_place_requires_explicit_contract() {
 #[test]
 fn explicitly_bounded_loop_carried_place_is_accepted() {
     let typed = transform_prepared(
-        "Small is in 0...2\nmain(flag Int):\n  value Small: 0\n  while flag is 0\n    value:: 1\n  loop\n  return value\n",
+        "Small is in 0 to 2\nmain(flag Int):\n  value Small: 0\n  while flag is 0\n    value:: 1\n  loop\n  return value\n",
     );
 
     assert!(
@@ -241,16 +252,17 @@ fn explicitly_bounded_loop_carried_place_is_accepted() {
 #[test]
 fn projected_rebind_resolves_a_child_place_and_version() {
     let typed = transform_prepared(
-        "Int is in 0...255\nCoord has x Int, y Int\nmain:\n  point: Coord(x: 1, y: 2)\n  point.x:: 10\n  observed: point.x\n  return observed\n",
+        "Int is in 0 to 255\nCoord has x Int, y Int\nmain:\n  point: Coord(x: 1, y: 2)\n  point.x:: 10\n  observed: point.x\n  return observed\n",
     );
     let typecheck::BindBody::Body { exprs, .. } =
         &typed.defs[&typecheck::DefId(Intern::from_ref("main"))].body
     else {
         panic!("expected function body");
     };
-    let root = typed.exprs.place[exprs[0].as_usize()].expect("root place");
-    let field = typed.exprs.place[exprs[1].as_usize()].expect("field place");
-    let replacement = typed.exprs.place_version[exprs[1].as_usize()].expect("field version");
+    let root = typed.exprs.facts.ownership_facts.place[exprs[0].as_usize()].expect("root place");
+    let field = typed.exprs.facts.ownership_facts.place[exprs[1].as_usize()].expect("field place");
+    let replacement = typed.exprs.facts.ownership_facts.place_version[exprs[1].as_usize()]
+        .expect("field version");
     let typecheck::TypedExprKind::Bind { body: observed, .. } =
         typed.exprs.kind[exprs[2].as_usize()]
     else {
@@ -269,9 +281,12 @@ fn projected_rebind_resolves_a_child_place_and_version() {
             ..
         }
     ));
-    assert_eq!(typed.exprs.place[observed.as_usize()], Some(field));
     assert_eq!(
-        typed.exprs.place_version[observed.as_usize()],
+        typed.exprs.facts.ownership_facts.place[observed.as_usize()],
+        Some(field)
+    );
+    assert_eq!(
+        typed.exprs.facts.ownership_facts.place_version[observed.as_usize()],
         Some(replacement)
     );
 }
@@ -279,7 +294,7 @@ fn projected_rebind_resolves_a_child_place_and_version() {
 #[test]
 fn projected_rebind_cannot_write_through_immutable_root() {
     let typed = transform_prepared(
-        "Int is in 0...255\nCoord has x Int\nmain:\n  point := Coord(x: 1)\n  point.x:: 2\n  return 0\n",
+        "Int is in 0 to 255\nCoord has x Int\nmain:\n  point := Coord(x: 1)\n  point.x:: 2\n  return 0\n",
     );
 
     assert!(typed.all_flaws().iter().any(|(_, flaw)| {
@@ -290,7 +305,7 @@ fn projected_rebind_cannot_write_through_immutable_root() {
 #[test]
 fn projected_rebind_must_discharge_non_discardable_old_value() {
     let typed = transform_prepared(
-        "Int is in 0...255\nPayload has pointer @Int\nContainer has payload Payload\nmain:\n  pointer: @1\n  container: Container(payload: Payload(pointer: pointer))\n  container.payload:: Payload(pointer: @2)\n  return 0\n",
+        "Int is in 0 to 255\nPayload has pointer @Int\nContainer has payload Payload\nmain:\n  pointer: @1\n  container: Container(payload: Payload(pointer: pointer))\n  container.payload:: Payload(pointer: @2)\n  return 0\n",
     );
 
     assert!(typed.all_flaws().iter().any(|(_, flaw)| {
@@ -302,7 +317,7 @@ fn projected_rebind_must_discharge_non_discardable_old_value() {
 #[test]
 fn conditional_projected_rebind_joins_the_child_versions() {
     let typed = transform_prepared(
-        "Int is in 0...255\nCoord has x Int\nmain(flag Int):\n  point: Coord(x: 1)\n  if flag is 0\n    point.x:: 2\n  return\n  observed: point.x\n  return observed\n",
+        "Int is in 0 to 255\nCoord has x Int\nmain(flag Int):\n  point: Coord(x: 1)\n  if flag is 0\n    point.x:: 2\n  return\n  observed: point.x\n  return observed\n",
     );
     let typecheck::BindBody::Body { exprs, .. } =
         &typed.defs[&typecheck::DefId(Intern::from_ref("main"))].body
@@ -314,7 +329,8 @@ fn conditional_projected_rebind_joins_the_child_versions() {
     else {
         panic!("expected observed bind");
     };
-    let joined = typed.exprs.place_version[observed.as_usize()].expect("field join");
+    let joined =
+        typed.exprs.facts.ownership_facts.place_version[observed.as_usize()].expect("field join");
     let typecheck::PlaceVersionOrigin::Join(predecessors) =
         &typed.place_versions[joined.0 as usize].origin
     else {
@@ -335,14 +351,27 @@ fn conditional_projected_rebind_joins_the_child_versions() {
 #[test]
 fn compound_name_rebind_uses_ordinary_dispatch_and_old_version() {
     let typed = transform_prepared(
-        "Word is in 0...255\n#intrinsic(BitsAdd)\nadd_bits(a Word, b Word) Word extern\n#operator(Add)\n#inline\nword_add(a Word, b Word) Word: add_bits(a, b)\nmain(input Word):\n  value Word: input\n  value+: 2\n  return value\n",
+        r#"Word is in 0 to 255
+add_bits(a Word, b Word) Word:
+    left is in 0 to 255: a
+    right is in 0 to 255: b
+return (left + right) as Word
+#infix('+')
+#inline
+word_add(a Word, b Word) Word: add_bits(a, b)
+main(input Word):
+  value Word: input
+  value+: 2
+  return value
+"#,
     );
     let typecheck::BindBody::Body { exprs, .. } =
         &typed.defs[&typecheck::DefId(Intern::from_ref("main"))].body
     else {
         panic!("expected function body");
     };
-    let initial = typed.exprs.place_version[exprs[0].as_usize()].expect("initial version");
+    let initial = typed.exprs.facts.ownership_facts.place_version[exprs[0].as_usize()]
+        .expect("initial version");
     let typecheck::TypedExprKind::Reassign {
         value,
         operator: Some(ast::BinOp::Add),
@@ -353,9 +382,7 @@ fn compound_name_rebind_uses_ordinary_dispatch_and_old_version() {
     };
     let args = match &typed.exprs.kind[value.as_usize()] {
         typecheck::TypedExprKind::FnCall {
-            operator_role: Some(ast::OperatorRole::Add),
-            args: Some(args),
-            ..
+            args: Some(args), ..
         }
         | typecheck::TypedExprKind::IntrinsicCall {
             op: typecheck::intrinsic::IntrinsicOp::BitsAdd,
@@ -364,7 +391,10 @@ fn compound_name_rebind_uses_ordinary_dispatch_and_old_version() {
         kind => panic!("expected ordinary addition dispatch, got {kind:?}"),
     };
     assert_eq!(args.len(), 2);
-    assert_eq!(typed.exprs.place_version[args[0].as_usize()], Some(initial));
+    assert_eq!(
+        typed.exprs.facts.ownership_facts.place_version[args[0].as_usize()],
+        Some(initial)
+    );
 }
 
 #[test]

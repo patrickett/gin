@@ -5,6 +5,7 @@ use crate::span::SpanId;
 // TODO: make this Spanned<Return>
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Return {
-    pub value: Option<Box<Typed<Expr>>>,
+    /// Values returned by this statement, in declaration order.
+    pub values: Vec<Typed<Expr>>,
     pub span_id: SpanId,
 }

@@ -74,7 +74,7 @@ fn candidate_with_overlapping_symbols_skips_shadowed_declarations() {
 fn runtime_dispatch_preserves_reference_mode_conventions() {
     let declaration = RuntimeDeclaration::new(
         "value".to_string(),
-        "value(ref lhs Signed64, mut rhs Signed64) Signed64".to_string(),
+        "value(lhs ref Signed64, rhs mut Signed64) Signed64".to_string(),
         vec!["lhs".to_string(), "rhs".to_string()],
         vec![ParamConvention::Observe, ParamConvention::Mutate],
         false,
@@ -82,7 +82,7 @@ fn runtime_dispatch_preserves_reference_mode_conventions() {
 
     assert_eq!(
         declaration.declaration_source("__gin_live_value_generation_1", "value"),
-        "__gin_live_value_generation_1(ref lhs Signed64, mut rhs Signed64) Signed64: value(ref lhs, mut rhs)\n"
+        "__gin_live_value_generation_1(lhs ref Signed64, rhs mut Signed64) Signed64: value(lhs, rhs)\n"
     );
 }
 

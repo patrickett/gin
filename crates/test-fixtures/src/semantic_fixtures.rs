@@ -1,10 +1,10 @@
-//! Canonical `modules/gin_core` source fixtures shared by integration tests.
+//! Capability-focused Gin source fixtures shared by integration tests.
 //!
 //! Integration tests write these into temp packages to exercise parsing,
 //! resolution, hover, and LSP span mapping against a realistic core-library layout.
 
-pub const BOOL_GIN: &str = r#"use core.Happy
-use core.ToString
+pub const BOOL_GIN: &str = r#"use core Happy
+use core ToString
 
 --- `Bool` represents a value, which could only be either `True` or `False`.
 ---
@@ -29,23 +29,8 @@ true  := Bool.True
 -- return False
 "#;
 
-pub const COPY_GIN: &str = r#"use core.reflect.(
-    ReflectionType
-    ReflectionTypeNamed
-    ReflectionVariantShape
-    ReflectionBits
-    ReflectionAddress
-    ReflectionRawPointer
-    ReflectionSafeReference
-    ReflectionObserve
-    ReflectionMutate
-    ReflectionUnsupported
-    ReflectionRecord
-    ReflectionUnion
-    ReflectionTuple
-    ReflectionArray
-)
-use core.primitive.(Bool, List)
+pub const COPY_GIN: &str = r#"use core.reflect ReflectionType, ReflectionTypeNamed, ReflectionVariantShape, ReflectionBits, ReflectionAddress, ReflectionRawPointer, ReflectionSafeReference, ReflectionObserve, ReflectionMutate, ReflectionUnsupported, ReflectionRecord, ReflectionUnion, ReflectionArray
+use core.primitive Bool, List
 
 --- Types that can be implicitly copied.
 --- Opt out with `Copy.can_copy: False`.
@@ -59,7 +44,6 @@ is_copy(x ReflectionType) Bool := when x is
     ReflectionSafeReference(_, ReflectionMutate)  then False
     ReflectionUnsupported(_)              then False
     ReflectionRecord(_, fields)      then all_named_copy(fields)
-    ReflectionTuple(elems)           then all_types_copy(elems)
     ReflectionUnion(_, variants)     then all_variants_copy(variants)
     ReflectionArray(elem, _)         then is_copy(elem)
 
@@ -77,25 +61,25 @@ all_variants_copy(variants List(ReflectionVariantShape)) Bool := when variants i
 "#;
 
 pub const INT_GIN: &str = r#"--- The 8-bit signed integer type.
-SignedTinyInt is in -128...127
+SignedTinyInt is in -128 to 127
 --- The 16-bit signed integer type.
-SignedSmallInt is in -32768...32767
+SignedSmallInt is in -32768 to 32767
 --- The 32-bit signed integer type.
-SignedInt is in -2147483648...2147483647
+SignedInt is in -2147483648 to 2147483647
 --- The 64-bit signed integer type.
-SignedBigInt is in -9223372036854775808...9223372036854775807
+SignedBigInt is in -9223372036854775808 to 9223372036854775807
 --- The 128-bit signed integer type.
-SignedLargeInt is in -170141183460469231731687303715884105728...170141183460469231731687303715884105727
+SignedLargeInt is in -170141183460469231731687303715884105728 to 170141183460469231731687303715884105727
 --- The 8-bit unsigned integer type.
-TinyInt is in 0...255
+TinyInt is in 0 to 255
 --- The 16-bit unsigned integer type.
-SmallInt is in 0...65535
+SmallInt is in 0 to 65535
 --- The 32-bit unsigned integer type.
-Int is in 0...4294967295
+Int is in 0 to 4294967295
 --- The 64-bit unsigned integer type.
-BigInt is in 0...18446744073709551615
+BigInt is in 0 to 18446744073709551615
 --- The 128-bit unsigned integer type.
-LargeInt is in 0...340282366920938463463374607431768211455
+LargeInt is in 0 to 340282366920938463463374607431768211455
 
 
 --- Alias for the 8-bit unsigned integer type.
@@ -110,7 +94,7 @@ pub const LIST_GIN: &str = r#"use PointerSize
 List(x) has pointer @x, length PointerSize
 "#;
 
-pub const POINTER_GIN: &str = r#"use '../target/'.target
+pub const POINTER_GIN: &str = r#"use '../target/' target
 use BigInt, Int
 
 --- The pointer-width unsigned integer type (8 bytes on 64-bit, 4 bytes on 32-bit).
@@ -119,21 +103,8 @@ PointerSize is when target.arch is
     'wasm32'            then Int
 "#;
 
-pub const SIZED_GIN: &str = r#"use core.reflect.(
-    ReflectionType
-    ReflectionTypeNamed
-    ReflectionVariantShape
-    ReflectionBits
-    ReflectionAddress
-    ReflectionRawPointer
-    ReflectionSafeReference
-    ReflectionUnsupported
-    ReflectionRecord
-    ReflectionUnion
-    ReflectionTuple
-    ReflectionArray
-)
-use core.primitive.(BigInt, List)
+pub const SIZED_GIN: &str = r#"use core.reflect ReflectionType, ReflectionTypeNamed, ReflectionVariantShape, ReflectionBits, ReflectionAddress, ReflectionRawPointer, ReflectionSafeReference, ReflectionUnsupported, ReflectionRecord, ReflectionUnion, ReflectionArray
+use core.primitive BigInt, List
 
 --- Compile-time byte size of a type.
 Size is Const(BigInt) or Dynamic
@@ -147,7 +118,6 @@ compute_size(x ReflectionType) Size := when x is
     ReflectionSafeReference(_, _)   then Const(8)
     ReflectionUnsupported(_)             then Dynamic
     ReflectionRecord(_, fields)     then sum_named(fields)
-    ReflectionTuple(elems)          then sum_types(elems)
     ReflectionUnion(_, variants)    then union_size(variants)
     ReflectionArray(elem, n)        then mul_size(compute_size(elem), n)
 
@@ -183,7 +153,7 @@ max_size(a Size, b Size) Size := when (a, b) is
 union_size(variants List(ReflectionVariantShape)) Size := add(union_disc(variants), union_max_payload(variants))
 "#;
 
-pub const STRING_GIN: &str = r#"use core.primitive.(Byte, PointerSize)
+pub const STRING_GIN: &str = r#"use core.primitive Byte, PointerSize
 
 --- A UTF-8 string represented by a byte pointer and byte length.
 String has pointer @Byte, len PointerSize
@@ -198,15 +168,60 @@ String has bytes List(Byte)\n\
 ToString has to_string String\n\
 ";
 
-pub const TYPE_GIN: &str = r#"use '../primitive.'.(BigInt, Bool, List)
-use '../string/'.String
+pub const COUNT_GIN: &str = r#"use '../primitive/' Byte
+
+index_bits := #index_bits(@())
+index_sign := 1 << (index_bits - 1)
+max_count := index_sign - 1
+min_offset := 0 - max_count
+max_alignment := 1 << (index_bits - 2)
+
+#phantom(unit)
+#bits(index_bits)
+Count(unit) is in 0 to max_count
+
+#phantom(unit)
+#bits(index_bits)
+Offset(unit) is in min_offset to max_count
+
+#bits(index_bits)
+Alignment is in 1 to max_alignment and max_alignment % self = 0
+
+ByteCount is Count(Byte)
+ByteOffset is Offset(Byte)
+
+is_alignment(bytes ref is in 0 to max_count) True thus bytes >= 1 and bytes <= max_alignment and max_alignment % bytes = 0 or False:
+    if bytes is in 1 to max_alignment
+        candidate is in 1 to max_alignment and max_alignment % candidate = 0: 1
+        while candidate < bytes is True
+            candidate *: 2
+        loop
+        if candidate = bytes is True
+            True
+        return
+        False
+    return
+return False
+
+Alignment has
+    new(bytes is in 1 to max_alignment and max_alignment % bytes = 0) Self:
+    return bytes as Alignment
+
+    try_new(bytes is in 0 to max_count):
+        if is_alignment(ref bytes) is True
+            Valid(bytes as Alignment)
+        return
+    return Invalid
+"#;
+
+pub const TYPE_GIN: &str = r#"use '../primitive.' BigInt, Bool, List
+use '../string/' String
 
 --- Structural description of a Gin type, used for compile-time reflection.
 Type is Bits(width BigInt, interpretation IntInterpretation)
      or Address(space BigInt, pointee Type)
      or Product(name String, fields List(ReflectionTypeNamed))
      or Sum(name String, variants List(ReflectionVariantShape))
-     or Tuple(elems List(Type))
      or SafeReference(pointee Type, permission IntPermission)
      or RawPointer(pointee Type)
      or Array(elem Type, size BigInt)
@@ -254,9 +269,6 @@ ReflectionRecord is Product
 
 #ReflectionUnion
 ReflectionUnion is Sum
-
-#ReflectionTuple
-ReflectionTuple is Tuple
 
 #ReflectionSafeReference
 ReflectionSafeReference is SafeReference

@@ -25,6 +25,7 @@ fn no_input_files_is_fatal() {
 
     let exe_path = dir.join("out");
     let mut args = Args {
+        gin_home: Some(flask::GinHome::new(unique_temp_dir("ginc-failures-cache"))),
         input: dir.clone(),
         emit: Emit::Exe,
         output: Some(exe_path.clone()),
@@ -61,6 +62,7 @@ fn unreadable_source_is_fatal_and_prevents_partial_output() {
 
     let exe_path = dir.join("out");
     let mut args = Args {
+        gin_home: Some(flask::GinHome::new(unique_temp_dir("ginc-failures-cache"))),
         input: dir.clone(),
         emit: Emit::Exe,
         output: Some(exe_path.clone()),
@@ -84,6 +86,7 @@ fn parse_failure_is_fatal_and_renderable() {
     write_source(&source, "main:\n");
 
     let mut args = Args {
+        gin_home: Some(flask::GinHome::new(unique_temp_dir("ginc-failures-cache"))),
         input: source.clone(),
         emit: Emit::Mlir,
         ..Default::default()
@@ -96,6 +99,7 @@ fn parse_failure_is_fatal_and_renderable() {
     ));
 
     let status = Command::new(ginc_binary())
+        .env("GIN_HOME", unique_temp_dir("ginc-cli-failures-cache"))
         .arg(source)
         .arg("--emit")
         .arg("mlir")
@@ -116,6 +120,7 @@ fn invalid_target_is_not_suppressed() {
     write_source(&source, "main: 1\n");
 
     let mut args = Args {
+        gin_home: Some(flask::GinHome::new(unique_temp_dir("ginc-failures-cache"))),
         input: source,
         emit: Emit::Exe,
         target: Some("bad_target".to_string()),
@@ -138,6 +143,7 @@ fn parse_failure_precedes_invalid_target() {
     write_source(&source, "main:\n");
 
     let mut args = Args {
+        gin_home: Some(flask::GinHome::new(unique_temp_dir("ginc-failures-cache"))),
         input: source,
         emit: Emit::Exe,
         target: Some("bad_target".to_string()),
@@ -171,6 +177,7 @@ fn successful_compilation_is_success() {
 
     let exe_path = source_path.join("out");
     let mut args = Args {
+        gin_home: Some(flask::GinHome::new(unique_temp_dir("ginc-failures-cache"))),
         input: source_file,
         emit: Emit::Exe,
         output: Some(exe_path.clone()),
@@ -192,11 +199,12 @@ fn typecheck_flaws_do_not_block_emission() {
     let source = dir.join("main.gin");
     write_source(
         &source,
-        "main:\n    x: when 1 is\n        2 then 1\n        1 then 2\n        3 then 3\n    return x\n",
+        "main: when 1 is\n    2 then 1\n    1 then 2\n    3 then 3\n",
     );
 
     let obj_path = dir.join("main.o");
     let mut args = Args {
+        gin_home: Some(flask::GinHome::new(unique_temp_dir("ginc-failures-cache"))),
         input: source,
         emit: Emit::Obj,
         output: Some(obj_path.clone()),
@@ -216,10 +224,11 @@ fn interface_emission_succeeds() {
     fs::create_dir_all(&dir).expect("create temp dir");
 
     let source = dir.join("main.gin");
-    write_source(&source, "main:\n    return 1\n");
+    write_source(&source, "main:\nreturn 1\n");
 
     let interface_path = dir.join("main.ginif");
     let mut args = Args {
+        gin_home: Some(flask::GinHome::new(unique_temp_dir("ginc-failures-cache"))),
         input: source.clone(),
         emit: Emit::Interface,
         output: Some(interface_path.clone()),
@@ -236,18 +245,19 @@ fn interface_emission_succeeds() {
 }
 
 #[test]
-fn interface_emission_with_warnings_still_succeeds() {
+fn interface_emission_with_type_flaws_is_rejected() {
     let dir = unique_temp_dir("ginc-interface-warnings");
     fs::create_dir_all(&dir).expect("create temp dir");
 
     let source = dir.join("main.gin");
     write_source(
         &source,
-        "main:\n    x: when 1 is\n        2 then 1\n        1 then 2\n        3 then 3\n    return x\n",
+        "main: when 1 is\n    2 then 1\n    1 then 2\n    3 then 3\n",
     );
 
     let interface_path = dir.join("main.ginif");
     let mut args = Args {
+        gin_home: Some(flask::GinHome::new(unique_temp_dir("ginc-failures-cache"))),
         input: source,
         emit: Emit::Interface,
         output: Some(interface_path.clone()),
@@ -255,9 +265,8 @@ fn interface_emission_with_warnings_still_succeeds() {
     };
     let result = GinCompiler::compile(&mut args);
 
-    assert!(result.has_typecheck_diagnostics());
-    assert!(result.is_success());
-    assert!(interface_path.exists());
+    assert!(matches!(result, CompileResult::Failed(_)));
+    assert!(!interface_path.exists());
 }
 
 #[test]
@@ -266,10 +275,11 @@ fn interface_emission_failed_build_does_not_clobber_prior_artifact() {
     fs::create_dir_all(&dir).expect("create temp dir");
 
     let source = dir.join("main.gin");
-    write_source(&source, "main:\n    return 1\n");
+    write_source(&source, "main:\nreturn 1\n");
 
     let interface_path = dir.join("main.ginif");
     let mut args = Args {
+        gin_home: Some(flask::GinHome::new(unique_temp_dir("ginc-failures-cache"))),
         input: source.clone(),
         emit: Emit::Interface,
         output: Some(interface_path.clone()),
@@ -302,11 +312,12 @@ fn interface_emission_is_deterministic_across_file_order() {
 
     let a = dir.join("a.gin");
     let b = dir.join("b.gin");
-    write_source(&a, "main:\n    return 1\n\nx:\n    return 2\n");
-    write_source(&b, "y:\n    return 3\n\nz:\n    return 4\n");
+    write_source(&a, "main:\nreturn 1\n\nx:\nreturn 2\n");
+    write_source(&b, "y:\nreturn 3\n\nz:\nreturn 4\n");
 
     let interface_path = dir.join("main.ginif");
     let mut args = Args {
+        gin_home: Some(flask::GinHome::new(unique_temp_dir("ginc-failures-cache"))),
         input: dir.clone(),
         emit: Emit::Interface,
         output: Some(interface_path.clone()),
@@ -318,8 +329,8 @@ fn interface_emission_is_deterministic_across_file_order() {
     );
     let first_bytes = fs::read(&interface_path).expect("read interface artifact");
 
-    write_source(&a, "x:\n    return 2\n\nmain:\n    return 1\n");
-    write_source(&b, "z:\n    return 4\n\ny:\n    return 3\n");
+    write_source(&a, "x:\nreturn 2\n\nmain:\nreturn 1\n");
+    write_source(&b, "z:\nreturn 4\n\ny:\nreturn 3\n");
 
     let second = GinCompiler::compile(&mut args);
     assert!(
@@ -339,6 +350,7 @@ fn no_input_files_exits_nonzero_via_process() {
     fs::create_dir_all(&dir).expect("create empty input dir");
 
     let status = Command::new(ginc_binary())
+        .env("GIN_HOME", unique_temp_dir("ginc-cli-failures-cache"))
         .arg(&dir)
         .arg("--emit")
         .arg("obj")
@@ -346,4 +358,32 @@ fn no_input_files_exits_nonzero_via_process() {
         .expect("run ginc binary");
 
     assert!(!status.status.success());
+}
+
+#[test]
+fn reserved_names_display_source_in_terminal_flaws() {
+    let dir = unique_temp_dir("ginc-reserved-name");
+    fs::create_dir_all(&dir).expect("create input dir");
+    let source = dir.join("main.gin");
+    write_source(&source, "compute() value Int, return Int: 0\n");
+
+    let output = Command::new(ginc_binary())
+        .env("GIN_HOME", unique_temp_dir("ginc-reserved-name-cache"))
+        .arg(&source)
+        .args(["--emit", "mlir"])
+        .output()
+        .expect("run ginc binary");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success(), "{stderr}");
+    for expected in [
+        "flaw",
+        "parse-reserved-name",
+        "`return` is a reserved keyword",
+        "compute() value Int, return Int: 0",
+        "main.gin:1:22",
+        "choose a different name",
+    ] {
+        assert!(stderr.contains(expected), "missing {expected:?}: {stderr}");
+    }
 }

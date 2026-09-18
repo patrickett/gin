@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-pub mod gin_core;
+pub mod semantic_fixtures;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -106,4 +106,16 @@ impl Drop for TempPackage {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+pub fn machine_backend_source(target: &str) -> &'static str {
+    if target.starts_with("x86_64") {
+        include_str!("machine/x86.gin")
+    } else {
+        include_str!("machine/arm.gin")
+    }
+}
+
+pub fn with_runtime(source: &str) -> String {
+    format!("{source}\n{}", include_str!("runtime.gin"))
 }

@@ -179,13 +179,15 @@ fn when_then_across_lines() {
 
 #[test]
 fn method_chaining_dot_at_start_of_line() {
-    let src = "some.Tag\n    .some_method(42)\n";
+    let src = "value: some.Tag\n    .some_method(42)\nafter: 1\n";
     let out = src.parse_source_full();
     let errors = count_errors(&out);
     assert_eq!(
         errors, 0,
         "method chaining attempt should not produce parse errors, got {errors} errors"
     );
+    assert!(has_def(&out, "value"));
+    assert!(has_def(&out, "after"));
 }
 
 #[test]

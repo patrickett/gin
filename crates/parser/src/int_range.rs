@@ -1,4 +1,4 @@
-//! Shared `N...M` literal parsing for declare and type-position `in`.
+//! Shared `N to M` literal parsing for declare and type-position `in`.
 
 use ast::{Expr, InRangeBounds, Literal, Range, Spanned, TypeExpr, Typed};
 use i256::I256;
@@ -20,21 +20,21 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
     pub fn parse_int_range(&mut self) -> Option<(I256, I256)> {
         let start = self.parse_signed_int()?;
-        if !self.eat(&Token::Infer) {
+        if !self.eat(&Token::To) {
             return None;
         }
         let end = self.parse_signed_int()?;
         Some((start, end))
     }
 
-    /// Parse `in N...M` or `in Tag` after `in` was consumed.
+    /// Parse `in N to M` or `in Tag` after `in` was consumed.
     pub fn parse_in_range_type(&mut self) -> Option<TypeExpr> {
         let span = self.current_span();
         if let Some(min) = self.parse_signed_int() {
-            if !self.eat(&Token::Infer) {
+            if !self.eat(&Token::To) {
                 self.error(
                     "parse-expected-type-or-range",
-                    "expected `...` after integer range start",
+                    "expected `to` after integer range start",
                     span,
                 );
                 return None;
@@ -48,7 +48,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             } else {
                 self.error(
                     "parse-expected-type-or-range",
-                    "expected integer or compile-time name after `...`",
+                    "expected integer or compile-time name after `to`",
                     span,
                 );
                 return None;
@@ -82,10 +82,10 @@ impl<'src, 't> TokenCursor<'src, 't> {
     pub fn parse_in_range_expr(&mut self) -> Option<Spanned<Expr>> {
         let span = self.current_span();
         let bounds = if let Some(min) = self.parse_signed_int() {
-            if !self.eat(&Token::Infer) {
+            if !self.eat(&Token::To) {
                 self.error(
                     "parse-expected-type-or-range",
-                    "expected `...` after integer range start",
+                    "expected `to` after integer range start",
                     span,
                 );
                 return None;
@@ -99,7 +99,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             } else {
                 self.error(
                     "parse-expected-type-or-range",
-                    "expected integer or compile-time name after `...`",
+                    "expected integer or compile-time name after `to`",
                     span,
                 );
                 return None;

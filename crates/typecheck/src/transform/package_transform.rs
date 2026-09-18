@@ -1,12 +1,13 @@
 use crate::compile_time_trait::CompileTimeTraitRegistry;
 use crate::{FileId, typed::TypedFileAst};
 use ast::FileAst;
+use ast_format::type_expr::ExprFormatExt;
 use flask::CompileTarget;
 use interface::{
     DeclarationRef, Fingerprint, InterfaceDeclaration, InterfacePublication, PackageInstanceId,
     PublicInterface,
 };
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
 use super::{PackageTransformOptions, TransformCtx, transform_package};
@@ -17,6 +18,7 @@ pub struct PackageTransformArtifacts {
     pub trait_registry: Option<CompileTimeTraitRegistry>,
     pub public_interface: PublicInterface,
     pub interface_publication: InterfacePublication,
+    pub implementation_fingerprint: Fingerprint,
 }
 
 pub fn transform_package_with_shared_context(
@@ -128,8 +130,8 @@ pub fn transform_package_with_shared_context_and_package(
         }
     }
 
-    let mut declarations = Vec::new();
-    let mut seen_declaration_keys = HashSet::new();
+    let mut surfaces: BTreeMap<DeclarationRef, BTreeSet<Vec<u8>>> = BTreeMap::new();
+    let mut resolution_surfaces = BTreeSet::new();
     for typed in &typed_asts {
         let module_path = typed
             .semantic_origin
@@ -144,6 +146,44 @@ pub fn transform_package_with_shared_context_and_package(
             })
             .unwrap_or_else(|| "".to_string());
 
+        for (id, tag) in &typed.tags {
+            if typed.private_tags.contains(id) {
+                continue;
+            }
+            let declaration_path = format!("{module_path}::type::{}", id.0.as_str());
+            let key = format!("subject:{module_path}:{declaration_path}");
+            {
+                let mut bytes = Vec::new();
+                encode_string(&mut bytes, &key);
+                encode_string(&mut bytes, &tag.declaration_text);
+                encode_ty(&mut bytes, &tag.resolved_ty);
+                for provided in &tag.provided_traits {
+                    encode_string(&mut bytes, provided.trait_name.as_str());
+                    for (name, value) in &provided.fields {
+                        encode_string(&mut bytes, name.as_str());
+                        encode_string(&mut bytes, &value.value.format_surface());
+                    }
+                }
+                if let Some(bits) = &tag.attributes.bits {
+                    encode_string(&mut bytes, &bits.value.format_surface());
+                }
+                encode_string(
+                    &mut bytes,
+                    &format!("{:?}", tag.attributes.reflection_roles),
+                );
+                if !tag.provided_traits.is_empty() {
+                    resolution_surfaces.insert(bytes.clone());
+                }
+                surfaces
+                    .entry(DeclarationRef::Subject {
+                        module_path: module_path.clone(),
+                        declaration_path,
+                    })
+                    .or_default()
+                    .insert(bytes);
+            }
+        }
+
         for (_, bind) in typed
             .defs
             .iter()
@@ -155,16 +195,42 @@ pub fn transform_package_with_shared_context_and_package(
                 module_path: module_path.clone(),
                 declaration_path,
             };
-            if seen_declaration_keys.insert(declaration_key.clone()) {
-                let declaration_bytes = encode_callable_surface(&declaration_key, bind);
-                declarations.push(InterfaceDeclaration {
-                    reference,
-                    fingerprint: Fingerprint::from_bytes(&declaration_bytes),
-                });
+            let bytes = encode_callable_surface(&declaration_key, bind);
+            if bind.infix_symbol.is_some() {
+                resolution_surfaces.insert(bytes.clone());
             }
+            surfaces.entry(reference).or_default().insert(bytes);
         }
     }
 
+    let declarations = surfaces
+        .into_iter()
+        .map(|(reference, candidates)| {
+            let mut bytes = Vec::new();
+            for candidate in candidates {
+                bytes.extend_from_slice(&(candidate.len() as u64).to_le_bytes());
+                bytes.extend(candidate);
+            }
+            InterfaceDeclaration {
+                reference,
+                fingerprint: Fingerprint::from_bytes(&bytes),
+            }
+        })
+        .collect();
+
+    let implementation_fingerprint =
+        implementation_fingerprint(&typed_asts, &options.compile_target);
+    let has_assembly = typed_asts.iter().any(|typed| {
+        typed.exprs.kind.iter().any(|kind| {
+            matches!(
+                kind,
+                crate::TypedExprKind::Asm {
+                    state: crate::assembly::AssemblyState::Checked(_),
+                    ..
+                }
+            )
+        })
+    });
     let target_profiles = target_profiles_for_compile_target(&options.compile_target);
     let subject = PackageInstanceId {
         package: package_ctx.package_instance.name.as_str().to_string(),
@@ -172,7 +238,7 @@ pub fn transform_package_with_shared_context_and_package(
         source: format!("{:?}", package_ctx.package_instance.source),
         instance: package_ctx.package_instance.instance.as_str().to_string(),
     };
-    let public_interface = if target_profiles.is_empty() {
+    let mut public_interface = if target_profiles.is_empty() {
         PublicInterface::from_subject_and_declarations(subject, declarations)
     } else {
         PublicInterface::with_targets_and_realizations(
@@ -183,6 +249,35 @@ pub fn transform_package_with_shared_context_and_package(
             Vec::new(),
         )
     };
+    let mut resolution_bytes = Vec::new();
+    for candidate in resolution_surfaces {
+        resolution_bytes.extend_from_slice(&(candidate.len() as u64).to_le_bytes());
+        resolution_bytes.extend(candidate);
+    }
+    public_interface.resolution_fingerprint = Fingerprint::from_bytes(&resolution_bytes);
+
+    if has_assembly {
+        for realization in &mut public_interface.target_realizations {
+            realization.semantic_surface_fingerprint = Fingerprint::from_domain(
+                b"gin.interface.target-assembly-surface\0",
+                interface::SCHEMA_VERSION,
+                &[
+                    realization.semantic_surface_fingerprint.0.as_slice(),
+                    implementation_fingerprint.0.as_slice(),
+                ]
+                .concat(),
+            );
+            realization.public_closure_fingerprint = Fingerprint::from_domain(
+                b"gin.interface.target-assembly-closure\0",
+                interface::SCHEMA_VERSION,
+                &[
+                    realization.public_closure_fingerprint.0.as_slice(),
+                    implementation_fingerprint.0.as_slice(),
+                ]
+                .concat(),
+            );
+        }
+    }
     let has_fatal_flaws = typed_asts.iter().any(|typed| !typed.all_flaws().is_empty());
     let interface_publication =
         InterfacePublication::resolve(public_interface.clone(), has_fatal_flaws, None);
@@ -193,18 +288,85 @@ pub fn transform_package_with_shared_context_and_package(
         trait_registry,
         public_interface,
         interface_publication,
+        implementation_fingerprint,
     }
 }
 
 fn encode_callable_surface(declaration_key: &str, bind: &crate::typed::TypedBind) -> Vec<u8> {
     let mut bytes = Vec::new();
     encode_string(&mut bytes, declaration_key);
+    encode_string(&mut bytes, &format!("{:?}", bind.param_conventions));
+    encode_string(&mut bytes, &format!("{:?}", bind.param_kinds));
+    encode_string(&mut bytes, &format!("{:?}", bind.call_capability));
+    encode_string(&mut bytes, &format!("{:?}", bind.definition_stage));
+    encode_string(&mut bytes, &format!("{:?}", bind.param_requirements));
+    encode_string(&mut bytes, &format!("{:?}", bind.param_refinements));
+    encode_string(&mut bytes, &format!("{:?}", bind.param_groups));
+    encode_string(
+        &mut bytes,
+        bind.infix_symbol.as_ref().map(|s| s.as_str()).unwrap_or(""),
+    );
     encode_u32(&mut bytes, bind.params.len());
-    for (_, ty) in &bind.params {
+    for (name, ty) in &bind.params {
+        encode_string(&mut bytes, name.as_str());
         encode_ty(&mut bytes, ty);
+    }
+    let signature = crate::typed::TypedCallableSignature::from(bind);
+    encode_u32(&mut bytes, signature.results.len());
+    for result in &signature.results {
+        if let Some(name) = result.name {
+            encode_string(&mut bytes, name.as_str());
+        } else {
+            encode_string(&mut bytes, "");
+        }
+        encode_ty(&mut bytes, &result.ty);
+    }
+    encode_u32(&mut bytes, bind.result_groups.len());
+    for group in &bind.result_groups {
+        let path = group
+            .and_then(|group| bind.groups.get(group.0 as usize))
+            .and_then(|group| group.path.as_ref())
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        encode_string(&mut bytes, &path);
     }
     encode_ty(&mut bytes, &bind.return_type);
     bytes
+}
+
+fn implementation_fingerprint(typed_asts: &[TypedFileAst], target: &CompileTarget) -> Fingerprint {
+    let mut entries = typed_asts
+        .iter()
+        .flat_map(|typed| {
+            typed.exprs.kind.iter().filter_map(|kind| {
+                let crate::TypedExprKind::Asm {
+                    operands, state, ..
+                } = kind
+                else {
+                    return None;
+                };
+                let crate::assembly::AssemblyState::Checked(assembly) = state else {
+                    return None;
+                };
+                let names = operands
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                Some(format!("{}\0{}\0", assembly.canonical_form(), names))
+            })
+        })
+        .collect::<Vec<_>>();
+    entries.sort();
+    let mut bytes = format!("target={target:?}\0").into_bytes();
+    for entry in entries {
+        encode_string(&mut bytes, &entry);
+    }
+    Fingerprint::from_domain(
+        b"gin.implementation.assembly\0",
+        interface::SCHEMA_VERSION,
+        &bytes,
+    )
 }
 
 fn encode_ty(bytes: &mut Vec<u8>, ty: &ast::Ty) {
@@ -257,12 +419,15 @@ fn ty_contains_private_identity(
         ast::Ty::Record { fields, .. } => fields
             .iter()
             .any(|(_, field)| ty_contains_private_identity(field, private_names, erasable_aliases)),
-        ast::Ty::Tuple(fields) => fields
+        ast::Ty::ResultRow(fields) => fields
             .iter()
-            .any(|field| ty_contains_private_identity(field, private_names, erasable_aliases)),
+            .any(|field| ty_contains_private_identity(&field.ty, private_names, erasable_aliases)),
         ast::Ty::Array { elem, .. } => {
             ty_contains_private_identity(elem, private_names, erasable_aliases)
         }
+        ast::Ty::UnresolvedSequence { element, .. } => element.as_deref().is_some_and(|element| {
+            ty_contains_private_identity(element, private_names, erasable_aliases)
+        }),
         ast::Ty::Ref { inner, .. }
         | ast::Ty::Ptr { inner }
         | ast::Ty::Address { pointee: inner, .. } => {

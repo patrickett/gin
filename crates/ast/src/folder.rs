@@ -1,5 +1,6 @@
 use std::ops::ControlFlow;
 
+use crate::expr::SequenceLiteral;
 use crate::{
     Binary, Bind, BindValue, Condition, Expr, FileAst, FnCall, ForInLoop, FormatPart, FormatString,
     IfExpr, Loop, Range, Return, SpanId, TagCall, WhenArm, WhenExpr, WhileLoop,
@@ -25,18 +26,28 @@ macro_rules! walk_expr_body {
                 }
                 Continue(())
             }
-            Expr::TupleLit(elems) | Expr::List(elems) => {
+            Expr::ResultValues(elems) | Expr::ArrayLit(elems) | Expr::List(elems) => {
                 for e in elems {
                     $v.visit_expr(e)?;
                 }
                 Continue(())
             }
-            Expr::TupleAlloc { init, size } => {
+            Expr::SequenceLiteral(SequenceLiteral::Elements(elems)) => {
+                for e in elems {
+                    $v.visit_expr(e)?;
+                }
+                Continue(())
+            }
+            Expr::SequenceLiteral(SequenceLiteral::Repeat { seed, count }) => {
+                $v.visit_expr(seed)?;
+                $v.visit_expr(count)
+            }
+            Expr::FixedArrayAlloc { init, size } => {
                 $v.visit_expr(init)?;
                 $v.visit_expr(size)
             }
-            Expr::TupleGet { base, .. } | Expr::RecordGet { base, .. } => $v.visit_expr(base),
-            Expr::TupleSet { base, value, .. } | Expr::RecordSet { base, value, .. } => {
+            Expr::AggregateGet { base, .. } | Expr::RecordGet { base, .. } => $v.visit_expr(base),
+            Expr::AggregateSet { base, value, .. } | Expr::RecordSet { base, value, .. } => {
                 $v.visit_expr(base)?;
                 $v.visit_expr(value)
             }
@@ -53,15 +64,17 @@ macro_rules! walk_expr_body {
                 $v.visit_expr(value)
             }
             Expr::Cast { expr: e, .. } => $v.visit_expr(e),
-            Expr::TakePtr(e)
-            | Expr::Ref { inner: e, .. }
-            | Expr::ConsumeArg(e)
-            | Expr::Eat(e)
-            | Expr::Deref(e)
-            | Expr::Negate(e) => $v.visit_expr(e),
-            Expr::Lit(_) | Expr::SelfRef | Expr::AnonymousTag(..) | Expr::TargetQuery { .. } => {
-                Continue(())
+            Expr::Asm { .. } => Continue(()),
+            Expr::Register(e) | Expr::TakePtr(e) | Expr::Ref { inner: e, .. } | Expr::Deref(e) | Expr::Negate(e) => {
+                $v.visit_expr(e)
             }
+            Expr::Lit(_)
+            | Expr::SelfRef
+            | Expr::AnonymousTag(..)
+            | Expr::TargetQuery { .. }
+            | Expr::Target
+            | Expr::Register(_)
+            | Expr::Invalid(_) => Continue(()),
         }
     };
 }
@@ -86,11 +99,11 @@ macro_rules! walk_expr_child_nodes {
                     for expr in exprs {
                         child!(expr);
                     }
-                    if let Some(expr) = borrow!(ret.value) {
+                    for expr in borrow!(ret.values) {
                         child!(expr);
                     }
                 }
-                BindValue::Extern | BindValue::Unassigned => {}
+                BindValue::Unassigned => {}
             },
             Expr::When(when) => {
                 if let Some(subject) = borrow!(when.subject) {
@@ -113,7 +126,7 @@ macro_rules! walk_expr_child_nodes {
                 for expr in borrow!(if_expr.body) {
                     child!(expr);
                 }
-                if let Some(expr) = borrow!(if_expr.ret.value) {
+                for expr in borrow!(if_expr.ret.values) {
                     child!(expr);
                 }
             }
@@ -153,26 +166,33 @@ macro_rules! walk_expr_child_nodes {
                     child!(expr);
                 }
             }
-            Expr::TupleLit(exprs) | Expr::List(exprs) => {
+            Expr::ResultValues(exprs) | Expr::ArrayLit(exprs) | Expr::List(exprs) => {
                 for expr in exprs {
                     child!(expr);
                 }
             }
-            Expr::TupleAlloc { init, size } => {
+            Expr::SequenceLiteral(SequenceLiteral::Elements(exprs)) => {
+                for expr in exprs {
+                    child!(expr);
+                }
+            }
+            Expr::SequenceLiteral(SequenceLiteral::Repeat { seed, count }) => {
+                child!(seed);
+                child!(count);
+            }
+            Expr::FixedArrayAlloc { init, size } => {
                 child!(init);
                 child!(size);
             }
-            Expr::TupleGet { base, .. }
+            Expr::AggregateGet { base, .. }
             | Expr::RecordGet { base, .. }
             | Expr::Cast { expr: base, .. }
             | Expr::TakePtr(base)
             | Expr::Ref { inner: base, .. }
-            | Expr::ConsumeArg(base)
-            | Expr::Eat(base)
             | Expr::Deref(base)
             | Expr::Negate(base)
             | Expr::Destructure { value: base, .. } => child!(base),
-            Expr::TupleSet { base, value, .. } | Expr::RecordSet { base, value, .. } => {
+            Expr::AggregateSet { base, value, .. } | Expr::RecordSet { base, value, .. } => {
                 child!(base);
                 child!(value);
             }
@@ -187,7 +207,14 @@ macro_rules! walk_expr_child_nodes {
                 child!(index);
                 child!(value);
             }
-            Expr::Lit(_) | Expr::SelfRef | Expr::AnonymousTag(_) | Expr::TargetQuery { .. } => {}
+            Expr::Asm { .. }
+            | Expr::Lit(_)
+            | Expr::SelfRef
+            | Expr::AnonymousTag(_)
+            | Expr::TargetQuery { .. }
+            | Expr::Target
+            | Expr::Register(_)
+            | Expr::Invalid(_) => {}
         }
         Continue(())
     }};
@@ -197,6 +224,17 @@ pub fn walk_typed_expr_children<'a>(
     expr: &'a Expr,
     visit: &mut impl FnMut(&'a crate::expr::Typed<Expr>) -> ControlFlow<()>,
 ) -> ControlFlow<()> {
+    if let Expr::Asm {
+        specification,
+        operands,
+    } = expr
+    {
+        visit(specification)?;
+        for operand in operands {
+            visit(&operand.value)?;
+        }
+        return Continue(());
+    }
     macro_rules! borrow {
         ($value:expr) => {
             &$value
@@ -219,6 +257,17 @@ pub fn walk_typed_expr_children_mut(
     expr: &mut Expr,
     visit: &mut impl FnMut(&mut crate::expr::Typed<Expr>) -> ControlFlow<()>,
 ) -> ControlFlow<()> {
+    if let Expr::Asm {
+        specification,
+        operands,
+    } = expr
+    {
+        visit(specification)?;
+        for operand in operands {
+            visit(&mut operand.value)?;
+        }
+        return Continue(());
+    }
     macro_rules! borrow {
         ($value:expr) => {
             &mut $value
@@ -321,11 +370,34 @@ walk_fn!(@s walk_bind_value, walk_bind_value_mut, v, val, BindValue, {
             for e in exprs { v.visit_expr(e)?; }
             v.visit_return(ret)
         }
-        BindValue::Extern | BindValue::Unassigned => Continue(()),
+        BindValue::Unassigned => Continue(()),
     }
 });
 
-walk_fn!(@s walk_expr, walk_expr_mut, v, expr, Expr, { walk_expr_body!(v, expr) });
+walk_fn!(@d walk_expr, walk_expr_mut, v, expr, Expr, {
+    if let Expr::Asm { specification, operands } = expr {
+        v.visit_expr(&specification.value)?;
+        for operand in operands {
+            v.visit_expr(&operand.value.value)?;
+        }
+        Continue(())
+    } else {
+        walk_expr_body!(v, expr)
+    }
+}, {
+    if let Expr::Asm {
+        specification,
+        operands,
+    } = expr
+    {
+        v.visit_expr(&mut specification.value)?;
+        for operand in operands {
+            v.visit_expr(&mut operand.value.value)?;
+        }
+        return Continue(());
+    }
+    walk_expr_body!(v, expr)
+});
 
 walk_fn!(@d walk_fn_call, walk_fn_call_mut, v, call, FnCall, {
     if let Some(args) = &call.args { for arg in args { v.visit_expr(arg)?; } }
@@ -442,7 +514,7 @@ walk_fn!(@d walk_format_string, walk_format_string_mut, v, fs, FormatString,
 walk_fn!(@s walk_format_part, walk_format_part_mut, v, p, FormatPart, {
     match p {
         FormatPart::Expr(e, _) => v.visit_expr(e),
-        FormatPart::Text(_) => Continue(()),
+        FormatPart::Text(_, _) => Continue(()),
     }
 });
 
@@ -452,8 +524,22 @@ walk_fn!(@d walk_range, walk_range_mut, v, r, Range,
 );
 
 walk_fn!(@d walk_return, walk_return_mut, v, r, Return,
-    { if let Some(e) = &r.value { v.visit_expr(e)?; } Continue(()) },
-    { if let Some(e) = &mut r.value { v.visit_expr(e)?; } Continue(()) }
+    {
+        if r.values.is_empty() {
+            for e in &r.values { v.visit_expr(e)?; }
+        } else {
+            for e in &r.values { v.visit_expr(e)?; }
+        }
+        Continue(())
+    },
+    {
+        if r.values.is_empty() {
+            for e in &mut r.values { v.visit_expr(e)?; }
+        } else {
+            for e in &mut r.values { v.visit_expr(e)?; }
+        }
+        Continue(())
+    }
 );
 
 macro_rules! v {

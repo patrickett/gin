@@ -25,12 +25,12 @@ fn body_expr_id(typed: &TypedFileAst, def_name: &str) -> Option<ExprId> {
                 exprs.last().copied()
             }
         }
-        BindBody::Extern => None,
+        BindBody::Unlowered => None,
     }
 }
 
-/// Prepend `Int is in 1...400\n\n` for integer literal support.
-const INT_TAG: &str = "Int is in 1...400\n\n";
+/// Prepend `Int is in 1 to 400\n\n` for integer literal support.
+const INT_TAG: &str = "Int is in 1 to 400\n\n";
 
 // The `p` expression resolves to the correct Record type, and `p.x` resolves
 // to the correct field type. However, cascading through binary operators uses
@@ -128,7 +128,7 @@ fn field_write_with_expression() {
         "{INT_TAG}
 Coord has x Int, y Int, z Int
 p: Coord(x: 1, y: 2, z: 3)
-#operator(Add)
+#infix('+')
 #inline
 plus(left Int, right Int) Int: left + right
 p.x:: p.x + 1

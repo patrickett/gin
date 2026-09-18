@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use ast::{
-    BundleExportImport, ImportSource, LocalBundleImport, LocalMemberImport, ModPath, ModuleImport,
-    Spanned, SymbolAlias,
+    BundleExportImport, ImportSource, LocalBundleImport, ModPath, ModuleImport, Spanned,
+    SymbolAlias,
 };
 use diagnostic::{Diagnostic, SpanId, SpanTable};
 
@@ -154,7 +154,16 @@ pub fn resolve_imports_with_graph(
     dependencies: &HashMap<String, PathBuf>,
     cache: ParsedModuleCache,
 ) -> ResolveImportsWithGraph {
-    let (graph, cache) = build_import_closure_with_cache(entry_files, dependencies, cache);
+    resolve_imports_with_home(entry_files, dependencies, cache, None)
+}
+
+pub fn resolve_imports_with_home(
+    entry_files: Vec<ParsedFile>,
+    dependencies: &HashMap<String, PathBuf>,
+    cache: ParsedModuleCache,
+    home: Option<&flask::GinHome>,
+) -> ResolveImportsWithGraph {
+    let (graph, cache) = build_import_closure_with_cache(entry_files, dependencies, cache, home);
     let import_graph = ImportDependencyGraph::from_resolve_graph(&graph);
     let package_graph = graph.packages.clone();
     let files = resolve(graph, &mut |path| cache.files.get(path).cloned());
@@ -287,6 +296,15 @@ pub(crate) fn resolve_module_import(
                 symptoms,
             },
         ),
+        ImportSource::LocalFile(path, _) => resolve_local_file_import(
+            path,
+            module_import.alias.as_ref().map(|a| a.as_ref().as_str()),
+            base_dir,
+            module_loader,
+            spans,
+            span_id,
+            symptoms,
+        ),
         ImportSource::LocalBundle(b) => {
             if b.local_path.is_some() {
                 resolve_local_bundle_import(
@@ -323,9 +341,86 @@ pub(crate) fn resolve_module_import(
         ImportSource::CurrentModule { member } => {
             resolve_current_module_import(member, base_dir, module_loader, spans, symptoms)
         }
-        ImportSource::LocalMember(m) => {
-            resolve_local_member_import(m, base_dir, module_loader, spans, symptoms)
+    }
+}
+
+fn resolve_local_file_import(
+    path: &Path,
+    alias: Option<&str>,
+    base_dir: &Path,
+    loader: &mut ModuleLoader,
+    spans: &SpanTable,
+    span_id: SpanId,
+    symptoms: &mut Vec<Diagnostic>,
+) -> ResolvedModule {
+    let Some(alias) = alias else {
+        return ResolvedModule {
+            files: vec![],
+            symbol_aliases: vec![],
+        };
+    };
+    let Some(pkg_root) = crate::import_query::find_package_root(base_dir) else {
+        return ResolvedModule {
+            files: vec![],
+            symbol_aliases: vec![],
+        };
+    };
+    let candidate = base_dir.join(path);
+    let full = match candidate.canonicalize() {
+        Ok(full)
+            if full.starts_with(&pkg_root)
+                && full.is_file()
+                && full.extension().is_some_and(|e| e == "gin") =>
+        {
+            full
         }
+        Ok(full) => {
+            symptoms.push(
+                Diagnostic::new(
+                    "use-local-file-not-found",
+                    format!("local file import not found: `{}`", full.display()),
+                )
+                .at_span(spans.get(span_id)),
+            );
+            return ResolvedModule {
+                files: vec![],
+                symbol_aliases: vec![],
+            };
+        }
+        Err(_) => {
+            symptoms.push(
+                Diagnostic::new(
+                    "use-local-file-not-found",
+                    format!("local file import not found: `{}`", path.display()),
+                )
+                .with_help("check the path relative to the importing file")
+                .at_span(spans.get(span_id)),
+            );
+            return ResolvedModule {
+                files: vec![],
+                symbol_aliases: vec![],
+            };
+        }
+    };
+    if loader.parsed_file(&full).is_none() {
+        loader.load_containing_module(&full);
+    }
+    if loader.parsed_file(&full).is_none() {
+        symptoms.push(
+            Diagnostic::new(
+                "use-local-file-not-found",
+                format!("local file import not found: `{}`", full.display()),
+            )
+            .at_span(spans.get(span_id)),
+        );
+        return ResolvedModule {
+            files: vec![],
+            symbol_aliases: vec![],
+        };
+    }
+    ResolvedModule {
+        files: vec![(full, alias.to_string())],
+        symbol_aliases: vec![],
     }
 }
 
@@ -411,7 +506,7 @@ fn flat_member_symbol_alias(qual_prefix: &str, member: &BundleExportImport) -> S
     }
 }
 
-/// Resolve one `use dep.(folder.Symbol, …)` entry against `module_dir`.
+/// Resolve one `use dep folder.Symbol, …` entry against `module_dir`.
 fn resolve_bundle_member_at(
     module_loader: &mut ModuleLoader,
     module_dir: &Path,
@@ -571,64 +666,6 @@ fn resolve_local_folder_module(
     }
 }
 
-fn resolve_local_member_import(
-    m: &LocalMemberImport,
-    base_dir: &Path,
-    module_loader: &mut ModuleLoader,
-    spans: &SpanTable,
-    symptoms: &mut Vec<Diagnostic>,
-) -> ResolvedModule {
-    let local_path = match &m.local_path {
-        Some(p) => p,
-        None => {
-            return ResolvedModule {
-                files: vec![],
-                symbol_aliases: vec![],
-            };
-        }
-    };
-
-    let Some(module_dir) =
-        resolve_local_folder_module(base_dir, local_path, spans, m.span, symptoms)
-    else {
-        return ResolvedModule {
-            files: vec![],
-            symbol_aliases: vec![],
-        };
-    };
-
-    let symbol = m.member.export.as_str();
-    let Some(member_file) = module_loader.find_public_def(&module_dir, symbol) else {
-        symptoms.push(
-            Diagnostic::new(
-                "use-not-exported",
-                format!(
-                    "`{}` is not exported from `{}`",
-                    symbol,
-                    module_dir.display()
-                ),
-            )
-            .with_help(format!(
-                "`{symbol}` is not exported from `{}`",
-                module_dir.display()
-            ))
-            .with_arg("symbol", symbol.to_string())
-            .with_arg("module", module_dir.display().to_string())
-            .at_span(spans.get(m.member.span)),
-        );
-        return ResolvedModule {
-            files: vec![],
-            symbol_aliases: vec![],
-        };
-    };
-
-    let qual = path_to_qual_prefix(local_path);
-    ResolvedModule {
-        files: vec![(member_file, qual.clone())],
-        symbol_aliases: vec![flat_member_symbol_alias(&qual, &m.member)],
-    }
-}
-
 fn resolve_local_path_import(
     path: &Path,
     alias: Option<&str>,
@@ -779,7 +816,7 @@ fn check_dep_local_collision(
     }
 }
 
-/// Resolve a local-path bundle import like `use 'arch'.(Constraint, Register, X0)`.
+/// Resolve a local-path bundle import like `use 'arch' Constraint, Register, X0`.
 /// Validates that each destructured member is a public symbol in the target module.
 fn resolve_local_bundle_import(
     _module_import: &ModuleImport,
@@ -977,170 +1014,48 @@ fn resolve_package_like_import(
         };
     }
 
-    if mp.segments.is_empty() {
-        let eff_root = module_import
-            .alias
-            .as_ref()
-            .map(|a| a.to_string())
-            .unwrap_or_else(|| root_name.to_string());
-        return ResolvedModule {
-            files: resolve_folder_module_files(
-                module_loader,
-                dep_dir,
-                &eff_root,
-                env.spans,
-                env.span_id,
-                env.symptoms,
-            ),
-            symbol_aliases: Vec::new(),
-        };
-    }
-
-    let seg_strs: Vec<&str> = mp.segments.iter().map(|s| s.as_str()).collect();
-    let (module_segs, trailing_member) = split_dep_path_segments(dep_dir, &seg_strs);
-
-    if let Some(member_name) = trailing_member {
-        let module_dir = if module_segs.is_empty() {
-            dep_dir.clone()
-        } else {
-            let refs: Vec<&str> = module_segs.iter().map(|s| s.as_str()).collect();
-            match resolve_logical_module_dir(dep_dir, &refs) {
-                Some(d) => d,
-                None => {
-                    env.symptoms.push(
-                        Diagnostic::new(
-                            "use-nested-package-not-found",
-                            format!(
-                                "no nested package `{}/{}` (expected a folder module with flask.jsonc)",
-                                dep_dir.display(),
-                                member_name,
-                            ),
-                        )
-                        .with_help(
-                            "create `segment/flask.jsonc` under the parent package, or fix the import path",
-                        )
-                        .with_arg("parent", dep_dir.display().to_string())
-                        .with_arg("segment", member_name.clone())
-                        .at_span(env.spans.get(env.span_id)),
-                    );
-                    return ResolvedModule {
-                        files: Vec::new(),
-                        symbol_aliases: Vec::new(),
-                    };
-                }
-            }
-        };
-
-        let member = BundleExportImport {
-            export: internment::Intern::new(member_name.clone()),
-            alias: module_import.alias,
-            span: mp.span_id(),
-        };
-
-        let Some(member_file) = module_loader.find_public_def(&module_dir, &member_name) else {
-            env.symptoms.push(
-                Diagnostic::new(
-                    "use-not-exported",
-                    format!(
-                        "`{}` is not exported from `{}`",
-                        member_name,
-                        module_dir.display()
-                    ),
-                )
-                .with_help(format!(
-                    "`{member_name}` is not exported from `{}`",
-                    module_dir.display()
-                ))
-                .with_arg("symbol", member_name.clone())
-                .with_arg("module", module_dir.display().to_string())
-                .at_span(env.spans.get(mp.span_id())),
-            );
-            return ResolvedModule {
-                files: Vec::new(),
-                symbol_aliases: Vec::new(),
-            };
-        };
-
-        let mut qual_parts = vec![root_name.to_string()];
-        qual_parts.extend(module_segs);
-        let qual = qual_parts.join(".");
-        return ResolvedModule {
-            files: vec![(member_file, qual.clone())],
-            symbol_aliases: vec![flat_member_symbol_alias(&qual, &member)],
-        };
-    }
-
-    let refs: Vec<&str> = module_segs.iter().map(|s| s.as_str()).collect();
-    let Some(module_dir) = resolve_logical_module_dir(dep_dir, &refs) else {
-        env.symptoms.push(
-            Diagnostic::new(
-                "use-nested-package-not-found",
-                format!(
-                    "no nested package `{}/{}` (expected a folder module with flask.jsonc)",
-                    dep_dir.display(),
-                    module_segs
-                        .last()
-                        .cloned()
-                        .unwrap_or_else(|| "?".to_string()),
-                ),
-            )
-            .with_help(
-                "create `segment/flask.jsonc` under the parent package, or fix the import path",
-            )
-            .with_arg("parent", dep_dir.display().to_string())
-            .with_arg(
-                "segment",
-                module_segs
-                    .last()
-                    .cloned()
-                    .unwrap_or_else(|| "?".to_string()),
-            )
-            .at_span(env.spans.get(env.span_id)),
-        );
+    let segments: Vec<&str> = mp.segments.iter().map(|s| s.as_str()).collect();
+    let Some(module_dir) = resolve_logical_module_dir(dep_dir, &segments) else {
+        let path = std::iter::once(root_name)
+            .chain(segments.iter().copied())
+            .collect::<Vec<_>>()
+            .join(".");
+        let mut diagnostic = Diagnostic::new(
+            "use-module-not-found",
+            format!("`{path}` does not name a module"),
+        )
+        .with_arg("module", &path);
+        if let Some((last, parent)) = segments.split_last() {
+            let parent = std::iter::once(root_name)
+                .chain(parent.iter().copied())
+                .collect::<Vec<_>>()
+                .join(".");
+            diagnostic =
+                diagnostic.with_help(format!("to select an export, write `use {parent} {last}`"));
+        }
+        env.symptoms
+            .push(diagnostic.at_span(env.spans.get(mp.span_id())));
         return ResolvedModule {
             files: Vec::new(),
             symbol_aliases: Vec::new(),
         };
     };
-
-    let eff = module_import
+    let qualifier = std::iter::once(root_name)
+        .chain(segments.iter().copied())
+        .collect::<Vec<_>>()
+        .join(".");
+    let alias = module_import
         .alias
-        .as_ref()
-        .map(|a| a.to_string())
-        .unwrap_or_else(|| {
-            module_segs
-                .last()
-                .cloned()
-                .unwrap_or_else(|| root_name.to_string())
-        });
-    let qual = if module_import.alias.is_some() {
-        eff
-    } else {
-        let mut parts = vec![root_name.to_string()];
-        parts.extend(module_segs.clone());
-        parts.join(".")
-    };
-
-    let symbol_aliases = if module_import.alias.is_none() {
-        let alias = internment::Intern::new(
-            module_segs
-                .last()
-                .cloned()
-                .unwrap_or_else(|| root_name.to_string()),
-        );
-        vec![SymbolAlias {
-            alias,
-            target: Spanned::new(ModPath::new(mp.root, mp.segments.clone()), mp.span_id()),
-        }]
-    } else {
-        Vec::new()
-    };
-
+        .unwrap_or_else(|| mp.segments.last().copied().unwrap_or(mp.root));
+    let symbol_aliases = vec![SymbolAlias {
+        alias,
+        target: Spanned::new(mp.value.clone(), mp.span_id()),
+    }];
     ResolvedModule {
         files: resolve_folder_module_files(
             module_loader,
             &module_dir,
-            &qual,
+            &qualifier,
             env.spans,
             env.span_id,
             env.symptoms,
@@ -1179,5 +1094,172 @@ fn resolve_folder_module_files(
         .collect()
 }
 #[cfg(test)]
-#[path = "../tests/package_resolver_tests.rs"]
-mod tests;
+mod tests {
+
+    use super::*;
+
+    #[test]
+    fn source_first_imports_resolve_folder_exports_and_aliases() {
+        let dir = std::env::temp_dir().join(format!("gin-source-import-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("math")).unwrap();
+        std::fs::write(
+            dir.join("flask.jsonc"),
+            r#"{"name":"sample","version":"0.0.0","authors":[]}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("math/ops.gin"), "add := 1\nsub := 2\n").unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let path = dir.join("main.gin");
+        for import in [
+            "use './math' add, sub as subtract",
+            "use './math'\n    add\n    sub as subtract",
+        ] {
+            std::fs::write(&path, format!("{import}\n\nmain: subtract\n")).unwrap();
+            let files = resolve_imports(vec![ParsedFile::read(&path).unwrap()], &HashMap::new());
+            for file in &files {
+                assert!(
+                    file.output.symptoms.is_empty(),
+                    "{:?}",
+                    file.output.symptoms
+                );
+            }
+            assert_eq!(files.len(), 2);
+            let entry = files.iter().find(|file| file.path == path).unwrap();
+            let main = entry
+                .output
+                .ast
+                .defs
+                .values()
+                .find(|bind| bind.name.as_str() == "main")
+                .unwrap();
+            let ast::BindValue::Expr(expr) = &main.value else {
+                panic!("expected main expression");
+            };
+            let ast::Expr::FnCall(call) = &expr.value else {
+                panic!("expected imported reference");
+            };
+            assert_eq!(call.path.segments.last().unwrap().as_str(), "sub");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod namespace_tests {
+    use super::*;
+    use test_fixtures::{unique_temp_dir, write_file};
+
+    #[test]
+    fn module_names_and_aliases_are_local_to_each_importing_file() {
+        let dir = unique_temp_dir("module_namespaces");
+        write_file(
+            &dir.join("flask.jsonc"),
+            r#"{"name":"app","version":"0","authors":[],"dependencies":{"package":{"path":"dep"}}}"#,
+        );
+        write_file(
+            &dir.join("dep/flask.jsonc"),
+            r#"{"name":"library","version":"0","authors":[]}"#,
+        );
+        write_file(&dir.join("dep/math/ops.gin"), "add: 42\n");
+        let dir = dir.canonicalize().unwrap();
+        let cases = [
+            (
+                "main.gin",
+                "use package.math\nmain: math.add\n",
+                "main",
+                "package",
+            ),
+            (
+                "alias.gin",
+                "use package.math as numbers\naliased: numbers.add\n",
+                "aliased",
+                "package",
+            ),
+            (
+                "selected.gin",
+                "use package.math add\nselected: add\n",
+                "selected",
+                "package",
+            ),
+            ("unbound.gin", "unbound: math.add\n", "unbound", "math"),
+            (
+                "shadowed.gin",
+                "use package.math\nshadowed(math Record): math.add\n",
+                "shadowed",
+                "math",
+            ),
+        ];
+        let entries = cases
+            .iter()
+            .map(|(name, source, _, _)| {
+                let path = dir.join(name);
+                write_file(&path, source);
+                ParsedFile::read(&path).unwrap()
+            })
+            .collect();
+        let files = resolve_imports(entries, &HashMap::new());
+        for (name, _, binding, root) in cases {
+            let file = files
+                .iter()
+                .find(|file| file.path == dir.join(name))
+                .unwrap();
+            assert!(
+                file.output.symptoms.is_empty(),
+                "{:?}",
+                file.output.symptoms
+            );
+            let bind = file
+                .output
+                .ast
+                .defs
+                .values()
+                .find(|b| b.name.as_str() == binding)
+                .unwrap();
+            let ast::BindValue::Expr(expr) = &bind.value else {
+                panic!("expected expression");
+            };
+            let value = if root == "math" {
+                let ast::Expr::RecordGet { base, field } = &expr.value else {
+                    panic!("expected untouched access");
+                };
+                assert_eq!(field.as_str(), "add");
+                &base.value
+            } else {
+                &expr.value
+            };
+            let ast::Expr::FnCall(call) = value else {
+                panic!("expected imported call in {name}: {expr:?}");
+            };
+            assert_eq!(call.path.root.as_str(), root);
+            assert_eq!(call.path.segments.len(), if root == "math" { 0 } else { 2 });
+            if root != "math" {
+                assert_eq!(call.path.segments.last().unwrap().as_str(), "add");
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn dotted_export_import_reports_the_explicit_selection_syntax() {
+        let dir = unique_temp_dir("obsolete_export_import");
+        write_file(
+            &dir.join("flask.jsonc"),
+            r#"{"name":"app","version":"0","authors":[],"dependencies":{"package":{"path":"dep"}}}"#,
+        );
+        write_file(
+            &dir.join("dep/flask.jsonc"),
+            r#"{"name":"library","version":"0","authors":[]}"#,
+        );
+        write_file(&dir.join("dep/math/ops.gin"), "add: 42\n");
+        write_file(&dir.join("main.gin"), "use package.math.add\nmain: 0\n");
+        let path = dir.join("main.gin").canonicalize().unwrap();
+        let files = resolve_imports(vec![ParsedFile::read(&path).unwrap()], &HashMap::new());
+        let diagnostic = files
+            .iter()
+            .flat_map(|file| &file.output.symptoms)
+            .find(|d| d.code.slug() == "use-module-not-found")
+            .expect("old dotted selection must fail");
+        assert!(diagnostic.message.contains("package.math.add"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

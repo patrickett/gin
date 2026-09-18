@@ -28,7 +28,7 @@ fn body_expr_id(typed: &TypedFileAst, def_name: &str) -> Option<ExprId> {
                 exprs.last().copied()
             }
         }
-        BindBody::Extern => None,
+        BindBody::Unlowered => None,
     }
 }
 
@@ -197,11 +197,11 @@ fn pure_literal_arithmetic_expression_reaches_const_value() {
     assert_eq!(op.name(), "BitsAdd");
     assert_eq!(args.len(), 2);
     assert!(matches!(
-        typed.exprs.const_value[args[0].as_usize()],
+        typed.exprs.facts.const_facts.const_value[args[0].as_usize()],
         Some(ConstValue::Int(value)) if value == 1.into()
     ));
     assert!(matches!(
-        typed.exprs.const_value[args[1].as_usize()],
+        typed.exprs.facts.const_facts.const_value[args[1].as_usize()],
         Some(ConstValue::Int(value)) if value == 2.into()
     ));
 }
@@ -242,13 +242,13 @@ fn generic_array_return_type_preserves_symbolic_addition_expression() {
         other => panic!("Expected make body expression, got {other:?}"),
     };
     match &body.kind {
-        TypedExprKind::TupleAlloc { size, .. } => {
+        TypedExprKind::FixedArrayAlloc { size, .. } => {
             assert!(
                 !matches!(size, NormalExpr::Value(_)),
-                "expected symbolic tuple size expression, got {size:?}"
+                "expected symbolic sequence size expression, got {size:?}"
             );
         }
-        other => panic!("Expected TupleAlloc in make body, got {other:?}"),
+        other => panic!("Expected FixedArrayAlloc in make body, got {other:?}"),
     }
 
     let main_body = body_expr_id(&typed, "main").expect("main has body");
@@ -269,44 +269,44 @@ fn generic_array_return_type_preserves_symbolic_addition_expression() {
 }
 
 #[test]
-fn tuple_alloc_arithmetic_size_is_not_forced_to_zero() {
+fn fixed_array_alloc_arithmetic_size_is_not_forced_to_zero() {
     let typed = transform_prepared("main: (0; 1 + 2)");
     let main_body = body_expr_id(&typed, "main").expect("main has body");
     let expr = typed.exprs.get(main_body.as_usize()).expect("main body");
 
     match &expr.kind {
-        TypedExprKind::TupleAlloc { size, .. } => {
+        TypedExprKind::FixedArrayAlloc { size, .. } => {
             assert_ne!(*size, NormalExpr::from(0));
         }
-        other => panic!("Expected TupleAlloc, got {other:?}"),
+        other => panic!("Expected FixedArrayAlloc, got {other:?}"),
     }
 }
 
 #[test]
-fn tuple_alloc_subtract_size_is_preserved_as_const_expr() {
+fn fixed_array_alloc_subtract_size_is_preserved_as_const_expr() {
     let typed = transform_prepared("main: (0; 6 - 1)");
     let main_body = body_expr_id(&typed, "main").expect("main has body");
     let expr = typed.exprs.get(main_body.as_usize()).expect("main body");
 
     match &expr.kind {
-        TypedExprKind::TupleAlloc { size, .. } => {
+        TypedExprKind::FixedArrayAlloc { size, .. } => {
             assert!(matches!(size, NormalExpr::Sub(..)));
         }
-        other => panic!("Expected TupleAlloc, got {other:?}"),
+        other => panic!("Expected FixedArrayAlloc, got {other:?}"),
     }
 }
 
 #[test]
-fn tuple_alloc_multiply_size_is_preserved_as_const_expr() {
+fn fixed_array_alloc_multiply_size_is_preserved_as_const_expr() {
     let typed = transform_prepared("main: (0; 2 * 3)");
     let main_body = body_expr_id(&typed, "main").expect("main has body");
     let expr = typed.exprs.get(main_body.as_usize()).expect("main body");
 
     match &expr.kind {
-        TypedExprKind::TupleAlloc { size, .. } => {
+        TypedExprKind::FixedArrayAlloc { size, .. } => {
             assert!(matches!(size, NormalExpr::Mul(..)));
         }
-        other => panic!("Expected TupleAlloc, got {other:?}"),
+        other => panic!("Expected FixedArrayAlloc, got {other:?}"),
     }
 }
 

@@ -4,24 +4,71 @@ mod support;
 use support::*;
 
 #[test]
+fn ranges_use_to_across_surface_forms() {
+    for source in [
+        "Byte is in 0 to 255\n",
+        "Window is -10 to 10\n",
+        "Offset(unit) is in min_offset to max_count\n",
+        "read(value in 0 to max_count): value\n",
+        "values := low to max\n",
+        "check(value) True thus value in low to max: True\n",
+    ] {
+        let out = source.parse_source_full();
+        assert_eq!(count_errors(&out), 0, "{source}: {:?}", out.symptoms);
+        let legacy = source.replace(" to ", "...").parse_source_full();
+        assert!(
+            count_errors(&legacy) > 0,
+            "accepted obsolete range: {source}"
+        );
+    }
+}
+
+#[test]
 fn parse_local_and_package_import_forms() {
-    let out = "use 'core'.(Int, Byte)\nuse self.(Bool)\nuse Bool\n".parse_source_full();
+    let out = "use 'core' Int, Byte\nuse self Bool\nuse Bool\n".parse_source_full();
     assert!(count_errors(&out) <= 1);
     assert_eq!(out.ast.uses.len(), 3);
 }
 
 #[test]
 fn pointer_types_are_valid_parameter_annotations() {
-    let out = "Byte is in 0...255\nwrite(buf @Byte) SignedBigInt extern\n".parse_source_full();
+    let out = "Byte is in 0 to 255\nwrite(buf @Byte) SignedBigInt: 0\n".parse_source_full();
     assert_eq!(count_errors(&out), 0, "symptoms: {:?}", out.symptoms);
     assert!(has_def(&out, "write"));
 }
 
 #[test]
 fn pointer_bindings_accept_explicit_pointer_types() {
-    let out = "Byte is in 0...255\nvalue Byte := 1\npointer @Byte := @value\n".parse_source_full();
+    let out = "Byte is in 0 to 255\nvalue Byte := 1\npointer @Byte := @value\n".parse_source_full();
     assert_eq!(count_errors(&out), 0, "symptoms: {:?}", out.symptoms);
     assert!(has_def(&out, "pointer"));
+}
+
+#[test]
+fn bracket_literals_parse_as_neutral_sequence_nodes() {
+    let out = "empty := []\nelements := [1, 2, 3, 4]\nrepeated := [0; 4]\n".parse_source_full();
+    assert_eq!(count_errors(&out), 0, "symptoms: {:?}", out.symptoms);
+    assert!(matches!(
+        &out.ast.defs[&intern("empty")].value,
+        ast::BindValue::Expr(expr)
+            if matches!(
+                &expr.value,
+                ast::Expr::SequenceLiteral(ast::SequenceLiteral::Elements(items)) if items.is_empty()
+            )
+    ));
+    assert!(matches!(
+        &out.ast.defs[&intern("elements")].value,
+        ast::BindValue::Expr(expr)
+            if matches!(
+                &expr.value,
+                ast::Expr::SequenceLiteral(ast::SequenceLiteral::Elements(items)) if items.len() == 4
+            )
+    ));
+    assert!(matches!(
+        &out.ast.defs[&intern("repeated")].value,
+        ast::BindValue::Expr(expr)
+            if matches!(&expr.value, ast::Expr::SequenceLiteral(ast::SequenceLiteral::Repeat { .. }))
+    ));
 }
 
 #[test]

@@ -94,34 +94,6 @@ impl InterpreterContext {
         })
     }
 
-    pub fn gin_core() -> Result<Self, InterpreterContextError> {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../modules/gin_core")
-            .canonicalize()
-            .map_err(|error| InterpreterContextError::InvalidPath {
-                path: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../modules/gin_core"),
-                error: error.to_string(),
-            })?;
-        let source_paths = [root.join("happy.gin"), root.join("primitive/int.gin")];
-        let sources = source_paths
-            .into_iter()
-            .map(|path| match std::fs::read_to_string(&path) {
-                Ok(source) => Ok(SourceFile::new(path, source)),
-                Err(_) => Err(InterpreterContextError::UnreadableSource(path)),
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(Self {
-            package: InterpreterPackage {
-                session_path: root.join(".gin-interpreter.gin"),
-                dependencies: HashMap::from([("core".to_string(), root.clone())]),
-                sources,
-                root,
-            },
-            target: native_compile_target(),
-        })
-    }
-
     pub fn package(&self) -> &InterpreterPackage {
         &self.package
     }

@@ -1,10 +1,10 @@
 mod condition;
 mod context;
 mod equality;
-mod format_string;
 mod if_;
 mod loop_;
 mod mlir;
+mod storage;
 mod ty_mapping;
 mod when;
 
@@ -17,7 +17,7 @@ use ast::ty::TyArg;
 use diagnostic::Diagnostic;
 use flask::CompileTarget;
 use melior::ir::Location;
-use melior::ir::operation::OperationLike;
+use melior::ir::operation::{OperationLike, OperationMutLike};
 use typecheck::normal_expr::Normalize;
 
 pub struct ResolvedFileInput<'a> {
@@ -116,10 +116,15 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         let module_filename = files
             .first()
             .map_or("<module>", |file| file.source_map.filename.as_str());
-        let module = melior::ir::Module::new(Location::new(context, module_filename, 0, 0));
+        let mut module = melior::ir::Module::new(Location::new(context, module_filename, 0, 0));
+        if let CompileTarget::Concrete(target) = target {
+            module.as_operation_mut().set_attribute(
+                "llvm.target_triple",
+                StringAttribute::new(context, &target.raw).into(),
+            );
+        }
         let mut diagnostics = Vec::with_capacity(files.len());
         let mut succeeded = true;
-
         for (index, file) in files.iter().enumerate() {
             let string_prefix = (files.len() > 1).then(|| format!("{index}_"));
             let ctx = CodegenContext::with_string_prefix(
@@ -167,8 +172,11 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         let typed = program;
 
         for (def_id, bind) in program.defs {
+            if bind.definition_stage == typecheck::typed::DefinitionStage::CompileTimeOnly {
+                continue;
+            }
             let mut symtab = crate::ScopedSymbolTable::new();
-            let func_name = self.function_symbol_name(def_id);
+            let func_name = def_id.0.as_str();
             let declared_return_ty = program
                 .fn_return_types
                 .get(def_id)
@@ -180,7 +188,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 typecheck::BindBody::Body {
                     ret: Some(expr_id), ..
                 } => program.exprs.ty_of(*expr_id).unwrap_or(declared_return_ty),
-                typecheck::BindBody::Body { ret: None, .. } | typecheck::BindBody::Extern => {
+                typecheck::BindBody::Body { ret: None, .. } | typecheck::BindBody::Unlowered => {
                     declared_return_ty
                 }
             };
@@ -207,23 +215,9 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
             let param_loc_pairs: Vec<(melior::ir::Type<'c>, Location<'c>)> =
                 param_types_mlir.iter().map(|t| (*t, loc)).collect();
 
-            if matches!(bind.body, typecheck::BindBody::Extern) {
-                let ret_types = (!self.is_empty_product(function_return_ty))
-                    .then(|| self.ty_to_mlir(function_return_ty))
-                    .into_iter()
-                    .collect::<Vec<_>>();
-                if !self.append_function(
-                    module,
-                    func_name,
-                    &param_types_mlir,
-                    &ret_types,
-                    Region::new(),
-                    Some("private"),
-                    loc,
-                ) {
-                    return false;
-                }
-                continue;
+            if matches!(bind.body, typecheck::BindBody::Unlowered) {
+                self.emit_internal(format!("callable `{func_name}` has no lowered body"));
+                return false;
             }
 
             // Create function body region and entry block.
@@ -249,17 +243,27 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     bind.param_conventions.get(param_index),
                     Some(ParamConvention::Observe | ParamConvention::Mutate)
                 );
-                if borrowed {
-                    symtab.insert(*name, val, param_ty.clone(), true);
-                } else {
-                    symtab.insert(*name, val, param_ty.clone(), false);
+                symtab.insert(*name, val, param_ty.clone(), borrowed);
+                let binder = ast::BinderId::new(
+                    typed.file_id.0,
+                    ast::BinderOwner::Parameter {
+                        definition: def_id.0,
+                        slot: param_index as u32,
+                    },
+                );
+                if self.addressed_binders.contains(&binder) {
+                    self.materialize_named_place(*name, &blk, &mut symtab);
+                }
+                if name.as_str() == "self" {
+                    let binding = symtab.get(name).unwrap().clone();
+                    symtab.insert(def_id.0, binding.value, binding.ty, binding.is_slot);
                 }
             }
 
             // Lower the body expression.
             let (result_id, result_val) = match &bind.body {
                 typecheck::BindBody::Expr(eid) => {
-                    let lowered = self.lower_typed_expr(*eid, &blk, &mut symtab);
+                    let lowered = self.lower_typed_values(*eid, &blk, &mut symtab);
                     (Some(*eid), lowered)
                 }
                 typecheck::BindBody::Body { exprs, ret } => {
@@ -273,10 +277,11 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     );
                     (result_id, result_val)
                 }
-                typecheck::BindBody::Extern => unreachable!(),
+                typecheck::BindBody::Unlowered => unreachable!(),
             };
 
             let actual_return_ty = result_val
+                .as_ref()
                 .and_then(|_| result_id.and_then(|result_id| typed.exprs.ty_of(result_id)))
                 .unwrap_or(function_return_ty);
             let function_return_ty = if self.is_empty_product(function_return_ty)
@@ -294,48 +299,26 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     .integer_validity_for_type(function_return_ty)
                     .is_some();
             let ret_types = if self.is_empty_product(function_return_ty) {
-                blk.append_operation(func::r#return(&[], loc));
-                Vec::new()
-            } else {
-                let ret_ty = if entry_integer_return {
-                    self.mlir.i64()
+                if func_name == "main" {
+                    let success = blk.const_i64(self.mlir, 0, loc);
+                    blk.append_operation(func::r#return(&[success], loc));
+                    vec![self.mlir.i64()]
                 } else {
-                    self.ty_to_mlir(function_return_ty)
-                };
+                    blk.append_operation(func::r#return(&[], loc));
+                    Vec::new()
+                }
+            } else if !entry_integer_return {
+                let ret_types = self.result_types_to_mlir(function_return_ty);
                 match result_val {
+                    Some(values) => blk.append_operation(func::r#return(values.values(), loc)),
+                    None => blk.append_operation(func::r#return(&[], loc)),
+                };
+                ret_types
+            } else {
+                let ret_ty = self.mlir.i64();
+                match result_val.and_then(|value| value.single()) {
                     Some(val) if val.r#type() != ret_ty => {
-                        let source_width = self
-                            .program
-                            .type_registry
-                            .integer_width_for_type(actual_return_ty);
-                        let operation =
-                            if entry_integer_return && source_width.is_some_and(|w| w > 64) {
-                                "arith.trunci"
-                            } else if entry_integer_return
-                                && self
-                                    .program
-                                    .type_registry
-                                    .nominal_integer_interpretation_for_type(actual_return_ty)
-                                    == Some(ast::ty::IntegerInterpretation::Signed)
-                            {
-                                "arith.extsi"
-                            } else {
-                                "arith.extui"
-                            };
-                        let cast = OperationBuilder::new(operation, loc)
-                            .add_operands(&[val])
-                            .add_results(&[ret_ty])
-                            .build()
-                            .map_err(|error| {
-                                self.emit_internal(format!("entry return cast: {error}"))
-                            })
-                            .ok()
-                            .and_then(|operation| {
-                                blk.append_operation(operation)
-                                    .result(0)
-                                    .ok()
-                                    .map(Into::into)
-                            });
+                        let cast = self.convert_integer_value(val, actual_return_ty, ret_ty, &blk);
                         match cast {
                             Some(value) => blk.append_operation(func::r#return(&[value], loc)),
                             None => blk.append_operation(func::r#return(&[], loc)),
@@ -412,6 +395,220 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         }
     }
 
+    fn lower_checked_assembly(
+        &self,
+        assembly: &typecheck::assembly::CheckedAssembly,
+        result_ty: &Ty,
+        block: &BlockRef<'c, 'c>,
+        symtab: &mut ScopedSymbolTable<'c>,
+    ) -> Option<LoweredValue<'c>> {
+        let mut operands = Vec::with_capacity(assembly.operands.len());
+        for (_, operand) in &assembly.operands {
+            let Some(value) = self.lower_typed_expr(*operand, block, symtab) else {
+                self.emit_symptom(
+                    "codegen-assembly-operand",
+                    "checked assembly operand could not be lowered".to_string(),
+                );
+                return None;
+            };
+            operands.push(value);
+        }
+        let constraints = assembly.llvm_constraints();
+        let attributes = vec![
+            (
+                Identifier::new(self.mlir, "asm_string"),
+                StringAttribute::new(self.mlir, &assembly.template).into(),
+            ),
+            (
+                Identifier::new(self.mlir, "constraints"),
+                StringAttribute::new(self.mlir, &constraints.join(",")).into(),
+            ),
+            (
+                Identifier::new(self.mlir, "asm_dialect"),
+                IntegerAttribute::new(self.mlir.i64(), i64::from(assembly.dialect == "intel"))
+                    .into(),
+            ),
+            (
+                Identifier::new(self.mlir, "has_side_effects"),
+                melior::ir::Attribute::unit(self.mlir),
+            ),
+        ];
+        let result_types = if assembly.outputs.is_empty() {
+            assembly
+                .result
+                .as_ref()
+                .map(|_| self.result_types_to_mlir(result_ty))
+                .unwrap_or_default()
+        } else {
+            self.result_types_to_mlir(result_ty)
+        };
+        let operation_result_types = if result_types.len() > 1 {
+            vec![melior::dialect::llvm::r#type::r#struct(
+                self.mlir,
+                &result_types,
+                false,
+            )]
+        } else {
+            result_types.clone()
+        };
+        let operation = OperationBuilder::new("llvm.inline_asm", self.location())
+            .add_attributes(&attributes)
+            .add_operands(&operands)
+            .add_results(&operation_result_types)
+            .build()
+            .ok()?;
+        let operation = block.append_operation(operation);
+        if result_types.len() <= 1 {
+            return Some(LoweredValue::new(
+                operation.results().map(Value::from).collect(),
+            ));
+        }
+        let aggregate = operation.result(0).ok()?.into();
+        Some(LoweredValue::new(
+            result_types
+                .iter()
+                .enumerate()
+                .map(|(index, ty)| {
+                    block.append_op(self.mlir.llvm_extractvalue(
+                        aggregate,
+                        index as i64,
+                        *ty,
+                        self.location(),
+                    ))
+                })
+                .collect(),
+        ))
+    }
+
+    pub fn lower_typed_values(
+        &self,
+        expr_id: typecheck::ExprId,
+        block: &BlockRef<'c, 'c>,
+        symtab: &mut ScopedSymbolTable<'c>,
+    ) -> Option<LoweredValue<'c>> {
+        let expr = self.program.expr(expr_id)?;
+        if let typecheck::TypedExprKind::Asm {
+            state: typecheck::assembly::AssemblyState::Checked(assembly),
+            ..
+        } = &expr.kind
+        {
+            return self.lower_checked_assembly(assembly, expr.ty, block, symtab);
+        }
+        if let typecheck::TypedExprKind::FnCall {
+            target,
+            args,
+            substituted_ty,
+        } = &expr.kind
+        {
+            let return_ty = self
+                .program
+                .fn_return_types
+                .get(target)
+                .or_else(|| self.program.defs.get(target).map(|bind| &bind.return_type))
+                .unwrap_or(expr.ty);
+            let return_ty = substituted_ty.as_ref().unwrap_or(return_ty);
+            if matches!(return_ty, Ty::ResultRow(_)) {
+                if args.as_ref().is_none_or(Vec::is_empty)
+                    && let Some(value) = symtab.get_lowered(&target.0)
+                {
+                    return Some(value.clone());
+                }
+                let mut lowered_args = Vec::new();
+                if let Some(args) = args {
+                    let conventions = self
+                        .program
+                        .defs
+                        .get(target)
+                        .map(|bind| bind.param_conventions.as_slice())
+                        .unwrap_or_default();
+                    for (index, arg) in args.iter().enumerate() {
+                        let value = match conventions.get(index) {
+                            Some(ParamConvention::Observe | ParamConvention::Mutate) => {
+                                self.lower_typed_place(*arg, block, symtab)
+                            }
+                            _ => self.lower_typed_expr(*arg, block, symtab),
+                        }?;
+                        lowered_args.push(value);
+                    }
+                }
+                let operation = OperationBuilder::new("func.call", self.location())
+                    .add_attributes(&[(
+                        Identifier::new(self.mlir, "callee"),
+                        self.mlir.symbol_ref_attr(target.0.as_str()),
+                    )])
+                    .add_operands(&lowered_args)
+                    .add_results(&self.result_types_to_mlir(return_ty))
+                    .build()
+                    .map_err(|error| self.emit_internal(format!("result call lowering: {error}")))
+                    .ok()?;
+                let operation = block.append_operation(operation);
+                return Some(LoweredValue::new(
+                    operation.results().map(Value::from).collect(),
+                ));
+            }
+        }
+        match &expr.kind {
+            typecheck::TypedExprKind::ResultRow(items) => {
+                let mut values = Vec::with_capacity(items.len());
+                for item in items {
+                    values.extend(self.lower_typed_values(*item, block, symtab)?.into_values());
+                }
+                Some(LoweredValue::new(values))
+            }
+            typecheck::TypedExprKind::Bind {
+                name,
+                stmts,
+                body,
+                unassigned: false,
+            } if matches!(expr.ty, Ty::ResultRow(_)) => {
+                for stmt in stmts {
+                    self.lower_typed_values(*stmt, block, symtab);
+                }
+                let value = self.lower_typed_values(*body, block, symtab)?;
+                symtab.insert_lowered(*name, value.clone(), expr.ty.clone());
+                Some(value)
+            }
+            typecheck::TypedExprKind::Reassign { name, value, .. }
+                if matches!(expr.ty, Ty::ResultRow(_)) =>
+            {
+                let value = self.lower_typed_values(*value, block, symtab)?;
+                symtab
+                    .assign_lowered(name, value.clone(), expr.ty.clone())
+                    .then_some(value)
+            }
+            typecheck::TypedExprKind::SelfRef { target } if matches!(expr.ty, Ty::ResultRow(_)) => {
+                symtab.get_lowered(&target.0).cloned()
+            }
+            typecheck::TypedExprKind::AggregateGet { base, index }
+                if matches!(self.program.expr(*base)?.ty, Ty::ResultRow(_)) =>
+            {
+                let values = self.lower_typed_values(*base, block, symtab)?;
+                values
+                    .values()
+                    .get(*index)
+                    .copied()
+                    .map(LoweredValue::scalar)
+            }
+            typecheck::TypedExprKind::If(if_expr)
+                if matches!(expr.ty, Ty::ResultRow(_)) || self.is_empty_product(expr.ty) =>
+            {
+                self.lower_typed_if_values(if_expr, expr.ty, block, symtab)
+            }
+            typecheck::TypedExprKind::When(when_expr)
+                if matches!(expr.ty, Ty::ResultRow(_)) || self.is_empty_product(expr.ty) =>
+            {
+                self.lower_typed_when_values(when_expr, expr.ty, block, symtab)
+            }
+            _ if self.is_empty_product(expr.ty) => {
+                self.lower_typed_expr(expr_id, block, symtab)?;
+                Some(LoweredValue::new(Vec::new()))
+            }
+            _ => self
+                .lower_typed_expr(expr_id, block, symtab)
+                .map(LoweredValue::scalar),
+        }
+    }
+
     pub fn lower_typed_expr(
         &self,
         expr_id: typecheck::ExprId,
@@ -424,7 +621,20 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         self.current_span.set(*expr_ref.span);
 
         if matches!(expr_ref.ty, ast::Ty::UnresolvedLiteral(_)) {
-            self.emit_internal("unresolved integer literal reached code generation");
+            match expr_ref.ty {
+                ast::Ty::UnresolvedLiteral(ast::ty::LiteralKind::Text) => self.emit_symptom(
+                    "type-unresolved-text-literal-codegen",
+                    "unresolved text literal reached code generation".to_string(),
+                ),
+                _ => self.emit_internal("unresolved integer literal reached code generation"),
+            }
+            return None;
+        }
+        if matches!(expr_ref.ty, ast::Ty::UnresolvedSequence { .. }) {
+            self.emit_symptom(
+                "type-unresolved-sequence-codegen",
+                "unresolved sequence literal reached code generation".to_string(),
+            );
             return None;
         }
         if expr_ref.ty.is_unresolved_address() {
@@ -436,12 +646,46 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         }
 
         match expr_ref.kind {
+            typecheck::TypedExprKind::Invalid => None,
+            typecheck::TypedExprKind::Register(inner) => {
+                self.lower_typed_values(*inner, block, symtab)?.single()
+            }
+            typecheck::TypedExprKind::Target => {
+                self.emit_symptom(
+                    "codegen-target-query",
+                    "#target is compile-time-only".to_string(),
+                );
+                None
+            }
+            typecheck::TypedExprKind::TargetField(_) => None,
+            typecheck::TypedExprKind::Asm {
+                specification,
+                operands: _,
+                state,
+            } => {
+                if let typecheck::assembly::AssemblyState::Checked(assembly) = state {
+                    let values =
+                        self.lower_checked_assembly(assembly, expr_ref.ty, block, symtab)?;
+                    if self.is_empty_product(expr_ref.ty) {
+                        Some(block.unit_value(self, self.location()))
+                    } else {
+                        values.single()
+                    }
+                } else {
+                    let _ = specification;
+                    self.emit_symptom(
+                        "codegen-assembly-not-checked",
+                        "pending or invalid assembly reached code generation".to_string(),
+                    );
+                    None
+                }
+            }
             typecheck::TypedExprKind::Lit(lit) => match lit {
                 ast::Literal::Number(0) => {
                     if let Some(value) = self.lower_synthetic_record_field(expr_id, block, symtab) {
                         return Some(value);
                     }
-                    let value = match expr_ref.const_value {
+                    let value = match expr_ref.facts.const_facts.const_value.as_ref() {
                         Some(ast::ConstValue::Int(value)) => {
                             ast::integer::to_i128(*value).unwrap_or(0)
                         }
@@ -455,7 +699,9 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     ))
                 }
                 ast::Literal::Number(_) | ast::Literal::Int(_) => {
-                    let Some(ast::ConstValue::Int(value)) = expr_ref.const_value else {
+                    let Some(ast::ConstValue::Int(value)) =
+                        expr_ref.facts.const_facts.const_value.as_ref()
+                    else {
                         self.emit_internal("materialized integer literal has no constant value");
                         return None;
                     };
@@ -477,8 +723,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 ast::Literal::String(s) => {
                     let name = self.register_string(s);
                     let ptr = self.addressof_string_global(block, &name, self.location())?;
-                    let len = block.const_i64(self.mlir, s.len() as i64, self.location());
-                    Some(self.build_string_value(block, ptr, len, expr_ref.ty, self.location()))
+                    block.load_typed(self, ptr, self.ty_to_mlir(expr_ref.ty), self.location())
                 }
             },
             typecheck::TypedExprKind::Rematerialize { constant, .. } => {
@@ -557,18 +802,37 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
 
                 let loc = self.location();
 
-                let fn_name = self.function_symbol_name(target);
+                let fn_name = target.0.as_str();
 
                 if (args.is_none() || args.as_ref().is_none_or(|a| a.is_empty()))
                     && let Some(slot) = symtab.get(&target.0)
                 {
                     return if slot.is_slot {
-                        block.load_typed(
-                            self,
-                            slot.value,
-                            self.ty_to_mlir(&slot.ty),
-                            self.location(),
+                        let reference_slot = typecheck::ty::reference_pointee_for_type(
+                            &slot.ty,
+                            Some(self.program.type_registry),
                         )
+                        .is_some();
+                        if reference_slot
+                            && typecheck::ty::reference_pointee_for_type(
+                                expr_ref.ty,
+                                Some(self.program.type_registry),
+                            )
+                            .is_some()
+                        {
+                            Some(slot.value)
+                        } else {
+                            block.load_typed(
+                                self,
+                                slot.value,
+                                self.ty_to_mlir(if reference_slot {
+                                    expr_ref.ty
+                                } else {
+                                    &slot.ty
+                                }),
+                                self.location(),
+                            )
+                        }
                     } else {
                         Some(slot.value)
                     };
@@ -595,7 +859,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
 
                 if self.is_empty_product(return_ty) {
                     block.call_unit(self.mlir, fn_name, &lowered_args, loc);
-                    return None;
+                    return Some(block.unit_value(self, loc));
                 }
 
                 let return_ty = self.ty_to_mlir(return_ty);
@@ -626,7 +890,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                             return None;
                         };
                         block.store_typed(self, *address, *value, self.location())?;
-                        return None;
+                        return Some(block.unit_value(self, self.location()));
                     }
                     typecheck::typed::IntrinsicOp::AddressOffset => {
                         let [address, index] = lowered.as_slice() else {
@@ -686,6 +950,35 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                         self.emit_internal(format!("invalid typed {} arity", op.name()));
                         return None;
                     };
+                    let signed = *interpretation == typecheck::intrinsic::IntegerComparison::Signed;
+                    let width = args
+                        .iter()
+                        .zip([*lhs, *rhs])
+                        .map(|(arg, value)| {
+                            let ty = typed_ast.expr(*arg)?.ty;
+                            let width = IntegerType::try_from(value.r#type()).ok()?.width();
+                            let extra = signed
+                                && matches!(ty, Ty::AnonymousInteger { .. })
+                                && ty.anonymous_operation_interpretation()
+                                    == Some(ast::ty::IntegerInterpretation::Unsigned);
+                            Some(width + u32::from(extra))
+                        })
+                        .collect::<Option<Vec<_>>>()?
+                        .into_iter()
+                        .max()?;
+                    let operand_ty = IntegerType::new(self.mlir, width).into();
+                    let lhs = self.convert_integer_value(
+                        *lhs,
+                        typed_ast.expr(args[0])?.ty,
+                        operand_ty,
+                        block,
+                    )?;
+                    let rhs = self.convert_integer_value(
+                        *rhs,
+                        typed_ast.expr(args[1])?.ty,
+                        operand_ty,
+                        block,
+                    )?;
                     let predicate = match (interpretation, predicate) {
                         (
                             typecheck::intrinsic::IntegerComparison::Signed,
@@ -728,12 +1021,8 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                             typecheck::intrinsic::ComparisonPredicate::Equal,
                         ) => Predicates::EQ,
                     };
-                    let compared = block.append_op(self.mlir.build_cmpi(
-                        predicate,
-                        *lhs,
-                        *rhs,
-                        self.location(),
-                    ));
+                    let compared =
+                        block.append_op(self.mlir.build_cmpi(predicate, lhs, rhs, self.location()));
                     let result_ty = self.ty_to_mlir(expr_ref.ty);
                     if result_ty == self.mlir.i1() {
                         return Some(compared);
@@ -825,34 +1114,13 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     typecheck::intrinsic::IntrinsicContract::SameWidthBinary
                 ) && lowered.len() == 2
                 {
-                    let target_width = expr_ref.ty.anonymous_integer_width().unwrap_or_default();
                     for (index, arg) in args.iter().enumerate().take(2) {
-                        let Some(arg_expr) = typed_ast.expr(*arg) else {
-                            self.emit_internal(format!("missing argument metadata for {index}"));
-                            continue;
-                        };
-                        let source_width =
-                            arg_expr.ty.anonymous_integer_width().unwrap_or_default();
-                        if source_width == target_width {
-                            continue;
-                        }
-                        let cast = if source_width < target_width {
-                            match arg_expr.ty.anonymous_operation_interpretation() {
-                                Some(ast::ty::IntegerInterpretation::Signed) => "arith.extsi",
-                                _ => "arith.extui",
-                            }
-                        } else {
-                            "arith.trunci"
-                        };
-                        let cast_op = OperationBuilder::new(cast, self.location())
-                            .add_operands(&[lowered[index]])
-                            .add_results(&[result_ty])
-                            .build()
-                            .map_err(|error| {
-                                self.emit_internal(format!("intrinsic operand normalize: {error}"))
-                            })
-                            .ok()?;
-                        lowered[index] = block.append_op(cast_op);
+                        lowered[index] = self.convert_integer_value(
+                            lowered[index],
+                            typed_ast.expr(*arg)?.ty,
+                            result_ty,
+                            block,
+                        )?;
                     }
                 }
                 let operation = OperationBuilder::new(operation, self.location())
@@ -884,6 +1152,17 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 } else {
                     let val = self.lower_typed_expr(*body, block, symtab)?;
                     symtab.insert(*name, val, expr_ref.ty.clone(), false);
+                    if typed_ast
+                        .exprs
+                        .place_of(expr_id)
+                        .flatten()
+                        .is_some_and(|place| {
+                            self.addressed_binders
+                                .contains(&typed_ast.places[place.0 as usize].binder)
+                        })
+                    {
+                        self.materialize_named_place(*name, block, symtab)?;
+                    }
                     Some(val)
                 }
             }
@@ -925,9 +1204,10 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 ));
                 None
             }
-            typecheck::TypedExprKind::InvalidOperator { role, .. } => {
+            typecheck::TypedExprKind::InvalidOperator { op, .. } => {
                 self.emit_internal(format!(
-                    "invalid operator registration for `{role:?}` reached code generation"
+                    "invalid operator registration for `{}` reached code generation",
+                    op.symbol()
                 ));
                 None
             }
@@ -960,14 +1240,19 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     else {
                         return (false, None);
                     };
-                    let Some(former) = declaration.fixed_array.as_ref() else {
+                    let Some(acceptance) = declaration.sequence_literal.as_ref() else {
+                        return (false, None);
+                    };
+                    let typecheck::SequenceLiteralMaterialization::FixedArray { length_parameter } =
+                        acceptance.materialization
+                    else {
                         return (false, None);
                     };
                     let element = instance
                         .arguments
                         .iter()
                         .find_map(|(parameter, argument)| {
-                            (*parameter == former.element_parameter).then_some(argument)
+                            (*parameter == acceptance.element_parameter).then_some(argument)
                         })
                         .and_then(|argument| match argument {
                             TyArg::Type(ty) => Some((**ty).clone()),
@@ -977,7 +1262,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                         return (true, None);
                     };
                     let length = instance.arguments.iter().find_map(|(parameter, argument)| {
-                        (*parameter == former.length_parameter).then_some(argument)
+                        (*parameter == length_parameter).then_some(argument)
                     });
                     let Some(length) = length else {
                         return (true, None);
@@ -1018,7 +1303,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                         Some(init) => Some(init),
                         None => {
                             let expr = typed_ast.expr(*init)?;
-                            if let Some(const_value) = &expr.const_value {
+                            if let Some(const_value) = &expr.facts.const_facts.const_value {
                                 self.lower_const_value(block, const_value, expr.ty)
                             } else if self
                                 .program
@@ -1083,7 +1368,16 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                         ),
                     );
                 }
-                if matches!(constructed_ty, Ty::ResultFamily { .. }) {
+                if let Ty::ResultFamily { alternatives, .. } = constructed_ty {
+                    let Some(discriminant) = alternatives
+                        .iter()
+                        .position(|alternative| alternative.label == variant_id.name)
+                    else {
+                        self.emit_internal(
+                            "constructed alternative is absent from its result family",
+                        );
+                        return None;
+                    };
                     if let Some(args) = args {
                         for argument in args {
                             self.lower_typed_expr(*argument, block, symtab)?;
@@ -1092,7 +1386,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     return Some(block.const_int(
                         self.mlir,
                         self.ty_to_mlir(constructed_ty),
-                        *discriminant as i128,
+                        discriminant as i128,
                         self.location(),
                     ));
                 }
@@ -1177,7 +1471,12 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
             typecheck::TypedExprKind::SelfRef { target } => {
                 let slot = symtab.get(&target.0)?;
                 if slot.is_slot {
-                    block.load_typed(self, slot.value, self.ty_to_mlir(&slot.ty), self.location())
+                    block.load_typed(
+                        self,
+                        slot.value,
+                        self.ty_to_mlir(expr_ref.ty),
+                        self.location(),
+                    )
                 } else {
                     Some(slot.value)
                 }
@@ -1187,12 +1486,69 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 let _e = self.lower_typed_expr(*end, block, symtab)?;
                 None // Range lowering not yet implemented
             }
-            typecheck::TypedExprKind::TupleLit(items) => {
+            typecheck::TypedExprKind::RecordValue(items) => {
                 let vals: Vec<Value<'c, 'c>> = items
                     .iter()
                     .filter_map(|id| self.lower_typed_expr(*id, block, symtab))
                     .collect();
-                vals.first().copied()
+                if vals.is_empty() {
+                    return None;
+                }
+
+                let aggregate_ty = self.ty_to_mlir(expr_ref.ty);
+                let mut value =
+                    block.append_op(self.mlir.llvm_undef(aggregate_ty, self.location()));
+                for (index, item) in vals.into_iter().enumerate() {
+                    value = block.append_op(self.mlir.llvm_insertvalue(
+                        value,
+                        item,
+                        i64::try_from(index).ok()?,
+                        self.location(),
+                    ));
+                }
+                Some(value)
+            }
+            typecheck::TypedExprKind::ResultRow(_) => {
+                self.emit_internal("result row reached scalar lowering");
+                None
+            }
+            typecheck::TypedExprKind::ArrayLit(items) => {
+                let repr = typecheck::representation::Repr::derive(
+                    expr_ref.ty,
+                    Some(typed_ast.type_registry),
+                )
+                .ok();
+                let Some(typecheck::representation::Repr::Array { length, .. }) = repr else {
+                    self.emit_symptom(
+                        "unresolved-fixed-array-construction",
+                        "fixed-array literal reached codegen without array representation"
+                            .to_string(),
+                    );
+                    return None;
+                };
+                let array_ty = self.ty_to_mlir(expr_ref.ty);
+                let mut value = block.append_op(self.mlir.llvm_undef(array_ty, self.location()));
+                for (index, item) in items.iter().take(usize::try_from(length).ok()?).enumerate() {
+                    let element = self.lower_typed_expr(*item, block, symtab)?;
+                    value = block.append_op(self.mlir.llvm_insertvalue(
+                        value,
+                        element,
+                        i64::try_from(index).ok()?,
+                        self.location(),
+                    ));
+                }
+                Some(value)
+            }
+            typecheck::TypedExprKind::UnionPayload { expr, variant } => {
+                let value = self.lower_typed_expr(*expr, block, symtab)?;
+                self.lower_sum_payload(
+                    block,
+                    value,
+                    typed_ast.expr(*expr)?.ty,
+                    *variant,
+                    0,
+                    expr_ref.ty,
+                )
             }
             typecheck::TypedExprKind::Cast { expr, .. } => {
                 let value = self.lower_typed_expr(*expr, block, symtab)?;
@@ -1205,34 +1561,16 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                         .map_err(|error| self.emit_internal(format!("ptrtoint: {error}")))
                         .ok()?;
                     Some(block.append_op(op))
-                } else if result_ty != value.r#type()
-                    && let Some(source) = typed_ast.expr(*expr)
-                    && let (Some(source_width), Some(target_width)) = (
-                        typed_ast.type_registry.integer_width_for_type(source.ty),
-                        typed_ast.type_registry.integer_width_for_type(expr_ref.ty),
-                    )
-                {
-                    let operation = if source_width < target_width {
-                        match typed_ast
-                            .type_registry
-                            .nominal_integer_interpretation_for_type(source.ty)
-                            .or_else(|| source.ty.anonymous_operation_interpretation())
-                        {
-                            Some(ast::ty::IntegerInterpretation::Signed) => "arith.extsi",
-                            _ => "arith.extui",
-                        }
-                    } else {
-                        "arith.trunci"
-                    };
-                    let operation = OperationBuilder::new(operation, self.location())
+                } else if result_ty == self.mlir.llvm_ptr() && result_ty != value.r#type() {
+                    let op = OperationBuilder::new("llvm.inttoptr", self.location())
                         .add_operands(&[value])
                         .add_results(&[result_ty])
                         .build()
-                        .map_err(|error| {
-                            self.emit_internal(format!("integer cast lowering: {error}"))
-                        })
+                        .map_err(|error| self.emit_internal(format!("inttoptr: {error}")))
                         .ok()?;
-                    Some(block.append_op(operation))
+                    Some(block.append_op(op))
+                } else if result_ty != value.r#type() {
+                    self.convert_integer_value(value, typed_ast.expr(*expr)?.ty, result_ty, block)
                 } else {
                     Some(value)
                 }
@@ -1249,7 +1587,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     .ok()?;
                 Some(block.append_op(op))
             }
-            typecheck::TypedExprKind::TupleAlloc { init, .. } => {
+            typecheck::TypedExprKind::FixedArrayAlloc { init, .. } => {
                 let repr = typecheck::representation::Repr::derive(
                     expr_ref.ty,
                     Some(typed_ast.type_registry),
@@ -1276,15 +1614,31 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 }
                 Some(value)
             }
-            typecheck::TypedExprKind::ConsumeArg(init) | typecheck::TypedExprKind::Eat(init) => {
-                self.lower_typed_expr(*init, block, symtab)
-            }
             typecheck::TypedExprKind::TakePtr(init) | typecheck::TypedExprKind::Ref(init) => {
                 self.lower_typed_place(*init, block, symtab)
             }
-            typecheck::TypedExprKind::TupleGet { base, index } => {
+            typecheck::TypedExprKind::AggregateGet { base, index } => {
+                let base_ty = typed_ast.expr(*base)?.ty;
+                if matches!(base_ty, Ty::ResultRow(_)) {
+                    return self
+                        .lower_typed_values(*base, block, symtab)?
+                        .values()
+                        .get(*index)
+                        .copied();
+                }
                 let base_val = self.lower_typed_expr(*base, block, symtab)?;
-                // Extract the field at the given index from the struct/tuple.
+                let base_val = if let Some(pointee_ty) = self.pointee_ty_for_reference_like(base_ty)
+                {
+                    block.load_typed(
+                        self,
+                        base_val,
+                        self.ty_to_mlir(&pointee_ty),
+                        self.location(),
+                    )?
+                } else {
+                    base_val
+                };
+                // Extract the field at the given index from the lowered aggregate.
                 // Use the expression's own type as the result type.
                 let result_ty = self.ty_to_mlir(expr_ref.ty);
                 Some(block.append_op(self.mlir.llvm_extractvalue(
@@ -1298,7 +1652,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 let ptr = self.lower_typed_expr(*base, block, symtab)?;
                 block.load_typed(self, ptr, self.ty_to_mlir(expr_ref.ty), self.location())
             }
-            typecheck::TypedExprKind::TupleSet {
+            typecheck::TypedExprKind::AggregateSet {
                 base,
                 value,
                 index,
@@ -1343,61 +1697,12 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 }
             }
             typecheck::TypedExprKind::BufGet { buf, index } => {
-                let base_ty = typed_ast.expr(*buf)?.ty;
-                let pointee_ty = self.pointee_ty_for_reference_like(base_ty);
-                let has_pointee = pointee_ty.is_some();
-                let pointer_base_ty = base_ty.without_reference_wrappers();
-                let array = typecheck::representation::Repr::array_parts(
-                    pointer_base_ty,
-                    Some(typed_ast.type_registry),
-                );
-                let (base, pointer_ty) = if array.is_some() {
-                    let base = if let Some(base) = self.lower_typed_place(*buf, block, symtab) {
-                        base
-                    } else {
-                        let value = self.lower_typed_expr(*buf, block, symtab)?;
-                        let slot = block.alloca_typed(
-                            self.mlir,
-                            self.ty_to_mlir(base_ty),
-                            self.location(),
-                        );
-                        block.store_typed(self, slot, value, self.location())?;
-                        slot
-                    };
-                    (base, self.mlir.llvm_ptr())
-                } else {
-                    (
-                        self.lower_typed_expr(*buf, block, symtab)?,
-                        self.ty_to_mlir(base_ty),
-                    )
-                };
-                let index = self.lower_typed_expr(*index, block, symtab)?;
-                let elem_ty = if let Some((element, _)) = array {
-                    element
-                } else {
-                    pointee_ty?
-                };
-                if has_pointee && !self.validate_pointee_stride(&elem_ty) {
-                    return None;
-                }
-                let index = if has_pointee {
-                    self.scale_pointer_index(block, index, &elem_ty)?
-                } else {
-                    index
-                };
-                let element_ptr = block.gep_typed_result(
-                    self,
-                    base,
-                    self.ty_to_mlir(&elem_ty),
-                    &[index],
-                    &[i32::MIN],
-                    pointer_ty,
-                    self.location(),
-                )?;
+                let (element_ptr, element_ty) =
+                    self.lower_buffer_element(*buf, *index, block, symtab)?;
                 block.load_typed(
                     self,
                     element_ptr,
-                    self.ty_to_mlir(&elem_ty),
+                    self.ty_to_mlir(&element_ty),
                     self.location(),
                 )
             }
@@ -1407,57 +1712,8 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 value,
                 operator,
             } => {
-                let base_ty = typed_ast.expr(*buf)?.ty;
-                let pointee_ty = self.pointee_ty_for_reference_like(base_ty);
-                let has_pointee = pointee_ty.is_some();
-                let pointer_base_ty = base_ty.without_reference_wrappers();
-                let array = typecheck::representation::Repr::array_parts(
-                    pointer_base_ty,
-                    Some(typed_ast.type_registry),
-                );
-                let (base, pointer_ty) = if array.is_some() {
-                    let base = if let Some(base) = self.lower_typed_place(*buf, block, symtab) {
-                        base
-                    } else {
-                        let value = self.lower_typed_expr(*buf, block, symtab)?;
-                        let slot = block.alloca_typed(
-                            self.mlir,
-                            self.ty_to_mlir(base_ty),
-                            self.location(),
-                        );
-                        block.store_typed(self, slot, value, self.location())?;
-                        slot
-                    };
-                    (base, self.mlir.llvm_ptr())
-                } else {
-                    (
-                        self.lower_typed_expr(*buf, block, symtab)?,
-                        self.ty_to_mlir(base_ty),
-                    )
-                };
-                let index = self.lower_typed_expr(*index, block, symtab)?;
-                let elem_ty = if let Some((element, _)) = array {
-                    element
-                } else {
-                    pointee_ty?
-                };
-                if has_pointee && !self.validate_pointee_stride(&elem_ty) {
-                    return None;
-                }
-                let index = if has_pointee {
-                    self.scale_pointer_index(block, index, &elem_ty)?
-                } else {
-                    index
-                };
-                let element_ptr = block.gep_typed_result(
-                    self,
-                    base,
-                    self.ty_to_mlir(&elem_ty),
-                    &[index],
-                    &[i32::MIN],
-                    pointer_ty,
-                    self.location(),
-                )?;
+                let (element_ptr, elem_ty) =
+                    self.lower_buffer_element(*buf, *index, block, symtab)?;
                 let rhs = self.lower_typed_expr(*value, block, symtab)?;
                 let value = if let Some(operator) = operator {
                     let lhs = block.load_typed(
@@ -1518,20 +1774,42 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 Some(value)
             }
             typecheck::TypedExprKind::List(items) => {
+                if let Ok(typecheck::representation::Repr::Array { length, .. }) =
+                    typecheck::representation::Repr::derive(
+                        expr_ref.ty,
+                        Some(typed_ast.type_registry),
+                    )
+                {
+                    let array_ty = self.ty_to_mlir(expr_ref.ty);
+                    let mut value =
+                        block.append_op(self.mlir.llvm_undef(array_ty, self.location()));
+                    for (index, item) in
+                        items.iter().take(usize::try_from(length).ok()?).enumerate()
+                    {
+                        let element = self.lower_typed_expr(*item, block, symtab)?;
+                        value = block.append_op(self.mlir.llvm_insertvalue(
+                            value,
+                            element,
+                            i64::try_from(index).ok()?,
+                            self.location(),
+                        ));
+                    }
+                    return Some(value);
+                }
                 let vals: Vec<Value<'c, 'c>> = items
                     .iter()
                     .filter_map(|id| self.lower_typed_expr(*id, block, symtab))
                     .collect();
-                vals.first().copied()
-            }
-            typecheck::TypedExprKind::FormatString(fs) => {
-                self.lower_typed_format_string(fs, expr_ref.ty, block, symtab)
+                vals.first().copied().or_else(|| {
+                    self.is_empty_product(expr_ref.ty)
+                        .then(|| block.unit_value(self, self.location()))
+                })
             }
             typecheck::TypedExprKind::If(if_expr) => {
                 self.lower_typed_if(if_expr, expr_ref.ty, block, symtab)
             }
             typecheck::TypedExprKind::When(when_expr) => {
-                if let Some(cv) = &expr_ref.const_value {
+                if let Some(cv) = &expr_ref.facts.const_facts.const_value {
                     self.lower_const_value(block, cv, expr_ref.ty)
                 } else {
                     self.lower_typed_when(when_expr, expr_ref.ty, block, symtab)
@@ -1540,7 +1818,50 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
             typecheck::TypedExprKind::Loop(loop_expr) => {
                 self.lower_typed_loop(loop_expr, block, symtab)
             }
-            typecheck::TypedExprKind::Destructure { .. } => None,
+            typecheck::TypedExprKind::Destructure {
+                value,
+                field_bindings,
+                ..
+            } => {
+                let source_ty = typed_ast.expr(*value)?.ty;
+                let referenced = typecheck::ty::reference_pointee_for_type(
+                    source_ty,
+                    Some(typed_ast.type_registry),
+                );
+                let source_ty = referenced.as_ref().unwrap_or(source_ty);
+                let Ty::Record { fields, .. } = typed_ast
+                    .type_registry
+                    .resolved_definition_for_type(source_ty)
+                else {
+                    self.emit_internal("record destructuring requires a record representation");
+                    return None;
+                };
+                let aggregate = self.lower_typed_expr(*value, block, symtab)?;
+                let aggregate = if referenced.is_some() {
+                    block.load_typed(
+                        self,
+                        aggregate,
+                        self.ty_to_mlir(source_ty),
+                        self.location(),
+                    )?
+                } else {
+                    aggregate
+                };
+                for (field, binding) in field_bindings {
+                    let (index, (_, ty)) = fields
+                        .iter()
+                        .enumerate()
+                        .find(|(_, (name, _))| name == field)?;
+                    let value = block.append_op(self.mlir.llvm_extractvalue(
+                        aggregate,
+                        index as i64,
+                        self.ty_to_mlir(ty),
+                        self.location(),
+                    ));
+                    symtab.insert(*binding, value, (**ty).clone(), false);
+                }
+                Some(block.unit_value(self, self.location()))
+            }
         }
     }
 
@@ -1659,6 +1980,10 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         self.current_span.set(*expr_ref.span);
 
         match &expr_ref.kind {
+            typecheck::TypedExprKind::Lit(ast::Literal::String(text)) => {
+                let name = self.register_string(text);
+                self.addressof_string_global(block, &name, self.location())
+            }
             typecheck::TypedExprKind::FnCall { target, args, .. }
                 if args.as_ref().is_none_or(Vec::is_empty) =>
             {
@@ -1671,7 +1996,13 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 self.lower_typed_place(*inner, block, symtab)
             }
             typecheck::TypedExprKind::Deref(inner) => self.lower_typed_expr(*inner, block, symtab),
-            typecheck::TypedExprKind::TupleGet { base, index } => {
+            typecheck::TypedExprKind::UnionPayload { expr, variant } => {
+                let base = self.lower_typed_place(*expr, block, symtab)?;
+                let offset = self.sum_payload_offset(typed_ast.expr(*expr)?.ty, *variant, 0)?;
+                let offset = block.const_i64(self.mlir, offset as i64, self.location());
+                block.gep_i8(self, base, offset, self.location())
+            }
+            typecheck::TypedExprKind::AggregateGet { base, index } => {
                 let base_ptr = self.lower_typed_place(*base, block, symtab)?;
                 let base_ty = typed_ast.expr(*base)?.ty;
                 block.gep_typed(
@@ -1683,30 +2014,9 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     self.location(),
                 )
             }
-            typecheck::TypedExprKind::BufGet { buf, index } => {
-                let base_ptr = self.lower_typed_place(*buf, block, symtab)?;
-                let index = self.lower_typed_expr(*index, block, symtab)?;
-                let base_ty = typed_ast.expr(*buf)?.ty;
-                if self
-                    .pointee_ty_for_reference_like(base_ty)
-                    .is_some_and(|pointee| !self.validate_pointee_stride(&pointee))
-                {
-                    return None;
-                }
-                let index = if let Some(pointee) = self.pointee_ty_for_reference_like(base_ty) {
-                    self.scale_pointer_index(block, index, &pointee)?
-                } else {
-                    index
-                };
-                block.gep_typed(
-                    self,
-                    base_ptr,
-                    IntegerType::new(self.mlir, 8).into(),
-                    &[index],
-                    &[i32::MIN],
-                    self.location(),
-                )
-            }
+            typecheck::TypedExprKind::BufGet { buf, index } => self
+                .lower_buffer_element(*buf, *index, block, symtab)
+                .map(|(address, _)| address),
             _ => {
                 self.emit_internal("expression is not an addressable place");
                 None

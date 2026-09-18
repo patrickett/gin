@@ -43,11 +43,22 @@ pub struct Args {
     #[arg(long)]
     pub no_cache: bool,
 
+    #[arg(skip)]
+    pub gin_home: Option<flask::GinHome>,
+
     /// Print per-phase compilation timings.
     ///
     /// Also enabled when `GINC_TIMINGS` is set to `1`, `true`, or `on`.
     #[arg(long)]
     pub timings: bool,
+
+    /// Write compilation durations and object-cache outcome as JSON, suppressing build status.
+    #[arg(long)]
+    pub timings_json: Option<PathBuf>,
+
+    /// Suppress build status messages; diagnostics and requested timings remain visible.
+    #[arg(short, long)]
+    pub quiet: bool,
 
     /// Use a faster LLVM/MLIR path for development builds (disable MLIR optimize pipeline,
     /// compile LLVM IR with `-O0`).

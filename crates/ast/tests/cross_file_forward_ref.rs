@@ -103,7 +103,7 @@ fn inline_forward_refs_not_unknown() {
 
     let source = "\
 Size is Const(BigInt) or Dynamic
-BigInt is in 0...18446744073709551615
+BigInt is in 0 to 18446744073709551615
 Type is Union
 
 compute_size(x Type) Size: union_size(x)

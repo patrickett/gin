@@ -54,6 +54,37 @@ fn clean_package_publishes_authoritative_interface() {
 }
 
 #[test]
+fn named_result_changes_affect_public_interface_fingerprint() {
+    let first = transform_with_sources(vec!["pair() first Int, second Int: return 1, 2\n"]);
+    let second = transform_with_sources(vec!["pair() left Int, right Int: return 1, 2\n"]);
+
+    assert_ne!(
+        first.public_interface.semantic_surface_fingerprint,
+        second.public_interface.semantic_surface_fingerprint
+    );
+}
+
+#[test]
+fn named_result_projection_resolves_across_package_files() {
+    let package = transform_with_sources(vec![
+        "pair() first Int, second Int: return 1, 2\n",
+        "main:\n    result: pair()\n    return result.second\n",
+    ]);
+    let flaws: Vec<_> = package
+        .typed_asts
+        .iter()
+        .flat_map(|typed| typed.all_flaws())
+        .collect();
+
+    assert!(
+        flaws
+            .iter()
+            .all(|(_, flaw)| flaw.code.slug() != "type-unknown-result-projection"),
+        "named result should remain available across package files: {flaws:?}"
+    );
+}
+
+#[test]
 fn declaration_rewrite_order_does_not_change_fingerprint() {
     let source_one = "a:\n    return 1\n\nb:\n    return 2\n";
     let source_two = "b:\n    return 2\n\na:\n    return 1\n";
@@ -89,10 +120,10 @@ fn source_perturbation_does_not_change_interface_output() {
 #[test]
 fn applied_nominal_arguments_participate_in_public_identity() {
     let byte = transform_with_sources(vec![
-        "Byte is in 0...255\nCodePoint is in 0...255\n#phantom(unit)\nCount(unit) is in 0...255\naccept(value Count(Byte)) Count(Byte): value\n",
+        "Byte is in 0 to 255\nCodePoint is in 0 to 255\n#phantom(unit)\nCount(unit) is in 0 to 255\naccept(value Count(Byte)) Count(Byte): value\n",
     ]);
     let code_point = transform_with_sources(vec![
-        "Byte is in 0...255\nCodePoint is in 0...255\n#phantom(unit)\nCount(unit) is in 0...255\naccept(value Count(CodePoint)) Count(CodePoint): value\n",
+        "Byte is in 0 to 255\nCodePoint is in 0 to 255\n#phantom(unit)\nCount(unit) is in 0 to 255\naccept(value Count(CodePoint)) Count(CodePoint): value\n",
     ]);
 
     let fingerprint_for = |package: &PackageTransformArtifacts, name: &str| {
@@ -115,6 +146,51 @@ fn applied_nominal_arguments_participate_in_public_identity() {
     assert_ne!(
         fingerprint_for(&byte, "accept"),
         fingerprint_for(&code_point, "accept")
+    );
+}
+
+#[test]
+fn checked_assembly_protocol_has_separate_implementation_fingerprint() {
+    let options = PackageTransformOptions::FULL.with_compile_target(CompileTarget::Concrete(
+        flask::TargetTriple::parse("x86_64-unknown-linux-gnu").unwrap(),
+    ));
+    let first = transform_with_sources_and_target(
+        vec![
+            "protocol := 'gin-asm 1\\ntarget \\\"x86_64-unknown-linux-gnu\\\"\\ndialect intel\\ntemplate \\\"nop\\\"'\nwrite(): #asm(protocol)\n",
+        ],
+        options.clone(),
+    );
+    let second = transform_with_sources_and_target(
+        vec![
+            "protocol := 'gin-asm 1\\ntarget \\\"x86_64-unknown-linux-gnu\\\"\\ndialect intel\\ntemplate \\\"pause\\\"'\nwrite(): #asm(protocol)\n",
+        ],
+        options,
+    );
+    let fingerprint_for = |package: &PackageTransformArtifacts| {
+        package
+            .public_interface
+            .declarations
+            .iter()
+            .find(|declaration| match &declaration.reference {
+                interface::DeclarationRef::Subject {
+                    declaration_path, ..
+                }
+                | interface::DeclarationRef::External {
+                    declaration_path, ..
+                } => declaration_path.ends_with("::write"),
+            })
+            .expect("public assembly declaration")
+            .fingerprint
+    };
+
+    assert_eq!(fingerprint_for(&first), fingerprint_for(&second));
+    assert_ne!(
+        first.implementation_fingerprint,
+        second.implementation_fingerprint
+    );
+    assert_ne!(
+        first.public_interface.target_realizations[0].semantic_surface_fingerprint,
+        second.public_interface.target_realizations[0].semantic_surface_fingerprint
     );
 }
 
@@ -309,5 +385,19 @@ fn target_realization_fingerprints_differ_for_same_base() {
     assert_ne!(
         package_x86.public_interface.target_realizations[0].public_closure_fingerprint,
         package_arm.public_interface.target_realizations[0].public_closure_fingerprint,
+    );
+}
+
+#[test]
+fn every_same_named_callable_contributes_to_the_interface() {
+    let first = "select(value True) True: value\n";
+    let second = "select(value False) False: value\n";
+    let one = transform_with_sources(vec![first]);
+    let both = transform_with_sources(vec![first, second]);
+    let reversed = transform_with_sources(vec![second, first]);
+    assert_eq!(both.public_interface, reversed.public_interface);
+    assert_eq!(
+        interface::classify_interfaces(&one.public_interface, &both.public_interface),
+        interface::Compatibility::Breaking
     );
 }

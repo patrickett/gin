@@ -26,7 +26,7 @@ fn body_expr_id(typed: &typecheck::TypedFileAst, def_name: &str) -> Option<ExprI
     match &bind.body {
         typecheck::BindBody::Expr(eid) => Some(*eid),
         typecheck::BindBody::Body { exprs, ret } => ret.or_else(|| exprs.last().copied()),
-        typecheck::BindBody::Extern => None,
+        typecheck::BindBody::Unlowered => None,
     }
 }
 
@@ -35,7 +35,13 @@ fn typed_bind_const_value<'a>(
     name: &str,
 ) -> Option<&'a ConstValue> {
     let id = body_expr_id(typed, name)?;
-    typed.exprs.get(id.as_usize())?.const_value.as_ref()
+    typed
+        .exprs
+        .get(id.as_usize())?
+        .facts
+        .const_facts
+        .const_value
+        .as_ref()
 }
 
 fn assert_const_int(cv: Option<&ConstValue>, n: i128) {
@@ -76,6 +82,15 @@ fn eval_binop_int_arithmetic_uses_size_const_tags() {
     assert_eq!(
         ConstValue::Int(17.into()).eval_binop(&BinOp::Modulo, &ConstValue::Int(5.into())),
         Some(ConstValue::Int(2.into()))
+    );
+}
+
+#[test]
+fn eval_binop_add_concatenates_compile_time_strings() {
+    assert_eq!(
+        ConstValue::Text("gin-asm ".into())
+            .eval_binop(&ast::BinOp::Add, &ConstValue::Text("1".into())),
+        Some(ConstValue::Text("gin-asm 1".into()))
     );
 }
 
@@ -140,21 +155,21 @@ fn anonymous_integer_equality_has_structural_result_family_and_folds_constants()
     ));
     assert!(
         matches!(
-            typed.exprs.const_value[expression.as_usize()],
+            typed.exprs.facts.const_facts.const_value[expression.as_usize()],
             Some(ConstValue::ResultAlternative {
                 owner: ast::ResultFamilyOwner::Structural(ast::OperatorRole::Equal),
                 label,
             }) if label.as_str() == "True"
         ),
         "{:?}",
-        typed.exprs.const_value[expression.as_usize()]
+        typed.exprs.facts.const_facts.const_value[expression.as_usize()]
     );
 }
 
 #[test]
 fn equality_rejects_distinct_nominal_types() {
     let typed = transform_source(
-        "Left is in 0...255\nRight is in 0...255\nBool is True or False\nsame(a Left, b Right) Bool: a = b\n",
+        "Left is in 0 to 255\nRight is in 0 to 255\nBool is True or False\nsame(a Left, b Right) Bool: a = b\n",
     );
 
     assert!(
@@ -168,7 +183,7 @@ fn equality_rejects_distinct_nominal_types() {
 #[test]
 fn equality_rejects_pointer_values() {
     let typed = transform_source(
-        "Int is in 0...255\nBool is True or False\nsame(a @Int, b @Int) Bool: a = b\n",
+        "Int is in 0 to 255\nBool is True or False\nsame(a @Int, b @Int) Bool: a = b\n",
     );
 
     assert!(
@@ -182,7 +197,19 @@ fn equality_rejects_pointer_values() {
 #[test]
 fn compile_time_bind_folds_addition() {
     let typed = transform_source(
-        "Word is in 0...255\n#intrinsic(BitsAdd)\nadd_bits(a Word, b Word) Word extern\n#operator(Add)\n#inline\nword_add(a Word, b Word) Word: add_bits(a, b)\ntwo() Word:\n    a Word := 1\n    b Word := 1\nreturn a + b\n",
+        r#"Word is in 0 to 255
+add_bits(a Word, b Word) Word:
+    left is in 0 to 255: a
+    right is in 0 to 255: b
+return (left + right) as Word
+#infix('+')
+#inline
+word_add(a Word, b Word) Word: add_bits(a, b)
+two() Word:
+    a Word := 1
+    b Word := 1
+return a + b
+"#,
     );
     assert_const_int(typed_bind_const_value(&typed, "two"), 2);
 }
@@ -190,7 +217,20 @@ fn compile_time_bind_folds_addition() {
 #[test]
 fn compile_time_bind_folds_nested_addition() {
     let typed = transform_source(
-        "Word is in 0...255\n#intrinsic(BitsAdd)\nadd_bits(a Word, b Word) Word extern\n#operator(Add)\n#inline\nword_add(a Word, b Word) Word: add_bits(a, b)\nsum() Word:\n    a Word := 1\n    b Word := 2\n    c Word := 3\nreturn (a + b) + c\n",
+        r#"Word is in 0 to 255
+add_bits(a Word, b Word) Word:
+    left is in 0 to 255: a
+    right is in 0 to 255: b
+return (left + right) as Word
+#infix('+')
+#inline
+word_add(a Word, b Word) Word: add_bits(a, b)
+sum() Word:
+    a Word := 1
+    b Word := 2
+    c Word := 3
+return (a + b) + c
+"#,
     );
     assert_const_int(typed_bind_const_value(&typed, "sum"), 6);
 }
@@ -306,7 +346,7 @@ fn runtime_anonymous_arithmetic_uses_structural_intrinsic() {
         ));
         assert_eq!(args.len(), 2);
     }
-    assert_eq!(*expr.const_value, None);
+    assert_eq!(*expr.facts.const_facts.const_value, None);
 }
 
 #[test]
@@ -334,8 +374,8 @@ fn bind_expr_const_value_removed(ast: &ast::FileAst, name: &str) -> bool {
 #[test]
 fn runtime_binary_with_variables_stays_dynamic() {
     let typed = transform_source(
-        "Int is in 0...255
-#operator(Add)
+        "Int is in 0 to 255
+#infix('+')
 add_int(a Int, b Int) Int: a
 x: 10\ny: 20\nmain: x + y",
     );
@@ -357,7 +397,7 @@ x: 10\ny: 20\nmain: x + y",
         expr.ty,
         Ty::AnonymousInteger { .. } | Ty::Named { .. } if expr.ty.type_name() == Some(&Intern::from_ref("Int")) || typed.type_registry.integer_width_for_type(expr.ty).is_some()
     ));
-    assert!(expr.const_value.is_none());
+    assert!(expr.facts.const_facts.const_value.is_none());
     assert!(matches!(
         typecheck::representation::Repr::derive(expr.ty, Some(&typed.type_registry)),
         Ok(typecheck::representation::Repr::Bits { .. })

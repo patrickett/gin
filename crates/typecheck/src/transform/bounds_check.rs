@@ -76,7 +76,7 @@ pub fn check_fn_call_bounds(
         }
         check_value_against_param_ty(
             arg_ty,
-            typed.exprs.const_value[arg_id.as_usize()].as_ref(),
+            typed.exprs.facts.const_facts.const_value[arg_id.as_usize()].as_ref(),
             &param_ty,
             &typed.type_registry,
             flaws,

@@ -1,4 +1,4 @@
-//! Regression: defs after tuple `when` arms must parse (sized.gin tail).
+//! Regression: defs after positional-row `when` arms must parse (sized.gin tail).
 
 use internment::Intern;
 use parser::query::SourceParseExt;
@@ -6,7 +6,7 @@ use parser::query::SourceParseExt;
 #[test]
 fn sized_gin_includes_tail_helpers() {
     // Parser-only test: type definitions not needed — just the def signatures
-    // with list-when and tuple-when bodies followed by more top-level defs.
+    // with list-when and positional-row-when bodies followed by more top-level defs.
     let src = "\
 Size is Const(BigInt) or Dynamic
 
@@ -57,7 +57,7 @@ max_size(a Size, b Size) Size := when (a, b) is
 }
 
 #[test]
-fn tuple_when_with_dedented_else_allows_following_top_level_bind() {
+fn value_row_when_with_dedented_else_allows_following_top_level_bind() {
     let src = r#"
 Size is Const(BigInt) or Dynamic
 
@@ -70,13 +70,13 @@ mul_size(size Size, n BigInt) Size := Const(0)
     let file = src.parse_source_full().ast;
     assert!(
         file.defs.contains_key(&Intern::new("mul_size".to_string())),
-        "defs after tuple-when-else: {:?}",
+        "defs after positional-row-when-else: {:?}",
         file.defs.keys().map(|k| k.as_str()).collect::<Vec<_>>()
     );
 }
 
 #[test]
-fn when_tuple_subject_parses_as_when_not_tuple_of_const() {
+fn when_value_row_subject_parses_as_when_not_value_row_of_const() {
     let src = "f() Size := when (a, b) is\n    (Const(x), Const(y)) then Const(0)\n";
     let file = src.parse_source_full().ast;
     let f = file.defs.get(&Intern::new("f".to_string())).unwrap();

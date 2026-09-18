@@ -57,7 +57,7 @@ pub fn analyze_availability(typed: &mut TypedFileAst, signatures: &CallableSigna
         );
     }
 
-    typed.exprs.availability[..len].copy_from_slice(&avail[..len]);
+    typed.exprs.facts.semantic_facts.availability[..len].copy_from_slice(&avail[..len]);
 }
 
 fn analyze_expr(
@@ -77,7 +77,7 @@ fn analyze_expr(
         None => return Availability::Unknown,
     }
 
-    if !typed.exprs.flaws[idx].is_empty() {
+    if !typed.exprs.facts.semantic_facts.flaws[idx].is_empty() {
         state[idx] = VisitState::Done;
         out[idx] = Availability::Unknown;
         return Availability::Unknown;
@@ -86,9 +86,36 @@ fn analyze_expr(
     state[idx] = VisitState::Visiting;
     let kind = &typed.exprs.kind[idx];
     let availability = match kind {
+        TypedExprKind::Invalid => Availability::Unknown,
+        TypedExprKind::Asm {
+            state: crate::assembly::AssemblyState::Checked(assembly),
+            ..
+        } if assembly.evaluation.is_some() => {
+            let operands: Vec<_> = assembly
+                .operands
+                .iter()
+                .map(|(_, operand)| *operand)
+                .collect();
+            analyze_call(
+                assembly.evaluation.unwrap(),
+                Some(&operands),
+                typed,
+                signatures,
+                &mut AvailabilityState {
+                    state,
+                    bind_cache,
+                    out,
+                    compiletime_refs,
+                },
+            )
+        }
+        TypedExprKind::Asm { .. } => Availability::Runtime,
+        TypedExprKind::Register(_) => Availability::Runtime,
         TypedExprKind::Lit(_)
         | TypedExprKind::Rematerialize { .. }
-        | TypedExprKind::TargetQuery { .. } => Availability::CompileTime,
+        | TypedExprKind::TargetQuery { .. }
+        | TypedExprKind::Target => Availability::CompileTime,
+        TypedExprKind::TargetField(_) => Availability::CompileTime,
         TypedExprKind::Binary { lhs, rhs, .. }
         | TypedExprKind::InvalidOperator { lhs, rhs, .. } => join_availability(&[
             analyze_expr(
@@ -239,7 +266,6 @@ fn analyze_expr(
         }
         TypedExprKind::Loop { .. } => Availability::Runtime,
         TypedExprKind::SelfRef { .. } => Availability::CompileTime,
-        TypedExprKind::FormatString(_) => Availability::CompileTime,
         TypedExprKind::Range { start, end } => join_availability(&[
             analyze_expr(
                 *start,
@@ -260,7 +286,10 @@ fn analyze_expr(
                 compiletime_refs,
             ),
         ]),
-        TypedExprKind::TupleLit(values) | TypedExprKind::List(values) => join_availability(
+        TypedExprKind::RecordValue(values)
+        | TypedExprKind::ResultRow(values)
+        | TypedExprKind::ArrayLit(values)
+        | TypedExprKind::List(values) => join_availability(
             &values
                 .iter()
                 .map(|value| {
@@ -276,16 +305,18 @@ fn analyze_expr(
                 })
                 .collect::<Vec<_>>(),
         ),
-        TypedExprKind::Cast { expr, .. } => analyze_expr(
-            *expr,
-            typed,
-            signatures,
-            state,
-            bind_cache,
-            out,
-            compiletime_refs,
-        ),
-        TypedExprKind::TupleAlloc { init, size } => {
+        TypedExprKind::Cast { expr, .. } | TypedExprKind::UnionPayload { expr, .. } => {
+            analyze_expr(
+                *expr,
+                typed,
+                signatures,
+                state,
+                bind_cache,
+                out,
+                compiletime_refs,
+            )
+        }
+        TypedExprKind::FixedArrayAlloc { init, size } => {
             let init_availability = analyze_expr(
                 *init,
                 typed,
@@ -302,7 +333,7 @@ fn analyze_expr(
                 Availability::Runtime
             }
         }
-        TypedExprKind::TupleGet { base, .. } => analyze_expr(
+        TypedExprKind::AggregateGet { base, .. } => analyze_expr(
             *base,
             typed,
             signatures,
@@ -311,7 +342,7 @@ fn analyze_expr(
             out,
             compiletime_refs,
         ),
-        TypedExprKind::TupleSet { .. } => Availability::Runtime,
+        TypedExprKind::AggregateSet { .. } => Availability::Runtime,
         TypedExprKind::Destructure { .. } => Availability::Runtime,
         TypedExprKind::RecordSet { .. } => Availability::Runtime,
         TypedExprKind::BufGet { buf, index } => join_availability(&[
@@ -355,15 +386,6 @@ fn analyze_expr(
                 compiletime_refs,
             )
         }
-        TypedExprKind::ConsumeArg(expr) | TypedExprKind::Eat(expr) => analyze_expr(
-            *expr,
-            typed,
-            signatures,
-            state,
-            bind_cache,
-            out,
-            compiletime_refs,
-        ),
     };
     state[idx] = VisitState::Done;
     out[idx] = availability;

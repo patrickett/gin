@@ -15,13 +15,16 @@ impl TyOwnershipExt for Ty {
             | Ty::Float { .. }
             | Ty::Unit
             | Ty::Ref { .. } => true,
-            Ty::Tuple(items) => items
+            Ty::ResultRow(items) => items
                 .iter()
-                .all(TyOwnershipExt::is_structurally_discardable),
+                .all(|item| item.ty.is_structurally_discardable()),
             Ty::Record { fields, .. } => fields
                 .iter()
                 .all(|(_, field)| field.is_structurally_discardable()),
             Ty::Array { elem, .. } => elem.is_structurally_discardable(),
+            Ty::UnresolvedSequence { element, .. } => element
+                .as_deref()
+                .is_none_or(TyOwnershipExt::is_structurally_discardable),
             Ty::Union { variants, .. } => variants.iter().all(|variant| {
                 variant
                     .fields
@@ -69,11 +72,13 @@ pub(crate) fn stage_rematerialize_owned_arguments(
     typed: &mut TypedFileAst,
     cross_file_signatures: &HashMap<DefId, TypedCallableSignature>,
 ) {
-    propagate_condition_singletons(typed);
     let original_len = typed.exprs.kind.len();
     for index in 0..original_len {
+        propagate_local_constant_to_reference(typed, ExprId(index as u32));
+    }
+    propagate_condition_singletons(typed);
+    for index in 0..original_len {
         if let TypedExprKind::Cast { expr, .. } = typed.exprs.kind[index] {
-            propagate_local_constant_to_reference(typed, expr);
             if expr_is_rematerializable(typed, expr) {
                 let rematerialized = append_rematerialization(typed, expr);
                 let TypedExprKind::Cast { expr, .. } = &mut typed.exprs.kind[index] else {
@@ -103,15 +108,14 @@ pub(crate) fn stage_rematerialize_owned_arguments(
                     .map(|signature| signature.param_conventions.clone())
             })
             .unwrap_or_default();
-        for argument in &arguments {
-            propagate_local_constant_to_reference(typed, *argument);
-        }
         let rewritten: Vec<_> = arguments
             .into_iter()
             .enumerate()
             .map(|(argument_index, argument)| {
-                if conventions.get(argument_index) == Some(&ast::ParamConvention::Own)
-                    && expr_is_rematerializable(typed, argument)
+                if matches!(
+                    conventions.get(argument_index),
+                    Some(&ast::ParamConvention::Own | &ast::ParamConvention::Terminal)
+                ) && expr_is_rematerializable(typed, argument)
                 {
                     append_rematerialization(typed, argument)
                 } else {
@@ -127,10 +131,7 @@ pub(crate) fn stage_rematerialize_owned_arguments(
 }
 
 fn propagate_local_constant_to_reference(typed: &mut TypedFileAst, reference: ExprId) {
-    let TypedExprKind::FnCall {
-        target, args: None, ..
-    } = typed.exprs.kind[reference.as_usize()]
-    else {
+    let TypedExprKind::FnCall { args: None, .. } = typed.exprs.kind[reference.as_usize()] else {
         return;
     };
     if !matches!(
@@ -139,33 +140,55 @@ fn propagate_local_constant_to_reference(typed: &mut TypedFileAst, reference: Ex
     ) {
         return;
     }
-    let source = typed.exprs.kind[..reference.as_usize()]
-        .iter()
-        .rev()
-        .find_map(|kind| match kind {
-            TypedExprKind::Bind { name, body, .. } if *name == target.0 => Some(*body),
-            TypedExprKind::Reassign { name, value, .. } if *name == target.0 => Some(*value),
-            _ => None,
-        });
-    let constant = source.and_then(|source| closed_constant(typed, source));
+    let Some(version) = typed.exprs.place_version_of(reference).flatten() else {
+        return;
+    };
+    let constant = closed_place_constant(typed, version);
+    typed.exprs.facts.const_facts.const_value[reference.as_usize()] = None;
+    if !matches!(
+        typed.exprs.integer_knowledge_of(reference),
+        Some(Some(ast::integer::IntegerKnowledge::Domain(_)))
+    ) {
+        typed.exprs.facts.semantic_facts.integer_knowledge[reference.as_usize()] = None;
+    }
     let Some(ast::ConstValue::Int(value)) = constant else {
         return;
     };
-    typed.exprs.const_value[reference.as_usize()] = Some(ast::ConstValue::Int(value));
-    typed.exprs.integer_knowledge[reference.as_usize()] = Some(
+    typed.exprs.facts.const_facts.const_value[reference.as_usize()] =
+        Some(ast::ConstValue::Int(value));
+    typed.exprs.facts.semantic_facts.integer_knowledge[reference.as_usize()] = Some(
         ast::integer::IntegerKnowledge::Exact(ast::integer::CanonicalIntegerExpr::Value(value)),
     );
 }
 
+fn closed_place_constant(
+    typed: &TypedFileAst,
+    version: crate::typed::PlaceVersionId,
+) -> Option<ast::ConstValue> {
+    match &typed.place_versions[version.0 as usize].origin {
+        crate::typed::PlaceVersionOrigin::Initializer(value)
+        | crate::typed::PlaceVersionOrigin::Rebind { value, .. } => closed_constant(typed, *value),
+        _ => None,
+    }
+}
+
 fn closed_constant(typed: &TypedFileAst, expression: ExprId) -> Option<ast::ConstValue> {
-    if let Some(value) = typed.exprs.const_value[expression.as_usize()].clone() {
+    if matches!(
+        typed.exprs.kind[expression.as_usize()],
+        TypedExprKind::FnCall { args: None, .. }
+    ) && let Some(version) = typed.exprs.place_version_of(expression).flatten()
+    {
+        return closed_place_constant(typed, version);
+    }
+    if let Some(value) = typed.exprs.facts.const_facts.const_value[expression.as_usize()].clone() {
         return Some(value);
     }
     let TypedExprKind::When(when_expr) = &typed.exprs.kind[expression.as_usize()] else {
         return None;
     };
     if let Some(subject) = when_expr.subject
-        && let Some(subject_value) = typed.exprs.const_value[subject.as_usize()].as_ref()
+        && let Some(subject_value) =
+            typed.exprs.facts.const_facts.const_value[subject.as_usize()].as_ref()
     {
         for arm in &when_expr.arms {
             match arm {
@@ -208,9 +231,8 @@ fn propagate_condition_singletons(typed: &mut TypedFileAst) {
             let crate::typed::TypedCondition::Is { subject, pattern } = &if_expr.condition else {
                 return None;
             };
-            let TypedExprKind::FnCall {
-                target, args: None, ..
-            } = typed.exprs.kind[subject.as_usize()].clone()
+            let TypedExprKind::FnCall { args: None, .. } =
+                typed.exprs.kind[subject.as_usize()].clone()
             else {
                 return None;
             };
@@ -218,7 +240,7 @@ fn propagate_condition_singletons(typed: &mut TypedFileAst) {
                 return None;
             };
             Some((
-                target.0,
+                typed.exprs.place_version_of(*subject).flatten()?,
                 value,
                 if_expr
                     .stmts
@@ -229,22 +251,24 @@ fn propagate_condition_singletons(typed: &mut TypedFileAst) {
             ))
         })
         .collect();
-    for (name, value, roots) in conditions {
+    for (version, value, roots) in conditions {
         let mut references = Vec::new();
         for root in roots {
             let _ = crate::typed::walk_expr_preorder(typed, root, &mut |expression| {
                 if matches!(
                     &typed.exprs.kind[expression.as_usize()],
-                    TypedExprKind::FnCall { target, args: None, .. } if target.0 == name
-                ) {
+                    TypedExprKind::FnCall { args: None, .. }
+                ) && typed.exprs.place_version_of(expression).flatten() == Some(version)
+                {
                     references.push(expression);
                 }
                 std::ops::ControlFlow::Continue(())
             });
         }
         for reference in references {
-            typed.exprs.const_value[reference.as_usize()] = Some(ast::ConstValue::Int(value));
-            typed.exprs.integer_knowledge[reference.as_usize()] =
+            typed.exprs.facts.const_facts.const_value[reference.as_usize()] =
+                Some(ast::ConstValue::Int(value));
+            typed.exprs.facts.semantic_facts.integer_knowledge[reference.as_usize()] =
                 Some(ast::integer::IntegerKnowledge::Exact(
                     ast::integer::CanonicalIntegerExpr::Value(value),
                 ));
@@ -253,12 +277,12 @@ fn propagate_condition_singletons(typed: &mut TypedFileAst) {
 }
 
 fn append_rematerialization(typed: &mut TypedFileAst, source: ExprId) -> ExprId {
-    let constant = typed.exprs.const_value[source.as_usize()]
+    let constant = typed.exprs.facts.const_facts.const_value[source.as_usize()]
         .clone()
         .or_else(|| {
             let ast::integer::IntegerKnowledge::Exact(ast::integer::CanonicalIntegerExpr::Value(
                 value,
-            )) = typed.exprs.integer_knowledge[source.as_usize()].as_ref()?
+            )) = typed.exprs.facts.semantic_facts.integer_knowledge[source.as_usize()].as_ref()?
             else {
                 return None;
             };
@@ -275,26 +299,55 @@ fn append_rematerialization(typed: &mut TypedFileAst, source: ExprId) -> ExprId 
         .ty
         .push(typed.exprs.ty[source.as_usize()].clone());
     typed.exprs.span.push(typed.exprs.span[source.as_usize()]);
-    typed.exprs.const_value.push(Some(constant));
     typed
         .exprs
+        .facts
+        .const_facts
+        .const_value
+        .push(Some(constant));
+    typed.exprs.facts.const_facts.const_object.push(None);
+    typed
+        .exprs
+        .facts
+        .semantic_facts
+        .sequence_provenance
+        .push(None);
+    typed.exprs.facts.const_facts.sequence_literal.push(None);
+    typed
+        .exprs
+        .facts
+        .const_facts
+        .literal_materialization
+        .push(None);
+    typed
+        .exprs
+        .facts
+        .semantic_facts
         .integer_knowledge
-        .push(typed.exprs.integer_knowledge[source.as_usize()].clone());
+        .push(typed.exprs.facts.semantic_facts.integer_knowledge[source.as_usize()].clone());
     typed
         .exprs
+        .facts
+        .semantic_facts
         .result_evidence
-        .push(typed.exprs.result_evidence[source.as_usize()].clone());
+        .push(typed.exprs.facts.semantic_facts.result_evidence[source.as_usize()].clone());
     typed
         .exprs
+        .facts
+        .semantic_facts
         .projected_result_evidence
-        .push(typed.exprs.projected_result_evidence[source.as_usize()].clone());
+        .push(
+            typed.exprs.facts.semantic_facts.projected_result_evidence[source.as_usize()].clone(),
+        );
     typed
         .exprs
+        .facts
+        .semantic_facts
         .availability
         .push(crate::Availability::CompileTime);
-    typed.exprs.target_group.push(None);
-    typed.exprs.place.push(None);
-    typed.exprs.place_version.push(None);
-    typed.exprs.flaws.push(Vec::new());
+    typed
+        .exprs
+        .push_ownership_facts(None, Vec::new(), None, None);
+    typed.exprs.facts.semantic_facts.flaws.push(Vec::new());
     id
 }

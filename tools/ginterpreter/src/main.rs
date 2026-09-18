@@ -11,7 +11,7 @@ use std::process::ExitCode;
 #[derive(Parser)]
 #[command(version, about)]
 struct Args {
-    package: Option<PathBuf>,
+    package: PathBuf,
 }
 
 fn main() -> ExitCode {
@@ -27,25 +27,14 @@ fn main() -> ExitCode {
         }
     };
     let args = Args::parse();
-    let mut session = match args.package.as_deref() {
-        Some(path) => match InterpreterContext::load(path) {
-            Ok(context) => InterpreterSession::with_context(context),
-            Err(error) => {
-                eprintln!("error: {error}");
-                return ExitCode::FAILURE;
-            }
-        },
-        None => match InterpreterSession::standalone() {
-            Ok(session) => session,
-            Err(error) => {
-                eprintln!("error: {error}");
-                return ExitCode::FAILURE;
-            }
-        },
+    let mut session = match InterpreterContext::load(&args.package) {
+        Ok(context) => InterpreterSession::with_context(context),
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::FAILURE;
+        }
     };
-    if args.package.is_some() {
-        println!("Package: {}", session.context().package().root().display());
-    }
+    println!("Package: {}", session.context().package().root().display());
 
     'repl: loop {
         let input = match editor.readline("> ") {
@@ -114,14 +103,14 @@ fn main() -> ExitCode {
             Submission::Evaluated {
                 value:
                     RuntimeValue {
-                        storage: RuntimeStorage::Bytes(_),
+                        storage: RuntimeStorage::Bytes(bytes),
                         ..
                     },
                 diagnostics,
                 ..
             } => {
                 print_diagnostics(&diagnostics);
-                eprintln!("runtime value cannot be printed");
+                println!("{}", String::from_utf8_lossy(&bytes));
             }
             Submission::Command(Command::Clear) => println!("session cleared"),
             Submission::Command(Command::Help) => print_help(),
@@ -210,14 +199,14 @@ fn handle_task_result(task: TaskResult) {
             ginterpreter::Submission::Evaluated {
                 value:
                     RuntimeValue {
-                        storage: RuntimeStorage::Bytes(_),
+                        storage: RuntimeStorage::Bytes(bytes),
                         ..
                     },
                 diagnostics,
                 ..
             } => {
                 print_diagnostics(&diagnostics);
-                eprintln!("task {} result cannot be printed", task.id.0);
+                println!("task {} => {}", task.id.0, String::from_utf8_lossy(&bytes));
             }
             ginterpreter::Submission::Rejected { diagnostics } => {
                 print_diagnostics(&diagnostics);

@@ -2,8 +2,8 @@
 
 use crate::ty::Ty;
 use ast::{
-    Bind, BindValue, Expr, FileAst, LoopEnum, ModPath, ParameterKind, Parameters, SpanId,
-    SpanTable, WhenArm,
+    Bind, BindValue, COMPILER_QUERY_NAMES, Expr, FileAst, LoopEnum, ModPath, ParameterKind,
+    Parameters, SpanId, SpanTable, WhenArm,
 };
 use ast::{ConstValue, HashFloat};
 use ast_format::type_expr::ExprFormatExt;
@@ -261,10 +261,10 @@ fn detect_block_in_expr(st: &SpanTable, expr: &Expr, byte_pos: usize) -> Option<
                     return detect_block_in_expr(st, &e.value, byte_pos);
                 }
             }
-            if let Some(ret_expr) = &ifx.ret.value
-                && st.contains(ret_expr.span_id, byte_pos)
-            {
-                return detect_block_in_expr(st, &ret_expr.value, byte_pos);
+            for ret_expr in &ifx.ret.values {
+                if st.contains(ret_expr.span_id, byte_pos) {
+                    return detect_block_in_expr(st, &ret_expr.value, byte_pos);
+                }
             }
             Some(NestedBlock::If)
         }
@@ -456,6 +456,10 @@ impl FileAstCompletionExt for FileAst {
         byte_pos: usize,
         tag_types: Option<&HashMap<Intern<String>, Ty>>,
     ) -> Vec<CompletionCandidate> {
+        if let Some(items) = compiler_query_completions(source, byte_pos) {
+            return items;
+        }
+
         // 1. Literal-union completions (cursor after `TypeName:` value area).
         if let Some(tag_types) = tag_types {
             let literal = literal_union_completions_at(source, byte_pos, tag_types);
@@ -473,6 +477,23 @@ impl FileAstCompletionExt for FileAst {
         let context = detect_cursor_context(self, source, byte_pos);
         completions_for_context_inner(self, context)
     }
+}
+
+fn compiler_query_completions(source: &str, byte_pos: usize) -> Option<Vec<CompletionCandidate>> {
+    let line_start = source[..byte_pos].rfind('\n').map_or(0, |i| i + 1);
+    let prefix = source[line_start..byte_pos].trim_start();
+    let query_prefix = prefix.strip_prefix('#')?;
+    if query_prefix.chars().any(char::is_whitespace) || query_prefix.contains('(') {
+        return None;
+    }
+
+    Some(
+        COMPILER_QUERY_NAMES
+            .iter()
+            .filter(|query| query.starts_with(query_prefix))
+            .map(|query| CompletionCandidate::new(query, CompletionKind::Keyword))
+            .collect(),
+    )
 }
 
 fn completions_for_context_inner(
@@ -717,7 +738,7 @@ pub fn literal_union_completions(ty: &Ty) -> Vec<CompletionCandidate> {
     values
         .iter()
         .filter_map(|v| match v {
-            ConstValue::String(s) => {
+            ConstValue::Text(s) => {
                 let label = format!("'{s}'");
                 Some(CompletionCandidate {
                     label: label.clone(),
@@ -856,11 +877,32 @@ pub struct SignatureInfo {
 
 pub fn signature_for_fn(bind: &Bind) -> Option<SignatureInfo> {
     let params = bind.params.as_ref()?;
+    let return_surface = if !bind.named_results.is_empty() {
+        Some(
+            bind.named_results
+                .iter()
+                .map(|result| format!("{} {}", result.name, result.ty.value.format_surface()))
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+    } else {
+        bind.return_type_name
+            .as_ref()
+            .map(ToString::to_string)
+            .or_else(|| {
+                bind.return_tag
+                    .as_ref()
+                    .map(|tag| tag.value.format_surface())
+            })
+    };
     let label = if params.is_empty() {
         format!("{}()", bind.name.as_str())
     } else {
         format!("{}{}", bind.name.as_str(), format_params(params))
     };
+    let label = return_surface
+        .map(|surface| format!("{label} {surface}"))
+        .unwrap_or(label);
     let param_list: Vec<String> = params
         .iter()
         .map(|(name, _kind)| name.to_string())

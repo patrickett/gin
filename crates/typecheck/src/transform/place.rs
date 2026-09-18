@@ -6,7 +6,7 @@ use crate::typed::{
     PlaceId, PlaceVersionComponent, PlaceVersionId, PlaceVersionOrigin, TypedFileAst,
 };
 
-fn knowledge_domain(knowledge: &IntegerKnowledge) -> Option<IntegerDomain> {
+pub(super) fn knowledge_domain(knowledge: &IntegerKnowledge) -> Option<IntegerDomain> {
     match knowledge {
         IntegerKnowledge::Exact(CanonicalIntegerExpr::Value(value)) => {
             IntegerDomain::bounded(*value, *value)
@@ -22,7 +22,8 @@ fn version_predecessors(origin: &PlaceVersionOrigin) -> Vec<PlaceVersionId> {
     match origin {
         PlaceVersionOrigin::Parameter
         | PlaceVersionOrigin::Declared
-        | PlaceVersionOrigin::Initializer(_) => Vec::new(),
+        | PlaceVersionOrigin::Initializer(_)
+        | PlaceVersionOrigin::Mutation(_) => Vec::new(),
         PlaceVersionOrigin::Projection { base } => vec![*base],
         PlaceVersionOrigin::Rebind { predecessor, .. } => predecessor.iter().copied().collect(),
         PlaceVersionOrigin::Join(predecessors) => predecessors.clone(),
@@ -134,7 +135,7 @@ pub(crate) fn stage_freeze_place_contracts(typed: &mut TypedFileAst) {
             cyclic_component.and_then(|component| cyclic_write_expression(typed, component))
         {
             let name = typed.places[place_index].name;
-            typed.exprs.flaws[write.as_usize()].push(
+            typed.exprs.facts.semantic_facts.flaws[write.as_usize()].push(
                 Diagnostic::new(
                     "type-cyclic-place-requires-explicit-contract",
                     format!(
@@ -167,12 +168,20 @@ pub(crate) fn stage_freeze_place_contracts(typed: &mut TypedFileAst) {
         {
             version.ty = contract.clone();
         }
-        for (expr_index, resolved_place) in typed.exprs.place.iter().enumerate() {
-            if *resolved_place == Some(place)
-                && matches!(typed.exprs.ty[expr_index], Ty::AnonymousInteger { .. })
-            {
-                typed.exprs.ty[expr_index] = contract.clone();
-            }
+        let matching_exprs: Vec<_> = typed
+            .exprs
+            .place_entries()
+            .filter_map(|(expr_id, resolved_place)| {
+                (resolved_place == Some(place)
+                    && matches!(
+                        typed.exprs.ty[expr_id.as_usize()],
+                        Ty::AnonymousInteger { .. }
+                    ))
+                .then_some(expr_id)
+            })
+            .collect();
+        for expr_id in matching_exprs {
+            typed.exprs.ty[expr_id.as_usize()] = contract.clone();
         }
     }
 }

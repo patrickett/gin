@@ -3,6 +3,9 @@ use codegen::NativeEngine;
 use derive_more::From;
 use std::collections::{HashMap, HashSet};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, From)]
+pub struct GenerationId(pub u64);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeStorage {
     Int64(i64),
@@ -112,9 +115,6 @@ impl RuntimeValue {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, From)]
-pub struct GenerationId(pub u64);
-
 #[derive(Debug)]
 pub struct NativeExport {
     pub logical_symbol: String,
@@ -217,9 +217,9 @@ impl LiveRuntime {
     }
 
     pub fn clear(&mut self) {
+        self.values.clear();
         self.generations.clear();
         self.symbols.clear();
-        self.values.clear();
         self.active_calls.clear();
     }
 

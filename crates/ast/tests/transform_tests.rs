@@ -31,7 +31,7 @@ fn body_expr_id(typed: &TypedFileAst, def_name: &str) -> Option<ExprId> {
                 exprs.last().copied()
             }
         }
-        BindBody::Extern => None,
+        BindBody::Unlowered => None,
     }
 }
 
@@ -486,6 +486,21 @@ fn test_end_to_end_hover() {
 }
 
 #[test]
+fn hover_on_parameter_includes_ownership_convention() {
+    let source = "discard(value own Int): 0";
+    let typed = transform_source(source);
+    let byte = source.find("value").expect("parameter") + 1;
+    let (line, character) = source.byte_offset_to_position(byte);
+
+    assert_eq!(
+        typed
+            .hover_at(source, line, character)
+            .expect("parameter hover"),
+        "```gin\nvalue own Int\n```"
+    );
+}
+
+#[test]
 fn test_end_to_end_all_flaws() {
     // End-to-end: transform and collect all flaws.
     let source = "main Int: 42";
@@ -533,7 +548,7 @@ fn test_flow_use_after_move() {
 fn test_flow_index_out_of_bounds() {
     // An array of size 3 accessed at index 5 should produce IndexOutOfBounds.
     let typed = transform_source("main: (42; 3); val: arr.5");
-    // TupleGet with constant index 5 on an array of size 3 is out of bounds.
+    // AggregateGet with constant index 5 on an array of size 3 is out of bounds.
     let flaws = typed.all_flaws();
     let _has_bounds = flaws.iter().any(|(_, f)| {
         f.code.slug() == "type-out-of-range"

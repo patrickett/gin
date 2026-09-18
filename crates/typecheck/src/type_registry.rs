@@ -21,9 +21,40 @@ pub struct ReferenceSemantics {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct FixedArrayFormer {
+pub struct SequenceLiteralAcceptance {
     pub element_parameter: Intern<String>,
-    pub length_parameter: Intern<String>,
+    pub materialization: SequenceLiteralMaterialization,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SequenceLiteralMaterialization {
+    FixedArray {
+        length_parameter: Intern<String>,
+    },
+    OwnedBuilder {
+        empty_member: Intern<String>,
+        push_member: Intern<String>,
+    },
+    BorrowStatic,
+}
+
+impl SequenceLiteralAcceptance {
+    pub fn permits_static_backing(&self) -> bool {
+        matches!(
+            self.materialization,
+            SequenceLiteralMaterialization::BorrowStatic
+        )
+    }
+
+    pub fn fixed_array_length_parameter(&self) -> Option<Intern<String>> {
+        match self.materialization {
+            SequenceLiteralMaterialization::FixedArray { length_parameter } => {
+                Some(length_parameter)
+            }
+            SequenceLiteralMaterialization::OwnedBuilder { .. } => None,
+            SequenceLiteralMaterialization::BorrowStatic => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,7 +63,7 @@ pub struct TypeDeclarationSemantics {
     pub display_name: Intern<String>,
     pub parameters: Vec<Intern<String>>,
     pub definition: Ty,
-    pub fixed_array: Option<FixedArrayFormer>,
+    pub sequence_literal: Option<SequenceLiteralAcceptance>,
     pub reference: Option<ReferenceSemantics>,
     pub integer: Option<NominalIntegerSemantics>,
 }
@@ -159,8 +190,8 @@ impl TypeRegistry {
         let Some(declaration) = self.declaration_for_instance(instance) else {
             return ty.clone();
         };
-        let substitution = Self::type_substitution_for_instance(instance);
-        let mut definition = declaration.definition.substitute(&substitution);
+        let substitution = crate::subst::DepSubst::from_ty_args(&instance.arguments);
+        let mut definition = substitution.apply_to_ty(&declaration.definition);
         let is_specialized =
             instance
                 .arguments

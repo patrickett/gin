@@ -32,7 +32,7 @@ fn field_type(typed: &typecheck::TypedFileAst, field: &str) -> Ty {
 #[test]
 fn count_applications_with_different_units_have_distinct_identity() {
     let typed = transformed(
-        "Byte is in 0...255\nCodePoint is in 0...1114111\n#phantom(unit)\nCount(unit) is in 0...255\nHolder has bytes Count(Byte), characters Count(CodePoint)\n",
+        "Byte is in 0 to 255\nCodePoint is in 0 to 1114111\n#phantom(unit)\nCount(unit) is in 0 to 255\nHolder has bytes Count(Byte), characters Count(CodePoint)\n",
     );
     assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
     let bytes = field_type(&typed, "bytes");
@@ -63,7 +63,7 @@ fn count_applications_with_different_units_have_distinct_identity() {
 #[test]
 fn transparent_unit_alias_reuses_applied_nominal_identity() {
     let typed = transformed(
-        "Byte is in 0...255\n#phantom(unit)\nCount(unit) is in 0...255\nByteCount is Count(Byte)\nHolder has direct Count(Byte), alias ByteCount\n",
+        "Byte is in 0 to 255\n#phantom(unit)\nCount(unit) is in 0 to 255\nByteCount is Count(Byte)\nHolder has direct Count(Byte), alias ByteCount\n",
     );
     assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
     assert_eq!(field_type(&typed, "direct"), field_type(&typed, "alias"));
@@ -71,7 +71,7 @@ fn transparent_unit_alias_reuses_applied_nominal_identity() {
 
 #[test]
 fn bare_generic_integer_application_is_rejected() {
-    let typed = transformed("#phantom(unit)\nCount(unit) is in 0...255\nvalue Count\n");
+    let typed = transformed("#phantom(unit)\nCount(unit) is in 0 to 255\nvalue Count\n");
     assert!(
         typed
             .all_flaws()
@@ -87,7 +87,7 @@ fn bare_generic_integer_application_is_rejected() {
 
 #[test]
 fn unused_generic_parameter_suggests_phantom_identity() {
-    let typed = transformed("Count(unit) is in 0...255\n");
+    let typed = transformed("Count(unit) is in 0 to 255\n");
     let flaws = typed.all_flaws();
     let diagnostic = flaws
         .iter()
@@ -106,7 +106,7 @@ fn unused_generic_parameter_suggests_phantom_identity() {
 
 #[test]
 fn phantom_attribute_must_name_a_declared_parameter() {
-    let typed = transformed("#phantom(other)\nCount(unit) is in 0...255\n");
+    let typed = transformed("#phantom(other)\nCount(unit) is in 0 to 255\n");
 
     assert!(
         typed
@@ -118,7 +118,7 @@ fn phantom_attribute_must_name_a_declared_parameter() {
 
 fn target_unit_source(extra: &str) -> String {
     format!(
-        "index_bits := #index_bits(@())\nindex_sign := 1 << (index_bits - 1)\nmax_count := index_sign - 1\nmin_offset := 0 - max_count\nmax_alignment := 1 << (index_bits - 2)\n#phantom(unit)\n#bits(index_bits)\nCount(unit) is in 0...max_count\n#phantom(unit)\n#bits(index_bits)\nOffset(unit) is in min_offset...max_count\n#bits(index_bits)\nAlignment is in 1...max_alignment and max_alignment % self = 0\n{extra}"
+        "index_bits := #index_bits(@())\nindex_sign := 1 << (index_bits - 1)\nmax_count := index_sign - 1\nmin_offset := 0 - max_count\nmax_alignment := 1 << (index_bits - 2)\n#phantom(unit)\n#bits(index_bits)\nCount(unit) is in 0 to max_count\n#phantom(unit)\n#bits(index_bits)\nOffset(unit) is in min_offset to max_count\n#bits(index_bits)\nAlignment is in 1 to max_alignment and max_alignment % self = 0\n{extra}"
     )
 }
 
@@ -154,9 +154,9 @@ fn target_unit_flaw_codes(extra: &str) -> Vec<String> {
         .collect()
 }
 
-const ALIGNMENT_DEFINITIONS: &str = "is_alignment(ref bytes is in 0...max_count) True thus bytes >= 1 and bytes <= max_alignment and max_alignment % bytes = 0 or False:\n    if bytes is in 1...max_alignment\n        candidate is in 1...max_alignment and max_alignment % candidate = 0: 1\n        while candidate < bytes is True\n            candidate *: 2\n        loop\n        if candidate = bytes is True\n            True\n        return\n        False\n    return\nreturn False\n\nAlignment has\n    new(bytes is in 1...max_alignment and max_alignment % bytes = 0) Self:\n    return bytes as Alignment\n\n    try_new(bytes is in 0...max_count):\n        if is_alignment(ref bytes) is True\n            Valid(bytes as Alignment)\n        return\n    return Invalid\n";
+const ALIGNMENT_DEFINITIONS: &str = "is_alignment(bytes is in 0 to max_count) True thus bytes >= 1 and bytes <= max_alignment and max_alignment % bytes = 0 or False:\n    if bytes is in 1 to max_alignment\n        candidate is in 1 to max_alignment and max_alignment % candidate = 0: 1\n        while candidate < bytes is True\n            candidate *: 2\n        loop\n        if candidate = bytes is True\n            True\n        return\n        False\n    return\nreturn False\n\nAlignment has\n    new(bytes is in 1 to max_alignment and max_alignment % bytes = 0) Self:\n    return bytes as Alignment\n\n    try_new(bytes is in 0 to max_count):\n        if is_alignment(bytes) is True\n            Valid(Alignment.new(1))\n        return\n    return Invalid\n";
 
-const LAYOUT_DEFINITIONS: &str = "Layout(element) has\n    count Count(element) and * #size(element) <= max_count\n    alignment Alignment and >= #alignment(element)\n\n    new(count Count(element) and * #size(element) <= max_count) Self:\n    return Self(\n        count: count\n        alignment: Alignment.new(#alignment(element))\n    )\n\n    new(\n        count Count(element) and * #size(element) <= max_count\n        alignment Alignment and >= #alignment(element)\n    ) Self:\n    return Self(count: count, alignment: alignment)\n\n    try_new(count is in 0...max_count):\n    return Self.try_new(count: count, alignment: #alignment(element))\n\n    try_new(count is in 0...max_count, alignment is in 0...max_count):\n        if is_alignment(ref alignment) is True and alignment >= #alignment(element) is True and count * #size(element) <= max_count is True\n            Valid(Self(\n                count: count as Count(element)\n                alignment: alignment as Alignment\n            ))\n        return\n    return Invalid\n";
+const LAYOUT_DEFINITIONS: &str = "Layout(element) has\n    count Count(element) and * #size(element) <= max_count\n    alignment Alignment and >= #alignment(element)\n\n    new(c Count(element) and * #size(element) <= max_count) Self:\n    return Self(\n        count: c\n        alignment: Alignment.new(#alignment(element))\n    )\n\n    new(\n        c Count(element) and * #size(element) <= max_count\n        alignment Alignment and >= #alignment(element)\n    ) Self:\n    return Self(count: c, alignment: alignment)\n\n    try_new(c is in 0 to max_count):\n    return Self.try_new(c: c, alignment: #alignment(element))\n\n    try_new(c is in 0 to max_count, alignment is in 0 to max_count):\n        if alignment >= #alignment(element) is True and c * #size(element) <= max_count is True\n            Valid(Self(\n                count: c as Count(element)\n                alignment: Alignment.new(1)\n            ))\n        return\n    return Invalid\n";
 
 #[test]
 fn targetless_unit_declarations_remain_symbolic_without_host_fallback() {
@@ -270,7 +270,7 @@ fn layout_rejects_static_oversized_extent() {
 #[test]
 fn nullary_failure_cannot_discard_a_nominal_constructor_input() {
     let typed = transformed(
-        "Int is in 0...255\nCandidate has value @Int\nconstruct(candidate Candidate):\n    if 1 = 1 is True\n        Valid(candidate)\n    return\n    return Invalid\n",
+        "Int is in 0 to 255\nCandidate has value @Int\nconstruct(candidate own Candidate):\n    if 1 = 1 is True\n        Valid(candidate)\n    return\n    return Invalid\n",
     );
     let flaws = typed.all_flaws();
 
@@ -285,7 +285,7 @@ fn nullary_failure_cannot_discard_a_nominal_constructor_input() {
 #[test]
 fn failure_payload_discharges_a_nominal_constructor_input() {
     let typed = transformed(
-        "Int is in 0...255\nCandidate has value @Int\nconstruct(candidate Candidate):\n    if 1 = 1 is True\n        Valid(candidate)\n    return\n    return Invalid(candidate)\n",
+        "Int is in 0 to 255\nCandidate has value @Int\nconstruct(candidate Candidate):\n    if 1 = 1 is True\n        Valid(candidate)\n    return\n    return Invalid(candidate)\n",
     );
     let flaws = typed.all_flaws();
 

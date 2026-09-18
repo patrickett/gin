@@ -76,13 +76,17 @@ fn binary_type_argument_resolves_as_array_size() {
         .type_registry
         .declaration_for_instance(instance)
         .expect("declaration metadata");
-    assert!(former.fixed_array.is_some());
     let former = former
-        .fixed_array
+        .sequence_literal
         .as_ref()
         .expect("Buffer fixed-array contract");
+    let typecheck::SequenceLiteralMaterialization::FixedArray { length_parameter } =
+        former.materialization
+    else {
+        panic!("expected fixed-array contract");
+    };
     assert_eq!(former.element_parameter.as_str(), "x");
-    assert_eq!(former.length_parameter.as_str(), "n");
+    assert_eq!(length_parameter.as_str(), "n");
 
     assert!(length.normalize_to_value().is_none());
     assert_eq!(
@@ -158,7 +162,7 @@ fn symbolic_length_expressions_support_nested_arithmetic() {
         typed
             .type_registry
             .declaration_for_instance(instance)
-            .is_some_and(|declaration| declaration.fixed_array.is_some())
+            .is_some_and(|declaration| declaration.sequence_literal.is_some())
     );
 }
 
@@ -219,7 +223,7 @@ fn symbolic_length_expressions_support_multiplicative_growth() {
         typed
             .type_registry
             .declaration_for_instance(instance)
-            .is_some_and(|declaration| declaration.fixed_array.is_some())
+            .is_some_and(|declaration| declaration.sequence_literal.is_some())
     );
 }
 
@@ -261,7 +265,7 @@ fn unannotated_array_spelling_remains_nominal_record() {
         .expect("declaration");
 
     assert_eq!(name.as_str(), "Array");
-    assert!(declaration.fixed_array.is_none());
+    assert!(declaration.sequence_literal.is_none());
     assert!(!matches!(
         Repr::derive(values_ty, Some(&typed.type_registry)),
         Ok(Repr::Array { .. })
@@ -359,7 +363,7 @@ fn symbolic_array_type_applications_preserve_alias_identity() {
 #[test]
 fn same_range_declarations_keep_distinct_identity_and_equal_representation() {
     let typed = transform_source(
-        "First is in 0...4294967295\nSecond is in 0...4294967295\nAlias is First\n",
+        "First is in 0 to 4294967295\nSecond is in 0 to 4294967295\nAlias is First\n",
     );
     let first = typed
         .tag_types
@@ -404,14 +408,14 @@ fn same_range_declarations_keep_distinct_identity_and_equal_representation() {
 #[test]
 fn trait_lookup_does_not_cross_equal_integer_representations() {
     let source = "\
-Int is in 0...4294967295
+Int is in 0 to 4294967295
 Flavor has code Int
 
-First is in 0...4294967295
+First is in 0 to 4294967295
 First has Flavor
     Flavor.code: 1
 
-Second is in 0...4294967295
+Second is in 0 to 4294967295
 Second has Flavor
     Flavor.code: 2
 ";
@@ -438,51 +442,9 @@ Second has Flavor
 }
 
 #[test]
-fn intrinsic_names_and_signatures_are_checked_during_typechecking() {
-    let unknown = transform_source(
-        "Int is in 0...4294967295\n#intrinsic(NoSuchIntrinsic)\nbad(a Int, b Int) Int extern\n",
-    );
-    assert!(unknown.all_flaws().iter().any(|(_, flaw)| {
-        flaw.code.slug() == "type-unknown-intrinsic" && flaw.arg("name") == Some("NoSuchIntrinsic")
-    }));
-
-    let invalid = transform_source("#intrinsic(BitsAdd)\nbad(a String, b String) String extern\n");
-    assert!(
-        invalid
-            .all_flaws()
-            .iter()
-            .any(|(_, flaw)| flaw.code.slug() == "type-intrinsic-non-bits")
-    );
-}
-
-#[test]
-fn intrinsic_constant_failures_are_expression_diagnostics() {
-    let division = transform_source(
-        "Wide is in 0...18446744073709551615\n#intrinsic(BitsUnsignedDivide)\ndivide(a Wide, b Wide) Wide extern\nmain := divide(1, 0)\n",
-    );
-    assert!(
-        division.all_flaws().iter().any(|(_, flaw)| {
-            flaw.code.slug() == "type-intrinsic-division-by-zero"
-                && flaw.arg("intrinsic") == Some("BitsUnsignedDivide")
-        }),
-        "{:?}",
-        division.all_flaws()
-    );
-
-    let extension = transform_source(
-        "Byte is in 0...255\n#intrinsic(BitsExtendUnsigned)\nextend(a Byte) Byte extern\n",
-    );
-    assert!(extension.all_flaws().iter().any(|(_, flaw)| {
-        flaw.code.slug() == "type-intrinsic-invalid-extension"
-            && flaw.arg("source_width") == Some("8")
-            && flaw.arg("result_width") == Some("8")
-    }));
-}
-
-#[test]
-fn intrinsic_known_integer_value_is_stored_on_the_expression() {
+fn ordinary_integer_value_is_stored_on_the_expression() {
     let typed = transform_source(
-        "Wide is in 0...18446744073709551615\n#intrinsic(BitsAdd)\nadd(a Wide, b Wide) Wide extern\nmain := add(1, 2)\n",
+        "main := 1 + 2\n",
     );
     let (index, _) = typed
         .exprs
@@ -493,7 +455,7 @@ fn intrinsic_known_integer_value_is_stored_on_the_expression() {
         .expect("intrinsic call");
 
     assert_eq!(
-        typed.exprs.const_value[index],
+        typed.exprs.facts.const_facts.const_value[index],
         Some(ast::ConstValue::Int(3.into()))
     );
     assert!(

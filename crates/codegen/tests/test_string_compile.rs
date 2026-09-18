@@ -2,8 +2,11 @@ mod support;
 use internment::Intern;
 use parser::parse_from_str;
 
-const INTEGER_TYPES: &str = "DefaultInteger is in 0...255\n";
-const STRING_TYPES: &str = "Int is in -9223372036854775808...9223372036854775807\nByte is in 0...255\nString has pointer @Byte, len Int\n";
+const INTEGER_TYPES: &str = "DefaultInteger is in 0 to 255\n";
+const STRING_TYPES: &str = r#"Int is in -9223372036854775808 to 9223372036854775807
+Byte is in 0 to 255
+String has pointer @Byte, len Int
+"#;
 
 #[test]
 fn test_parse_string_literal() {
@@ -36,8 +39,11 @@ fn test_compile_empty_function() {
 
 #[test]
 fn test_compile_string_literal() {
-    let (mlir_text, symptoms) =
-        support::codegen_to_mlir_text("hello_text: 'hello'\n", "test.gin", false);
+    let (mlir_text, symptoms) = support::codegen_to_mlir_text(
+        &format!("{STRING_TYPES}hello_text String: String(pointer: (@'hello') as @Byte, len: 5)\n"),
+        "test.gin",
+        false,
+    );
     assert!(
         symptoms.is_empty(),
         "expected no codegen symptoms: {symptoms:?}"
@@ -69,7 +75,7 @@ identity(value String) String:
 return value
 
 entry() String:
-    message := 'hello'
+    message := String(pointer: (@'hello') as @Byte, len: 5)
 return identity(message)
 "
     );
@@ -81,8 +87,11 @@ return identity(message)
 
 #[test]
 fn test_compile_string_literal_with_print() {
-    let (mlir_text, symptoms) =
-        support::codegen_to_mlir_text("hello_text: 'hello'\n", "test.gin", false);
+    let (mlir_text, symptoms) = support::codegen_to_mlir_text(
+        &format!("{STRING_TYPES}hello_text String: String(pointer: (@'hello') as @Byte, len: 5)\n"),
+        "test.gin",
+        false,
+    );
 
     // Print any diagnostics for debugging
     for symptom in &symptoms {
@@ -164,7 +173,7 @@ fn test_when_basic_ternary() {
     // Basic single-line ternary with string payloads.
     let src = format!(
         "{INTEGER_TYPES}{STRING_TYPES}
-main() String: when 1 < 2 is True and 2 < 3 is True then 'debug' else 'info'
+main() String: when 1 < 2 is True and 2 < 3 is True then String(pointer: (@'debug') as @Byte, len: 5) else String(pointer: (@'info') as @Byte, len: 4)
 "
     );
     let (mlir_text, symptoms) =
@@ -194,9 +203,9 @@ fn test_compile_const_union_in_when() {
 main:
     level LogLevel: 'debug'
     result String: when level
-        'debug': 'debug'
-        'info': 'info'
-        else 'error'
+        'debug': String(pointer: (@'debug') as @Byte, len: 5)
+        'info': String(pointer: (@'info') as @Byte, len: 4)
+        else String(pointer: (@'error') as @Byte, len: 5)
 return result
 "
     );

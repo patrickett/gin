@@ -109,13 +109,14 @@ impl Repr {
             Ty::Named { instance, .. } => {
                 let former = registry?
                     .declaration_for_instance(instance)?
-                    .fixed_array
+                    .sequence_literal
                     .as_ref()?;
+                let length_parameter = former.fixed_array_length_parameter()?;
                 let element = instance.arguments.iter().find_map(|(parameter, argument)| {
                     (*parameter == former.element_parameter).then_some(argument)
                 });
                 let length = instance.arguments.iter().find_map(|(parameter, argument)| {
-                    (*parameter == former.length_parameter).then_some(argument)
+                    (*parameter == length_parameter).then_some(argument)
                 });
                 let TyArg::Type(element) = element? else {
                     return None;
@@ -140,9 +141,11 @@ pub fn has_symbolic_fixed_array_length(ty: &Ty, registry: Option<&TypeRegistry>)
             else {
                 return false;
             };
-            if let Some(former) = &declaration.fixed_array {
+            if let Some(former) = &declaration.sequence_literal
+                && let Some(length_parameter) = former.fixed_array_length_parameter()
+            {
                 let length = instance.arguments.iter().find_map(|(parameter, argument)| {
-                    (*parameter == former.length_parameter).then_some(argument)
+                    (*parameter == length_parameter).then_some(argument)
                 });
                 return !matches!(
                     fixed_array_length_argument(length),
@@ -157,9 +160,9 @@ pub fn has_symbolic_fixed_array_length(ty: &Ty, registry: Option<&TypeRegistry>)
         Ty::Record { fields, .. } => fields
             .iter()
             .any(|(_, field)| has_symbolic_fixed_array_length(field, registry)),
-        Ty::Tuple(fields) => fields
+        Ty::ResultRow(fields) => fields
             .iter()
-            .any(|field| has_symbolic_fixed_array_length(field, registry)),
+            .any(|field| has_symbolic_fixed_array_length(&field.ty, registry)),
         Ty::Union { variants, .. } => variants.iter().any(|variant| {
             variant
                 .fields
@@ -184,18 +187,6 @@ impl<'a> RepresentationContext<'a> {
         ty: &Ty,
         active: &mut HashSet<RecursionKey>,
     ) -> Result<Repr, RepresentationError> {
-        if matches!(ty, Ty::Literal(ast::ConstValue::String(_)))
-            || ty.union_literal_values().is_some_and(|values| {
-                values
-                    .iter()
-                    .all(|value| matches!(value, ast::ConstValue::String(_)))
-            })
-        {
-            return Ok(Repr::Product {
-                fields: vec![Repr::Address { address_space: 0 }, Repr::Bits { width: 64 }],
-            });
-        }
-
         if self
             .registry
             .is_some_and(|registry| registry.reference_former_for_type(ty).is_some())
@@ -264,13 +255,18 @@ impl<'a> RepresentationContext<'a> {
                 if let Some(former) = self
                     .registry
                     .and_then(|registry| registry.declaration_for_instance(instance))
-                    .and_then(|declaration| declaration.fixed_array.as_ref())
+                    .and_then(|declaration| declaration.sequence_literal.as_ref())
                 {
+                    let Some(length_parameter) = former.fixed_array_length_parameter() else {
+                        return Err(RepresentationError::Unsupported {
+                            type_name: name.to_string(),
+                        });
+                    };
                     let element = instance.arguments.iter().find_map(|(parameter, argument)| {
                         (*parameter == former.element_parameter).then_some(argument)
                     });
                     let length = instance.arguments.iter().find_map(|(parameter, argument)| {
-                        (*parameter == former.length_parameter).then_some(argument)
+                        (*parameter == length_parameter).then_some(argument)
                     });
                     let Some(TyArg::Type(element)) = element else {
                         return Err(RepresentationError::InvalidArrayLength {
@@ -341,11 +337,9 @@ impl<'a> RepresentationContext<'a> {
                 .map(|(_, field)| self.derive_inner(field, active))
                 .collect::<Result<Vec<_>, _>>()
                 .map(|fields| Repr::Product { fields }),
-            Ty::Tuple(fields) => fields
-                .iter()
-                .map(|field| self.derive_inner(field, active))
-                .collect::<Result<Vec<_>, _>>()
-                .map(|fields| Repr::Product { fields }),
+            Ty::ResultRow(_) => Err(RepresentationError::Unsupported {
+                type_name: ty.format_for_hover(),
+            }),
             Ty::Unit => Ok(Repr::Product { fields: Vec::new() }),
             Ty::Union { variants, .. } => variants
                 .iter()
@@ -370,11 +364,13 @@ impl<'a> RepresentationContext<'a> {
                     length,
                 })
             }
-            Ty::UnresolvedLiteral(_) | Ty::Float { .. } | Ty::Opaque(_) | Ty::Literal(_) => {
-                Err(RepresentationError::Unsupported {
-                    type_name: ty.format_for_hover(),
-                })
-            }
+            Ty::UnresolvedLiteral(_)
+            | Ty::UnresolvedSequence { .. }
+            | Ty::Float { .. }
+            | Ty::Opaque(_)
+            | Ty::Literal(_) => Err(RepresentationError::Unsupported {
+                type_name: ty.format_for_hover(),
+            }),
         }
     }
 }
@@ -483,6 +479,7 @@ fn normalize_for_representation(ty: &Ty) -> Ty {
             variants: variants
                 .iter()
                 .map(|variant| ast::ty::UnionVariant {
+                    kind: variant.kind,
                     name: variant.name,
                     fields: variant
                         .fields
@@ -500,7 +497,15 @@ fn normalize_for_representation(ty: &Ty) -> Ty {
             literal_values: literal_values.clone(),
             resolved_params: resolved_params.clone(),
         },
-        Ty::Tuple(fields) => Ty::Tuple(fields.iter().map(normalize_for_representation).collect()),
+        Ty::ResultRow(fields) => Ty::ResultRow(
+            fields
+                .iter()
+                .map(|field| ast::ty::ResultElement {
+                    name: field.name,
+                    ty: Box::new(normalize_for_representation(&field.ty)),
+                })
+                .collect(),
+        ),
         Ty::Array { elem, size } => Ty::Array {
             elem: Box::new(normalize_for_representation(elem)),
             size: size.clone(),

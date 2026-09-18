@@ -1,6 +1,6 @@
 use ast::ParameterKind;
 use ast::{
-    Expr, FnCall, HashFloat, Literal, ModPath, Pattern, SpanId, Spanned, TypeExpr, Typed,
+    Expr, FnCall, HashFloat, Literal, ModPath, Pattern, SpanId, Spanned, TypeExpr,
     ty::{Ty, VariantMap},
 };
 use internment::Intern;
@@ -40,15 +40,6 @@ fn for_loop_pattern_cases() {
             vec![simple_var("i")],
             Some(vec!["i"]),
             Some("i"),
-        ),
-        (
-            "tuple_names",
-            vec![Expr::TupleLit(vec![
-                Typed::infer(simple_var("a"), SpanId::new(1)),
-                Typed::infer(simple_var("b"), SpanId::new(2)),
-            ])],
-            Some(vec!["a", "b"]),
-            None,
         ),
         (
             "rejects_calls",

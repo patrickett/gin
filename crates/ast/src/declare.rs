@@ -29,7 +29,6 @@ pub enum ReflectionRole {
     Integer,
     Record,
     Union,
-    Tuple,
     Unit,
     Signed,
     Unsigned,
@@ -62,7 +61,6 @@ impl ReflectionRole {
             "ReflectionInteger" => Some(Self::Integer),
             "ReflectionRecord" => Some(Self::Record),
             "ReflectionUnion" => Some(Self::Union),
-            "ReflectionTuple" => Some(Self::Tuple),
             "ReflectionUnit" => Some(Self::Unit),
             "ReflectionSigned" => Some(Self::Signed),
             "ReflectionUnsigned" => Some(Self::Unsigned),
@@ -96,7 +94,6 @@ impl ReflectionRole {
             Self::Integer => "ReflectionInteger",
             Self::Record => "ReflectionRecord",
             Self::Union => "ReflectionUnion",
-            Self::Tuple => "ReflectionTuple",
             Self::Unit => "ReflectionUnit",
             Self::Signed => "ReflectionSigned",
             Self::Unsigned => "ReflectionUnsigned",
@@ -186,10 +183,12 @@ pub struct HasFunction {
     pub param_refinements: Box<IndexMap<Intern<String>, PredicateExpr>>,
     pub return_ty: Option<Box<Spanned<Expr>>>,
     pub error_ty: Option<Box<Spanned<Expr>>>,
+    pub anonymous_result_alternatives: Vec<Spanned<crate::ResultAlternative>>,
     pub body: Option<HasMemberBody>,
     pub doc_comment: Option<DocComment>,
     pub refinement: Option<PredicateExpr>,
     pub kind: HasFunctionKind,
+    pub attributes: crate::expr::BindAttributes,
 }
 
 impl Hash for HasFunction {
@@ -215,10 +214,12 @@ impl Hash for HasFunction {
         }
         self.return_ty.hash(state);
         self.error_ty.hash(state);
+        self.anonymous_result_alternatives.hash(state);
         self.body.hash(state);
         self.doc_comment.hash(state);
         self.refinement.hash(state);
         self.kind.hash(state);
+        self.attributes.hash(state);
     }
 }
 
@@ -267,14 +268,6 @@ impl std::fmt::Display for HasFunction {
                     write!(f, ", ")?;
                 }
                 first = false;
-                if let Some(conv) = self.conventions.get(k) {
-                    match conv {
-                        ParamConvention::Observe => write!(f, "ref ")?,
-                        ParamConvention::Mutate => write!(f, "mut ")?,
-                        ParamConvention::Consume => write!(f, "eat ")?,
-                        ParamConvention::Own => {}
-                    }
-                }
                 write!(f, "{}", k.as_str())?;
                 match &v.kind {
                     ParameterKind::Tagged(sp) => write!(f, " {:?}", sp.value)?,
@@ -283,8 +276,30 @@ impl std::fmt::Display for HasFunction {
                     ParameterKind::Default(expr) => write!(f, ": {:?}", expr)?,
                     ParameterKind::Generic => {}
                 }
+                if let Some(conv) = self.conventions.get(k) {
+                    match conv {
+                        ParamConvention::Observe => write!(f, " ref")?,
+                        ParamConvention::Mutate => write!(f, " mut")?,
+                        ParamConvention::Own => write!(f, " own")?,
+                        ParamConvention::Terminal => {}
+                    }
+                }
+                if !v.constraints.is_empty() {
+                    write!(f, " has {}", v.constraints_surface())?;
+                }
             }
             write!(f, ")")?;
+        }
+        for (index, alternative) in self.anonymous_result_alternatives.iter().enumerate() {
+            write!(
+                f,
+                "{}{}",
+                if index == 0 { " " } else { " or " },
+                alternative.value.label
+            )?;
+            if let Some(proposition) = &alternative.value.proposition {
+                write!(f, " thus {proposition}")?;
+            }
         }
         if let Some(rt) = &self.return_ty {
             write!(f, " {:?}", rt.value)?;
@@ -307,8 +322,12 @@ impl std::fmt::Display for HasMember {
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct DeclareAttributes {
-    pub fixed_array: Option<FixedArrayContract>,
+    pub fixed_array: Option<Box<FixedArrayContract>>,
     pub invalid_fixed_array: Option<Intern<String>>,
+    pub sequence_builder: Option<Box<SequenceBuilderContract>>,
+    pub invalid_sequence_builder: Option<Intern<String>>,
+    pub sequence_view: Option<Box<SequenceViewContract>>,
+    pub invalid_sequence_view: Option<Intern<String>>,
     pub bits: Option<Box<Typed<Expr>>>,
     pub bits_span: Option<SpanId>,
     pub reflection_roles: Vec<ReflectionRole>,
@@ -320,6 +339,20 @@ pub struct DeclareAttributes {
 pub struct FixedArrayContract {
     pub element_parameter: Intern<String>,
     pub length_parameter: Intern<String>,
+    pub span: SpanId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SequenceBuilderContract {
+    pub element_parameter: Intern<String>,
+    pub empty_member: Intern<String>,
+    pub push_member: Intern<String>,
+    pub span: SpanId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SequenceViewContract {
+    pub element_parameter: Intern<String>,
     pub span: SpanId,
 }
 
@@ -387,13 +420,70 @@ impl DeclareAttributes {
                         .zip(args.as_slice().get(1).and_then(identifier))
                     {
                         Some((element_parameter, length_parameter)) => {
-                            self.fixed_array = Some(FixedArrayContract {
+                            self.fixed_array = Some(Box::new(FixedArrayContract {
                                 element_parameter,
                                 length_parameter,
                                 span: *name_span,
-                            });
+                            }));
                         }
                         _ => self.invalid_fixed_array = Some(*name),
+                    }
+                }
+                AttributeItem::Call {
+                    name,
+                    name_span,
+                    args,
+                } if name.as_str() == "sequence_builder" => {
+                    let identifier = |arg: &Typed<Expr>| match &arg.value {
+                        Expr::AnonymousTag(name) => Some(*name),
+                        Expr::FnCall(call)
+                            if call.args.is_none() && call.path.value.segments.is_empty() =>
+                        {
+                            Some(call.path.value.root)
+                        }
+                        _ => None,
+                    };
+                    match (
+                        args.first().and_then(identifier),
+                        args.get(1).and_then(identifier),
+                        args.get(2).and_then(identifier),
+                    ) {
+                        (Some(element_parameter), Some(empty_member), Some(push_member)) => {
+                            self.sequence_builder = Some(Box::new(SequenceBuilderContract {
+                                element_parameter,
+                                empty_member,
+                                push_member,
+                                span: *name_span,
+                            }));
+                        }
+                        _ => self.invalid_sequence_builder = Some(*name),
+                    }
+                }
+                AttributeItem::Call {
+                    name,
+                    name_span,
+                    args,
+                } if name.as_str() == "sequence_view" => {
+                    let Some(argument) = args.first() else {
+                        self.invalid_sequence_view = Some(*name);
+                        continue;
+                    };
+                    let element_parameter = match &argument.value {
+                        Expr::AnonymousTag(name) => Some(*name),
+                        Expr::FnCall(call)
+                            if call.args.is_none() && call.path.value.segments.is_empty() =>
+                        {
+                            Some(call.path.value.root)
+                        }
+                        _ => None,
+                    };
+                    if let Some(element_parameter) = element_parameter {
+                        self.sequence_view = Some(Box::new(SequenceViewContract {
+                            element_parameter,
+                            span: *name_span,
+                        }));
+                    } else {
+                        self.invalid_sequence_view = Some(*name);
                     }
                 }
                 AttributeItem::Call {
@@ -417,7 +507,7 @@ pub enum DeclareValue {
     When(Box<WhenExpr>),
     Set(/* TODO */),
     Range(I256, I256),
-    // DiceThrow is in 1...6 (element of range)
+    // DiceThrow is in 1 to 6 (element of range)
     InRange(I256, I256),
     Refinement(Box<crate::ty::PredicateExpr>),
     Has(Vec<HasMember>),
@@ -462,8 +552,8 @@ impl std::fmt::Display for DeclareValue {
                 Ok(())
             }
             Self::Set() => write!(f, "set"),
-            Self::Range(start, end) => write!(f, "{start}...{end}"),
-            Self::InRange(start, end) => write!(f, "in {start}...{end}"),
+            Self::Range(start, end) => write!(f, "{start} to {end}"),
+            Self::InRange(start, end) => write!(f, "in {start} to {end}"),
             Self::Refinement(predicate) => write!(f, "{predicate:?}"),
         }
     }

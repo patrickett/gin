@@ -4,7 +4,7 @@ use internment::Intern;
 
 use crate::representation::Repr;
 use crate::{TypeRegistry, normal_expr::Normalize, ty::Ty};
-use ast::expr::{Expr, Literal, TagCall, Typed};
+use ast::expr::{Binary, Expr, FnCall, Literal, SequenceLiteral, TagCall, Typed};
 use ast::span::SpanId;
 use ast::ty::{DeclarationKey, NamedTypeInstance, PackageSourceKey, TyArg};
 use ast::{ConstValue, HashFloat};
@@ -84,7 +84,6 @@ pub struct ReflectionShapeConstructors {
     pub safe_reference: ReflectionTag,
     pub record: ReflectionTag,
     pub union: ReflectionTag,
-    pub tuple: ReflectionTag,
     pub array: ReflectionTag,
     pub integer: ReflectionTag,
     pub unit: ReflectionTag,
@@ -288,9 +287,6 @@ pub enum ReflectedSemantics {
         declaration_name: String,
         declaration_key: Option<String>,
     },
-    Tuple {
-        elements: Vec<ReflectedType>,
-    },
     Unit,
     Array {
         element: Box<ReflectedType>,
@@ -379,7 +375,7 @@ impl ReflectedType {
                 ..
             } => tag(
                 &schema.opaque,
-                vec![ConstValue::String("anonymous integer".to_string())],
+                vec![ConstValue::Text("anonymous integer".to_string())],
             ),
             ReflectedSemantics::RawPointer { pointee } => tag(
                 &schema.raw_pointer,
@@ -403,12 +399,12 @@ impl ReflectedType {
             } => tag(
                 &schema.record,
                 vec![
-                    ConstValue::String(reflected_ty_decl_name(
+                    ConstValue::Text(reflected_ty_decl_name(
                         &self.identity,
                         &self.arguments,
                         declaration_name,
                     )),
-                    ConstValue::List(
+                    ConstValue::Sequence(
                         fields
                             .iter()
                             .map(|(name, field)| {
@@ -426,12 +422,12 @@ impl ReflectedType {
             } => tag(
                 &schema.union,
                 vec![
-                    ConstValue::String(reflected_ty_decl_name(
+                    ConstValue::Text(reflected_ty_decl_name(
                         &self.identity,
                         &self.arguments,
                         declaration_name,
                     )),
-                    ConstValue::List(
+                    ConstValue::Sequence(
                         variants
                             .iter()
                             .map(|(name, fields)| {
@@ -453,16 +449,6 @@ impl ReflectedType {
                     ),
                 ],
             ),
-            ReflectedSemantics::Tuple { elements } => tag(
-                &schema.tuple,
-                vec![ConstValue::List(
-                    elements
-                        .iter()
-                        .map(|element| element.to_const_value_with_schema(schema))
-                        .collect::<Vec<_>>()
-                        .into(),
-                )],
-            ),
             ReflectedSemantics::Array {
                 element,
                 length,
@@ -471,7 +457,7 @@ impl ReflectedType {
                 let Some(length) = length.filter(|_| unresolved_length.is_none()) else {
                     return tag(
                         &schema.unsupported,
-                        vec![ConstValue::String("unresolved array length".to_string())],
+                        vec![ConstValue::Text("unresolved array length".to_string())],
                     );
                 };
                 tag(
@@ -483,21 +469,20 @@ impl ReflectedType {
                 )
             }
             ReflectedSemantics::Opaque { name } => {
-                tag(&schema.opaque, vec![ConstValue::String(name.clone())])
+                tag(&schema.opaque, vec![ConstValue::Text(name.clone())])
             }
             ReflectedSemantics::Literal { value } => record_named("Literal", value.clone()),
             ReflectedSemantics::Float => tag(
                 &schema.unsupported,
-                vec![ConstValue::String("float".to_string())],
+                vec![ConstValue::Text("float".to_string())],
             ),
             ReflectedSemantics::UnresolvedLiteral => tag(
                 &schema.unsupported,
-                vec![ConstValue::String("unresolved-literal".to_string())],
+                vec![ConstValue::Text("unresolved-literal".to_string())],
             ),
-            ReflectedSemantics::Unsupported { reason } => tag(
-                &schema.unsupported,
-                vec![ConstValue::String(reason.clone())],
-            ),
+            ReflectedSemantics::Unsupported { reason } => {
+                tag(&schema.unsupported, vec![ConstValue::Text(reason.clone())])
+            }
             ReflectedSemantics::RecursiveReference {
                 declaration,
                 arguments,
@@ -505,11 +490,13 @@ impl ReflectedType {
             } => tag(
                 &schema.recursive_reference,
                 vec![
-                    ConstValue::String(recursive_reference_name(declaration, arguments)),
+                    ConstValue::Text(recursive_reference_name(declaration, arguments)),
                     ConstValue::Int((*depth).into()),
                 ],
             ),
-            ReflectedSemantics::Unit => tag(&schema.unit, vec![ConstValue::List(vec![].into())]),
+            ReflectedSemantics::Unit => {
+                tag(&schema.unit, vec![ConstValue::Sequence(vec![].into())])
+            }
         }
     }
 }
@@ -584,14 +571,6 @@ fn reflected_ty_display(ty: &ReflectedType) -> String {
         ReflectedSemantics::Union {
             declaration_name, ..
         } => declaration_name.clone(),
-        ReflectedSemantics::Tuple { elements } => {
-            let inner = elements
-                .iter()
-                .map(reflected_ty_display)
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("Tuple[{inner}]")
-        }
         ReflectedSemantics::Array {
             element,
             length,
@@ -640,7 +619,7 @@ fn reflected_ty_display_length(length: u64) -> String {
 fn const_value_display(value: &ConstValue) -> String {
     match value {
         ConstValue::ResultAlternative { label, .. } => label.as_str().to_string(),
-        ConstValue::String(text) => format!("\"{text}\""),
+        ConstValue::Text(text) => format!("\"{text}\""),
         ConstValue::Tag {
             name,
             qual_path,
@@ -671,13 +650,24 @@ fn const_value_display(value: &ConstValue) -> String {
                 .join(", ");
             format!("{{{fields}}}")
         }
-        ConstValue::List(items) => {
+        ConstValue::ResultRow(items) => {
+            let items = items
+                .iter()
+                .map(const_value_display)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({items})")
+        }
+        ConstValue::FixedArray(items) | ConstValue::Sequence(items) => {
             let items = items
                 .iter()
                 .map(const_value_display)
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("[{items}]")
+        }
+        ConstValue::SequenceRepeat { seed, count } => {
+            format!("[{}; {count}]", const_value_display(seed))
         }
         ConstValue::Int(value) => value.to_string(),
         ConstValue::Float(HashFloat(f)) => f.to_string(),
@@ -784,7 +774,7 @@ fn reflect_ty_to_reflected_type_inner(
                     TyArg::Const(expr) => {
                         let value = expr
                             .normalize_to_value()
-                            .unwrap_or_else(|| ConstValue::String(expr.to_string()));
+                            .unwrap_or_else(|| ConstValue::Text(expr.to_string()));
                         ReflectedArgument::Const(value)
                     }
                 })
@@ -830,6 +820,12 @@ fn reflect_ty_to_reflected_type_inner(
             representation: reflected_representation(ty, registry),
         },
         Ty::UnresolvedLiteral(_) => ReflectedType {
+            identity: ReflectedIdentity::Anonymous,
+            arguments: Vec::new(),
+            semantics: ReflectedSemantics::UnresolvedLiteral,
+            representation: reflected_representation(ty, registry),
+        },
+        Ty::UnresolvedSequence { .. } => ReflectedType {
             identity: ReflectedIdentity::Anonymous,
             arguments: Vec::new(),
             semantics: ReflectedSemantics::UnresolvedLiteral,
@@ -964,18 +960,14 @@ fn reflect_ty_to_reflected_type_inner(
                 representation: reflected_representation(ty, registry),
             }
         }
-        Ty::Tuple(elements) => {
-            let elements = elements
-                .iter()
-                .map(|element| reflect_ty_to_reflected_type_inner(element, seen, registry))
-                .collect();
-            ReflectedType {
-                identity: ReflectedIdentity::Anonymous,
-                arguments: Vec::new(),
-                semantics: ReflectedSemantics::Tuple { elements },
-                representation: reflected_representation(ty, registry),
-            }
-        }
+        Ty::ResultRow(_) => ReflectedType {
+            identity: ReflectedIdentity::Anonymous,
+            arguments: Vec::new(),
+            semantics: ReflectedSemantics::Unsupported {
+                reason: "callable result rows are not reflected types".to_string(),
+            },
+            representation: reflected_representation(ty, registry),
+        },
         Ty::Ptr { inner } => ReflectedType {
             identity: ReflectedIdentity::Anonymous,
             arguments: Vec::new(),
@@ -1007,7 +999,7 @@ fn reflect_ty_to_reflected_type_inner(
                     .map(|length| (Some(length), None))
                     .unwrap_or((None, Some(ConstValue::Int(value)))),
                 Some(value) => (None, Some(value)),
-                None => (None, Some(ConstValue::String(size.to_string()))),
+                None => (None, Some(ConstValue::Text(size.to_string()))),
             };
             ReflectedType {
                 identity: ReflectedIdentity::Anonymous,
@@ -1116,7 +1108,7 @@ fn record_named(name: &str, ty: ConstValue) -> ConstValue {
         fields: vec![
             (
                 Intern::new("name".to_string()),
-                ConstValue::String(name.to_string()),
+                ConstValue::Text(name.to_string()),
             ),
             (Intern::new("ty".to_string()), ty),
         ]
@@ -1129,11 +1121,11 @@ fn record_variant(name: &str, fields: Vec<ConstValue>) -> ConstValue {
         fields: vec![
             (
                 Intern::new("name".to_string()),
-                ConstValue::String(name.to_string()),
+                ConstValue::Text(name.to_string()),
             ),
             (
                 Intern::new("fields".to_string()),
-                ConstValue::List(fields.into()),
+                ConstValue::Sequence(fields.into()),
             ),
         ]
         .into(),
@@ -1164,7 +1156,7 @@ pub fn const_value_to_typed_expr(cv: &ConstValue, span_id: SpanId) -> Typed<Expr
 pub fn const_value_to_expr(cv: &ConstValue) -> Expr {
     match cv {
         ConstValue::ResultAlternative { label, .. } => Expr::AnonymousTag(*label),
-        ConstValue::String(s) => Expr::Lit(Literal::String(s.clone())),
+        ConstValue::Text(s) => Expr::Lit(Literal::String(s.clone())),
         ConstValue::Int(n) => Expr::Lit(Literal::Int(*n)),
         ConstValue::Float(HashFloat(f)) => Expr::Lit(Literal::Float(HashFloat(*f))),
         ConstValue::Tag { name, args, .. } if args.is_empty() => Expr::AnonymousTag(*name),
@@ -1208,12 +1200,66 @@ pub fn const_value_to_expr(cv: &ConstValue) -> Expr {
                 args,
             })
         }
-        ConstValue::List(items) => Expr::List(
+        ConstValue::ResultRow(items) => Expr::ResultValues(
             items
                 .iter()
-                .map(|i| const_value_to_typed_expr(i, SpanId::INVALID))
+                .map(|item| const_value_to_typed_expr(item, SpanId::INVALID))
                 .collect(),
         ),
+        ConstValue::FixedArray(items) => Expr::ArrayLit(
+            items
+                .iter()
+                .map(|item| const_value_to_typed_expr(item, SpanId::INVALID))
+                .collect(),
+        ),
+        ConstValue::Sequence(items) => Expr::SequenceLiteral(SequenceLiteral::Elements(
+            items
+                .iter()
+                .map(|item| const_value_to_typed_expr(item, SpanId::INVALID))
+                .collect(),
+        )),
+        ConstValue::SequenceRepeat { seed, count } => {
+            Expr::SequenceLiteral(SequenceLiteral::Repeat {
+                seed: Box::new(const_value_to_typed_expr(seed, SpanId::INVALID)),
+                count: Box::new(Typed::infer(normal_expr_to_expr(count), SpanId::INVALID)),
+            })
+        }
+    }
+}
+
+pub(crate) fn normal_expr_to_expr(normal: &ast::NormalExpr) -> Expr {
+    match normal {
+        ast::NormalExpr::Value(value) => const_value_to_expr(value),
+        ast::NormalExpr::Var(name) => Expr::FnCall(FnCall {
+            path: ast::Spanned::new(ast::ModPath::new(*name, Vec::new()), SpanId::INVALID),
+            args: None,
+        }),
+        ast::NormalExpr::Inferred(id) => {
+            let name = Intern::new(format!("_dependent_{id:?}"));
+            Expr::FnCall(FnCall {
+                path: ast::Spanned::new(ast::ModPath::new(name, Vec::new()), SpanId::INVALID),
+                args: None,
+            })
+        }
+        ast::NormalExpr::Add(lhs, rhs)
+        | ast::NormalExpr::Sub(lhs, rhs)
+        | ast::NormalExpr::Mul(lhs, rhs) => {
+            let op = match normal {
+                ast::NormalExpr::Add(_, _) => ast::BinOp::Add,
+                ast::NormalExpr::Sub(_, _) => ast::BinOp::Subtract,
+                ast::NormalExpr::Mul(_, _) => ast::BinOp::Multiply,
+                _ => unreachable!(),
+            };
+            Expr::Binary(Binary::new(
+                Typed::infer(normal_expr_to_expr(lhs), SpanId::INVALID),
+                op,
+                Typed::infer(normal_expr_to_expr(rhs), SpanId::INVALID),
+            ))
+        }
+        ast::NormalExpr::TargetQuery { kind, operand } => Expr::TargetQuery {
+            kind: *kind,
+            operand: operand.clone(),
+        },
     }
 }
 #[cfg(test)]

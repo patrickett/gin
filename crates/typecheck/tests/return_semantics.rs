@@ -19,7 +19,7 @@ fn def_body<'a>(typed: &'a TypedFileAst, name: &str) -> &'a BindBody {
 #[test]
 fn block_with_bare_return_has_unit_return_and_empty_ret_slot() {
     let typed =
-        check("Int is in 0...255\nwrite(value Int) Int: 0\nmain:\n    write(1)\n    return\n");
+        check("Int is in 0 to 255\nwrite(value Int) Int: 0\nmain:\n    write(1)\n    return\n");
 
     let bind = def_body(&typed, "main");
     let (exprs, ret) = match bind {
@@ -63,7 +63,7 @@ fn block_with_explicit_return_keeps_return_expression() {
 
 #[test]
 fn expression_body_infers_expression_type() {
-    let typed = check("Int is in 0...255\nmain Int: 3\n");
+    let typed = check("Int is in 0 to 255\nmain Int: 3\n");
 
     let bind = &typed.defs[&DefId(Intern::from_ref("main"))];
     let expr = match &bind.body {

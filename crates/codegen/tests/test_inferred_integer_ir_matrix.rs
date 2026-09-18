@@ -5,7 +5,7 @@ use parser::parse_from_str;
 use typecheck::{FileId, transform::transform_file};
 
 fn assert_range_materializes(min: &str, max: &str, value: &str, width: u32) {
-    let source = format!("Window is in {min}...{max}\nvalue Window: {value}\n");
+    let source = format!("Window is in {min} to {max}\nvalue Window: {value}\n");
     let (mlir, symptoms) = support::codegen_to_mlir_text(&source, "integer_width.gin", false);
     assert!(symptoms.is_empty(), "{symptoms:?}");
     assert!(mlir.contains(&format!("i{width}")), "{mlir}");
@@ -13,7 +13,7 @@ fn assert_range_materializes(min: &str, max: &str, value: &str, width: u32) {
 
 #[test]
 fn targetless_library_cannot_be_codegened() {
-    let source = "Window is in 0...255\nvalue Window: 1\n";
+    let source = "Window is in 0 to 255\nvalue Window: 1\n";
     let typed = transform_file(parse_from_str(source), FileId(0));
     let context = NativeCompiler::create_context();
     let (module, diagnostics) = CodegenContext::build_module_from_resolved_program(
@@ -83,26 +83,29 @@ fn range_negative_1_to_256_materializes_as_i10() {
 
 #[test]
 fn inferred_integer_and_comparison_ir_contains_expected_shapes() {
-    let source = "\
-Bool is True or False
-I1 is in 0...1
-I2 is in 0...3
-I9 is in 0...256
-I128 is in -170141183460469231731687303715884105728...170141183460469231731687303715884105727
-Signed128 is in -128...127
+    let source = r#"Bool is True or False
+I1 is in 0 to 1
+I2 is in 0 to 3
+I9 is in 0 to 256
+I128 is in -170141183460469231731687303715884105728 to 170141183460469231731687303715884105727
+Signed128 is in -128 to 127
 
 Decision is Enabled or Disabled
-Unsigned is in 0...255
-Signed is in -128...127
+Unsigned is in 0 to 255
+Signed is in -128 to 127
 
-#intrinsic(BitsUnsignedLess)
-unsigned_less_bits(a Unsigned, b Unsigned) Decision extern
-#operator(Less)
+unsigned_less_bits(a Unsigned, b Unsigned) Decision:
+    left is in 0 to 255: a
+    right is in 0 to 255: b
+return left < right
+#infix('<')
 unsigned_less(a Unsigned, b Unsigned) Decision: unsigned_less_bits(a, b)
 
-#intrinsic(BitsSignedGreaterOrEqual)
-signed_greater_equal_bits(a Signed, b Signed) Decision extern
-#operator(GreaterOrEqual)
+signed_greater_equal_bits(a Signed, b Signed) Decision:
+    left is in -128 to 127: a
+    right is in -128 to 127: b
+return left >= right
+#infix('>=')
 signed_greater_equal(a Signed, b Signed) Decision: signed_greater_equal_bits(a, b)
 
 SmallPair has left I2, right I9
@@ -118,7 +121,7 @@ mk_pair(a I2, b I9) SmallPair: SmallPair(left: a, right: b)
 pair: mk_pair(1, 256)
 left_field: pair.left
 right_field: pair.right
-";
+"#;
     let (mlir, symptoms) = support::codegen_to_mlir_text(source, "integer_matrix.gin", false);
 
     assert!(symptoms.is_empty(), "{symptoms:?}");

@@ -4,13 +4,13 @@ use analysis::{HoverContent, PackageCache};
 use ast::source::SourceExt;
 use parser::query::SourceParseExt;
 use test_fixtures::TempPackage;
-use test_fixtures::gin_core::{BOOL_GIN, INT_GIN, LIST_GIN, STRING_GIN, TYPE_GIN};
+use test_fixtures::semantic_fixtures::{BOOL_GIN, INT_GIN, LIST_GIN, STRING_GIN, TYPE_GIN};
 
 const DEFAULT_GIN: &str = r#"--- Provides a default value for a type.
 Default(value) has default value
 "#;
 
-const MAYBE_GIN: &str = r#"use core.Happy
+const MAYBE_GIN: &str = r#"use core Happy
 
 Maybe(x) is    --- Used to represent values that may or may not be present.
     Some(x) or --- Has some value `x`
@@ -67,7 +67,7 @@ fn hover_import_symbol_matches_definition_hover() {
         r#"{"name":"core","version":"0.0.0","authors":[]}"#,
     );
     pkg.write("core/bool.gin", bool_gin);
-    let path = pkg.write("main.gin", "use core.true\n\nmain:\n    true\nreturn\n");
+    let path = pkg.write("main.gin", "use core true\n\nmain:\n    true\nreturn\n");
 
     let main_source = std::fs::read_to_string(&path).unwrap();
     let true_byte = main_source.find("true").expect("`true` in use path") as u32;
@@ -118,7 +118,7 @@ fn hover_local_constant_bind() {
     let HoverContent { markdown, .. } = hover_at(source, "x :=", "local_constant");
     assert_eq!(
         markdown,
-        "x 1\nanonymous integer\ncurrent knowledge: exactly 1\nvalidity: 1...1\nruntime representation: i1"
+        "x 1\nanonymous integer\ncurrent knowledge: exactly 1\nvalidity: 1 to 1\nruntime representation: i1"
     );
 }
 
@@ -128,7 +128,7 @@ fn hover_local_rebindable_bind() {
     let HoverContent { markdown, .. } = hover_at(source, "x: 1", "local_rebindable");
     assert_eq!(
         markdown,
-        "x 1\nanonymous integer\ncurrent knowledge: exactly 1\nvalidity: 1...1\nruntime representation: i1"
+        "x 1\nanonymous integer\ncurrent knowledge: exactly 1\nvalidity: 1 to 1\nruntime representation: i1"
     );
 }
 
@@ -319,7 +319,6 @@ Type is Bits(width BigInt, interpretation IntInterpretation)
      or Address(space BigInt, pointee Type)
      or Product(name String, fields List(ReflectionTypeNamed))
      or Sum(name String, variants List(ReflectionVariantShape))
-     or Tuple(elems List(Type))
      or SafeReference(pointee Type, permission IntPermission)
      or RawPointer(pointee Type)
      or Array(elem Type, size BigInt)
@@ -494,11 +493,11 @@ fn hover_record_field_same_file_shows_named_type() {
 #[test]
 fn hover_narrowed_type_in_when_then_body() {
     let source = "\
-Int is in -9223372036854775808...9223372036854775807\n\nmain:\n    x := 42\n    when x is\n        Int then x + 1\n            else 0\n    return x\n";
+Int is in -9223372036854775808 to 9223372036854775807\n\nmain:\n    x := 42\n    when x is\n        Int then x + 1\n            else 0\n    return x\n";
     let HoverContent { markdown, .. } = hover_at(source, "x + 1", "narrowed");
     assert_eq!(
         markdown,
-        "x integer in 42...42\nanonymous integer\ncurrent knowledge: exactly 42\nvalidity: 42...42\nruntime representation: i6"
+        "x integer in 42 to 42\nanonymous integer\ncurrent knowledge: exactly 42\nvalidity: 42 to 42\nruntime representation: i6"
     );
 }
 
@@ -508,7 +507,7 @@ fn hover_literal_separates_integer_semantic_facts() {
     let HoverContent { markdown, .. } = hover_at(source, "42", "literal");
     assert_eq!(
         markdown,
-        "42\nanonymous integer\ncurrent knowledge: exactly 42\nvalidity: 0...63\nruntime representation: i6"
+        "42\nanonymous integer\ncurrent knowledge: exactly 42\nvalidity: 0 to 63\nruntime representation: i6"
     );
 }
 
@@ -576,9 +575,9 @@ fn interface_method_signatures_display_correctly() {
     let source = r#"
 Allocator has
     --- Attempt to allocate.
-    allocate(ref self, l Layout) Slice(Byte) or AllocError,
+    allocate(self ref, l Layout) Slice(Byte) or AllocError,
     --- Free a block.
-    deallocate(ref self, p @Byte, l Layout),
+    deallocate(self ref, p @Byte, l Layout),
 )
 "#;
     let pkg = TempPackage::new("interface_methods");
@@ -603,8 +602,8 @@ Allocator has
             "",
             "```gin",
             "Allocator has",
-            "    allocate(ref self, l Layout) Slice(Byte) or AllocError",
-            "    deallocate(ref self, p @Byte, l Layout)",
+            "    allocate(self ref, l Layout) Slice(Byte) or AllocError",
+            "    deallocate(self ref, p @Byte, l Layout)",
             "```",
         ]
         .join("\n"),
@@ -617,9 +616,9 @@ fn hover_has_method_name_returns_method_hover_without_extra_space() {
     let source = r#"
 Allocator has
     --- Attempt to allocate.
-    reserve(ref self, l Layout) Slice(Byte) or AllocError,
+    reserve(self ref, l Layout) Slice(Byte) or AllocError,
     --- Free a block.
-    release(ref self, p @Byte, l Layout),
+    release(self ref, p @Byte, l Layout),
 )
 "#;
     let pkg = TempPackage::new("interface_method_hover");
@@ -642,7 +641,7 @@ Allocator has
             "```",
             "",
             "```gin",
-            "release(ref self, p @Byte, l Layout)",
+            "release(self ref, p @Byte, l Layout)",
             "```",
             "---",
             "",
@@ -662,9 +661,9 @@ fn hover_interface_member_shows_doc_comment() {
     let source = r#"
 Allocator has
     --- Attempt to allocate a block of memory.
-    allocate(ref self, l Layout) Slice(Byte) or AllocError,
+    allocate(self ref, l Layout) Slice(Byte) or AllocError,
     --- Free a block of memory.
-    deallocate(ref self, p @Byte, l Layout),
+    deallocate(self ref, p @Byte, l Layout),
 )
 "#;
     let pkg = TempPackage::new("interface_member_doc");
@@ -688,7 +687,7 @@ Allocator has
             "```",
             "",
             "```gin",
-            "allocate(ref self, l Layout) Slice(Byte) or AllocError",
+            "allocate(self ref, l Layout) Slice(Byte) or AllocError",
             "```",
             "---",
             "",
@@ -731,10 +730,10 @@ fn hover_self_in_has_method_body_shows_type() {
     );
 }
 
-/// Hovering on `ref self` in a has method body shows `ref self Type`.
+/// Hovering on `self ref` in a has method body shows `self ref Type`.
 #[test]
 fn hover_ref_self_in_has_method_body_shows_ref_type() {
-    let source = "Region has\n    reset(ref self) Region: self\n";
+    let source = "Region has\n    reset(self ref) Region: self\n";
     let pkg = TempPackage::new("ref_self_hover");
     pkg.write_flask("ref_self_hover");
     let path = pkg.write("main.gin", source);
@@ -746,16 +745,16 @@ fn hover_ref_self_in_has_method_body_shows_ref_type() {
     let hover = engine.hover(&path, byte).expect("hover on body self");
     assert_eq!(
         hover.markdown,
-        ["```gin", "ref self Region", "```"].join("\n"),
-        "hover on `self` in has method body should show `ref self Region`"
+        ["```gin", "self ref Region", "```"].join("\n"),
+        "hover on `self` in has method body should show `self ref Region`"
     );
 }
 
 /// Hovering on `self` inside a has method with a block body shows the type
-/// (e.g. `self Type`, `ref self Type`, `mut self Type`).
+/// (e.g. `self Type`, `self ref Type`, `self mut Type`).
 #[test]
 fn hover_self_in_has_block_body_shows_ref_type() {
-    let source = "Region has\n    reset(ref self) Region:\n        self\n";
+    let source = "Region has\n    reset(self ref) Region:\n        self\n";
     let pkg = TempPackage::new("block_self_hover");
     pkg.write_flask("block_self_hover");
     let path = pkg.write("main.gin", source);
@@ -767,8 +766,8 @@ fn hover_self_in_has_block_body_shows_ref_type() {
     let hover = engine.hover(&path, byte).expect("hover on body self");
     assert_eq!(
         hover.markdown,
-        ["```gin", "ref self Region", "```"].join("\n"),
-        "hover on `self` in has block body should show `ref self Region`"
+        ["```gin", "self ref Region", "```"].join("\n"),
+        "hover on `self` in has block body should show `self ref Region`"
     );
 }
 
@@ -781,7 +780,7 @@ fn hover_self_in_block_body_with_multiple_exprs_and_return() {
     cursor @Byte
     end @Byte
 
-    allocate(ref self, size PointerSize) @Byte:
+    allocate(self ref, size PointerSize) @Byte:
         self
         -- a comment
     return self.cursor
@@ -801,7 +800,7 @@ fn hover_self_in_block_body_with_multiple_exprs_and_return() {
         .expect("hover on body self");
     assert_eq!(
         hover.markdown,
-        ["```gin", "ref self Region", "```"].join("\n"),
-        "hover on `self` in block body with return should show `ref self Region`"
+        ["```gin", "self ref Region", "```"].join("\n"),
+        "hover on `self` in block body with return should show `self ref Region`"
     );
 }

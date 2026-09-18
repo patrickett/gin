@@ -5,11 +5,11 @@
 pub mod expr;
 pub mod warnings;
 pub use expr::{
-    AttributeItem, BinOp, Binary, Bind, BindAttributes, BindOperator, BindValue,
-    BundleExportImport, Complexity, ComplexityExpr, Condition, Expr, FnCall, ForInLoop, FormatPart,
-    FormatString, IfExpr, Import, ImportSource, Literal, LocalBundleImport, LocalMemberImport,
-    Loop, LoopEnum, ModuleImport, OperatorRole, Range, Return, TagCall, Typed, WhenArm, WhenExpr,
-    WhileLoop,
+    AsmOperandBinding, AttributeItem, BinOp, Binary, Bind, BindAttributes, BindOperator, BindValue,
+    BundleExportImport, COMPILER_QUERY_NAMES, Complexity, ComplexityExpr, Condition, Expr, FnCall,
+    ForInLoop, FormatPart, FormatString, IfExpr, Import, ImportSource, Literal, LocalBundleImport,
+    Loop, LoopEnum, ModuleImport, NamedResult, OperatorRole, Range, Return, SequenceLiteral,
+    TagCall, Typed, WhenArm, WhenExpr, WhileLoop,
 };
 
 mod file_ast;

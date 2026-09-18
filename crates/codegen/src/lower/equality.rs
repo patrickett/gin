@@ -23,7 +23,8 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 rhs,
                 fields.iter().map(|(_, field)| field.as_ref()),
             ),
-            Ty::Tuple(fields) => self.lower_aggregate_equality(block, lhs, rhs, fields.iter()),
+
+            Ty::ResultRow(_) => None,
             Ty::Union { variants, .. }
                 if variants.iter().all(|variant| variant.fields.is_empty()) =>
             {
@@ -37,6 +38,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
             }
             Ty::Named { .. } => unreachable!(),
             Ty::UnresolvedLiteral(_)
+            | Ty::UnresolvedSequence { .. }
             | Ty::Opaque(_)
             | Ty::Array { .. }
             | Ty::Ptr { .. }

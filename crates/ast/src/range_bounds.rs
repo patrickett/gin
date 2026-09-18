@@ -1,4 +1,4 @@
-//! Bounds helpers for `in N...M` scalar types and range-value tags.
+//! Bounds helpers for `in N to M` scalar types and range-value tags.
 //!
 //! Provides [`InclusiveBounds`] and associated methods on [`Ty`] and [`DeclareValue`]
 //! so that bound-related queries live on the types they inspect.
@@ -79,7 +79,7 @@ impl Ty {
         }
     }
 
-    /// Build a bounded anonymous integer from `is in` / `is N...M` bounds.
+    /// Build a bounded anonymous integer from `is in` / `is N to M` bounds.
     pub fn bounded_int(min: I256, max: I256) -> Ty {
         let validity = crate::integer::IntegerDomain::bounded(min, max)
             .unwrap_or_else(crate::integer::IntegerDomain::empty);
@@ -88,7 +88,7 @@ impl Ty {
         }
     }
 
-    /// Nominal range-value record (`WeekRange is 1...7`).
+    /// Nominal range-value record (`WeekRange is 1 to 7`).
     pub fn range_value_record(name: Intern<String>, min: I256, max: I256) -> Ty {
         let elem = Ty::bounded_int(min, max);
         Ty::Record {
@@ -126,7 +126,7 @@ impl Ty {
 }
 
 impl DeclareValue {
-    /// Bounds from a tag declaration (`is in` or `is N...M`).
+    /// Bounds from a tag declaration (`is in` or `is N to M`).
     pub fn bounds(&self) -> Option<InclusiveBounds> {
         match self {
             DeclareValue::InRange(start, end) | DeclareValue::Range(start, end) => {

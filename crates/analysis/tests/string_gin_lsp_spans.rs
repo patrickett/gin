@@ -1,6 +1,6 @@
 use analysis::PackageCache;
 use std::path::PathBuf;
-use test_fixtures::gin_core::STRING_GIN_SOURCE;
+use test_fixtures::semantic_fixtures::STRING_GIN_SOURCE;
 
 /// ginlsp maps typecheck diagnostics through the typed span table, not the parse table.
 #[test]

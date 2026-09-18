@@ -16,7 +16,44 @@ pub use mlir_ext::{AttributeExt, BlockExt, ContextExt, OperationBuilderExt, Pred
 use internment::Intern;
 use melior::ir::Value;
 use std::collections::HashMap;
+use std::ops::Deref;
 use typecheck::ty::Ty;
+
+#[derive(Debug, Clone)]
+pub struct LoweredValue<'c>(Vec<Value<'c, 'c>>);
+
+impl<'c> LoweredValue<'c> {
+    pub fn new(values: Vec<Value<'c, 'c>>) -> Self {
+        Self(values)
+    }
+
+    pub fn scalar(value: Value<'c, 'c>) -> Self {
+        Self(vec![value])
+    }
+
+    pub fn values(&self) -> &[Value<'c, 'c>] {
+        &self.0
+    }
+
+    pub fn into_values(self) -> Vec<Value<'c, 'c>> {
+        self.0
+    }
+
+    pub fn single(&self) -> Option<Value<'c, 'c>> {
+        let [value] = self.0.as_slice() else {
+            return None;
+        };
+        Some(*value)
+    }
+}
+
+impl<'c> Deref for LoweredValue<'c> {
+    type Target = [Value<'c, 'c>];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 /// A variable binding in the scoped symbol table.
 #[derive(Debug, Clone)]
@@ -41,6 +78,7 @@ pub struct Slot<'c> {
 pub struct ScopedSymbolTable<'c> {
     /// Stack of scopes, where each scope maps interned variable names to Slot info.
     scopes: Vec<HashMap<Intern<String>, Slot<'c>>>,
+    lowered_scopes: Vec<HashMap<Intern<String>, LoweredValue<'c>>>,
 }
 
 impl<'c> ScopedSymbolTable<'c> {
@@ -48,6 +86,7 @@ impl<'c> ScopedSymbolTable<'c> {
     pub fn new() -> Self {
         Self {
             scopes: vec![HashMap::new()],
+            lowered_scopes: vec![HashMap::new()],
         }
     }
 
@@ -55,6 +94,7 @@ impl<'c> ScopedSymbolTable<'c> {
     /// This creates a new HashMap for the inner scope, allowing variables to shadow outer ones.
     pub fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
+        self.lowered_scopes.push(HashMap::new());
     }
 
     /// Pop the current scope from the stack (e.g., when exiting a block, loop, or function).
@@ -68,12 +108,35 @@ impl<'c> ScopedSymbolTable<'c> {
             "Cannot pop the global scope from ScopedSymbolTable"
         );
         self.scopes.pop();
+        self.lowered_scopes.pop();
     }
 
     /// Insert a variable binding in the current (innermost) scope.
     pub fn insert(&mut self, name: Intern<String>, value: Value<'c, 'c>, ty: Ty, is_slot: bool) {
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name, Slot { value, ty, is_slot });
+        }
+        if let Some(scope) = self.lowered_scopes.last_mut() {
+            scope.insert(name, LoweredValue::scalar(value));
+        }
+    }
+
+    pub fn insert_lowered(&mut self, name: Intern<String>, value: LoweredValue<'c>, ty: Ty) {
+        let Some(first) = value.values().first().copied() else {
+            return;
+        };
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.insert(
+                name,
+                Slot {
+                    value: first,
+                    ty,
+                    is_slot: false,
+                },
+            );
+        }
+        if let Some(scope) = self.lowered_scopes.last_mut() {
+            scope.insert(name, value);
         }
     }
 
@@ -93,10 +156,55 @@ impl<'c> ScopedSymbolTable<'c> {
         self.get(name).map(|s| s.value)
     }
 
+    pub fn get_lowered(&self, name: &Intern<String>) -> Option<&LoweredValue<'c>> {
+        self.lowered_scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name))
+    }
+
     pub fn assign(&mut self, name: &Intern<String>, slot: Slot<'c>) -> bool {
         for scope in self.scopes.iter_mut().rev() {
             if let Some(binding) = scope.get_mut(name) {
                 *binding = slot;
+                if let Some(lowered) = self
+                    .lowered_scopes
+                    .iter_mut()
+                    .rev()
+                    .find_map(|scope| scope.get_mut(name))
+                {
+                    *lowered = LoweredValue::scalar(binding.value);
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn assign_lowered(
+        &mut self,
+        name: &Intern<String>,
+        value: LoweredValue<'c>,
+        ty: Ty,
+    ) -> bool {
+        let Some(first) = value.values().first().copied() else {
+            return false;
+        };
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(binding) = scope.get_mut(name) {
+                *binding = Slot {
+                    value: first,
+                    ty,
+                    is_slot: false,
+                };
+                if let Some(lowered) = self
+                    .lowered_scopes
+                    .iter_mut()
+                    .rev()
+                    .find_map(|scope| scope.get_mut(name))
+                {
+                    *lowered = value;
+                }
                 return true;
             }
         }
@@ -128,6 +236,7 @@ pub mod prelude {
         BlockExt,
         CodegenContext,
         ContextExt,
+        LoweredValue,
         OperationBuilderExt,
         Predicates,
         ScopedSymbolTable,

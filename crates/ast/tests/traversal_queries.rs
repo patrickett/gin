@@ -21,16 +21,16 @@ fn parse_direct_children_follow_source_order() {
     let cases = [
         ("main: call(left, right)\n", "call", 2),
         ("main: left + right\n", "binary", 2),
-        ("main: (left, right)\n", "tuple", 2),
+        ("main: (left, right)\n", "call", 0),
         ("main: (x: left, y: right)\n", "record", 2),
-        ("main: [left, right]\n", "list", 2),
+        ("main: [left, right]\n", "sequence literal", 2),
         ("main: Shape(left, right)\n", "tag call", 2),
-        ("main: left...right\n", "range", 2),
-        ("main: (init; size)\n", "tuple allocation", 2),
+        ("main: left to right\n", "range", 2),
+        ("main: (init; size)\n", "fixed-array allocation", 2),
         ("main: buffer.(index)\n", "buffer get", 2),
         ("main: buffer.(index):: value\n", "buffer set", 3),
-        ("main: tuple.0\n", "tuple get", 1),
-        ("main: tuple.0:: value\n", "tuple set", 2),
+        ("main: tuple.0\n", "value row get", 1),
+        ("main: tuple.0:: value\n", "value row set", 2),
         ("main: record.field\n", "record get", 1),
         ("main: record.field:: value\n", "record set", 2),
         ("main: value as Int\n", "cast", 1),
@@ -39,10 +39,9 @@ fn parse_direct_children_follow_source_order() {
         ("main: ref value\n", "reference", 1),
         ("main: mut value\n", "mutable reference", 1),
         ("main: deref value\n", "dereference", 1),
-        ("main: eat value\n", "eat", 1),
         ("main: -value\n", "negate", 1),
         ("main: dispatch(spec, left, right)\n", "call", 3),
-        ("main: \"value: (needle)\"\n", "format string", 1),
+        ("main: \"value: \\(needle)\"\n", "format string", 1),
         (
             "main: when condition is True then body else fallback\n",
             "when",
@@ -72,16 +71,17 @@ fn parse_direct_children_follow_source_order() {
         let actual_variant = match &expr {
             Expr::FnCall(_) => "call",
             Expr::Binary(_) => "binary",
-            Expr::TupleLit(_) => "tuple",
+            Expr::SequenceLiteral(_) => "sequence literal",
+            Expr::ArrayLit(_) => "array",
             Expr::RecordLit(_) => "record",
             Expr::List(_) => "list",
             Expr::TagCall(_) => "tag call",
             Expr::Range(_) => "range",
-            Expr::TupleAlloc { .. } => "tuple allocation",
+            Expr::FixedArrayAlloc { .. } => "fixed-array allocation",
             Expr::BufGet { .. } => "buffer get",
             Expr::BufSet { .. } => "buffer set",
-            Expr::TupleGet { .. } => "tuple get",
-            Expr::TupleSet { .. } => "tuple set",
+            Expr::AggregateGet { .. } => "value row get",
+            Expr::AggregateSet { .. } => "value row set",
             Expr::RecordGet { .. } => "record get",
             Expr::RecordSet { .. } => "record set",
             Expr::Cast { .. } => "cast",
@@ -89,7 +89,6 @@ fn parse_direct_children_follow_source_order() {
             Expr::Deref(_) => "dereference",
             Expr::Ref { mutable: false, .. } => "reference",
             Expr::Ref { mutable: true, .. } => "mutable reference",
-            Expr::Eat(_) => "eat",
             Expr::Negate(_) => "negate",
             Expr::FormatString(_) => "format string",
             Expr::When(_) => "when",
@@ -139,25 +138,25 @@ fn typed_direct_children_cover_lowered_multi_child_shapes() {
     let cases = [
         ("main: call(left, right)\n", "call", 2),
         ("main: left + right\n", "intrinsic", 2),
-        ("main: (left, right)\n", "tuple", 2),
-        ("main: [left, right]\n", "list", 2),
+        ("main: (left, right)\n", "call", 0),
+        ("main: (x: left, y: right)\n", "record", 2),
+        ("main: [left, right]\n", "array", 2),
         ("main: Shape(left, right)\n", "tag call", 2),
-        ("main: left...right\n", "range", 2),
-        ("main: (init; 3)\n", "tuple allocation", 1),
+        ("main: left to right\n", "range", 2),
+        ("main: (init; 3)\n", "fixed-array allocation", 1),
         ("main: buffer.(index)\n", "buffer get", 2),
         ("main: buffer.(index):: value\n", "buffer set", 3),
-        ("main: tuple.0\n", "tuple get", 1),
-        ("main: tuple.0:: value\n", "tuple set", 2),
+        ("main: tuple.0\n", "value row get", 1),
+        ("main: tuple.0:: value\n", "value row set", 2),
         ("main: record.field:: value\n", "record set", 2),
         ("main: value as Int\n", "cast", 1),
         ("main: @value\n", "take pointer", 1),
         ("main: *value\n", "dereference", 1),
         ("main: ref value\n", "reference", 1),
         ("main: deref value\n", "dereference", 1),
-        ("main: eat value\n", "eat", 1),
         ("main: -value\n", "negate", 1),
         ("main: dispatch(spec, left, right)\n", "call", 3),
-        ("main: \"value: (needle)\"\n", "format string", 0),
+        ("main: \"value: \\(needle)\"\n", "invalid", 0),
         (
             "main: when condition is True then body else fallback\n",
             "when",
@@ -189,23 +188,23 @@ fn typed_direct_children_cover_lowered_multi_child_shapes() {
             TypedExprKind::IntrinsicCall { .. } => "intrinsic",
             TypedExprKind::Binary { .. } => "binary",
             TypedExprKind::InvalidOperator { .. } => "binary",
-            TypedExprKind::TupleLit(_) => "tuple",
+            TypedExprKind::RecordValue(_) => "record",
+            TypedExprKind::ArrayLit(_) => "array",
             TypedExprKind::List(_) => "list",
             TypedExprKind::TagCall { .. } => "tag call",
             TypedExprKind::Range { .. } => "range",
-            TypedExprKind::TupleAlloc { .. } => "tuple allocation",
+            TypedExprKind::FixedArrayAlloc { .. } => "fixed-array allocation",
             TypedExprKind::BufGet { .. } => "buffer get",
             TypedExprKind::BufSet { .. } => "buffer set",
-            TypedExprKind::TupleGet { .. } => "tuple get",
-            TypedExprKind::TupleSet { .. } => "tuple set",
+            TypedExprKind::AggregateGet { .. } => "value row get",
+            TypedExprKind::AggregateSet { .. } => "value row set",
             TypedExprKind::RecordSet { .. } => "record set",
             TypedExprKind::Cast { .. } => "cast",
             TypedExprKind::TakePtr(_) => "take pointer",
             TypedExprKind::Deref(_) => "dereference",
             TypedExprKind::Ref(_) => "reference",
-            TypedExprKind::Eat(_) => "eat",
             TypedExprKind::Negate(_) => "negate",
-            TypedExprKind::FormatString(_) => "format string",
+            TypedExprKind::Invalid => "invalid",
             TypedExprKind::When(_) => "when",
             TypedExprKind::Loop(_) => "loop",
             TypedExprKind::If(_) => "if",
@@ -282,47 +281,15 @@ return item
 }
 
 #[test]
-fn call_argument_traversal_preserves_consume_argument_child() {
-    let (_, expr) = parsed_main_expr("main: call(eat value)\n");
-    let Expr::FnCall(call) = &expr else {
-        panic!("call expression");
-    };
-    let argument = &call.args.as_ref().expect("arguments")[0].value;
-    assert!(matches!(argument, Expr::ConsumeArg(_)));
-
-    let mut children = 0;
-    let _ = ast::folder::walk_expr_children(argument, &mut |_, _| {
-        children += 1;
-        std::ops::ControlFlow::Continue(())
-    });
-    assert_eq!(children, 1);
-
-    let typed = transform(
-        &TokenCursor::parse_source("main: call(eat value)\n"),
-        FileId(0),
-        &TransformCtx::new(),
+fn call_eat_argument_is_rejected() {
+    let source = "main: call(eat value)\n";
+    let ast = TokenCursor::parse_source(source);
+    assert!(
+        ast.parse_warnings
+            .iter()
+            .any(|diagnostic| diagnostic.code.slug() == "parse-removed-consume-arg-syntax"),
+        "expected a parse warning for removed consume-argument syntax",
     );
-    let bind = typed
-        .defs
-        .get(&DefId(Intern::from_ref("main")))
-        .expect("typed main definition");
-    let BindBody::Expr(root) = bind.body else {
-        panic!("typed expression body");
-    };
-    let TypedExprKind::FnCall {
-        args: Some(args), ..
-    } = &typed.exprs.kind[root.as_usize()]
-    else {
-        panic!("typed call expression");
-    };
-    let consume = &typed.exprs.kind[args[0].as_usize()];
-    assert!(matches!(consume, TypedExprKind::ConsumeArg(_)));
-    let mut typed_children = 0;
-    let _ = typecheck::typed::walk_expr_children(consume, &mut |_| {
-        typed_children += 1;
-        std::ops::ControlFlow::Continue(())
-    });
-    assert_eq!(typed_children, 1);
 }
 
 #[test]

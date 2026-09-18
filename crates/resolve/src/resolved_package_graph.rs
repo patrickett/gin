@@ -112,10 +112,15 @@ pub struct ResolvedPackageGraph {
     pub nodes: Vec<ResolvedPackageNode>,
     pub root: ResolvedPackageId,
     pub diagnostics: Vec<Diagnostic>,
+    registry: Option<(flask::GinHome, String, flask::PackageResolution)>,
 }
 
 impl ResolvedPackageGraph {
     pub fn discover(entry_path: &Path) -> Self {
+        Self::discover_with_home(entry_path, None)
+    }
+
+    pub fn discover_with_home(entry_path: &Path, home: Option<&flask::GinHome>) -> Self {
         let Some((config, root)) = FlaskConfig::find_package_config(entry_path) else {
             let root = entry_path.parent().unwrap_or(entry_path).to_path_buf();
             return Self {
@@ -127,6 +132,7 @@ impl ResolvedPackageGraph {
                 }],
                 root: ResolvedPackageId(0),
                 diagnostics: Vec::new(),
+                registry: None,
             };
         };
 
@@ -140,7 +146,38 @@ impl ResolvedPackageGraph {
             }],
             root: ResolvedPackageId(0),
             diagnostics: Vec::new(),
+            registry: None,
         };
+        if graph.nodes[0]
+            .config
+            .dependencies()
+            .values()
+            .any(|dep| matches!(dep.kind, DependencyKind::Version { .. }))
+        {
+            let verified = (|| -> Result<_, std::io::Error> {
+                let home = home
+                    .cloned()
+                    .map(Ok)
+                    .unwrap_or_else(flask::GinHome::discover)?;
+                let client = flask::RegistryClient::load(home.clone())?;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(std::io::Error::other)?
+                    .as_secs();
+                let resolution = client.verify_cached(&graph.nodes[0].config, now)?;
+                Ok((home, client.registry_name().to_owned(), resolution))
+            })();
+            match verified {
+                Ok(context) => graph.registry = Some(context),
+                Err(error) => {
+                    graph.diagnostics.push(Diagnostic::new(
+                        "package-registry-verification-failed",
+                        error.to_string(),
+                    ));
+                    return graph;
+                }
+            }
+        }
         let mut active = HashSet::from([graph.nodes[0].root.clone()]);
         graph.resolve_dependencies(ResolvedPackageId(0), &mut active);
         graph
@@ -206,6 +243,15 @@ impl ResolvedPackageGraph {
     }
 
     fn resolve_dependencies(&mut self, parent: ResolvedPackageId, active: &mut HashSet<PathBuf>) {
+        if parent == self.root
+            && let Err(error) = self.nodes[parent.0].config.validate_resolution()
+        {
+            self.diagnostics.push(Diagnostic::new(
+                "package-invalid-resolution",
+                error.to_string(),
+            ));
+            return;
+        }
         let declarations: Vec<_> = self.nodes[parent.0]
             .config
             .dependencies()
@@ -221,9 +267,7 @@ impl ResolvedPackageGraph {
                     ResolvedDependencyState::Unresolved(UnresolvedDependency::GitRevision { url })
                 }
                 DependencyKind::Version { version } => {
-                    ResolvedDependencyState::Unresolved(UnresolvedDependency::RegistryInstance {
-                        version,
-                    })
+                    self.resolve_registry(parent, &alias, &version, active)
                 }
                 _ => ResolvedDependencyState::Unresolved(UnresolvedDependency::RegistryInstance {
                     version: "unsupported".to_string(),
@@ -235,6 +279,90 @@ impl ResolvedPackageGraph {
             edges.push(ResolvedDependencyEdge { alias, state });
         }
         self.nodes[parent.0].dependencies = edges;
+    }
+
+    fn resolve_registry(
+        &mut self,
+        parent: ResolvedPackageId,
+        alias: &str,
+        requirement: &str,
+        active: &mut HashSet<PathBuf>,
+    ) -> ResolvedDependencyState {
+        let unresolved = || {
+            ResolvedDependencyState::Unresolved(UnresolvedDependency::RegistryInstance {
+                version: requirement.to_owned(),
+            })
+        };
+        let Some((home, registry, resolution)) = &self.registry else {
+            return unresolved();
+        };
+        let edges = if parent == self.root {
+            Some(&resolution.direct)
+        } else {
+            resolution
+                .packages
+                .get(self.nodes[parent.0].instance.instance.as_str())
+                .map(|p| &p.dependencies)
+        };
+        let Some(key) = edges.and_then(|edges| edges.get(alias)) else {
+            return unresolved();
+        };
+        let Some(package) = resolution.packages.get(key) else {
+            return unresolved();
+        };
+        let Ok(root) = home.dependency(&package.name, &package.version) else {
+            return unresolved();
+        };
+        let root = normalize_operational(&root);
+        if active.contains(&root) {
+            return ResolvedDependencyState::Unresolved(UnresolvedDependency::DependencyCycle {
+                path: root.display().to_string(),
+            });
+        }
+        let instance = PackageInstanceKey {
+            name: Intern::new(package.name.clone()),
+            version: Intern::new(package.version.to_string()),
+            source: PackageSourceKey::Registry {
+                registry: Intern::new(registry.clone()),
+            },
+            instance: Intern::new(key.clone()),
+        };
+        if let Some((index, _)) = self
+            .nodes
+            .iter()
+            .enumerate()
+            .find(|(_, node)| node.instance == instance)
+        {
+            return ResolvedDependencyState::Resolved {
+                package: ResolvedPackageId(index),
+                import_root: root,
+            };
+        }
+        let Some((config, manifest_root)) = FlaskConfig::find_package_config(&root) else {
+            return unresolved();
+        };
+        if normalize_operational(&manifest_root) != root
+            || config.name() != package.name
+            || config.version() != package.version.to_string()
+        {
+            return ResolvedDependencyState::Unresolved(
+                UnresolvedDependency::ManifestIdentityMismatch { expected: instance },
+            );
+        }
+        let id = ResolvedPackageId(self.nodes.len());
+        self.nodes.push(ResolvedPackageNode {
+            instance,
+            root: root.clone(),
+            config,
+            dependencies: Vec::new(),
+        });
+        active.insert(root.clone());
+        self.resolve_dependencies(id, active);
+        active.remove(&root);
+        ResolvedDependencyState::Resolved {
+            package: id,
+            import_root: root,
+        }
     }
 
     fn resolve_path(
@@ -361,3 +489,44 @@ fn normalize_operational(path: &Path) -> PathBuf {
 #[cfg(test)]
 #[path = "../tests/resolved_package_graph_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod resolution_tests {
+    use super::*;
+    use test_fixtures::TempPackage;
+
+    #[test]
+    fn stale_root_resolution_is_rejected() {
+        let pkg = TempPackage::new("stale_resolution");
+        pkg.write(
+            "flask.jsonc",
+            r#"{
+            "name":"pkg", "version":"1.0.0", "authors":[],
+            "resolution":{"direct":{"missing":"missing@1.0.0"},"packages":{}}
+        }"#,
+        );
+        let graph = ResolvedPackageGraph::discover(pkg.path());
+        assert!(
+            graph
+                .diagnostics
+                .iter()
+                .any(|d| d.code.slug() == "package-invalid-resolution")
+        );
+    }
+
+    #[test]
+    fn dependency_checkout_resolution_does_not_control_the_consumer() {
+        let pkg = TempPackage::new("consumer_resolution");
+        pkg.write_flask_with_deps("consumer", r#"{"dep":{"path":"dep"}}"#);
+        pkg.write(
+            "dep/flask.jsonc",
+            r#"{
+            "name":"dep", "version":"1.0.0", "authors":[],
+            "resolution":{"direct":{"missing":"missing@1.0.0"},"packages":{}}
+        }"#,
+        );
+        let graph = ResolvedPackageGraph::discover(pkg.path());
+        assert!(graph.diagnostics.is_empty(), "{:?}", graph.diagnostics);
+        assert_eq!(graph.nodes.len(), 2);
+    }
+}

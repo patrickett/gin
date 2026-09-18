@@ -162,11 +162,11 @@ impl Folder for IntrinsicFolder {
                 for expr in exprs.iter_mut() {
                     inject_typed_expr_intrinsics(expr);
                 }
-                if let Some(e) = &mut ret.value {
+                for e in &mut ret.values {
                     inject_typed_expr_intrinsics(e);
                 }
             }
-            BindValue::Extern | BindValue::Unassigned => {}
+            BindValue::Unassigned => {}
         }
         ControlFlow::Continue(())
     }

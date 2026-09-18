@@ -27,6 +27,11 @@ impl ExprFormatExt for Expr {
 
     fn write_surface(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Expr::Binary(binary) if binary.op == ast::BinOp::LogicalOr => {
+                binary.lhs.value.write_surface(f)?;
+                write!(f, " or ")?;
+                binary.rhs.value.write_surface(f)
+            }
             Expr::AnonymousTag(name) => write!(f, "{}", name.as_str()),
             Expr::FnCall(call) => {
                 write!(f, "{}", call.path.value.root.as_str())?;
@@ -81,17 +86,7 @@ impl ExprFormatExt for Expr {
                 write!(f, "@")?;
                 inner.value.write_surface(f)
             }
-            Expr::TupleLit(values) => {
-                write!(f, "(")?;
-                for (index, value) in values.iter().enumerate() {
-                    if index > 0 {
-                        write!(f, ", ")?;
-                    }
-                    value.value.write_surface(f)?;
-                }
-                write!(f, ")")
-            }
-            Expr::List(values) => {
+            Expr::ArrayLit(values) | Expr::List(values) => {
                 write!(f, "[")?;
                 for (index, value) in values.iter().enumerate() {
                     if index > 0 {
@@ -103,7 +98,7 @@ impl ExprFormatExt for Expr {
             }
             Expr::Range(range) => {
                 range.start.value.write_surface(f)?;
-                write!(f, "...")?;
+                write!(f, " to ")?;
                 range.end.value.write_surface(f)
             }
             other => write!(f, "{other:?}"),
@@ -118,6 +113,7 @@ pub trait PatternFormatExt {
 impl PatternFormatExt for Pattern {
     fn format_variant_shape(&self) -> String {
         match self {
+            Pattern::Invalid => "<invalid>".to_string(),
             Pattern::Nominal(name, _) => name.as_str().to_string(),
             Pattern::Qualified(path) => {
                 let mut out = path.value.root.as_str().to_string();
@@ -176,14 +172,6 @@ impl PatternFormatExt for Pattern {
                 "[{}, ...{}]",
                 head.value.format_variant_shape(),
                 tail.value.format_variant_shape()
-            ),
-            Pattern::Tuple(elements) => format!(
-                "({})",
-                elements
-                    .iter()
-                    .map(|element| element.value.format_variant_shape())
-                    .collect::<Vec<_>>()
-                    .join(", ")
             ),
             Pattern::InRange { bounds, .. } => bounds.to_string(),
         }

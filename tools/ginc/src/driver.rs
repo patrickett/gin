@@ -63,6 +63,7 @@ impl ParsedPackage {
 }
 
 pub struct CompilePackage {
+    gin_home: Option<flask::GinHome>,
     parsed: ParsedPackage,
     dependencies: HashMap<String, PathBuf>,
     target: CompileTarget,
@@ -74,11 +75,17 @@ impl CompilePackage {
     pub fn new(parsed: ParsedPackage, target: CompileTarget) -> Self {
         Self {
             parsed,
+            gin_home: None,
             dependencies: HashMap::new(),
             target,
             resolve_imports: false,
             package_fallback: PackageInstanceKey::workspace("anonymous", "0"),
         }
+    }
+
+    pub fn with_gin_home(mut self, home: Option<flask::GinHome>) -> Self {
+        self.gin_home = home;
+        self
     }
 
     pub fn with_dependencies(mut self, dependencies: HashMap<String, PathBuf>) -> Self {
@@ -163,6 +170,10 @@ impl CheckedPackage {
 
     pub fn files(&self) -> &[CheckedFile] {
         &self.files
+    }
+
+    pub fn target(&self) -> &CompileTarget {
+        &self.target
     }
 
     pub fn file(&self, path: &Path) -> Option<&CheckedFile> {
@@ -253,6 +264,7 @@ impl CompilerDriver {
             &package.dependencies,
             std::mem::take(&mut self.cache),
             resolve::PackageFrontEndOptions {
+                gin_home: package.gin_home,
                 compile_target: target.clone(),
                 transform: PackageTransformOptions::FULL,
                 resolve_imports: package.resolve_imports,
@@ -281,7 +293,13 @@ impl CompilerDriver {
                 let typecheck_diagnostics = typed
                     .all_flaws()
                     .into_iter()
-                    .map(|(_, diagnostic)| diagnostic.clone())
+                    .map(|(span, diagnostic)| {
+                        if diagnostic.span.start() == 0 && diagnostic.span.end() == 0 {
+                            diagnostic.clone().at_span_id(span, &typed.span_table)
+                        } else {
+                            diagnostic.clone()
+                        }
+                    })
                     .collect();
                 CheckedFile {
                     parsed,

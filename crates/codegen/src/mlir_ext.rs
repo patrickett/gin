@@ -3,6 +3,7 @@
 //! This module provides extension traits that simplify common Melior patterns
 
 use crate::prelude::*;
+use melior::dialect::arith::CmpiPredicate;
 
 /// Extension trait for [`melior::Context`] to simplify common operations.
 pub trait ContextExt {
@@ -270,14 +271,6 @@ pub trait BlockExt<'c> {
     ) -> Value<'c, 'c>;
     /// Create a string constant - returns a fat pointer (ptr, length)
     /// This requires access to CodegenContext to register the string globally
-    fn const_string_with_ctx(
-        &self,
-        ctx: &CodegenContext<'_, 'c>,
-        value: &str,
-        ty: &ast::Ty,
-        loc: Location<'c>,
-    ) -> Value<'c, 'c>;
-    /// Return a unit/void value
     fn unit_value(&self, ctx: &CodegenContext<'_, 'c>, loc: Location<'c>) -> Value<'c, 'c>;
     fn call(
         &self,
@@ -373,25 +366,6 @@ impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
         loc: Location<'c>,
     ) -> Value<'c, 'c> {
         self.append_op(ctx.int_const(ty, value, loc))
-    }
-
-    fn const_string_with_ctx(
-        &self,
-        ctx: &CodegenContext<'_, 'c>,
-        value: &str,
-        ty: &ast::Ty,
-        loc: Location<'c>,
-    ) -> Value<'c, 'c> {
-        let c = ctx.mlir;
-        let symbol_name = ctx.register_string(value);
-
-        // llvm.mlir.addressof @symbol → !llvm.ptr
-        let ptr = ctx
-            .addressof_string_global(self, &symbol_name, loc)
-            .expect("addressof should succeed");
-        let len = self.const_i64(c, value.len() as i64, loc);
-
-        ctx.build_string_value(self, ptr, len, ty, loc)
     }
 
     fn unit_value(&self, ctx: &CodegenContext<'_, 'c>, loc: Location<'c>) -> Value<'c, 'c> {
@@ -597,14 +571,14 @@ impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
 /// Comparison predicate constants.
 pub struct Predicates;
 impl Predicates {
-    pub const EQ: u64 = 0;
-    pub const NE: u64 = 1;
-    pub const SLT: u64 = 2;
-    pub const SGT: u64 = 3;
-    pub const SLE: u64 = 4;
-    pub const SGE: u64 = 5;
-    pub const ULT: u64 = 6;
-    pub const UGT: u64 = 7;
-    pub const ULE: u64 = 8;
-    pub const UGE: u64 = 9;
+    pub const EQ: u64 = CmpiPredicate::Eq as u64;
+    pub const NE: u64 = CmpiPredicate::Ne as u64;
+    pub const SLT: u64 = CmpiPredicate::Slt as u64;
+    pub const SGT: u64 = CmpiPredicate::Sgt as u64;
+    pub const SLE: u64 = CmpiPredicate::Sle as u64;
+    pub const SGE: u64 = CmpiPredicate::Sge as u64;
+    pub const ULT: u64 = CmpiPredicate::Ult as u64;
+    pub const UGT: u64 = CmpiPredicate::Ugt as u64;
+    pub const ULE: u64 = CmpiPredicate::Ule as u64;
+    pub const UGE: u64 = CmpiPredicate::Uge as u64;
 }

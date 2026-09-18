@@ -3,8 +3,8 @@ use lexer::Token;
 
 use ast::span::SpanId;
 use ast::{
-    BindValue, Expr, GroupPath, Parameter, ParameterKind, Parameters, Pattern, Spanned, TypeExpr,
-    Typed,
+    Bind, BindValue, Expr, GroupPath, Parameter, ParameterKind, Parameters, Pattern, Spanned,
+    TypeExpr, Typed,
 };
 
 use crate::cursor::TokenCursor;
@@ -22,7 +22,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             return self.parse_pattern_list_node(expr_parser);
         }
         if self.is_at(&Token::ParenOpen) {
-            return self.parse_pattern_tuple_node(expr_parser);
+            return self.parse_pattern_value_row_node(expr_parser);
         }
         self.parse_type_expr_structural(expr_parser)
             .map(|pattern| Spanned {
@@ -31,7 +31,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             })
     }
 
-    fn parse_pattern_tuple_node(&mut self, expr_parser: ExprFn) -> Option<Spanned<Pattern>> {
+    fn parse_pattern_value_row_node(&mut self, expr_parser: ExprFn) -> Option<Spanned<Pattern>> {
         let start = self.peek_span()?;
         self.expect(&Token::ParenOpen);
         self.skip_layout();
@@ -42,14 +42,13 @@ impl<'src, 't> TokenCursor<'src, 't> {
                 span_id: self.merge_span(start, end),
             });
         }
-        let first = self.parse_pattern_node(expr_parser)?;
-        let mut elems = vec![first];
+        self.parse_pattern_node(expr_parser)?;
         loop {
             if self.is_at(&Token::ParenClose) {
                 break;
             }
             if self.eat_list_separator() {
-                elems.push(self.parse_pattern_node(expr_parser)?);
+                self.parse_pattern_node(expr_parser)?;
                 continue;
             }
             break;
@@ -57,9 +56,15 @@ impl<'src, 't> TokenCursor<'src, 't> {
         self.skip_layout();
         self.expect(&Token::ParenClose);
         let end = self.last_consumed_span();
+        let pattern_span = self.merge_span(start, end);
+        self.error(
+            "parse-positional-destructure-removed",
+            "positional destructuring patterns are not supported; use named result projection",
+            pattern_span,
+        );
         Some(Spanned {
-            value: Pattern::Tuple(elems),
-            span_id: self.merge_span(start, end),
+            value: Pattern::Invalid,
+            span_id: pattern_span,
         })
     }
 
@@ -153,6 +158,15 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
     fn parse_type_expr_expr(&mut self, expr_parser: ExprFn) -> Option<Spanned<Expr>> {
         let start_span = self.current_span();
+
+        // Structural fixed-array type syntax: `[Element; length]`.
+        if self.is_at(&Token::BracketOpen) {
+            let array = self.parse_bracket_lit();
+            return Some(Spanned {
+                value: array.value,
+                span_id: array.span_id,
+            });
+        }
 
         if self.eat(&Token::In) {
             return self.parse_in_range_expr();
@@ -290,7 +304,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
     ) -> Option<Spanned<TypeExpr>> {
         let start_span = self.current_span();
 
-        // Range type: `in N...M` or `in Tag`
+        // Range type: `in N to M` or `in Tag`
         if self.eat(&Token::In) {
             if let Some(range) = self.parse_in_range_type() {
                 let span = self.current_span();
@@ -465,30 +479,13 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
         let mut params = Parameters::new();
         let mut param_spans = Vec::new();
-        let mut seen_default = false;
 
         if !self.is_at(&close_token) {
             loop {
                 if let Some((name, mut parameter, span)) =
                     self.parse_one_tag_param(expr_parser, params.len())
                 {
-                    // NOTE: Named type arguments (e.g. `Box(a: BumpAllocator)` to skip
-                    // a defaulted positional param) would allow omitting defaults without
-                    // triggering this flaw. Currently only positional type args are supported.
                     parameter.name_span = span;
-                    if seen_default && !matches!(parameter.kind, ParameterKind::Default(_)) {
-                        self.error(
-                            "parse-parameter-after-default",
-                            format!(
-                                "positional type parameter `{}` appears after a default parameter",
-                                name.as_str()
-                            ),
-                            self.current_span(),
-                        );
-                    }
-                    if matches!(parameter.kind, ParameterKind::Default(_)) {
-                        seen_default = true;
-                    }
                     param_spans.push((name, span));
                     params.insert(name, parameter);
                 }
@@ -689,11 +686,11 @@ fn is_parse_error_expr(expr: &ast::Expr) -> bool {
         }
         ast::Expr::Ref { inner, .. } => is_parse_error_expr(&inner.value),
         ast::Expr::Negate(inner) => is_parse_error_expr(&inner.value),
-        ast::Expr::TupleAlloc { init, size } => {
+        ast::Expr::FixedArrayAlloc { init, size } => {
             is_parse_error_expr(&init.value) || is_parse_error_expr(&size.value)
         }
-        ast::Expr::TupleGet { base, .. } => is_parse_error_expr(&base.value),
-        ast::Expr::TupleSet { base, value, .. } => {
+        ast::Expr::AggregateGet { base, .. } => is_parse_error_expr(&base.value),
+        ast::Expr::AggregateSet { base, value, .. } => {
             is_parse_error_expr(&base.value) || is_parse_error_expr(&value.value)
         }
         ast::Expr::Cast { expr, .. } => is_parse_error_expr(&expr.value),
@@ -714,7 +711,7 @@ fn is_parse_error_expr(expr: &ast::Expr) -> bool {
         ast::Expr::RecordLit(fields) => fields
             .iter()
             .any(|(_, field)| is_parse_error_expr(&field.value)),
-        ast::Expr::TupleLit(fields) | ast::Expr::List(fields) => {
+        ast::Expr::ArrayLit(fields) | ast::Expr::List(fields) => {
             fields.iter().any(|field| is_parse_error_expr(&field.value))
         }
         ast::Expr::Destructure { value, .. } => is_parse_error_expr(&value.value),
@@ -761,6 +758,13 @@ fn type_params_to_expr_args(params: ParsedTagParams) -> Vec<Typed<Expr>> {
             ParameterKind::Tagged(sp)
             | ParameterKind::ValueParam { ty: sp }
             | ParameterKind::Inferred { ty: sp } => Typed::infer(sp.value, sp.span_id),
+            ParameterKind::Default(expr) if !name.as_str().starts_with("__expr_") => {
+                let span = parameter.name_span;
+                Typed::infer(
+                    Expr::Bind(Box::new(Bind::new(name, span, BindValue::Expr(expr)))),
+                    span,
+                )
+            }
             ParameterKind::Default(expr) => *expr,
         })
         .collect()

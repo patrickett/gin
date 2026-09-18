@@ -14,7 +14,7 @@ use internment::Intern;
 use kinded::Kinded;
 use std::collections::HashMap;
 
-use crate::expr::{Expr, FnCall, Literal, Typed, WhenArm, WhenExpr};
+use crate::expr::{Expr, FnCall, Literal, WhenArm, WhenExpr};
 use crate::normal_expr::NormalExpr;
 use crate::parameter::ParameterKind;
 use crate::source::SourceExt;
@@ -27,6 +27,7 @@ use crate::{GroupPath, InRangeBounds, ModPath, TypeExpr};
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Kinded)]
 #[kinded(kind = PatternKind)]
 pub enum Pattern {
+    Invalid,
     Nominal(Intern<String>, SpanId),
     Qualified(crate::Spanned<ModPath>),
     Generic {
@@ -48,7 +49,6 @@ pub enum Pattern {
         head: Box<crate::Spanned<Pattern>>,
         tail: Box<crate::Spanned<Pattern>>,
     },
-    Tuple(Vec<crate::Spanned<Pattern>>),
     InRange {
         bounds: InRangeBounds,
         span: SpanId,
@@ -123,28 +123,21 @@ impl Pattern {
                 value: Self::from_expr(inner.value),
                 span_id: inner.span_id,
             })),
-            Expr::TupleLit(values) => Self::Tuple(
+            Expr::ArrayLit(values) | Expr::List(values) => {
                 values
                     .into_iter()
-                    .map(|value| Spanned {
-                        value: Self::from_expr(value.value),
-                        span_id: value.span_id,
+                    .rev()
+                    .fold(Self::ListEmpty, |tail, value| Self::ListCons {
+                        head: Box::new(Spanned {
+                            value: Self::from_expr(value.value),
+                            span_id: value.span_id,
+                        }),
+                        tail: Box::new(Spanned {
+                            value: tail,
+                            span_id: value.span_id,
+                        }),
                     })
-                    .collect(),
-            ),
-            Expr::List(values) => values
-                .into_iter()
-                .rev()
-                .fold(Self::ListEmpty, |tail, value| Self::ListCons {
-                    head: Box::new(Spanned {
-                        value: Self::from_expr(value.value),
-                        span_id: value.span_id,
-                    }),
-                    tail: Box::new(Spanned {
-                        value: tail,
-                        span_id: value.span_id,
-                    }),
-                }),
+            }
             _ => Self::Nominal(Intern::from_ref("_"), SpanId::INVALID),
         }
     }
@@ -264,18 +257,6 @@ impl Pattern {
                     }
                 }
             }
-            Pattern::Tuple(elems) => {
-                if let Some(Ty::Tuple(subject_elems)) = subject_ty {
-                    for (pat, subj) in elems.iter().zip(subject_elems.iter()) {
-                        for (name, ty) in
-                            pat.value
-                                .pattern_binding_types(Some(subj), variant_map, tag_types)
-                        {
-                            out.insert(name, ty);
-                        }
-                    }
-                }
-            }
             _ => {}
         }
         out
@@ -348,6 +329,7 @@ impl Pattern {
 
     pub fn surface_mangle_name(&self) -> &str {
         match self {
+            Self::Invalid => "__invalid",
             Self::Nominal(name, _) => name.as_str(),
             Self::Generic { name, .. } => name.as_str(),
             Self::Qualified(path) => path
@@ -366,7 +348,6 @@ impl Pattern {
             Self::InRange { .. } => "__in_range",
             Self::ListEmpty => "[]",
             Self::ListCons { .. } => "[..]",
-            Self::Tuple(_) => "(..)",
         }
     }
 
@@ -484,10 +465,6 @@ impl Pattern {
                         .value
                         .variant_word_at(pattern_span_id, span_table, byte_pos, word)
             }
-            Pattern::Tuple(elems) => elems.iter().any(|elem| {
-                elem.value
-                    .variant_word_at(pattern_span_id, span_table, byte_pos, word)
-            }),
             _ => false,
         }
     }
@@ -559,27 +536,13 @@ impl TypeExpr {
 
 impl Expr {
     /// `for` loop patterns are a subset of expressions:
-    /// - a simple identifier (`x` → `Expr::FnCall` with an empty path tail), or
-    /// - a parenthesized list of identifiers (`(a, b)` → `Expr::TupleLit`, or `(x)` → same shape as `x`).
+    /// - a simple identifier (`x` → `Expr::FnCall` with an empty path tail).
     ///
     /// Returns `None` if the expression is not a valid `for` binder (e.g. a call or literal).
     pub fn for_loop_pattern_names(&self) -> Option<Vec<Intern<String>>> {
         match self {
             Expr::FnCall(FnCall { path, args: None }) if path.segments.is_empty() => {
                 Some(vec![path.root])
-            }
-            Expr::TupleLit(elems) => {
-                let mut out = Vec::with_capacity(elems.len());
-                for Typed { value, .. } in elems {
-                    let Expr::FnCall(FnCall { path, args: None }) = value else {
-                        return None;
-                    };
-                    if !path.segments.is_empty() {
-                        return None;
-                    }
-                    out.push(path.root);
-                }
-                Some(out)
             }
             _ => None,
         }
@@ -643,7 +606,7 @@ impl Expr {
                 .args
                 .iter()
                 .any(|a| a.value.pattern_variant_word_in(span_table, byte_pos, word)),
-            Expr::TupleLit(elems) | Expr::List(elems) => elems
+            Expr::ArrayLit(elems) | Expr::List(elems) => elems
                 .iter()
                 .any(|e| e.value.pattern_variant_word_in(span_table, byte_pos, word)),
             _ => false,
@@ -713,11 +676,12 @@ impl BindValue {
                 exprs
                     .iter()
                     .any(|e| e.value.pattern_variant_word_in(span_table, byte_pos, word))
-                    || ret.value.as_ref().is_some_and(|r| {
-                        r.value.pattern_variant_word_in(span_table, byte_pos, word)
-                    })
+                    || ret
+                        .values
+                        .iter()
+                        .any(|r| r.value.pattern_variant_word_in(span_table, byte_pos, word))
             }
-            BindValue::Extern | BindValue::Unassigned => false,
+            BindValue::Unassigned => false,
         }
     }
 }
@@ -830,7 +794,8 @@ impl Pattern {
             {
                 vec![*name]
             }
-            Pattern::Nominal(..)
+            Pattern::Invalid
+            | Pattern::Nominal(..)
             | Pattern::Qualified(_)
             | Pattern::Literal(..)
             | Pattern::Pointer(_)
@@ -843,10 +808,6 @@ impl Pattern {
                 names.extend(tail.value.binding_names_filtered(exclude_wildcards));
                 names
             }
-            Pattern::Tuple(elems) => elems
-                .iter()
-                .flat_map(|e| e.value.binding_names_filtered(exclude_wildcards))
-                .collect(),
         };
         if exclude_wildcards {
             names.retain(|n| !n.is_pattern_wildcard());

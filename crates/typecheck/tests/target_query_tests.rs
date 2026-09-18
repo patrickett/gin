@@ -32,7 +32,7 @@ fn target_query_lowering_preserves_kind_and_resolved_operand() {
 #[test]
 fn applied_cast_lowering_preserves_nominal_argument_identity() {
     let typed = transformed(
-        "Count(unit) is in 0...255\nconvert(value, element): value as Count(element)\n",
+        "Count(unit) is in 0 to 255\nconvert(value, element): value as Count(element)\n",
     );
     let convert = typed
         .defs

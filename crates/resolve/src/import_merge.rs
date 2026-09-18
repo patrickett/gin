@@ -24,6 +24,7 @@ pub struct CollectedImport {
     pub symbol: String,
     pub alias: Option<String>,
     pub line: u32,
+    pub end_line: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,8 +43,8 @@ pub struct RawSuggestion {
 impl RawSuggestion {
     pub fn format_member_line(&self) -> String {
         match &self.root {
-            ImportRoot::Dependency(dep) => format!("use {dep}.{}", self.symbol),
-            ImportRoot::LocalPath(path) => format!("use '{path}'.{}", self.symbol),
+            ImportRoot::Dependency(dep) => format!("use {dep} {}", self.symbol),
+            ImportRoot::LocalPath(path) => format!("use '{path}' {}", self.symbol),
             ImportRoot::CurrentModule => format!("use {}", self.symbol),
         }
     }
@@ -66,35 +67,23 @@ pub fn collect_member_imports(source: &str) -> Vec<CollectedImport> {
     for import in &output.ast.uses {
         for mi in &import.0 {
             match &mi.source {
-                ImportSource::LocalMember(m) => {
-                    if let Some(path) = &m.local_path {
-                        let line = line_index(span_table.get(m.span).start(), source);
-                        out.push(CollectedImport {
-                            root: ImportRoot::LocalPath(path.to_string_lossy().into_owned()),
-                            symbol: m.member.export.to_string(),
-                            alias: m.member.alias.map(|a| a.to_string()),
-                            line,
-                        });
-                    }
-                }
                 ImportSource::LocalBundle(b) => {
                     let line = line_index(span_table.get(b.span_id()).start(), source);
+                    let end_line = b.members.last().map_or(line, |m| {
+                        line_index(span_table.get(m.span).end().saturating_sub(1), source)
+                    });
                     let root = if let Some(path) = &b.local_path {
                         ImportRoot::LocalPath(path.to_string_lossy().into_owned())
                     } else {
-                        ImportRoot::Dependency(b.root.to_string())
+                        ImportRoot::Dependency(b.qualifier_prefix())
                     };
-                    push_bundle_members(&mut out, root, line, &b.members);
-                }
-                ImportSource::Package(path) if path.segments.len() == 1 => {
-                    let line = line_index(span_table.get(path.span_id).start(), source);
-                    let seg = &path.segments[0];
-                    out.push(CollectedImport {
-                        root: ImportRoot::Dependency(path.root.to_string()),
-                        symbol: seg.to_string(),
-                        alias: None,
-                        line,
-                    });
+                    if output.comments.iter().any(|comment| {
+                        let comment_line = line_index(span_table.get(comment.span).start(), source);
+                        (line..=end_line).contains(&comment_line)
+                    }) {
+                        continue;
+                    }
+                    push_bundle_members(&mut out, root, line, end_line, &b.members);
                 }
                 ImportSource::CurrentModule { member } => {
                     let line = line_index(span_table.get(member.span).start(), source);
@@ -103,6 +92,7 @@ pub fn collect_member_imports(source: &str) -> Vec<CollectedImport> {
                         symbol: member.export.to_string(),
                         alias: member.alias.map(|a| a.to_string()),
                         line,
+                        end_line: line,
                     });
                 }
                 _ => {}
@@ -117,6 +107,7 @@ fn push_bundle_members(
     out: &mut Vec<CollectedImport>,
     root: ImportRoot,
     line: u32,
+    end_line: u32,
     members: &[BundleExportImport],
 ) {
     for member in members {
@@ -125,6 +116,7 @@ fn push_bundle_members(
             symbol: member.export.to_string(),
             alias: member.alias.map(|a| a.to_string()),
             line,
+            end_line,
         });
     }
 }
@@ -208,8 +200,8 @@ fn format_bundle_line(root: &ImportRoot, members: &[BundleMember]) -> String {
     let bundle = member_strs.join(", ");
 
     match root {
-        ImportRoot::Dependency(dep) => format!("use {dep}.({bundle})"),
-        ImportRoot::LocalPath(path) => format!("use '{path}'.({bundle})"),
+        ImportRoot::Dependency(dep) => format!("use {dep} {bundle}"),
+        ImportRoot::LocalPath(path) => format!("use '{path}' {bundle}"),
         ImportRoot::CurrentModule => format_current_module_line(members),
     }
 }
@@ -245,7 +237,7 @@ impl RawSuggestion {
 
         add_member(self.symbol.clone(), None);
         for c in &matching {
-            lines.push(c.line);
+            lines.extend(c.line..=c.end_line);
             add_member(c.symbol.clone(), c.alias.clone());
         }
 
@@ -266,6 +258,7 @@ impl RawSuggestion {
         let replace_line = *lines.iter().min().unwrap();
         let mut delete_lines: Vec<u32> = lines.into_iter().filter(|l| *l != replace_line).collect();
         delete_lines.sort_by(|a, b| b.cmp(a));
+        delete_lines.dedup();
 
         MergedImportSuggestion {
             use_line,
@@ -275,5 +268,26 @@ impl RawSuggestion {
     }
 }
 #[cfg(test)]
-#[path = "../tests/import_merge_tests.rs"]
-mod tests;
+mod tests {
+
+    use super::*;
+
+    #[test]
+    fn merging_indented_import_replaces_all_member_lines() {
+        let source = "use math.numbers\n    add\n    sub as subtract\n\nvalue := 1\n";
+        let imports = collect_member_imports(source);
+        let suggestion = RawSuggestion {
+            root: ImportRoot::Dependency("math.numbers".into()),
+            symbol: "multiply".into(),
+        }
+        .merge(&imports, None);
+        assert_eq!(
+            suggestion.use_line,
+            "use math.numbers add, multiply, sub as subtract"
+        );
+        assert_eq!(suggestion.replace_line, Some(0));
+        assert_eq!(suggestion.delete_lines, vec![2, 1]);
+        let parsed = suggestion.use_line.parse_source_full();
+        assert!(parsed.symptoms.is_empty(), "{:?}", parsed.symptoms);
+    }
+}

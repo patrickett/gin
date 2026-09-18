@@ -15,7 +15,7 @@ fn typed_codegen_to_mlir(source: &str, filename: &str) -> Option<String> {
 
 #[test]
 fn test_typed_ast_literal_codegen() {
-    let source = "Signed64 is in -9223372036854775808...9223372036854775807\n\
+    let source = "Signed64 is in -9223372036854775808 to 9223372036854775807\n\
 main Signed64: 42";
     let mlir = typed_codegen_to_mlir(source, "test.gin").expect("codegen should succeed");
 
@@ -35,7 +35,7 @@ main Signed64: 42";
 
 #[test]
 fn test_typed_ast_fn_call_codegen() {
-    let source = "Signed64 is in -9223372036854775808...9223372036854775807\n\
+    let source = "Signed64 is in -9223372036854775808 to 9223372036854775807\n\
 first(a Signed64, b Signed64) Signed64: a\n\
 main() Signed64: first(1, 2)";
     let mlir = typed_codegen_to_mlir(source, "test.gin").expect("codegen should succeed");
@@ -49,7 +49,7 @@ main() Signed64: first(1, 2)";
 
 #[test]
 fn test_typed_ast_multiple_defs() {
-    let source = "Signed64 is in -9223372036854775808...9223372036854775807\n\
+    let source = "Signed64 is in -9223372036854775808 to 9223372036854775807\n\
 x Signed64: 10\n\
 y Signed64: 20";
     let mlir = typed_codegen_to_mlir(source, "test.gin").expect("codegen should succeed");

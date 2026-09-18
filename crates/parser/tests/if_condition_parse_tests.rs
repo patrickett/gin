@@ -40,7 +40,7 @@ fn parse_if_match_condition_is_structural_leaf() {
 #[test]
 fn parse_if_range_preserves_literal_lower_and_symbolic_upper_bounds() {
     assert!(matches!(
-        parse_if("value is in 1...max_alignment").condition,
+        parse_if("value is in 1 to max_alignment").condition,
         Condition::Is { pattern, .. }
             if matches!(
                 pattern.value,

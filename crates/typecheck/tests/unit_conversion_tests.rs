@@ -15,7 +15,7 @@ fn flaw_codes(source: &str) -> Vec<String> {
 }
 
 fn unit_types() -> &'static str {
-    "Byte is in 0...255\nCodePoint is in 0...1114111\n#phantom(unit)\nCount(unit) is in 0...127\n#phantom(unit)\nOffset(unit) is in -127...127\n"
+    "Byte is in 0 to 255\nCodePoint is in 0 to 1114111\n#phantom(unit)\nCount(unit) is in 0 to 127\n#phantom(unit)\nOffset(unit) is in -127 to 127\n"
 }
 
 #[test]

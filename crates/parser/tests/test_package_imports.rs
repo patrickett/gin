@@ -135,7 +135,7 @@ fn test_package_import_bundle_lists_nested_folder_gin_files() {
     pkg.write("io/read.gin", "read:\nreturn\n");
     pkg.write("fs/write.gin", "write:\nreturn\n");
 
-    let src = "use core.(io, fs)\nmain:\nreturn\n";
+    let src = "use core io, fs\nmain:\nreturn\n";
     let ast = src.parse_source_full().ast;
 
     let mut deps = HashMap::new();

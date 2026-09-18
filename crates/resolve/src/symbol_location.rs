@@ -99,7 +99,7 @@ pub fn public_symbol_in_module_dir(
     public_symbol_def_location(&folder, &sym, file_reader)
 }
 
-/// Dependency bundle member: `use dep.(folder.Symbol)` or `use core.(Sym)`.
+/// Dependency bundle member: `use dep folder.Symbol` or `use core Sym`.
 pub fn dep_bundle_member_def_location(
     file_path: &Path,
     b: &LocalBundleImport,
@@ -116,7 +116,7 @@ pub fn dep_bundle_member_def_location(
     public_symbol_in_module_dir(&module_dir, export, file_reader)
 }
 
-/// Local bundle member: `use './path'.(Sym)` or `use './path'.(folder.Symbol)`.
+/// Local bundle member: `use './path' Sym` or `use './path' folder.Symbol`.
 pub fn local_bundle_def_location(
     file_path: &Path,
     local_path: &Path,
@@ -222,10 +222,21 @@ pub fn def_location_for_import_target(
             }
             None
         }
-        ImportTarget::DepSymbol { dep_name, symbol }
-        | ImportTarget::BodySymbol { dep_name, symbol } => {
-            dep_symbol_def_location(file_path, &dep_name, &symbol, file_reader)
-                .map(ImportNavLocation::Definition)
+        ImportTarget::DepModule {
+            dep_name,
+            path_segments,
+        } => {
+            let segments: Vec<_> = path_segments
+                .iter()
+                .map(|s| Intern::new(s.clone()))
+                .collect();
+            package_import_part_location(
+                file_path,
+                &dep_name,
+                &segments,
+                segments.len(),
+                file_reader,
+            )
         }
         ImportTarget::DepBundleMember {
             dep_name,
@@ -256,7 +267,7 @@ pub fn def_location_for_import_target(
     }
 }
 
-/// Cursor on an imported name in the file body (`use core.true` → `true`).
+/// Cursor on an imported name in the file body (`use core true` → `true`).
 pub fn body_import_def_location(
     file_path: &Path,
     ast: &FileAst,
@@ -268,9 +279,6 @@ pub fn body_import_def_location(
     let _ = word;
     let target = resolve_import_at(ast, source, byte_pos)?;
     match target {
-        crate::ImportTarget::BodySymbol { dep_name, symbol } => {
-            dep_symbol_def_location(file_path, &dep_name, &symbol, file_reader)
-        }
         crate::ImportTarget::LocalBundleSymbol { local_path, symbol } => {
             local_bundle_def_location(file_path, &local_path, &symbol, file_reader)
         }
@@ -328,7 +336,7 @@ fn dep_dir_from_file(file_path: &Path, dep_name: &str) -> Option<PathBuf> {
     }
 }
 
-/// `use dep.folder.(sym, …)` — `part_index` 0 = dep root, 1+ = `path_segments`.
+/// `use dep.folder sym, …` — `part_index` 0 = dep root, 1+ = `path_segments`.
 pub fn dep_bundle_import_part_location(
     file_path: &Path,
     b: &LocalBundleImport,
@@ -366,7 +374,7 @@ pub fn package_import_part_location(
     root: &str,
     segments: &[Intern<String>],
     part_index: usize,
-    file_reader: &dyn Fn(&Path) -> Option<ParsedFile>,
+    _file_reader: &dyn Fn(&Path) -> Option<ParsedFile>,
 ) -> Option<ImportNavLocation> {
     let dep_dir = dep_dir_from_file(file_path, root)?;
 
@@ -388,18 +396,7 @@ pub fn package_import_part_location(
         return Some(ImportNavLocation::Manifest(manifest));
     }
 
-    if seg_idx == seg_count - 1 {
-        let symbol = segments[seg_idx].as_str();
-        let module_segments: Vec<&str> = segments[..seg_idx]
-            .iter()
-            .map(|segment| segment.as_str())
-            .collect();
-        let module_dir = resolve_logical_module_dir(&dep_dir, &module_segments)?;
-        return public_symbol_in_module_dir(&module_dir, symbol, file_reader)
-            .map(ImportNavLocation::Definition);
-    }
-
-    None
+    resolve_logical_module_dir(&dep_dir, &seg_strs[..=seg_idx]).map(ImportNavLocation::Manifest)
 }
 
 /// Resolve a `use` import source to a manifest or definition (folder / dep / local path).
@@ -418,10 +415,11 @@ pub fn import_source_nav_location(
             let full = normalize_local_import_path(base_dir, &pkg_root, path).ok()?;
             full.is_dir().then_some(ImportNavLocation::Manifest(full))
         }
-        ImportSource::LocalMember(m) => {
-            let local_path = m.local_path.as_ref()?;
-            local_bundle_def_location(file_path, local_path, m.member.export.as_str(), file_reader)
-                .map(ImportNavLocation::Definition)
+        ImportSource::LocalFile(path, _) => {
+            let base_dir = file_path.parent()?;
+            let pkg_root = find_package_root(base_dir)?;
+            let full = normalize_local_import_path(base_dir, &pkg_root, path).ok()?;
+            Some(ImportNavLocation::FileRoot(full))
         }
         ImportSource::LocalBundle(b) => {
             if let Some(local_path) = &b.local_path {
@@ -675,7 +673,7 @@ fn byte_in_has_function_body(
                 let end = span_table.get(ret.span_id).end();
                 (start..end).contains(&byte_pos)
             }
-            ast::BindValue::Extern | ast::BindValue::Unassigned => false,
+            ast::BindValue::Unassigned => false,
         }
     })
 }
@@ -854,7 +852,7 @@ fn bind_body_contains(
                 .any(|expr| span_table.get(expr.span_id).contains(byte_pos))
                 || span_table.get(ret.span_id).contains(byte_pos)
         }
-        ast::BindValue::Extern | ast::BindValue::Unassigned => false,
+        ast::BindValue::Unassigned => false,
     }
 }
 
@@ -912,7 +910,9 @@ fn definition_in_use_span(
                         member: member.clone(),
                     },
                 ),
-                ImportSource::LocalMember(m) => (m.span, ImportSource::LocalMember(m.clone())),
+                ImportSource::LocalFile(path, span) => {
+                    (*span, ImportSource::LocalFile(path.clone(), *span))
+                }
             };
 
             let span = span_table.get(import_span);
@@ -964,15 +964,6 @@ fn definition_in_use_span(
                     let byte_in_span = byte_pos.saturating_sub(span.start());
                     let part = crate::part_index_in_dotted_path(span_text, byte_in_span);
                     dep_bundle_import_part_location(file_path, b, part, file_reader)?
-                }
-                ImportSource::LocalMember(m) => {
-                    let local_path = m.local_path.as_ref()?;
-                    ImportNavLocation::Definition(local_bundle_def_location(
-                        file_path,
-                        local_path,
-                        m.member.export.as_str(),
-                        file_reader,
-                    )?)
                 }
                 ImportSource::CurrentModule { member } => {
                     ImportNavLocation::Definition(current_module_sibling_def_location(

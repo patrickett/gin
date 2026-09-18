@@ -1,6 +1,6 @@
 //! Shared parse → transform helpers for AST integration tests.
 //!
-//! Marker/reflect tests share a single parsed `gin_core` bundle via [`marker_fixtures`]
+//! Marker/reflect tests share a single parsed semantic bundle via [`marker_fixtures`]
 //! so each test does not reload seven modules and re-run compile-time folding.
 //! For self-contained snippets (inline `Type` / `List` / …), prefer [`transform_source`].
 
@@ -43,7 +43,7 @@ struct FullMarkerPackageFixtures {
 static MARKER_FIXTURES: OnceLock<MarkerPackageFixtures> = OnceLock::new();
 static FULL_MARKER_FIXTURES: OnceLock<FullMarkerPackageFixtures> = OnceLock::new();
 
-/// Parsed `gin_core` marker bundle + cross-file declare context (built once per test process).
+/// Parsed marker bundle + cross-file declare context (built once per test process).
 fn marker_fixtures() -> &'static MarkerPackageFixtures {
     MARKER_FIXTURES.get_or_init(|| {
         // Keep this fixture intentionally small: these tests only need the reflect `Type`
@@ -62,7 +62,7 @@ fn marker_fixtures() -> &'static MarkerPackageFixtures {
     })
 }
 
-/// Load `gin_core` marker/reflect sources into a merged eval AST and trait registry.
+/// Load marker/reflect sources into a merged eval AST and trait registry.
 pub fn marker_trait_registry() -> CompileTimeTraitRegistry {
     // Trait tests want auto trait defaults and compile-time bodies from marker modules.
     // Keep this separate from the lightweight hover/pattern fixture.
@@ -102,7 +102,7 @@ pub fn transform_with_markers(source: &str) -> TypedFileAst {
     transform(&file_ast, FileId(0), marker_transform_ctx().as_ref())
 }
 
-/// Transform `source` with gin_core types/variants from the marker eval package in scope.
+/// Transform `source` with marker types/variants from the fixture package in scope.
 pub fn transform_with_marker_package(source: &str) -> TypedFileAst {
     let file_ast = TokenCursor::parse_source(source);
     transform(
@@ -132,7 +132,7 @@ pub fn transform_with_full_marker_eval(source: &str) -> TypedFileAst {
     )
 }
 
-/// Merged gin_core AST used by marker/reflect integration tests.
+/// Merged marker AST used by marker/reflect integration tests.
 pub fn load_marker_eval_ast_for_tests() -> FileAst {
     marker_fixtures().eval_ast.as_ref().clone()
 }
@@ -144,8 +144,8 @@ pub fn marker_eval_typed_for_tests() -> &'static TypedFileAst {
 
 /// Inline Gin source providing primitive types (BigInt, Bool, List, Pointer, String, etc.).
 const LIGHT_MARKER_SRC: &str = "\
-BigInt is in 0...18446744073709551615
-Int is in 0...4294967295
+BigInt is in 0 to 18446744073709551615
+Int is in 0 to 4294967295
 
 Bool is True or False
 
@@ -181,8 +181,8 @@ fn load_marker_eval_ast_light() -> FileAst {
 
 /// Inline Gin source for the full marker eval bundle (primitives + Copy + Sized).
 const FULL_MARKER_SRC: &str = "\
-BigInt is in 0...18446744073709551615
-Int is in 0...4294967295
+BigInt is in 0 to 18446744073709551615
+Int is in 0 to 4294967295
 
 Bool is True or False
 
@@ -286,9 +286,9 @@ fn load_marker_eval_ast_full() -> FileAst {
 
 /// Like `transform_source` but prepends a small record tag (`Cell has n Int`
 /// and a numeric `Int` tag so tests that exercise typed local bindings have a
-/// known schema available without loading `gin_core`.
+/// known schema available without loading the full fixture package.
 pub fn transform_source_with_typed_locals(source: &str) -> TypedFileAst {
-    transform_source(&format!("Int is in 1...400\n\nCell has n Int\n\n{source}"))
+    transform_source(&format!("Int is in 1 to 400\n\nCell has n Int\n\n{source}"))
 }
 
 /// Resident set size for the current process (best-effort; 0 if unavailable).

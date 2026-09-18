@@ -34,14 +34,14 @@ fn ast_layout_stays_within_current_ceilings() {
     check!(TypeExpr, 80);
     check!(Pattern, 80);
     check!(ParamSlot, 432);
-    check!(Bind, 968);
-    check!(BindValue, 40);
+    check!(Bind, 1016);
+    check!(BindValue, 64);
     check!(BindAttributes, 96);
     check!(DeclareAttributes, 160);
     check!(DeclareValue, 72);
     check!(Declare, 472);
     check!(HasMember, 360);
-    check!(HasFunction, 360);
-    check!(HasProperty, 208);
+    check!(HasFunction, 368);
+    check!(HasProperty, 232);
     check!(FileAst, 480);
 }

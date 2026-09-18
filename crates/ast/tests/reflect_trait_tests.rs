@@ -48,7 +48,7 @@ fn address_and_safe_reference_have_distinct_reflection_shapes() {
 fn list_patterns_match_empty_and_cons_values() {
     assert!(pattern_matches_public(
         &Pattern::ListEmpty,
-        &ConstValue::List(Vec::new().into())
+        &ConstValue::Sequence(Vec::new().into())
     ));
     let pattern = Pattern::ListCons {
         head: Box::new(ast::Spanned {
@@ -63,7 +63,7 @@ fn list_patterns_match_empty_and_cons_values() {
 
     assert!(pattern_matches_public(
         &pattern,
-        &ConstValue::List(vec![ConstValue::Int(1.into())].into())
+        &ConstValue::Sequence(vec![ConstValue::Int(1.into())].into())
     ));
 }
 

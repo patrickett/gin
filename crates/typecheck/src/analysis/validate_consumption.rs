@@ -1,6 +1,5 @@
 use ast::ParamConvention;
-use diagnostic::Diagnostic;
-use internment::Intern;
+use diagnostic::{Diagnostic, RelatedSpan};
 
 use crate::typed::{BindBody, ExprId, TypedExprKind, TypedFileAst};
 
@@ -9,12 +8,10 @@ enum ArgumentMode {
     Own,
     Observe,
     Mutate,
-    Consume,
 }
 
 fn argument_mode(typed: &TypedFileAst, expr_id: ExprId) -> ArgumentMode {
     match typed.exprs.kind_of(expr_id) {
-        Some(TypedExprKind::ConsumeArg(_)) => ArgumentMode::Consume,
         Some(TypedExprKind::Ref(_)) => match typed.exprs.ty_of(expr_id) {
             Some(ty) if ty.is_mutable_ref() => ArgumentMode::Mutate,
             _ => ArgumentMode::Observe,
@@ -28,7 +25,7 @@ fn is_addressable_place(typed: &TypedFileAst, expr_id: ExprId) -> bool {
         Some(TypedExprKind::FnCall { args, .. }) => {
             args.as_ref().is_none_or(|args| args.is_empty())
         }
-        Some(TypedExprKind::TupleGet { base, .. }) => is_addressable_place(typed, *base),
+        Some(TypedExprKind::AggregateGet { base, .. }) => is_addressable_place(typed, *base),
         Some(TypedExprKind::BufGet { buf, .. }) => is_addressable_place(typed, *buf),
         Some(TypedExprKind::Deref(_)) => true,
         _ => false,
@@ -37,10 +34,10 @@ fn is_addressable_place(typed: &TypedFileAst, expr_id: ExprId) -> bool {
 
 fn expected_mode(convention: ParamConvention) -> ArgumentMode {
     match convention {
+        ParamConvention::Terminal => ArgumentMode::Own,
         ParamConvention::Own => ArgumentMode::Own,
         ParamConvention::Observe => ArgumentMode::Observe,
         ParamConvention::Mutate => ArgumentMode::Mutate,
-        ParamConvention::Consume => ArgumentMode::Consume,
     }
 }
 
@@ -49,99 +46,113 @@ fn mode_name(mode: ArgumentMode) -> &'static str {
         ArgumentMode::Own => "owned",
         ArgumentMode::Observe => "ref",
         ArgumentMode::Mutate => "mut",
-        ArgumentMode::Consume => "eat",
     }
 }
 
-fn emit_return_consumed_param_flaws(typed: &mut TypedFileAst) {
-    let bodies: Vec<(Vec<Intern<String>>, Vec<ExprId>)> = typed
-        .defs
-        .values()
-        .filter_map(|bind| {
-            let consumed: Vec<_> = bind
-                .params
-                .iter()
-                .zip(&bind.param_conventions)
-                .filter_map(|((name, _), convention)| {
-                    (*convention == ParamConvention::Consume).then_some(*name)
-                })
-                .collect();
-            if consumed.is_empty() {
-                return None;
-            }
-            let roots = match &bind.body {
-                BindBody::Expr(id) => vec![*id],
-                BindBody::Body { ret: Some(id), .. } => vec![*id],
-                BindBody::Body { ret: None, .. } | BindBody::Extern => vec![],
-            };
-            Some((consumed, roots))
-        })
-        .collect();
-
-    for (consumed, roots) in bodies {
-        for root in roots {
-            emit_return_consumed_in_expr(typed, root, &consumed);
-        }
-    }
-}
-
-fn emit_return_consumed_in_expr(
-    typed: &mut TypedFileAst,
-    expr_id: ExprId,
-    consumed: &[Intern<String>],
+fn collect_returning_sequence(
+    typed: &TypedFileAst,
+    exprs: &[ExprId],
+    ret: Option<ExprId>,
+    returns: &mut Vec<ExprId>,
 ) {
-    if expr_id.index() >= typed.exprs.kind.len() {
-        return;
-    }
-    let target_name = typed.exprs.kind_of(expr_id).and_then(|kind| match kind {
-        TypedExprKind::FnCall { target, args, .. }
-            if args.as_ref().is_none_or(Vec::is_empty) && consumed.contains(&target.0) =>
+    for (index, expr) in exprs.iter().enumerate() {
+        if let Some(TypedExprKind::If(branch)) = typed.exprs.kind_of(*expr)
+            && branch.place_joins.is_empty()
         {
-            Some(*target)
+            if let Some((last, stmts)) = branch.stmts.split_last() {
+                collect_returning_sequence(typed, stmts, Some(*last), returns);
+            }
+            if let Some(ret) = branch.ret {
+                collect_return_values(typed, ret, returns);
+            } else {
+                collect_returning_sequence(typed, &exprs[index + 1..], ret, returns);
+            }
+            return;
         }
-        _ => None,
-    });
-    let Some(target_name) = target_name else {
-        return;
-    };
-    typed.exprs.flaws[expr_id.index()].push(Diagnostic::new(
-        "type-return-consumed-param",
-        format!(
-            "cannot return consumed parameter `{}`",
-            target_name.0.as_str()
-        ),
-    ));
-    typed.exprs.flaws[expr_id.index()].push(Diagnostic::new(
-        "type-consuming-parameter-escapes",
-        format!(
-            "cannot return or recover a consuming parameter `{}`",
-            target_name.0.as_str()
-        ),
-    ));
+    }
+    if let Some(ret) = ret {
+        collect_return_values(typed, ret, returns);
+    }
+}
+
+fn collect_return_values(typed: &TypedFileAst, expr: ExprId, returns: &mut Vec<ExprId>) {
+    match typed.exprs.kind_of(expr) {
+        Some(TypedExprKind::When(branch)) => {
+            for arm in &branch.arms {
+                let body = match arm {
+                    crate::typed::TypedWhenArm::Cond { body, .. }
+                    | crate::typed::TypedWhenArm::Is { body, .. }
+                    | crate::typed::TypedWhenArm::Else(body, _) => *body,
+                };
+                collect_return_values(typed, body, returns);
+            }
+        }
+        Some(TypedExprKind::Bind { stmts, body, .. }) => {
+            collect_returning_sequence(typed, stmts, Some(*body), returns);
+        }
+        Some(TypedExprKind::If(branch)) => {
+            if branch.place_joins.is_empty() {
+                collect_returning_sequence(typed, &[expr], None, returns);
+            } else if let Some(ret) = branch.ret {
+                collect_return_values(typed, ret, returns);
+            }
+        }
+        _ => returns.push(expr),
+    }
 }
 
 fn validate_reference_returns(typed: &mut TypedFileAst) {
-    let returns: Vec<_> = typed
-        .defs
-        .values()
-        .filter_map(|bind| {
-            let expected = bind.return_group?;
-            let expr = match &bind.body {
-                BindBody::Expr(expr) => Some(*expr),
-                BindBody::Body { ret, .. } => *ret,
-                BindBody::Extern => None,
-            }?;
-            Some((expr, expected))
-        })
-        .collect();
+    let mut checks = Vec::new();
+    for bind in typed.defs.values() {
+        let signature = crate::typed::TypedCallableSignature::from(bind);
+        let mut returns = Vec::new();
+        match &bind.body {
+            BindBody::Expr(expr) => collect_return_values(typed, *expr, &mut returns),
+            BindBody::Body { exprs, ret } => {
+                collect_returning_sequence(typed, exprs, *ret, &mut returns);
+            }
+            BindBody::Unlowered => continue,
+        }
+        for expr in returns {
+            for (index, result) in signature.results.iter().enumerate() {
+                if crate::ty::reference_semantics_for_type(&result.ty, Some(&typed.type_registry))
+                    .is_none()
+                {
+                    continue;
+                }
+                let (site, actual) = match typed.exprs.kind_of(expr) {
+                    Some(TypedExprKind::ResultRow(fields)) => {
+                        let Some(field) = fields.get(index) else {
+                            continue;
+                        };
+                        (
+                            *field,
+                            typed.exprs.target_group_of(*field).cloned().flatten(),
+                        )
+                    }
+                    _ if signature.results.len() > 1 => (
+                        expr,
+                        typed
+                            .exprs
+                            .result_target_groups_of(expr)
+                            .and_then(|groups| groups.get(index))
+                            .cloned()
+                            .flatten(),
+                    ),
+                    _ => (expr, typed.exprs.target_group_of(expr).cloned().flatten()),
+                };
+                let expected = bind.result_groups.get(index).copied().flatten();
+                checks.push((site, expected, actual));
+            }
+        }
+    }
 
-    for (expr, expected) in returns {
-        let actual = typed.exprs.target_group_of(expr).cloned().flatten();
-        let (code, message) = match actual {
+    for (expr, expected, actual) in checks {
+        let (code, message) = match actual.as_ref() {
             Some(targets)
-                if targets
-                    .iter()
-                    .all(|target| target.root_param() == Some(expected)) =>
+                if expected.is_some()
+                    && targets.iter().next().is_some()
+                    && targets.iter().all(|target| target.root_param() == expected) =>
             {
                 continue;
             }
@@ -149,22 +160,74 @@ fn validate_reference_returns(typed: &mut TypedFileAst) {
                 "type-reference-return-local-target",
                 "cannot return a reference to local storage",
             ),
-            Some(_) => (
+            Some(targets) if expected.is_some() && targets.iter().next().is_some() => (
                 "type-reference-return-wrong-target-group",
                 "returned reference comes from the wrong target group",
             ),
-            None => (
+            _ => (
                 "type-reference-return-unknown-target",
-                "cannot determine the returned reference target",
+                "cannot prove the returned reference outlives the call",
             ),
         };
-        typed.exprs.flaws[expr.index()].push(Diagnostic::new(code, message));
+        let mut diagnostic = Diagnostic::new(code, message);
+        if let Some(span) = typed.exprs.span_of(expr) {
+            diagnostic = diagnostic.at_span_id(span, &typed.span_table);
+        }
+        diagnostic = match code {
+            "type-reference-return-local-target" => diagnostic
+                .with_help_on_span("this reference escapes the local storage's lifetime")
+                .with_help("return the value by ownership instead, or return a reference to caller-owned storage"),
+            "type-reference-return-wrong-target-group" => diagnostic
+                .with_help_on_span("this reference comes from a different input target group")
+                .with_help("return a reference from the declared result target group"),
+            _ => diagnostic
+                .with_help_on_span("the lifetime of this reference cannot be established")
+                .with_help("return an owned value, or a reference with a known input target group"),
+        };
+        if let Some(targets) = actual {
+            let mut locals: Vec<_> = targets
+                .iter()
+                .filter_map(|target| target.root_local())
+                .collect();
+            locals.sort_by_key(|place| place.0);
+            locals.dedup();
+            for local in locals {
+                let Some(place) = typed.places.get(local.0 as usize) else {
+                    continue;
+                };
+                let span = typed
+                    .defs
+                    .values()
+                    .find(|bind| bind.dependent_binder == place.binder)
+                    .map(|bind| bind.name_span)
+                    .or_else(|| {
+                        typed.exprs.place_entries().find_map(|(expr, candidate)| {
+                            (candidate == Some(local)
+                                && matches!(
+                                    typed.exprs.kind_of(expr),
+                                    Some(TypedExprKind::Bind { .. })
+                                ))
+                            .then(|| typed.exprs.span_of(expr))
+                            .flatten()
+                        })
+                    });
+                if let Some(span) = span {
+                    diagnostic.related.push(RelatedSpan {
+                        span: typed.span_table.get(span),
+                        label: format!(
+                            "local `{}` is declared here; its storage does not outlive this call",
+                            place.name
+                        ),
+                    });
+                }
+            }
+        }
+        typed.exprs.facts.semantic_facts.flaws[expr.index()].push(diagnostic);
     }
 }
 
 pub fn stage_validate_consumption(typed: &mut TypedFileAst) {
     validate_reference_returns(typed);
-    emit_return_consumed_param_flaws(typed);
 
     let callable_defs: Vec<_> = typed
         .defs
@@ -196,7 +259,7 @@ pub fn stage_validate_consumption(typed: &mut TypedFileAst) {
                         && let Some(TypedExprKind::Ref(inner)) = typed.exprs.kind_of(*arg_id)
                         && !is_addressable_place(typed, *inner)
                     {
-                        typed.exprs.flaws[idx].push(
+                        typed.exprs.facts.semantic_facts.flaws[idx].push(
                             Diagnostic::new(
                                 "type-reference-to-temporary",
                                 format!(
@@ -211,12 +274,8 @@ pub fn stage_validate_consumption(typed: &mut TypedFileAst) {
                     }
                     continue;
                 }
-                let code = match (expected, actual) {
-                    (ArgumentMode::Consume, _) => "type-consume-required",
-                    (ArgumentMode::Own, ArgumentMode::Consume) => "type-consume-arg-on-owned-param",
-                    _ => "type-argument-mode-mismatch",
-                };
-                typed.exprs.flaws[idx].push(
+                let code = "type-argument-mode-mismatch";
+                typed.exprs.facts.semantic_facts.flaws[idx].push(
                     Diagnostic::new(
                         code,
                         format!(

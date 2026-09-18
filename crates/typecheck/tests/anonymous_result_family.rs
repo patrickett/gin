@@ -32,7 +32,7 @@ fn explicit_anonymous_result_surface_has_callable_owner() {
         panic!("expected expression body");
     };
     assert_eq!(
-        typed.exprs.const_value[body.as_usize()],
+        typed.exprs.facts.const_facts.const_value[body.as_usize()],
         Some(ast::ConstValue::ResultAlternative {
             owner: ast::ResultFamilyOwner::Callable(owner.clone()),
             label: Intern::from_ref("True"),
@@ -76,7 +76,7 @@ fn inferred_alternative_construction_introduces_callable_family() {
     };
     assert_eq!(typed.exprs.ty[body.as_usize()], bind.return_type);
     assert!(matches!(
-        &typed.exprs.const_value[body.as_usize()],
+        &typed.exprs.facts.const_facts.const_value[body.as_usize()],
         Some(ast::ConstValue::ResultAlternative { owner: value_owner, label })
             if value_owner == &ast::ResultFamilyOwner::Callable(owner.clone())
                 && label.as_str() == "Ready"
@@ -122,7 +122,7 @@ fn inferred_branch_exits_extend_one_callable_family() {
     for (exit, label) in [(true_exit, "True"), (*false_exit, "False")] {
         assert_eq!(typed.exprs.ty[exit.as_usize()], bind.return_type);
         assert!(matches!(
-            &typed.exprs.const_value[exit.as_usize()],
+            &typed.exprs.facts.const_facts.const_value[exit.as_usize()],
             Some(ast::ConstValue::ResultAlternative { owner: exit_owner, label: exit_label })
                 if exit_owner == &ast::ResultFamilyOwner::Callable(owner.clone())
                     && exit_label.as_str() == label
@@ -167,7 +167,7 @@ fn anonymous_result_alternative_cannot_name_public_variant_payload() {
 #[test]
 fn nominal_type_sharing_result_alternative_spelling_remains_nameable() {
     let codes = flaw_codes(
-        "True is in 0...1\nchoose(value) True or False: True\naccept(value True) True: value",
+        "True is in 0 to 1\nchoose(value) True or False: True\naccept(value True) True: value",
     );
 
     assert!(!codes.contains(&"type-anonymous-result-not-nameable".to_string()));
@@ -393,25 +393,9 @@ fn proof_contract_names_must_refer_to_incoming_values() {
 }
 
 #[test]
-fn extern_cannot_assert_untrusted_proof_contract() {
-    let typed = transform(
-        &TokenCursor::parse_source(
-            "Number is in 0...255\ncheck(value Number) True thus value = value or False thus value /= value extern\nresult: check(1)",
-        ),
-        FileId(0),
-        &TransformCtx::new(),
-    );
-    let flaws = &typed.defs[&DefId(Intern::from_ref("check"))].flaws;
-
-    assert!(
-        flaws
-            .iter()
-            .any(|flaw| { flaw.code.slug() == "type-extern-proof-contract-untrusted" })
-    );
-    let BindBody::Expr(call) = typed.defs[&DefId(Intern::from_ref("result"))].body else {
-        panic!("expected call body");
-    };
-    assert!(typed.exprs.result_evidence[call.as_usize()].is_none());
+fn proof_contracts_require_a_gin_body() {
+    let parsed = TokenCursor::parse_source("Number is in 0 to 255\ncheck(value Number) True thus value = value or False extern\n");
+    assert!(parsed.parse_warnings.iter().any(|flaw| flaw.code.slug() == "parse-removed-extern"));
 }
 
 #[test]
@@ -507,7 +491,7 @@ fn repeated_non_equivalent_contracts_for_one_alternative_conflict() {
 
 #[test]
 fn verified_contract_substitutes_call_arguments_into_result_evidence() {
-    let source = "Number is in 0...255\nless(left Number, right Number) True thus left < right or False thus left >= right:\n\tif left < right is True\n\t\tTrue\n\treturn\n\treturn False\ncomparison: less(1, 2)";
+    let source = "Number is in 0 to 255\nless(left Number, right Number) True thus left < right or False thus left >= right:\n\tif left < right is True\n\t\tTrue\n\treturn\n\treturn False\ncomparison: less(1, 2)";
     let typed = transform(
         &TokenCursor::parse_source(source),
         FileId(0),
@@ -516,7 +500,7 @@ fn verified_contract_substitutes_call_arguments_into_result_evidence() {
     let BindBody::Expr(call) = typed.defs[&DefId(Intern::from_ref("comparison"))].body else {
         panic!("expected call body");
     };
-    let evidence = typed.exprs.result_evidence[call.as_usize()]
+    let evidence = typed.exprs.facts.semantic_facts.result_evidence[call.as_usize()]
         .as_ref()
         .unwrap_or_else(|| {
             panic!(
@@ -553,7 +537,7 @@ fn verified_contract_substitutes_call_arguments_into_result_evidence() {
 
 #[test]
 fn transparent_forwarding_substitutes_outer_call_arguments_into_evidence() {
-    let source = "Number is in 0...255\nless(left Number, right Number) True thus left < right or False thus left >= right:\n\tif left < right is True\n\t\tTrue\n\treturn\n\treturn False\nforward(left Number, right Number): less(left, right)\ncomparison: forward(1, 2)";
+    let source = "Number is in 0 to 255\nless(left Number, right Number) True thus left < right or False thus left >= right:\n\tif left < right is True\n\t\tTrue\n\treturn\n\treturn False\nforward(left Number, right Number): less(left, right)\ncomparison: forward(1, 2)";
     let typed = transform(
         &TokenCursor::parse_source(source),
         FileId(0),
@@ -569,7 +553,7 @@ fn transparent_forwarding_substitutes_outer_call_arguments_into_evidence() {
     else {
         panic!("expected forwarded call");
     };
-    let evidence = typed.exprs.result_evidence[call.as_usize()]
+    let evidence = typed.exprs.facts.semantic_facts.result_evidence[call.as_usize()]
         .as_ref()
         .expect("forwarded evidence");
 
@@ -582,7 +566,7 @@ fn transparent_forwarding_substitutes_outer_call_arguments_into_evidence() {
 
 #[test]
 fn inferred_generic_identity_preserves_result_family_and_evidence() {
-    let source = "Number is in 0...255\nless(left Number, right Number) True thus left < right or False thus left >= right:\n\tif left < right is True\n\t\tTrue\n\treturn\n\treturn False\nidentity(value x): value\ncomparison: identity(less(1, 2))";
+    let source = "Number is in 0 to 255\nless(left Number, right Number) True thus left < right or False thus left >= right:\n\tif left < right is True\n\t\tTrue\n\treturn\n\treturn False\nidentity(value x): value\ncomparison: identity(less(1, 2))";
     let typed = transform(
         &TokenCursor::parse_source(source),
         FileId(0),
@@ -613,8 +597,8 @@ fn inferred_generic_identity_preserves_result_family_and_evidence() {
         typed.exprs.ty[identity_call.as_usize()]
     );
     assert_eq!(
-        typed.exprs.result_evidence[identity_call.as_usize()],
-        typed.exprs.result_evidence[source_result.as_usize()]
+        typed.exprs.facts.semantic_facts.result_evidence[identity_call.as_usize()],
+        typed.exprs.facts.semantic_facts.result_evidence[source_result.as_usize()]
     );
-    assert!(typed.exprs.result_evidence[identity_call.as_usize()].is_some());
+    assert!(typed.exprs.facts.semantic_facts.result_evidence[identity_call.as_usize()].is_some());
 }

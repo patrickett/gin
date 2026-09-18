@@ -5,8 +5,9 @@ use internment::Intern;
 
 use crate::ty::{Ty, reference_pointee_for_type};
 use crate::typed::{
-    AppliedEffectTarget, AvailabilityRequirement, BindBody, CallCapability, DefId, EffectTarget,
-    FunctionEffects, TypedCallableSignature, TypedExprKind, TypedFileAst, walk_expr_children,
+    AppliedEffectTarget, AvailabilityRequirement, BindBody, CallCapability, DefId, DefinitionStage,
+    EffectTarget, FunctionEffects, TypedCallableSignature, TypedExprKind, TypedFileAst,
+    walk_expr_children,
 };
 
 use super::lower_exprs::target_index_for_expr;
@@ -36,11 +37,13 @@ pub fn stage_infer_effects(
             if summary.effects != bind.effects
                 || summary.param_requirements != bind.param_requirements
                 || summary.call_capability != bind.call_capability
+                || summary.definition_stage != bind.definition_stage
             {
                 let typed_bind = typed.defs.get_mut(def_id).unwrap();
                 typed_bind.effects = summary.effects;
                 typed_bind.param_requirements = summary.param_requirements;
                 typed_bind.call_capability = summary.call_capability;
+                typed_bind.definition_stage = summary.definition_stage;
                 changed = true;
             }
         }
@@ -75,7 +78,8 @@ pub fn stage_infer_package_effects(
                     let summary = infer_bind_summary(typed, bind, signatures);
                     (summary.effects != bind.effects
                         || summary.param_requirements != bind.param_requirements
-                        || summary.call_capability != bind.call_capability)
+                        || summary.call_capability != bind.call_capability
+                        || summary.definition_stage != bind.definition_stage)
                         .then_some((file_index, *def_id, summary))
                 })
             })
@@ -89,6 +93,7 @@ pub fn stage_infer_package_effects(
             bind.effects = summary.effects;
             bind.param_requirements = summary.param_requirements;
             bind.call_capability = summary.call_capability;
+            bind.definition_stage = summary.definition_stage;
         }
     }
 }
@@ -98,6 +103,7 @@ struct CallableSummary {
     effects: FunctionEffects,
     param_requirements: Vec<AvailabilityRequirement>,
     call_capability: CallCapability,
+    definition_stage: DefinitionStage,
 }
 
 fn infer_bind_summary(
@@ -112,15 +118,15 @@ fn infer_bind_summary(
             roots.extend(ret);
             roots
         }
-        BindBody::Extern => Vec::new(),
+        BindBody::Unlowered => Vec::new(),
     };
     let mut effects = FunctionEffects::default();
     let mut has_runtime_call = false;
     let mut visited = HashSet::new();
-    for root in roots {
+    for root in &roots {
         infer_expr_effects(
             typed,
-            root,
+            *root,
             signatures,
             &mut has_runtime_call,
             &mut effects,
@@ -128,7 +134,10 @@ fn infer_bind_summary(
         );
     }
     let param_requirements = infer_param_requirements(bind, typed);
-    let call_capability = if has_runtime_effects(&effects) || has_runtime_call {
+    let call_capability = if matches!(bind.body, crate::typed::BindBody::Unlowered)
+        || effects.unknown_memory
+        || has_runtime_call
+    {
         CallCapability::RuntimeOnly
     } else {
         CallCapability::StagePolymorphic
@@ -138,7 +147,48 @@ fn infer_bind_summary(
         effects,
         param_requirements,
         call_capability,
+        definition_stage: if call_capability == CallCapability::RuntimeOnly {
+            DefinitionStage::RuntimeOnly
+        } else if roots
+            .iter()
+            .any(|root| body_has_compile_time_boundary(typed, *root, signatures))
+        {
+            DefinitionStage::CompileTimeOnly
+        } else {
+            DefinitionStage::StagePolymorphic
+        },
     }
+}
+
+fn body_has_compile_time_boundary(
+    typed: &TypedFileAst,
+    root: crate::typed::ExprId,
+    signatures: &HashMap<DefId, TypedCallableSignature>,
+) -> bool {
+    let mut pending = vec![root];
+    while let Some(id) = pending.pop() {
+        match typed.exprs.kind_of(id) {
+            Some(TypedExprKind::Asm { operands, .. }) => {
+                pending.extend(operands.iter().map(|(_, operand)| *operand));
+                continue;
+            }
+            Some(TypedExprKind::Target | TypedExprKind::TargetField(_)) => return true,
+            Some(TypedExprKind::FnCall { target, .. }) => {
+                if signatures
+                    .get(target)
+                    .is_some_and(|s| s.definition_stage == DefinitionStage::CompileTimeOnly)
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        let _ = crate::typed::walk_expr_children_of(typed, id, &mut |child| {
+            pending.push(child);
+            std::ops::ControlFlow::Continue(())
+        });
+    }
+    false
 }
 
 fn infer_param_requirements(
@@ -231,7 +281,8 @@ fn infer_param_requirements(
 }
 
 fn has_runtime_effects(effects: &FunctionEffects) -> bool {
-    !effects.reads.is_empty()
+    effects.unknown_memory
+        || !effects.reads.is_empty()
         || !effects.writes.is_empty()
         || !effects.invalidates.is_empty()
         || !effects.consumes.is_empty()
@@ -248,7 +299,7 @@ fn bind_body_exprs<'a>(
             expr_ids.extend(ret);
             expr_ids
         }
-        BindBody::Extern => Vec::new(),
+        BindBody::Unlowered => Vec::new(),
     }
 }
 
@@ -387,6 +438,24 @@ fn walk_param_indices_in_ty(
                 indices,
             );
         }
+        Ty::UnresolvedSequence { element, length } => {
+            if let Some(element) = element {
+                walk_param_indices_in_ty(
+                    element,
+                    name_to_index,
+                    inferred_index,
+                    dependent_binder,
+                    indices,
+                );
+            }
+            walk_param_indices_in_normal_expr(
+                length,
+                name_to_index,
+                inferred_index,
+                dependent_binder,
+                indices,
+            );
+        }
         Ty::Ptr { inner } | Ty::Address { pointee: inner, .. } => {
             walk_param_indices_in_ty(
                 inner,
@@ -396,10 +465,10 @@ fn walk_param_indices_in_ty(
                 indices,
             );
         }
-        Ty::Tuple(elements) => {
+        Ty::ResultRow(elements) => {
             for element in elements {
                 walk_param_indices_in_ty(
-                    element,
+                    &element.ty,
                     name_to_index,
                     inferred_index,
                     dependent_binder,
@@ -485,7 +554,7 @@ fn infer_expr_effects(
     typed: &TypedFileAst,
     expr_id: crate::typed::ExprId,
     signatures: &HashMap<DefId, TypedCallableSignature>,
-    _has_runtime_call: &mut bool,
+    has_runtime_call: &mut bool,
     effects: &mut FunctionEffects,
     visited: &mut HashSet<crate::typed::ExprId>,
 ) {
@@ -500,6 +569,45 @@ fn infer_expr_effects(
     add_exact_effect(typed, expr_id, &mut effects.reads);
 
     match kind {
+        TypedExprKind::Asm {
+            state, operands, ..
+        } => {
+            if let crate::assembly::AssemblyState::Checked(assembly) = state {
+                effects.unknown_memory |= assembly.evaluation.is_none();
+                *has_runtime_call |= assembly.evaluation.is_none();
+                if let Some(method) = assembly.evaluation
+                    && let Some(signature) = signatures.get(&method)
+                {
+                    effects.unknown_memory |= has_runtime_effects(&signature.effects);
+                    *has_runtime_call |= signature.call_capability == CallCapability::RuntimeOnly;
+                }
+                for (pointer, length) in assembly.memory.reads.iter() {
+                    if let Some((_, operand)) =
+                        operands.iter().find(|(name, _)| name.as_str() == pointer)
+                    {
+                        if typed.exprs.ty_of(*operand).is_some_and(Ty::is_ref) {
+                            add_exact_effect(typed, *operand, &mut effects.reads);
+                        }
+                        effects
+                            .assembly_reads
+                            .push((pointer.clone(), length.clone()));
+                    }
+                }
+                for (pointer, length) in assembly.memory.writes.iter() {
+                    if let Some((_, operand)) =
+                        operands.iter().find(|(name, _)| name.as_str() == pointer)
+                    {
+                        if typed.exprs.ty_of(*operand).is_some_and(Ty::is_ref) {
+                            add_exact_effect(typed, *operand, &mut effects.writes);
+                            add_exact_effect(typed, *operand, &mut effects.invalidates);
+                        }
+                        effects
+                            .assembly_writes
+                            .push((pointer.clone(), length.clone()));
+                    }
+                }
+            }
+        }
         TypedExprKind::RecordSet { base, field, .. } => {
             if let Some(index) = record_field_index(typed, *base, *field) {
                 add_projected_effect(typed, *base, &mut effects.writes, |base| {
@@ -516,7 +624,7 @@ fn infer_expr_effects(
                 });
             }
         }
-        TypedExprKind::TupleSet { base, index, .. } => {
+        TypedExprKind::AggregateSet { base, index, .. } => {
             add_projected_effect(typed, *base, &mut effects.writes, |base| {
                 EffectTarget::Field {
                     base: Box::new(base),
@@ -545,10 +653,6 @@ fn infer_expr_effects(
                 }))
             });
         }
-        TypedExprKind::Eat(inner) | TypedExprKind::ConsumeArg(inner) => {
-            add_exact_effect(typed, *inner, &mut effects.consumes);
-            add_descendant_effect(typed, *inner, &mut effects.invalidates);
-        }
         TypedExprKind::FnCall {
             target,
             args: Some(args),
@@ -556,6 +660,7 @@ fn infer_expr_effects(
         } => {
             let signature = signatures.get(target);
             if let Some(signature) = signature {
+                *has_runtime_call |= signature.call_capability == CallCapability::RuntimeOnly;
                 apply_call_effects(typed, args, signature, effects);
             }
         }
@@ -563,14 +668,7 @@ fn infer_expr_effects(
     }
 
     let _ = walk_expr_children(kind, &mut |child| {
-        infer_expr_effects(
-            typed,
-            child,
-            signatures,
-            _has_runtime_call,
-            effects,
-            visited,
-        );
+        infer_expr_effects(typed, child, signatures, has_runtime_call, effects, visited);
         std::ops::ControlFlow::Continue(())
     });
 }
@@ -581,6 +679,13 @@ fn apply_call_effects(
     signature: &TypedCallableSignature,
     effects: &mut FunctionEffects,
 ) {
+    effects.unknown_memory |= signature.effects.unknown_memory;
+    effects
+        .assembly_reads
+        .extend(signature.effects.assembly_reads.iter().cloned());
+    effects
+        .assembly_writes
+        .extend(signature.effects.assembly_writes.iter().cloned());
     for (index, convention) in signature.param_conventions.iter().enumerate() {
         let Some(arg) = args.get(index) else {
             continue;
@@ -588,10 +693,7 @@ fn apply_call_effects(
         match convention {
             ParamConvention::Observe => add_exact_effect(typed, *arg, &mut effects.reads),
             ParamConvention::Mutate => add_exact_effect(typed, *arg, &mut effects.writes),
-            ParamConvention::Consume => {
-                add_exact_effect(typed, *arg, &mut effects.consumes);
-                add_descendant_effect(typed, *arg, &mut effects.invalidates);
-            }
+            ParamConvention::Terminal => {}
             ParamConvention::Own => {}
         }
     }
@@ -658,12 +760,7 @@ pub(crate) fn applied_effect_targets(
             let Some(arg) = args.get(index) else {
                 continue;
             };
-            let Some(actual) = typed
-                .exprs
-                .target_group
-                .get(arg.as_usize())
-                .and_then(|target| target.as_ref())
-            else {
+            let Some(actual) = typed.exprs.target_group_of(*arg).and_then(Option::as_ref) else {
                 continue;
             };
             for actual in actual.iter() {
@@ -685,35 +782,14 @@ fn add_exact_effect(
 ) {
     let Some(target) = typed
         .exprs
-        .target_group
-        .get(expr_id.as_usize())
-        .and_then(|target| target.as_ref())
+        .target_group_of(expr_id)
+        .and_then(Option::as_ref)
     else {
         return;
     };
     for target in target.iter() {
         if let Some(target) = EffectTarget::from_reference(target) {
             effects.insert(target);
-        }
-    }
-}
-
-fn add_descendant_effect(
-    typed: &TypedFileAst,
-    expr_id: crate::typed::ExprId,
-    effects: &mut HashSet<EffectTarget>,
-) {
-    let Some(target) = typed
-        .exprs
-        .target_group
-        .get(expr_id.as_usize())
-        .and_then(|target| target.as_ref())
-    else {
-        return;
-    };
-    for target in target.iter() {
-        if let Some(target) = EffectTarget::from_reference(target) {
-            effects.insert(EffectTarget::Descendants(Box::new(target)));
         }
     }
 }
@@ -726,9 +802,8 @@ fn add_projected_effect(
 ) {
     let Some(target) = typed
         .exprs
-        .target_group
-        .get(expr_id.as_usize())
-        .and_then(|target| target.as_ref())
+        .target_group_of(expr_id)
+        .and_then(Option::as_ref)
     else {
         return;
     };

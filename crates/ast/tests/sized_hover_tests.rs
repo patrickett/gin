@@ -8,7 +8,7 @@ use typecheck::transform::{TransformCtx, transform};
 
 /// Primitive type definitions needed by `Type` and `Sized`.
 const PRIMITIVES_SRC: &str = "\
-BigInt is in 0...18446744073709551615
+BigInt is in 0 to 18446744073709551615
 Bool is True or False
 List(x) has pointer @x, length BigInt
 PointerSize is BigInt

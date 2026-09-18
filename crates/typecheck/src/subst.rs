@@ -57,6 +57,7 @@ impl DependentInstantiation {
                 variants: variants
                     .iter()
                     .map(|variant| UnionVariant {
+                        kind: variant.kind,
                         name: variant.name,
                         fields: variant
                             .fields
@@ -74,10 +75,24 @@ impl DependentInstantiation {
                         .collect()
                 }),
             },
-            Ty::Tuple(types) => Ty::Tuple(types.iter().map(|ty| self.apply_to_ty(ty)).collect()),
+            Ty::ResultRow(elements) => Ty::ResultRow(
+                elements
+                    .iter()
+                    .map(|element| ast::ty::ResultElement {
+                        name: element.name,
+                        ty: Box::new(self.apply_to_ty(&element.ty)),
+                    })
+                    .collect(),
+            ),
             Ty::Array { elem, size } => Ty::Array {
                 elem: Box::new(self.apply_to_ty(elem)),
                 size: self.apply_to_normal(size),
+            },
+            Ty::UnresolvedSequence { element, length } => Ty::UnresolvedSequence {
+                element: element
+                    .as_deref()
+                    .map(|element| Box::new(self.apply_to_ty(element))),
+                length: self.apply_to_normal(length),
             },
             Ty::Ptr { inner } => Ty::Ptr {
                 inner: Box::new(self.apply_to_ty(inner)),
@@ -242,7 +257,12 @@ impl DepSubst {
                             .iter()
                             .map(|(n, t)| (*n, Box::new(self.apply_to_ty(t))))
                             .collect();
-                        UnionVariant::new(v.name, new_fields)
+                        UnionVariant {
+                            kind: v.kind,
+                            name: v.name,
+                            fields: new_fields,
+                            result_ty: v.result_ty.as_ref().map(|ty| self.apply_to_ty(ty)),
+                        }
                     })
                     .collect(),
                 literal_values: literal_values.clone(),
@@ -261,10 +281,24 @@ impl DepSubst {
             },
             Ty::Literal(v) => Ty::Literal(v.clone()),
             Ty::ResultFamily { .. } => ty.clone(),
-            Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|t| self.apply_to_ty(t)).collect()),
+            Ty::ResultRow(elements) => Ty::ResultRow(
+                elements
+                    .iter()
+                    .map(|element| ast::ty::ResultElement {
+                        name: element.name,
+                        ty: Box::new(self.apply_to_ty(&element.ty)),
+                    })
+                    .collect(),
+            ),
             Ty::Array { elem, size } => Ty::Array {
                 elem: Box::new(self.apply_to_ty(elem)),
                 size: self.apply_to_normal(size),
+            },
+            Ty::UnresolvedSequence { element, length } => Ty::UnresolvedSequence {
+                element: element
+                    .as_deref()
+                    .map(|element| Box::new(self.apply_to_ty(element))),
+                length: self.apply_to_normal(length),
             },
             Ty::Ptr { inner } => Ty::Ptr {
                 inner: Box::new(self.apply_to_ty(inner)),

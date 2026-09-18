@@ -16,7 +16,7 @@ use ginc::driver::{
 use parser::query::SourceParseExt;
 use std::collections::HashMap;
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
     mpsc::{self, Receiver, TryRecvError},
 };
@@ -100,13 +100,11 @@ pub struct InterpreterSession {
     live_runtime: LiveRuntime,
     running_tasks: HashMap<TaskId, SpawnedTask>,
     driver: CompilerDriver,
+    eval_state: Arc<Mutex<typecheck::EvalState>>,
 }
 
 const RUNTIME_I64_MIN: &str = "-9223372036854775808";
 const RUNTIME_I64_MAX: &str = "9223372036854775807";
-const GIN_CORE_PRELUDE: &str =
-    "use 'primitive/'.(SignedBigInt, signed_big_int_add_bits, signed_big_int_add)";
-
 impl Default for InterpreterSession {
     fn default() -> Self {
         Self::with_context(InterpreterContext::isolated())
@@ -114,17 +112,6 @@ impl Default for InterpreterSession {
 }
 
 impl InterpreterSession {
-    pub fn standalone() -> Result<Self, crate::InterpreterContextError> {
-        let mut session = Self::with_context(InterpreterContext::gin_core()?);
-        session.source = SessionSource::default().with_evaluation_type("SignedBigInt");
-        let prelude = session.submit(GIN_CORE_PRELUDE);
-        assert!(
-            matches!(prelude, Submission::DeclarationAccepted { .. }),
-            "gin_core interpreter prelude should compile: {prelude:#?}"
-        );
-        Ok(session)
-    }
-
     pub fn with_context(context: InterpreterContext) -> Self {
         Self {
             context,
@@ -135,6 +122,7 @@ impl InterpreterSession {
             running_tasks: HashMap::new(),
             live_runtime: LiveRuntime::default(),
             driver: CompilerDriver::default(),
+            eval_state: Arc::new(Mutex::new(typecheck::EvalState::default())),
         }
     }
 
@@ -247,6 +235,7 @@ impl InterpreterSession {
             .live_runtime
             .track_active_generations_for_symbols(&live_symbols);
         let context = self.context.clone();
+        let eval_state = self.eval_state.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_token = stop.clone();
         let id = TaskId(self.next_task_id);
@@ -259,7 +248,7 @@ impl InterpreterSession {
 
         let task_id = id;
         thread::spawn(move || {
-            let result = run_task_submission(context, evaluation, task_id, stop_token);
+            let result = run_task_submission(context, evaluation, task_id, stop_token, eval_state);
             let _ = sender.send(result);
         });
 
@@ -441,7 +430,6 @@ impl InterpreterSession {
         } else {
             invalid_evaluation_result_type(expression_checked.primary_file(), input)
         };
-
         let generation = self.next_generation;
         self.next_generation = self
             .next_generation
@@ -492,8 +480,8 @@ impl InterpreterSession {
         let active_generations = self
             .live_runtime
             .track_active_generations_for_symbols(&live_symbols);
-        let value = match engine.invoke_i64() {
-            Ok(value) => value,
+        let storage = match engine.invoke_i64().map(RuntimeStorage::Int64) {
+            Ok(storage) => storage,
             Err(error) => {
                 self.live_runtime
                     .finish_active_generations(active_generations);
@@ -501,11 +489,12 @@ impl InterpreterSession {
                 return Submission::Rejected { diagnostics };
             }
         };
+
         self.live_runtime
             .finish_active_generations(active_generations);
 
         Submission::Evaluated {
-            value: RuntimeValue::new(RuntimeType::I64, RuntimeStorage::Int64(value)),
+            value: RuntimeValue::new(RuntimeType::I64, storage),
             diagnostics,
         }
     }
@@ -531,11 +520,15 @@ impl InterpreterSession {
             Some("clear") => {
                 self.source.clear();
                 self.live_runtime.clear();
+                *self.eval_state.lock().expect("evaluator state lock") =
+                    typecheck::EvalState::default();
                 Submission::Command(Command::Clear)
             }
             Some("reset") => {
                 self.source.clear();
                 self.live_runtime.clear();
+                *self.eval_state.lock().expect("evaluator state lock") =
+                    typecheck::EvalState::default();
                 self.clear_tasks();
                 Submission::Command(Command::Reset)
             }
@@ -605,7 +598,8 @@ impl InterpreterSession {
         let runtime_lowered = self.driver.lower_package(&context, &runtime_checked);
         let runtime_module = runtime_lowered.module?;
 
-        NativeEngine::new(runtime_module, generation_symbol).ok()
+        let engine = NativeEngine::new(runtime_module, generation_symbol).ok()?;
+        Some(engine)
     }
 }
 
@@ -614,6 +608,7 @@ fn run_task_submission(
     evaluation: GeneratedEvaluation,
     task_id: TaskId,
     stop_requested: Arc<AtomicBool>,
+    eval_state: Arc<Mutex<typecheck::EvalState>>,
 ) -> TaskResult {
     let expression = evaluation.expression().to_string();
     let expression_for_worker = expression.clone();
@@ -686,6 +681,17 @@ fn run_task_submission(
                     )],
                 },
             };
+        }
+
+        if let Some(result) = evaluate_with_typed_machine(
+            &checked,
+            &context,
+            &expression,
+            task_id,
+            stop_requested.clone(),
+            eval_state,
+        ) {
+            return result;
         }
 
         let context = NativeCompiler::create_context();
@@ -787,6 +793,71 @@ fn run_task_submission(
                 )],
             },
         },
+    }
+}
+
+fn evaluate_with_typed_machine(
+    checked: &CheckedPackage,
+    context: &InterpreterContext,
+    expression: &str,
+    task_id: TaskId,
+    stop_requested: Arc<AtomicBool>,
+    eval_state: Arc<Mutex<typecheck::EvalState>>,
+) -> Option<TaskResult> {
+    let file = checked.primary_file();
+    let root = *file.typed().root_exprs.last()?;
+    let mut evaluator = typecheck::Evaluator::new(
+        file.typed().resolved_program(),
+        InteractiveHost {
+            target: context.target().clone(),
+            stop_requested,
+        },
+    );
+    let mut state = eval_state.lock().ok()?;
+    state.fuel = typecheck::Fuel::default();
+    let value = match evaluator.eval_with_state(root, &mut state).ok()? {
+        typecheck::EvalOutcome::Complete(value) => value,
+        typecheck::EvalOutcome::Address(_) => return None,
+        typecheck::EvalOutcome::Residual(_) => return None,
+        typecheck::EvalOutcome::RuntimeDependency(_) | typecheck::EvalOutcome::Cancelled => {
+            return None;
+        }
+        typecheck::EvalOutcome::Trap(_) => return None,
+    };
+    let (runtime_type, storage) = match value {
+        ast::ConstValue::Int(value) => (
+            RuntimeType::I64,
+            RuntimeStorage::Int64(value.as_i128() as i64),
+        ),
+        ast::ConstValue::Text(value) => (
+            RuntimeType { size: 16, align: 8 },
+            RuntimeStorage::Bytes(value.into_bytes()),
+        ),
+        _ => return None,
+    };
+    Some(TaskResult {
+        id: task_id,
+        expression: expression.to_string(),
+        state: TaskState::Completed,
+        submission: Submission::Evaluated {
+            value: RuntimeValue::new(runtime_type, storage),
+            diagnostics: Vec::new(),
+        },
+    })
+}
+
+struct InteractiveHost {
+    target: flask::CompileTarget,
+    stop_requested: Arc<AtomicBool>,
+}
+
+impl typecheck::EvalHost for InteractiveHost {
+    fn target(&self) -> &flask::CompileTarget {
+        &self.target
+    }
+
+    fn cancelled(&self) -> bool {
+        self.stop_requested.load(Ordering::SeqCst)
     }
 }
 
@@ -985,7 +1056,7 @@ fn extract_runtime_declarations(
                         bind.param_conventions
                             .get(name)
                             .copied()
-                            .unwrap_or(ast::ParamConvention::Own)
+                            .unwrap_or(ast::ParamConvention::Terminal)
                     })
                     .collect()
             })
@@ -1014,7 +1085,7 @@ fn extract_runtime_declarations(
                         bind.param_conventions
                             .get(name)
                             .copied()
-                            .unwrap_or(ast::ParamConvention::Own)
+                            .unwrap_or(ast::ParamConvention::Terminal)
                     })
                     .collect()
             })
@@ -1044,6 +1115,7 @@ fn runtime_signature(bind: &ast::Bind, typed: &typecheck::TypedFileAst) -> Strin
             .values()
             .find(|typed_bind| typed_bind.name == bind.name)
             .map(|typed_bind| &typed_bind.return_type)
+        && !matches!(return_type, ast::ty::Ty::Unit | ast::ty::Ty::Array { .. })
     {
         signature.push(' ');
         signature.push_str(&return_type.format_for_hover());
@@ -1057,7 +1129,8 @@ fn runtime_type_name(generation: GenerationId) -> String {
 
 fn generation_candidate(candidate: &str, symbol: &str, generation: GenerationId) -> String {
     let runtime_type = runtime_type_name(generation);
-    let type_declaration = format!("{runtime_type} is in {RUNTIME_I64_MIN}...{RUNTIME_I64_MAX}\n",);
+    let type_declaration =
+        format!("{runtime_type} is in {RUNTIME_I64_MIN} to {RUNTIME_I64_MAX}\n",);
     let mut generation_source =
         String::with_capacity(type_declaration.len() + candidate.len() + symbol.len() + 20);
     generation_source.push_str(&type_declaration);

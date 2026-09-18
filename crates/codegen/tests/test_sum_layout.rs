@@ -3,7 +3,7 @@ mod support;
 #[test]
 fn payload_sum_uses_explicit_discriminant_and_payload_offsets() {
     let source = "\
-DefaultInteger is in 0...255
+DefaultInteger is in 0 to 255
 Maybe(value) is Some(value) or None
 make(v DefaultInteger) Maybe(DefaultInteger): Maybe.Some(v)
 ";
@@ -20,7 +20,7 @@ make(v DefaultInteger) Maybe(DefaultInteger): Maybe.Some(v)
 fn payload_sum_pattern_projection_reads_the_authoritative_field_offset() {
     let source = "\
 Bool is True or False
-DefaultInteger is in 0...255
+DefaultInteger is in 0 to 255
 Maybe(value) is Some(value) or None
 has_value(v Maybe(DefaultInteger)) Bool: when v is Some(x) then True else False
 ";

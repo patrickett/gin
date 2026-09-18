@@ -2,20 +2,20 @@
 
 use analysis::PackageCache;
 use test_fixtures::TempPackage;
-use test_fixtures::gin_core::{
+use test_fixtures::semantic_fixtures::{
     BOOL_GIN, INT_GIN, LIST_GIN, POINTER_GIN, SIZED_GIN, STRING_GIN, TYPE_GIN,
 };
 
-const RANGE_GIN: &str = r#"use '../'.Bounded
+const RANGE_GIN: &str = r#"use '../' Bounded
 
 --- Range utilities.
 ---
---- `Range(x)` is the value type constructed by a range literal like `start...end`.
+--- `Range(x)` is the value type constructed by a range literal like `start to end`.
 ---
 --- ## Examples
 ---
 --- ```gin
---- r := 12...1200
+--- r := 12 to 1200
 --- ```
 ---
 --- `start` and `end` are the bounds of the range.

@@ -61,6 +61,53 @@ pub enum BinOp {
     LogicalOr,
 }
 
+impl BinOp {
+    pub fn from_symbol(symbol: &str) -> Option<Self> {
+        Some(match symbol {
+            "=" => Self::Equal,
+            "<" => Self::Less,
+            "<=" => Self::LessOrEqual,
+            ">=" => Self::GreaterOrEqual,
+            ">" => Self::Greater,
+            "+" => Self::Add,
+            "/" => Self::Divide,
+            "*" => Self::Multiply,
+            "-" => Self::Subtract,
+            "%" => Self::Modulo,
+            "&" => Self::BitAnd,
+            "|" => Self::BitOr,
+            "^" => Self::BitXor,
+            "<<" => Self::ShiftLeft,
+            ">>" => Self::ShiftRight,
+            "and" => Self::LogicalAnd,
+            "or" => Self::LogicalOr,
+            _ => return None,
+        })
+    }
+
+    pub fn symbol(&self) -> &'static str {
+        match self {
+            Self::Equal => "=",
+            Self::Less => "<",
+            Self::LessOrEqual => "<=",
+            Self::GreaterOrEqual => ">=",
+            Self::Greater => ">",
+            Self::Add => "+",
+            Self::Divide => "/",
+            Self::Multiply => "*",
+            Self::Subtract => "-",
+            Self::Modulo => "%",
+            Self::BitAnd => "&",
+            Self::BitOr => "|",
+            Self::BitXor => "^",
+            Self::ShiftLeft => "<<",
+            Self::ShiftRight => ">>",
+            Self::LogicalAnd => "and",
+            Self::LogicalOr => "or",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumString)]
 pub enum OperatorRole {
     Add,

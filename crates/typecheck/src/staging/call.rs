@@ -157,8 +157,13 @@ fn value_param_ty_contains_generic_opaque(ty: &Ty) -> bool {
         }
         Ty::Ref { inner, .. } | Ty::Ptr { inner } => value_param_ty_contains_generic_opaque(inner),
         Ty::Address { pointee, .. } => value_param_ty_contains_generic_opaque(pointee),
-        Ty::Tuple(tys) => tys.iter().any(value_param_ty_contains_generic_opaque),
+        Ty::ResultRow(elements) => elements
+            .iter()
+            .any(|element| value_param_ty_contains_generic_opaque(&element.ty)),
         Ty::Array { elem, .. } => value_param_ty_contains_generic_opaque(elem),
+        Ty::UnresolvedSequence { element, .. } => element
+            .as_deref()
+            .is_some_and(value_param_ty_contains_generic_opaque),
         Ty::Literal(_)
         | Ty::UnresolvedLiteral(_)
         | Ty::AnonymousInteger { .. }

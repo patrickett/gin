@@ -34,6 +34,13 @@ fn builder_basics() {
 
 #[test]
 fn with_category_sets_category() {
-    let diag = Diagnostic::new("x", "y").with_category(Category::Help);
-    assert_eq!(diag.category, Category::Help);
+    let diag = Diagnostic::new("x", "y").with_category(Category::Warn);
+    assert_eq!(diag.category, Category::Warn);
+}
+
+#[test]
+fn diagnostic_category_names_use_gin_terms() {
+    assert_eq!(Category::Flaw.as_str(), "flaw");
+    assert_eq!(Category::Warn.as_str(), "warn");
+    assert_eq!(Category::Help.as_str(), "help");
 }

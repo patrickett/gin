@@ -59,6 +59,19 @@ struct ModuleQualifyFolder {
 }
 
 impl Folder for ModuleQualifyFolder {
+    fn visit_bind(&mut self, bind: &mut crate::Bind) -> ControlFlow<()> {
+        for attribute in bind.attributes.raw_attributes.iter_mut().flatten() {
+            if let crate::AttributeItem::Call { name, args, .. } = attribute
+                && matches!(name.as_str(), "machine")
+            {
+                for arg in args {
+                    self.visit_expr(arg)?;
+                }
+            }
+        }
+        walk_bind_mut(self, bind)
+    }
+
     fn visit_expr(&mut self, expr: &mut Expr) -> ControlFlow<()> {
         // Type expressions (TypeExpr) are now a separate enum and are not
         // folded through the Expr Folder. Qualification of TypeExpr nodes
@@ -80,16 +93,19 @@ impl ModPath {
         old_names: &HashSet<Intern<String>>,
         qual_parts: &[Intern<String>],
     ) {
-        if !self.segments.is_empty() {
-            return;
-        }
-        if !old_names.contains(&self.root) {
+        let local_name = if self.segments.is_empty() {
+            self.root
+        } else {
+            Intern::new(self.to_qualified_string())
+        };
+        if !old_names.contains(&local_name) {
             return;
         }
         let old_root = self.root;
-        let mut segments = Vec::with_capacity(qual_parts.len());
+        let mut segments = Vec::with_capacity(qual_parts.len() + self.segments.len());
         segments.extend_from_slice(&qual_parts[1..]);
         segments.push(old_root);
+        segments.append(&mut self.segments);
         self.root = qual_parts[0];
         self.segments = segments;
     }

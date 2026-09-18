@@ -23,7 +23,7 @@ fn preserves_removed_condition_attribute_as_raw_syntax() {
 
 #[test]
 fn rejects_removed_default_attribute() {
-    let output = "#default(IntegerLiteral)\nInt is in 0...255\n".parse_source_full();
+    let output = "#default(IntegerLiteral)\nInt is in 0 to 255\n".parse_source_full();
     assert!(
         output
             .symptoms
@@ -95,6 +95,67 @@ fn parses_same_line_declare_attributes() {
 }
 
 #[test]
+fn rejects_asm_attribute_as_callable_body_with_migration() {
+    let output = "#asm('gin-asm 1')\nwrite(fd Int) Int\n".parse_source_full();
+    let ast = &output.ast;
+    let write = ast
+        .defs
+        .get(&Intern::from_ref("write"))
+        .expect("write definition");
+    assert!(matches!(write.value, ast::BindValue::Unassigned));
+    assert!(
+        output
+            .symptoms
+            .iter()
+            .any(|diagnostic| diagnostic.code.slug() == "parse-asm-declaration-migration")
+    );
+}
+
+#[test]
+fn rejects_invalid_asm_attribute_arity_and_duplicates() {
+    for source in [
+        "#asm\nwrite(fd Int) Int\n",
+        "#asm('a', 'b')\nwrite(fd Int) Int\n",
+        "#asm('a')\n#asm('b')\nwrite(fd Int) Int\n",
+    ] {
+        let output = source.parse_source_full();
+        assert!(
+            output.symptoms.iter().any(|diagnostic| {
+                diagnostic.code.slug() == "parse-asm-missing-argument"
+                    || diagnostic.code.slug() == "parse-asm-argument-count"
+                    || diagnostic.code.slug() == "parse-duplicate-asm-attribute"
+            }),
+            "expected asm diagnostic for {source:?}: {:?}",
+            output.symptoms
+        );
+    }
+}
+
+#[test]
+fn rejects_asm_combined_with_extern() {
+    let output = r#"#asm('gin-asm 1')
+write(fd Int) Int extern"#
+        .parse_source_full();
+    assert!(
+        output
+            .symptoms
+            .iter()
+            .any(|diagnostic| diagnostic.code.slug() == "parse-asm-with-extern")
+    );
+}
+
+#[test]
+fn rejects_asm_combined_with_gin_body() {
+    let output = "#asm('gin-asm 1')\nwrite() Int: 0\n".parse_source_full();
+    assert!(
+        output
+            .symptoms
+            .iter()
+            .any(|diagnostic| diagnostic.code.slug() == "parse-asm-with-body")
+    );
+}
+
+#[test]
 fn detached_declare_attribute_reports_diagnostic() {
     let output = "#custom\n\nExample has value Bool\n".parse_source_full();
 
@@ -113,9 +174,9 @@ fn parses_has_function_signatures() {
     let source = r#"
 Allocator has
     --- Attempt to allocate.
-    allocate(ref self, l Layout) Slice(Byte) or AllocError,
+    allocate(self ref, l Layout) Slice(Byte) or AllocError,
     --- Free a block.
-    deallocate(ref self, p @Byte, l Layout),
+    deallocate(self ref, p @Byte, l Layout),
 "#;
     let ast = source.parse_source_full().ast;
     let allocator = ast
@@ -201,7 +262,7 @@ Allocator has
 
 #[test]
 fn marker_copy_syntax_rejected() {
-    let output = "Int is in 0...255 and is Copy".parse_source_full();
+    let output = "Int is in 0 to 255 and is Copy".parse_source_full();
 
     assert!(
         output

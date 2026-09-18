@@ -7,7 +7,6 @@ pub enum ParameterMode {
     Own,
     Ref,
     Mut,
-    Eat,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

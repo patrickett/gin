@@ -96,13 +96,12 @@ foo(
 }
 
 #[test]
-fn func_params_convention_prefix_with_newline() {
-    // Convention-prefixed params need a comma before the next param
-    // because bare Id after a convention param name is parsed as a type
-    // variable (not the next param name). This matches existing Gin behavior.
+fn func_params_convention_suffix_with_newline() {
+    // Suffix mode params (for example `self ref`) are parsed like other multiline
+    // params because the mode appears after the parameter name.
     let src = "\
 set_item(
-    ref self,
+    self ref,
     val Int
 ) Int := 0
 ";
@@ -496,10 +495,10 @@ fn list_lit_empty_with_layout() {
     assert!(has_def(&out, "xs"));
 }
 
-// ── Tuple literals ───────────────────────────────────────────────────────
+// ── Value-row literals ───────────────────────────────────────────────────
 
 #[test]
-fn tuple_lit_newline_separated() {
+fn value_row_lit_newline_separated() {
     let src = "\
 pair : (
     1
@@ -510,28 +509,28 @@ pair : (
     assert_eq!(
         count_errors(&out),
         0,
-        "newline-separated tuple elements: {:?}",
+        "newline-separated value-row elements: {:?}",
         out.symptoms.iter().map(|d| &d.message).collect::<Vec<_>>()
     );
     assert!(has_def(&out, "pair"));
 }
 
 #[test]
-fn tuple_lit_same_line_missing_comma_rejected() {
+fn value_row_lit_same_line_missing_comma_rejected() {
     let src = "pair : (1 2 3)\n";
     let out = src.parse_source_full();
     let errors = count_errors(&out);
     assert!(
         errors > 0,
-        "same-line tuple elements without comma should produce an error"
+        "same-line value-row elements without comma should produce an error"
     );
 }
 
-// ── Bundle export lists (use 'module'.(Foo, Bar)) ────────────────────
+// ── Bundle export lists (use 'module' Foo, Bar) ────────────────────
 
 #[test]
 fn bundle_exports_newline_separated() {
-    let src = "use 'module'.(\n    Foo\n    Bar\n)\n";
+    let src = "use 'module'\n    Foo\n    Bar\n";
     let out = src.parse_source_full();
     assert_eq!(
         count_errors(&out),
@@ -543,7 +542,7 @@ fn bundle_exports_newline_separated() {
 
 #[test]
 fn bundle_exports_comma_and_newline_mixed() {
-    let src = "use 'module'.(\n    Foo,\n    Bar,\n)\n";
+    let src = "use 'module'\n    Foo,\n    Bar\n";
     let out = src.parse_source_full();
     assert_eq!(
         count_errors(&out),
@@ -554,7 +553,7 @@ fn bundle_exports_comma_and_newline_mixed() {
 
 #[test]
 fn bundle_exports_same_line_missing_comma_rejected() {
-    let src = "use 'module'.(Foo Bar)\n";
+    let src = "use 'module' Foo Bar\n";
     let out = src.parse_source_full();
     let errors = count_errors(&out);
     assert!(

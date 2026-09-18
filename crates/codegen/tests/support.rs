@@ -6,7 +6,7 @@ use melior::ir::operation::{OperationLike, OperationPrintingFlags};
 use melior::utility;
 use parser::parse_from_str;
 use typecheck::FileId;
-use typecheck::transform::transform_file;
+use typecheck::transform::{TransformCtx, transform, transform_file};
 
 fn test_target() -> flask::CompileTarget {
     flask::CompileTarget::Concrete(
@@ -77,7 +77,7 @@ pub fn codegen_to_mlir_text(
     } else {
         flags
     };
-    let module = module.expect("codegen should succeed");
+    let module = module.unwrap_or_else(|| panic!("codegen should succeed: {symptoms:?}"));
     if std::env::var("DEBUG_CODEGEN_FUNCS").is_ok() {
         let debug_flags = OperationPrintingFlags::new().print_generic_operation_form();
         eprintln!(
@@ -93,6 +93,72 @@ pub fn codegen_to_mlir_text(
         .to_string_with_flags(flags)
         .expect("MLIR print");
     (mlir_text, symptoms)
+}
+
+pub fn codegen_assembly_to_mlir_text(source: &str, filename: &str) -> (String, Vec<Diagnostic>) {
+    codegen_assembly_to_mlir_text_for_target(source, filename, test_target())
+}
+
+pub fn codegen_assembly_to_mlir_text_for_target(
+    source: &str,
+    filename: &str,
+    target: flask::CompileTarget,
+) -> (String, Vec<Diagnostic>) {
+    let ast = parse_from_str(source);
+    let mut transform_context = TransformCtx::new();
+    transform_context.compile_target = target.clone();
+    let typed = transform(&ast, FileId(0), &transform_context);
+    let context = NativeCompiler::create_context();
+    let (module, diagnostics) = CodegenContext::build_module_from_resolved_program_for_target(
+        &context,
+        typed.resolved_program(),
+        CodegenSourceMap::new(filename, source, &typed.span_table),
+        &target,
+    );
+    let Some(module) = module else {
+        return (String::new(), diagnostics);
+    };
+    let flags = OperationPrintingFlags::new().print_generic_operation_form();
+    (
+        module
+            .as_operation()
+            .to_string_with_flags(flags)
+            .expect("MLIR print"),
+        diagnostics,
+    )
+}
+
+pub fn codegen_assembly_to_object(
+    source: &str,
+    filename: &str,
+    target: flask::CompileTarget,
+    object: &std::path::Path,
+) -> (bool, Vec<Diagnostic>) {
+    let ast = parse_from_str(source);
+    let mut transform_context = TransformCtx::new();
+    transform_context.compile_target = target.clone();
+    let typed = transform(&ast, FileId(0), &transform_context);
+    let context = NativeCompiler::create_context();
+    let (module, diagnostics) = CodegenContext::build_module_from_resolved_program_for_target(
+        &context,
+        typed.resolved_program(),
+        CodegenSourceMap::new(filename, source, &typed.span_table),
+        &target,
+    );
+    let Some(module) = module else {
+        return (false, diagnostics);
+    };
+    let compiler = NativeCompiler::default();
+    let (ok, more, _) = compiler.native_from_module_with_timings_for_target(
+        &module,
+        object,
+        codegen::Profile::Debug,
+        true,
+        target.triple_raw(),
+    );
+    let mut diagnostics = diagnostics;
+    diagnostics.extend(more);
+    (ok, diagnostics)
 }
 
 pub fn codegen_to_mlir_text_with_package_context(

@@ -11,6 +11,7 @@ use ast::{
     BinderId, DeclareValue, DependentArgId, FnCall, InRangeBounds, Literal, NormalExpr, ParamKind,
     ParameterKind, Parameters, TyArg,
 };
+use ast_format::type_expr::ExprFormatExt;
 use internment::Intern;
 use std::collections::HashMap;
 
@@ -120,35 +121,59 @@ impl<'a> TypeEnv<'a> {
                 .iter()
                 .map(|(n, k)| (*n, param_kind_from_decl_parameter_kind(&k.kind)))
                 .collect();
-            let _ = check_type_application(&declared, use_site_params);
             let decl_entries: Vec<_> = decl_params.iter().collect();
+            let defaulted = decl_entries
+                .iter()
+                .rev()
+                .take_while(|(_, parameter)| {
+                    matches!(
+                        parameter.kind,
+                        ParameterKind::Default(_) | ParameterKind::Inferred { .. }
+                    )
+                })
+                .count();
+            let _ = check_type_application_with_defaults(&declared, use_site_params, defaulted);
             for (i, (name, kind)) in use_site_params.iter().enumerate() {
-                if let Some((decl_name, _)) = decl_entries.get(i) {
+                let decl_name = decl_entries
+                    .iter()
+                    .find(|(decl_name, _)| **decl_name == *name)
+                    .map(|(decl_name, _)| **decl_name)
+                    .or_else(|| decl_entries.get(i).map(|(decl_name, _)| **decl_name));
+                if let Some(decl_name) = decl_name {
                     match kind {
                         ParameterKind::Tagged(sp) | ParameterKind::ValueParam { ty: sp } => {
                             let is_length_parameter =
-                                is_fixed_array_length(decl_name, &fixed_array_length_param);
+                                is_fixed_array_length(&decl_name, &fixed_array_length_param);
                             if is_length_parameter {
                                 if let Some(cv) = expr_as_size_normal_expr(&sp.value) {
-                                    consts.insert(**decl_name, cv);
+                                    consts.insert(decl_name, cv);
                                 }
                             } else if is_literal_expr(&sp.value) {
                                 if let Some(cv) = literal_expr_as_const(&sp.value) {
-                                    consts.insert(**decl_name, cv);
+                                    consts.insert(decl_name, cv);
                                 }
                             } else if expr_is_type_surface(&sp.value) {
                                 let ty = self.resolve_expr(&sp.value);
-                                types.insert(**decl_name, ty);
+                                types.insert(decl_name, ty);
                             }
                         }
                         ParameterKind::Generic => {
-                            types.insert(**decl_name, Ty::Opaque(*name));
+                            types.insert(decl_name, Ty::Opaque(*name));
                         }
                         ParameterKind::Default(expr) => {
-                            if expr_is_type_surface(&expr.value) {
-                                types.insert(**decl_name, self.resolve_expr(&expr.value));
+                            let value_parameter =
+                                is_fixed_array_length(&decl_name, &fixed_array_length_param)
+                                    || declared.iter().any(|(name, kind)| {
+                                        *name == decl_name && matches!(kind, ParamKind::Value(_))
+                                    });
+                            if value_parameter {
+                                if let Some(value) = expr_as_size_normal_expr(&expr.value) {
+                                    consts.insert(decl_name, value);
+                                }
+                            } else if expr_is_type_surface(&expr.value) {
+                                types.insert(decl_name, self.resolve_expr(&expr.value));
                             } else if let Some(value) = expr_as_size_normal_expr(&expr.value) {
-                                consts.insert(**decl_name, value);
+                                consts.insert(decl_name, value);
                             }
                         }
                         ParameterKind::Inferred { .. } => continue,
@@ -221,7 +246,13 @@ impl<'a> TypeEnv<'a> {
 
     pub fn resolve(&self, expr: &ast::Expr) -> Ty {
         match expr {
+            ast::Expr::Binary(binary) if binary.op == ast::BinOp::LogicalOr => {
+                self.resolve_sum(expr)
+            }
             ast::Expr::AnonymousTag(name) => {
+                match name.as_str() {
+                    _ => {}
+                }
                 if let Some(subst) = self.subst
                     && let Some(t) = subst.get(name)
                 {
@@ -241,17 +272,7 @@ impl<'a> TypeEnv<'a> {
                     .unwrap_or(Ty::Opaque(*name))
             }
             ast::Expr::TagCall(call) => {
-                let params: Vec<(Intern<String>, ParameterKind)> = call
-                    .args
-                    .iter()
-                    .enumerate()
-                    .map(|(index, arg)| {
-                        (
-                            Intern::new(format!("_{index}")),
-                            ParameterKind::Default(Box::new(arg.clone())),
-                        )
-                    })
-                    .collect();
+                let params = self.generic_params_from_call(&call.name, &call.args);
                 self.resolve_generic(&call.name, &params)
             }
             ast::Expr::Ref { inner, mutable, .. } => Ty::Ref {
@@ -272,6 +293,16 @@ impl<'a> TypeEnv<'a> {
                 }
             }
             ast::Expr::Lit(_) => Ty::Opaque(Intern::new(String::new())),
+            ast::Expr::FixedArrayAlloc { init, size } => Ty::Array {
+                elem: Box::new(self.resolve_expr(&init.value)),
+                size: expr_as_size_normal_expr(&size.value)
+                    .unwrap_or_else(|| NormalExpr::Var(Intern::from_ref("<array-size>"))),
+            },
+            ast::Expr::SequenceLiteral(ast::SequenceLiteral::Repeat { seed, count }) => Ty::Array {
+                elem: Box::new(self.resolve_expr(&seed.value)),
+                size: expr_as_size_normal_expr(&count.value)
+                    .unwrap_or_else(|| NormalExpr::Var(Intern::from_ref("<array-size>"))),
+            },
             ast::Expr::Range(range) => match (&range.start.value, &range.end.value) {
                 (ast::Expr::AnonymousTag(start), ast::Expr::AnonymousTag(end)) if start == end => {
                     resolve_in_range_bounds(&InRangeBounds::Tag(*start), self.tag_types)
@@ -296,8 +327,144 @@ impl<'a> TypeEnv<'a> {
         }
     }
 
+    fn resolve_sum(&self, expr: &ast::Expr) -> Ty {
+        fn alternatives<'a>(expr: &'a ast::Expr, out: &mut Vec<&'a ast::Expr>) {
+            if let ast::Expr::Binary(binary) = expr
+                && binary.op == ast::BinOp::LogicalOr
+            {
+                alternatives(&binary.lhs.value, out);
+                alternatives(&binary.rhs.value, out);
+            } else {
+                out.push(expr);
+            }
+        }
+        let mut members = Vec::new();
+        alternatives(expr, &mut members);
+        let variants: Vec<ast::ty::UnionVariant> = members
+            .into_iter()
+            .map(|member| match member {
+                ast::Expr::AnonymousTag(name) if !self.tag_types.contains_key(name) => {
+                    ast::ty::UnionVariant::new(*name, Vec::new())
+                }
+                ast::Expr::TagCall(call) if !self.tag_types.contains_key(&call.name) => {
+                    ast::ty::UnionVariant::new(
+                        call.name,
+                        call.args
+                            .iter()
+                            .enumerate()
+                            .map(|(index, arg)| {
+                                (
+                                    Intern::new(format!("field_{index}")),
+                                    Box::new(self.resolve_expr(&arg.value)),
+                                )
+                            })
+                            .collect(),
+                    )
+                }
+                _ => {
+                    let ty = self.resolve_expr(member);
+                    let mut variant = ast::ty::UnionVariant::new(
+                        ty.type_name()
+                            .copied()
+                            .unwrap_or_else(|| Intern::new(member.format_surface())),
+                        vec![(Intern::from_ref("value"), Box::new(ty))],
+                    );
+                    variant.kind = ast::ty::UnionVariantKind::Type;
+                    variant
+                }
+            })
+            .collect();
+        Ty::Union {
+            name: Intern::new(format!(
+                "({})",
+                variants
+                    .iter()
+                    .map(|variant| variant.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" or ")
+            )),
+            variants,
+            literal_values: None,
+            resolved_params: None,
+        }
+    }
+
     pub fn resolve_expr(&self, expr: &ast::Expr) -> Ty {
         self.resolve(expr)
+    }
+
+    fn generic_params_from_call(
+        &self,
+        name: &Intern<String>,
+        args: &[ast::Typed<ast::Expr>],
+    ) -> Vec<(Intern<String>, ParameterKind)> {
+        let raw: Vec<(Option<Intern<String>>, ast::Typed<ast::Expr>)> = args
+            .iter()
+            .map(|arg| {
+                named_generic_argument(arg)
+                    .map_or_else(|| (None, arg.clone()), |(name, value)| (Some(name), value))
+            })
+            .collect();
+
+        let Some(declaration_params) = self.tag_params.and_then(|tag_params| tag_params.get(name))
+        else {
+            return raw
+                .into_iter()
+                .enumerate()
+                .map(|(index, (name, value))| {
+                    (
+                        name.unwrap_or_else(|| Intern::new(format!("__expr_{index}"))),
+                        ParameterKind::Default(Box::new(value)),
+                    )
+                })
+                .collect();
+        };
+
+        let declaration_names: Vec<Intern<String>> = declaration_params.keys().copied().collect();
+        if raw.iter().all(|(name, _)| name.is_none()) {
+            return raw
+                .into_iter()
+                .enumerate()
+                .map(|(index, (_, value))| {
+                    (
+                        declaration_names
+                            .get(index)
+                            .copied()
+                            .unwrap_or_else(|| Intern::new(format!("__expr_{index}"))),
+                        ParameterKind::Default(Box::new(value)),
+                    )
+                })
+                .collect();
+        }
+
+        let mut slots: Vec<Option<(Intern<String>, ast::Typed<ast::Expr>)>> =
+            vec![None; declaration_names.len()];
+        let mut next_positional = 0;
+        for (arg_name, value) in raw {
+            let index = arg_name
+                .and_then(|arg_name| {
+                    declaration_names
+                        .iter()
+                        .position(|decl_name| *decl_name == arg_name)
+                })
+                .unwrap_or_else(|| {
+                    let index = next_positional;
+                    next_positional += 1;
+                    index
+                });
+            if let Some(slot) = slots.get_mut(index)
+                && slot.is_none()
+            {
+                let declaration_name = declaration_names[index];
+                *slot = Some((declaration_name, value));
+            }
+        }
+
+        slots
+            .into_iter()
+            .flatten()
+            .map(|(name, value)| (name, ParameterKind::Default(Box::new(value))))
+            .collect()
     }
 
     fn resolve_generic(
@@ -425,11 +592,13 @@ impl<'a> TypeEnv<'a> {
         {
             return with_subst.resolve_expr(&sp.value);
         }
-        let base = self
-            .tag_types
-            .get(name)
-            .cloned()
-            .unwrap_or(Ty::Opaque(*name));
+        let base = match name.as_str() {
+            _ => self
+                .tag_types
+                .get(name)
+                .cloned()
+                .unwrap_or(Ty::Opaque(*name)),
+        };
         if merged_types.is_empty() && local_dep.consts.is_empty() {
             base
         } else {
@@ -588,12 +757,30 @@ pub fn check_type_application(
     declared_params: &[(Intern<String>, ParamKind)],
     provided_params: &[(Intern<String>, ParameterKind)],
 ) -> Result<(), String> {
-    if provided_params.len() != declared_params.len() {
-        return Err(format!(
-            "expected {} type arguments, found {}",
-            declared_params.len(),
-            provided_params.len()
-        ));
+    check_type_application_with_defaults(declared_params, provided_params, 0)
+}
+
+fn check_type_application_with_defaults(
+    declared_params: &[(Intern<String>, ParamKind)],
+    provided_params: &[(Intern<String>, ParameterKind)],
+    defaulted_params: usize,
+) -> Result<(), String> {
+    let required_params = declared_params.len().saturating_sub(defaulted_params);
+    if provided_params.len() < required_params || provided_params.len() > declared_params.len() {
+        return Err(if defaulted_params == 0 {
+            format!(
+                "expected {} type arguments, found {}",
+                declared_params.len(),
+                provided_params.len()
+            )
+        } else {
+            format!(
+                "expected between {} and {} type arguments, found {}",
+                required_params,
+                declared_params.len(),
+                provided_params.len()
+            )
+        });
     }
 
     for (i, ((_decl_name, decl_kind), (_, prov_kind))) in declared_params
@@ -627,17 +814,38 @@ pub fn check_type_application(
 /// discriminant is used during kind-checking.
 fn param_kind_from_decl_parameter_kind(kind: &ParameterKind) -> ParamKind {
     match kind {
-        ParameterKind::Generic | ParameterKind::Tagged(_) | ParameterKind::Default(_) => {
-            ParamKind::Type
-        }
-        ParameterKind::ValueParam { ty: _ } | ParameterKind::Inferred { ty: _ } => {
-            ParamKind::Value(Box::new(crate::ty::Ty::i64()))
+        ParameterKind::Generic => ParamKind::Type,
+        ParameterKind::Default(expr) if expr_is_type_surface(&expr.value) => ParamKind::Type,
+        ParameterKind::Default(_) => ParamKind::Value(Box::new(crate::ty::Ty::i64())),
+        ParameterKind::Tagged(ty)
+        | ParameterKind::ValueParam { ty }
+        | ParameterKind::Inferred { ty } => {
+            if matches!(&ty.value, ast::Expr::AnonymousTag(name) if name.as_str() == "Type") {
+                ParamKind::Type
+            } else {
+                ParamKind::Value(Box::new(crate::ty::Ty::i64()))
+            }
         }
     }
 }
 
 fn is_literal_expr(expr: &ast::Expr) -> bool {
     matches!(expr, ast::Expr::Lit(Literal::Int(_) | Literal::Number(_)))
+}
+
+fn named_generic_argument(
+    arg: &ast::Typed<ast::Expr>,
+) -> Option<(Intern<String>, ast::Typed<ast::Expr>)> {
+    let ast::Expr::Bind(bind) = &arg.value else {
+        return None;
+    };
+    if bind.params.is_some() {
+        return None;
+    }
+    let ast::BindValue::Expr(value) = &bind.value else {
+        return None;
+    };
+    Some((bind.name, (**value).clone()))
 }
 
 fn literal_expr_as_const(expr: &ast::Expr) -> Option<NormalExpr> {
@@ -650,6 +858,9 @@ fn literal_expr_as_const(expr: &ast::Expr) -> Option<NormalExpr> {
 
 pub(crate) fn expr_is_type_surface(expr: &ast::Expr) -> bool {
     match expr {
+        ast::Expr::Binary(binary) if binary.op == ast::BinOp::LogicalOr => {
+            expr_is_type_surface(&binary.lhs.value) && expr_is_type_surface(&binary.rhs.value)
+        }
         ast::Expr::AnonymousTag(_)
         | ast::Expr::TagCall(_)
         | ast::Expr::FnCall(ast::FnCall { args: None, .. }) => true,
@@ -662,6 +873,12 @@ pub(crate) fn expr_is_type_surface(expr: &ast::Expr) -> bool {
             | (ast::Expr::Lit(ast::Literal::Int(_)), ast::Expr::Lit(ast::Literal::Int(_))) => true,
             _ => false,
         },
+        ast::Expr::FixedArrayAlloc { init, size } => {
+            expr_is_type_surface(&init.value) && expr_as_size_normal_expr(&size.value).is_some()
+        }
+        ast::Expr::SequenceLiteral(ast::SequenceLiteral::Repeat { seed, count }) => {
+            expr_is_type_surface(&seed.value) && expr_as_size_normal_expr(&count.value).is_some()
+        }
         _ => false,
     }
 }

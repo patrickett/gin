@@ -159,12 +159,26 @@ impl TokenCursor<'_, '_> {
                 let end_span = self.last_consumed_span();
                 let merged = self.merge_span(start_span, end_span);
                 match elems.len() {
-                    0 => Some(Typed::infer(Expr::TupleLit(Vec::new()), merged)),
+                    0 => {
+                        self.error(
+                            "parse-positional-destructure-removed",
+                            "empty parenthesized binders are not supported",
+                            merged,
+                        );
+                        None
+                    }
                     1 => {
                         let Typed { value: e, .. } = elems.pop().unwrap();
                         Some(Typed::infer(e, merged))
                     }
-                    _ => Some(Typed::infer(Expr::TupleLit(elems), merged)),
+                    _ => {
+                        self.error(
+                            "parse-positional-destructure-removed",
+                            "positional destructuring is not supported; use named bindings",
+                            merged,
+                        );
+                        None
+                    }
                 }
             }
             _ => None,
@@ -185,18 +199,14 @@ impl TokenCursor<'_, '_> {
 
         if has_indent && self.is_at(&Token::Return) {
             let span = self.peek_span().unwrap_or(SpanId::INVALID);
-            self.hint("__gin_hint__:indented-return", span);
-            if let Some(ret) = self.parse_return(expr_parser)
-                && let Some(value) = ret.value
-            {
-                body.push(*value);
+            self.error(
+                "parse-indented-return",
+                "return must align with the if keyword; dedent it to close the if expression",
+                span,
+            );
+            if let Some(ret) = self.parse_return(expr_parser) {
+                body.extend(ret.values);
             }
-        }
-
-        // Detect improperly indented return inside the if body.
-        if has_indent && self.is_at(&Token::Return) {
-            let span = self.peek_span().unwrap_or(SpanId::INVALID);
-            self.hint("__gin_hint__:indented-return", span);
         }
 
         if has_indent {
@@ -703,15 +713,19 @@ impl TokenCursor<'_, '_> {
         {
             let span = self.current_span();
             return Some(Return {
-                value: None,
+                values: Vec::new(),
                 span_id: span,
             });
         }
 
-        let expr = expr_parser(self);
-        let span = self.merge_span(expr.span_id, self.last_consumed_span());
+        let first = expr_parser(self);
+        let mut values = vec![first];
+        while self.eat(&Token::Comma) {
+            values.push(expr_parser(self));
+        }
+        let span = self.merge_span(values[0].span_id, self.last_consumed_span());
         Some(Return {
-            value: Some(Box::new(expr)),
+            values,
             span_id: span,
         })
     }

@@ -21,7 +21,7 @@ pub use module_inventory::child_folder_module_names;
 pub use module_loader::ParsedModuleCache;
 pub use package_resolver::{
     ImportDependencyGraph, ResolveImportsWithGraph, resolve_import_symptoms, resolve_imports,
-    resolve_imports_with_graph,
+    resolve_imports_with_graph, resolve_imports_with_home,
 };
 pub use public_symbols::find_public_def;
 pub use resolved_package_graph::{

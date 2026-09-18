@@ -33,9 +33,6 @@ fn supported_with_registry(ty: &Ty, type_registry: &TypeRegistry) -> bool {
         Ty::Record { fields, .. } => fields
             .iter()
             .all(|(_, field)| supported_with_registry(field, type_registry)),
-        Ty::Tuple(fields) => fields
-            .iter()
-            .all(|field| supported_with_registry(field, type_registry)),
         Ty::Union { variants, .. } => variants.iter().all(|variant| variant.fields.is_empty()),
         Ty::Literal(ConstValue::Int(_) | ConstValue::Float(_)) => true,
         Ty::Literal(ConstValue::Tag { args, .. }) => args.is_empty(),
@@ -43,10 +40,12 @@ fn supported_with_registry(ty: &Ty, type_registry: &TypeRegistry) -> bool {
         Ty::Named { .. } => unreachable!(),
         Ty::Ref { inner, .. } => supported_with_registry(inner, type_registry),
         Ty::UnresolvedLiteral(_)
+        | Ty::UnresolvedSequence { .. }
         | Ty::Opaque(_)
         | Ty::Array { .. }
         | Ty::Ptr { .. }
         | Ty::Address { .. } => false,
+        Ty::ResultRow(_) => false,
     }
 }
 
@@ -94,13 +93,6 @@ fn compatible_with_registry(lhs: &Ty, rhs: &Ty, type_registry: &TypeRegistry) ->
                         lhs_name == rhs_name && compatible_with_registry(lhs, rhs, type_registry)
                     })
         }
-        (Ty::Tuple(lhs), Ty::Tuple(rhs)) => {
-            lhs.len() == rhs.len()
-                && lhs
-                    .iter()
-                    .zip(rhs)
-                    .all(|(lhs, rhs)| compatible_with_registry(lhs, rhs, type_registry))
-        }
         (Ty::Union { name: lhs_name, .. }, Ty::Union { name: rhs_name, .. }) => {
             lhs_name == rhs_name
         }
@@ -138,10 +130,15 @@ fn compatible_literals(lhs: &ConstValue, rhs: &ConstValue) -> bool {
         (lhs, rhs),
         (ConstValue::Int(_), ConstValue::Int(_))
             | (ConstValue::Float(_), ConstValue::Float(_))
-            | (ConstValue::String(_), ConstValue::String(_))
+            | (ConstValue::Text(_), ConstValue::Text(_))
             | (ConstValue::Tag { .. }, ConstValue::Tag { .. })
             | (ConstValue::Record { .. }, ConstValue::Record { .. })
-            | (ConstValue::List(_), ConstValue::List(_))
+            | (ConstValue::FixedArray(_), ConstValue::FixedArray(_))
+            | (ConstValue::Sequence(_), ConstValue::Sequence(_))
+            | (
+                ConstValue::SequenceRepeat { .. },
+                ConstValue::SequenceRepeat { .. }
+            )
     )
 }
 #[cfg(test)]
