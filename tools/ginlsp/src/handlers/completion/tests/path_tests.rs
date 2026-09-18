@@ -211,19 +211,19 @@ fn use_completion_package_member_import() {
         r#"{"name":"core","version":"0.0.0","authors":[]}"#,
     );
     write_file(&dir.join("core/int.gin"), "Int is Unit\n");
-    write_file(&dir.join("main.gin"), "use core.\n");
+    write_file(&dir.join("main.gin"), "use core \n");
 
     let uri = Url::from_file_path(dir.join("main.gin")).unwrap();
-    let src = "use core.\n";
+    let src = "use core \n";
     let pos = Position {
         line: 0,
-        character: "use core.".len() as u32,
+        character: "use core ".len() as u32,
     };
     let items = Backend::use_completions(src, pos, &uri, None).unwrap();
     let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
     assert!(
         labels.contains(&"Int"),
-        "expected Int in completions after `use core.`, got {:?}",
+        "expected Int in completions after `use core `, got {:?}",
         labels
     );
 
@@ -262,13 +262,13 @@ fn use_completion_shows_public_symbols() {
         "println(s Str): s\nprint(s Str): s\n",
     );
     write_file(&dir.join("dep/maybe.gin"), "Maybe is Some(value) or None\n");
-    write_file(&dir.join("main.gin"), "use dep.\n");
+    write_file(&dir.join("main.gin"), "use dep \n");
 
     let uri = Url::from_file_path(dir.join("main.gin")).unwrap();
-    let src = "use dep.\n";
+    let src = "use dep \n";
     let pos = Position {
         line: 0,
-        character: "use dep.".len() as u32,
+        character: "use dep ".len() as u32,
     };
     let items = Backend::use_completions(src, pos, &uri, None).unwrap();
     let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
@@ -333,13 +333,13 @@ fn use_completion_filters_public_symbols_by_partial() {
         "println(s Str): s\nprint(s Str): s\n",
     );
     write_file(&dir.join("dep/maybe.gin"), "Maybe is Some(value) or None\n");
-    write_file(&dir.join("main.gin"), "use dep.p\n");
+    write_file(&dir.join("main.gin"), "use dep p\n");
 
     let uri = Url::from_file_path(dir.join("main.gin")).unwrap();
-    let src = "use dep.p\n";
+    let src = "use dep p\n";
     let pos = Position {
         line: 0,
-        character: "use dep.p".len() as u32,
+        character: "use dep p".len() as u32,
     };
     let items = Backend::use_completions(src, pos, &uri, None).unwrap();
     let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
@@ -348,4 +348,83 @@ fn use_completion_filters_public_symbols_by_partial() {
     assert!(!labels.contains(&"Maybe"));
 
     let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn source_first_import_completion_selects_exports_left_to_right() {
+    let dir = unique_temp_dir("source_first");
+    write_file(
+        &dir.join("flask.jsonc"),
+        r#"{"name":"sample","version":"0.0.0","authors":[],"dependencies":{"calc":{"path":"math"}}}"#,
+    );
+    write_file(&dir.join("main.gin"), "");
+    write_file(&dir.join("math/ops.gin"), "add := 1\nsub := 2\n");
+    let uri = Url::from_file_path(dir.join("main.gin")).unwrap();
+    for (src, line, col, expected) in [
+        ("use './math' ", 0, 13, vec!["add", "sub"]),
+        ("use calc ", 0, 9, vec!["add", "sub"]),
+        ("use './math' add, s", 0, 19, vec!["sub"]),
+        ("use './math'\n    add\n    s", 2, 5, vec!["sub"]),
+    ] {
+        let position = Position::new(line, col);
+        let items = Backend::use_completions(src, position, &uri, None).unwrap();
+        let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
+        for label in expected {
+            assert!(labels.contains(&label), "{src}: {labels:?}");
+        }
+        if line > 0 || col > 13 {
+            assert!(!labels.contains(&"add"));
+        }
+        let item = items.iter().find(|item| item.label == "sub").unwrap();
+        let Some(tower_lsp::lsp_types::CompletionTextEdit::Edit(edit)) = &item.text_edit else {
+            panic!("expected export replacement");
+        };
+        let start = src
+            .position_to_byte_offset(edit.range.start.line, edit.range.start.character)
+            .unwrap();
+        let end = src
+            .position_to_byte_offset(edit.range.end.line, edit.range.end.character)
+            .unwrap();
+        let completed = format!("{}{}{}", &src[..start], edit.new_text, &src[end..]);
+        let parsed = parser::query::SourceParseExt::parse_source_full(completed.as_str());
+        assert!(
+            parsed.symptoms.is_empty(),
+            "{completed}: {:?}",
+            parsed.symptoms
+        );
+    }
+    assert!(
+        Backend::use_completions(
+            "use './math' add\nvalue := 1",
+            Position::new(1, 10),
+            &uri,
+            None
+        )
+        .is_none()
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn dotted_source_completion_only_suggests_modules() {
+    let dir = unique_temp_dir("module_only");
+    write_file(
+        &dir.join("flask.jsonc"),
+        r#"{"name":"app","version":"0","authors":[],"dependencies":{"dep":{"path":"dep"}}}"#,
+    );
+    write_file(
+        &dir.join("dep/flask.jsonc"),
+        r#"{"name":"library","version":"0","authors":[]}"#,
+    );
+    write_file(&dir.join("dep/ops.gin"), "add: 1\n");
+    write_file(&dir.join("dep/math/ops.gin"), "sub: 1\n");
+    let uri = Url::from_file_path(dir.join("main.gin")).unwrap();
+    let items = Backend::use_completions("use dep.", Position::new(0, 8), &uri, None).unwrap();
+    assert!(items.iter().any(|item| item.label == "math"));
+    assert!(
+        items
+            .iter()
+            .all(|item| item.kind == Some(CompletionItemKind::MODULE))
+    );
+    fs::remove_dir_all(dir).unwrap();
 }

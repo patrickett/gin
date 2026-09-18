@@ -8,7 +8,7 @@
 /// The type of delimiter being aligned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DelimiterKind {
-    /// For "is" declarations (e.g., `Area is 0...999`)
+    /// For "is" declarations (e.g., `Area is 0 to 999`)
     Is,
     /// For ":" bind statements (e.g., `start: Instant.now`)
     Colon,

@@ -1,4 +1,5 @@
 use crate::Backend;
+use ast::HasSpanId;
 use ast::source::SourceExt;
 use std::collections::HashMap;
 use tower_lsp::jsonrpc::Result;
@@ -54,6 +55,9 @@ impl Backend {
             if let Some(action) = Self::rename_bind_snake_case_code_action(uri, diag) {
                 out.push(CodeActionOrCommand::CodeAction(action));
             }
+            if let Some(action) = Self::rename_duplicate_parameter_code_action(uri, diag) {
+                out.push(CodeActionOrCommand::CodeAction(action));
+            }
             if let Some(actions) = Self::add_import_code_actions(uri, diag, &source) {
                 for action in actions {
                     out.push(CodeActionOrCommand::CodeAction(action));
@@ -63,9 +67,6 @@ impl Backend {
                 out.push(CodeActionOrCommand::CodeAction(action));
             }
             if let Some(action) = Self::sort_imports_code_action(uri, diag) {
-                out.push(CodeActionOrCommand::CodeAction(action));
-            }
-            if let Some(action) = Self::prefer_member_import_code_action(uri, diag, &source) {
                 out.push(CodeActionOrCommand::CodeAction(action));
             }
             if let Some(action) = Self::fix_indented_return_code_action(uri, diag, &source) {
@@ -270,58 +271,6 @@ impl Backend {
         })
     }
 
-    fn prefer_member_import_code_action(
-        uri: &Url,
-        diag: &Diagnostic,
-        source: &str,
-    ) -> Option<CodeAction> {
-        let v = diag.data.as_ref()?;
-        let obj = v.as_object()?;
-        if obj.get("gincQuickFix").and_then(|x| x.as_str()) != Some("prefer-member-import") {
-            return None;
-        }
-        let symbol = obj.get("symbol").and_then(|x| x.as_str())?;
-
-        let line = diag.range.start.line;
-        let line_text = source.lines().nth(line as usize)?;
-        let old = format!(".({symbol})");
-        let new = format!(".{symbol}");
-        let start_byte = line_text.find(&old)?;
-        let end_byte = start_byte + old.len();
-
-        let range = Range {
-            start: Position {
-                line,
-                character: start_byte as u32,
-            },
-            end: Position {
-                line,
-                character: end_byte as u32,
-            },
-        };
-
-        let mut changes = HashMap::new();
-        changes.insert(
-            uri.clone(),
-            vec![TextEdit {
-                range,
-                new_text: new,
-            }],
-        );
-
-        Some(CodeAction {
-            title: format!("Use `.{symbol}` member import"),
-            kind: Some(CodeActionKind::QUICKFIX),
-            diagnostics: Some(vec![diag.clone()]),
-            edit: Some(WorkspaceEdit {
-                changes: Some(changes),
-                ..Default::default()
-            }),
-            is_preferred: Some(true),
-            ..Default::default()
-        })
-    }
-
     fn sort_imports_code_action(uri: &Url, diag: &Diagnostic) -> Option<CodeAction> {
         let v = diag.data.as_ref()?;
         let obj = v.as_object()?;
@@ -418,25 +367,27 @@ impl Backend {
 
     /// Byte/line position to insert a new `use` line (after the last `use` block, or at file start).
     fn use_insert_position(source: &str) -> Position {
-        let mut last_use_line: Option<u32> = None;
-        for (i, line) in source.lines().enumerate() {
-            let t = line.trim_start();
-            if t.starts_with("use ") {
-                last_use_line = Some(i as u32);
-            } else if !t.is_empty() && !t.starts_with("--") && last_use_line.is_some() {
-                break;
-            }
-        }
-        match last_use_line {
-            Some(line) => Position {
-                line: line + 1,
-                character: 0,
-            },
-            None => Position {
-                line: 0,
-                character: 0,
-            },
-        }
+        let parsed = parser::query::SourceParseExt::parse_source_full(source);
+        let spans = &parsed.ast.span_table;
+        let last = parsed
+            .ast
+            .uses
+            .iter()
+            .flat_map(|import| &import.0)
+            .map(|module| {
+                let span = match &module.source {
+                    ast::ImportSource::LocalBundle(b) => {
+                        b.members.last().map_or(b.span, |m| m.span)
+                    }
+                    _ => module.source.span_id(),
+                };
+                spans.get(span).end()
+            })
+            .max();
+        last.map_or(Position::new(0, 0), |end| {
+            let (line, _) = source.byte_offset_to_position(end.saturating_sub(1));
+            Position::new(line + 1, 0)
+        })
     }
 
     fn line_byte_range(source: &str, line: u32) -> Option<(usize, usize)> {
@@ -604,6 +555,37 @@ impl Backend {
 
         Some(CodeAction {
             title: format!("Rename bind `{old_name}` to `{new_name}`"),
+            kind: Some(CodeActionKind::QUICKFIX),
+            diagnostics: Some(vec![diag.clone()]),
+            edit: Some(WorkspaceEdit {
+                changes: Some(changes),
+                ..Default::default()
+            }),
+            is_preferred: Some(true),
+            ..Default::default()
+        })
+    }
+
+    fn rename_duplicate_parameter_code_action(uri: &Url, diag: &Diagnostic) -> Option<CodeAction> {
+        let v = diag.data.as_ref()?;
+        let obj = v.as_object()?;
+        if obj.get("gincQuickFix").and_then(|x| x.as_str()) != Some("rename-duplicate-parameter") {
+            return None;
+        }
+        let old_name = obj.get("oldName").and_then(|x| x.as_str())?;
+        let new_name = obj.get("newName").and_then(|x| x.as_str())?;
+
+        let mut changes = HashMap::new();
+        changes.insert(
+            uri.clone(),
+            vec![TextEdit {
+                range: diag.range,
+                new_text: new_name.to_string(),
+            }],
+        );
+
+        Some(CodeAction {
+            title: format!("Rename parameter `{old_name}` to `{new_name}`"),
             kind: Some(CodeActionKind::QUICKFIX),
             diagnostics: Some(vec![diag.clone()]),
             edit: Some(WorkspaceEdit {

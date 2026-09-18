@@ -38,7 +38,7 @@ impl Backend {
         Ok(result.flatten())
     }
 
-    fn build_signature_help(
+    pub(crate) fn build_signature_help(
         source: &str,
         ast: &FileAst,
         position: Position,

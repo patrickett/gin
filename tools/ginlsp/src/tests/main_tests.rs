@@ -2,6 +2,22 @@ use internment::Intern;
 use parser::parse_from_str;
 
 #[test]
+fn signature_help_includes_named_results() {
+    let source = "pair() first Int, second Bit: return 1, True\nmain: pair(";
+    let ast = parser::cursor::TokenCursor::parse_source(source);
+    let help = crate::Backend::build_signature_help(
+        source,
+        &ast,
+        tower_lsp::lsp_types::Position {
+            line: 1,
+            character: 10,
+        },
+    )
+    .expect("signature help");
+    assert_eq!(help.signatures[0].label, "pair() first Int, second Bit");
+}
+
+#[test]
 fn dot_completion_union_variants() {
     use typecheck::completions::dot_completions_for_ty;
     use typecheck::transform::transform_file;

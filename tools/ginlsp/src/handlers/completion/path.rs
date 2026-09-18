@@ -1,4 +1,5 @@
 use crate::Backend;
+use ast::source::SourceExt;
 use resolve::GinPackageExt;
 use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Position, Range, Url};
 
@@ -12,36 +13,16 @@ impl Backend {
         let line_text = source.lines().nth(position.line as usize)?;
         let trimmed = line_text.trim_start();
 
+        let col = line_text.position_to_byte_offset(0, position.character)?;
+        let before_cursor = &line_text[..col];
+
+        if let Some((module, partial)) = Self::source_first_import_context(source, position) {
+            return Some(Self::complete_bundle_members(
+                file_uri, config, module, &partial, position,
+            ));
+        }
         if !trimmed.starts_with("use ") {
             return None;
-        }
-
-        let col = position.character as usize;
-        let before_cursor = &line_text[..col.min(line_text.len())];
-
-        // Inside `use path.(partial` — bundle member list.
-        if let Some(dot_paren_pos) = before_cursor.rfind(".(") {
-            let module_path = &line_text[..dot_paren_pos].trim();
-            if let Some(use_end) = module_path.rfind("use ") {
-                let mod_name = module_path[use_end + 4..].trim();
-                let partial = &before_cursor[dot_paren_pos + 2..];
-                return Some(Self::complete_bundle_members(
-                    file_uri, config, mod_name, partial, position,
-                ));
-            }
-        }
-
-        // After `use core.` or `use 'arch'.` — member import completions (`.Symbol`).
-        if before_cursor.ends_with('.')
-            && !before_cursor.contains(".(")
-            && let Some(use_end) = before_cursor.rfind("use ")
-        {
-            let path_part = before_cursor[use_end + 4..].trim_end_matches('.').trim();
-            if !path_part.is_empty() && !path_part.contains(',') {
-                return Some(Self::complete_module_member_after_dot(
-                    file_uri, config, path_part, position,
-                ));
-            }
         }
 
         if let Some(quote_pos) = before_cursor.rfind('\'') {
@@ -87,6 +68,65 @@ impl Backend {
         Some(Self::complete_package_paths(
             file_uri, config, line_text, position,
         ))
+    }
+
+    fn source_first_import_context(source: &str, position: Position) -> Option<(&str, String)> {
+        let lines: Vec<_> = source.lines().collect();
+        let line = *lines.get(position.line as usize)?;
+        let end = line.position_to_byte_offset(0, position.character)?;
+        let prefix = &line[..end];
+        let mut header = position.line as usize;
+        if !prefix.trim_start().starts_with("use ") {
+            let indent = prefix.len() - prefix.trim_start().len();
+            if indent == 0 {
+                return None;
+            }
+            while header > 0 {
+                header -= 1;
+                let previous = lines[header];
+                if previous.trim().is_empty() || previous.trim_start().starts_with("--") {
+                    continue;
+                }
+                if previous.len() - previous.trim_start().len() < indent {
+                    break;
+                }
+            }
+        }
+        let declaration = if header == position.line as usize {
+            prefix
+        } else {
+            lines[header]
+        };
+        let rest = declaration.trim_start().strip_prefix("use ")?;
+        let source_end = if rest.starts_with(['\'', '"']) {
+            let quote = rest.chars().next()?;
+            rest[1..].find(quote)? + 2
+        } else {
+            rest.find(char::is_whitespace).unwrap_or(rest.len())
+        };
+        let module = &rest[..source_end];
+        let tail = &rest[source_end..];
+        if module.is_empty()
+            || module.contains([',', '('])
+            || (!tail.is_empty() && !tail.starts_with(char::is_whitespace))
+            || tail.trim_start().starts_with("as ")
+            || (header == position.line as usize && tail.is_empty())
+        {
+            return None;
+        }
+        let mut partial = tail.trim_start().to_string();
+        for previous in lines.iter().take(position.line as usize).skip(header + 1) {
+            if previous.trim_start().starts_with("--") {
+                continue;
+            }
+            partial.push('\n');
+            partial.push_str(previous.trim());
+        }
+        if header != position.line as usize {
+            partial.push('\n');
+            partial.push_str(prefix.trim_start());
+        }
+        Some((module, partial))
     }
 
     fn dependency_names(file_uri: &Url, config: Option<&flask::FlaskConfigHandle>) -> Vec<String> {
@@ -245,31 +285,6 @@ impl Backend {
             });
         }
 
-        // Add public symbols (defs and tags) from .gin files in the package.
-        for sym in base_pkg_dir.list_public_symbols() {
-            if !sym.starts_with(partial) {
-                continue;
-            }
-            items.push(CompletionItem {
-                label: sym.clone(),
-                kind: Some(CompletionItemKind::FUNCTION),
-                detail: Some("public symbol".to_string()),
-                text_edit: Some(tower_lsp::lsp_types::CompletionTextEdit::Edit(
-                    tower_lsp::lsp_types::TextEdit {
-                        range: Range {
-                            start: Position {
-                                line: position.line,
-                                character: token_start as u32,
-                            },
-                            end: position,
-                        },
-                        new_text: format!("{base_prefix}{sym}"),
-                    },
-                )),
-                ..Default::default()
-            });
-        }
-
         items
     }
 
@@ -405,11 +420,12 @@ impl Backend {
         mod_path: &str,
     ) -> Option<std::path::PathBuf> {
         let trimmed = mod_path.trim();
-        if let Some(quoted) = trimmed
-            .strip_prefix('\'')
-            .and_then(|s| s.strip_suffix('\''))
+        if let Some(quote) = trimmed.chars().next().filter(|c| matches!(c, '\'' | '"'))
+            && let Some(quoted) = trimmed
+                .strip_prefix(quote)
+                .and_then(|s| s.strip_suffix(quote))
         {
-            let pkg_root = resolve::find_package_root(file_dir)?;
+            let pkg_root = resolve::find_package_root(&file_uri.to_file_path().ok()?)?;
             return resolve::normalize_local_import_path(
                 file_dir,
                 &pkg_root,
@@ -431,69 +447,6 @@ impl Backend {
         resolve::resolve_logical_module_dir(&dep_dir, &segments)
     }
 
-    /// `use core.|` or `use 'arch'.|` — offer `.Symbol` member imports.
-    fn complete_module_member_after_dot(
-        file_uri: &Url,
-        config: Option<&flask::FlaskConfigHandle>,
-        mod_path: &str,
-        position: Position,
-    ) -> Vec<CompletionItem> {
-        let file_path = match file_uri.to_file_path() {
-            Ok(p) => p,
-            Err(_) => return vec![],
-        };
-        let file_dir = match file_path.parent() {
-            Some(d) => d,
-            None => return vec![],
-        };
-        let Some(mod_dir) =
-            Self::resolve_module_dir_for_import_path(file_uri, config, file_dir, mod_path)
-        else {
-            return vec![];
-        };
-
-        let dot_col = position.character.saturating_sub(1);
-        let text_edit_range = Range {
-            start: Position {
-                line: position.line,
-                character: dot_col,
-            },
-            end: position,
-        };
-
-        let mut items = Vec::new();
-        for sub in Self::nested_folder_module_names(&mod_dir) {
-            items.push(CompletionItem {
-                label: sub.clone(),
-                kind: Some(CompletionItemKind::MODULE),
-                detail: Some("folder module".to_string()),
-                text_edit: Some(tower_lsp::lsp_types::CompletionTextEdit::Edit(
-                    tower_lsp::lsp_types::TextEdit {
-                        range: text_edit_range,
-                        new_text: format!(".{sub}"),
-                    },
-                )),
-                ..Default::default()
-            });
-        }
-        for sym in mod_dir.list_public_symbols() {
-            items.push(CompletionItem {
-                label: sym.clone(),
-                kind: Some(CompletionItemKind::FUNCTION),
-                detail: Some(format!("{}.{}", mod_path.trim_matches('\''), sym)),
-                text_edit: Some(tower_lsp::lsp_types::CompletionTextEdit::Edit(
-                    tower_lsp::lsp_types::TextEdit {
-                        range: text_edit_range,
-                        new_text: format!(".{sym}"),
-                    },
-                )),
-                ..Default::default()
-            });
-        }
-        items
-    }
-
-    /// Inside `use path.(a, b|` — bundle members.
     fn complete_bundle_members(
         file_uri: &Url,
         config: Option<&flask::FlaskConfigHandle>,
@@ -516,17 +469,16 @@ impl Backend {
             return vec![];
         };
 
-        let parts: Vec<&str> = partial.split(',').map(|s| s.trim()).collect();
+        let parts: Vec<&str> = partial.split([',', '\n']).map(|s| s.trim()).collect();
         let already: Vec<String> = parts[..parts.len().saturating_sub(1)]
             .iter()
             .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
+            .map(|s| s.split_whitespace().next().unwrap_or_default().to_string())
             .collect();
         let current_partial = parts.last().unwrap_or(&"").trim();
-        let after_last_comma = partial.rfind(',').map(|i| i + 1).unwrap_or(0);
         let edit_start_col = position
             .character
-            .saturating_sub((partial.len() - after_last_comma) as u32);
+            .saturating_sub(current_partial.encode_utf16().count() as u32);
 
         let text_edit_range = Range {
             start: Position {
@@ -541,11 +493,7 @@ impl Backend {
             if !sym.starts_with(current_partial) || already.iter().any(|s| s == &sym) {
                 continue;
             }
-            let new_text = if partial.contains(',') {
-                format!(" {sym}")
-            } else {
-                sym.clone()
-            };
+            let new_text = sym.clone();
             items.push(CompletionItem {
                 label: sym.clone(),
                 kind: Some(CompletionItemKind::FUNCTION),

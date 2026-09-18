@@ -2,18 +2,18 @@ use super::*;
 
 #[test]
 fn build_add_import_edits_replaces_existing_use_line() {
-    let source = "use '../primitive/'.List\n\nString has (bytes List(Byte))\n";
+    let source = "use '../primitive/' List\n\nString has (bytes List(Byte))\n";
     let insert_pos = Backend::use_insert_position(source);
     let edits = Backend::build_add_import_edits(
         source,
-        "use '../primitive/'.(Byte, List)",
+        "use '../primitive/' Byte, List",
         Some(0),
         &[],
         insert_pos,
         false,
     );
     assert_eq!(edits.len(), 1);
-    assert_eq!(edits[0].new_text, "use '../primitive/'.(Byte, List)\n");
+    assert_eq!(edits[0].new_text, "use '../primitive/' Byte, List\n");
     assert_eq!(edits[0].range.start.line, 0);
     assert_eq!(edits[0].range.start.character, 0);
     // End spans through the line's trailing newline.
@@ -42,8 +42,14 @@ fn build_add_import_edits_inserts_when_no_replace_line() {
     let source = "main:\nreturn\n";
     let insert_pos = Backend::use_insert_position(source);
     let edits =
-        Backend::build_add_import_edits(source, "use core.Int", None, &[], insert_pos, false);
+        Backend::build_add_import_edits(source, "use core Int", None, &[], insert_pos, false);
     assert_eq!(edits.len(), 1);
     assert_eq!(edits[0].range.start, insert_pos);
-    assert!(edits[0].new_text.contains("use core.Int"));
+    assert!(edits[0].new_text.contains("use core Int"));
+}
+
+#[test]
+fn import_insertion_follows_the_entire_member_block() {
+    let source = "use package.math\n    add\n    sub\n\nmain: 0\n";
+    assert_eq!(Backend::use_insert_position(source), Position::new(3, 0));
 }

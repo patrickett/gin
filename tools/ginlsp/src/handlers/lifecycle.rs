@@ -21,6 +21,8 @@ impl Backend {
             completion_provider: Some(CompletionOptions {
                 resolve_provider: Some(false),
                 trigger_characters: Some(vec![
+                    " ".to_string(),
+                    ",".to_string(),
                     ".".to_string(),
                     "'".to_string(),
                     "/".to_string(),
@@ -42,7 +44,7 @@ impl Backend {
                 retrigger_characters: Some(vec![",".to_string()]),
                 work_done_progress_options: WorkDoneProgressOptions::default(),
             }),
-            document_formatting_provider: None,
+            document_formatting_provider: Some(OneOf::Left(true)),
             ..Default::default()
         };
 

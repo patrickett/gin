@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::Semaphore;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
@@ -48,18 +49,9 @@ impl Backend {
                     s
                 }
                 ImportSource::Local(p, _) => p.to_string_lossy().to_lowercase(),
+                ImportSource::LocalFile(p, _) => p.to_string_lossy().to_lowercase(),
                 ImportSource::LocalBundle(b) => b.root.as_str().to_lowercase(),
                 ImportSource::CurrentModule { member } => member.export.as_str().to_lowercase(),
-                ImportSource::LocalMember(m) => {
-                    let mut s = m
-                        .local_path
-                        .as_ref()
-                        .map(|p| p.to_string_lossy().to_lowercase())
-                        .unwrap_or_default();
-                    s.push('.');
-                    s.push_str(m.member.export.as_str().to_lowercase().as_str());
-                    s
-                }
             }
         }
 
@@ -119,67 +111,13 @@ impl Backend {
                     None => continue,
                 };
 
-            // Build the sorted version
-            let mut sorted: Vec<&ast::ModuleImport> = items.clone();
-            sorted.sort_by_key(|mi| import_sort_key(mi));
-
-            let mut sorted_text = String::from("use ");
-            for (i, mi) in sorted.iter().enumerate() {
-                if i > 0 {
-                    sorted_text.push_str(", ");
-                }
-                match &mi.source {
-                    ImportSource::Package(path) => {
-                        sorted_text.push_str(path.root.as_str());
-                        for seg in &path.segments {
-                            sorted_text.push('.');
-                            sorted_text.push_str(seg.as_str());
-                        }
-                    }
-                    ImportSource::Local(p, _) => {
-                        sorted_text.push('\'');
-                        sorted_text.push_str(&p.to_string_lossy());
-                        sorted_text.push('\'');
-                    }
-                    ImportSource::LocalBundle(b) => {
-                        sorted_text.push_str(b.root.as_str());
-                        sorted_text.push_str(".(");
-                        let mut members: Vec<&ast::BundleExportImport> = b.members.iter().collect();
-                        members.sort_by_key(|m| m.export.as_str().to_lowercase());
-                        for (j, member) in members.iter().enumerate() {
-                            if j > 0 {
-                                sorted_text.push_str(", ");
-                            }
-                            sorted_text.push_str(member.export.as_str());
-                            if let Some(alias) = &member.alias {
-                                sorted_text.push_str(" as ");
-                                sorted_text.push_str(alias.as_str());
-                            }
-                        }
-                        sorted_text.push(')');
-                    }
-                    ImportSource::CurrentModule { member } => {
-                        sorted_text.push_str(member.export.as_str());
-                        if let Some(alias) = &member.alias {
-                            sorted_text.push_str(" as ");
-                            sorted_text.push_str(alias.as_str());
-                        }
-                    }
-                    ImportSource::LocalMember(m) => {
-                        if let Some(p) = &m.local_path {
-                            sorted_text.push('\'');
-                            sorted_text.push_str(&p.to_string_lossy());
-                            sorted_text.push('\'');
-                            sorted_text.push('.');
-                        }
-                        sorted_text.push_str(m.member.export.as_str());
-                        if let Some(alias) = &m.member.alias {
-                            sorted_text.push_str(" as ");
-                            sorted_text.push_str(alias.as_str());
-                        }
-                    }
-                }
-            }
+            let mut import_ast = ast::FileAst::default();
+            import_ast.uses.push(import.clone());
+            let config = ginfmt::Config::default();
+            let sorted_text = ginfmt::AstFormatter::new(source, &config, span_table)
+                .format_file(&import_ast)
+                .trim_end()
+                .to_string();
 
             let (sl, sc) = source.byte_offset_to_position(line_start_byte);
             let (el, ec) = source.byte_offset_to_position(line_end_byte);
@@ -246,7 +184,7 @@ impl Backend {
                             )
                             .with_arg("name", name.clone())
                             .with_help("remove the import or reference the name in this file")
-                            .with_category(diagnostic::Category::Help)
+                            .with_category(diagnostic::Category::Warn)
                             .at_span(span_table.get(span_id)),
                         );
                     }
@@ -278,6 +216,7 @@ pub(crate) struct GinLspBackend {
     pub(crate) package_configs: DashMap<std::path::PathBuf, flask::FlaskConfigHandle>,
     pub(crate) shutdown: AtomicBool,
     pub(crate) latest_diagnostic_gen: AtomicU64,
+    pub(crate) diagnostic_worker: Arc<Semaphore>,
 }
 
 #[derive(Clone)]
@@ -300,6 +239,7 @@ impl Backend {
             package_configs: DashMap::new(),
             shutdown: AtomicBool::new(false),
             latest_diagnostic_gen: AtomicU64::new(0),
+            diagnostic_worker: Arc::new(Semaphore::new(1)),
         }))
     }
 
@@ -404,6 +344,12 @@ impl Backend {
     }
 
     async fn publish_diagnostics_for(&self, uri: Url, trigger_path: PathBuf, my_gen: u64) {
+        if self.is_shutdown() || self.is_stale(my_gen) {
+            return;
+        }
+        let Ok(_permit) = Arc::clone(&self.diagnostic_worker).acquire_owned().await else {
+            return;
+        };
         if self.is_shutdown() || self.is_stale(my_gen) {
             return;
         }
@@ -613,6 +559,11 @@ impl LanguageServer for Backend {
 
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
         self.catch_request("code_action", self.handle_code_action(params))
+            .await
+    }
+
+    async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
+        self.catch_request("formatting", self.handle_formatting(params))
             .await
     }
 }

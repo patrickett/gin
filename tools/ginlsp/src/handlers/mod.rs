@@ -1,6 +1,7 @@
 pub(crate) mod code_action;
 pub(crate) mod completion;
 mod document_sync;
+pub(crate) mod formatting;
 mod goto_definition;
 mod hover;
 mod lifecycle;

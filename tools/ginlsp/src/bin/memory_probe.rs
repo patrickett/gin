@@ -72,9 +72,10 @@ fn load_root_cache(cache: &PackageCache, root: &Path) -> Vec<PathBuf> {
 }
 
 fn main() {
-    let root = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "modules/gin_core".to_string());
+    let Some(root) = std::env::args().nth(1) else {
+        eprintln!("usage: memory_probe <package-path>");
+        std::process::exit(2);
+    };
 
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let mut root_path = PathBuf::from(manifest_dir);

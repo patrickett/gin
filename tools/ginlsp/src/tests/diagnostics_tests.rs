@@ -79,7 +79,7 @@ fn unknown_symbol_add_import_merges_with_existing_primitive_import() {
     .unwrap();
     fs::write(root.join("primitive/list.gin"), "List(x) is Unit\n").unwrap();
     fs::write(root.join("primitive/int.gin"), "Byte is Unit\n").unwrap();
-    let source = "use '../primitive/'.List\n\nString has (bytes List(Byte))\n";
+    let source = "use '../primitive/' List\n\nString has (bytes List(Byte))\n";
     fs::write(root.join("string/string.gin"), source).unwrap();
 
     let path = Path::new(&root).join("string/string.gin");
@@ -107,7 +107,7 @@ fn unknown_symbol_add_import_merges_with_existing_primitive_import() {
         .expect("merged suggestion");
     assert_eq!(
         merged.get("useLine").and_then(|v| v.as_str()),
-        Some("use '../primitive/'.(Byte, List)")
+        Some("use '../primitive/' Byte, List")
     );
     assert_eq!(merged.get("replaceLine").and_then(|v| v.as_u64()), Some(0));
 
@@ -217,7 +217,7 @@ fn unreachable_else_omit_quickfix() {
 
 #[test]
 fn indexed_diagnostics_produce_correct_ranges() {
-    let source = "use core.true\n\nmain:\n    core.true\n    check(core.true)\nreturn\n";
+    let source = "use core true\n\nmain:\n    core.true\n    check(core.true)\nreturn\n";
     let symptoms = [
         Diagnostic::new("parse-custom", "unexpected token").at_span(span::Span::new(0, 3)),
         Diagnostic::new("type-unknown-symbol", "unknown symbol `Foo`")
@@ -250,4 +250,21 @@ fn indexed_diagnostics_produce_correct_ranges() {
         assert!(diag.severity.is_some(), "diagnostic {i} missing severity");
         assert!(diag.code.is_some(), "diagnostic {i} missing code");
     }
+}
+
+#[test]
+fn empty_parens_are_reported_as_warning() {
+    use parser::query::SourceParseExt;
+    let source = "good() Int: 7\n";
+    let output = source.parse_source_full();
+    let converter = DiagnosticConverter::new(source.to_string(), LineIndex::new(source));
+    let diagnostics = converter.symptoms_to_diagnostics(
+        &output.symptoms,
+        &Url::parse("file:///test.gin").unwrap(),
+        None,
+    );
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message == "unnecessary parentheses"
+            && diagnostic.severity == Some(DiagnosticSeverity::WARNING)
+    }));
 }

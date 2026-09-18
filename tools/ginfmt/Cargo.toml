@@ -12,6 +12,7 @@ ast = { workspace = true }
 span = { workspace = true }
 resolve = { workspace = true }
 internment = "0.8"
+indexmap = { workspace = true }
 
 lexer = { workspace = true }
 diagnostic = { workspace = true }

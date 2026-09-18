@@ -9,6 +9,7 @@ pub struct Config {
     pub align_comments: bool,
     /// Maximum line width before wrapping (default: 80).
     pub max_line_width: usize,
+    pub max_type_alignment_padding: usize,
     // TODO: Add `comment_fill_column` for relative comment wrapping (default: 70).
     //
     // Design: Comment content should be wrapped relative to the comment's start column,
@@ -35,6 +36,7 @@ impl Default for Config {
             align_binds: true,
             align_comments: true,
             max_line_width: 80,
+            max_type_alignment_padding: 16,
         }
     }
 }

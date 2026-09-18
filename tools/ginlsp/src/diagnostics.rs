@@ -98,20 +98,20 @@ impl DiagnosticConverter {
             "parse-indented-return" => Some(serde_json::json!({
                 "gincQuickFix": "fix-indented-return",
             })),
-            "use-prefer-member-import" => {
-                let path_prefix = symptom.arg("pathPrefix")?;
-                let symbol = symptom.arg("symbol")?;
-                Some(serde_json::json!({
-                    "gincQuickFix": "prefer-member-import",
-                    "pathPrefix": path_prefix,
-                    "symbol": symbol,
-                }))
-            }
             "parse-bind-name-not-snake-case" => {
                 let name = symptom.arg("name")?;
                 let suggested = symptom.arg("suggested")?;
                 Some(serde_json::json!({
                     "gincQuickFix": "rename-bind-snake-case",
+                    "oldName": name,
+                    "newName": suggested,
+                }))
+            }
+            "style-duplicate-parameter-name" => {
+                let name = symptom.arg("parameter")?;
+                let suggested = symptom.arg("suggestion")?;
+                Some(serde_json::json!({
+                    "gincQuickFix": "rename-duplicate-parameter",
                     "oldName": name,
                     "newName": suggested,
                 }))
@@ -164,13 +164,13 @@ impl DiagnosticConverter {
             .map(|symptom| {
                 let range = self.span_to_range_indexed(symptom.span.start(), symptom.span.end());
                 let severity = match symptom.code.slug() {
-                    "use-prefer-member-import" | "parse-bind-name-not-snake-case" => {
+                    "parse-bind-name-not-snake-case" | "parse-empty-parens" => {
                         DiagnosticSeverity::WARNING
                     }
                     _ => match symptom.category {
                         Category::Flaw => DiagnosticSeverity::ERROR,
+                        Category::Warn => DiagnosticSeverity::WARNING,
                         Category::Help => DiagnosticSeverity::HINT,
-                        Category::Info => DiagnosticSeverity::INFORMATION,
                     },
                 };
                 let slug = symptom.error_code().to_string();
