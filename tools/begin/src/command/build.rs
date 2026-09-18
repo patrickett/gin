@@ -1,12 +1,15 @@
 use flask::FlaskConfig;
-use ginc::cli::{Args, Emit};
+use ginc::cli::{Args, Emit, Profile};
 use ginc::compile::GinCompiler;
 use std::path::PathBuf;
 
-// TODO: compiler performance, show time spend on io, and the number of syscalls
-
-/// `begin (b)uild` will build
-pub fn begin_build(config: FlaskConfig, input: Option<PathBuf>) {
+pub fn begin_build(
+    config: FlaskConfig,
+    input: Option<PathBuf>,
+    timings: bool,
+    release: bool,
+    quiet: bool,
+) -> bool {
     let (path, emit) = match input {
         Some(p) => (p, Emit::Exe),
         None => {
@@ -14,7 +17,7 @@ pub fn begin_build(config: FlaskConfig, input: Option<PathBuf>) {
                 Ok(d) => d,
                 Err(e) => {
                     eprintln!("error: cannot get current directory: {e}");
-                    return;
+                    return false;
                 }
             };
 
@@ -29,7 +32,7 @@ pub fn begin_build(config: FlaskConfig, input: Option<PathBuf>) {
 
     if !path.exists() {
         eprintln!("error: path does not exist: {}", path.display());
-        return;
+        return false;
     }
 
     // Resolve path dependencies relative to cwd (where flask.jsonc lives).
@@ -37,26 +40,24 @@ pub fn begin_build(config: FlaskConfig, input: Option<PathBuf>) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("error: cannot get current directory: {e}");
-            return;
+            return false;
         }
     };
     let dependencies = super::resolve_path_dependencies(&config, &config_dir);
-
-    // For libraries, use package name as output
-    let output = if emit == Emit::Obj {
-        let pkg_name = format!("{}.o", config.name.replace('-', "_"));
-        Some(config_dir.join("target").join(pkg_name))
-    } else {
-        None
-    };
 
     let mut args = Args {
         input: path,
         dependencies,
         emit,
-        output,
+        timings,
+        profile: if release {
+            Profile::Release
+        } else {
+            Profile::Debug
+        },
+        quiet,
         ..Default::default()
     };
 
-    let _ = GinCompiler::compile(&mut args);
+    GinCompiler::compile_cli(&mut args).is_success()
 }

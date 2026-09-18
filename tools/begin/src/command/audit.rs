@@ -1,15 +1,22 @@
-use flask::FlaskConfig;
+use flask::{FlaskConfig, GinHome, RegistryClient};
 
-/// `begin audit` checks dependencies against security advisories
-pub fn begin_audit(_config: FlaskConfig) {
-    #[cfg(debug_assertions)]
-    println!("info: auditing dependencies for security vulnerabilities...");
-
-    // TODO: Implement audit functionality when flasks.io is available
-    // 1. Read dependencies from flask.jsonc
-    // 2. Fetch security advisories from flasks.io API
-    // 3. Match dependency versions against advisories
-    // 4. Report any vulnerabilities found
-
-    eprintln!("warning: `begin audit` is not yet implemented");
+pub fn begin_audit(config: FlaskConfig) {
+    let result = (|| -> Result<(), String> {
+        let client = RegistryClient::load(GinHome::discover().map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_secs();
+        client.audit(&config, now).map_err(|e| e.to_string())
+    })();
+    match result {
+        Ok(()) => println!(
+            "Every locked registry dependency is eligible under current signed security metadata"
+        ),
+        Err(error) => {
+            eprintln!("begin audit: {error}");
+            std::process::exit(1);
+        }
+    }
 }

@@ -1,14 +1,18 @@
 use flask::FlaskConfig;
 use ginc::cli::{Args, Emit};
-use ginc::compile::GinCompiler;
+use ginc::compile::{CompileResult, GinCompiler};
 use std::path::PathBuf;
-use std::process::Command;
 
 // TODO: support passing args to the executable: begin run -- --some-arg
 
 /// `begin (r)un` compiles and executes the default entry file (see [`super::DEFAULT_ENTRY`])
 /// or the given file. Without that entry, treats the package as a library and does not run.
-pub fn begin_run(config: FlaskConfig, input: Option<PathBuf>, watch: bool) {
+pub fn begin_run(
+    config: FlaskConfig,
+    input: Option<PathBuf>,
+    watch: bool,
+    sandbox: flask::ExecutionSandbox,
+) {
     let cwd = match std::env::current_dir() {
         Ok(d) => d,
         Err(_) => {
@@ -40,42 +44,50 @@ pub fn begin_run(config: FlaskConfig, input: Option<PathBuf>, watch: bool) {
     let config_dir = std::env::current_dir().unwrap_or_default();
     let dependencies = super::resolve_path_dependencies(&config, &config_dir);
 
-    // Determine executable path (same as input but without extension)
-    let exe_path = path.with_extension("");
-
-    // Compile to executable
     eprintln!("Compiling {} v{}", config.name, config.version);
-
     let mut args = Args {
         input: path.clone(),
-        dependencies: dependencies.clone(),
+        dependencies,
         emit: Emit::Exe,
-        output: Some(exe_path.clone()),
         ..Default::default()
     };
-
-    GinCompiler::compile(&mut args);
-
-    // Check if compilation succeeded
-    if !exe_path.exists() {
-        eprintln!("error: Compilation failed");
-        return;
-    }
+    let exe_path = match GinCompiler::compile(&mut args) {
+        CompileResult::Success { output: Some(path) }
+        | CompileResult::SuccessWithTypecheckDiagnostics { output: Some(path) } => path,
+        _ => {
+            eprintln!("error: Compilation failed");
+            std::process::exit(1);
+        }
+    };
 
     eprintln!("Running `{}`", exe_path.display());
 
-    let mut cmd = Command::new(&exe_path);
+    let scratch = match tempfile::tempdir() {
+        Ok(dir) => dir,
+        Err(error) => {
+            eprintln!("error: cannot create execution sandbox: {error}");
+            std::process::exit(1);
+        }
+    };
+    let mut cmd = match sandbox.command(&exe_path, scratch.path()) {
+        Ok(command) => command,
+        Err(error) => {
+            eprintln!("error: cannot configure execution sandbox: {error}");
+            std::process::exit(1);
+        }
+    };
     // TODO: forward args to executable when args passthrough is implemented
     let status = match cmd.status() {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("error: Failed to execute: {}", e);
-            return;
+            eprintln!("error: Failed to execute in sandbox: {}", e);
+            std::process::exit(1);
         }
     };
 
     if !status.success() {
         eprintln!("info: Exited with status: {}", status);
+        std::process::exit(status.code().unwrap_or(1));
     }
 
     // TODO: implement watch mode for recompile+run loop

@@ -1,18 +1,28 @@
 use clap::Subcommand;
+use std::path::PathBuf;
 
 mod bump;
-use bump::*;
 
 #[derive(Subcommand, Debug)]
 pub enum VersionCommand {
-    /// Check the current module interface and increase
-    /// the module version accordingly
+    /// Compare the compiled interface with a previous release and update the version.
     #[command(alias = "b")]
-    Bump,
+    Bump {
+        /// Compare a local interface artifact instead of fetching the signed registry baseline.
+        #[arg(long)]
+        against: Option<PathBuf>,
+        /// Explain the required version without modifying the manifest.
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 pub fn version(cmd: &VersionCommand) {
-    match cmd {
-        VersionCommand::Bump => bump(),
+    let result = match cmd {
+        VersionCommand::Bump { against, check } => bump::bump(against.as_deref(), *check),
+    };
+    if let Err(error) = result {
+        eprintln!("begin version bump: {error}");
+        std::process::exit(1);
     }
 }

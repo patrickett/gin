@@ -5,14 +5,6 @@ use crate::{command::BeginCommand, tui::Tui};
 use clap::*;
 use flask::FlaskConfig;
 
-// TODO: So if a semantic version is of the same major version the interface should
-// be the same which means begin can use an already compiled one of the same
-// major version
-//
-// TODO: automatic semantic versioning, when publishing a flask we want to make
-// sure via the compiler that the interface is compatible with the version
-// via a hash or something similar
-
 #[derive(Parser, Debug)]
 #[command(version, about)]
 /// Begin is the package manager for the Gin programming language
@@ -28,7 +20,7 @@ fn main() {
     // TODO: come up with a different pattern for this,
     // we want to prompt when no flask
     if let Some(cmd) = &args.command
-        && !cmd.needs_config()
+        && !cmd.needs_preloaded_config()
     {
         cmd.run(None);
         return;
