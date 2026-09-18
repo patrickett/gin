@@ -11,16 +11,20 @@ VSCODE_QUERIES="${ROOT}/editors/vscode/queries"
 
 cd "${GRAMMAR_DIR}"
 
-if ! command -v npx >/dev/null 2>&1; then
-  echo "error: npx is required (install Node.js)" >&2
+TREE_SITTER="${GRAMMAR_DIR}/node_modules/.bin/tree-sitter"
+if [[ ! -x "${TREE_SITTER}" ]]; then
+  echo "error: install grammar dependencies with npm install --prefix editors/tree-sitter-gin" >&2
   exit 1
 fi
 
-echo "==> tree-sitter generate (ABI 14)"
-npx --yes tree-sitter-cli@0.22.6 generate --abi 14
+CLI_VERSION="$(node -p 'require("./package.json").devDependencies["tree-sitter-cli"]')"
+if [[ "$("${TREE_SITTER}" --version)" != "tree-sitter ${CLI_VERSION}"* ]]; then
+  echo "error: reinstall grammar dependencies to use tree-sitter ${CLI_VERSION}" >&2
+  exit 1
+fi
 
-echo "==> tree-sitter build --wasm"
-npx --yes tree-sitter-cli@0.22.6 build --wasm
+"${TREE_SITTER}" generate --abi 14
+"${TREE_SITTER}" build --wasm
 
 WASM_SRC="${GRAMMAR_DIR}/tree-sitter-gin.wasm"
 if [[ ! -f "${WASM_SRC}" ]]; then

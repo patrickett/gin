@@ -17,7 +17,7 @@ use core as c
 consecutive selective uses
 ================================================================================
 
-use '../target/'.target
+use '../target/' target
 use BigInt, Int
 
 --------------------------------------------------------------------------------
@@ -64,8 +64,8 @@ declare interface signatures
 ================================================================================
 
 Allocator has
-    allocate(ref self, l Layout) Slice(Byte) or AllocError
-    deallocate(ref self, p Pointer(Byte), l Layout)
+    allocate(self ref, l Layout) Slice(Byte) or AllocError
+    deallocate(self ref, p Pointer(Byte), l Layout)
 
 --------------------------------------------------------------------------------
 
@@ -112,8 +112,8 @@ composed interface with qualified methods
 ================================================================================
 
 Combined has TraitA and TraitB
-    TraitA.run(ref self) Int := 1
-    TraitB.run(ref self) Int := 2
+    TraitA.run(self ref) Int := 1
+    TraitB.run(self ref) Int := 2
 
 --------------------------------------------------------------------------------
 
@@ -392,10 +392,7 @@ result : write(
 newline tests: bundle exports
 ================================================================================
 
-use 'mod'.(
-    Foo
-    Bar
-)
+use 'mod' Foo, Bar
 
 --------------------------------------------------------------------------------
 
@@ -559,19 +556,17 @@ Coord has (x Int, y Int)
 --------------------------------------------------------------------------------
 
 (source_file
-  (declare_statement
-    (type_identifier)
-    (ERROR)
-    (decl_member_list
-      (record_field
+  (type_identifier)
+  (ERROR
+    (declaration_parameters
+      (declaration_parameter
         (identifier)
         (tag
           (type_identifier)))
-      (record_field
+      (declaration_parameter
         (identifier)
         (tag
-          (type_identifier)))))
-  (ERROR))
+          (type_identifier))))))
 
 ================================================================================
 grouped attributes are rejected
@@ -583,16 +578,14 @@ get(i Int) Byte: buf.(i)
 --------------------------------------------------------------------------------
 
 (source_file
-  (bind_statement
-    (attributes
-      (ERROR)
-      (identifier))
-    (ERROR
+  (ERROR)
+  (sequence_literal
+    (identifier)
+    (call_expression
       (identifier)
-      (parameters
-        (parameter
-          (tag
-            (type_identifier)))))
+      (argument_list
+        (type_identifier))))
+  (bind_statement
     (identifier)
     (parameters
       (parameter
@@ -610,33 +603,35 @@ get(i Int) Byte: buf.(i)
 grouped references and prefix local bindings
 ================================================================================
 
-borrow(ref{r} value Entity) ref{r} Entity: value
+borrow(value ref{r} Entity) ref{r} Entity: value
 mut current Entity: place
 
 --------------------------------------------------------------------------------
 
 (source_file
   (bind_statement
-    (identifier)
+    name: (identifier)
     (parameters
       (parameter
-        (reference_group
-          (identifier))
-        (identifier)
-        (tag
-          (type_identifier))))
-    (tag
+        name: (identifier)
+        type: (tag
+          (reference_type
+            (reference_group
+              root: (identifier))
+            type: (tag
+              (type_identifier))))))
+    return_type: (tag
       (reference_type
         (reference_group
-          (identifier))
-        (tag
+          root: (identifier))
+        type: (tag
           (type_identifier))))
-    (identifier))
+    value: (identifier))
   (bind_statement
-    (identifier)
-    (tag
+    name: (identifier)
+    return_type: (tag
       (type_identifier))
-    (identifier)))
+    value: (identifier)))
 
 ================================================================================
 typed hidden state parameters
@@ -683,9 +678,9 @@ List(x, length PointerSize: ?, capacity PointerSize: ?, storage StorageIdentity:
 ownership modifiers and expressions
 ================================================================================
 
-drop(eat value Entity): eat value
-inspect(ref value Entity, mut output Entity): update(ref value, mut output)
-main: drop(eat value)
+drop(value own Entity): value
+inspect(value ref Entity, output mut Entity): update(value, output)
+main: drop(value)
 
 --------------------------------------------------------------------------------
 
@@ -697,15 +692,16 @@ main: drop(eat value)
         name: (identifier)
         type: (tag
           (type_identifier))))
-    value: (unary_expression
-      operand: (identifier)))
+    value: (identifier))
   (bind_statement
     name: (identifier)
     (parameters
       (parameter
         name: (identifier)
         type: (tag
-          (type_identifier)))
+          (reference_type
+            type: (tag
+              (type_identifier)))))
       (parameter
         name: (identifier)
         type: (tag
@@ -713,23 +709,20 @@ main: drop(eat value)
     value: (call_expression
       function: (identifier)
       arguments: (argument_list
-        (unary_expression
-          operand: (identifier))
-        (unary_expression
-          operand: (identifier)))))
+        (identifier)
+        (identifier))))
   (bind_statement
     name: (identifier)
     value: (call_expression
       function: (identifier)
       arguments: (argument_list
-        (unary_expression
-          operand: (identifier))))))
+        (identifier)))))
 
 ================================================================================
 semantic group paths
 ================================================================================
 
-power_up(ref{entities} entity Entity, mut{entities.rings.items} ring Ring): 0
+power_up(entity ref{entities} Entity, ring mut{entities.rings.items} Ring): 0
 
 --------------------------------------------------------------------------------
 
@@ -738,17 +731,19 @@ power_up(ref{entities} entity Entity, mut{entities.rings.items} ring Ring): 0
     name: (identifier)
     (parameters
       (parameter
-        (reference_group
-          root: (identifier))
         name: (identifier)
         type: (tag
-          (type_identifier)))
+          (reference_type
+            (reference_group
+              root: (identifier))
+            type: (tag
+              (type_identifier)))))
       (parameter
+        name: (identifier)
         (reference_group
           root: (identifier)
           segment: (identifier)
           segment: (identifier))
-        name: (identifier)
         type: (tag
           (type_identifier))))
     value: (literal

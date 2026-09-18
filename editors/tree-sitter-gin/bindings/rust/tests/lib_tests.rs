@@ -24,6 +24,26 @@ fn test_can_load_grammar() {
 }
 
 #[test]
+fn ranges_use_to_in_declarations_expressions_and_proofs() {
+    let mut parser = parser();
+    for source in [
+        "Byte is in 0 to 255\n",
+        "Window is -10 to 10\n",
+        "values := low to max\n",
+        "check(value) True thus value in low to max: True\n",
+    ] {
+        let tree = parser.parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error(), "{source}");
+        let legacy = source.replace(" to ", "...");
+        let tree = parser.parse(legacy, None).unwrap();
+        assert!(
+            tree.root_node().has_error(),
+            "accepted obsolete range: {source}"
+        );
+    }
+}
+
+#[test]
 fn simple_decl_no_newline() {
     let mut p = parser();
     let result = p.parse("Bool is True", None);

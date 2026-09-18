@@ -1,0 +1,12 @@
+[package]
+name = "gin-grammar-conformance"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+lexer = { path = "../../../../crates/lexer" }
+parser = { path = "../../../../crates/parser" }
+serde_json = "1.0"

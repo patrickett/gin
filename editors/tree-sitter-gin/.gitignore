@@ -7,3 +7,5 @@ build
 /target/
 *.wasm
 tree-sitter-gin.wasm
+
+!test/compiler/Cargo.lock

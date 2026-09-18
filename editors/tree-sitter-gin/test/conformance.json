@@ -1,0 +1,172 @@
+[
+  {
+    "name": "imports",
+    "source": "use 'sample' Int, Byte\nuse self Bool\nuse Bool\n",
+    "valid": true
+  },
+  {
+    "name": "module namespace imports",
+    "source": "use package.math\nuse package.stats as stats\nmain: math.answer\n",
+    "valid": true
+  },
+  {
+    "name": "source first import selections",
+    "source": "use package.math add, sub as subtract\nuse '../math' add, sub\n",
+    "valid": true
+  },
+  {
+    "name": "indented import selections",
+    "source": "use package.math\n    add\n    sub as subtract\nmain: add\n",
+    "valid": true
+  },
+  {
+    "name": "obsolete parenthesized dependency imports",
+    "source": "use package.math.(add, sub)\n",
+    "valid": false
+  },
+  {
+    "name": "obsolete parenthesized local imports",
+    "source": "use '../math'.(add, sub)\n",
+    "valid": false
+  },
+  {
+    "name": "obsolete dotted local export imports",
+    "source": "use '../math'.add\n",
+    "valid": false
+  },
+  {
+    "name": "numbers and identifier boundaries",
+    "source": "x__ := 1_000\ny_ := 0xAB_CD\nz := 1_2.3_4\n",
+    "valid": true
+  },
+  {
+    "name": "bracket literals",
+    "source": "empty := []\nelements := [1, 2, 3]\nrepeated := [0; 4]\n",
+    "valid": true
+  },
+  {
+    "name": "pointer annotations",
+    "source": "value Byte := 1\npointer @Byte := @value\nwrite(buf @Byte) Int extern\n",
+    "valid": true
+  },
+  {
+    "name": "references and ownership",
+    "source": "f(value own Entity, other ref{root} Entity) ref{root} Entity: other\n",
+    "valid": true
+  },
+  {
+    "name": "rebindings",
+    "source": "main:\n    value: 1\n    value:: 2\n    value+: 3\n    record.field:: 1\n    items.(index)*: 2\nreturn value\n",
+    "valid": true
+  },
+  {
+    "name": "compile-time queries",
+    "source": "f(value Int) Int: #asm('spec', value: #register(value))\narch := #target.arch\nsize := #size(@Byte)\nalign := #alignment(Byte)\nbits := #index_bits(Byte)\n",
+    "valid": true
+  },
+  {
+    "name": "format interpolation",
+    "source": "msg := \"🫖 \\(outer(inner(1), 'text)')) done\"",
+    "valid": true
+  },
+  {
+    "name": "multiline interpolation",
+    "source": "msg := \"value \\(f(\n    1\n)) done\"\n",
+    "valid": true
+  },
+  {
+    "name": "format text and escapes",
+    "source": "msg := \"(name) {name} \\\\(name) \\n\"",
+    "valid": true
+  },
+  {
+    "name": "comments",
+    "source": "--| module\n--- documentation\nx := '-- text' -- ordinary\n",
+    "valid": true
+  },
+  {
+    "name": "ranges and predicates",
+    "source": "Byte is in 0 to 255\nPositive is in 1 to 255\nvalues := 1 to 10\n",
+    "valid": true
+  },
+  {
+    "name": "conditionals",
+    "source": "result: when x is\n    1 then 'yes'\n    else 'no'\n",
+    "valid": true
+  },
+  {
+    "name": "named results",
+    "source": "pair() left Int, right Int:\nreturn left: 1, right: 2\n",
+    "valid": true
+  },
+  {
+    "name": "removed positional products",
+    "source": "pair := (1, 2)\n",
+    "valid": false
+  },
+  {
+    "name": "unsupported equality",
+    "source": "x := a == b\n",
+    "valid": false
+  },
+  {
+    "name": "unsupported inequality",
+    "source": "x := a /= b\n",
+    "valid": false
+  },
+  {
+    "name": "explicit loop and if conditions",
+    "source": "run: while x is True\n    consume(x)\nloop\ncheck: if x is True\n    consume(x)\nreturn\n",
+    "valid": true
+  },
+  {
+    "name": "composed conditions",
+    "source": "check := when x is Ready and y is True then 1 else 0\nnegated := when not x is Ready then 0 else 1\n",
+    "valid": true
+  },
+  {
+    "name": "literal type alternatives",
+    "source": "Digit is 1 or 2 or 3\nGreeting is 'hello'\n",
+    "valid": true
+  },
+  {
+    "name": "expression type arguments",
+    "source": "values Vec(Int, 4 + 4) := make()\n",
+    "valid": true
+  },
+  {
+    "name": "fixed-array annotations",
+    "source": "fill(data [Byte; 4]) [Byte; 4]: data\n",
+    "valid": true
+  },
+  {
+    "name": "ordinary operator precedence",
+    "source": "result := a or b and c + d * e\nrange := a to b to c\naddress := @a + b\nnegative := -a + b\n",
+    "valid": true
+  },
+  {
+    "name": "generic parameter and return type",
+    "source": "identity(value t) t: value\nBox(t) has value t\n",
+    "valid": true
+  },
+  {
+    "name": "proof-bearing results",
+    "source": "check(value Int) Yes thus value = 1 or No: Yes\n",
+    "valid": true
+  },
+  {
+    "name": "constrained and defaulted type parameters",
+    "source": "Box(t has Copy) has value t\nDefault(t: Int) has value t\nHidden(t, count Int: ?) has value t\n",
+    "valid": true
+  },
+  {
+    "name": "generic reference and variant result types",
+    "source": "copy(value ref t) t: deref value\nChoice is Ready -> Int or Missing -> Int\n",
+    "valid": true
+  },
+  {
+    "name": "proof operators are contextual",
+    "source": "check(value Int) Yes thus value == 1 and value /= 2 or No: Yes\n",
+    "valid": true
+  }
+]

@@ -1,5 +1,6 @@
 ; Identifiers
 (identifier) @variable
+(member_expression field: (identifier) @property)
 
 ; Types
 (type_identifier) @type
@@ -16,19 +17,15 @@
 (parameter
   name: (self_parameter) @variable.builtin)
 
+; Parameter ownership is a semantic keyword even in an isolated hover signature.
+
+(parameter modifier: "ref" @keyword)
+(parameter modifier: "mut" @keyword)
+
 ; Bind statements (function/variable definitions)
 (bind_statement
-  name: (identifier) @function)
-
-; Error recovery for top-level bind headers after indentation-based `when` arms.
-; Without newline tokens, tree-sitter can recover helper headers as ERROR nodes;
-; keep their names highlighted consistently as functions.
-(ERROR
-  (is_pattern
-    (identifier) @function)
-  (is_pattern
-    (tuple_is_pattern))
-  (type_identifier))
+  name: (identifier) @function
+  (parameters))
 
 (record_signature
   name: (identifier) @function.method)
@@ -68,29 +65,33 @@
 ; Format strings
 (format_string) @string
 (escape_sequence) @string.escape
-(interpolation) @string.special
 
 ; Comments
 (line_comment) @comment
-(doc_comment) @comment
-(module_doc_comment) @comment
+(doc_comment) @comment.documentation
+(module_doc_comment) @comment.documentation
 
 ; Attributes
-(attributes) @attribute
+(attributes (identifier) @attribute)
+(attribute_call name: (identifier) @attribute)
+(compile_time_query ["size" "alignment" "index_bits" "register" "target" "asm"] @function.builtin)
 ; Keywords
 "use" @keyword
 "as" @keyword
 "private" @keyword
-"has" @keyword.type
-"is" @keyword.operator
 [
-  "ref"
-  "mut"
-  "eat"
+    "has"
+    "ref"
+    "mut"
+    "own"
+
 ] @keyword.modifier
+"is" @keyword.operator
 "or" @keyword.operator
 "and" @keyword.operator
 "not" @keyword.operator
+"deref" @keyword.operator
+"to" @keyword.operator
 
 "return" @keyword.return
 "if" @keyword.conditional
@@ -101,7 +102,6 @@
 "while" @keyword.repeat
 "in" @keyword
 "loop" @keyword.repeat
-"extern" @keyword
 
 ; Operators
 "+" @operator
@@ -110,7 +110,6 @@
 "/" @operator
 "%" @operator
 "=" @operator
-"/=" @operator
 "<" @operator
 ">" @operator
 "<=" @operator
@@ -123,6 +122,8 @@
 "..." @operator
 ":=" @operator
 ":" @operator
+"::" @operator
+"@" @operator
 
 ; Punctuation
 "(" @punctuation.bracket
@@ -133,3 +134,21 @@
 "}" @punctuation.bracket
 "." @punctuation.delimiter
 "," @punctuation.delimiter
+
+(self_type) @type.builtin
+(named_result name: (identifier) @variable.parameter)
+(named_argument name: (identifier) @property)
+(record_set field: (identifier) @property)
+
+"#" @punctuation.special
+";" @punctuation.delimiter
+"?" @operator
+
+((identifier) @keyword
+  (#any-of? @keyword "break" "continue" "of"))
+
+(interpolation "\\(" @punctuation.special ")" @punctuation.special)
+
+"thus" @keyword
+"==" @operator
+"/=" @operator

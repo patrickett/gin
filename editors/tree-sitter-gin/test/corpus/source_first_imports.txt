@@ -1,0 +1,59 @@
+==================
+source first inline imports
+==================
+use '../math' add, sub as subtract
+
+---
+
+(source_file
+  (use_statement
+    (module_import
+      (string)
+      (import_symbol
+        (identifier))
+      (import_symbol
+        (identifier)
+        (identifier)))))
+
+==================
+source first indented imports
+==================
+use math
+    add
+    sub as subtract
+main: 1
+
+---
+
+(source_file
+  (use_statement
+    (module_import
+      (path
+        (identifier))
+      (import_symbol
+        (identifier))
+      (import_symbol
+        (identifier)
+        (identifier))))
+  (bind_statement
+    (identifier)
+    (literal
+      (number))))
+
+==================
+source only import before declaration
+==================
+use math
+value := 1
+
+---
+
+(source_file
+  (use_statement
+    (module_import
+      (path
+        (identifier))))
+  (bind_statement
+    (identifier)
+    (literal
+      (number))))
