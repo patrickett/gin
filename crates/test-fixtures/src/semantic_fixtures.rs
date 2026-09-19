@@ -309,3 +309,160 @@ ReflectionUnit is Unit
 #ReflectionArray
 ReflectionArray is Array
 "#;
+
+pub const MACHINE_X86: &str = r#"architecture := (
+    target: #target.triple
+    arch: "x86_64"
+    dialect: "intel"
+    inputs: (inputs0: "rdi", inputs1: "rsi")
+    references: (references0: "rax", references1: "rcx")
+    scratch: (scratch0: "rax", scratch1: "rcx", scratch2: "rdx", scratch3: "r8", scratch4: "r9", scratch5: "r10", scratch6: "r11")
+    result: "rax"
+    length: "rdx"
+    copy: "mov {destination}, {left}"
+    add: "add {destination}, {right}"
+    load: "mov {destination}, qword ptr [{left}]"
+    store: "mov qword ptr [{destination}], {left}"
+    nop: "nop"
+    add_inout: 1
+    add_clobbers: ["cc"]
+)
+"#;
+
+pub const MACHINE_ARM: &str = r#"architecture := (
+    target: #target.triple
+    arch: "arm64"
+    dialect: "att"
+    inputs: (inputs0: "x0", inputs1: "x1")
+    references: (references0: "x9", references1: "x10")
+    scratch: (scratch0: "x9", scratch1: "x10", scratch2: "x11", scratch3: "x12", scratch4: "x13", scratch5: "x14", scratch6: "x15")
+    result: "x9"
+    length: "x2"
+    copy: "mov {destination}, {left}"
+    add: "add {destination}, {left}, {right}"
+    load: "ldr {destination}, [{left}]"
+    store: "str {left}, [{destination}]"
+    nop: "nop"
+    add_inout: 0
+    add_clobbers: ()
+)
+"#;
+
+pub const RUNTIME: &str = r#"
+RuntimeByte is in 0 to 255
+RuntimePointer is @RuntimeByte
+RuntimeWord is in 0 to 18446744073709551615
+RuntimeInt is in -9223372036854775808 to 9223372036854775807
+
+runtime_reserve_spec := when #target.triple is
+    'aarch64-apple-darwin' then "gin-asm 1\ntarget \"aarch64-apple-darwin\"\ndialect att\ninput \"size\" fixed \"x9\"\nresult fixed \"x0\"\nclobber \"x1\"\nclobber \"x2\"\nclobber \"x3\"\nclobber \"x4\"\nclobber \"x5\"\nclobber \"x16\"\nclobber \"cc\"\noption side_effects\ntemplate \"mov x0, #0\\nmov x1, x9\\nmov x2, #3\\nmov x3, #4098\\nmov x4, #-1\\nmov x5, #0\\nmov x16, #197\\nsvc #128\\nb.cc 1f\\nmov x0, #0\\n1:\""
+    'aarch64-unknown-linux-gnu' then "gin-asm 1\ntarget \"aarch64-unknown-linux-gnu\"\ndialect att\ninput \"size\" fixed \"x9\"\nresult fixed \"x0\"\nclobber \"x1\"\nclobber \"x2\"\nclobber \"x3\"\nclobber \"x4\"\nclobber \"x5\"\nclobber \"x8\"\nclobber \"cc\"\noption side_effects\ntemplate \"mov x0, #0\\nmov x1, x9\\nmov x2, #3\\nmov x3, #34\\nmov x4, #-1\\nmov x5, #0\\nmov x8, #222\\nsvc #0\\ncmn x0, #4095\\nb.cc 1f\\nmov x0, #0\\n1:\""
+    'x86_64-unknown-linux-gnu' then "gin-asm 1\ntarget \"x86_64-unknown-linux-gnu\"\ndialect intel\ninput \"size\" fixed \"rsi\"\nresult fixed \"rax\"\nclobber \"rdi\"\nclobber \"rdx\"\nclobber \"r10\"\nclobber \"r8\"\nclobber \"r9\"\nclobber \"rcx\"\nclobber \"r11\"\nclobber \"cc\"\noption side_effects\ntemplate \"mov rax, 9\\nxor edi, edi\\nmov edx, 3\\nmov r10d, 34\\nmov r8, -1\\nxor r9d, r9d\\nsyscall\\ncmp rax, -4095\\njb 9f\\nxor eax, eax\\n9:\""
+    'x86_64-apple-darwin' then "gin-asm 1\ntarget \"x86_64-apple-darwin\"\ndialect intel\ninput \"size\" fixed \"rsi\"\nresult fixed \"rax\"\nclobber \"rdi\"\nclobber \"rdx\"\nclobber \"r10\"\nclobber \"r8\"\nclobber \"r9\"\nclobber \"rcx\"\nclobber \"r11\"\nclobber \"cc\"\noption side_effects\ntemplate \"mov rax, 33554629\\nxor edi, edi\\nmov edx, 3\\nmov r10d, 4098\\nmov r8, -1\\nxor r9d, r9d\\nsyscall\\njnc 9f\\nxor eax, eax\\n9:\""
+    else ""
+
+runtime_release_spec := when #target.triple is
+    'aarch64-apple-darwin' then "gin-asm 1\ntarget \"aarch64-apple-darwin\"\ndialect att\ninput \"pointer\" fixed \"x9\"\ninput \"size\" fixed \"x10\"\nresult fixed \"x0\"\nclobber \"x1\"\nclobber \"x16\"\nclobber \"cc\"\nmemory write pointer=\"pointer\" length=\"size\"\noption side_effects\ntemplate \"mov x0, x9\\nmov x1, x10\\nmov x16, #73\\nsvc #128\""
+    'aarch64-unknown-linux-gnu' then "gin-asm 1\ntarget \"aarch64-unknown-linux-gnu\"\ndialect att\ninput \"pointer\" fixed \"x9\"\ninput \"size\" fixed \"x10\"\nresult fixed \"x0\"\nclobber \"x1\"\nclobber \"x8\"\nclobber \"cc\"\nmemory write pointer=\"pointer\" length=\"size\"\noption side_effects\ntemplate \"mov x0, x9\\nmov x1, x10\\nmov x8, #215\\nsvc #0\""
+    'x86_64-unknown-linux-gnu' then "gin-asm 1\ntarget \"x86_64-unknown-linux-gnu\"\ndialect intel\ninput \"pointer\" fixed \"rdi\"\ninput \"size\" fixed \"rsi\"\nresult fixed \"rax\"\nclobber \"rcx\"\nclobber \"r11\"\nclobber \"cc\"\nmemory write pointer=\"pointer\" length=\"size\"\noption side_effects\ntemplate \"mov rax, 11\\nsyscall\""
+    'x86_64-apple-darwin' then "gin-asm 1\ntarget \"x86_64-apple-darwin\"\ndialect intel\ninput \"pointer\" fixed \"rdi\"\ninput \"size\" fixed \"rsi\"\nresult fixed \"rax\"\nclobber \"rcx\"\nclobber \"r11\"\nclobber \"cc\"\nmemory write pointer=\"pointer\" length=\"size\"\noption side_effects\ntemplate \"mov rax, 33554505\\nsyscall\""
+    else ""
+
+runtime_nonzero(size RuntimeWord) RuntimeWord:
+    count is in 0 to 18446744073709551615: size
+return when count = 0 is True then 1 else size
+
+runtime_reserve(size RuntimeWord) @RuntimeByte: #asm(runtime_reserve_spec, size: runtime_nonzero(size))
+runtime_release(pointer @RuntimeByte, size RuntimeWord):
+    result RuntimeInt: #asm(runtime_release_spec, pointer: pointer, size: runtime_nonzero(size))
+return
+
+runtime_read_spec := when #target.triple is
+    'aarch64-apple-darwin' then "gin-asm 1\ntarget \"aarch64-apple-darwin\"\ndialect att\ninput \"fd\" fixed \"x9\"\ninput \"pointer\" fixed \"x10\"\ninput \"size\" fixed \"x11\"\nresult fixed \"x0\"\nclobber \"x1\"\nclobber \"x2\"\nclobber \"x16\"\nclobber \"cc\"\nmemory write pointer=\"pointer\" length=\"size\"\noption side_effects\ntemplate \"mov x0, x9\\nmov x1, x10\\nmov x2, x11\\nmov x16, #3\\nsvc #128\""
+    'aarch64-unknown-linux-gnu' then "gin-asm 1\ntarget \"aarch64-unknown-linux-gnu\"\ndialect att\ninput \"fd\" fixed \"x9\"\ninput \"pointer\" fixed \"x10\"\ninput \"size\" fixed \"x11\"\nresult fixed \"x0\"\nclobber \"x1\"\nclobber \"x2\"\nclobber \"x8\"\nclobber \"cc\"\nmemory write pointer=\"pointer\" length=\"size\"\noption side_effects\ntemplate \"mov x0, x9\\nmov x1, x10\\nmov x2, x11\\nmov x8, #63\\nsvc #0\""
+    'x86_64-unknown-linux-gnu' then "gin-asm 1\ntarget \"x86_64-unknown-linux-gnu\"\ndialect intel\ninput \"fd\" fixed \"rdi\"\ninput \"pointer\" fixed \"rsi\"\ninput \"size\" fixed \"rdx\"\nresult fixed \"rax\"\nclobber \"rcx\"\nclobber \"r11\"\nclobber \"cc\"\nmemory write pointer=\"pointer\" length=\"size\"\noption side_effects\ntemplate \"mov rax, 0\\nsyscall\""
+    'x86_64-apple-darwin' then "gin-asm 1\ntarget \"x86_64-apple-darwin\"\ndialect intel\ninput \"fd\" fixed \"rdi\"\ninput \"pointer\" fixed \"rsi\"\ninput \"size\" fixed \"rdx\"\nresult fixed \"rax\"\nclobber \"rcx\"\nclobber \"r11\"\nclobber \"cc\"\nmemory write pointer=\"pointer\" length=\"size\"\noption side_effects\ntemplate \"mov rax, 33554435\\nsyscall\""
+    else ""
+
+runtime_write_spec := when #target.triple is
+    'aarch64-apple-darwin' then "gin-asm 1\ntarget \"aarch64-apple-darwin\"\ndialect att\ninput \"fd\" fixed \"x9\"\ninput \"pointer\" fixed \"x10\"\ninput \"size\" fixed \"x11\"\nresult fixed \"x0\"\nclobber \"x1\"\nclobber \"x2\"\nclobber \"x16\"\nclobber \"cc\"\nmemory read pointer=\"pointer\" length=\"size\"\noption side_effects\ntemplate \"mov x0, x9\\nmov x1, x10\\nmov x2, x11\\nmov x16, #4\\nsvc #128\""
+    'aarch64-unknown-linux-gnu' then "gin-asm 1\ntarget \"aarch64-unknown-linux-gnu\"\ndialect att\ninput \"fd\" fixed \"x9\"\ninput \"pointer\" fixed \"x10\"\ninput \"size\" fixed \"x11\"\nresult fixed \"x0\"\nclobber \"x1\"\nclobber \"x2\"\nclobber \"x8\"\nclobber \"cc\"\nmemory read pointer=\"pointer\" length=\"size\"\noption side_effects\ntemplate \"mov x0, x9\\nmov x1, x10\\nmov x2, x11\\nmov x8, #64\\nsvc #0\""
+    'x86_64-unknown-linux-gnu' then "gin-asm 1\ntarget \"x86_64-unknown-linux-gnu\"\ndialect intel\ninput \"fd\" fixed \"rdi\"\ninput \"pointer\" fixed \"rsi\"\ninput \"size\" fixed \"rdx\"\nresult fixed \"rax\"\nclobber \"rcx\"\nclobber \"r11\"\nclobber \"cc\"\nmemory read pointer=\"pointer\" length=\"size\"\noption side_effects\ntemplate \"mov rax, 1\\nsyscall\""
+    'x86_64-apple-darwin' then "gin-asm 1\ntarget \"x86_64-apple-darwin\"\ndialect intel\ninput \"fd\" fixed \"rdi\"\ninput \"pointer\" fixed \"rsi\"\ninput \"size\" fixed \"rdx\"\nresult fixed \"rax\"\nclobber \"rcx\"\nclobber \"r11\"\nclobber \"cc\"\nmemory read pointer=\"pointer\" length=\"size\"\noption side_effects\ntemplate \"mov rax, 33554436\\nsyscall\""
+    else ""
+
+runtime_read(fd RuntimeInt, pointer @RuntimeByte, size RuntimeWord) RuntimeInt: #asm(runtime_read_spec, fd: fd, pointer: pointer, size: size)
+runtime_write(fd RuntimeInt, pointer @RuntimeByte, size RuntimeWord) RuntimeInt: #asm(runtime_write_spec, fd: fd, pointer: pointer, size: size)
+
+
+runtime_copy_pointer(value ref RuntimePointer) RuntimePointer: deref value
+
+runtime_number_spec := when #target.triple is
+    'aarch64-apple-darwin' then "gin-asm 1\ntarget \"aarch64-apple-darwin\"\ndialect att\ninput \"pointer\" fixed \"x9\"\nresult fixed \"x0\"\nclobber \"x1\"\nclobber \"x2\"\nclobber \"x11\"\nclobber \"x12\"\nclobber \"x13\"\nclobber \"x14\"\nclobber \"x15\"\nclobber \"x16\"\nclobber \"cc\"\noption side_effects\ntemplate \"mov x12, #0\\nmov x13, #1\\nmov x14, #0\\n1:\\nmov x0, #0\\nmov x1, x9\\nmov x2, #1\\nmov x16, #3\\nsvc #128\\ncmp x0, #1\\nb.ne 4f\\nldrb w15, [x9]\\ncbnz x14, 2f\\ncmp w15, #32\\nb.ls 1b\\nmov x14, #1\\ncmp w15, #45\\nb.ne 2f\\nmov x13, #-1\\nb 1b\\n2:\\nsub w15, w15, #48\\ncmp w15, #9\\nb.hi 4f\\nmov x11, #10\\nmadd x12, x12, x11, x15\\nb 1b\\n4:\\nmul x0, x12, x13\""
+    'aarch64-unknown-linux-gnu' then "gin-asm 1\ntarget \"aarch64-unknown-linux-gnu\"\ndialect att\ninput \"pointer\" fixed \"x9\"\nresult fixed \"x0\"\nclobber \"x1\"\nclobber \"x2\"\nclobber \"x11\"\nclobber \"x12\"\nclobber \"x13\"\nclobber \"x14\"\nclobber \"x15\"\nclobber \"x8\"\nclobber \"cc\"\noption side_effects\ntemplate \"mov x12, #0\\nmov x13, #1\\nmov x14, #0\\n1:\\nmov x0, #0\\nmov x1, x9\\nmov x2, #1\\nmov x8, #63\\nsvc #0\\ncmp x0, #1\\nb.ne 4f\\nldrb w15, [x9]\\ncbnz x14, 2f\\ncmp w15, #32\\nb.ls 1b\\nmov x14, #1\\ncmp w15, #45\\nb.ne 2f\\nmov x13, #-1\\nb 1b\\n2:\\nsub w15, w15, #48\\ncmp w15, #9\\nb.hi 4f\\nmov x11, #10\\nmadd x12, x12, x11, x15\\nb 1b\\n4:\\nmul x0, x12, x13\""
+    'x86_64-unknown-linux-gnu' then "gin-asm 1\ntarget \"x86_64-unknown-linux-gnu\"\ndialect intel\ninput \"pointer\" fixed \"r12\"\nresult fixed \"rax\"\nclobber \"rdi\"\nclobber \"rsi\"\nclobber \"rdx\"\nclobber \"r8\"\nclobber \"r10\"\nclobber \"rcx\"\nclobber \"r11\"\nclobber \"cc\"\nclobber \"r9\"\noption side_effects\ntemplate \"xor r8d, r8d\\nmov r9, 1\\nxor r10d, r10d\\n9:\\nxor edi, edi\\nmov rsi, r12\\nmov edx, 1\\nmov eax, 0\\nsyscall\\ncmp rax, 1\\njne 4f\\nmovzx edx, byte ptr [r12]\\ntest r10, r10\\njnz 2f\\ncmp edx, 32\\njbe 9b\\nmov r10, 1\\ncmp edx, 45\\njne 2f\\nmov r9, -1\\njmp 9b\\n2:\\nsub edx, 48\\ncmp edx, 9\\nja 4f\\nimul r8, r8, 10\\nadd r8, rdx\\njmp 9b\\n4:\\nmov rax, r8\\nimul rax, r9\""
+    'x86_64-apple-darwin' then "gin-asm 1\ntarget \"x86_64-apple-darwin\"\ndialect intel\ninput \"pointer\" fixed \"r12\"\nresult fixed \"rax\"\nclobber \"rdi\"\nclobber \"rsi\"\nclobber \"rdx\"\nclobber \"r8\"\nclobber \"r10\"\nclobber \"rcx\"\nclobber \"r11\"\nclobber \"cc\"\nclobber \"r9\"\noption side_effects\ntemplate \"xor r8d, r8d\\nmov r9, 1\\nxor r10d, r10d\\n9:\\nxor edi, edi\\nmov rsi, r12\\nmov edx, 1\\nmov eax, 33554435\\nsyscall\\ncmp rax, 1\\njne 4f\\nmovzx edx, byte ptr [r12]\\ntest r10, r10\\njnz 2f\\ncmp edx, 32\\njbe 9b\\nmov r10, 1\\ncmp edx, 45\\njne 2f\\nmov r9, -1\\njmp 9b\\n2:\\nsub edx, 48\\ncmp edx, 9\\nja 4f\\nimul r8, r8, 10\\nadd r8, rdx\\njmp 9b\\n4:\\nmov rax, r8\\nimul rax, r9\""
+    else ""
+
+runtime_number RuntimeInt:
+    pointer RuntimePointer: runtime_reserve(1)
+    result RuntimeInt: #asm(runtime_number_spec, pointer: runtime_copy_pointer(ref pointer))
+    runtime_release(pointer, 1)
+return result
+
+runtime_print_spec := when #target.triple is
+    'aarch64-apple-darwin' then "gin-asm 1\ntarget \"aarch64-apple-darwin\"\ndialect att\ninput \"value\" fixed \"x9\"\ninput \"pointer\" fixed \"x10\"\nresult fixed \"x0\"\nclobber \"x1\"\nclobber \"x2\"\nclobber \"x11\"\nclobber \"x12\"\nclobber \"x13\"\nclobber \"x14\"\nclobber \"x15\"\nclobber \"x16\"\nclobber \"cc\"\noption side_effects\ntemplate \"add x11, x10, #31\\nmov w15, #10\\nstrb w15, [x11]\\ncmp x9, #0\\ncneg x12, x9, lt\\nmov x13, #10\\n1:\\nudiv x14, x12, x13\\nmsub x15, x14, x13, x12\\nadd w15, w15, #48\\nstrb w15, [x11, #-1]!\\nmov x12, x14\\ncbnz x12, 1b\\ntbz x9, #63, 2f\\nmov w15, #45\\nstrb w15, [x11, #-1]!\\n2:\\nmov x0, #1\\nmov x1, x11\\nadd x2, x10, #32\\nsub x2, x2, x11\\nmov x16, #4\\nsvc #128\\nmov x0, x9\""
+    'aarch64-unknown-linux-gnu' then "gin-asm 1\ntarget \"aarch64-unknown-linux-gnu\"\ndialect att\ninput \"value\" fixed \"x9\"\ninput \"pointer\" fixed \"x10\"\nresult fixed \"x0\"\nclobber \"x1\"\nclobber \"x2\"\nclobber \"x11\"\nclobber \"x12\"\nclobber \"x13\"\nclobber \"x14\"\nclobber \"x15\"\nclobber \"x8\"\nclobber \"cc\"\noption side_effects\ntemplate \"add x11, x10, #31\\nmov w15, #10\\nstrb w15, [x11]\\ncmp x9, #0\\ncneg x12, x9, lt\\nmov x13, #10\\n1:\\nudiv x14, x12, x13\\nmsub x15, x14, x13, x12\\nadd w15, w15, #48\\nstrb w15, [x11, #-1]!\\nmov x12, x14\\ncbnz x12, 1b\\ntbz x9, #63, 2f\\nmov w15, #45\\nstrb w15, [x11, #-1]!\\n2:\\nmov x0, #1\\nmov x1, x11\\nadd x2, x10, #32\\nsub x2, x2, x11\\nmov x8, #64\\nsvc #0\\nmov x0, x9\""
+    'x86_64-unknown-linux-gnu' then "gin-asm 1\ntarget \"x86_64-unknown-linux-gnu\"\ndialect intel\ninput \"value\" fixed \"r9\"\ninput \"pointer\" fixed \"r12\"\nresult fixed \"rax\"\nclobber \"rdi\"\nclobber \"rsi\"\nclobber \"rdx\"\nclobber \"r8\"\nclobber \"r10\"\nclobber \"rcx\"\nclobber \"r11\"\nclobber \"cc\"\noption side_effects\ntemplate \"mov r8, r9\\nmov rax, r9\\ntest rax, rax\\njns 9f\\nneg rax\\n9:\\nlea rsi, [r12 + 31]\\nmov byte ptr [rsi], 10\\nmov ecx, 10\\n2:\\nxor edx, edx\\ndiv rcx\\nadd dl, 48\\ndec rsi\\nmov byte ptr [rsi], dl\\ntest rax, rax\\njnz 2b\\ntest r8, r8\\njns 3f\\ndec rsi\\nmov byte ptr [rsi], 45\\n3:\\nlea rdx, [r12 + 32]\\nsub rdx, rsi\\nmov edi, 1\\nmov eax, 1\\nsyscall\\nmov rax, r8\""
+    'x86_64-apple-darwin' then "gin-asm 1\ntarget \"x86_64-apple-darwin\"\ndialect intel\ninput \"value\" fixed \"r9\"\ninput \"pointer\" fixed \"r12\"\nresult fixed \"rax\"\nclobber \"rdi\"\nclobber \"rsi\"\nclobber \"rdx\"\nclobber \"r8\"\nclobber \"r10\"\nclobber \"rcx\"\nclobber \"r11\"\nclobber \"cc\"\noption side_effects\ntemplate \"mov r8, r9\\nmov rax, r9\\ntest rax, rax\\njns 9f\\nneg rax\\n9:\\nlea rsi, [r12 + 31]\\nmov byte ptr [rsi], 10\\nmov ecx, 10\\n2:\\nxor edx, edx\\ndiv rcx\\nadd dl, 48\\ndec rsi\\nmov byte ptr [rsi], dl\\ntest rax, rax\\njnz 2b\\ntest r8, r8\\njns 3f\\ndec rsi\\nmov byte ptr [rsi], 45\\n3:\\nlea rdx, [r12 + 32]\\nsub rdx, rsi\\nmov edi, 1\\nmov eax, 33554436\\nsyscall\\nmov rax, r8\""
+    else ""
+
+runtime_print(value RuntimeInt) RuntimeInt:
+    pointer RuntimePointer: runtime_reserve(32)
+    result RuntimeInt: #asm(runtime_print_spec, value: value, pointer: runtime_copy_pointer(ref pointer))
+    runtime_release(pointer, 32)
+return result
+
+runtime_copy_input_spec := when #target.triple is
+    'aarch64-apple-darwin' then "gin-asm 1\ntarget \"aarch64-apple-darwin\"\ndialect att\ninput \"pointer\" fixed \"x9\"\nresult fixed \"x0\"\nclobber \"x1\"\nclobber \"x2\"\nclobber \"x11\"\nclobber \"x12\"\nclobber \"x13\"\nclobber \"x14\"\nclobber \"x15\"\nclobber \"x16\"\nclobber \"cc\"\noption side_effects\ntemplate \"1:\\nmov x0, #0\\nmov x1, x9\\nmov x2, #1\\nmov x16, #3\\nsvc #128\\ncmp x0, #1\\nb.ne 2f\\nmov x0, #1\\nmov x1, x9\\nmov x2, #1\\nmov x16, #4\\nsvc #128\\nb 1b\\n2:\\nmov x0, #0\""
+    'aarch64-unknown-linux-gnu' then "gin-asm 1\ntarget \"aarch64-unknown-linux-gnu\"\ndialect att\ninput \"pointer\" fixed \"x9\"\nresult fixed \"x0\"\nclobber \"x1\"\nclobber \"x2\"\nclobber \"x11\"\nclobber \"x12\"\nclobber \"x13\"\nclobber \"x14\"\nclobber \"x15\"\nclobber \"x8\"\nclobber \"cc\"\noption side_effects\ntemplate \"1:\\nmov x0, #0\\nmov x1, x9\\nmov x2, #1\\nmov x8, #63\\nsvc #0\\ncmp x0, #1\\nb.ne 2f\\nmov x0, #1\\nmov x1, x9\\nmov x2, #1\\nmov x8, #64\\nsvc #0\\nb 1b\\n2:\\nmov x0, #0\""
+    'x86_64-unknown-linux-gnu' then "gin-asm 1\ntarget \"x86_64-unknown-linux-gnu\"\ndialect intel\ninput \"pointer\" fixed \"r12\"\nresult fixed \"rax\"\nclobber \"rdi\"\nclobber \"rsi\"\nclobber \"rdx\"\nclobber \"r8\"\nclobber \"r10\"\nclobber \"rcx\"\nclobber \"r11\"\nclobber \"cc\"\nclobber \"r9\"\noption side_effects\ntemplate \"9:\\nxor edi, edi\\nmov rsi, r12\\nmov edx, 1\\nmov eax, 0\\nsyscall\\ncmp rax, 1\\njne 2f\\nmov edi, 1\\nmov rsi, r12\\nmov edx, 1\\nmov eax, 1\\nsyscall\\njmp 9b\\n2:\\nxor eax, eax\""
+    'x86_64-apple-darwin' then "gin-asm 1\ntarget \"x86_64-apple-darwin\"\ndialect intel\ninput \"pointer\" fixed \"r12\"\nresult fixed \"rax\"\nclobber \"rdi\"\nclobber \"rsi\"\nclobber \"rdx\"\nclobber \"r8\"\nclobber \"r10\"\nclobber \"rcx\"\nclobber \"r11\"\nclobber \"cc\"\nclobber \"r9\"\noption side_effects\ntemplate \"9:\\nxor edi, edi\\nmov rsi, r12\\nmov edx, 1\\nmov eax, 33554435\\nsyscall\\ncmp rax, 1\\njne 2f\\nmov edi, 1\\nmov rsi, r12\\nmov edx, 1\\nmov eax, 33554436\\nsyscall\\njmp 9b\\n2:\\nxor eax, eax\""
+    else ""
+
+runtime_copy_input RuntimeInt:
+    pointer RuntimePointer: runtime_reserve(1)
+    result RuntimeInt: #asm(runtime_copy_input_spec, pointer: runtime_copy_pointer(ref pointer))
+    runtime_release(pointer, 1)
+return result
+
+runtime_bits_spec := when #target.triple is
+    'aarch64-apple-darwin' then "gin-asm 1\ntarget \"aarch64-apple-darwin\"\ndialect att\ninput \"value\" fixed \"x9\"\nresult fixed \"x0\"\ntemplate \"mov x0, x9\""
+    'aarch64-unknown-linux-gnu' then "gin-asm 1\ntarget \"aarch64-unknown-linux-gnu\"\ndialect att\ninput \"value\" fixed \"x9\"\nresult fixed \"x0\"\ntemplate \"mov x0, x9\""
+    'x86_64-unknown-linux-gnu' then "gin-asm 1\ntarget \"x86_64-unknown-linux-gnu\"\ndialect intel\ninput \"value\" fixed \"r9\"\nresult fixed \"rax\"\ntemplate \"mov rax, r9\""
+    'x86_64-apple-darwin' then "gin-asm 1\ntarget \"x86_64-apple-darwin\"\ndialect intel\ninput \"value\" fixed \"r9\"\nresult fixed \"rax\"\ntemplate \"mov rax, r9\""
+    else ""
+
+runtime_word_bits(value RuntimeInt) RuntimeWord: #asm(runtime_bits_spec, value: value)
+runtime_signed_bits(value RuntimeWord) RuntimeInt: #asm(runtime_bits_spec, value: value)
+"#;
+
+pub const INDEXED_COPY: &str = r#"Byte is in 0 to 255
+replace(previous Byte, next Byte) Byte: next
+copy(source ref Buffer(Byte,4), destination mut Buffer(Byte,4), count is in 0 to 4):
+    for index in 0 to count
+        destination.(index) :: replace(destination.(index), source.(index))
+    loop
+return
+forward(source ref Buffer(Byte,4), destination mut Buffer(Byte,4), count is in 0 to 4): copy(ref source, mut destination, count)
+run(count is in 0 to 4) Buffer(Byte,4):
+    source Buffer(Byte,4): [3,17,128,255]
+    destination Buffer(Byte,4): [41;4]
+    forward(ref source, mut destination, count)
+return destination
+
+read_copied(count is in 0 to 4, index is in 0 to 3) Byte: run(count).(index)
+
+#fixed_array(element,count)
+Buffer(element Type,count BigInt) has
+"#;

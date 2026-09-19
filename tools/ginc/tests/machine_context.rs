@@ -7,7 +7,33 @@ use test_fixtures::{TempPackage, host_target_triple};
 #[test]
 fn machine_register_helpers_execute_with_runtime_inputs() {
     let target = host_target_triple();
-    let source = include_str!("fixtures/machine_main.gin");
+    let source = r#"Word is in -9223372036854775808 to 9223372036854775807
+#machine(architecture)
+mov(destination mut Word, source Word):
+    destination:: source
+return
+#machine(architecture)
+add(destination mut Word, source Word):
+    destination:: destination + source
+return
+#machine(architecture)
+add_words(a Word, b Word) Word:
+    left: x9
+    right: x10
+    input := b
+    mov(left, a)
+    mov(right, input)
+    add(left, right)
+return left
+runtime_read_int Word: runtime_number() as Word
+runtime_print_int(value Word) Word: runtime_print(value as RuntimeInt) as Word
+main:
+    a: runtime_read_int
+    b: runtime_read_int
+    result: add_words(a, b)
+    runtime_print_int(result)
+return 0
+"#;
     let source = if target.starts_with("x86_64") {
         source.replace("x9", "rax").replace("x10", "rcx")
     } else {

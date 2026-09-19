@@ -3,6 +3,8 @@
     all(target_arch = "x86_64", target_os = "linux")
 ))]
 
+use test_fixtures::semantic_fixtures::INDEXED_COPY;
+
 use codegen::{CodegenContext, CodegenSourceMap, NativeCompiler, NativeEngine};
 use typecheck::transform::{TransformCtx, transform};
 
@@ -36,10 +38,7 @@ fn engine(source: &str, export: &str) -> NativeEngine {
 
 #[test]
 fn native_copy_updates_only_the_requested_bytes() {
-    let engine = engine(
-        include_str!("../../typecheck/tests/fixtures/indexed_copy.gin"),
-        "copy",
-    );
+    let engine = engine(INDEXED_COPY, "copy");
     for count in 0..=4 {
         let source: [u8; 4] = [3, 17, 128, 255];
         let mut destination: [u8; 4] = [41; 4];
@@ -62,10 +61,7 @@ fn native_copy_updates_only_the_requested_bytes() {
 
 #[test]
 fn native_copy_reads_the_updated_local_storage_with_compact_indices() {
-    let engine = engine(
-        include_str!("../../typecheck/tests/fixtures/indexed_copy.gin"),
-        "read_copied",
-    );
+    let engine = engine(INDEXED_COPY, "read_copied");
     for mut count in 0u8..=4 {
         for mut index in 0u8..4 {
             let mut result = 0u8;
@@ -90,8 +86,7 @@ fn native_copy_reads_the_updated_local_storage_with_compact_indices() {
 
 #[test]
 fn native_copy_scales_wide_elements_once() {
-    let source = include_str!("../../typecheck/tests/fixtures/indexed_copy.gin")
-        .replace("0 to 255", "0 to 65535");
+    let source = INDEXED_COPY.replace("0 to 255", "0 to 65535");
     let engine = engine(&source, "copy");
     for mut count in 0u8..=4 {
         let source = [3u16, 257, 32768, 65535];

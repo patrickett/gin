@@ -110,12 +110,12 @@ impl Drop for TempPackage {
 
 pub fn machine_backend_source(target: &str) -> &'static str {
     if target.starts_with("x86_64") {
-        include_str!("machine/x86.gin")
+        semantic_fixtures::MACHINE_X86
     } else {
-        include_str!("machine/arm.gin")
+        semantic_fixtures::MACHINE_ARM
     }
 }
 
 pub fn with_runtime(source: &str) -> String {
-    format!("{source}\n{}", include_str!("runtime.gin"))
+    format!("{source}\n{}", semantic_fixtures::RUNTIME)
 }

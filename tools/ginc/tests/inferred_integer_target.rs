@@ -27,6 +27,8 @@ fn concrete_target_cli_preserves_wide_compile_time_integer_constants() {
         no_cache: true,
         gin_home: None,
         timings: false,
+        timings_json: None,
+        quiet: false,
         fast_llvm: false,
         verbose: None,
         dependencies: Default::default(),
@@ -55,7 +57,7 @@ fn assert_alignment_invalid(candidate: &str, test_name: &str) {
     let count = test_fixtures::semantic_fixtures::COUNT_GIN;
     let count = count.lines().skip(1).collect::<Vec<_>>().join("\n");
     let source = format!(
-        "Byte is in 0 to 255\n{count}\n\nmain:\n    if Alignment.try_new({candidate}) is Invalid\n        0\n    return\n    return 1\n"
+        "Byte is in 0 to 255\n{count}\n\nmain:\n    if Alignment.try_new({candidate}) is Invalid\n        0\n    return\nreturn 1\n"
     );
 
     cra(test_name, &source)

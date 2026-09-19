@@ -1,6 +1,5 @@
 use std::hint::black_box;
 use std::mem::size_of;
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use ast::{Bind, Declare, Expr, Typed};
@@ -88,29 +87,13 @@ fn measure(mut operation: impl FnMut()) -> Vec<Duration> {
     samples
 }
 
-fn gin_sources(path: &Path, sources: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(path) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            gin_sources(&path, sources);
-        } else if path.extension().is_some_and(|extension| extension == "gin")
-            && let Ok(source) = std::fs::read_to_string(path)
-        {
-            sources.push(source);
-        }
-    }
-}
-
 #[test]
 #[ignore = "manual declaration attribute frequency report"]
 fn report_declare_attribute_frequency() {
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let mut sources = Vec::new();
-    gin_sources(&workspace.join("modules"), &mut sources);
-    gin_sources(&workspace.join("crates"), &mut sources);
+    let sources = [
+        declaration_heavy_source(),
+        "#bits(8)\nByte is in 0 to 255\n#phantom(unit)\nCount(unit) is in 0 to 1000\n".to_owned(),
+    ];
 
     let mut declarations = 0;
     let mut attributed = 0;
@@ -127,7 +110,7 @@ fn report_declare_attribute_frequency() {
     }
 
     println!(
-        "files={} declarations={} attributed={} default={} raw_items={} declare_B={} attrs_B={} typed_tag_B={}",
+        "sources={} declarations={} attributed={} default={} raw_items={} declare_B={} attrs_B={} typed_tag_B={}",
         sources.len(),
         declarations,
         attributed,

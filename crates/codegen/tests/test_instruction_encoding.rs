@@ -9,9 +9,128 @@ use typecheck::eval::{CompileTimeHost, Evaluator};
 use typecheck::transform::{TransformCtx, transform};
 use typecheck::{DefId, FileId, TypedFileAst};
 
-const REGIONS: &str = include_str!("fixtures/instruction_regions.gin");
+const REGIONS: &str = r#"Register(register_type Type) has register register_type
+Relative(label_type Type) has relative label_type, min Int, max Int
+Mark(label_type Type) has label label_type
+Instruction(encoder_type Type, arguments_type Type) has encoder encoder_type, size Int, arguments arguments_type
+Region(contract_type Type, items_type Type) has contract contract_type, items items_type
 
-const SOURCE: &str = include_str!("fixtures/encoded_instructions.gin");
+add_region():
+return Region(
+        contract: add_contract()
+        items: (instruction0: Instruction(encoder: AddEncoder, size: 3, arguments: (argument0: Register(register: "left"), argument1: Register(register: "right"))))
+    )
+
+kernel_region():
+return Region(
+        contract: syscall_contract()
+        items: (instruction0: Instruction(encoder: KernelEncoder, size: 2, arguments: ()))
+    )
+
+branch_region():
+return Region(
+        contract: branch_contract()
+        items: (instruction0: Instruction(encoder: JumpEncoder, size: 2, arguments: (jump: Relative(relative: "done", min: -128, max: 127))), instruction1: Instruction(encoder: IncrementEncoder, size: 4, arguments: (increment: Register(register: "value"))), instruction2: Mark(label: "done"), instruction3: Instruction(encoder: NopEncoder, size: 1, arguments: ()))
+    )
+
+add_words(a Int, b Int) left Int: #asm(add_region(), left: a, right: b)
+kernel_entry(n Int, fd Int, buffer @Int, length Int) number Int: #asm(kernel_region(), number: n, fd: fd, buffer: buffer, length: length)
+skip_increment(input Int) value Int: #asm(branch_region(), value: input)
+"#;
+
+const SOURCE: &str = r#"
+Int is in -9223372036854775808 to 9223372036854775807
+Choice(slot_type Type, register_type Type) has slot slot_type, register register_type, code Int
+MemoryAccess has pointer Int, length Int
+
+KernelEncoder has
+    encode() Array(Int, 2): [15 as Int, 5 as Int]
+
+AddEncoder has
+    encode(destination is in 0 to 255, source is in 0 to 255) Array(Int, 3): [
+        ((72 | ((source >> 3) << 2) | (destination >> 3)) as Int)
+        (1 as Int)
+        ((192 | ((source & 7) << 3) | (destination & 7)) as Int)
+    ]
+
+JumpEncoder has
+    encode(displacement is in -9223372036854775808 to 9223372036854775807) Array(Int, 2): [235 as Int, (displacement & 255) as Int]
+
+IncrementEncoder has
+    encode(destination is in 0 to 255) Array(Int, 4): [
+        ((72 | (destination >> 3)) as Int)
+        (131 as Int)
+        ((192 | (destination & 7)) as Int)
+        (1 as Int)
+    ]
+
+NopEncoder has
+    encode() Array(Int, 1): [144 as Int]
+
+AddContract(target_type Type, choices_type Type, inputs_type Type, outputs_type Type, clobbers_type Type, reads_type Type, writes_type Type) has
+    target target_type
+    choices choices_type
+    inputs inputs_type
+    outputs outputs_type
+    clobbers clobbers_type
+    reads reads_type
+    writes writes_type
+
+SyscallContract(target_type Type, choices_type Type, inputs_type Type, outputs_type Type, clobbers_type Type, reads_type Type, writes_type Type) has
+    target target_type
+    choices choices_type
+    inputs inputs_type
+    outputs outputs_type
+    clobbers clobbers_type
+    reads reads_type
+    writes writes_type
+
+BranchContract(target_type Type, choices_type Type, inputs_type Type, outputs_type Type, clobbers_type Type, reads_type Type, writes_type Type) has
+    target target_type
+    choices choices_type
+    inputs inputs_type
+    outputs outputs_type
+    clobbers clobbers_type
+    reads reads_type
+    writes writes_type
+
+add_contract():
+return AddContract(
+        target: #target.triple
+        choices: (choice0: Choice(slot: "left", register: "r9", code: 9), choice1: Choice(slot: "left", register: "rax", code: 0), choice2: Choice(slot: "right", register: "r9", code: 9))
+        inputs: (input0: "left", input1: "right")
+        outputs: ["left"]
+        clobbers: ["cc"]
+        reads: ()
+        writes: ()
+    )
+
+syscall_contract():
+return SyscallContract(
+        target: #target.triple
+        choices: (choice0: Choice(slot: "number", register: "rax", code: 0), choice1: Choice(slot: "fd", register: "rdi", code: 7), choice2: Choice(slot: "buffer", register: "rsi", code: 6), choice3: Choice(slot: "length", register: "rdx", code: 2))
+        inputs: (input0: "number", input1: "fd", input2: "buffer", input3: "length")
+        outputs: ["number"]
+        clobbers: (clobber0: "rcx", clobber1: "r11", clobber2: "cc")
+        reads: [MemoryAccess(pointer: 2, length: 3)]
+        writes: ()
+    )
+
+branch_contract():
+return BranchContract(
+        target: #target.triple
+        choices: (choice0: Choice(slot: "value", register: "rax", code: 0))
+        inputs: ["value"]
+        outputs: ["value"]
+        clobbers: ["cc"]
+        reads: ()
+        writes: ()
+    )
+
+#fixed_array(element, count)
+Array(element Type, count BigInt) has
+
+"#;
 
 fn target() -> CompileTarget {
     CompileTarget::Concrete(TargetTriple::parse("x86_64-unknown-linux-gnu").unwrap())

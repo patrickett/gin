@@ -1,7 +1,5 @@
-use std::fs;
 use std::hint::black_box;
 use std::mem::size_of;
-use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use ast::{Bind, Declare, Expr, FileAst};
@@ -75,33 +73,15 @@ fn slot_slack(ast: &FileAst) -> usize {
             .saturating_sub(ast.parse_warnings.len())
 }
 
-fn gin_files(path: &Path, files: &mut Vec<PathBuf>) {
-    for entry in fs::read_dir(path).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            gin_files(&path, files);
-        } else if path.extension().is_some_and(|extension| extension == "gin") {
-            files.push(path);
-        }
-    }
-}
-
 #[test]
-#[ignore = "manual repository corpus Bind occupancy baseline"]
-fn report_repository_bind_occupancy() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../modules");
-    let mut files = Vec::new();
-    gin_files(&root, &mut files);
-    files.sort();
-
-    let mut file_count = 0;
+#[ignore = "manual generated source Bind occupancy baseline"]
+fn report_generated_bind_occupancy() {
+    let sources = [representative_source()];
     let mut bind_count = 0;
     let mut nonempty_counts = [0usize; 10];
     let mut total_slot_slack = 0;
-    for path in files {
-        let source = fs::read_to_string(&path).unwrap();
-        let parsed = TokenCursor::parse_source(&source);
-        file_count += 1;
+    for source in &sources {
+        let parsed = TokenCursor::parse_source(source);
         total_slot_slack += slot_slack(&parsed);
         for bind in parsed.defs.values().chain(&parsed.method_binds) {
             bind_count += 1;
@@ -124,8 +104,10 @@ fn report_repository_bind_occupancy() {
     }
 
     println!(
-        "files={} binds={} top_level_slot_slack={}",
-        file_count, bind_count, total_slot_slack
+        "sources={} binds={} top_level_slot_slack={}",
+        sources.len(),
+        bind_count,
+        total_slot_slack
     );
     println!(
         "bind_nonempty params={} param_slots={} conventions={} group_params={} param_groups={} refinements={} receiver_typevars={} attributes={} return_state={} receiver={}",

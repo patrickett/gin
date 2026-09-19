@@ -25,6 +25,7 @@ sha2 = { workspace = true }
 [dev-dependencies]
 criterion = { workspace = true }
 parser = { workspace = true }
+test-fixtures = { workspace = true }
 
 [[bench]]
 name = "codegen_bench"

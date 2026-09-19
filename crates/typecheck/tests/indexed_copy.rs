@@ -1,5 +1,6 @@
 use internment::Intern;
 use parser::cursor::TokenCursor;
+use test_fixtures::semantic_fixtures::INDEXED_COPY;
 use typecheck::transform::{TransformCtx, transform};
 use typecheck::{FileId, TypedFileAst};
 
@@ -23,8 +24,7 @@ fn check(replacement: &str) -> TypedFileAst {
 
 #[test]
 fn indexed_replacement_explicitly_consumes_the_previous_byte() {
-    let typed = check("replace(destination.(index)
-use source index)");
+    let typed = check("replace(destination.(index), source.(index))");
     assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
     let byte = &typed.tags[&typecheck::TagId(Intern::from_ref("Byte"))].resolved_ty;
     for (id, kind) in typed.exprs.kind.iter().enumerate() {
@@ -41,10 +41,8 @@ use source index)");
 fn indexed_replacement_cannot_silently_discard_a_byte() {
     for replacement in [
         "source.(index)",
-        "inspect(ref destination.(index)
-use source index)",
-        "replace(destination.(0)
-use source index)",
+        "inspect(ref destination.(index), source.(index))",
+        "replace(destination.(0), source.(index))",
     ] {
         let typed = check(replacement);
         assert!(
@@ -60,7 +58,7 @@ use source index)",
 
 #[test]
 fn compile_time_copy_updates_the_callers_buffer() {
-    let source = include_str!("fixtures/indexed_copy.gin");
+    let source = INDEXED_COPY;
     let typed = transform(
         &TokenCursor::parse_source(source),
         FileId(0),
@@ -96,10 +94,7 @@ fn compile_time_copy_updates_the_callers_buffer() {
 
 #[test]
 fn a_closed_copy_call_normalizes_to_a_frozen_buffer() {
-    let source = format!(
-        "copied: run(4)\n{}",
-        include_str!("fixtures/indexed_copy.gin")
-    );
+    let source = format!("copied: run(4)\n{}", INDEXED_COPY);
     let typed = transform(
         &TokenCursor::parse_source(&source),
         FileId(0),
@@ -127,7 +122,7 @@ fn a_closed_copy_call_normalizes_to_a_frozen_buffer() {
 fn copying_overlapping_buffers_is_rejected() {
     let source = format!(
         "overlap(buffer mut Buffer(Byte,4)): copy(ref buffer, mut buffer, 4)\n{}",
-        include_str!("fixtures/indexed_copy.gin")
+        INDEXED_COPY
     );
     let typed = transform(
         &TokenCursor::parse_source(&source),
@@ -146,10 +141,7 @@ fn copying_overlapping_buffers_is_rejected() {
 
 #[test]
 fn copying_more_than_the_buffer_length_is_rejected() {
-    let source = format!(
-        "invalid: run(5)\n{}",
-        include_str!("fixtures/indexed_copy.gin")
-    );
+    let source = format!("invalid: run(5)\n{}", INDEXED_COPY);
     let typed = transform(
         &TokenCursor::parse_source(&source),
         FileId(0),
@@ -199,7 +191,7 @@ fn projections_share_storage_with_their_parent_and_siblings() {
 fn compile_time_out_of_bounds_access_is_a_trap() {
     let source = format!(
         "bad(source ref Buffer(Byte,4)) Byte: source.(4)\nfail:\n    buffer Buffer(Byte,4): [41;4]\nreturn bad(ref buffer)\n{}",
-        include_str!("fixtures/indexed_copy.gin")
+        INDEXED_COPY
     );
     let typed = transform(
         &TokenCursor::parse_source(&source),
@@ -231,7 +223,7 @@ fn compile_time_out_of_bounds_access_is_a_trap() {
 
 #[test]
 fn mutating_a_callers_storage_is_not_folded_away() {
-    let source = include_str!("fixtures/indexed_copy.gin");
+    let source = INDEXED_COPY;
     let typed = transform(
         &TokenCursor::parse_source(source),
         FileId(0),
@@ -256,7 +248,7 @@ fn mutating_a_callers_storage_is_not_folded_away() {
 fn repeated_aggregate_seeds_remain_nested_values() {
     let source = format!(
         "nested Buffer(Buffer(Byte,2),2): [[1,2];2]\n{}",
-        include_str!("fixtures/indexed_copy.gin")
+        INDEXED_COPY
     );
     let typed = transform(
         &TokenCursor::parse_source(&source),
