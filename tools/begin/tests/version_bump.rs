@@ -28,7 +28,7 @@ fn bump_checks_updates_preserves_comments_and_is_idempotent() {
     let cache = tempfile::tempdir().unwrap();
     let raw = "{ // keep this\n name: 'pkg', version: '1.2.3', authors: [] }\n";
     fs::write(root.path().join("flask.jsonc"), raw).unwrap();
-    fs::write(root.path().join("main.gin"), "ping:\n    return\n").unwrap();
+    fs::write(root.path().join("main.gin"), "ping:\nreturn\n").unwrap();
     let result = GinCompiler::compile(&mut Args {
         input: root.path().to_path_buf(),
         emit: Emit::Interface,
@@ -51,7 +51,7 @@ fn bump_checks_updates_preserves_comments_and_is_idempotent() {
     );
     fs::write(
         root.path().join("main.gin"),
-        "ping:\n    return\npong:\n    return\n",
+        "ping:\nreturn\npong:\nreturn\n",
     )
     .unwrap();
     let apply = run(root.path(), cache.path(), &old, false);

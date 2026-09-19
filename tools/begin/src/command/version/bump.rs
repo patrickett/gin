@@ -1,5 +1,4 @@
-use flask::FlaskConfigHandle;
-use flasks::VersionBump;
+use flask::{FlaskConfigHandle, VersionBump};
 use ginc::cli::{Args, Emit};
 use ginc::compile::{CompileResult, GinCompiler};
 use interface::PublicInterface;

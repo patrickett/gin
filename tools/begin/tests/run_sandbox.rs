@@ -8,7 +8,7 @@ fn run_compiles_into_user_cache_and_executes_in_sandbox() {
         serde_json::to_vec(&serde_json::json!({"name":"app","version":"1.0.0","authors":[],"target":test_fixtures::host_target_triple()})).unwrap(),
     )
     .unwrap();
-    std::fs::write(source.path().join("main.gin"), "main:\n    return 0\n").unwrap();
+    std::fs::write(source.path().join("main.gin"), "main:\nreturn 0\n").unwrap();
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_begin"))
         .current_dir(source.path())
         .env("GIN_HOME", home.path())

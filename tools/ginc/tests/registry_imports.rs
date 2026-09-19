@@ -1,6 +1,8 @@
 use ed25519_dalek::SigningKey;
-use flask::{FlaskConfig, GinHome, RegistryClient, RegistrySettings, RegistryTransport};
-use flasks::{Registry, Release, ReleaseStatus, SignedSnapshot, TrustRoot};
+use flask::{
+    FlaskConfig, GinHome, Registry, RegistryClient, RegistrySettings, RegistryTransport, Release,
+    ReleaseStatus, SignedSnapshot, TrustRoot,
+};
 use ginc::{
     cli::{Args, Emit},
     compile::{CompileResult, GinCompiler},

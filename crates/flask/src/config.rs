@@ -70,6 +70,8 @@ pub struct FlaskConfig {
     pub target: Option<String>,
     #[serde(default)]
     dependencies: HashMap<String, Dependency>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<crate::PackageResolution>,
 }
 
 impl FlaskConfig {
@@ -86,6 +88,7 @@ impl FlaskConfig {
             funding: None,
             target: None,
             dependencies: HashMap::new(),
+            resolution: None,
         }
     }
 }
@@ -152,5 +155,31 @@ impl FlaskConfig {
                 return None;
             }
         }
+    }
+}
+
+impl FlaskConfig {
+    pub fn registry_requirements(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, semver::VersionReq>, crate::ResolutionError>
+    {
+        self.dependencies
+            .iter()
+            .filter_map(|(name, dep)| match &dep.kind {
+                DependencyKind::Version { version } => Some(
+                    semver::VersionReq::parse(version)
+                        .map(|req| (name.clone(), req))
+                        .map_err(|e| crate::ResolutionError(e.to_string())),
+                ),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn validate_resolution(&self) -> Result<(), crate::ResolutionError> {
+        if let Some(resolution) = &self.resolution {
+            resolution.validate(&self.registry_requirements()?)?;
+        }
+        Ok(())
     }
 }

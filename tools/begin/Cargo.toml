@@ -25,7 +25,6 @@ tui-input = "0.14"
 crossbeam-channel = { workspace = true }
 dialoguer = "0.11"
 ast = { workspace = true }
-flasks = { workspace = true }
 interface = { workspace = true }
 semver = { workspace = true }
 

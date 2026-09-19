@@ -43,7 +43,7 @@ pub use target::{
 };
 pub use validation::{InterfaceValidationError, validate as validate_interface};
 
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 4;
 pub const MAGIC: &[u8] = b"GINIFACE";
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -77,6 +77,7 @@ pub struct PublicInterface {
     pub subject: PackageInstanceId,
     pub semantic_surface_fingerprint: Fingerprint,
     pub public_closure_fingerprint: Fingerprint,
+    pub resolution_fingerprint: Fingerprint,
     pub declarations: Vec<InterfaceDeclaration>,
     pub target_profiles: Vec<TargetProfile>,
     pub target_realizations: Vec<TargetRealization>,
@@ -98,6 +99,9 @@ impl PublicInterface {
         input.push(0);
         input.extend_from_slice(&self.semantic_surface_fingerprint.0);
         input.extend_from_slice(&self.public_closure_fingerprint.0);
+        if self.schema_version >= 4 {
+            input.extend_from_slice(&self.resolution_fingerprint.0);
+        }
         Fingerprint::from_bytes(&input)
     }
 
@@ -148,6 +152,7 @@ impl PublicInterface {
         Self {
             schema_version: SCHEMA_VERSION,
             subject,
+            resolution_fingerprint: Fingerprint::from_bytes(&[]),
             semantic_surface_fingerprint: Fingerprint::from_domain(
                 b"gin.interface.semantic-surface\0",
                 SCHEMA_VERSION,
@@ -368,6 +373,9 @@ impl PublicInterface {
             write_string(&image.target, &mut section);
             section.extend_from_slice(&image.image_fingerprint.0);
         }
+        if self.schema_version >= 4 {
+            section.extend_from_slice(&self.resolution_fingerprint.0);
+        }
         let mut out = Vec::with_capacity(MAGIC.len() + 4 + section.len());
         out.extend_from_slice(MAGIC);
         write_u32(
@@ -407,7 +415,7 @@ impl PublicInterface {
         bytes = rest;
 
         let (schema_version, rest) = read_uleb(bytes)?;
-        if !matches!(schema_version, 1 | SCHEMA_VERSION) {
+        if !matches!(schema_version, 1 | 2 | 3 | SCHEMA_VERSION) {
             return Err(InterfaceDecodeError::UnsupportedSchema(schema_version));
         }
         bytes = rest;
@@ -558,6 +566,13 @@ impl PublicInterface {
             });
         }
 
+        let resolution_fingerprint = if schema_version >= 4 {
+            let (fingerprint, rest) = read_fp(bytes)?;
+            bytes = rest;
+            fingerprint
+        } else {
+            Fingerprint::from_bytes(&[])
+        };
         if !bytes.is_empty() {
             return Err(InterfaceDecodeError::CorruptHeader);
         }
@@ -575,6 +590,7 @@ impl PublicInterface {
             },
             semantic_surface_fingerprint,
             public_closure_fingerprint,
+            resolution_fingerprint,
             declarations,
             target_profiles,
             target_realizations,
@@ -776,7 +792,7 @@ mod tests {
             .position(|window| window == b"S1")
             .expect("signature");
         let schema_pos = sig_pos + 2;
-        encoded[schema_pos] = 3;
+        encoded[schema_pos] = (SCHEMA_VERSION + 1) as u8;
         let decoded = PublicInterface::decode(&encoded);
         assert!(matches!(
             decoded,
