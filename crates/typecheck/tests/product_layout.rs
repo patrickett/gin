@@ -1,16 +1,9 @@
-use internment::Intern;
-use parser::cursor::TokenCursor;
-use typecheck::representation::Repr;
-use typecheck::transform::{TransformCtx, transform};
-use typecheck::{FileId, TagId, TypedFileAst};
+mod support;
 
-fn check(source: &str) -> TypedFileAst {
-    transform(
-        &TokenCursor::parse_source(source),
-        FileId(0),
-        &TransformCtx::new(),
-    )
-}
+use internment::Intern;
+use support::check;
+use typecheck::TagId;
+use typecheck::representation::Repr;
 
 #[test]
 fn library_record_and_nested_value_row_use_product_representation() {

@@ -1,23 +1,8 @@
+mod support;
+
 use internment::Intern;
-use parser::cursor::TokenCursor;
-use typecheck::transform::{TransformCtx, transform};
-use typecheck::{BindBody, DefId, FileId, TypedExprKind};
-
-fn check(source: &str) -> typecheck::TypedFileAst {
-    transform(
-        &TokenCursor::parse_source(source),
-        FileId(0),
-        &TransformCtx::new(),
-    )
-}
-
-fn flaw_codes(typed: &typecheck::TypedFileAst) -> Vec<String> {
-    typed
-        .all_flaws()
-        .into_iter()
-        .map(|(_, flaw)| flaw.code.slug().to_string())
-        .collect()
-}
+use support::{check, flaw_codes};
+use typecheck::{BindBody, DefId, TypedExprKind};
 
 #[test]
 fn exact_anonymous_value_proves_nominal_conversion_containment() {

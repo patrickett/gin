@@ -1,30 +1,12 @@
+mod support;
+
 use ast::ConstValue;
 use internment::Intern;
 use parser::cursor::TokenCursor;
+use support::{body, check, flaw_codes};
+use typecheck::FileId;
 use typecheck::transform::{TransformCtx, transform};
 use typecheck::ty::Ty;
-use typecheck::{BindBody, DefId, ExprId, FileId, TypedFileAst};
-
-fn check(source: &str) -> TypedFileAst {
-    let ast = TokenCursor::parse_source(source);
-    transform(&ast, FileId(0), &TransformCtx::new())
-}
-
-fn body(typed: &TypedFileAst, name: &str) -> ExprId {
-    match &typed.defs[&DefId(Intern::new(name.to_string()))].body {
-        BindBody::Expr(expr) => *expr,
-        BindBody::Body { exprs, ret } => ret.or_else(|| exprs.last().copied()).unwrap(),
-        BindBody::Unlowered => panic!("expected body"),
-    }
-}
-
-fn flaw_codes(typed: &TypedFileAst) -> Vec<String> {
-    typed
-        .all_flaws()
-        .into_iter()
-        .map(|(_, flaw)| flaw.code.slug().to_string())
-        .collect()
-}
 
 #[test]
 fn annotation_materializes_literal_with_nominal_identity_and_value() {

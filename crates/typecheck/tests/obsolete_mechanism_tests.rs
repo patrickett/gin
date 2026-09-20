@@ -1,20 +1,8 @@
+mod support;
+
 use parser::cursor::TokenCursor;
 use parser::query::SourceParseExt;
-use typecheck::FileId;
-use typecheck::transform::{TransformCtx, transform};
-
-fn check(source: &str) -> typecheck::TypedFileAst {
-    let ast = TokenCursor::parse_source(source);
-    transform(&ast, FileId(0), &TransformCtx::new())
-}
-
-fn flaw_codes(typed: &typecheck::TypedFileAst) -> Vec<String> {
-    typed
-        .all_flaws()
-        .into_iter()
-        .map(|(_, flaw)| flaw.code.slug().to_string())
-        .collect()
-}
+use support::{check, flaw_codes};
 
 fn flaw_messages(typed: &typecheck::TypedFileAst) -> Vec<String> {
     typed

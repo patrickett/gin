@@ -1,21 +1,9 @@
+mod support;
+
 use ast::Ty;
 use internment::Intern;
-use parser::cursor::TokenCursor;
-use typecheck::transform::{TransformCtx, transform};
-use typecheck::{BindBody, DefId, FileId, TypedFileAst};
-
-fn check(source: &str) -> TypedFileAst {
-    let ast = TokenCursor::parse_source(source);
-    transform(&ast, FileId(0), &TransformCtx::new())
-}
-
-fn result(typed: &TypedFileAst, name: &str) -> typecheck::ExprId {
-    match &typed.defs[&DefId(Intern::from_ref(name))].body {
-        BindBody::Expr(expr) => *expr,
-        BindBody::Body { exprs, ret } => ret.or_else(|| exprs.last().copied()).unwrap(),
-        BindBody::Unlowered => panic!("expected a body"),
-    }
-}
+use support::{body, check};
+use typecheck::DefId;
 
 #[test]
 fn slice_fields_preserve_declared_types() {
@@ -29,7 +17,7 @@ length(text Slice(ViewByte)): text.len
     );
     assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
     assert_eq!(
-        typed.exprs.ty_of(result(&typed, "pointer")),
+        typed.exprs.ty_of(body(&typed, "pointer")),
         Some(&Ty::Ptr {
             inner: Box::new(
                 typed.tag_types[&typecheck::TagId(Intern::from_ref("ViewByte"))].clone()
@@ -37,7 +25,7 @@ length(text Slice(ViewByte)): text.len
         })
     );
     assert_eq!(
-        typed.exprs.ty_of(result(&typed, "length")),
+        typed.exprs.ty_of(body(&typed, "length")),
         Some(&typed.tag_types[&typecheck::TagId(Intern::from_ref("ViewLength"))])
     );
 }
@@ -91,7 +79,7 @@ return #size(text)
         typed.resolved_program(),
         typecheck::CompileTimeHost::new(&target),
     )
-    .eval(result(&typed, "length"))
+    .eval(body(&typed, "length"))
     .expect("length evaluation");
     assert!(
         matches!(value, typecheck::EvalOutcome::Complete(ast::ConstValue::Int(bytes)) if bytes == 6.into())

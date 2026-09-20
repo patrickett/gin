@@ -1,31 +1,10 @@
+mod support;
+
 use internment::Intern;
 use parser::cursor::TokenCursor;
-use typecheck::transform::{PackageTransformOptions, TransformCtx, transform, transform_package};
-use typecheck::{BindBody, DefId, FileId, TypedFileAst};
-
-fn check(source: &str) -> TypedFileAst {
-    transform(
-        &TokenCursor::parse_source(source),
-        FileId(0),
-        &TransformCtx::new(),
-    )
-}
-
-fn body(typed: &TypedFileAst, name: &str) -> typecheck::ExprId {
-    match &typed.defs[&DefId(Intern::new(name.to_string()))].body {
-        BindBody::Expr(expr) => *expr,
-        BindBody::Body { exprs, ret } => ret.or_else(|| exprs.last().copied()).unwrap(),
-        BindBody::Unlowered => panic!("expected a body"),
-    }
-}
-
-fn flaw_codes(typed: &TypedFileAst) -> Vec<String> {
-    typed
-        .all_flaws()
-        .into_iter()
-        .map(|(_, flaw)| flaw.code.slug().to_string())
-        .collect()
-}
+use support::{body, check, flaw_codes};
+use typecheck::FileId;
+use typecheck::transform::{PackageTransformOptions, TransformCtx, transform_package};
 
 #[test]
 fn explicit_pointer_types_preserve_the_pointee_argument() {

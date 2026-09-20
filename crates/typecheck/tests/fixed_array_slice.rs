@@ -1,24 +1,8 @@
+mod support;
+
 use ast::ConstValue;
 use internment::Intern;
-use parser::cursor::TokenCursor;
-use typecheck::transform::{TransformCtx, transform};
-use typecheck::{BindBody, DefId, FileId, TypedFileAst};
-
-fn check(source: &str) -> TypedFileAst {
-    transform(
-        &TokenCursor::parse_source(source),
-        FileId(0),
-        &TransformCtx::new(),
-    )
-}
-
-fn body(typed: &TypedFileAst, name: &str) -> typecheck::ExprId {
-    match &typed.defs[&DefId(Intern::new(name.to_string()))].body {
-        BindBody::Expr(expr) => *expr,
-        BindBody::Body { exprs, ret } => ret.or_else(|| exprs.last().copied()).unwrap(),
-        BindBody::Unlowered => panic!("expected a body"),
-    }
-}
+use support::{body, check};
 
 #[test]
 fn renamed_fixed_array_former_retains_named_application_and_array_repr() {

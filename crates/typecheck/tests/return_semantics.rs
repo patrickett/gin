@@ -1,16 +1,9 @@
-use internment::Intern;
-use parser::cursor::TokenCursor;
-use typecheck::transform::{TransformCtx, transform};
-use typecheck::ty::Ty;
-use typecheck::{BindBody, DefId, FileId, TypedFileAst};
+mod support;
 
-fn check(source: &str) -> TypedFileAst {
-    transform(
-        &TokenCursor::parse_source(source),
-        FileId(0),
-        &TransformCtx::new(),
-    )
-}
+use internment::Intern;
+use support::check;
+use typecheck::ty::Ty;
+use typecheck::{BindBody, DefId, TypedFileAst};
 
 fn def_body<'a>(typed: &'a TypedFileAst, name: &str) -> &'a BindBody {
     &typed.defs[&DefId(Intern::new(name.to_string()))].body
