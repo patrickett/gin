@@ -273,23 +273,16 @@ impl CompilerDriver {
             },
         );
         self.cache = front_end.cache;
-        let mut parsed_files = front_end.files;
-        for (file, mut diagnostics) in parsed_files.iter_mut().zip(front_end.prepare_diagnostics) {
-            file.output.symptoms.append(&mut diagnostics);
-        }
-
-        let typed_asts = front_end.artifacts.typed_asts;
-        assert_eq!(
-            parsed_files.len(),
-            typed_asts.len(),
-            "package frontend returned unpaired parsed and typed files"
-        );
-        let package_index =
-            PackageSemanticIndex::from_typed_asts(&typed_asts.iter().collect::<Vec<_>>());
-        let files: Vec<_> = parsed_files
+        let files: Vec<_> = front_end
+            .files
             .into_iter()
-            .zip(typed_asts)
-            .map(|(parsed, typed)| {
+            .map(|file| {
+                let mut parsed = file.parsed;
+                parsed.output.symptoms.extend(file.import_diagnostics);
+                parsed.output.symptoms.extend(file.prepare_diagnostics);
+                let typed = file
+                    .typed
+                    .expect("full package transformation checks every file");
                 let typecheck_diagnostics = typed
                     .all_flaws()
                     .into_iter()
@@ -308,6 +301,9 @@ impl CompilerDriver {
                 }
             })
             .collect();
+        let package_index = PackageSemanticIndex::from_typed_asts(
+            &files.iter().map(CheckedFile::typed).collect::<Vec<_>>(),
+        );
         let primary_index = files
             .iter()
             .position(|file| file.path() == primary_path)
@@ -318,7 +314,7 @@ impl CompilerDriver {
             files,
             import_graph: front_end.import_graph,
             target,
-            public_interface: front_end.artifacts.public_interface,
+            public_interface: front_end.public_interface,
             package_index,
         }
     }

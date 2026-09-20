@@ -15,7 +15,9 @@ mod module_inventory;
 mod module_loader;
 
 // Re-export batch pipeline
-pub use front_end::{PackageFrontEndOptions, PackageFrontEndOutput, run_package_front_end};
+pub use front_end::{
+    FrontEndFile, PackageFrontEndOptions, PackageFrontEndOutput, run_package_front_end,
+};
 pub use graph::{ResolveGraph, ResolveNode};
 pub use module_inventory::child_folder_module_names;
 pub use module_loader::ParsedModuleCache;

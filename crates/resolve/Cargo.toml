@@ -9,6 +9,7 @@ workspace = true
 [dependencies]
 ast = { workspace = true }
 diagnostic = { workspace = true }
+interface = { workspace = true }
 parser = { workspace = true }
 flask = { workspace = true }
 typecheck = { workspace = true }

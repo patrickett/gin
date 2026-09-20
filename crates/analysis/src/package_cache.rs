@@ -13,7 +13,7 @@ use notify_debouncer_mini::{
 };
 
 use parser::query::{ParseOutput, SourceParseExt};
-use typecheck::transform::{PackageTransformArtifacts, PackageTransformOptions};
+use typecheck::transform::PackageTransformOptions;
 use typecheck::{
     CompletionCandidate, PackageSemanticIndex, TypedFileAst, completions::FileAstCompletionExt,
 };
@@ -24,14 +24,6 @@ use ast::source::{LineIndex, SourceExt};
 use flask::{CompileTarget, FlaskConfig};
 use resolve::GinPackageExt;
 
-/// Result from the resolve-and-prepare stage.
-struct Stage1Result {
-    file_paths: Vec<PathBuf>,
-    prepare_diags: Vec<Vec<Diagnostic>>,
-    import_diags: HashMap<PathBuf, Vec<Diagnostic>>,
-    dependency_dirs: HashMap<String, PathBuf>,
-    artifacts: PackageTransformArtifacts,
-}
 use diagnostic::Diagnostic;
 use resolve::{CursorDefinition, ParsedFile};
 
@@ -52,7 +44,7 @@ pub struct PackageEntry {
     pub typed_asts: Vec<TypedFileAst>,
     pub public_interface: interface::PublicInterface,
     pub package_index: PackageSemanticIndex,
-    /// File paths in the same order as `typed_asts` (sorted by path).
+    /// File paths in declaration order, matching `typed_asts`.
     pub file_paths: Vec<PathBuf>,
     pub typecheck_outputs: Vec<Vec<Diagnostic>>,
     pub import_diags: HashMap<PathBuf, Vec<Diagnostic>>,
@@ -350,69 +342,27 @@ impl PackageCache {
         Some(entry)
     }
 
-    /// Run the full pipeline: parse → resolve imports → prepare → transform → diagnostics.
     fn compute_package(
         &self,
         package: &PackageIdentity,
         all_files: &[PathBuf],
     ) -> Option<PackageEntry> {
-        let Stage1Result {
-            file_paths,
-            prepare_diags,
-            import_diags,
-            dependency_dirs,
-            artifacts,
-        } = self.stage_resolve_and_prepare(package, all_files)?;
-        let public_interface = artifacts.public_interface.clone();
-        let typed_asts = artifacts.typed_asts;
-        let package_index = self.stage_build_index(&file_paths, &typed_asts);
-        let (typecheck_outputs, prepare_diags) =
-            self.stage_derive_diagnostics(&typed_asts, &prepare_diags);
-        Some(PackageEntry {
-            registry_resolution: None,
-            typed_asts,
-            public_interface,
-            package_index,
-            file_paths,
-            typecheck_outputs,
-            import_diags,
-            dependency_dirs,
-            prepare_diags,
-        })
-    }
-
-    /// Stage 1: Collect parse results, resolve imports, and run prepare passes.
-    fn stage_resolve_and_prepare(
-        &self,
-        package: &PackageIdentity,
-        all_files: &[PathBuf],
-    ) -> Option<Stage1Result> {
         let files = self.files.lock().unwrap();
 
-        let mut sorted: Vec<(PathBuf, &ParseEntry)> = all_files
+        let mut parsed: Vec<ParsedFile> = all_files
             .iter()
-            .filter_map(|p| files.get(p).map(|e| (p.clone(), e)))
-            .collect();
-        if sorted.is_empty() {
-            return None;
-        }
-        sorted.sort_by(|a, b| a.0.cmp(&b.0));
-
-        let (file_paths, parse_entries): (Vec<_>, Vec<_>) = sorted.into_iter().unzip();
-
-        let parsed: Vec<ParsedFile> = file_paths
-            .iter()
-            .zip(parse_entries.iter())
-            .map(|(path, entry)| ParsedFile {
-                path: path.clone(),
-                source: (*entry.source).clone(),
-                output: (*entry.parse).clone(),
+            .filter_map(|path| {
+                files.get(path).map(|entry| ParsedFile {
+                    path: path.clone(),
+                    source: (*entry.source).clone(),
+                    output: (*entry.parse).clone(),
+                })
             })
             .collect();
-        let parse_symptoms_by_path: std::collections::HashMap<PathBuf, Vec<Diagnostic>> = parsed
-            .iter()
-            .map(|f| (f.path.clone(), f.output.symptoms.clone()))
-            .collect();
+        if parsed.is_empty() {
+            return None;
+        }
+        parsed.sort_by(|a, b| a.path.cmp(&b.path));
 
         let compile_target = match package {
             PackageIdentity::Configured { root } => FlaskConfig::find_package_config(root)
@@ -466,136 +416,44 @@ impl PackageCache {
                 .unwrap()
                 .insert(package.clone(), import_graph.clone());
         }
-        let resolved = front_end.files;
-        let raw_file_paths: Vec<_> = resolved.iter().map(|file| file.path.clone()).collect();
-        let file_paths = import_graph
-            .as_ref()
-            .and_then(|graph| {
-                (!raw_file_paths.is_empty())
-                    .then_some(graph.declaration_file_order(&raw_file_paths))
-            })
-            .unwrap_or_else(|| {
-                let mut sorted = raw_file_paths;
-                sorted.sort();
-                sorted
-            });
-        let typecheck::transform::PackageTransformArtifacts {
-            typed_asts,
-            compile_time_eval_ast,
-            trait_registry,
-            public_interface,
-            interface_publication,
-            implementation_fingerprint,
-        } = front_end.artifacts;
-        let mut typed_asts_by_path = resolved
-            .iter()
-            .cloned()
-            .zip(typed_asts)
-            .map(|(file, ast)| (file.path, ast))
-            .collect::<HashMap<_, _>>();
-        let mut prepare_by_path: HashMap<PathBuf, Vec<Diagnostic>> = resolved
-            .iter()
-            .map(|file| file.path.clone())
-            .zip(front_end.prepare_diagnostics)
-            .collect();
-        let mut ordered_typed_asts = Vec::with_capacity(file_paths.len());
-        for path in &file_paths {
-            if let Some(ast) = typed_asts_by_path.remove(path) {
-                ordered_typed_asts.push(ast);
-            }
-        }
-
-        let mut by_path: HashMap<PathBuf, resolve::ParsedFile> =
-            resolved.into_iter().map(|f| (f.path.clone(), f)).collect();
-
-        let ordered: Vec<resolve::ParsedFile> = file_paths
-            .iter()
-            .filter_map(|p| by_path.remove(p))
-            .collect();
-
-        let mut prepare_diags: Vec<Vec<Diagnostic>> = file_paths
-            .iter()
-            .map(|path| prepare_by_path.remove(path).unwrap_or_default())
-            .collect();
-
+        let mut file_paths = Vec::with_capacity(front_end.files.len());
+        let mut typed_asts = Vec::with_capacity(front_end.files.len());
+        let mut prepare_diags = Vec::with_capacity(front_end.files.len());
+        let mut typecheck_outputs = Vec::with_capacity(front_end.files.len());
         let mut import_diags = HashMap::new();
-        for (path, resolved_file) in file_paths.iter().zip(ordered.iter()) {
-            let mut file_import_diags = resolved_file.output.symptoms.clone();
-            let original_syms = parse_symptoms_by_path
-                .get(path)
-                .map(std::vec::Vec::as_slice)
-                .unwrap_or(&[]);
-            if file_import_diags.len() >= original_syms.len() {
-                file_import_diags.drain(0..original_syms.len());
-            } else {
-                file_import_diags.clear();
+        for file in front_end.files {
+            let typed = file
+                .typed
+                .expect("IDE package transformation checks every file");
+            typecheck_outputs.push(
+                typed
+                    .all_flaws()
+                    .into_iter()
+                    .map(|(_, flaw)| flaw.clone())
+                    .collect(),
+            );
+            let mut diagnostics = file.parsed.output.symptoms;
+            diagnostics.extend(file.prepare_diagnostics);
+            prepare_diags.push(diagnostics);
+            if !file.import_diagnostics.is_empty() {
+                import_diags.insert(file.parsed.path.clone(), file.import_diagnostics);
             }
-            if !file_import_diags.is_empty() {
-                import_diags.insert(path.clone(), file_import_diags);
-            }
+            file_paths.push(file.parsed.path);
+            typed_asts.push(typed);
         }
-
-        // Prepend parse symptoms to prepare diags (same file order)
-        for (path, prep_diags) in file_paths.iter().zip(prepare_diags.iter_mut()) {
-            let mut parse_syms = parse_symptoms_by_path
-                .get(path)
-                .cloned()
-                .unwrap_or_default();
-            parse_syms.append(prep_diags);
-            *prep_diags = parse_syms;
-        }
-
-        Some(Stage1Result {
+        let package_index =
+            PackageSemanticIndex::from_typed_asts(&typed_asts.iter().collect::<Vec<_>>());
+        Some(PackageEntry {
+            registry_resolution: None,
+            typed_asts,
+            public_interface: front_end.public_interface,
+            package_index,
             file_paths,
-            prepare_diags,
+            typecheck_outputs,
             import_diags,
             dependency_dirs: deps,
-            artifacts: typecheck::transform::PackageTransformArtifacts {
-                typed_asts: ordered_typed_asts,
-                compile_time_eval_ast,
-                trait_registry,
-                public_interface,
-                interface_publication,
-                implementation_fingerprint,
-            },
+            prepare_diags,
         })
-    }
-
-    /// Stage 3: Build cross-file package index from typed ASTs.
-    ///
-    /// `file_paths` must be sorted (they are, from [`PackageEntry`]).
-    fn stage_build_index(
-        &self,
-        _file_paths: &[PathBuf],
-        typed_asts: &[TypedFileAst],
-    ) -> PackageSemanticIndex {
-        let typed_refs: Vec<&TypedFileAst> = typed_asts.iter().collect();
-        PackageSemanticIndex::from_typed_asts(&typed_refs)
-    }
-
-    /// Stage 4: Derive typecheck diagnostics and collect prepare diagnostics.
-    ///
-    /// `semantic_outputs` is NOT stored — it is derived on access from
-    /// `typecheck_outputs` + `prepare_diags` to avoid duplicating type-flaw
-    /// `Diagnostic` vectors.
-    fn stage_derive_diagnostics(
-        &self,
-        typed_asts: &[TypedFileAst],
-        prepare_diags: &[Vec<Diagnostic>],
-    ) -> (Vec<Vec<Diagnostic>>, Vec<Vec<Diagnostic>>) {
-        let mut typecheck_outputs = Vec::with_capacity(typed_asts.len());
-        let mut collected_prepare = Vec::with_capacity(typed_asts.len());
-
-        for (typed, prep_diags) in typed_asts.iter().zip(prepare_diags.iter()) {
-            let mut file_diags: Vec<Diagnostic> = Vec::new();
-            for (_, flaw) in typed.all_flaws() {
-                file_diags.push(flaw.clone());
-            }
-            typecheck_outputs.push(file_diags);
-            collected_prepare.push(prep_diags.clone());
-        }
-
-        (typecheck_outputs, collected_prepare)
     }
 
     /// Get semantic outputs in caller-requested path order.
