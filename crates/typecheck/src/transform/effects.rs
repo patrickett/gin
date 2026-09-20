@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
+use std::ops::ControlFlow;
 
 use ast::{BinderId, ParamConvention, TyArg};
 use internment::Intern;
 
-use crate::ty::{Ty, reference_pointee_for_type};
+use crate::ty::{Ty, TyChild, reference_pointee_for_type};
 use crate::typed::{
     AppliedEffectTarget, AvailabilityRequirement, BindBody, CallCapability, DefId, DefinitionStage,
     EffectTarget, FunctionEffects, TypedCallableSignature, TypedExprKind, TypedFileAst,
@@ -327,181 +328,40 @@ fn walk_param_indices_in_ty(
     dependent_binder: BinderId,
     indices: &mut Vec<usize>,
 ) {
-    match ty {
-        Ty::Named { instance, .. } => {
-            for (_, argument) in &instance.arguments {
-                if let ast::TyArg::Type(ty) = argument {
-                    walk_param_indices_in_ty(
-                        ty,
-                        name_to_index,
-                        inferred_index,
-                        dependent_binder,
-                        indices,
-                    );
-                }
-            }
+    if let Ty::Opaque(name) = ty {
+        if name
+            .as_str()
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_lowercase)
+            && let Some(index) = name_to_index.get(name)
+            && !indices.contains(index)
+        {
+            indices.push(*index);
         }
-        Ty::Record {
-            fields,
-            resolved_params,
-            ..
-        } => {
-            for (_, field_ty) in fields {
-                walk_param_indices_in_ty(
-                    field_ty,
-                    name_to_index,
-                    inferred_index,
-                    dependent_binder,
-                    indices,
-                );
-            }
-            if let Some(params) = resolved_params {
-                for (_, arg) in params {
-                    match arg {
-                        TyArg::Type(inner_ty) => walk_param_indices_in_ty(
-                            inner_ty,
-                            name_to_index,
-                            inferred_index,
-                            dependent_binder,
-                            indices,
-                        ),
-                        TyArg::Const(expr) => walk_param_indices_in_normal_expr(
-                            expr,
-                            name_to_index,
-                            inferred_index,
-                            dependent_binder,
-                            indices,
-                        ),
-                    }
-                }
-            }
-        }
-        Ty::Union {
-            variants,
-            resolved_params,
-            ..
-        } => {
-            for variant in variants {
-                for (_, field_ty) in &variant.fields {
-                    walk_param_indices_in_ty(
-                        field_ty,
-                        name_to_index,
-                        inferred_index,
-                        dependent_binder,
-                        indices,
-                    );
-                }
-                if let Some(result_ty) = &variant.result_ty {
-                    walk_param_indices_in_ty(
-                        result_ty,
-                        name_to_index,
-                        inferred_index,
-                        dependent_binder,
-                        indices,
-                    );
-                }
-            }
-            if let Some(params) = resolved_params {
-                for (_, arg) in params {
-                    match arg {
-                        TyArg::Type(inner_ty) => walk_param_indices_in_ty(
-                            inner_ty,
-                            name_to_index,
-                            inferred_index,
-                            dependent_binder,
-                            indices,
-                        ),
-                        TyArg::Const(expr) => walk_param_indices_in_normal_expr(
-                            expr,
-                            name_to_index,
-                            inferred_index,
-                            dependent_binder,
-                            indices,
-                        ),
-                    }
-                }
-            }
-        }
-        Ty::Array { elem, size } => {
-            walk_param_indices_in_ty(
-                elem,
-                name_to_index,
-                inferred_index,
-                dependent_binder,
-                indices,
-            );
-            walk_param_indices_in_normal_expr(
-                size,
-                name_to_index,
-                inferred_index,
-                dependent_binder,
-                indices,
-            );
-        }
-        Ty::UnresolvedSequence { element, length } => {
-            if let Some(element) = element {
-                walk_param_indices_in_ty(
-                    element,
-                    name_to_index,
-                    inferred_index,
-                    dependent_binder,
-                    indices,
-                );
-            }
-            walk_param_indices_in_normal_expr(
-                length,
-                name_to_index,
-                inferred_index,
-                dependent_binder,
-                indices,
-            );
-        }
-        Ty::Ptr { inner } | Ty::Address { pointee: inner, .. } => {
-            walk_param_indices_in_ty(
-                inner,
-                name_to_index,
-                inferred_index,
-                dependent_binder,
-                indices,
-            );
-        }
-        Ty::ResultRow(elements) => {
-            for element in elements {
-                walk_param_indices_in_ty(
-                    &element.ty,
-                    name_to_index,
-                    inferred_index,
-                    dependent_binder,
-                    indices,
-                );
-            }
-        }
-        Ty::AnonymousInteger { .. }
-        | Ty::ResultFamily { .. }
-        | Ty::Float { .. }
-        | Ty::Unit
-        | Ty::Literal(_)
-        | Ty::UnresolvedLiteral(_) => {}
-        Ty::Opaque(name) => {
-            if name
-                .as_str()
-                .as_bytes()
-                .first()
-                .is_some_and(u8::is_ascii_lowercase)
-                && let Some(index) = name_to_index.get(name)
-                && !indices.contains(index)
-            {
-                indices.push(*index);
-            }
-        }
-        Ty::Ref { inner, .. } => walk_param_indices_in_ty(
-            inner,
-            name_to_index,
-            inferred_index,
-            dependent_binder,
-            indices,
-        ),
     }
+    let _: ControlFlow<()> = ty.walk_children(&mut |child| {
+        if let Some(child_ty) = child.ty() {
+            walk_param_indices_in_ty(
+                child_ty,
+                name_to_index,
+                inferred_index,
+                dependent_binder,
+                indices,
+            );
+        } else if !matches!(ty, Ty::Named { .. })
+            && let TyChild::Constant(expr) | TyChild::Argument(TyArg::Const(expr)) = child
+        {
+            walk_param_indices_in_normal_expr(
+                expr,
+                name_to_index,
+                inferred_index,
+                dependent_binder,
+                indices,
+            );
+        }
+        ControlFlow::Continue(())
+    });
 }
 
 fn walk_param_indices_in_normal_expr(
@@ -828,5 +688,79 @@ fn record_field_index(
     fields.iter().position(|(name, _)| *name == field)
 }
 #[cfg(test)]
-#[path = "../../tests/effects_tests.rs"]
-mod tests;
+mod tests {
+    use super::*;
+    use ast::ty::{NamedTypeInstance, TypeId, UnionVariant};
+    use ast::{BinderOwner, DependentArgId, NormalExpr};
+
+    #[test]
+    fn parameter_dependencies_keep_order_and_named_constant_pruning() {
+        let names = ["element", "length", "other", "inferred", "extra", "ignored"]
+            .map(Intern::from_ref);
+        let indices = names
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, name)| (name, index))
+            .collect();
+        let binder = BinderId::new(0, BinderOwner::Expression(0));
+        let mut variant = UnionVariant::new(
+            names[0],
+            vec![
+                (
+                    names[0],
+                    Box::new(Ty::Named {
+                        name: names[0],
+                        instance: NamedTypeInstance::new(TypeId {
+                            file: 0,
+                            name: names[0],
+                        })
+                        .with_arguments(vec![
+                            (names[0], TyArg::Type(Box::new(Ty::Opaque(names[0])))),
+                            (names[5], TyArg::Const(NormalExpr::Var(names[5]))),
+                        ]),
+                    }),
+                ),
+                (
+                    names[1],
+                    Box::new(Ty::Ref {
+                        mutable: false,
+                        inner: Box::new(Ty::Array {
+                            elem: Box::new(Ty::Opaque(names[0])),
+                            size: NormalExpr::Var(names[1]),
+                        }),
+                    }),
+                ),
+            ],
+        );
+        variant.result_ty = Some(Ty::UnresolvedSequence {
+            element: Some(Box::new(Ty::Ptr {
+                inner: Box::new(Ty::Opaque(names[2])),
+            })),
+            length: NormalExpr::Inferred(DependentArgId::new(binder, 7)),
+        });
+        let ty = Ty::Union {
+            name: names[0],
+            variants: vec![variant],
+            literal_values: None,
+            resolved_params: Some(vec![
+                (names[1], TyArg::Const(NormalExpr::Var(names[1]))),
+                (
+                    names[4],
+                    TyArg::Type(Box::new(Ty::Record {
+                        name: names[4],
+                        fields: vec![],
+                        resolved_params: Some(vec![(
+                            names[4],
+                            TyArg::Const(NormalExpr::Var(names[4])),
+                        )]),
+                    })),
+                ),
+            ]),
+        };
+        assert_eq!(
+            param_indices_in_ty(&ty, &indices, &HashMap::from([(7, 3)]), binder),
+            [0, 1, 2, 3, 4]
+        );
+    }
+}

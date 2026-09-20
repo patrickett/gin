@@ -1,5 +1,9 @@
 //! Type representation and type-level operations.
 
+mod traversal;
+
+pub use traversal::TyChild;
+
 use internment::Intern;
 use std::collections::HashMap;
 

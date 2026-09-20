@@ -23,7 +23,7 @@ use crate::compile_time_trait::{
 };
 use crate::normal_expr::Normalize;
 use crate::representation::RepresentationError;
-use crate::ty::{Ty, UnionVariant, reference_semantics_for_type};
+use crate::ty::{Ty, TyChild, UnionVariant, reference_semantics_for_type};
 use crate::type_registry::ReferenceSemantics;
 use crate::typed::{
     Availability, AvailabilityRequirement, CallCapability, DefId, ExprId, FileId, GroupId,
@@ -1417,84 +1417,25 @@ fn declaration_ty_refers_to_name(
     resolved_tags: &HashMap<Intern<String>, Ty>,
     recursion_stack: &mut HashSet<Intern<String>>,
 ) -> bool {
-    match ty {
-        Ty::Ref { .. } | Ty::Ptr { .. } | Ty::Address { .. } => false,
-        Ty::Named { instance, .. } => {
-            declarations.contains_key(&instance.declaration.name)
-                && declaration_recursively_refers_to_name(
-                    &instance.declaration.name,
-                    declarations,
-                    resolved_tags,
-                    recursion_stack,
-                )
-        }
-        Ty::Opaque(name) => {
-            declarations.contains_key(name)
-                && declaration_recursively_refers_to_name(
-                    name,
-                    declarations,
-                    resolved_tags,
-                    recursion_stack,
-                )
-        }
-        Ty::Record {
-            fields,
-            resolved_params,
-            ..
-        } => {
-            fields.iter().any(|(_, ty)| {
-                declaration_ty_refers_to_name(ty, declarations, resolved_tags, recursion_stack)
-            }) || resolved_params.as_ref().is_some_and(|params| {
-                params.iter().any(|(_, arg)| match arg {
-                    ast::TyArg::Type(ty) => declaration_ty_refers_to_name(
-                        ty,
-                        declarations,
-                        resolved_tags,
-                        recursion_stack,
-                    ),
-                    ast::TyArg::Const(_) => false,
-                })
-            })
-        }
-        Ty::Union {
-            variants,
-            resolved_params,
-            ..
-        } => {
-            variants.iter().any(|variant| {
-                variant.fields.iter().any(|(_, ty)| {
-                    declaration_ty_refers_to_name(ty, declarations, resolved_tags, recursion_stack)
-                }) || variant.result_ty.as_ref().is_some_and(|ty| {
+    let name = match ty {
+        Ty::Ref { .. } | Ty::Ptr { .. } | Ty::Address { .. } => return false,
+        Ty::Named { instance, .. } => &instance.declaration.name,
+        Ty::Opaque(name) => name,
+        _ => {
+            return ty.any_child(|child| {
+                child.ty().is_some_and(|ty| {
                     declaration_ty_refers_to_name(ty, declarations, resolved_tags, recursion_stack)
                 })
-            }) || resolved_params.as_ref().is_some_and(|params| {
-                params.iter().any(|(_, arg)| match arg {
-                    ast::TyArg::Type(ty) => declaration_ty_refers_to_name(
-                        ty,
-                        declarations,
-                        resolved_tags,
-                        recursion_stack,
-                    ),
-                    ast::TyArg::Const(_) => false,
-                })
-            })
+            });
         }
-        Ty::Array { elem, .. } => {
-            declaration_ty_refers_to_name(elem, declarations, resolved_tags, recursion_stack)
-        }
-        Ty::UnresolvedSequence { element, .. } => element.as_deref().is_some_and(|element| {
-            declaration_ty_refers_to_name(element, declarations, resolved_tags, recursion_stack)
-        }),
-        Ty::ResultRow(elements) => elements.iter().any(|element| {
-            declaration_ty_refers_to_name(&element.ty, declarations, resolved_tags, recursion_stack)
-        }),
-        Ty::AnonymousInteger { .. }
-        | Ty::ResultFamily { .. }
-        | Ty::Float { .. }
-        | Ty::Unit
-        | Ty::Literal(_)
-        | Ty::UnresolvedLiteral(_) => false,
-    }
+    };
+    declarations.contains_key(name)
+        && declaration_recursively_refers_to_name(
+            name,
+            declarations,
+            resolved_tags,
+            recursion_stack,
+        )
 }
 
 fn declaration_reference_semantics(
@@ -2302,79 +2243,12 @@ fn tag_params_map(tags: &ast::TagMap) -> HashMap<Intern<String>, Parameters> {
 }
 
 fn references_nominal_type(ty: &Ty, target: Intern<String>) -> bool {
-    if let Some(reference) = reference_semantics_for_type(ty, None) {
-        return references_nominal_type(&reference.pointee, target);
-    }
-
-    match ty {
-        Ty::Ref { inner, .. } => references_nominal_type(inner, target),
-        Ty::Named { instance, name } => {
-            *name == target
-                || instance
-                    .arguments
-                    .iter()
-                    .any(|(_, argument)| match argument {
-                        ast::TyArg::Type(ty) => references_nominal_type(ty, target),
-                        ast::TyArg::Const(_) => false,
-                    })
-        }
-        Ty::Record {
-            name,
-            fields,
-            resolved_params,
-        } => {
-            *name == target
-                || fields
-                    .iter()
-                    .any(|(_, field_ty)| references_nominal_type(field_ty, target))
-                || resolved_params.as_ref().is_some_and(|params| {
-                    params.iter().any(|(_, arg)| match arg {
-                        ast::TyArg::Type(ty) => references_nominal_type(ty, target),
-                        ast::TyArg::Const(_) => false,
-                    })
-                })
-        }
-        Ty::Union {
-            name,
-            variants,
-            resolved_params,
-            ..
-        } => {
-            *name == target
-                || variants.iter().any(|variant| {
-                    variant
-                        .fields
-                        .iter()
-                        .any(|(_, field_ty)| references_nominal_type(field_ty, target))
-                        || variant
-                            .result_ty
-                            .as_ref()
-                            .is_some_and(|ty| references_nominal_type(ty, target))
-                })
-                || resolved_params.as_ref().is_some_and(|params| {
-                    params.iter().any(|(_, arg)| match arg {
-                        ast::TyArg::Type(ty) => references_nominal_type(ty, target),
-                        ast::TyArg::Const(_) => false,
-                    })
-                })
-        }
-        Ty::Opaque(name) => *name == target,
-        Ty::Array { elem, .. } | Ty::Ptr { inner: elem } | Ty::Address { pointee: elem, .. } => {
-            references_nominal_type(elem, target)
-        }
-        Ty::UnresolvedSequence { element, .. } => element
-            .as_deref()
-            .is_some_and(|element| references_nominal_type(element, target)),
-        Ty::ResultRow(elements) => elements
-            .iter()
-            .any(|element| references_nominal_type(&element.ty, target)),
-        Ty::AnonymousInteger { .. }
-        | Ty::ResultFamily { .. }
-        | Ty::Float { .. }
-        | Ty::Unit
-        | Ty::Literal(_)
-        | Ty::UnresolvedLiteral(_) => false,
-    }
+    matches!(ty, Ty::Named { name, .. } | Ty::Record { name, .. } | Ty::Union { name, .. } | Ty::Opaque(name) if *name == target)
+        || ty.any_child(|child| {
+            child
+                .ty()
+                .is_some_and(|ty| references_nominal_type(ty, target))
+        })
 }
 
 fn resolve_tag_pass(
@@ -3684,38 +3558,11 @@ fn anonymous_result_labels(file_ast: &FileAst) -> HashSet<Intern<String>> {
 fn contains_unresolved_result_label(ty: &Ty, labels: &HashSet<Intern<String>>) -> bool {
     match ty {
         Ty::Opaque(name) => labels.contains(name),
-        Ty::Named { instance, .. } => {
-            instance
-                .arguments
-                .iter()
-                .any(|(_, argument)| match argument {
-                    ast::TyArg::Type(ty) => contains_unresolved_result_label(ty, labels),
-                    ast::TyArg::Const(_) => false,
-                })
+        Ty::Named { .. } | Ty::Array { .. } | Ty::Ptr { .. } | Ty::Address { .. } | Ty::Ref { .. } => {
+            ty.any_child(|child| child.ty().is_some_and(|ty| contains_unresolved_result_label(ty, labels)))
         }
-        Ty::Array {
-            elem: underlying, ..
-        }
-        | Ty::Ptr { inner: underlying }
-        | Ty::Address {
-            pointee: underlying,
-            ..
-        }
-        | Ty::Ref {
-            inner: underlying, ..
-        } => contains_unresolved_result_label(underlying, labels),
-        Ty::Record { fields, .. } => fields
-            .iter()
-            .any(|(_, field)| contains_unresolved_result_label(field, labels)),
-        Ty::Union { variants, .. } => variants.iter().any(|variant| {
-            variant
-                .fields
-                .iter()
-                .any(|(_, field)| contains_unresolved_result_label(field, labels))
-                || variant
-                    .result_ty
-                    .as_ref()
-                    .is_some_and(|result| contains_unresolved_result_label(result, labels))
+        Ty::Record { .. } | Ty::Union { .. } => ty.any_child(|child| {
+            matches!(child, TyChild::Type(ty) if contains_unresolved_result_label(ty, labels))
         }),
         _ => false,
     }
@@ -3947,5 +3794,73 @@ fn is_type_parameter(kind: &ParameterKind) -> bool {
 }
 
 #[cfg(test)]
-#[path = "../../tests/transform_declare_tests.rs"]
-mod tests;
+mod tests {
+    use super::*;
+    use ast::ty::{NamedTypeInstance, ResultElement, TypeId};
+
+    #[test]
+    fn nominal_and_anonymous_label_queries_keep_distinct_traversal_rules() {
+        let label = Intern::from_ref("Label");
+        let name = Intern::from_ref("Container");
+        let opaque = Ty::Opaque(label);
+        let arguments = vec![(name, ast::TyArg::Type(Box::new(opaque.clone())))];
+        let cases = [
+            (
+                Ty::Named {
+                    name,
+                    instance: NamedTypeInstance::new(TypeId { file: 0, name })
+                        .with_arguments(arguments.clone()),
+                },
+                true,
+            ),
+            (
+                Ty::Record {
+                    name,
+                    fields: vec![],
+                    resolved_params: Some(arguments.clone()),
+                },
+                false,
+            ),
+            (
+                Ty::Union {
+                    name,
+                    variants: vec![],
+                    literal_values: None,
+                    resolved_params: Some(arguments),
+                },
+                false,
+            ),
+            (
+                Ty::Record {
+                    name,
+                    fields: vec![(name, Box::new(opaque.clone()))],
+                    resolved_params: None,
+                },
+                true,
+            ),
+            (
+                Ty::ResultRow(vec![ResultElement {
+                    name,
+                    ty: Box::new(opaque.clone()),
+                }]),
+                false,
+            ),
+            (
+                Ty::UnresolvedSequence {
+                    element: Some(Box::new(opaque)),
+                    length: 1.into(),
+                },
+                false,
+            ),
+        ];
+        for (ty, contains_label) in cases {
+            assert!(references_nominal_type(&ty, label), "{ty:?}");
+            assert_eq!(
+                contains_unresolved_result_label(&ty, &HashSet::from([label])),
+                contains_label,
+                "{ty:?}"
+            );
+            assert!(!references_nominal_type(&ty, Intern::from_ref("Absent")));
+        }
+    }
+}
