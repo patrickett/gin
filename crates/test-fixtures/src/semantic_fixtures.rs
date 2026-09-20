@@ -310,13 +310,13 @@ ReflectionUnit is Unit
 ReflectionArray is Array
 "#;
 
-pub const MACHINE_X86: &str = r#"architecture := (
+pub const MACHINE_X86: &str = r#"architecture := [
     target: #target.triple
     arch: "x86_64"
     dialect: "intel"
-    inputs: (inputs0: "rdi", inputs1: "rsi")
-    references: (references0: "rax", references1: "rcx")
-    scratch: (scratch0: "rax", scratch1: "rcx", scratch2: "rdx", scratch3: "r8", scratch4: "r9", scratch5: "r10", scratch6: "r11")
+    inputs: [inputs0: "rdi", inputs1: "rsi"]
+    references: [references0: "rax", references1: "rcx"]
+    scratch: [scratch0: "rax", scratch1: "rcx", scratch2: "rdx", scratch3: "r8", scratch4: "r9", scratch5: "r10", scratch6: "r11"]
     result: "rax"
     length: "rdx"
     copy: "mov {destination}, {left}"
@@ -326,16 +326,16 @@ pub const MACHINE_X86: &str = r#"architecture := (
     nop: "nop"
     add_inout: 1
     add_clobbers: ["cc"]
-)
+]
 "#;
 
-pub const MACHINE_ARM: &str = r#"architecture := (
+pub const MACHINE_ARM: &str = r#"architecture := [
     target: #target.triple
     arch: "arm64"
     dialect: "att"
-    inputs: (inputs0: "x0", inputs1: "x1")
-    references: (references0: "x9", references1: "x10")
-    scratch: (scratch0: "x9", scratch1: "x10", scratch2: "x11", scratch3: "x12", scratch4: "x13", scratch5: "x14", scratch6: "x15")
+    inputs: [inputs0: "x0", inputs1: "x1"]
+    references: [references0: "x9", references1: "x10"]
+    scratch: [scratch0: "x9", scratch1: "x10", scratch2: "x11", scratch3: "x12", scratch4: "x13", scratch5: "x14", scratch6: "x15"]
     result: "x9"
     length: "x2"
     copy: "mov {destination}, {left}"
@@ -344,8 +344,8 @@ pub const MACHINE_ARM: &str = r#"architecture := (
     store: "str {left}, [{destination}]"
     nop: "nop"
     add_inout: 0
-    add_clobbers: ()
-)
+    add_clobbers: []
+]
 "#;
 
 pub const RUNTIME: &str = r#"

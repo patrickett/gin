@@ -30,6 +30,8 @@ module.exports = grammar({
   },
 
   conflicts: ($) => [
+    [$.sequence_literal, $.sequence_type],
+    [$.named_result, $._type_hint],
     [$.decl_member_list],
     [$.proof_result_type, $.proof_proposition],
     [$.when_pattern_arm, $.when_is_arm],
@@ -157,10 +159,11 @@ module.exports = grammar({
 
     record_signature: ($) =>
       prec.right(
+        3,
         seq(
           choice(field("name", $.identifier), $.qualified_member_name),
           $.parameters,
-          optional(field("return_type", $._type_hint)),
+          optional(field("return_type", choice($._type_hint, $.named_results))),
           optional($.member_default),
         ),
       ),
@@ -187,10 +190,10 @@ module.exports = grammar({
       seq(field("operator", choice(":=", ":")), field("value", $._expression)),
 
     member_default: ($) =>
-      choice(
-        seq(field("operator", ":="), field("value", $._expression)),
-        seq(field("operator", ":"), field("body", $.block_body)),
-      ),
+      prec.right(choice(
+        seq(field("operator", ":="), field("value", choice($._expression, $.bare_sequence))),
+        seq(field("operator", ":"), field("body", choice($.block_body, $.return_statement, $._expression, $.bare_sequence))),
+      )),
 
     block_body: ($) => seq($._newline, repeat($._statement), $.return_statement),
 
@@ -277,12 +280,12 @@ module.exports = grammar({
       ),
 
     unassigned_binding: ($) =>
-      seq(field("name", $.identifier), field("type", choice($.tag, $.sequence_literal))),
+      seq(field("name", $.identifier), field("type", choice($.tag, $.sequence_type))),
 
-    named_results: ($) => sep1(",", $.named_result),
+    named_results: ($) => prec.right(choice($.named_result, seq(choice($.named_result, $._type_hint), repeat1(seq(",", choice($.named_result, $._type_hint)))))),
     named_result: ($) => seq(field("name", $.identifier), field("type", $._type_hint)),
 
-    _type_hint: ($) => choice($.type_union, $.proof_result_type, $.unit_type, $.tag, $.sequence_literal, alias($.identifier, $.type_variable)),
+    _type_hint: ($) => choice($.type_union, $.proof_result_type, $.unit_type, $.tag, $.sequence_type, alias($.identifier, $.type_variable)),
 
     unit_type: ($) => seq("(", ")"),
 
@@ -314,13 +317,18 @@ module.exports = grammar({
       prec.right(6, seq("-", $._proof_term)),
     ),
 
-    _bind_value: ($) => choice($._expression, $.block_body),
+    _bind_value: ($) => choice($._expression, $.bare_sequence, $.return_statement, $.block_body),
+
+    bare_sequence: ($) => prec.right(choice(
+      seq($.named_argument, repeat(seq(",", choice($.named_argument, $._expression)))),
+      seq($._expression, repeat1(seq(",", choice($.named_argument, $._expression)))),
+    )),
 
     return_statement: ($) => prec.right(seq("return", optional(sep1(",", choice($.named_argument, $._expression))))),
 
     named_argument: ($) => seq(field("name", $.identifier), ":", field("value", $._expression)),
 
-    parameters: ($) => seq("(", optional(nlist($, $.parameter)), ")"),
+    parameters: ($) => prec(3, prec.dynamic(1, seq("(", optional(nlist($, $.parameter)), ")"))),
 
     parameter: ($) =>
       choice(
@@ -334,13 +342,13 @@ module.exports = grammar({
           ),
           optional(
             choice(
-              field("type", choice($.tag, $.sequence_literal)),
+              field("type", choice($.tag, $.sequence_type)),
               field("type", alias($.identifier, $.type_variable)),
               seq(":", field("default", $._expression)),
             ),
           ),
         ),
-        field("type", choice($.tag, $.sequence_literal)),
+        field("type", choice($.tag, $.sequence_type)),
       ),
 
     self_parameter: ($) => prec(1, "self"),
@@ -448,7 +456,6 @@ module.exports = grammar({
         $.self_expression,
         $.sequence_literal,
         $.compile_time_query,
-        $.fixed_array_alloc,
         $.parenthesized_expression,
         $.format_string,
         $.literal,
@@ -594,10 +601,15 @@ module.exports = grammar({
       "[",
       optional(choice(
         seq(field("init", $._expression), ";", field("size", $._expression)),
-        nlist($, $._expression),
+        nlist($, choice($.named_argument, $._expression)),
       )),
       "]",
     ),
+
+    sequence_type: ($) => seq("[", optional(choice(
+      seq($._type_hint, ";", $._expression),
+      nlist($, choice($.named_result, $._type_hint)),
+    )), "]"),
 
     compile_time_query: ($) => seq("#", choice(
       seq("target", optional(seq(".", field("field", $.identifier)))),
@@ -605,9 +617,6 @@ module.exports = grammar({
       seq("register", "(", $._expression, ")"),
       seq("asm", "(", $._expression, repeat(seq(choice(",", $._newline), $.named_argument)), optional(","), ")"),
     )),
-
-    fixed_array_alloc: ($) =>
-      seq("(", field("init", $._expression), ";", field("size", $._expression), ")"),
 
     parenthesized_expression: ($) => seq("(", $._expression, ")"),
 

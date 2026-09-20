@@ -519,7 +519,15 @@ fn normalize_expr(
                         }
                     }
                 }
-                NormalizeResult::Value(ConstValue::ResultRow(arg_values.into()))
+                NormalizeResult::Value(ConstValue::sequence(
+                    arg_values,
+                    match context.program.exprs.ty.get(expr_id.as_usize()) {
+                        Some(Ty::Sequence(fields)) => {
+                            fields.iter().map(|field| field.name).collect::<Vec<_>>()
+                        }
+                        _ => Vec::new(),
+                    },
+                ))
             }
             TypedExprKind::ArrayLit(items) => {
                 let mut arg_values = Vec::with_capacity(items.len());
@@ -716,7 +724,9 @@ fn field_from_const_value(base: &ConstValue, index: usize) -> Option<ConstValue>
     match base {
         ConstValue::Tag { args, .. } => args.get(index).cloned(),
         ConstValue::Text(text) if index == 1 => Some(ConstValue::Int((text.len() as u64).into())),
-        ConstValue::ResultRow(items) => items.get(index).cloned(),
+        ConstValue::ResultRow(items)
+        | ConstValue::Sequence(items)
+        | ConstValue::FixedArray(items) => items.get(index).cloned(),
         ConstValue::Record { fields } => fields.get(index).map(|(_, value)| value.clone()),
         _ => None,
     }

@@ -21,7 +21,7 @@ fn check(source: &str) -> TypedFileAst {
 #[test]
 fn constructor_infers_type_arguments_from_ordinary_values() {
     for (value, expected) in [
-        ("()", Ty::Unit),
+        ("[]", Ty::Sequence(Vec::new())),
         (
             "\"abc\"",
             Ty::Array {
@@ -56,7 +56,7 @@ fn target_property_can_be_stored_in_a_generic_record() {
 #[test]
 fn repeated_type_parameters_reject_conflicting_field_types() {
     let typed = check(
-        "Pair(value_type Type) has left value_type, right value_type\npair := Pair(left: (), right: \"abc\")\n",
+        "Pair(value_type Type) has left value_type, right value_type\npair := Pair(left: [], right: \"abc\")\n",
     );
     assert!(
         typed

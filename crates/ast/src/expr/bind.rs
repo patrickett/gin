@@ -176,7 +176,7 @@ impl Bind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct NamedResult {
-    pub name: Intern<String>,
+    pub name: Option<Intern<String>>,
     pub name_span: SpanId,
     pub ty: Box<Spanned<Expr>>,
 }

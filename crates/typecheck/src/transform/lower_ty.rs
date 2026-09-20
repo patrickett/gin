@@ -227,12 +227,12 @@ pub(crate) fn resolve_expr_type(
                             })
                             .collect::<Vec<_>>();
                         if local_bind.named_results.len() == types.len() && types.len() > 1 {
-                            Ty::ResultRow(
+                            Ty::Sequence(
                                 local_bind
                                     .named_results
                                     .iter()
                                     .zip(types)
-                                    .map(|(result, ty)| ast::ty::ResultElement {
+                                    .map(|(result, ty)| ast::ty::SequenceTypeElement {
                                         name: result.name,
                                         ty: Box::new(ty),
                                     })
@@ -241,7 +241,15 @@ pub(crate) fn resolve_expr_type(
                         } else if let [ty] = types.as_slice() {
                             ty.clone()
                         } else {
-                            Ty::Opaque(Intern::from_ref("unnamed-multiple-results"))
+                            Ty::sequence(
+                                types
+                                    .into_iter()
+                                    .map(|ty| ast::ty::SequenceTypeElement {
+                                        name: None,
+                                        ty: Box::new(ty),
+                                    })
+                                    .collect(),
+                            )
                         }
                     } else {
                         match ret.values.first() {
@@ -576,41 +584,46 @@ pub(crate) fn resolve_expr_type(
             }
         }
         Expr::SequenceLiteral(ast::SequenceLiteral::Elements(items)) => {
-            let expected_ty = expected_ty.map(Ty::without_reference_wrappers);
-            if let Some(expected) = expected_ty
-                && (matches!(expected, Ty::Array { .. })
+            if let Some(expected) = expected_ty.map(Ty::without_reference_wrappers)
+                && (matches!(
+                    expected,
+                    Ty::Array { .. } | Ty::Sequence(_) | Ty::Record { .. }
+                ) || expected
+                    .named_instance()
+                    .and_then(|instance| type_registry.declaration_for_instance(instance))
+                    .is_some_and(|declaration| declaration.sequence_literal.is_some())
                     || crate::representation::Repr::array_parts(expected, Some(type_registry))
                         .is_some())
             {
                 return expected.clone();
             }
-            let elem_ty = items
-                .first()
-                .map(|item| {
-                    resolve_expr_type(
-                        item,
-                        tag_types,
-                        variant_map,
-                        receiver_type,
-                        None,
-                        local_var_types,
-                        fn_return_types,
-                        type_registry,
-                    )
-                })
-                .unwrap_or(Ty::Unit);
-            let elem_ty = if matches!(
-                elem_ty,
-                Ty::UnresolvedLiteral(ast::ty::LiteralKind::Integer)
-            ) {
-                Ty::i64()
-            } else {
-                elem_ty
-            };
-            Ty::Array {
-                elem: Box::new(elem_ty),
-                size: NormalExpr::from(items.len() as i128),
-            }
+            Ty::sequence(
+                items
+                    .iter()
+                    .map(|item| {
+                        let ty = resolve_expr_type(
+                            &item.expr,
+                            tag_types,
+                            variant_map,
+                            receiver_type,
+                            None,
+                            local_var_types,
+                            fn_return_types,
+                            type_registry,
+                        );
+                        let ty =
+                            if matches!(ty, Ty::UnresolvedLiteral(ast::ty::LiteralKind::Integer)) {
+                                Ty::i64()
+                            } else {
+                                ty
+                            };
+                        ast::ty::SequenceTypeElement {
+                            name: item.name,
+                            ty: Box::new(ty),
+                        }
+                    })
+                    .collect(),
+            )
         }
         Expr::SequenceLiteral(ast::SequenceLiteral::Repeat { seed, count }) => {
             if let Some(expected) = expected_ty.map(Ty::without_reference_wrappers)
@@ -801,15 +814,12 @@ pub(crate) fn bind_explicit_ty(bind: &Bind, tag_types: &HashMap<Intern<String>, 
         let elements = bind
             .named_results
             .iter()
-            .map(|result| ast::ty::ResultElement {
+            .map(|result| ast::ty::SequenceTypeElement {
                 name: result.name,
                 ty: Box::new(env.resolve_expr(&result.ty.value)),
             })
             .collect::<Vec<_>>();
-        return Some(match elements.as_slice() {
-            [element] => (*element.ty).clone(),
-            _ => Ty::ResultRow(elements),
-        });
+        return Some(Ty::results(elements));
     }
     if let Some(sp) = &bind.return_tag
         && expr_is_type_surface(&sp.value)
@@ -854,15 +864,12 @@ pub(crate) fn bind_explicit_ty_in_scope(
         let elements = bind
             .named_results
             .iter()
-            .map(|result| ast::ty::ResultElement {
+            .map(|result| ast::ty::SequenceTypeElement {
                 name: result.name,
                 ty: Box::new(env.resolve_expr(&result.ty.value)),
             })
             .collect::<Vec<_>>();
-        return Some(match elements.as_slice() {
-            [element] => (*element.ty).clone(),
-            _ => Ty::ResultRow(elements),
-        });
+        return Some(Ty::results(elements));
     }
     if let Some(sp) = &bind.return_tag
         && expr_is_type_surface(&sp.value)

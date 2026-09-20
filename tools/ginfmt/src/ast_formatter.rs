@@ -608,8 +608,10 @@ impl<'a> AstFormatter<'a> {
                 if index > 0 {
                     self.buffer.push_str(", ");
                 }
-                self.buffer.push_str(result.name.as_str());
-                self.buffer.push(' ');
+                if let Some(name) = result.name {
+                    self.buffer.push_str(name.as_str());
+                    self.buffer.push(' ');
+                }
                 self.buffer
                     .push_str(&span_text_spanned_expr(&result.ty, st, src));
             }

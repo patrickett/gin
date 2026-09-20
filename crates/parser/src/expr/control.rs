@@ -700,7 +700,7 @@ impl TokenCursor<'_, '_> {
         }
     }
 
-    pub fn parse_return(&mut self, expr_parser: ExprFn) -> Option<Return> {
+    pub fn parse_return(&mut self, _expr_parser: ExprFn) -> Option<Return> {
         if !self.eat(&Token::Return) {
             return None;
         }
@@ -718,12 +718,20 @@ impl TokenCursor<'_, '_> {
             });
         }
 
-        let first = expr_parser(self);
-        let mut values = vec![first];
-        while self.eat(&Token::Comma) {
-            values.push(expr_parser(self));
+        let first = self.parse_sequence_element();
+        let start = first.span_id;
+        let mut elems = vec![first];
+        while self.peek_at(0) == Some(&Token::Comma) {
+            self.advance();
+            self.skip_layout();
+            elems.push(self.parse_sequence_element());
         }
-        let span = self.merge_span(values[0].span_id, self.last_consumed_span());
+        let values = if elems.iter().any(|elem| elem.name.is_some()) {
+            vec![self.sequence_value(elems, start)]
+        } else {
+            elems.into_iter().map(|elem| elem.expr).collect()
+        };
+        let span = self.merge_span(start, self.last_consumed_span());
         Some(Return {
             values,
             span_id: span,

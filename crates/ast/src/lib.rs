@@ -8,8 +8,8 @@ pub use expr::{
     AsmOperandBinding, AttributeItem, BinOp, Binary, Bind, BindAttributes, BindOperator, BindValue,
     BundleExportImport, COMPILER_QUERY_NAMES, Complexity, ComplexityExpr, Condition, Expr, FnCall,
     ForInLoop, FormatPart, FormatString, IfExpr, Import, ImportSource, Literal, LocalBundleImport,
-    Loop, LoopEnum, ModuleImport, NamedResult, OperatorRole, Range, Return, SequenceLiteral,
-    TagCall, Typed, WhenArm, WhenExpr, WhileLoop,
+    Loop, LoopEnum, ModuleImport, NamedResult, OperatorRole, Range, Return, SequenceElement,
+    SequenceLiteral, TagCall, Typed, WhenArm, WhenExpr, WhileLoop,
 };
 
 mod file_ast;

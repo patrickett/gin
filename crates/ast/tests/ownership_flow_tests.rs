@@ -642,7 +642,7 @@ return 0
 fn test_fixed_array_item_replacement_invalidates_equal_reference() {
     let src = "\
 main:
-    items: (0; 2)
+    items: [0; 2]
     ref saved Int: items.(0)
     items.(0):: 1
     result: saved
@@ -662,7 +662,7 @@ return 0
 fn test_fixed_array_disjoint_item_replacement_preserves_reference() {
     let src = "\
 main:
-    items: (0; 2)
+    items: [0; 2]
     ref saved Int: items.(0)
     items.(1):: 1
     result: saved
@@ -681,7 +681,7 @@ return 0
 fn test_symbolic_item_replacement_conservatively_invalidates_reference() {
     let src = "\
 main(i Int, j Int):
-    items: (0; 2)
+    items: [0; 2]
     ref saved Int: items.(i)
     items.(j):: 1
     result: saved
@@ -700,9 +700,9 @@ return 0
 fn test_ancestor_replacement_invalidates_descendant_reference() {
     let src = "\
 main:
-    items: (0; 2)
+    items: [0; 2]
     ref saved Int: items.(0)
-    items:: (1; 2)
+    items:: [1; 2]
     result: saved
 return 0
 ";
@@ -740,7 +740,7 @@ fn test_consuming_different_fixed_array_item_preserves_reference() {
     let src = "\
 drop(value Int) Int: 0
 main:
-    items: (0; 2)
+    items: [0; 2]
     ref saved Int: items.(0)
     drop(items.(1))
     result: saved
@@ -761,7 +761,7 @@ fn test_fixed_array_call_proves_index_refinement_from_length() {
     let src = "\
 get(ref array Array(x, n), index Int and >= 0 and < n) ref x: array.(index)
 main:
-    items: (0; 4)
+    items: [0; 4]
     ref saved Int: get(ref items, 2)
     result: saved
 return 0
@@ -784,7 +784,7 @@ fn test_fixed_array_call_rejects_index_at_length() {
     let src = "\
 get(ref array Array(x, n), index Int and >= 0 and < n) ref x: array.(index)
 main:
-    items: (0; 4)
+    items: [0; 4]
     ref saved Int: get(ref items, 4)
 return 0
 ";
@@ -864,7 +864,7 @@ fn test_consuming_same_fixed_array_item_invalidates_reference() {
     let src = "\
 drop(value Int) Int: 0
 main:
-    items: (0; 2)
+    items: [0; 2]
     ref saved Int: items.(0)
     drop(items.(0))
     result: saved

@@ -441,6 +441,7 @@ fn default_expr_value_expr(cv: &ConstValue, span_id: SpanId) -> Expr {
             items
                 .iter()
                 .map(|item| Typed::infer(default_expr_value_expr(item, span_id), span_id))
+                .map(ast::SequenceElement::new)
                 .collect(),
         )),
         ConstValue::SequenceRepeat { seed, count } => {

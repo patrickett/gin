@@ -23,7 +23,7 @@ Target has Default
     arch Architecture
     vendor Vendor
     os OperatingSystem
-    Default.default: ( arch: 'x86_64', vendor: 'unknown', os: 'unknown', )
+    Default.default: [ arch: 'x86_64', vendor: 'unknown', os: 'unknown', ]
 target := Target.default
 "#;
     let ast = prepare_source(source, &CompileTarget::Library);
@@ -71,7 +71,7 @@ fn record_default_does_not_leak_top_level_defs() {
     let source = r#"
 Target has Default
     arch Architecture
-    Default.default: ( arch: 'x86_64', )
+    Default.default: [ arch: 'x86_64', ]
 target Target
 "#;
     let ast = TokenCursor::parse_source(source);
@@ -90,7 +90,7 @@ Target has Default
     arch Architecture
     vendor Vendor
     os OperatingSystem
-    Default.default: ( arch: 'x86_64', vendor: 'unknown', os: 'unknown', )
+    Default.default: [ arch: 'x86_64', vendor: 'unknown', os: 'unknown', ]
 target Target
 "#;
     let ast = TokenCursor::parse_source(source);
@@ -115,7 +115,7 @@ Target has Default
     arch Architecture
     vendor Vendor
     os OperatingSystem
-    Default.default: ( arch: 'x86_64', vendor: 'unknown', os: 'unknown', )
+    Default.default: [ arch: 'x86_64', vendor: 'unknown', os: 'unknown', ]
 
 target Target
 "#;

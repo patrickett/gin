@@ -87,20 +87,20 @@ fn two_alternative_structural_result_family_uses_one_bit_sum_discriminant() {
 }
 
 #[test]
-fn result_rows_do_not_have_a_single_physical_representation() {
-    let ty = Ty::ResultRow(vec![
-        ast::ty::ResultElement {
-            name: Intern::from_ref("first"),
+fn uniform_named_sequences_have_an_array_representation() {
+    let ty = Ty::Sequence(vec![
+        ast::ty::SequenceTypeElement {
+            name: Some(Intern::from_ref("first")),
             ty: Box::new(Ty::anonymous_integer_for_width(8, false)),
         },
-        ast::ty::ResultElement {
-            name: Intern::from_ref("second"),
+        ast::ty::SequenceTypeElement {
+            name: Some(Intern::from_ref("second")),
             ty: Box::new(Ty::anonymous_integer_for_width(8, false)),
         },
     ]);
 
     assert!(matches!(
         Repr::derive(&ty, None),
-        Err(RepresentationError::Unsupported { .. })
+        Ok(Repr::Array { length: 2, .. })
     ));
 }

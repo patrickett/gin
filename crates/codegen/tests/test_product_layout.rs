@@ -45,8 +45,8 @@ choose_when(flag Bool) first Byte, second Byte: when flag is True then pair() el
 "#;
     let (mlir, diagnostics) = support::codegen_to_mlir_text(source, "result_row_values.gin", false);
     assert!(diagnostics.is_empty(), "{diagnostics:?}\n{mlir}");
-    assert!(!mlir.contains("llvm.insertvalue"), "{mlir}");
-    assert!(!mlir.contains("llvm.extractvalue"), "{mlir}");
+    assert!(mlir.contains("llvm.insertvalue"), "{mlir}");
+    assert!(mlir.contains("llvm.extractvalue"), "{mlir}");
     assert!(mlir.contains("function_type = () -> (i8, i8)"), "{mlir}");
     assert!(mlir.contains("callee = @pair"), "{mlir}");
     assert!(mlir.contains(": () -> (i8, i8)"), "{mlir}");

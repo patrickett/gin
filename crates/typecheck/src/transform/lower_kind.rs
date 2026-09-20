@@ -7,7 +7,7 @@
 
 use ast::prelude::*;
 use ast::span::{SpanId, SubSpan};
-use ast::{BinderId, BinderOwner, NormalExpr};
+use ast::{BinderId, BinderOwner, ConstValue, NormalExpr};
 use diagnostic::Diagnostic;
 use internment::Intern;
 
@@ -440,7 +440,7 @@ fn result_names_for_expr(
     typed: &TypedFileAst,
     scope: &ExprLowerScope<'_>,
     expr: ExprId,
-) -> Vec<Intern<String>> {
+) -> Vec<Option<Intern<String>>> {
     let Some(TypedExprKind::FnCall { target, .. }) = typed.exprs.kind_of(expr) else {
         return Vec::new();
     };
@@ -456,13 +456,7 @@ fn result_names_for_expr(
     scope
         .callable_signatures
         .get(target)
-        .map(|signature| {
-            signature
-                .results
-                .iter()
-                .filter_map(|result| result.name)
-                .collect()
-        })
+        .map(|signature| signature.results.iter().map(|result| result.name).collect())
         .unwrap_or_default()
 }
 
@@ -1609,15 +1603,36 @@ pub(crate) fn lower_expr_kind(
             let base_definition = typed.type_registry.resolved_definition_for_type(
                 &typed.exprs.ty_of(base_id).cloned().unwrap_or(Ty::Unit),
             );
-            let expected = match base_definition {
+            let sequence_field = if matches!(base_definition, Ty::Sequence(_)) {
+                base_definition.named_field(*field)
+            } else {
+                None
+            };
+            let expected = match &base_definition {
                 Ty::Record { fields, .. } => fields
                     .iter()
                     .find(|(name, _)| name == field)
                     .map(|(_, ty)| ty.as_ref().clone()),
-                _ => None,
+                _ => sequence_field.as_ref().map(|(_, ty)| ty.clone()),
             };
             let value_id =
                 lower_typed_expr(typed, value, &scope.with_expected(expected.as_ref()), env);
+            if let Some((index, _)) = sequence_field {
+                return TypedExprKind::AggregateSet {
+                    base: base_id,
+                    index,
+                    value: value_id,
+                    operator: operator.as_ref().map(|operator| {
+                        resolve_compound_operator(
+                            typed,
+                            scope,
+                            operator,
+                            expected.as_ref().unwrap(),
+                            value_id,
+                        )
+                    }),
+                };
+            }
             TypedExprKind::RecordSet {
                 base: base_id,
                 field: *field,
@@ -1644,48 +1659,45 @@ pub(crate) fn lower_expr_kind(
             let base_ty = reference_pointee_for_type(&base_ty, Some(&typed.type_registry))
                 .unwrap_or(base_ty.clone());
             let base_definition = typed.type_registry.resolved_definition_for_type(&base_ty);
-            let field_idx = match base_definition.named_field(*field) {
-                Some((index, _)) => Some(index),
-                None => {
-                    if let Some(TypedExprKind::Bind { name, .. }) = typed.exprs.kind_of(base_id)
-                        && let Some(index) = env
-                            .result_names
-                            .get(name)
-                            .and_then(|names| names.iter().position(|name| name == field))
-                    {
-                        Some(index)
-                    } else if let Some(TypedExprKind::SelfRef { target }) =
-                        typed.exprs.kind_of(base_id)
-                        && let Some(index) = env
-                            .result_names
-                            .get(&target.0)
-                            .and_then(|names| names.iter().position(|name| name == field))
-                    {
-                        Some(index)
-                    } else if let Some(TypedExprKind::FnCall { target, .. }) =
-                        typed.exprs.kind_of(base_id)
-                        && let Some(index) = env
-                            .result_names
-                            .get(&target.0)
-                            .and_then(|names| names.iter().position(|name| name == field))
-                    {
-                        Some(index)
-                    } else {
-                        let target = match typed.exprs.kind_of(base_id) {
-                            Some(TypedExprKind::FnCall { target, .. }) => Some(*target),
-                            _ => None,
-                        };
-                        target.and_then(|target| {
-                            let bind = typed.defs.get(&target)?;
-                            if let Some(index) = bind
-                                .named_results
-                                .iter()
-                                .position(|result| result.name == *field)
-                            {
-                                return Some(index);
-                            }
-                            if let Some(index) =
-                                scope
+            let field_idx =
+                match base_definition.named_field(*field) {
+                    Some((index, _)) => Some(index),
+                    None => {
+                        if let Some(TypedExprKind::Bind { name, .. }) = typed.exprs.kind_of(base_id)
+                            && let Some(index) = env.result_names.get(name).and_then(|names| {
+                                names.iter().position(|name| *name == Some(*field))
+                            })
+                        {
+                            Some(index)
+                        } else if let Some(TypedExprKind::SelfRef { target }) =
+                            typed.exprs.kind_of(base_id)
+                            && let Some(index) = env.result_names.get(&target.0).and_then(|names| {
+                                names.iter().position(|name| *name == Some(*field))
+                            })
+                        {
+                            Some(index)
+                        } else if let Some(TypedExprKind::FnCall { target, .. }) =
+                            typed.exprs.kind_of(base_id)
+                            && let Some(index) = env.result_names.get(&target.0).and_then(|names| {
+                                names.iter().position(|name| *name == Some(*field))
+                            })
+                        {
+                            Some(index)
+                        } else {
+                            let target = match typed.exprs.kind_of(base_id) {
+                                Some(TypedExprKind::FnCall { target, .. }) => Some(*target),
+                                _ => None,
+                            };
+                            target.and_then(|target| {
+                                let bind = typed.defs.get(&target)?;
+                                if let Some(index) = bind
+                                    .named_results
+                                    .iter()
+                                    .position(|result| result.name == Some(*field))
+                                {
+                                    return Some(index);
+                                }
+                                if let Some(index) = scope
                                     .callable_signatures
                                     .get(&target)
                                     .and_then(|signature| {
@@ -1694,34 +1706,34 @@ pub(crate) fn lower_expr_kind(
                                             .iter()
                                             .position(|result| result.name == Some(*field))
                                     })
-                            {
-                                return Some(index);
-                            }
-                            let body = match &bind.body {
-                                BindBody::Expr(expr) => Some(*expr),
-                                BindBody::Body { exprs, ret } => {
-                                    (*ret).or_else(|| exprs.last().copied())
+                                {
+                                    return Some(index);
                                 }
-                                BindBody::Unlowered => None,
-                            }?;
-                            let tag_id = match typed.exprs.kind_of(body) {
-                                Some(TypedExprKind::TagCall { variant_id, .. }) => {
-                                    Some(variant_id.union)
-                                }
-                                _ => None,
-                            }?;
-                            let tag = typed.tags.get(&tag_id)?;
-                            let Ty::Record { fields, .. } = typed
-                                .type_registry
-                                .resolved_definition_for_type(&tag.resolved_ty)
-                            else {
-                                return None;
-                            };
-                            fields.iter().position(|(name, _)| name == field)
-                        })
+                                let body = match &bind.body {
+                                    BindBody::Expr(expr) => Some(*expr),
+                                    BindBody::Body { exprs, ret } => {
+                                        (*ret).or_else(|| exprs.last().copied())
+                                    }
+                                    BindBody::Unlowered => None,
+                                }?;
+                                let tag_id = match typed.exprs.kind_of(body) {
+                                    Some(TypedExprKind::TagCall { variant_id, .. }) => {
+                                        Some(variant_id.union)
+                                    }
+                                    _ => None,
+                                }?;
+                                let tag = typed.tags.get(&tag_id)?;
+                                let Ty::Record { fields, .. } = typed
+                                    .type_registry
+                                    .resolved_definition_for_type(&tag.resolved_ty)
+                                else {
+                                    return None;
+                                };
+                                fields.iter().position(|(name, _)| name == field)
+                            })
+                        }
                     }
-                }
-            };
+                };
             if let Some(idx) = field_idx {
                 TypedExprKind::AggregateGet {
                     base: base_id,
@@ -1740,7 +1752,7 @@ pub(crate) fn lower_expr_kind(
                         .at_span_id(base.span_id, &typed.span_table),
                     );
                 }
-                if matches!(base_definition, Ty::Record { .. }) {
+                if matches!(base_definition, Ty::Record { .. } | Ty::Sequence(_)) {
                     let expr_id = reserved_expr_id.unwrap_or(base_id);
                     typed.exprs.facts.semantic_facts.flaws[expr_id.as_usize()].push(
                         Diagnostic::new(
@@ -1750,7 +1762,7 @@ pub(crate) fn lower_expr_kind(
                         .with_arg("name", field.as_str().to_string())
                         .at_span_id(base.span_id, &typed.span_table),
                     );
-                } else if !matches!(base_definition, Ty::ResultRow(..)) {
+                } else if !matches!(base_definition, Ty::Sequence(..)) {
                     let expr_id = reserved_expr_id.unwrap_or(base_id);
                     typed.exprs.facts.semantic_facts.flaws[expr_id.as_usize()].push(
                         Diagnostic::new(
@@ -1770,24 +1782,6 @@ pub(crate) fn lower_expr_kind(
 
         Expr::AggregateGet { base, index } => {
             let base_id = lower_typed_expr(typed, base, &scope.child(), env);
-            if matches!(
-                typed
-                    .type_registry
-                    .resolved_definition_for_type(typed.exprs.ty_of(base_id).unwrap_or(&Ty::Unit)),
-                Ty::ResultRow(_)
-            ) {
-                if let Some(def_id) = scope.current_def_id
-                    && let Some(bind) = typed.defs.get_mut(&def_id)
-                {
-                    bind.flaws.push(
-                        Diagnostic::new(
-                            "type-positional-result-projection",
-                            "result rows support named projection only",
-                        )
-                        .at_span_id(expr.span_id(), &typed.span_table),
-                    );
-                }
-            }
             TypedExprKind::AggregateGet {
                 base: base_id,
                 index: *index,
@@ -1806,6 +1800,8 @@ pub(crate) fn lower_expr_kind(
             );
             let expected = match base_definition {
                 Ty::Record { fields, .. } => fields.get(*index).map(|(_, field)| (**field).clone()),
+                Ty::Sequence(fields) => fields.get(*index).map(|field| (*field.ty).clone()),
+                Ty::Array { elem, .. } => Some(*elem),
                 _ => None,
             };
             let value_id =
@@ -1829,6 +1825,16 @@ pub(crate) fn lower_expr_kind(
         Expr::BufGet { buf, index } => {
             let base_id = lower_typed_expr(typed, buf, &scope.child(), env);
             let index_id = lower_typed_expr(typed, index, &scope.child(), env);
+            if matches!(typed.exprs.ty_of(base_id), Some(Ty::Sequence(_)))
+                && let Some(ConstValue::Int(value)) =
+                    &typed.exprs.facts.const_facts.const_value[index_id.as_usize()]
+                && let Some(index) = ast::integer::to_usize(*value)
+            {
+                return TypedExprKind::AggregateGet {
+                    base: base_id,
+                    index,
+                };
+            }
             TypedExprKind::BufGet {
                 buf: base_id,
                 index: index_id,
@@ -1966,13 +1972,13 @@ pub(crate) fn lower_expr_kind(
                 .enumerate()
                 .map(|(index, e)| {
                     let expected = match scope.expected_ty {
-                        Some(Ty::ResultRow(fields)) => fields.get(index).map(|field| &*field.ty),
+                        Some(Ty::Sequence(fields)) => fields.get(index).map(|field| &*field.ty),
                         _ => None,
                     };
                     lower_typed_expr(typed, e, &scope.with_expected(expected), env)
                 })
                 .collect();
-            if let Some(Ty::ResultRow(fields)) = scope.expected_ty {
+            if let Some(Ty::Sequence(fields)) = scope.expected_ty {
                 for (id, field) in item_ids.iter().zip(fields) {
                     typed.exprs.ty[id.as_usize()] = (*field.ty).clone();
                 }
@@ -2009,24 +2015,47 @@ pub(crate) fn lower_expr_kind(
         Expr::SequenceLiteral(ast::SequenceLiteral::Elements(items)) => {
             let element_expected = scope
                 .expected_ty
-                .and_then(|expected| fixed_array_element_type(typed, expected))
-                .or_else(|| {
-                    items.first().and_then(|item| {
+                .and_then(|ty| fixed_array_element_type(typed, ty));
+            let expected = scope
+                .expected_ty
+                .filter(|_| element_expected.is_none())
+                .map(|ty| typed.type_registry.resolved_definition_for_type(ty));
+            let item_ids: Vec<_> = items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    let ty = match &expected {
+                        Some(Ty::Sequence(fields)) => {
+                            fields.get(index).map(|field| (*field.ty).clone())
+                        }
+                        Some(Ty::Record { fields, .. }) => {
+                            fields.get(index).map(|(_, ty)| (**ty).clone())
+                        }
+                        _ => element_expected.clone(),
+                    }
+                    .or_else(|| {
                         matches!(item.value, Expr::Lit(Literal::Int(_) | Literal::Number(_)))
                             .then(Ty::i64)
-                    })
-                });
-            let item_ids = items
-                .iter()
-                .map(|e| {
-                    let item_scope = element_expected
-                        .as_ref()
-                        .map(|ty| scope.with_expected(Some(ty)))
-                        .unwrap_or_else(|| scope.child());
-                    lower_typed_expr(typed, e, &item_scope, env)
+                    });
+                    lower_typed_expr(typed, &item.expr, &scope.with_expected(ty.as_ref()), env)
                 })
                 .collect();
-            TypedExprKind::ArrayLit(item_ids)
+            if matches!(expected, Some(Ty::Record { .. })) {
+                return TypedExprKind::RecordValue(item_ids);
+            }
+            if (items.is_empty() && element_expected.is_none())
+                || matches!(expected, Some(Ty::Sequence(_)))
+                || items.iter().any(|item| item.name.is_some())
+                || item_ids.first().is_some_and(|first| {
+                    item_ids
+                        .iter()
+                        .any(|id| typed.exprs.ty[id.as_usize()] != typed.exprs.ty[first.as_usize()])
+                })
+            {
+                TypedExprKind::ResultRow(item_ids)
+            } else {
+                TypedExprKind::ArrayLit(item_ids)
+            }
         }
 
         Expr::SequenceLiteral(ast::SequenceLiteral::Repeat { seed, count }) => {

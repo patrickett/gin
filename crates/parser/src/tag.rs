@@ -156,12 +156,66 @@ impl<'src, 't> TokenCursor<'src, 't> {
         self.parse_type_expr_expr(expr_parser)
     }
 
+    fn parse_sequence_type(&mut self, expr_parser: ExprFn) -> Typed<Expr> {
+        let start = self.current_span();
+        self.advance();
+        self.skip_layout();
+        let mut elems = Vec::new();
+        while !self.is_at(&Token::BracketClose) && self.peek().is_some() {
+            let name = if matches!(self.peek(), Some(Token::Id(_)))
+                && matches!(
+                    self.peek_at(1),
+                    Some(
+                        Token::Tag(_) | Token::Ref | Token::Mut | Token::BracketOpen | Token::Id(_)
+                    )
+                ) {
+                self.parse_name()
+            } else {
+                None
+            };
+            let Some(ty) = self.parse_type_expr(expr_parser) else {
+                break;
+            };
+            let expr = Typed::infer(ty.value, ty.span_id);
+            if self.eat(&Token::ColonSemi) {
+                if name.is_some() || !elems.is_empty() {
+                    self.error(
+                        "parse-sequence-repeat-elements",
+                        "a repeated type requires one unnamed element type",
+                        start,
+                    );
+                }
+                let count = self.parse_expression();
+                self.skip_layout();
+                self.expect(&Token::BracketClose);
+                return Typed::infer(
+                    Expr::SequenceLiteral(ast::SequenceLiteral::Repeat {
+                        seed: Box::new(expr),
+                        count: Box::new(count),
+                    }),
+                    self.merge_span(start, self.last_consumed_span()),
+                );
+            }
+            elems.push(ast::SequenceElement { name, expr });
+            if self.is_at(&Token::BracketClose) {
+                break;
+            }
+            if !self.eat_list_separator() {
+                break;
+            }
+            self.skip_layout();
+        }
+        self.skip_layout();
+        self.expect(&Token::BracketClose);
+        self.sequence_value(elems, start)
+    }
+
     fn parse_type_expr_expr(&mut self, expr_parser: ExprFn) -> Option<Spanned<Expr>> {
         let start_span = self.current_span();
 
         // Structural fixed-array type syntax: `[Element; length]`.
         if self.is_at(&Token::BracketOpen) {
-            let array = self.parse_bracket_lit();
+            let array = self.parse_sequence_type(expr_parser);
             return Some(Spanned {
                 value: array.value,
                 span_id: array.span_id,

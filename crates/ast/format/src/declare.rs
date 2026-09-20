@@ -133,8 +133,10 @@ impl BindFormatExt for Bind {
                     if index > 0 {
                         sig.push_str(", ");
                     }
-                    sig.push_str(result.name.as_str());
-                    sig.push(' ');
+                    if let Some(name) = result.name {
+                        sig.push_str(name.as_str());
+                        sig.push(' ');
+                    }
                     sig.push_str(&result.ty.value.format_surface());
                 }
             } else if let Some(sp) = &self.return_tag {
@@ -147,8 +149,10 @@ impl BindFormatExt for Bind {
                 if index > 0 {
                     sig.push_str(", ");
                 }
-                sig.push_str(result.name.as_str());
-                sig.push(' ');
+                if let Some(name) = result.name {
+                    sig.push_str(name.as_str());
+                    sig.push(' ');
+                }
                 sig.push_str(&result.ty.value.format_surface());
             }
         } else if let Some(sp) = &self.return_tag {

@@ -15,7 +15,7 @@ impl TyOwnershipExt for Ty {
             | Ty::Float { .. }
             | Ty::Unit
             | Ty::Ref { .. } => true,
-            Ty::ResultRow(items) => items
+            Ty::Sequence(items) => items
                 .iter()
                 .all(|item| item.ty.is_structurally_discardable()),
             Ty::Record { fields, .. } => fields

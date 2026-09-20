@@ -493,14 +493,11 @@ pub fn format_ty_for_hover(ty: &Ty) -> String {
             let prefix = if *mutable { "mut " } else { "ref " };
             format!("{}{}", prefix, format_ty_for_hover(inner))
         }
-        Ty::ResultRow(elements) => elements
+        Ty::Sequence(elements) => elements
             .iter()
-            .map(|element| {
-                format!(
-                    "{} {}",
-                    element.name.as_str(),
-                    format_ty_for_hover(&element.ty)
-                )
+            .map(|element| match element.name {
+                Some(name) => format!("{name} {}", format_ty_for_hover(&element.ty)),
+                None => format_ty_for_hover(&element.ty),
             })
             .collect::<Vec<_>>()
             .join(", "),

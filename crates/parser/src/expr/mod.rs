@@ -148,7 +148,21 @@ impl<'src, 't> TokenCursor<'src, 't> {
 
     /// Parse a call argument expression.
     fn parse_arg_expr(&mut self) -> Typed<Expr> {
-        self.parse_expression()
+        let elem = self.parse_sequence_element();
+        match elem.name {
+            Some(name) => {
+                let span = elem.span_id;
+                Typed::infer(
+                    Expr::Bind(Box::new(Bind::new(
+                        name,
+                        span,
+                        BindValue::Expr(Box::new(elem.expr)),
+                    ))),
+                    span,
+                )
+            }
+            None => elem.expr,
+        }
     }
 
     pub fn parse_expression(&mut self) -> Typed<Expr> {
@@ -311,7 +325,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
             Some(Token::Mut) => self.parse_mut_take(),
             Some(Token::Deref) => self.parse_deref_expr(),
             Some(Token::BracketOpen) => self.parse_bracket_lit(),
-            Some(Token::ParenOpen) => self.parse_value_row_lit_or_alloc_or_group(),
+            Some(Token::ParenOpen) => self.parse_group(),
             Some(Token::FormatStringDelim) => self.parse_format_string_expr(),
             Some(Token::Id(_)) => {
                 if let Some((Token::Id(name), name_span)) = self.peek().zip(self.peek_span())
@@ -408,6 +422,17 @@ impl<'src, 't> TokenCursor<'src, 't> {
         }
         if self.compound_rebind_at(1).is_some() {
             return true;
+        }
+
+        if self.peek_at(1) == Some(&Token::BracketOpen) {
+            return self
+                .skip_balanced_delimiters(1, Token::BracketOpen, Token::BracketClose)
+                .is_some_and(|offset| {
+                    matches!(
+                        self.peek_at(offset),
+                        Some(Token::Colon | Token::ColonEq | Token::Newline | Token::Dedent) | None
+                    )
+                });
         }
 
         if self.peek_at(1) == Some(&Token::Is) {
@@ -875,237 +900,140 @@ impl<'src, 't> TokenCursor<'src, 't> {
         Typed::infer(Expr::AnonymousTag(self.intern("__parse_error")), span)
     }
 
-    pub(crate) fn parse_bracket_lit(&mut self) -> Typed<Expr> {
-        let start_span = self.peek_span().unwrap_or_else(|| self.current_span());
-        self.advance(); // consume [
-
-        self.skip_layout();
-
-        if self.is_at(&Token::BracketClose) {
-            self.advance();
-            let end_span = self.last_consumed_span();
-            return Typed::infer(
-                Expr::SequenceLiteral(SequenceLiteral::Elements(Vec::new())),
-                self.merge_span(start_span, end_span),
-            );
+    fn parse_sequence_element(&mut self) -> ast::SequenceElement {
+        let name = if matches!(self.peek(), Some(Token::Id(_)))
+            && self.peek_at(1) == Some(&Token::Colon)
+        {
+            let name = self.parse_name();
+            self.expect(&Token::Colon);
+            name
+        } else {
+            None
+        };
+        ast::SequenceElement {
+            name,
+            expr: self.parse_expression(),
         }
+    }
 
-        let mut elems = Vec::new();
-        loop {
-            if self.is_at(&Token::BracketClose) {
-                break;
+    pub(crate) fn parse_sequence_value(&mut self) -> Typed<Expr> {
+        let first = self.parse_sequence_element();
+        if first.name.is_none() && self.peek_at(0) != Some(&Token::Comma) {
+            return first.expr;
+        }
+        let start = first.span_id;
+        let mut elems = vec![first];
+        while self.peek_at(0) == Some(&Token::Comma) {
+            self.advance();
+            self.skip_layout();
+            elems.push(self.parse_sequence_element());
+        }
+        self.sequence_value(elems, start)
+    }
+
+    pub(crate) fn sequence_value(
+        &mut self,
+        elems: Vec<ast::SequenceElement>,
+        start: SpanId,
+    ) -> Typed<Expr> {
+        let mut names = std::collections::HashSet::new();
+        for elem in &elems {
+            if let Some(name) = elem.name
+                && !names.insert(name)
+            {
+                self.error(
+                    "parse-duplicate-sequence-name",
+                    format!("duplicate sequence name `{name}`"),
+                    elem.span_id,
+                );
             }
+        }
+        Typed::infer(
+            Expr::SequenceLiteral(SequenceLiteral::Elements(elems)),
+            self.merge_span(start, self.last_consumed_span()),
+        )
+    }
 
-            let first = self.parse_expression();
-
+    pub(crate) fn parse_bracket_lit(&mut self) -> Typed<Expr> {
+        let start = self.current_span();
+        self.advance();
+        self.skip_layout();
+        let mut elems = Vec::new();
+        while !self.is_at(&Token::BracketClose) && self.peek().is_some() {
+            let first = self.parse_sequence_element();
             if self.eat(&Token::ColonSemi) {
+                if !elems.is_empty() || first.name.is_some() {
+                    self.error(
+                        "parse-sequence-repeat-elements",
+                        "a repeated sequence requires one unnamed initializer",
+                        first.span_id,
+                    );
+                }
                 let count = self.parse_expression();
                 self.skip_layout();
                 self.expect(&Token::BracketClose);
-                let end_span = self.last_consumed_span();
                 return Typed::infer(
                     Expr::SequenceLiteral(SequenceLiteral::Repeat {
-                        seed: Box::new(first),
+                        seed: Box::new(first.expr),
                         count: Box::new(count),
                     }),
-                    self.merge_span(start_span, end_span),
+                    self.merge_span(start, self.last_consumed_span()),
                 );
             }
-
             elems.push(first);
-
             if self.is_at(&Token::BracketClose) {
                 break;
             }
-
-            if self.eat_list_separator() {
+            if self.eat_list_separator() || self.previous_token_was_newline_separator() {
+                self.skip_layout();
                 continue;
             }
-
             self.error(
                 "parse-expected-list-separator",
-                "expected ',' or newline between list elements",
+                "expected ',' or newline between sequence elements",
                 self.current_span(),
             );
             break;
         }
-
         self.skip_layout();
         self.expect(&Token::BracketClose);
-        let end_span = self.last_consumed_span();
-        Typed::infer(
-            Expr::SequenceLiteral(SequenceLiteral::Elements(elems)),
-            self.merge_span(start_span, end_span),
-        )
+        self.sequence_value(elems, start)
     }
 
-    /// `(` followed by `id:` — record literal for compile-time defaults and similar.
-    fn is_record_literal_start(&self) -> bool {
-        let mut offset = 0;
-        loop {
-            match self.peek_at(offset) {
-                Some(Token::Newline) | Some(Token::Indent) | Some(Token::Dedent) => {
-                    offset += 1;
-                }
-                Some(Token::Id(_)) => {
-                    return matches!(self.peek_at(offset + 1), Some(Token::Colon));
-                }
-                _ => return false,
-            }
-        }
-    }
-
-    fn parse_record_literal_after_open_paren(&mut self, start_span: SpanId) -> Typed<Expr> {
-        let mut fields: Vec<Typed<Expr>> = Vec::new();
-        loop {
-            self.skip_layout();
-            if self.is_at(&Token::ParenClose) {
-                break;
-            }
-            let (field_name, field_span) = match self.peek() {
-                Some(Token::Id(n)) => {
-                    let name = self.intern(n);
-                    let span = self.peek_span().unwrap_or(start_span);
-                    self.advance();
-                    (name, span)
-                }
-                _ => {
-                    self.error(
-                        "parse-expected-field-name",
-                        "expected record field name",
-                        self.current_span(),
-                    );
-                    break;
-                }
-            };
-            if self.expect(&Token::Colon).is_none() {
-                break;
-            }
-            let value = self.parse_expression();
-            let bind = Bind::new(field_name, field_span, BindValue::Expr(Box::new(value)));
-            fields.push(Typed::infer(Expr::Bind(Box::new(bind)), field_span));
-
-            if self.is_at(&Token::ParenClose) {
-                break;
-            }
-            if !(self.eat_list_separator() || self.previous_token_was_newline_separator()) {
-                // No comma — newline is the separator (handled by skip_newlines
-                // at the top of the next iteration).
-                continue;
-            }
-        }
-
-        self.skip_newlines();
-        self.skip_indents();
-        self.expect(&Token::ParenClose);
-        let end_span = self.last_consumed_span();
-        let named_fields: Vec<(Intern<String>, Typed<Expr>)> = fields
-            .into_iter()
-            .filter_map(|f| {
-                if let Expr::Bind(ref b) = f.value {
-                    Some((b.name, f))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        Typed::infer(
-            Expr::RecordLit(named_fields),
-            self.merge_span(start_span, end_span),
-        )
-    }
-
-    fn parse_value_row_lit_or_alloc_or_group(&mut self) -> Typed<Expr> {
-        let start_span = self.peek_span().unwrap_or_else(|| self.current_span());
-        self.advance(); // consume (
-
+    fn parse_group(&mut self) -> Typed<Expr> {
+        let start = self.current_span();
+        self.advance();
         self.skip_layout();
-
-        if self.is_record_literal_start() {
-            self.skip_newlines();
-            self.skip_indents();
-            return self.parse_record_literal_after_open_paren(start_span);
-        }
-
-        if self.is_at(&Token::ParenClose) {
-            self.advance();
-            let end_span = self.last_consumed_span();
-            return Typed::infer(
-                Expr::ResultValues(Vec::new()),
-                self.merge_span(start_span, end_span),
-            );
-        }
-
-        let first = self.parse_expression();
-        self.skip_newlines();
-
-        // Fixed-array allocation: (init; size) — size must be compile-time-known
-        if self.eat(&Token::ColonSemi) {
-            let size = self.parse_expression();
-            self.expect(&Token::ParenClose);
-            let end_span = self.last_consumed_span();
-            return Typed::infer(
-                Expr::FixedArrayAlloc {
-                    init: Box::new(first),
-                    size: Box::new(size),
-                },
-                self.merge_span(start_span, end_span),
-            );
-        }
-
-        // Single element with no separator → grouped expression
-        if self.is_at(&Token::ParenClose) {
-            self.advance();
-            return first;
-        }
-
-        // Multiple elements — comma or newline separated
-        let mut elems = vec![first];
-        let mut has_positional_product = false;
-        loop {
-            if self.is_at(&Token::ParenClose) {
-                break;
-            }
-
-            let comma = self.eat_list_separator();
-            if comma {
-                has_positional_product = true;
-            }
-            let newline = self.previous_token_was_newline_separator();
-            if newline {
-                has_positional_product = true;
-            }
-            if !(comma || newline) {
-                self.error(
-                    "parse-expected-value-row-separator",
-                    "expected ',' or newline between value-row elements",
-                    self.current_span(),
-                );
-                break;
-            }
-
-            if self.is_at(&Token::ParenClose) {
-                break;
-            }
-
-            elems.push(self.parse_expression());
-        }
-
-        self.expect(&Token::ParenClose);
-        let end_span = self.last_consumed_span();
-        if has_positional_product {
-            let product_span = self.merge_span(start_span, end_span);
+        if self.eat(&Token::ParenClose) {
             self.error(
-                "parse-positional-product-removed",
-                "comma-separated parenthesized products are not values; use a callable with named results",
-                product_span,
+                "parse-empty-parens-removed",
+                "empty parentheses are not a value; use an empty nominal value or a bare return",
+                start,
             );
-            return Typed::infer(Expr::Invalid(product_span), product_span);
+            return Typed::infer(Expr::Invalid(start), start);
         }
-        elems
-            .into_iter()
-            .next()
-            .expect("parenthesized expression has a first element")
+        let named =
+            matches!(self.peek(), Some(Token::Id(_))) && self.peek_at(1) == Some(&Token::Colon);
+        let first = if named {
+            self.parse_sequence_value()
+        } else {
+            self.parse_expression()
+        };
+        if named || self.is_at(&Token::ColonSemi) || self.is_at(&Token::Comma) {
+            self.error(
+                "parse-parenthesized-sequence",
+                "use brackets to construct a sequence",
+                start,
+            );
+            while self.peek().is_some() && !self.is_at(&Token::ParenClose) {
+                self.advance();
+            }
+            self.expect(&Token::ParenClose);
+            return Typed::infer(Expr::Invalid(start), start);
+        }
+        self.skip_layout();
+        self.expect(&Token::ParenClose);
+        first
     }
 
     fn parse_take_ptr(&mut self) -> Typed<Expr> {

@@ -480,6 +480,51 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         ))
     }
 
+    fn pack_sequence(
+        &self,
+        values: LoweredValue<'c>,
+        ty: &Ty,
+        block: &BlockRef<'c, 'c>,
+    ) -> Option<Value<'c, 'c>> {
+        let aggregate = self.ty_to_mlir(ty);
+        if let [value] = values.values()
+            && value.r#type() == aggregate
+        {
+            return Some(*value);
+        }
+        let mut value = block.append_op(self.mlir.llvm_undef(aggregate, self.location()));
+        for (index, item) in values.into_values().into_iter().enumerate() {
+            value = block.append_op(self.mlir.llvm_insertvalue(
+                value,
+                item,
+                i64::try_from(index).ok()?,
+                self.location(),
+            ));
+        }
+        Some(value)
+    }
+
+    fn unpack_sequence(
+        &self,
+        value: Value<'c, 'c>,
+        ty: &Ty,
+        block: &BlockRef<'c, 'c>,
+    ) -> Option<LoweredValue<'c>> {
+        let Ty::Sequence(fields) = ty else {
+            return Some(LoweredValue::scalar(value));
+        };
+        let mut values = Vec::with_capacity(fields.len());
+        for (index, field) in fields.iter().enumerate() {
+            values.push(block.append_op(self.mlir.llvm_extractvalue(
+                value,
+                i64::try_from(index).ok()?,
+                self.ty_to_mlir(&field.ty),
+                self.location(),
+            )));
+        }
+        Some(LoweredValue::new(values))
+    }
+
     pub fn lower_typed_values(
         &self,
         expr_id: typecheck::ExprId,
@@ -507,11 +552,21 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 .or_else(|| self.program.defs.get(target).map(|bind| &bind.return_type))
                 .unwrap_or(expr.ty);
             let return_ty = substituted_ty.as_ref().unwrap_or(return_ty);
-            if matches!(return_ty, Ty::ResultRow(_)) {
+            if matches!(return_ty, Ty::Sequence(_)) {
                 if args.as_ref().is_none_or(Vec::is_empty)
-                    && let Some(value) = symtab.get_lowered(&target.0)
+                    && let Some(binding) = symtab.get(&target.0).cloned()
                 {
-                    return Some(value.clone());
+                    let value = if binding.is_slot {
+                        block.load_typed(
+                            self,
+                            binding.value,
+                            self.ty_to_mlir(&binding.ty),
+                            self.location(),
+                        )?
+                    } else {
+                        binding.value
+                    };
+                    return self.unpack_sequence(value, return_ty, block);
                 }
                 let mut lowered_args = Vec::new();
                 if let Some(args) = args {
@@ -546,12 +601,16 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     operation.results().map(Value::from).collect(),
                 ));
             }
+            if matches!(expr.ty, Ty::Sequence(_)) {
+                self.emit_internal("sequence call has a scalar return signature");
+                return None;
+            }
         }
         match &expr.kind {
             typecheck::TypedExprKind::ResultRow(items) => {
                 let mut values = Vec::with_capacity(items.len());
                 for item in items {
-                    values.extend(self.lower_typed_values(*item, block, symtab)?.into_values());
+                    values.push(self.lower_typed_expr(*item, block, symtab)?);
                 }
                 Some(LoweredValue::new(values))
             }
@@ -560,42 +619,56 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 stmts,
                 body,
                 unassigned: false,
-            } if matches!(expr.ty, Ty::ResultRow(_)) => {
+            } if matches!(expr.ty, Ty::Sequence(_)) => {
                 for stmt in stmts {
                     self.lower_typed_values(*stmt, block, symtab);
                 }
                 let value = self.lower_typed_values(*body, block, symtab)?;
-                symtab.insert_lowered(*name, value.clone(), expr.ty.clone());
+                let aggregate = self.pack_sequence(value.clone(), expr.ty, block)?;
+                symtab.insert(*name, aggregate, expr.ty.clone(), false);
                 Some(value)
             }
             typecheck::TypedExprKind::Reassign { name, value, .. }
-                if matches!(expr.ty, Ty::ResultRow(_)) =>
+                if matches!(expr.ty, Ty::Sequence(_)) =>
             {
                 let value = self.lower_typed_values(*value, block, symtab)?;
-                symtab
-                    .assign_lowered(name, value.clone(), expr.ty.clone())
-                    .then_some(value)
+                let aggregate = self.pack_sequence(value.clone(), expr.ty, block)?;
+                let binding = symtab.get(name)?.clone();
+                if binding.is_slot {
+                    block.store_typed(self, binding.value, aggregate, self.location())?;
+                } else {
+                    symtab.assign(
+                        name,
+                        crate::Slot {
+                            value: aggregate,
+                            ty: expr.ty.clone(),
+                            is_slot: false,
+                        },
+                    );
+                }
+                Some(value)
             }
-            typecheck::TypedExprKind::SelfRef { target } if matches!(expr.ty, Ty::ResultRow(_)) => {
-                symtab.get_lowered(&target.0).cloned()
-            }
-            typecheck::TypedExprKind::AggregateGet { base, index }
-                if matches!(self.program.expr(*base)?.ty, Ty::ResultRow(_)) =>
-            {
-                let values = self.lower_typed_values(*base, block, symtab)?;
-                values
-                    .values()
-                    .get(*index)
-                    .copied()
-                    .map(LoweredValue::scalar)
+            typecheck::TypedExprKind::SelfRef { target } if matches!(expr.ty, Ty::Sequence(_)) => {
+                let binding = symtab.get(&target.0)?.clone();
+                let value = if binding.is_slot {
+                    block.load_typed(
+                        self,
+                        binding.value,
+                        self.ty_to_mlir(&binding.ty),
+                        self.location(),
+                    )?
+                } else {
+                    binding.value
+                };
+                self.unpack_sequence(value, expr.ty, block)
             }
             typecheck::TypedExprKind::If(if_expr)
-                if matches!(expr.ty, Ty::ResultRow(_)) || self.is_empty_product(expr.ty) =>
+                if matches!(expr.ty, Ty::Sequence(_)) || self.is_empty_product(expr.ty) =>
             {
                 self.lower_typed_if_values(if_expr, expr.ty, block, symtab)
             }
             typecheck::TypedExprKind::When(when_expr)
-                if matches!(expr.ty, Ty::ResultRow(_)) || self.is_empty_product(expr.ty) =>
+                if matches!(expr.ty, Ty::Sequence(_)) || self.is_empty_product(expr.ty) =>
             {
                 self.lower_typed_when_values(when_expr, expr.ty, block, symtab)
             }
@@ -603,9 +676,10 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 self.lower_typed_expr(expr_id, block, symtab)?;
                 Some(LoweredValue::new(Vec::new()))
             }
-            _ => self
-                .lower_typed_expr(expr_id, block, symtab)
-                .map(LoweredValue::scalar),
+            _ => {
+                let value = self.lower_typed_expr(expr_id, block, symtab)?;
+                self.unpack_sequence(value, expr.ty, block)
+            }
         }
     }
 
@@ -617,6 +691,27 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
     ) -> Option<Value<'c, 'c>> {
         let typed_ast = self.program;
         let expr_ref = typed_ast.expr(expr_id)?;
+        if matches!(expr_ref.ty, Ty::Sequence(_))
+            && matches!(
+                expr_ref.kind,
+                typecheck::TypedExprKind::FnCall { .. }
+                    | typecheck::TypedExprKind::Bind {
+                        unassigned: false,
+                        ..
+                    }
+                    | typecheck::TypedExprKind::SelfRef { .. }
+                    | typecheck::TypedExprKind::Reassign { .. }
+                    | typecheck::TypedExprKind::If(_)
+                    | typecheck::TypedExprKind::When(_)
+                    | typecheck::TypedExprKind::Asm {
+                        state: typecheck::assembly::AssemblyState::Checked(_),
+                        ..
+                    }
+            )
+        {
+            let values = self.lower_typed_values(expr_id, block, symtab)?;
+            return self.pack_sequence(values, expr_ref.ty, block);
+        }
         // Propagate source location from the original expression span.
         self.current_span.set(*expr_ref.span);
 
@@ -1486,7 +1581,8 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 let _e = self.lower_typed_expr(*end, block, symtab)?;
                 None // Range lowering not yet implemented
             }
-            typecheck::TypedExprKind::RecordValue(items) => {
+            typecheck::TypedExprKind::RecordValue(items)
+            | typecheck::TypedExprKind::ResultRow(items) => {
                 let vals: Vec<Value<'c, 'c>> = items
                     .iter()
                     .filter_map(|id| self.lower_typed_expr(*id, block, symtab))
@@ -1507,10 +1603,6 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     ));
                 }
                 Some(value)
-            }
-            typecheck::TypedExprKind::ResultRow(_) => {
-                self.emit_internal("result row reached scalar lowering");
-                None
             }
             typecheck::TypedExprKind::ArrayLit(items) => {
                 let repr = typecheck::representation::Repr::derive(
@@ -1619,7 +1711,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
             }
             typecheck::TypedExprKind::AggregateGet { base, index } => {
                 let base_ty = typed_ast.expr(*base)?.ty;
-                if matches!(base_ty, Ty::ResultRow(_)) {
+                if matches!(base_ty, Ty::Sequence(_)) {
                     return self
                         .lower_typed_values(*base, block, symtab)?
                         .values()

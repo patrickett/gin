@@ -19,7 +19,7 @@ fn calls_and_named_projection_select_an_ssa_result() {
     assert!(diagnostics.is_empty(), "{diagnostics:?}\n{mlir}");
     assert!(mlir.contains("callee = @pair"), "{mlir}");
     assert!(mlir.contains(": (i8, i8) -> (i8, i8)"), "{mlir}");
-    assert!(!mlir.contains("llvm.extractvalue"), "{mlir}");
+    assert!(mlir.contains("llvm.extractvalue"), "{mlir}");
 }
 
 #[test]
@@ -36,7 +36,7 @@ fn library_defined_fixed_array_lowers_as_an_inline_aggregate() {
 Byte is in 0 to 255
 #fixed_array(element, count)
 Buffer(element Type, count BigInt) has
-make(value Byte) Buffer(Byte, 4): (value; 4)
+make(value Byte) Buffer(Byte, 4): [value; 4]
 get(value Buffer(Byte, 4), index Byte) Byte: value.(index)
 set(value mut Buffer(Byte, 4), index Byte, replacement Byte): value.(index):: replacement
 "#;
@@ -73,7 +73,7 @@ fn symbolic_fixed_array_lengths_in_declaration_reach_codegen_boundary_as_error()
 Byte is in 0 to 255
 #fixed_array(element, count)
 Buffer(element Type, count Int) has
-make(value Byte): Buffer(Byte, n): (value; n)
+make(value Byte): Buffer(Byte, n): [value; n]
 "#;
     let (_verified, symptoms) = support::codegen_verifies(source, "symbolic_fixed_array.gin");
     assert!(
@@ -129,7 +129,7 @@ fn symbolic_fixed_array_length_with_concrete_substitution_lowers_to_array() {
 Byte is in 0 to 255
 #fixed_array(element, count)
 Buffer(element Type, count Int) has
-make(value Byte): Buffer(Byte, 3): (value; 3)
+make(value Byte): Buffer(Byte, 3): [value; 3]
 main() Buffer(Byte, 3):
     return Buffer.make(1)
 "#;

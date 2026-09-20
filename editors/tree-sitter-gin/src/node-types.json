@@ -44,10 +44,6 @@
             "named": true
           },
           {
-            "type": "fixed_array_alloc",
-            "named": true
-          },
-          {
             "type": "for_expression",
             "named": true
           },
@@ -133,10 +129,6 @@
         },
         {
           "type": "compile_time_query",
-          "named": true
-        },
-        {
-          "type": "fixed_array_alloc",
           "named": true
         },
         {
@@ -248,6 +240,97 @@
     }
   },
   {
+    "type": "bare_sequence",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "binary_expression",
+          "named": true
+        },
+        {
+          "type": "call_expression",
+          "named": true
+        },
+        {
+          "type": "cast_expression",
+          "named": true
+        },
+        {
+          "type": "compile_time_query",
+          "named": true
+        },
+        {
+          "type": "for_expression",
+          "named": true
+        },
+        {
+          "type": "format_string",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "if_expression",
+          "named": true
+        },
+        {
+          "type": "literal",
+          "named": true
+        },
+        {
+          "type": "member_expression",
+          "named": true
+        },
+        {
+          "type": "named_argument",
+          "named": true
+        },
+        {
+          "type": "parenthesized_expression",
+          "named": true
+        },
+        {
+          "type": "range_expression",
+          "named": true
+        },
+        {
+          "type": "self_expression",
+          "named": true
+        },
+        {
+          "type": "self_type",
+          "named": true
+        },
+        {
+          "type": "sequence_literal",
+          "named": true
+        },
+        {
+          "type": "type_identifier",
+          "named": true
+        },
+        {
+          "type": "unary_expression",
+          "named": true
+        },
+        {
+          "type": "when_expression",
+          "named": true
+        },
+        {
+          "type": "while_expression",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "binary_expression",
     "named": true,
     "fields": {
@@ -269,10 +352,6 @@
           },
           {
             "type": "compile_time_query",
-            "named": true
-          },
-          {
-            "type": "fixed_array_alloc",
             "named": true
           },
           {
@@ -429,10 +508,6 @@
           },
           {
             "type": "compile_time_query",
-            "named": true
-          },
-          {
-            "type": "fixed_array_alloc",
             "named": true
           },
           {
@@ -598,7 +673,7 @@
             "named": true
           },
           {
-            "type": "sequence_literal",
+            "type": "sequence_type",
             "named": true
           },
           {
@@ -624,6 +699,10 @@
         "required": true,
         "types": [
           {
+            "type": "bare_sequence",
+            "named": true
+          },
+          {
             "type": "binary_expression",
             "named": true
           },
@@ -641,10 +720,6 @@
           },
           {
             "type": "compile_time_query",
-            "named": true
-          },
-          {
-            "type": "fixed_array_alloc",
             "named": true
           },
           {
@@ -677,6 +752,10 @@
           },
           {
             "type": "range_expression",
+            "named": true
+          },
+          {
+            "type": "return_statement",
             "named": true
           },
           {
@@ -759,10 +838,6 @@
         },
         {
           "type": "compile_time_query",
-          "named": true
-        },
-        {
-          "type": "fixed_array_alloc",
           "named": true
         },
         {
@@ -872,10 +947,6 @@
           },
           {
             "type": "compile_time_query",
-            "named": true
-          },
-          {
-            "type": "fixed_array_alloc",
             "named": true
           },
           {
@@ -1003,7 +1074,7 @@
             "named": true
           },
           {
-            "type": "sequence_literal",
+            "type": "sequence_type",
             "named": true
           },
           {
@@ -1042,10 +1113,6 @@
           },
           {
             "type": "compile_time_query",
-            "named": true
-          },
-          {
-            "type": "fixed_array_alloc",
             "named": true
           },
           {
@@ -1148,10 +1215,6 @@
           "named": true
         },
         {
-          "type": "fixed_array_alloc",
-          "named": true
-        },
-        {
           "type": "for_expression",
           "named": true
         },
@@ -1201,6 +1264,10 @@
         },
         {
           "type": "sequence_literal",
+          "named": true
+        },
+        {
+          "type": "sequence_type",
           "named": true
         },
         {
@@ -1290,10 +1357,6 @@
             "named": true
           },
           {
-            "type": "fixed_array_alloc",
-            "named": true
-          },
-          {
             "type": "for_expression",
             "named": true
           },
@@ -1374,7 +1437,7 @@
             "named": true
           },
           {
-            "type": "sequence_literal",
+            "type": "sequence_type",
             "named": true
           },
           {
@@ -1527,188 +1590,6 @@
             "named": true
           },
           {
-            "type": "fixed_array_alloc",
-            "named": true
-          },
-          {
-            "type": "for_expression",
-            "named": true
-          },
-          {
-            "type": "format_string",
-            "named": true
-          },
-          {
-            "type": "identifier",
-            "named": true
-          },
-          {
-            "type": "if_expression",
-            "named": true
-          },
-          {
-            "type": "literal",
-            "named": true
-          },
-          {
-            "type": "member_expression",
-            "named": true
-          },
-          {
-            "type": "parenthesized_expression",
-            "named": true
-          },
-          {
-            "type": "range_expression",
-            "named": true
-          },
-          {
-            "type": "self_expression",
-            "named": true
-          },
-          {
-            "type": "self_type",
-            "named": true
-          },
-          {
-            "type": "sequence_literal",
-            "named": true
-          },
-          {
-            "type": "type_identifier",
-            "named": true
-          },
-          {
-            "type": "unary_expression",
-            "named": true
-          },
-          {
-            "type": "when_expression",
-            "named": true
-          },
-          {
-            "type": "while_expression",
-            "named": true
-          }
-        ]
-      }
-    }
-  },
-  {
-    "type": "fixed_array_alloc",
-    "named": true,
-    "fields": {
-      "init": {
-        "multiple": false,
-        "required": true,
-        "types": [
-          {
-            "type": "binary_expression",
-            "named": true
-          },
-          {
-            "type": "call_expression",
-            "named": true
-          },
-          {
-            "type": "cast_expression",
-            "named": true
-          },
-          {
-            "type": "compile_time_query",
-            "named": true
-          },
-          {
-            "type": "fixed_array_alloc",
-            "named": true
-          },
-          {
-            "type": "for_expression",
-            "named": true
-          },
-          {
-            "type": "format_string",
-            "named": true
-          },
-          {
-            "type": "identifier",
-            "named": true
-          },
-          {
-            "type": "if_expression",
-            "named": true
-          },
-          {
-            "type": "literal",
-            "named": true
-          },
-          {
-            "type": "member_expression",
-            "named": true
-          },
-          {
-            "type": "parenthesized_expression",
-            "named": true
-          },
-          {
-            "type": "range_expression",
-            "named": true
-          },
-          {
-            "type": "self_expression",
-            "named": true
-          },
-          {
-            "type": "self_type",
-            "named": true
-          },
-          {
-            "type": "sequence_literal",
-            "named": true
-          },
-          {
-            "type": "type_identifier",
-            "named": true
-          },
-          {
-            "type": "unary_expression",
-            "named": true
-          },
-          {
-            "type": "when_expression",
-            "named": true
-          },
-          {
-            "type": "while_expression",
-            "named": true
-          }
-        ]
-      },
-      "size": {
-        "multiple": false,
-        "required": true,
-        "types": [
-          {
-            "type": "binary_expression",
-            "named": true
-          },
-          {
-            "type": "call_expression",
-            "named": true
-          },
-          {
-            "type": "cast_expression",
-            "named": true
-          },
-          {
-            "type": "compile_time_query",
-            "named": true
-          },
-          {
-            "type": "fixed_array_alloc",
-            "named": true
-          },
-          {
             "type": "for_expression",
             "named": true
           },
@@ -1794,10 +1675,6 @@
           },
           {
             "type": "compile_time_query",
-            "named": true
-          },
-          {
-            "type": "fixed_array_alloc",
             "named": true
           },
           {
@@ -1903,10 +1780,6 @@
         },
         {
           "type": "compile_time_query",
-          "named": true
-        },
-        {
-          "type": "fixed_array_alloc",
           "named": true
         },
         {
@@ -2063,10 +1936,6 @@
           "named": true
         },
         {
-          "type": "fixed_array_alloc",
-          "named": true
-        },
-        {
           "type": "for_expression",
           "named": true
         },
@@ -2200,10 +2069,6 @@
           "named": true
         },
         {
-          "type": "fixed_array_alloc",
-          "named": true
-        },
-        {
           "type": "for_expression",
           "named": true
         },
@@ -2313,10 +2178,6 @@
           },
           {
             "type": "compile_time_query",
-            "named": true
-          },
-          {
-            "type": "fixed_array_alloc",
             "named": true
           },
           {
@@ -2488,7 +2349,91 @@
         "required": false,
         "types": [
           {
+            "type": "bare_sequence",
+            "named": true
+          },
+          {
+            "type": "binary_expression",
+            "named": true
+          },
+          {
             "type": "block_body",
+            "named": true
+          },
+          {
+            "type": "call_expression",
+            "named": true
+          },
+          {
+            "type": "cast_expression",
+            "named": true
+          },
+          {
+            "type": "compile_time_query",
+            "named": true
+          },
+          {
+            "type": "for_expression",
+            "named": true
+          },
+          {
+            "type": "format_string",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "if_expression",
+            "named": true
+          },
+          {
+            "type": "literal",
+            "named": true
+          },
+          {
+            "type": "member_expression",
+            "named": true
+          },
+          {
+            "type": "parenthesized_expression",
+            "named": true
+          },
+          {
+            "type": "range_expression",
+            "named": true
+          },
+          {
+            "type": "return_statement",
+            "named": true
+          },
+          {
+            "type": "self_expression",
+            "named": true
+          },
+          {
+            "type": "self_type",
+            "named": true
+          },
+          {
+            "type": "sequence_literal",
+            "named": true
+          },
+          {
+            "type": "type_identifier",
+            "named": true
+          },
+          {
+            "type": "unary_expression",
+            "named": true
+          },
+          {
+            "type": "when_expression",
+            "named": true
+          },
+          {
+            "type": "while_expression",
             "named": true
           }
         ]
@@ -2512,6 +2457,10 @@
         "required": false,
         "types": [
           {
+            "type": "bare_sequence",
+            "named": true
+          },
+          {
             "type": "binary_expression",
             "named": true
           },
@@ -2525,10 +2474,6 @@
           },
           {
             "type": "compile_time_query",
-            "named": true
-          },
-          {
-            "type": "fixed_array_alloc",
             "named": true
           },
           {
@@ -2617,10 +2562,6 @@
           },
           {
             "type": "compile_time_query",
-            "named": true
-          },
-          {
-            "type": "fixed_array_alloc",
             "named": true
           },
           {
@@ -2775,10 +2716,6 @@
             "named": true
           },
           {
-            "type": "fixed_array_alloc",
-            "named": true
-          },
-          {
             "type": "for_expression",
             "named": true
           },
@@ -2865,7 +2802,7 @@
             "named": true
           },
           {
-            "type": "sequence_literal",
+            "type": "sequence_type",
             "named": true
           },
           {
@@ -2898,6 +2835,30 @@
       "types": [
         {
           "type": "named_result",
+          "named": true
+        },
+        {
+          "type": "proof_result_type",
+          "named": true
+        },
+        {
+          "type": "sequence_type",
+          "named": true
+        },
+        {
+          "type": "tag",
+          "named": true
+        },
+        {
+          "type": "type_union",
+          "named": true
+        },
+        {
+          "type": "type_variable",
+          "named": true
+        },
+        {
+          "type": "unit_type",
           "named": true
         }
       ]
@@ -2957,10 +2918,6 @@
           },
           {
             "type": "compile_time_query",
-            "named": true
-          },
-          {
-            "type": "fixed_array_alloc",
             "named": true
           },
           {
@@ -3062,7 +3019,7 @@
         "required": false,
         "types": [
           {
-            "type": "sequence_literal",
+            "type": "sequence_type",
             "named": true
           },
           {
@@ -3151,10 +3108,6 @@
         },
         {
           "type": "compile_time_query",
-          "named": true
-        },
-        {
-          "type": "fixed_array_alloc",
           "named": true
         },
         {
@@ -3263,7 +3216,7 @@
           "named": true
         },
         {
-          "type": "sequence_literal",
+          "type": "sequence_type",
           "named": true
         },
         {
@@ -3315,10 +3268,6 @@
         },
         {
           "type": "declare_statement",
-          "named": true
-        },
-        {
-          "type": "fixed_array_alloc",
           "named": true
         },
         {
@@ -3558,10 +3507,6 @@
             "named": true
           },
           {
-            "type": "fixed_array_alloc",
-            "named": true
-          },
-          {
             "type": "for_expression",
             "named": true
           },
@@ -3641,10 +3586,6 @@
           },
           {
             "type": "compile_time_query",
-            "named": true
-          },
-          {
-            "type": "fixed_array_alloc",
             "named": true
           },
           {
@@ -3749,7 +3690,7 @@
             "named": true
           },
           {
-            "type": "sequence_literal",
+            "type": "sequence_type",
             "named": true
           },
           {
@@ -3857,10 +3798,6 @@
             "named": true
           },
           {
-            "type": "fixed_array_alloc",
-            "named": true
-          },
-          {
             "type": "for_expression",
             "named": true
           },
@@ -3943,11 +3880,15 @@
         "required": false,
         "types": [
           {
+            "type": "named_results",
+            "named": true
+          },
+          {
             "type": "proof_result_type",
             "named": true
           },
           {
-            "type": "sequence_literal",
+            "type": "sequence_type",
             "named": true
           },
           {
@@ -4045,7 +3986,7 @@
             "named": true
           },
           {
-            "type": "sequence_literal",
+            "type": "sequence_type",
             "named": true
           },
           {
@@ -4100,10 +4041,6 @@
         },
         {
           "type": "compile_time_query",
-          "named": true
-        },
-        {
-          "type": "fixed_array_alloc",
           "named": true
         },
         {
@@ -4229,10 +4166,6 @@
             "named": true
           },
           {
-            "type": "fixed_array_alloc",
-            "named": true
-          },
-          {
             "type": "for_expression",
             "named": true
           },
@@ -4312,10 +4245,6 @@
           },
           {
             "type": "compile_time_query",
-            "named": true
-          },
-          {
-            "type": "fixed_array_alloc",
             "named": true
           },
           {
@@ -4402,10 +4331,6 @@
           "named": true
         },
         {
-          "type": "fixed_array_alloc",
-          "named": true
-        },
-        {
           "type": "for_expression",
           "named": true
         },
@@ -4427,6 +4352,10 @@
         },
         {
           "type": "member_expression",
+          "named": true
+        },
+        {
+          "type": "named_argument",
           "named": true
         },
         {
@@ -4455,6 +4384,121 @@
         },
         {
           "type": "unary_expression",
+          "named": true
+        },
+        {
+          "type": "when_expression",
+          "named": true
+        },
+        {
+          "type": "while_expression",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "sequence_type",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "binary_expression",
+          "named": true
+        },
+        {
+          "type": "call_expression",
+          "named": true
+        },
+        {
+          "type": "cast_expression",
+          "named": true
+        },
+        {
+          "type": "compile_time_query",
+          "named": true
+        },
+        {
+          "type": "for_expression",
+          "named": true
+        },
+        {
+          "type": "format_string",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "if_expression",
+          "named": true
+        },
+        {
+          "type": "literal",
+          "named": true
+        },
+        {
+          "type": "member_expression",
+          "named": true
+        },
+        {
+          "type": "named_result",
+          "named": true
+        },
+        {
+          "type": "parenthesized_expression",
+          "named": true
+        },
+        {
+          "type": "proof_result_type",
+          "named": true
+        },
+        {
+          "type": "range_expression",
+          "named": true
+        },
+        {
+          "type": "self_expression",
+          "named": true
+        },
+        {
+          "type": "self_type",
+          "named": true
+        },
+        {
+          "type": "sequence_literal",
+          "named": true
+        },
+        {
+          "type": "sequence_type",
+          "named": true
+        },
+        {
+          "type": "tag",
+          "named": true
+        },
+        {
+          "type": "type_identifier",
+          "named": true
+        },
+        {
+          "type": "type_union",
+          "named": true
+        },
+        {
+          "type": "type_variable",
+          "named": true
+        },
+        {
+          "type": "unary_expression",
+          "named": true
+        },
+        {
+          "type": "unit_type",
           "named": true
         },
         {
@@ -4499,10 +4543,6 @@
         },
         {
           "type": "declare_statement",
-          "named": true
-        },
-        {
-          "type": "fixed_array_alloc",
           "named": true
         },
         {
@@ -4726,10 +4766,6 @@
             "named": true
           },
           {
-            "type": "fixed_array_alloc",
-            "named": true
-          },
-          {
             "type": "for_expression",
             "named": true
           },
@@ -4842,7 +4878,7 @@
         "required": true,
         "types": [
           {
-            "type": "sequence_literal",
+            "type": "sequence_type",
             "named": true
           },
           {
@@ -4909,7 +4945,7 @@
           "named": true
         },
         {
-          "type": "sequence_literal",
+          "type": "sequence_type",
           "named": true
         },
         {
@@ -4957,10 +4993,6 @@
         },
         {
           "type": "compile_time_query",
-          "named": true
-        },
-        {
-          "type": "fixed_array_alloc",
           "named": true
         },
         {
@@ -5067,10 +5099,6 @@
           "named": true
         },
         {
-          "type": "fixed_array_alloc",
-          "named": true
-        },
-        {
           "type": "for_expression",
           "named": true
         },
@@ -5158,10 +5186,6 @@
             "named": true
           },
           {
-            "type": "fixed_array_alloc",
-            "named": true
-          },
-          {
             "type": "for_expression",
             "named": true
           },
@@ -5242,10 +5266,6 @@
         },
         {
           "type": "compile_time_query",
-          "named": true
-        },
-        {
-          "type": "fixed_array_alloc",
           "named": true
         },
         {
@@ -5368,10 +5388,6 @@
           "named": true
         },
         {
-          "type": "fixed_array_alloc",
-          "named": true
-        },
-        {
           "type": "for_expression",
           "named": true
         },
@@ -5460,10 +5476,6 @@
           },
           {
             "type": "compile_time_query",
-            "named": true
-          },
-          {
-            "type": "fixed_array_alloc",
             "named": true
           },
           {
@@ -5607,10 +5619,6 @@
         },
         {
           "type": "compile_time_query",
-          "named": true
-        },
-        {
-          "type": "fixed_array_alloc",
           "named": true
         },
         {

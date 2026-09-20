@@ -960,7 +960,7 @@ fn reflect_ty_to_reflected_type_inner(
                 representation: reflected_representation(ty, registry),
             }
         }
-        Ty::ResultRow(_) => ReflectedType {
+        Ty::Sequence(_) => ReflectedType {
             identity: ReflectedIdentity::Anonymous,
             arguments: Vec::new(),
             semantics: ReflectedSemantics::Unsupported {
@@ -1216,6 +1216,7 @@ pub fn const_value_to_expr(cv: &ConstValue) -> Expr {
             items
                 .iter()
                 .map(|item| const_value_to_typed_expr(item, SpanId::INVALID))
+                .map(ast::SequenceElement::new)
                 .collect(),
         )),
         ConstValue::SequenceRepeat { seed, count } => {

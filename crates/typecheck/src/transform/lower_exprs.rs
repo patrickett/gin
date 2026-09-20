@@ -74,7 +74,7 @@ pub(crate) struct FlowState {
     pub(crate) projected_result_evidence:
         HashMap<Intern<String>, crate::typed::ProjectedResultEvidence>,
     /// Result labels carried by local bindings initialized from callable rows.
-    pub(crate) result_names: HashMap<Intern<String>, Vec<Intern<String>>>,
+    pub(crate) result_names: HashMap<Intern<String>, Vec<Option<Intern<String>>>>,
     /// Per-field ownership targets carried by stored callable result rows.
     pub(crate) result_target_groups: HashMap<Intern<String>, Vec<Option<ReferenceTargetSet>>>,
 }
@@ -727,11 +727,11 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
                         })
                         .collect::<Vec<_>>();
                     if bind.named_results.len() == types.len() && types.len() > 1 {
-                        Ty::ResultRow(
+                        Ty::Sequence(
                             bind.named_results
                                 .iter()
                                 .zip(types)
-                                .map(|(result, ty)| ast::ty::ResultElement {
+                                .map(|(result, ty)| ast::ty::SequenceTypeElement {
                                     name: result.name,
                                     ty: Box::new(ty),
                                 })
@@ -740,7 +740,15 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
                     } else if let [ty] = types.as_slice() {
                         ty.clone()
                     } else {
-                        Ty::Opaque(Intern::from_ref("unnamed-multiple-results"))
+                        Ty::sequence(
+                            types
+                                .into_iter()
+                                .map(|ty| ast::ty::SequenceTypeElement {
+                                    name: None,
+                                    ty: Box::new(ty),
+                                })
+                                .collect(),
+                        )
                     }
                 } else {
                     ret.values
@@ -765,17 +773,7 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
                 return_ty = Some(ty);
             }
         }
-        if let BindValue::Body { ret, .. } = &bind.value
-            && ret.values.len() > 1
-            && bind.named_results.is_empty()
-            && let Some(typed_bind) = typed.defs.get_mut(def_id)
-        {
-            typed_bind.flaws.push(Diagnostic::new(
-                "type-unnamed-multiple-results",
-                "multiple return values require named result declarations",
-            ));
-        }
-        if let (Some(Ty::ResultRow(fields)), BindValue::Body { exprs, ret }) =
+        if let (Some(Ty::Sequence(fields)), BindValue::Body { exprs, ret }) =
             (return_ty.as_ref(), &bind.value)
         {
             let expected_fields = fields.clone();
@@ -810,7 +808,8 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
                         &typed.fn_return_types,
                         &typed.type_registry,
                     );
-                    if !matches!(actual, Ty::UnresolvedLiteral(_) | Ty::ResultRow(_))
+                    if !matches!(value.value, Expr::SequenceLiteral(_))
+                        && !matches!(actual, Ty::UnresolvedLiteral(_) | Ty::Sequence(_))
                         && actual != *field.ty
                         && let Some(typed_bind) = typed.defs.get_mut(def_id)
                     {
@@ -841,7 +840,8 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
                     &typed.fn_return_types,
                     &typed.type_registry,
                 );
-                if matches!(actual, Ty::ResultRow(_))
+                if matches!(actual, Ty::Sequence(_))
+                    && !matches!(value.value, Expr::SequenceLiteral(_))
                     && actual != *return_ty.as_ref().unwrap()
                     && let Some(typed_bind) = typed.defs.get_mut(def_id)
                 {
@@ -855,6 +855,9 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
                 }
             }
             for (value, field) in ret.values.iter().zip(fields) {
+                if ret.values.len() == 1 && matches!(value.value, Expr::SequenceLiteral(_)) {
+                    continue;
+                }
                 let actual = resolve_expr_type(
                     value,
                     &tag_types,
@@ -865,7 +868,8 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
                     &typed.fn_return_types,
                     &typed.type_registry,
                 );
-                if !matches!(actual, Ty::UnresolvedLiteral(_) | Ty::ResultRow(_))
+                if !matches!(value.value, Expr::SequenceLiteral(_))
+                    && !matches!(actual, Ty::UnresolvedLiteral(_) | Ty::Sequence(_))
                     && actual != *field.ty
                     && let Some(typed_bind) = typed.defs.get_mut(def_id)
                 {
@@ -969,13 +973,15 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
                 let ret_id = if !ret.values.is_empty() {
                     let values = ret.values.clone();
                     let span_id = ret.span_id;
-                    let ret_expr = if values.len() == 1
-                        && (!matches!(scope.expected_ty, Some(Ty::ResultRow(_)))
-                            || !matches!(values[0].value, Expr::FnCall(_)))
-                    {
+                    let ret_expr = if values.len() == 1 {
                         values.into_iter().next().expect("one return value")
                     } else {
-                        Typed::infer(Expr::ResultValues(values), span_id)
+                        Typed::infer(
+                            Expr::SequenceLiteral(ast::SequenceLiteral::Elements(
+                                values.into_iter().map(ast::SequenceElement::new).collect(),
+                            )),
+                            span_id,
+                        )
                     };
                     Some(lower_typed_expr(typed, &ret_expr, &scope, &mut env))
                 } else {
@@ -1079,26 +1085,18 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
                 .insert(*def_id, explicit_return_type.clone());
             let supplied_count = match &bind.value {
                 BindValue::Expr(_) => return_expr_id
-                    .and_then(|id| match typed.exprs.ty_of(id) {
-                        Some(Ty::ResultRow(fields)) => Some(fields.len()),
-                        _ => None,
-                    })
+                    .and_then(|id| typed.exprs.ty_of(id).and_then(Ty::sequence_len))
                     .unwrap_or(1),
                 BindValue::Body { ret, .. } if ret.values.len() == 1 => return_expr_id
-                    .and_then(|id| match typed.exprs.ty_of(id) {
-                        Some(Ty::ResultRow(fields)) => Some(fields.len()),
-                        _ => None,
-                    })
+                    .and_then(|id| typed.exprs.ty_of(id).and_then(Ty::sequence_len))
                     .unwrap_or(1),
                 BindValue::Body { ret, .. } if !ret.values.is_empty() => ret.values.len(),
                 BindValue::Body { ret, .. } => usize::from(!ret.values.is_empty()),
                 BindValue::Unassigned => 0,
             };
-            let expected_count = match explicit_return_type {
-                Ty::ResultRow(fields) => fields.len(),
-                Ty::Unit => 0,
-                _ => 1,
-            };
+            let expected_count = explicit_return_type
+                .sequence_len()
+                .unwrap_or(usize::from(!matches!(explicit_return_type, Ty::Unit)));
             if !matches!(bind.value, BindValue::Unassigned)
                 && supplied_count != expected_count
                 && let Some(typed_bind) = typed.defs.get_mut(def_id)
@@ -1117,6 +1115,10 @@ pub fn stage_lower(typed: &mut TypedFileAst, file_ast: &FileAst, ctx: &Transform
             if let Some(return_expr_id) = return_expr_id
                 && typed.exprs.ty_of(return_expr_id) != Some(explicit_return_type)
                 && let Some(typed_bind) = typed.defs.get_mut(def_id)
+                && !typed_bind
+                    .flaws
+                    .iter()
+                    .any(|flaw| flaw.code.slug() == "type-return-mismatch")
             {
                 typed_bind.flaws.push(
                     Diagnostic::new(
@@ -1393,6 +1395,37 @@ pub(crate) fn lower_typed_expr(
         }
         _ => None,
     };
+    if let Some(Ty::Sequence(fields)) = scope.expected_ty
+        && fields.len() == 1
+        && fields[0].name.is_some()
+        && !matches!(
+            expr.value,
+            Expr::SequenceLiteral(ast::SequenceLiteral::Elements(_))
+                | Expr::ResultValues(_)
+                | Expr::Bind(_)
+                | Expr::Asm { .. }
+        )
+    {
+        let actual = resolve_expr_type(
+            expr,
+            scope.tag_types,
+            scope.variant_map,
+            scope.receiver_type,
+            None,
+            &env.types,
+            &typed.fn_return_types,
+            &typed.type_registry,
+        );
+        if !matches!(actual, Ty::Sequence(_)) {
+            let wrapped = Typed::infer(
+                Expr::SequenceLiteral(ast::SequenceLiteral::Elements(vec![
+                    ast::SequenceElement::new(expr.clone()),
+                ])),
+                expr.span_id,
+            );
+            return lower_typed_expr(typed, &wrapped, scope, env);
+        }
+    }
     let mut resolved_ty = resolve_expr_type(
         expr,
         scope.tag_types,
@@ -1602,6 +1635,13 @@ pub(crate) fn lower_typed_expr(
         const_val = Some(ConstValue::Int(value));
         kind = TypedExprKind::Lit(Literal::Int(value));
     }
+    if let TypedExprKind::RecordSet { value, .. }
+    | TypedExprKind::AggregateSet { value, .. }
+    | TypedExprKind::BufSet { value, .. } = &kind
+        && let Some(ty) = typed.exprs.ty_of(*value)
+    {
+        resolved_ty = ty.clone();
+    }
     if matches!(
         &kind,
         TypedExprKind::Reassign { .. }
@@ -1648,7 +1688,7 @@ pub(crate) fn lower_typed_expr(
                     resolved_ty = (**field_ty).clone();
                 }
             }
-            Ty::ResultRow(fields) => {
+            Ty::Sequence(fields) => {
                 if let Some(field) = fields.get(index) {
                     resolved_ty = (*field.ty).clone();
                 }
@@ -1800,6 +1840,100 @@ pub(crate) fn lower_typed_expr(
     }
 
     let mut flaws: Vec<Diagnostic> = Vec::new();
+    if let (
+        Expr::SequenceLiteral(ast::SequenceLiteral::Elements(elems)),
+        TypedExprKind::ResultRow(ids)
+        | TypedExprKind::RecordValue(ids)
+        | TypedExprKind::ArrayLit(ids),
+    ) = (&expr.value, &kind)
+        && let Some(expected) = scope.expected_ty
+    {
+        let collection = expected
+            .named_instance()
+            .and_then(|instance| typed.type_registry.declaration_for_instance(instance))
+            .is_some_and(|declaration| declaration.sequence_literal.is_some());
+        let definition = typed.type_registry.resolved_definition_for_type(expected);
+        let fields = match &definition {
+            Ty::Sequence(fields) => Some(fields.clone()),
+            Ty::Record { fields, .. } if !collection => Some(
+                fields
+                    .iter()
+                    .map(|(name, ty)| ast::ty::SequenceTypeElement {
+                        name: Some(*name),
+                        ty: ty.clone(),
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        };
+        if let Some(fields) = fields {
+            if elems.len() != fields.len() {
+                flaws.push(
+                    Diagnostic::new(
+                        "type-sequence-arity",
+                        format!("expected {} elements, found {}", fields.len(), elems.len()),
+                    )
+                    .at_span_id(expr.span_id, &typed.span_table),
+                );
+            }
+            for ((elem, id), field) in elems.iter().zip(ids).zip(&fields) {
+                if elem.name.is_some() && elem.name != field.name {
+                    flaws.push(Diagnostic::new("type-sequence-name-mismatch", "sequence element name does not match the expected name at this position").at_span_id(elem.span_id, &typed.span_table));
+                }
+                let actual = &typed.exprs.ty[id.as_usize()];
+                if actual != field.ty.as_ref() && !matches!(actual, Ty::UnresolvedLiteral(_)) {
+                    flaws.push(
+                        Diagnostic::new(
+                            "type-sequence-element-mismatch",
+                            "sequence element does not match its expected type",
+                        )
+                        .at_span_id(elem.span_id, &typed.span_table),
+                    );
+                }
+            }
+        } else if elems.iter().any(|elem| elem.name.is_some())
+            && crate::representation::Repr::array_parts(expected, Some(&typed.type_registry))
+                .is_some()
+        {
+            flaws.push(
+                Diagnostic::new(
+                    "type-sequence-name-mismatch",
+                    "named elements do not match an unnamed array type",
+                )
+                .at_span_id(expr.span_id, &typed.span_table),
+            );
+        }
+    }
+    if let TypedExprKind::AggregateGet { base, index }
+    | TypedExprKind::AggregateSet { base, index, .. } = &kind
+    {
+        let ty = typed.exprs.ty_of(*base).unwrap();
+        let ty = reference_pointee_for_type(ty, Some(&typed.type_registry))
+            .unwrap_or_else(|| ty.clone());
+        let len = match &ty {
+            Ty::Sequence(fields) => Some(fields.len()),
+            Ty::Record { fields, .. } => Some(fields.len()),
+            _ => crate::representation::Repr::array_parts(&ty, Some(&typed.type_registry))
+                .and_then(|(_, length)| usize::try_from(length).ok()),
+        };
+        if len.is_some_and(|len| *index >= len) {
+            flaws.push(
+                Diagnostic::new(
+                    "type-sequence-index-out-of-bounds",
+                    "sequence element index is out of bounds",
+                )
+                .at_span_id(expr.span_id, &typed.span_table),
+            );
+        }
+    }
+    if let TypedExprKind::BufGet { buf, .. } | TypedExprKind::BufSet { buf, .. } = &kind
+        && let Some(Ty::Sequence(fields)) = typed.exprs.ty_of(*buf)
+        && fields
+            .first()
+            .is_none_or(|first| fields.iter().any(|field| field.ty != first.ty))
+    {
+        flaws.push(Diagnostic::new("type-sequence-dynamic-index", "runtime indexing requires a common element type; use a constant position for this sequence").at_span_id(expr.span_id, &typed.span_table));
+    }
     if let TypedExprKind::TagCall {
         field_names,
         args: Some(args),
@@ -1848,20 +1982,6 @@ pub(crate) fn lower_typed_expr(
             }
         }
     }
-    if let Expr::SequenceLiteral(ast::SequenceLiteral::Elements(items)) = &expr.value {
-        let numeric = |item: &Typed<Expr>| {
-            matches!(item.value, Expr::Lit(Literal::Int(_) | Literal::Number(_)))
-        };
-        if items.first().is_some_and(numeric) && items.iter().skip(1).any(|item| !numeric(item)) {
-            flaws.push(
-                Diagnostic::new(
-                    "type-sequence-elements-must-unify",
-                    "sequence literal elements must have one common type",
-                )
-                .at_span_id(expr.span_id, &typed.span_table),
-            );
-        }
-    }
     if let Expr::SequenceLiteral(ast::SequenceLiteral::Repeat { count, .. }) = &expr.value
         && scope.expected_ty.is_none()
         && !matches!(count.value, Expr::Lit(Literal::Int(_) | Literal::Number(_)))
@@ -1870,17 +1990,6 @@ pub(crate) fn lower_typed_expr(
             Diagnostic::new(
                 "type-sequence-repeat-requires-context",
                 "a runtime-count repeat requires an expected dynamic collection type",
-            )
-            .at_span_id(expr.span_id, &typed.span_table),
-        );
-    }
-    if matches!(&expr.value, Expr::SequenceLiteral(ast::SequenceLiteral::Elements(items)) if items.is_empty())
-        && scope.expected_ty.is_none()
-    {
-        flaws.push(
-            Diagnostic::new(
-                "type-sequence-literal-requires-context",
-                "empty sequence literal requires an expected aggregate type",
             )
             .at_span_id(expr.span_id, &typed.span_table),
         );
@@ -2213,11 +2322,28 @@ pub(crate) fn lower_typed_expr(
                 mutable: *mutable,
             }
         }
-        TypedExprKind::ResultRow(_) => scope
-            .expected_ty
-            .filter(|ty| matches!(ty, Ty::ResultRow(_)))
-            .cloned()
-            .unwrap_or_else(|| resolved_ty.clone()),
+        TypedExprKind::ResultRow(ids) => {
+            let names = match &expr.value {
+                Expr::SequenceLiteral(ast::SequenceLiteral::Elements(elems)) => {
+                    elems.iter().map(|elem| elem.name).collect::<Vec<_>>()
+                }
+                _ => vec![None; ids.len()],
+            };
+            Ty::Sequence(
+                ids.iter()
+                    .enumerate()
+                    .map(|(index, id)| ast::ty::SequenceTypeElement {
+                        name: names[index].or_else(|| match scope.expected_ty {
+                            Some(Ty::Sequence(fields)) => {
+                                fields.get(index).and_then(|field| field.name)
+                            }
+                            _ => None,
+                        }),
+                        ty: Box::new(typed.exprs.ty[id.as_usize()].clone()),
+                    })
+                    .collect(),
+            )
+        }
         TypedExprKind::TagCall { .. } if contextual_result_ty.is_some() => {
             contextual_result_ty.cloned().unwrap()
         }
@@ -2544,6 +2670,10 @@ fn typed_sequence_literal(
 ) -> Option<crate::typed::TypedSequenceLiteral> {
     match (source, kind) {
         (
+            Expr::SequenceLiteral(ast::SequenceLiteral::Elements(elems)),
+            TypedExprKind::ResultRow(items),
+        ) if elems.is_empty() => Some(crate::typed::TypedSequenceLiteral::Elements(items.clone())),
+        (
             Expr::SequenceLiteral(ast::SequenceLiteral::Elements(_)),
             TypedExprKind::ArrayLit(items),
         ) => Some(crate::typed::TypedSequenceLiteral::Elements(items.clone())),
@@ -2741,6 +2871,11 @@ fn contextualize_literal_value(
         .all(|item| contextualize_literal_value(typed, item, &element))
     {
         return false;
+    }
+    if let TypedExprKind::ResultRow(items) = &typed.exprs.kind[expression.as_usize()]
+        && items.is_empty()
+    {
+        typed.exprs.kind[expression.as_usize()] = TypedExprKind::ArrayLit(Vec::new());
     }
     typed.exprs.facts.const_facts.literal_materialization[expression.as_usize()] = Some(plan);
     contextualized_literal_type(typed, expression, expected);
@@ -3120,7 +3255,7 @@ fn place_for_kind(
                     .get(*index)
                     .map(|(_, field)| (**field).clone())
                     .unwrap_or_else(|| ty.clone()),
-                Ty::ResultRow(fields) => fields
+                Ty::Sequence(fields) => fields
                     .get(*index)
                     .map(|field| (*field.ty).clone())
                     .unwrap_or_else(|| ty.clone()),
@@ -4413,9 +4548,9 @@ fn check_type_flaws(
                 };
                 typed.exprs.ty.get(body.as_usize())
             });
-            if let Some(first) = arm_types.clone().find(|ty| matches!(ty, Ty::ResultRow(_))) {
+            if let Some(first) = arm_types.clone().find(|ty| matches!(ty, Ty::Sequence(_))) {
                 if arm_types
-                    .filter(|ty| matches!(ty, Ty::ResultRow(_)))
+                    .filter(|ty| matches!(ty, Ty::Sequence(_)))
                     .any(|ty| {
                         crate::equality::validate_with_registry(first, ty, &typed.type_registry)
                             .is_err()

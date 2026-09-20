@@ -331,7 +331,6 @@ pub enum Ty {
     },
     /// Unresolved / generic type — falls back to `i64` in codegen.
     Opaque(Intern<String>),
-    /// Fixed-size stack-allocated array (`(T.new; N)`). The value is a `!llvm.ptr`.
     Array {
         elem: Box<Ty>,
         size: NormalExpr,
@@ -352,8 +351,7 @@ pub enum Ty {
         inner: Box<Ty>,
         mutable: bool,
     },
-    /// Ordered, named results produced by a callable.
-    ResultRow(Vec<ResultElement>),
+    Sequence(Vec<SequenceTypeElement>),
     /// A single compile-time-known literal (`'John'`, `42`, …) from a site bind.
     Literal(ConstValue),
     /// Tagged union. When [`Self::literal_values`] is set, every variant is a unit literal
@@ -378,8 +376,8 @@ pub struct RowTypeElement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ResultElement {
-    pub name: Intern<String>,
+pub struct SequenceTypeElement {
+    pub name: Option<Intern<String>>,
     pub ty: Box<Ty>,
 }
 
@@ -395,6 +393,40 @@ impl RowTypeElement {
 }
 
 impl Ty {
+    pub fn sequence_len(&self) -> Option<usize> {
+        match self {
+            Self::Sequence(elements) => Some(elements.len()),
+            Self::Array { size, .. } => size
+                .as_const_int()
+                .and_then(|size| usize::try_from(size).ok()),
+            _ => None,
+        }
+    }
+
+    pub fn sequence(elements: Vec<SequenceTypeElement>) -> Self {
+        if let Some(first) = elements.first()
+            && elements
+                .iter()
+                .all(|elem| elem.name.is_none() && elem.ty == first.ty)
+        {
+            return Self::Array {
+                elem: first.ty.clone(),
+                size: NormalExpr::from(elements.len() as i128),
+            };
+        }
+        Self::Sequence(elements)
+    }
+
+    pub fn results(mut elements: Vec<SequenceTypeElement>) -> Self {
+        if elements.len() == 1 && elements[0].name.is_none() {
+            return *elements.remove(0).ty;
+        }
+        if elements.is_empty() {
+            return Self::Unit;
+        }
+        Self::sequence(elements)
+    }
+
     pub fn type_id(&self) -> Option<TypeId> {
         match self {
             Ty::Named { instance, .. } => Some(instance.declaration),
@@ -633,14 +665,11 @@ impl Ty {
                 let prefix = if *mutable { "mut " } else { "ref " };
                 format!("{}{}", prefix, inner.format_for_hover())
             }
-            Ty::ResultRow(elements) => elements
+            Ty::Sequence(elements) => elements
                 .iter()
-                .map(|element| {
-                    format!(
-                        "{} {}",
-                        element.name.as_str(),
-                        element.ty.format_for_hover()
-                    )
+                .map(|element| match element.name {
+                    Some(name) => format!("{name} {}", element.ty.format_for_hover()),
+                    None => element.ty.format_for_hover(),
                 })
                 .collect::<Vec<_>>()
                 .join(", "),
@@ -685,10 +714,10 @@ impl Ty {
                 .enumerate()
                 .find(|(_, (field, _))| *field == name)
                 .map(|(index, (_, ty))| (index, (**ty).clone())),
-            Ty::ResultRow(fields) => fields
+            Ty::Sequence(fields) => fields
                 .iter()
                 .enumerate()
-                .find(|(_, field)| field.name == name)
+                .find(|(_, field)| field.name == Some(name))
                 .map(|(index, field)| (index, (*field.ty).clone())),
             _ => None,
         }
@@ -788,10 +817,10 @@ impl Ty {
                 resolved_params: resolved_params.clone(),
             },
             Ty::Literal(v) => Ty::Literal(v.clone()),
-            Ty::ResultRow(elements) => Ty::ResultRow(
+            Ty::Sequence(elements) => Ty::Sequence(
                 elements
                     .iter()
-                    .map(|element| ResultElement {
+                    .map(|element| SequenceTypeElement {
                         name: element.name,
                         ty: Box::new(element.ty.substitute(subst)),
                     })

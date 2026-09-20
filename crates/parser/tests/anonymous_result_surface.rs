@@ -66,8 +66,11 @@ fn parses_named_result_rows_with_order_and_types() {
     let bind = &ast.defs[&intern("add")];
 
     assert_eq!(bind.named_results.len(), 2);
-    assert_eq!(bind.named_results[0].name.as_str(), "sum");
-    assert_eq!(bind.named_results[1].name.as_str(), "overflow");
+    assert_eq!(bind.named_results[0].name.as_ref().unwrap().as_str(), "sum");
+    assert_eq!(
+        bind.named_results[1].name.as_ref().unwrap().as_str(),
+        "overflow"
+    );
     assert!(bind.named_results[0].name_span != ast::SpanId::INVALID);
     assert!(bind.named_results[1].name_span != ast::SpanId::INVALID);
 }
@@ -120,7 +123,7 @@ fn rejects_parenthesized_positional_products() {
         output
             .symptoms
             .iter()
-            .any(|diagnostic| diagnostic.code.0 == "parse-positional-product-removed")
+            .any(|diagnostic| diagnostic.code.0 == "parse-parenthesized-sequence")
     );
     let bind = &output.ast.defs[&intern("value")];
     assert!(

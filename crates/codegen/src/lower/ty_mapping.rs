@@ -6,7 +6,7 @@ use typecheck::representation::Repr;
 impl<'a, 'c> CodegenContext<'a, 'c> {
     pub(crate) fn result_types_to_mlir(&self, ty: &Ty) -> Vec<Type<'c>> {
         match ty {
-            Ty::ResultRow(fields) => fields
+            Ty::Sequence(fields) => fields
                 .iter()
                 .map(|field| self.ty_to_mlir(&field.ty))
                 .collect(),
@@ -109,7 +109,14 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 r#type::r#struct(mlir_ctx, &[], false)
             }
             Ty::Literal(_) => mlir_ctx.i64(),
-            Ty::ResultRow(_) => panic!("result rows require multi-value lowering"),
+            Ty::Sequence(fields) => r#type::r#struct(
+                mlir_ctx,
+                &fields
+                    .iter()
+                    .map(|field| self.ty_to_mlir(&field.ty))
+                    .collect::<Vec<_>>(),
+                false,
+            ),
             ty if ty.union_literal_values().is_some() => {
                 let n = ty.union_literal_values().unwrap().len();
                 if n <= 256 {

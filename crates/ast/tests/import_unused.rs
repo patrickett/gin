@@ -33,7 +33,7 @@ Target has Default
     arch Architecture
     vendor Vendor
     os OperatingSystem
-    Default.default: (arch: 'x86_64', vendor: 'unknown', os: 'unknown')
+    Default.default: [arch: 'x86_64', vendor: 'unknown', os: 'unknown']
 ";
     let output = source.parse_source_full();
     let import = &output.ast.uses[0];

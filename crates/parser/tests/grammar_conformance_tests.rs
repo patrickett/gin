@@ -139,13 +139,13 @@ fn unsupported_not_equal_token_is_rejected_as_infix() {
 #[test]
 fn newline_and_comma_separator_rules_are_accepted() {
     let list_and_tuple = "\
-pair : (\n    1\n    2\n)\nxs : [\n    1\n    2\n]\n";
+pair : [\n    1\n    2\n]\nxs : [\n    1\n    2\n]\n";
     let list_and_tuple = list_and_tuple.parse_source_full();
     assert_eq!(count_errors(&list_and_tuple), 0);
 }
 
 #[test]
 fn parse_record_and_format_interpolation() {
-    let out = "msg: \"x={(n)} and y={f}\"\nmsg2: (a: 1, b: 2)\n".parse_source_full();
+    let out = "msg: \"x={(n)} and y={f}\"\nmsg2: [a: 1, b: 2]\n".parse_source_full();
     assert_eq!(count_errors(&out), 0);
 }

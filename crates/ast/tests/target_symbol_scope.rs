@@ -10,7 +10,7 @@ Target has Default
     arch Architecture
     vendor Vendor
     os OperatingSystem
-    Default.default: (arch: 'x86_64', vendor: 'unknown', os: 'unknown')
+    Default.default: [arch: 'x86_64', vendor: 'unknown', os: 'unknown']
 
 target Target
 "#;
@@ -54,7 +54,7 @@ Target has Default
     arch Architecture
     vendor Vendor
     os OperatingSystem
-    Default.default: (arch: 'x86_64', vendor: 'unknown', os: 'unknown')
+    Default.default: [arch: 'x86_64', vendor: 'unknown', os: 'unknown']
 
 target Target
 "#;

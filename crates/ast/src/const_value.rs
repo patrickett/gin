@@ -75,6 +75,19 @@ pub enum ConstValue {
 }
 
 impl ConstValue {
+    pub fn sequence(
+        values: Vec<Self>,
+        names: impl IntoIterator<Item = Option<Intern<String>>>,
+    ) -> Self {
+        let names = names.into_iter().collect::<Option<Vec<_>>>();
+        match names {
+            Some(names) if names.len() == values.len() && !names.is_empty() => Self::Record {
+                fields: names.into_iter().zip(values).collect::<Vec<_>>().into(),
+            },
+            _ => Self::ResultRow(values.into()),
+        }
+    }
+
     pub fn as_utf8(&self) -> Option<Cow<'_, str>> {
         match self {
             Self::Text(text) => Some(Cow::Borrowed(text)),

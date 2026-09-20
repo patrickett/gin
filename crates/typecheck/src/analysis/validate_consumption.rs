@@ -130,7 +130,7 @@ fn validate_reference_returns(typed: &mut TypedFileAst) {
                             typed.exprs.target_group_of(*field).cloned().flatten(),
                         )
                     }
-                    _ if signature.results.len() > 1 => (
+                    _ if matches!(bind.return_type, ast::Ty::Sequence(_)) => (
                         expr,
                         typed
                             .exprs
@@ -169,6 +169,12 @@ fn validate_reference_returns(typed: &mut TypedFileAst) {
                 "cannot prove the returned reference outlives the call",
             ),
         };
+        if typed.exprs.facts.semantic_facts.flaws[expr.as_usize()]
+            .iter()
+            .any(|flaw| flaw.code.slug() == code)
+        {
+            continue;
+        }
         let mut diagnostic = Diagnostic::new(code, message);
         if let Some(span) = typed.exprs.span_of(expr) {
             diagnostic = diagnostic.at_span_id(span, &typed.span_table);

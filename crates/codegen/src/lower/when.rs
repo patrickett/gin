@@ -307,7 +307,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         }
         for (index, (value, target)) in values.iter_mut().zip(result_types).enumerate() {
             let source = match ty {
-                Ty::ResultRow(fields) => &fields.get(index)?.ty,
+                Ty::Sequence(fields) => &fields.get(index)?.ty,
                 _ => ty,
             };
             *value = self.convert_integer_value(*value, source, *target, block)?;

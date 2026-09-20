@@ -374,7 +374,7 @@ fn test_flow_context_records_var_state() {
 
 #[test]
 fn test_bounds_check_array() {
-    let typed = transform_source("main: (42; 3)");
+    let typed = transform_source("main: [42; 3]");
     let main_body = body_expr_id(&typed, "main").expect("main has body");
     let _expr = typed.exprs.get(main_body.as_usize()).expect("main body");
 }
@@ -547,7 +547,7 @@ fn test_flow_use_after_move() {
 #[test]
 fn test_flow_index_out_of_bounds() {
     // An array of size 3 accessed at index 5 should produce IndexOutOfBounds.
-    let typed = transform_source("main: (42; 3); val: arr.5");
+    let typed = transform_source("main: [42; 3]; val: arr.5");
     // AggregateGet with constant index 5 on an array of size 3 is out of bounds.
     let flaws = typed.all_flaws();
     let _has_bounds = flaws.iter().any(|(_, f)| {
@@ -680,7 +680,7 @@ Target has Default
     arch Architecture
     vendor Vendor
     os OperatingSystem
-    Default.default: ( arch: 'x86_64', vendor: 'unknown', os: 'unknown', )
+    Default.default: [ arch: 'x86_64', vendor: 'unknown', os: 'unknown', ]
 
 target Target
 ";

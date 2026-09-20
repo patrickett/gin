@@ -355,6 +355,93 @@ impl<'src, 't> TokenCursor<'src, 't> {
         expr_parser: ExprFn,
         is_function: bool,
     ) -> ParseResultType {
+        if !is_function || matches!(self.raw_peek(), Some(Token::Newline)) {
+            return self.parse_method_result_type(expr_parser, is_function);
+        }
+        let start = self.current_span();
+        let name = self.parse_result_element_name();
+        let (ty, error_ty) = self.parse_method_result_type(expr_parser, is_function);
+        let Some(ty) = ty else {
+            return (None, error_ty);
+        };
+        if name.is_none() && !self.has_more_method_results() {
+            return (Some(ty), error_ty);
+        }
+        let mut elems = vec![ast::SequenceElement {
+            name,
+            expr: ast::Typed::infer(ty.value, ty.span_id),
+        }];
+        while self.has_more_method_results() {
+            self.advance();
+            let name = self.parse_result_element_name();
+            let Some(ty) = self.parse_type_expr(expr_parser) else {
+                self.error(
+                    "parse-expected-result-type",
+                    "expected a result type after ','",
+                    self.current_span(),
+                );
+                break;
+            };
+            elems.push(ast::SequenceElement {
+                name,
+                expr: ast::Typed::infer(ty.value, ty.span_id),
+            });
+        }
+        let sequence = self.sequence_value(elems, start);
+        (
+            Some(Box::new(Spanned {
+                value: sequence.value,
+                span_id: sequence.span_id,
+            })),
+            error_ty,
+        )
+    }
+
+    fn has_more_method_results(&self) -> bool {
+        self.is_at(&Token::Comma)
+            && matches!(
+                self.peek_at(1),
+                Some(
+                    Token::Tag(_)
+                        | Token::Id(_)
+                        | Token::Ref
+                        | Token::Mut
+                        | Token::At
+                        | Token::BracketOpen
+                        | Token::SelfTag
+                )
+            )
+            && !matches!(
+                (self.peek_at(1), self.peek_at(2)),
+                (Some(Token::Id(_)), Some(Token::ParenOpen))
+            )
+    }
+
+    fn parse_result_element_name(&mut self) -> Option<Intern<String>> {
+        if matches!(self.peek(), Some(Token::Id(_)))
+            && matches!(
+                self.peek_at(1),
+                Some(
+                    Token::Tag(_)
+                        | Token::Id(_)
+                        | Token::Ref
+                        | Token::Mut
+                        | Token::At
+                        | Token::BracketOpen
+                )
+            )
+        {
+            self.parse_name()
+        } else {
+            None
+        }
+    }
+
+    fn parse_method_result_type(
+        &mut self,
+        expr_parser: ExprFn,
+        is_function: bool,
+    ) -> ParseResultType {
         // If the return type would be on a different line from the params,
         // there's no return type — the real return type must be on the same
         // line. This prevents consuming the next member name as a bare-Id

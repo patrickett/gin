@@ -139,53 +139,55 @@ impl<'src, 't> TokenCursor<'src, 't> {
             let name_span = self.last_consumed_span();
             if matches!(
                 self.peek(),
-                Some(Token::Tag(_))
-                    | Some(Token::At)
-                    | Some(Token::Ref)
-                    | Some(Token::Mut)
-                    | Some(Token::BracketOpen)
+                Some(Token::Tag(_) | Token::At | Token::Ref | Token::Mut | Token::BracketOpen)
             ) && let Some(ty) = self.parse_type_expr(expr_parser)
             {
                 named_results.push(NamedResult {
-                    name,
+                    name: Some(name),
                     name_span,
                     ty: Box::new(ty),
                 });
-                while self.eat(&Token::Comma) {
-                    let result_name_span = self.peek_span().unwrap_or(SpanId::INVALID);
-                    let Some(result_name) = self.parse_name() else {
-                        self.error(
-                            "parse-expected-result-name",
-                            "expected a named result after ','",
-                            self.current_span(),
-                        );
-                        break;
-                    };
-                    let Some(result_ty) = self.parse_type_expr(expr_parser) else {
-                        self.error(
-                            "parse-expected-result-type",
-                            "expected a type for the named result",
-                            self.current_span(),
-                        );
-                        break;
-                    };
-                    if named_results
-                        .iter()
-                        .any(|existing: &NamedResult| existing.name == result_name)
-                    {
-                        self.error(
-                            "parse-duplicate-result-name",
-                            format!("duplicate named result `{}`", result_name.as_str()),
-                            result_name_span,
-                        );
-                    }
-                    named_results.push(NamedResult {
-                        name: result_name,
-                        name_span: result_name_span,
-                        ty: Box::new(result_ty),
-                    });
-                }
             }
+        }
+        if self.is_at(&Token::Comma)
+            && named_results.is_empty()
+            && let Some(ty) = return_tag.take()
+        {
+            named_results.push(NamedResult {
+                name: None,
+                name_span: ty.span_id,
+                ty,
+            });
+        }
+        while !named_results.is_empty() && self.eat(&Token::Comma) {
+            let name_span = self.current_span();
+            let name = if matches!(self.peek(), Some(Token::Id(_)))
+                || self.peek().and_then(|token| token.keyword()).is_some()
+            {
+                self.parse_name()
+            } else {
+                None
+            };
+            let Some(ty) = self.parse_type_expr(expr_parser) else {
+                self.error(
+                    "parse-expected-result-type",
+                    "expected a result type after ','",
+                    self.current_span(),
+                );
+                break;
+            };
+            if name.is_some() && named_results.iter().any(|result| result.name == name) {
+                self.error(
+                    "parse-duplicate-result-name",
+                    format!("duplicate named result `{}`", name.unwrap()),
+                    name_span,
+                );
+            }
+            named_results.push(NamedResult {
+                name,
+                name_span,
+                ty: Box::new(ty),
+            });
         }
         if self.eat(&Token::And) {
             let mut predicates = match return_refinement.take() {
@@ -208,17 +210,24 @@ impl<'src, 't> TokenCursor<'src, 't> {
             && return_tag.is_none()
             && type_annotation.is_none()
             && self.is_at(&Token::Colon)
+            && matches!(
+                self.peek_at(1),
+                Some(Token::Tag(_) | Token::Ref | Token::Mut | Token::BracketOpen)
+            )
         {
             let checkpoint = self.checkpoint();
+            let errors = self.errors.len();
             self.advance();
             if let Some(type_expr) = self.parse_type_expr(expr_parser) {
-                if self.is_at(&Token::Colon) {
+                if self.is_at(&Token::Colon) && self.errors.len() == errors {
                     return_tag = Some(Box::new(type_expr));
                 } else {
                     self.rewind(checkpoint);
+                    self.errors.truncate(errors);
                 }
             } else {
                 self.rewind(checkpoint);
+                self.errors.truncate(errors);
             }
         }
         let mut return_tag = return_tag;
@@ -1016,7 +1025,7 @@ impl<'src, 't> TokenCursor<'src, 't> {
         }
 
         // Otherwise → single expression with optional postfix doc comment
-        let expr = expr_parser(self);
+        let expr = self.parse_sequence_value();
         // Only consume a doc comment if it's on the same line (no intervening newline),
         // otherwise it belongs to the next top-level declaration.
         let doc = if matches!(self.peek_at(0), Some(Token::DocComment(_))) {

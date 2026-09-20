@@ -21,12 +21,12 @@ fn parse_direct_children_follow_source_order() {
     let cases = [
         ("main: call(left, right)\n", "call", 2),
         ("main: left + right\n", "binary", 2),
-        ("main: (left, right)\n", "call", 0),
-        ("main: (x: left, y: right)\n", "record", 2),
+        ("main: left, right\n", "sequence literal", 2),
+        ("main: [x: left, y: right]\n", "sequence literal", 2),
         ("main: [left, right]\n", "sequence literal", 2),
         ("main: Shape(left, right)\n", "tag call", 2),
         ("main: left to right\n", "range", 2),
-        ("main: (init; size)\n", "fixed-array allocation", 2),
+        ("main: [init; size]\n", "sequence literal", 2),
         ("main: buffer.(index)\n", "buffer get", 2),
         ("main: buffer.(index):: value\n", "buffer set", 3),
         ("main: tuple.0\n", "value row get", 1),
@@ -122,7 +122,7 @@ fn parse_direct_children_support_early_exit() {
 
 #[test]
 fn mutable_parse_traversal_visits_all_allocation_children() {
-    let (_, mut expr) = parsed_main_expr("main: (initializer; size)\n");
+    let (_, mut expr) = parsed_main_expr("main: [initializer; size]\n");
     let mut visits = 0;
 
     let _ = ast::folder::walk_expr_children_mut(&mut expr, &mut |_, _| {
@@ -138,12 +138,12 @@ fn typed_direct_children_cover_lowered_multi_child_shapes() {
     let cases = [
         ("main: call(left, right)\n", "call", 2),
         ("main: left + right\n", "intrinsic", 2),
-        ("main: (left, right)\n", "call", 0),
-        ("main: (x: left, y: right)\n", "record", 2),
+        ("main: 1, 2\n", "array", 2),
+        ("main: [x: left, y: right]\n", "record", 2),
         ("main: [left, right]\n", "array", 2),
         ("main: Shape(left, right)\n", "tag call", 2),
         ("main: left to right\n", "range", 2),
-        ("main: (init; 3)\n", "fixed-array allocation", 1),
+        ("main: [init; 3]\n", "array", 3),
         ("main: buffer.(index)\n", "buffer get", 2),
         ("main: buffer.(index):: value\n", "buffer set", 3),
         ("main: tuple.0\n", "value row get", 1),
@@ -188,7 +188,7 @@ fn typed_direct_children_cover_lowered_multi_child_shapes() {
             TypedExprKind::IntrinsicCall { .. } => "intrinsic",
             TypedExprKind::Binary { .. } => "binary",
             TypedExprKind::InvalidOperator { .. } => "binary",
-            TypedExprKind::RecordValue(_) => "record",
+            TypedExprKind::RecordValue(_) | TypedExprKind::ResultRow(_) => "record",
             TypedExprKind::ArrayLit(_) => "array",
             TypedExprKind::List(_) => "list",
             TypedExprKind::TagCall { .. } => "tag call",

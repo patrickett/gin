@@ -43,27 +43,28 @@ Contract(target_type Type, choices_type Type, inputs_type Type, outputs_type Typ
     clobbers clobbers_type
     reads reads_type
     writes writes_type
-    evaluate(a is in -9223372036854775808 to 9223372036854775807, b is in -9223372036854775808 to 9223372036854775807) Word: (a + b) as Word
+    evaluate(a is in -9223372036854775808 to 9223372036854775807, b is in -9223372036854775808 to 9223372036854775807) a Word: (a + b) as Word
 
+word_sum_result(a Word, b Word) a Word: #asm(region(), a: a, b: b)
 #infix('+')
-word_sum(a Word, b Word) a Word: #asm(region(), a: a, b: b)
+word_sum(a Word, b Word) Word: word_sum_result(a, b).a
 calculate(a Word, b Word) Word: a + b
 
 contract():
 return Contract(
         target: #target.triple
-        choices: (choice0: Choice(slot: 'a', register: '{left}', code: 0), choice1: Choice(slot: 'b', register: '{right}', code: 9))
-        inputs: (input0: 'a', input1: 'b')
+        choices: [choice0: Choice(slot: 'a', register: '{left}', code: 0), choice1: Choice(slot: 'b', register: '{right}', code: 9)]
+        inputs: [input0: 'a', input1: 'b']
         outputs: ['a']
         clobbers: ['cc']
-        reads: ()
-        writes: ()
+        reads: []
+        writes: []
     )
 
 region():
 return Region(
         contract: contract()
-        items: (instruction0: Instruction(encoder: Encoder, size: {size}, arguments: (argument0: Operand(register: 'a'), argument1: Operand(register: 'b'))))
+        items: [instruction0: Instruction(encoder: Encoder, size: {size}, arguments: [argument0: Operand(register: 'a'), argument1: Operand(register: 'b')])]
     )
 
 
@@ -75,7 +76,7 @@ Sequence(element Type, count BigInt) has
 
 #[test]
 fn instruction_evaluation_requires_a_compatible_gin_method() {
-    let declaration = "    evaluate(a is in -9223372036854775808 to 9223372036854775807, b is in -9223372036854775808 to 9223372036854775807) Word: (a + b) as Word\n";
+    let declaration = "    evaluate(a is in -9223372036854775808 to 9223372036854775807, b is in -9223372036854775808 to 9223372036854775807) a Word: (a + b) as Word\n";
     let target = CompileTarget::Concrete(TargetTriple::parse("x86_64-unknown-linux-gnu").unwrap());
     let mut ctx = TransformCtx::new();
     ctx.compile_target = target.clone();

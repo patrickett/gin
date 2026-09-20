@@ -881,7 +881,10 @@ pub fn signature_for_fn(bind: &Bind) -> Option<SignatureInfo> {
         Some(
             bind.named_results
                 .iter()
-                .map(|result| format!("{} {}", result.name, result.ty.value.format_surface()))
+                .map(|result| match result.name {
+                    Some(name) => format!("{} {}", name, result.ty.value.format_surface()),
+                    None => result.ty.value.format_surface(),
+                })
                 .collect::<Vec<_>>()
                 .join(", "),
         )

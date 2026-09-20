@@ -1340,7 +1340,7 @@ fn unsaturated_type_name(
         Ty::UnresolvedSequence { element, .. } => element
             .as_deref()
             .and_then(|element| unsaturated_type_name(element, registry)),
-        Ty::ResultRow(fields) => fields
+        Ty::Sequence(fields) => fields
             .iter()
             .find_map(|field| unsaturated_type_name(&field.ty, registry)),
         Ty::ResultFamily { .. }
@@ -1533,7 +1533,7 @@ fn declaration_has_symbolic_fixed_array_length_with_seen(
         Ty::Record { fields, .. } => fields.iter().any(|(_, field)| {
             declaration_has_symbolic_fixed_array_length_with_seen(field, registry, stack)
         }),
-        Ty::ResultRow(fields) => fields.iter().any(|field| {
+        Ty::Sequence(fields) => fields.iter().any(|field| {
             declaration_has_symbolic_fixed_array_length_with_seen(&field.ty, registry, stack)
         }),
         Ty::Union { variants, .. } => variants.iter().any(|variant| {
@@ -1600,10 +1600,10 @@ fn declaration_representation_type(ty: &Ty) -> Ty {
             literal_values: literal_values.clone(),
             resolved_params: resolved_params.clone(),
         },
-        Ty::ResultRow(elements) => Ty::ResultRow(
+        Ty::Sequence(elements) => Ty::Sequence(
             elements
                 .iter()
-                .map(|element| ast::ty::ResultElement {
+                .map(|element| ast::ty::SequenceTypeElement {
                     name: element.name,
                     ty: Box::new(declaration_representation_type(&element.ty)),
                 })
@@ -1840,10 +1840,10 @@ fn preserve_self_reference_with_instance(
             )),
             address_space: *address_space,
         },
-        Ty::ResultRow(elements) => Ty::ResultRow(
+        Ty::Sequence(elements) => Ty::Sequence(
             elements
                 .iter()
-                .map(|element| ast::ty::ResultElement {
+                .map(|element| ast::ty::SequenceTypeElement {
                     name: element.name,
                     ty: Box::new(declaration_representation_type(&element.ty)),
                 })
@@ -3003,15 +3003,12 @@ fn resolve_return_type(
         let elements = bind
             .named_results
             .iter()
-            .map(|result| ast::ty::ResultElement {
+            .map(|result| ast::ty::SequenceTypeElement {
                 name: result.name,
                 ty: Box::new(env.resolve_expr(&result.ty.value)),
             })
             .collect::<Vec<_>>();
-        return match elements.as_slice() {
-            [element] => (*element.ty).clone(),
-            _ => Ty::ResultRow(elements),
-        };
+        return Ty::results(elements);
     }
     if let Some(predicate) = &bind.return_refinement {
         return Ty::AnonymousInteger {
@@ -3119,12 +3116,12 @@ fn resolve_return_type(
                     .values
                     .iter()
                     .enumerate()
-                    .map(|(index, expr)| ast::ty::ResultElement {
-                        name: Intern::new(index.to_string()),
+                    .map(|(_index, expr)| ast::ty::SequenceTypeElement {
+                        name: None,
                         ty: Box::new(resolve_type_from_typed_expr(expr, tag_types)),
                     })
                     .collect();
-                Ty::ResultRow(fields)
+                Ty::results(fields)
             } else {
                 ret.values
                     .first()
@@ -3796,7 +3793,7 @@ fn is_type_parameter(kind: &ParameterKind) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ast::ty::{NamedTypeInstance, ResultElement, TypeId};
+    use ast::ty::{NamedTypeInstance, SequenceTypeElement, TypeId};
 
     #[test]
     fn nominal_and_anonymous_label_queries_keep_distinct_traversal_rules() {
@@ -3839,8 +3836,8 @@ mod tests {
                 true,
             ),
             (
-                Ty::ResultRow(vec![ResultElement {
-                    name,
+                Ty::Sequence(vec![SequenceTypeElement {
+                    name: Some(name),
                     ty: Box::new(opaque.clone()),
                 }]),
                 false,

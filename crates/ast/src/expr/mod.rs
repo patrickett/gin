@@ -207,8 +207,39 @@ pub struct AsmOperandBinding {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SequenceElement {
+    pub name: Option<Intern<String>>,
+    pub expr: Typed<Expr>,
+}
+
+impl SequenceElement {
+    pub fn new(expr: Typed<Expr>) -> Self {
+        Self { name: None, expr }
+    }
+
+    pub fn with_name(mut self, name: Intern<String>) -> Self {
+        self.name = Some(name);
+        self
+    }
+}
+
+impl std::ops::Deref for SequenceElement {
+    type Target = Typed<Expr>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.expr
+    }
+}
+
+impl std::ops::DerefMut for SequenceElement {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.expr
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SequenceLiteral {
-    Elements(Vec<Typed<Expr>>),
+    Elements(Vec<SequenceElement>),
     Repeat {
         seed: Box<Typed<Expr>>,
         count: Box<Typed<Expr>>,

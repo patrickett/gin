@@ -419,7 +419,7 @@ fn ty_contains_private_identity(
         ast::Ty::Record { fields, .. } => fields
             .iter()
             .any(|(_, field)| ty_contains_private_identity(field, private_names, erasable_aliases)),
-        ast::Ty::ResultRow(fields) => fields
+        ast::Ty::Sequence(fields) => fields
             .iter()
             .any(|field| ty_contains_private_identity(&field.ty, private_names, erasable_aliases)),
         ast::Ty::Array { elem, .. } => {

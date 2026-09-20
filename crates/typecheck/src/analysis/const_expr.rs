@@ -293,7 +293,21 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
                     elems.iter().filter_map(|e| self.eval(&e.value)).collect();
                 (items.len() == elems.len()).then(|| ConstValue::FixedArray(items.into()))
             }
-            Expr::List(elems) | Expr::SequenceLiteral(ast::SequenceLiteral::Elements(elems)) => {
+            Expr::SequenceLiteral(ast::SequenceLiteral::Elements(elems)) => {
+                let items = elems
+                    .iter()
+                    .map(|elem| self.eval(&elem.value))
+                    .collect::<Option<Vec<_>>>()?;
+                if elems.iter().any(|elem| elem.name.is_some()) {
+                    Some(ConstValue::sequence(
+                        items,
+                        elems.iter().map(|elem| elem.name),
+                    ))
+                } else {
+                    Some(ConstValue::Sequence(items.into()))
+                }
+            }
+            Expr::List(elems) => {
                 let items: Vec<ConstValue> =
                     elems.iter().filter_map(|e| self.eval(&e.value)).collect();
                 (items.len() == elems.len()).then(|| ConstValue::Sequence(items.into()))

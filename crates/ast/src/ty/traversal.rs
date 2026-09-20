@@ -72,7 +72,7 @@ impl Ty {
             | Self::Address { pointee: inner, .. } => {
                 visit(TyChild::Type(inner))?;
             }
-            Self::ResultRow(elements) => {
+            Self::Sequence(elements) => {
                 for element in elements {
                     visit(TyChild::Type(&element.ty))?;
                 }

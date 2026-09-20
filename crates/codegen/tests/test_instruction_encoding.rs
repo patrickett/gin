@@ -18,19 +18,19 @@ Region(contract_type Type, items_type Type) has contract contract_type, items it
 add_region():
 return Region(
         contract: add_contract()
-        items: (instruction0: Instruction(encoder: AddEncoder, size: 3, arguments: (argument0: Register(register: "left"), argument1: Register(register: "right"))))
+        items: [instruction0: Instruction(encoder: AddEncoder, size: 3, arguments: [argument0: Register(register: "left"), argument1: Register(register: "right")])]
     )
 
 kernel_region():
 return Region(
         contract: syscall_contract()
-        items: (instruction0: Instruction(encoder: KernelEncoder, size: 2, arguments: ()))
+        items: [instruction0: Instruction(encoder: KernelEncoder, size: 2, arguments: [])]
     )
 
 branch_region():
 return Region(
         contract: branch_contract()
-        items: (instruction0: Instruction(encoder: JumpEncoder, size: 2, arguments: (jump: Relative(relative: "done", min: -128, max: 127))), instruction1: Instruction(encoder: IncrementEncoder, size: 4, arguments: (increment: Register(register: "value"))), instruction2: Mark(label: "done"), instruction3: Instruction(encoder: NopEncoder, size: 1, arguments: ()))
+        items: [instruction0: Instruction(encoder: JumpEncoder, size: 2, arguments: [jump: Relative(relative: "done", min: -128, max: 127)]), instruction1: Instruction(encoder: IncrementEncoder, size: 4, arguments: [increment: Register(register: "value")]), instruction2: Mark(label: "done"), instruction3: Instruction(encoder: NopEncoder, size: 1, arguments: [])]
     )
 
 add_words(a Int, b Int) left Int: #asm(add_region(), left: a, right: b)
@@ -97,34 +97,34 @@ BranchContract(target_type Type, choices_type Type, inputs_type Type, outputs_ty
 add_contract():
 return AddContract(
         target: #target.triple
-        choices: (choice0: Choice(slot: "left", register: "r9", code: 9), choice1: Choice(slot: "left", register: "rax", code: 0), choice2: Choice(slot: "right", register: "r9", code: 9))
-        inputs: (input0: "left", input1: "right")
+        choices: [choice0: Choice(slot: "left", register: "r9", code: 9), choice1: Choice(slot: "left", register: "rax", code: 0), choice2: Choice(slot: "right", register: "r9", code: 9)]
+        inputs: [input0: "left", input1: "right"]
         outputs: ["left"]
         clobbers: ["cc"]
-        reads: ()
-        writes: ()
+        reads: []
+        writes: []
     )
 
 syscall_contract():
 return SyscallContract(
         target: #target.triple
-        choices: (choice0: Choice(slot: "number", register: "rax", code: 0), choice1: Choice(slot: "fd", register: "rdi", code: 7), choice2: Choice(slot: "buffer", register: "rsi", code: 6), choice3: Choice(slot: "length", register: "rdx", code: 2))
-        inputs: (input0: "number", input1: "fd", input2: "buffer", input3: "length")
+        choices: [choice0: Choice(slot: "number", register: "rax", code: 0), choice1: Choice(slot: "fd", register: "rdi", code: 7), choice2: Choice(slot: "buffer", register: "rsi", code: 6), choice3: Choice(slot: "length", register: "rdx", code: 2)]
+        inputs: [input0: "number", input1: "fd", input2: "buffer", input3: "length"]
         outputs: ["number"]
-        clobbers: (clobber0: "rcx", clobber1: "r11", clobber2: "cc")
+        clobbers: [clobber0: "rcx", clobber1: "r11", clobber2: "cc"]
         reads: [MemoryAccess(pointer: 2, length: 3)]
-        writes: ()
+        writes: []
     )
 
 branch_contract():
 return BranchContract(
         target: #target.triple
-        choices: (choice0: Choice(slot: "value", register: "rax", code: 0))
+        choices: [choice0: Choice(slot: "value", register: "rax", code: 0)]
         inputs: ["value"]
         outputs: ["value"]
         clobbers: ["cc"]
-        reads: ()
-        writes: ()
+        reads: []
+        writes: []
     )
 
 #fixed_array(element, count)
@@ -597,13 +597,13 @@ fn source_instruction_contracts_reject_invalid_encoders_operands_and_memory() {
 fn source_branch_resolves_a_backward_symbolic_destination() {
     let source = format!("{REGIONS}\n{SOURCE}");
     let start = source
-        .find("        items: (instruction0: Instruction(encoder: JumpEncoder")
+        .find("        items: [instruction0: Instruction(encoder: JumpEncoder")
         .unwrap();
     let end = source[start..].find('\n').unwrap() + start;
     let source = format!(
         "{}{}{}",
         &source[..start],
-        "        items: (item0: Mark(label: \"start\"), item1: Instruction(encoder: NopEncoder, size: 1, arguments: ()), item2: Instruction(encoder: JumpEncoder, size: 2, arguments: (argument0: Relative(relative: \"start\", min: -128, max: 127))))",
+        "        items: [item0: Mark(label: \"start\"), item1: Instruction(encoder: NopEncoder, size: 1, arguments: []), item2: Instruction(encoder: JumpEncoder, size: 2, arguments: [argument0: Relative(relative: \"start\", min: -128, max: 127)])]",
         &source[end..]
     );
     let typed = checked(&source);

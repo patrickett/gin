@@ -24,7 +24,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 fields.iter().map(|(_, field)| field.as_ref()),
             ),
 
-            Ty::ResultRow(_) => None,
+            Ty::Sequence(_) => None,
             Ty::Union { variants, .. }
                 if variants.iter().all(|variant| variant.fields.is_empty()) =>
             {

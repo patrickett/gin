@@ -1,7 +1,7 @@
 //! Tests probing how Gin handles newlines and expression continuation.
 //!
 //! These tests exercise the edge cases discussed in the blog post
-//! "No Semicolons Needed" (https://terts.dev/blog/no-semicolons-needed/),
+//! "No Semicolons Needed" [https://terts.dev/blog/no-semicolons-needed/],
 //! comparing Gin's behavior against the approaches used by
 //! Python, Go, Kotlin, Swift, JavaScript, Gleam, Lua, Ruby, R, Julia, and Odin.
 

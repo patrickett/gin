@@ -500,10 +500,10 @@ fn list_lit_empty_with_layout() {
 #[test]
 fn value_row_lit_newline_separated() {
     let src = "\
-pair : (
+pair : [
     1
     2
-)
+]
 ";
     let out = src.parse_source_full();
     assert_eq!(
@@ -567,15 +567,15 @@ fn bundle_exports_same_line_missing_comma_rejected() {
 
 #[test]
 fn record_fields_newline_separated() {
-    // Record literals use the `(name: value)` syntax inside function bodies.
+    // Record literals use the `[name: value]` syntax inside function bodies.
     // The field separator is comma, but newlines also work because the loop
     // naturally advances past layout tokens between fields.
     let src = "\
 main:
-    point : (
+    point : [
         x: 1
         y: 2
-    )
+    ]
 return
 ";
     let out = src.parse_source_full();
@@ -592,10 +592,10 @@ return
 fn record_fields_comma_and_newline_mixed() {
     let src = "\
 main:
-    point : (
+    point : [
         x: 1,
         y: 2,
-    )
+    ]
 return
 ";
     let out = src.parse_source_full();

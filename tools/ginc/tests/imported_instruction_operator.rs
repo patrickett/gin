@@ -14,7 +14,7 @@ fn imported_operator_calls_a_library_owned_instruction_body() {
         r#"use '../machine' Word, machine_sum
 Number is in -9223372036854775808 to 9223372036854775807
 #infix('+')
-sum(a Number, b Number) Number: machine_sum(a as Word, b as Word) as Number
+sum(a Number, b Number) Number: machine_sum(a as Word, b as Word).left as Number
 "#,
     );
     let consumer = TempPackage::new("instruction_operator_consumer");
@@ -119,20 +119,20 @@ Contract(target_type Type, choices_type Type, inputs_type Type, outputs_type Typ
     clobbers clobbers_type
     reads reads_type
     writes writes_type
-    evaluate(a is in -9223372036854775808 to 9223372036854775807, b is in -9223372036854775808 to 9223372036854775807) Word: (a + b) as Word
+    evaluate(a is in -9223372036854775808 to 9223372036854775807, b is in -9223372036854775808 to 9223372036854775807) left Word: (a + b) as Word
 
 machine_sum(a Word, b Word) left Word: #asm(region(), left: a, right: b)
 contract():
 return Contract(
         target: #target.triple
-        choices: (choice0: Choice(slot: 'left', register: 'rax', code: 0), choice1: Choice(slot: 'right', register: 'rcx', code: 1))
-        inputs: (input0: 'left', input1: 'right')
+        choices: [choice0: Choice(slot: 'left', register: 'rax', code: 0), choice1: Choice(slot: 'right', register: 'rcx', code: 1)]
+        inputs: [input0: 'left', input1: 'right']
         outputs: ['left']
         clobbers: ['cc']
-        reads: ()
-        writes: ()
+        reads: []
+        writes: []
     )
-region(): Region(contract: contract(), items: (instruction0: Instruction(encoder: Encoder, size: 3, arguments: ())))
+region(): Region(contract: contract(), items: [instruction0: Instruction(encoder: Encoder, size: 3, arguments: [])])
 
 #fixed_array(element, count)
 Sequence(element Type, count BigInt) has

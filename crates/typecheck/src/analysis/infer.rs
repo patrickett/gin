@@ -219,12 +219,12 @@ impl TyInfer for Bind {
                         .collect::<Vec<_>>();
                     if self.named_results.len() == types.len() {
                         match types.as_slice() {
-                            [ty] => ty.clone(),
-                            _ => Ty::ResultRow(
+                            [ty] if self.named_results[0].name.is_none() => ty.clone(),
+                            _ => Ty::Sequence(
                                 self.named_results
                                     .iter()
                                     .zip(types)
-                                    .map(|(result, ty)| ast::ty::ResultElement {
+                                    .map(|(result, ty)| ast::ty::SequenceTypeElement {
                                         name: result.name,
                                         ty: Box::new(ty),
                                     })
@@ -232,7 +232,15 @@ impl TyInfer for Bind {
                             ),
                         }
                     } else {
-                        Ty::Opaque(Intern::from_ref("unnamed-multiple-results"))
+                        Ty::results(
+                            types
+                                .into_iter()
+                                .map(|ty| ast::ty::SequenceTypeElement {
+                                    name: None,
+                                    ty: Box::new(ty),
+                                })
+                                .collect(),
+                        )
                     }
                 } else {
                     ret.values
@@ -356,7 +364,7 @@ impl TyInfer for Expr {
                     .nth(*index)
                     .map(|(_, field)| *field)
                     .unwrap_or(Ty::Opaque(Intern::from_ref("unresolved-value-row-element"))),
-                Ty::ResultRow(fields) => fields
+                Ty::Sequence(fields) => fields
                     .into_iter()
                     .nth(*index)
                     .map(|field| *field.ty)
@@ -422,10 +430,27 @@ impl TyInfer for Expr {
             },
             Expr::Invalid(_) => Ty::Opaque(Intern::from_ref("invalid-expression")),
             Expr::ResultValues(_) => Ty::Opaque(Intern::from_ref("result-values")),
-            Expr::SequenceLiteral(ast::SequenceLiteral::Elements(elems)) => Ty::Array {
-                elem: Box::new(elems.first().map(|e| e.infer_ty(env)).unwrap_or(Ty::Unit)),
-                size: NormalExpr::from(elems.len() as i128),
-            },
+            Expr::SequenceLiteral(ast::SequenceLiteral::Elements(elems)) => Ty::sequence(
+                elems
+                    .iter()
+                    .map(|elem| {
+                        let ty = elem.infer_ty(env);
+                        ast::ty::SequenceTypeElement {
+                            name: elem.name,
+                            ty: Box::new(
+                                if matches!(
+                                    ty,
+                                    Ty::UnresolvedLiteral(ast::ty::LiteralKind::Integer)
+                                ) {
+                                    Ty::i64()
+                                } else {
+                                    ty
+                                },
+                            ),
+                        }
+                    })
+                    .collect(),
+            ),
             Expr::SequenceLiteral(ast::SequenceLiteral::Repeat { seed, count }) => {
                 let length =
                     as_size_normal_expr_with_arithmetic(&count.value).unwrap_or_else(|| {
@@ -509,17 +534,11 @@ mod tests {
 
     #[test]
     fn sequence_inference_preserves_element_and_length_shape() {
-        assert_eq!(
-            infer_expression("[]"),
-            Ty::Array {
-                elem: Box::new(Ty::Unit),
-                size: NormalExpr::from(0)
-            }
-        );
+        assert_eq!(infer_expression("[]"), Ty::Sequence(Vec::new()));
         assert_eq!(
             infer_expression("[1, 2]"),
             Ty::Array {
-                elem: Box::new(Ty::UnresolvedLiteral(ast::ty::LiteralKind::Integer)),
+                elem: Box::new(Ty::i64()),
                 size: NormalExpr::from(2)
             }
         );
@@ -527,7 +546,7 @@ mod tests {
             infer_expression("[[1], [2]]"),
             Ty::Array {
                 elem: Box::new(Ty::Array {
-                    elem: Box::new(Ty::UnresolvedLiteral(ast::ty::LiteralKind::Integer)),
+                    elem: Box::new(Ty::i64()),
                     size: NormalExpr::from(1),
                 }),
                 size: NormalExpr::from(2),

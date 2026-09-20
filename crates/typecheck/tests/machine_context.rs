@@ -319,8 +319,8 @@ fn helper_local_immutable_alias_does_not_freeze_callers_register_after_return() 
 fn backend_values_control_registers_and_instruction_templates() {
     let backend = test_fixtures::machine_backend_source("x86_64")
         .replace(
-            r#"(inputs0: "rdi", inputs1: "rsi")"#,
-            r#"(inputs0: "r8", inputs1: "r9")"#,
+            r#"[inputs0: "rdi", inputs1: "rsi"]"#,
+            r#"[inputs0: "r8", inputs1: "r9"]"#,
         )
         .replace(
             r#""mov {destination}, {left}""#,
@@ -344,15 +344,15 @@ fn rejects_invalid_backend_contracts() {
         ),
         (
             backend.replace(
-                r#"(inputs0: "rdi", inputs1: "rsi")"#,
-                r#"(inputs0: "rdi", inputs1: "rdi")"#,
+                r#"[inputs0: "rdi", inputs1: "rsi"]"#,
+                r#"[inputs0: "rdi", inputs1: "rdi"]"#,
             ),
             "overlap",
         ),
         (
             backend.replace(
-                r#"(inputs0: "rdi", inputs1: "rsi")"#,
-                r#"(inputs0: "rax", inputs1: "rsi")"#,
+                r#"[inputs0: "rdi", inputs1: "rsi"]"#,
+                r#"[inputs0: "rax", inputs1: "rsi"]"#,
             ),
             "overlap",
         ),

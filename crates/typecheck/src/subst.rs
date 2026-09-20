@@ -75,10 +75,10 @@ impl DependentInstantiation {
                         .collect()
                 }),
             },
-            Ty::ResultRow(elements) => Ty::ResultRow(
+            Ty::Sequence(elements) => Ty::Sequence(
                 elements
                     .iter()
-                    .map(|element| ast::ty::ResultElement {
+                    .map(|element| ast::ty::SequenceTypeElement {
                         name: element.name,
                         ty: Box::new(self.apply_to_ty(&element.ty)),
                     })
@@ -281,10 +281,10 @@ impl DepSubst {
             },
             Ty::Literal(v) => Ty::Literal(v.clone()),
             Ty::ResultFamily { .. } => ty.clone(),
-            Ty::ResultRow(elements) => Ty::ResultRow(
+            Ty::Sequence(elements) => Ty::Sequence(
                 elements
                     .iter()
-                    .map(|element| ast::ty::ResultElement {
+                    .map(|element| ast::ty::SequenceTypeElement {
                         name: element.name,
                         ty: Box::new(self.apply_to_ty(&element.ty)),
                     })

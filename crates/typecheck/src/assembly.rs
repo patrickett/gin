@@ -535,9 +535,14 @@ fn validate_assembly_ids(
             }
             if !defer_target {
                 let declared_results = match &typed.exprs.ty[id.as_usize()] {
-                    Ty::ResultRow(fields) => fields
+                    Ty::Sequence(fields) => fields
                         .iter()
-                        .map(|field| (field.name.as_str().to_string(), (*field.ty).clone()))
+                        .map(|field| {
+                            (
+                                field.name.map(|name| name.to_string()).unwrap_or_default(),
+                                (*field.ty).clone(),
+                            )
+                        })
                         .collect::<Vec<_>>(),
                     Ty::Unit => Vec::new(),
                     ty => typed
@@ -547,7 +552,15 @@ fn validate_assembly_ids(
                             (matches!(bind.body, crate::typed::BindBody::Expr(expr) if expr == id))
                                 .then(|| bind.named_results.first())
                                 .flatten()
-                                .map(|result| vec![(result.name.as_str().to_string(), ty.clone())])
+                                .map(|result| {
+                                    vec![(
+                                        result
+                                            .name
+                                            .map(|name| name.to_string())
+                                            .unwrap_or_default(),
+                                        ty.clone(),
+                                    )]
+                                })
                         })
                         .unwrap_or_default(),
                 };

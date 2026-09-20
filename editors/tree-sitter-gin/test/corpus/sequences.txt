@@ -1,0 +1,94 @@
+==================
+Bare and named sequences
+==================
+numbers: 10, 20
+point: [x: 10, 20]
+buffer: [0; 20]
+make() first Int, Int: return 10, 20
+identity(value [first Int, Int]) [first Int, Int]: value
+
+---
+
+(source_file
+  (bind_statement
+    (identifier)
+    (bare_sequence
+      (literal
+        (number))
+      (literal
+        (number))))
+  (bind_statement
+    (identifier)
+    (sequence_literal
+      (named_argument
+        (identifier)
+        (literal
+          (number)))
+      (literal
+        (number))))
+  (bind_statement
+    (identifier)
+    (sequence_literal
+      (literal
+        (number))
+      (literal
+        (number))))
+  (bind_statement
+    (identifier)
+    (parameters)
+    (named_results
+      (named_result
+        (identifier)
+        (tag
+          (type_identifier)))
+      (tag
+        (type_identifier)))
+    (return_statement
+      (literal
+        (number))
+      (literal
+        (number))))
+  (bind_statement
+    (identifier)
+    (parameters
+      (parameter
+        (identifier)
+        (sequence_type
+          (named_result
+            (identifier)
+            (tag
+              (type_identifier)))
+          (tag
+            (type_identifier)))))
+    (sequence_type
+      (named_result
+        (identifier)
+        (tag
+          (type_identifier)))
+      (tag
+        (type_identifier)))
+    (identifier)))
+
+==================
+Named singleton method result
+==================
+Factory has
+    get() value Int: 42
+
+---
+
+(source_file
+  (declare_statement
+    (type_identifier)
+    (decl_member_list
+      (record_signature
+        (identifier)
+        (parameters)
+        (named_results
+          (named_result
+            (identifier)
+            (tag
+              (type_identifier))))
+        (member_default
+          (literal
+            (number)))))))

@@ -88,7 +88,7 @@ fn unify_ty(
             Ok(())
         }
         (Ty::Union { name: n1, .. }, Ty::Union { name: n2, .. }) if n1 == n2 => Ok(()),
-        (Ty::ResultRow(e1), Ty::ResultRow(e2)) if e1.len() == e2.len() => {
+        (Ty::Sequence(e1), Ty::Sequence(e2)) if e1.len() == e2.len() => {
             for (expected, actual) in e1.iter().zip(e2) {
                 if expected.name != actual.name {
                     return Err("named result names or order do not match".to_string());

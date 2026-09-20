@@ -271,7 +271,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     .and_then(|acceptance| acceptance.fixed_array_length_parameter())
                     .is_none(),
                 Ty::Unit => true,
-                Ty::ResultRow(fields) => fields.is_empty(),
+                Ty::Sequence(fields) => fields.is_empty(),
                 Ty::Record { fields, .. } => fields.is_empty(),
                 _ => false,
             };

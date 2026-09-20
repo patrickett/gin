@@ -298,6 +298,15 @@ impl<'a> TypeEnv<'a> {
                 size: expr_as_size_normal_expr(&size.value)
                     .unwrap_or_else(|| NormalExpr::Var(Intern::from_ref("<array-size>"))),
             },
+            ast::Expr::SequenceLiteral(ast::SequenceLiteral::Elements(elems)) => Ty::sequence(
+                elems
+                    .iter()
+                    .map(|elem| ast::ty::SequenceTypeElement {
+                        name: elem.name,
+                        ty: Box::new(self.resolve_expr(&elem.value)),
+                    })
+                    .collect(),
+            ),
             ast::Expr::SequenceLiteral(ast::SequenceLiteral::Repeat { seed, count }) => Ty::Array {
                 elem: Box::new(self.resolve_expr(&seed.value)),
                 size: expr_as_size_normal_expr(&count.value)
@@ -875,6 +884,9 @@ pub(crate) fn expr_is_type_surface(expr: &ast::Expr) -> bool {
         },
         ast::Expr::FixedArrayAlloc { init, size } => {
             expr_is_type_surface(&init.value) && expr_as_size_normal_expr(&size.value).is_some()
+        }
+        ast::Expr::SequenceLiteral(ast::SequenceLiteral::Elements(elems)) => {
+            elems.iter().all(|elem| expr_is_type_surface(&elem.value))
         }
         ast::Expr::SequenceLiteral(ast::SequenceLiteral::Repeat { seed, count }) => {
             expr_is_type_surface(&seed.value) && expr_as_size_normal_expr(&count.value).is_some()

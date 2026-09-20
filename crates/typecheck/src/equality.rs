@@ -45,7 +45,7 @@ fn supported_with_registry(ty: &Ty, type_registry: &TypeRegistry) -> bool {
         | Ty::Array { .. }
         | Ty::Ptr { .. }
         | Ty::Address { .. } => false,
-        Ty::ResultRow(_) => false,
+        Ty::Sequence(_) => false,
     }
 }
 

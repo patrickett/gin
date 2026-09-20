@@ -106,6 +106,13 @@ impl Repr {
                 };
                 Some(((**elem).clone(), length))
             }
+            Ty::Sequence(fields) => {
+                let first = fields.first()?;
+                fields
+                    .iter()
+                    .all(|field| field.ty == first.ty)
+                    .then(|| ((*first.ty).clone(), fields.len() as u64))
+            }
             Ty::Named { instance, .. } => {
                 let former = registry?
                     .declaration_for_instance(instance)?
@@ -160,7 +167,7 @@ pub fn has_symbolic_fixed_array_length(ty: &Ty, registry: Option<&TypeRegistry>)
         Ty::Record { fields, .. } => fields
             .iter()
             .any(|(_, field)| has_symbolic_fixed_array_length(field, registry)),
-        Ty::ResultRow(fields) => fields
+        Ty::Sequence(fields) => fields
             .iter()
             .any(|field| has_symbolic_fixed_array_length(&field.ty, registry)),
         Ty::Union { variants, .. } => variants.iter().any(|variant| {
@@ -337,9 +344,20 @@ impl<'a> RepresentationContext<'a> {
                 .map(|(_, field)| self.derive_inner(field, active))
                 .collect::<Result<Vec<_>, _>>()
                 .map(|fields| Repr::Product { fields }),
-            Ty::ResultRow(_) => Err(RepresentationError::Unsupported {
-                type_name: ty.format_for_hover(),
-            }),
+            Ty::Sequence(fields) => {
+                if let Some((element, length)) = Repr::array_parts(ty, self.registry) {
+                    Ok(Repr::Array {
+                        element: Box::new(self.derive_inner(&element, active)?),
+                        length,
+                    })
+                } else {
+                    fields
+                        .iter()
+                        .map(|field| self.derive_inner(&field.ty, active))
+                        .collect::<Result<Vec<_>, _>>()
+                        .map(|fields| Repr::Product { fields })
+                }
+            }
             Ty::Unit => Ok(Repr::Product { fields: Vec::new() }),
             Ty::Union { variants, .. } => variants
                 .iter()
@@ -497,10 +515,10 @@ fn normalize_for_representation(ty: &Ty) -> Ty {
             literal_values: literal_values.clone(),
             resolved_params: resolved_params.clone(),
         },
-        Ty::ResultRow(fields) => Ty::ResultRow(
+        Ty::Sequence(fields) => Ty::Sequence(
             fields
                 .iter()
-                .map(|field| ast::ty::ResultElement {
+                .map(|field| ast::ty::SequenceTypeElement {
                     name: field.name,
                     ty: Box::new(normalize_for_representation(&field.ty)),
                 })

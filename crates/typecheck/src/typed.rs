@@ -275,11 +275,11 @@ impl From<&TypedBind> for TypedCallableSignature {
 }
 
 fn callable_results(bind: &TypedBind) -> Vec<CallableResult> {
-    if let Ty::ResultRow(elements) = &bind.return_type {
+    if let Ty::Sequence(elements) = &bind.return_type {
         return elements
             .iter()
             .map(|element| CallableResult {
-                name: Some(element.name),
+                name: element.name,
                 ty: (*element.ty).clone(),
             })
             .collect();
@@ -291,7 +291,7 @@ fn callable_results(bind: &TypedBind) -> Vec<CallableResult> {
     tys.into_iter()
         .enumerate()
         .map(|(index, ty)| CallableResult {
-            name: bind.named_results.get(index).map(|result| result.name),
+            name: bind.named_results.get(index).and_then(|result| result.name),
             ty,
         })
         .collect()

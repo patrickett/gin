@@ -96,6 +96,26 @@ impl ExprFormatExt for Expr {
                 }
                 write!(f, "]")
             }
+            Expr::SequenceLiteral(ast::SequenceLiteral::Elements(elems)) => {
+                write!(f, "[")?;
+                for (index, elem) in elems.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, ", ")?;
+                    }
+                    if let Some(name) = elem.name {
+                        write!(f, "{name} ")?;
+                    }
+                    elem.value.write_surface(f)?;
+                }
+                write!(f, "]")
+            }
+            Expr::SequenceLiteral(ast::SequenceLiteral::Repeat { seed, count }) => {
+                write!(f, "[")?;
+                seed.value.write_surface(f)?;
+                write!(f, "; ")?;
+                count.value.write_surface(f)?;
+                write!(f, "]")
+            }
             Expr::Range(range) => {
                 range.start.value.write_surface(f)?;
                 write!(f, " to ")?;

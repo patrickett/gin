@@ -62,7 +62,7 @@ fn uncontextualized_fixed_array_construction_infers_structural_array() {
         "Byte is in 0 to 255\n\
          #fixed_array(element, count)\n\
          LibraryBuffer(element Type, count BigInt) has\n\
-         make(value Byte): (value; 4)\n",
+         make(value Byte): [value; 4]\n",
     );
     let result = &typed.exprs.ty[body(&typed, "LibraryBuffer.make").as_usize()];
     assert!(matches!(result, typecheck::ty::Ty::Array { .. }));
@@ -135,27 +135,20 @@ fn fixed_array_iteration_preserves_structural_element_and_length() {
 }
 
 #[test]
-fn empty_sequence_without_context_is_rejected_at_typecheck_boundary() {
+fn empty_sequence_without_context_has_an_empty_shape() {
     let typed = check("empty := []\n");
-    let expression = body(&typed, "empty");
+    assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
     assert!(
-        typed.exprs.facts.semantic_facts.flaws[expression.as_usize()]
-            .iter()
-            .any(|flaw| {
-                flaw.code.slug() == "type-sequence-literal-requires-context"
-                    || flaw.code.slug() == "type-unresolved-sequence"
-            })
+        matches!(&typed.exprs.ty[body(&typed, "empty").as_usize()], ast::Ty::Sequence(fields) if fields.is_empty())
     );
 }
 
 #[test]
-fn mixed_sequence_elements_receive_unification_diagnostic() {
-    let typed = check("mixed := [1, true]\n");
-    let expression = body(&typed, "mixed");
+fn mixed_sequence_elements_preserve_individual_types() {
+    let typed = check("Flag is True or False\nmixed := [1, True]\n");
+    assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
     assert!(
-        typed.exprs.facts.semantic_facts.flaws[expression.as_usize()]
-            .iter()
-            .any(|flaw| flaw.code.slug() == "type-sequence-elements-must-unify")
+        matches!(&typed.exprs.ty[body(&typed, "mixed").as_usize()], ast::Ty::Sequence(fields) if fields.len() == 2 && fields[0].ty != fields[1].ty)
     );
 }
 

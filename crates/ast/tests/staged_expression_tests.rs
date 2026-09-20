@@ -209,7 +209,7 @@ fn pure_literal_arithmetic_expression_reaches_const_value() {
 #[test]
 fn generic_value_parameter_substitutes_array_size_in_call_type() {
     let typed = transform_source(
-        "sized_array(n Int): Array(Int, n): (0; n)\n\
+        "sized_array(n Int): Array(Int, n): [0; n]\n\
          main: sized_array(2)",
     );
     let main_body = body_expr_id(&typed, "main").expect("main has body");
@@ -232,7 +232,7 @@ fn generic_value_parameter_substitutes_array_size_in_call_type() {
 
 #[test]
 fn generic_array_return_type_preserves_symbolic_addition_expression() {
-    let typed = transform_source("make(n Int): (0; (n + 1))\nmain: make(2)");
+    let typed = transform_source("make(n Int): [0; (n + 1)]\nmain: make(2)");
     let def = typed
         .defs
         .get(&DefId(Intern::new("make".to_string())))
@@ -270,7 +270,7 @@ fn generic_array_return_type_preserves_symbolic_addition_expression() {
 
 #[test]
 fn fixed_array_alloc_arithmetic_size_is_not_forced_to_zero() {
-    let typed = transform_prepared("main: (0; 1 + 2)");
+    let typed = transform_prepared("main: [0; 1 + 2]");
     let main_body = body_expr_id(&typed, "main").expect("main has body");
     let expr = typed.exprs.get(main_body.as_usize()).expect("main body");
 
@@ -284,7 +284,7 @@ fn fixed_array_alloc_arithmetic_size_is_not_forced_to_zero() {
 
 #[test]
 fn fixed_array_alloc_subtract_size_is_preserved_as_const_expr() {
-    let typed = transform_prepared("main: (0; 6 - 1)");
+    let typed = transform_prepared("main: [0; 6 - 1]");
     let main_body = body_expr_id(&typed, "main").expect("main has body");
     let expr = typed.exprs.get(main_body.as_usize()).expect("main body");
 
@@ -298,7 +298,7 @@ fn fixed_array_alloc_subtract_size_is_preserved_as_const_expr() {
 
 #[test]
 fn fixed_array_alloc_multiply_size_is_preserved_as_const_expr() {
-    let typed = transform_prepared("main: (0; 2 * 3)");
+    let typed = transform_prepared("main: [0; 2 * 3]");
     let main_body = body_expr_id(&typed, "main").expect("main has body");
     let expr = typed.exprs.get(main_body.as_usize()).expect("main body");
 

@@ -531,13 +531,19 @@ impl<'p, H: EvalHost> Evaluator<'p, H> {
                     fields: names.into_iter().zip(values).collect::<Vec<_>>().into(),
                 })
             }
-            TypedExprKind::ResultRow(items) => Some(ConstValue::ResultRow(
-                items
+            TypedExprKind::ResultRow(items) => {
+                let values = items
                     .iter()
                     .map(|item| self.complete(*item))
-                    .collect::<EvalResult<Vec<_>>>()?
-                    .into(),
-            )),
+                    .collect::<EvalResult<Vec<_>>>()?;
+                let names = match self.program.exprs.ty.get(expr.as_usize()) {
+                    Some(Ty::Sequence(fields)) => {
+                        fields.iter().map(|field| field.name).collect::<Vec<_>>()
+                    }
+                    _ => Vec::new(),
+                };
+                Some(ConstValue::sequence(values, names))
+            }
             TypedExprKind::ArrayLit(items) => Some(ConstValue::FixedArray(
                 items
                     .iter()

@@ -576,3 +576,27 @@ fn self_and_nested_result_alternatives_round_trip() {
         "{formatted}"
     );
 }
+
+#[test]
+fn sequence_forms_round_trip_without_adding_result_brackets() {
+    for source in [
+        "numbers: 10, 20\n",
+        "point: x: 10, y: 20\n",
+        "point: [x: 10, 20]\n",
+        "make() first Int, Int: return 1, 2\n",
+        "make() Int, second Int: return 1, 2\n",
+        "make() values [Int; 2], count Int: return [1, 2], 2\n",
+    ] {
+        let formatted = crate::format(source);
+        assert_eq!(crate::format(&formatted), formatted, "{source}");
+        let parsed = formatted.parse_source_full();
+        assert!(
+            parsed
+                .symptoms
+                .iter()
+                .all(|d| d.category != diagnostic::Category::Flaw),
+            "{formatted}: {:?}",
+            parsed.symptoms
+        );
+    }
+}

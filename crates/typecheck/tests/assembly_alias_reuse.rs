@@ -66,7 +66,7 @@ fn assembly_write_preserves_unrelated_reference_on_reuse() {
 #[test]
 fn assembly_write_invalidates_affected_reference_on_reuse() {
     let source = format!(
-        "Len is in 0 to 18446744073709551615\nWord is in 0 to 255\nwrite(pointer ref Word, length Len): #asm({ASM}, pointer: pointer, length: length)\nmain(length Len) Word:\n    items: (0; 2)\n    ref saved Word: items.(0)\n    write(ref items.(0), length)\n    result: saved\n    return 0\n"
+        "Len is in 0 to 18446744073709551615\nWord is in 0 to 255\nwrite(pointer ref Word, length Len): #asm({ASM}, pointer: pointer, length: length)\nmain(length Len) Word:\n    items: [0; 2]\n    ref saved Word: items.(0)\n    write(ref items.(0), length)\n    result: saved\n    return 0\n"
     );
     let typed = check(&source);
     let flaws = typed.all_flaws();
@@ -81,7 +81,7 @@ fn assembly_write_invalidates_affected_reference_on_reuse() {
 #[test]
 fn direct_assembly_write_invalidates_affected_reference_on_reuse() {
     let source = format!(
-        "Len is in 0 to 18446744073709551615\nWord is in 0 to 255\nmain(length Len) Word:\n    items: (0; 2)\n    ref saved Word: items.(0)\n    written: #asm({ASM}, pointer: ref items.(0), length: length)\n    result: saved\n    return 0\n"
+        "Len is in 0 to 18446744073709551615\nWord is in 0 to 255\nmain(length Len) Word:\n    items: [0; 2]\n    ref saved Word: items.(0)\n    written: #asm({ASM}, pointer: ref items.(0), length: length)\n    result: saved\n    return 0\n"
     );
     let typed = check(&source);
     let flaws = typed.all_flaws();
@@ -96,7 +96,7 @@ fn direct_assembly_write_invalidates_affected_reference_on_reuse() {
 #[test]
 fn direct_assembly_write_preserves_unrelated_reference_on_reuse() {
     let source = format!(
-        "Len is in 0 to 18446744073709551615\nWord is in 0 to 255\nmain(length Len) Word:\n    items: (0; 2)\n    ref saved Word: items.(1)\n    written: #asm({ASM}, pointer: ref items.(0), length: length)\n    result: saved\n    return 0\n"
+        "Len is in 0 to 18446744073709551615\nWord is in 0 to 255\nmain(length Len) Word:\n    items: [0; 2]\n    ref saved Word: items.(1)\n    written: #asm({ASM}, pointer: ref items.(0), length: length)\n    result: saved\n    return 0\n"
     );
     let typed = check(&source);
     assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());

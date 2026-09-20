@@ -86,7 +86,7 @@ fn callable_signature_preserves_named_result_order() {
 }
 
 #[test]
-fn one_named_result_normalizes_to_scalar_type() {
+fn one_named_result_preserves_its_name() {
     let source = "identity(value Int) result Int: return value\nmain: return identity(1)";
     let typed = transform(
         &TokenCursor::parse_source(source),
@@ -94,11 +94,9 @@ fn one_named_result_normalizes_to_scalar_type() {
         &TransformCtx::new(),
     );
     let identity = &typed.defs[&DefId(Intern::from_ref("identity"))];
-    assert!(matches!(identity.return_type, typecheck::ty::Ty::Opaque(_)));
-    assert!(!matches!(
-        identity.return_type,
-        typecheck::ty::Ty::ResultRow(_)
-    ));
+    assert!(
+        matches!(&identity.return_type, typecheck::ty::Ty::Sequence(fields) if fields.len() == 1 && fields[0].name == Some(Intern::from_ref("result")))
+    );
     assert!(
         identity.flaws.is_empty(),
         "unexpected flaws: {:?}",
@@ -107,17 +105,15 @@ fn one_named_result_normalizes_to_scalar_type() {
 }
 
 #[test]
-fn unnamed_multiple_returns_are_rejected_instead_of_becoming_value_rows() {
+fn unnamed_multiple_returns_infer_a_sequence() {
     let typed = transform(
         &TokenCursor::parse_source("pair: return 1, 2"),
         FileId(0),
         &TransformCtx::new(),
     );
+    assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
     assert!(
-        typed
-            .all_flaws()
-            .into_iter()
-            .any(|(_, flaw)| flaw.code == "type-unnamed-multiple-results".into())
+        matches!(&typed.defs[&DefId(Intern::from_ref("pair"))].return_type, typecheck::ty::Ty::Array { size, .. } if size.as_const_int() == Some(2))
     );
 }
 
@@ -162,13 +158,13 @@ fn named_result_rows_forward_through_callable_calls() {
         typed.exprs.kind[pair_ret.as_usize()],
         TypedExprKind::ResultRow(_)
     ));
-    let typecheck::ty::Ty::ResultRow(fields) = &forward.return_type else {
+    let typecheck::ty::Ty::Sequence(fields) = &forward.return_type else {
         panic!("expected named result row, got {:?}", forward.return_type);
     };
     assert_eq!(
         fields
             .iter()
-            .map(|field| field.name.as_str())
+            .map(|field| field.name.as_ref().unwrap().as_str())
             .collect::<Vec<_>>(),
         ["first", "second"]
     );
@@ -289,7 +285,7 @@ fn rebinding_keeps_old_and_new_result_evidence_separate() {
 }
 
 #[test]
-fn positional_projection_of_named_result_reports_diagnostic() {
+fn positional_projection_of_named_result_is_supported() {
     let source =
         "pair() first Int, second Int: return 1, 2\nmain:\n\tresult: pair()\n\treturn result.0";
     let typed = transform(
@@ -298,11 +294,7 @@ fn positional_projection_of_named_result_reports_diagnostic() {
         &TransformCtx::new(),
     );
     let main = &typed.defs[&DefId(Intern::from_ref("main"))];
-    assert!(
-        main.flaws
-            .iter()
-            .any(|flaw| flaw.code == "type-positional-result-projection".into())
-    );
+    assert!(main.flaws.is_empty(), "{:?}", main.flaws);
 }
 
 #[test]
@@ -315,13 +307,13 @@ fn compatible_named_result_rows_join_through_when() {
     );
     let main = &typed.defs[&DefId(Intern::from_ref("main"))];
     assert!(main.flaws.is_empty(), "unexpected flaws: {:?}", main.flaws);
-    let typecheck::ty::Ty::ResultRow(elements) = &main.return_type else {
+    let typecheck::ty::Ty::Sequence(elements) = &main.return_type else {
         panic!("expected named result row, got {:?}", main.return_type);
     };
     assert_eq!(
         elements
             .iter()
-            .map(|element| element.name.as_str())
+            .map(|element| element.name.as_ref().unwrap().as_str())
             .collect::<Vec<_>>(),
         ["sum", "overflow"]
     );
