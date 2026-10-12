@@ -17,7 +17,8 @@
   ],
   "main": "./out/extension.js",
   "activationEvents": [
-    "workspaceContains:**/*.gin"
+    "workspaceContains:**/*.gin",
+    "workspaceContains:**/mod.flask"
   ],
   "contributes": {
     "commands": [
@@ -37,6 +38,12 @@
           ".gin"
         ],
         "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "gin-flask",
+        "aliases": ["Gin Manifest"],
+        "filenames": ["mod.flask"],
+        "configuration": "./flask-language-configuration.json"
       }
     ],
     "configuration": {

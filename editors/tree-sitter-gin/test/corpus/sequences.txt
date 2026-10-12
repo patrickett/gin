@@ -5,7 +5,7 @@ numbers: 10, 20
 point: [x: 10, 20]
 buffer: [0; 20]
 make() first Int, Int: return 10, 20
-identity(value [first Int, Int]) [first Int, Int]: value
+identity(value [first Int, Int]) [first Int, Int]: return value
 
 ---
 
@@ -67,13 +67,14 @@ identity(value [first Int, Int]) [first Int, Int]: value
           (type_identifier)))
       (tag
         (type_identifier)))
-    (identifier)))
+    (return_statement
+      (identifier))))
 
 ==================
 Named singleton method result
 ==================
 Factory has
-    get() value Int: 42
+    get() value Int: return 42
 
 ---
 
@@ -90,5 +91,6 @@ Factory has
             (tag
               (type_identifier))))
         (member_default
-          (literal
-            (number)))))))
+          (return_statement
+            (literal
+              (number))))))))

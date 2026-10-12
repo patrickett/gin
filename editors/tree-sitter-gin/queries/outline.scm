@@ -7,3 +7,7 @@
 
 
 (use_statement) @item
+
+(unassigned_binding
+  name: (identifier) @name
+  (parameters)) @item

@@ -39,6 +39,11 @@
 (call_expression
   function: (identifier) @function.call)
 
+(call_expression
+  function: (member_expression
+    field: (identifier) @function.method))
+
+
 ; Qualified type calls: Byte.new(255)
 (call_expression
   function: (member_expression
@@ -72,9 +77,10 @@
 (module_doc_comment) @comment.documentation
 
 ; Attributes
-(attributes (identifier) @attribute)
-(attribute_call name: (identifier) @attribute)
-(compile_time_query ["size" "alignment" "index_bits" "register" "target" "asm"] @function.builtin)
+(attributes (identifier) @keyword.modifier)
+(private_member_block (identifier) @keyword.modifier)
+(attribute_call name: (identifier) @keyword.modifier)
+(compile_time_query ["size" "alignment" "index_bits" "target" "emit" "todo"] @keyword.modifier)
 ; Keywords
 "use" @keyword
 "as" @keyword
@@ -94,14 +100,16 @@
 "to" @keyword.operator
 
 "return" @keyword.return
-"if" @keyword.conditional
+"case" @keyword.conditional
 "when" @keyword.conditional
 "then" @keyword
 "else" @keyword.conditional
 "for" @keyword.repeat
 "while" @keyword.repeat
+"do" @keyword.repeat
 "in" @keyword
-"loop" @keyword.repeat
+"domain" @keyword
+"of" @keyword
 
 ; Operators
 "+" @operator
@@ -140,7 +148,7 @@
 (named_argument name: (identifier) @property)
 (record_set field: (identifier) @property)
 
-"#" @punctuation.special
+"#" @keyword.modifier
 ";" @punctuation.delimiter
 "?" @operator
 

@@ -44,6 +44,10 @@
             "named": true
           },
           {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
             "type": "for_expression",
             "named": true
           },
@@ -56,7 +60,7 @@
             "named": true
           },
           {
-            "type": "if_expression",
+            "type": "index_expression",
             "named": true
           },
           {
@@ -132,6 +136,10 @@
           "named": true
         },
         {
+          "type": "domain_expression",
+          "named": true
+        },
+        {
           "type": "for_expression",
           "named": true
         },
@@ -144,7 +152,7 @@
           "named": true
         },
         {
-          "type": "if_expression",
+          "type": "index_expression",
           "named": true
         },
         {
@@ -153,6 +161,10 @@
         },
         {
           "type": "member_expression",
+          "named": true
+        },
+        {
+          "type": "named_argument",
           "named": true
         },
         {
@@ -264,6 +276,10 @@
           "named": true
         },
         {
+          "type": "domain_expression",
+          "named": true
+        },
+        {
           "type": "for_expression",
           "named": true
         },
@@ -276,7 +292,7 @@
           "named": true
         },
         {
-          "type": "if_expression",
+          "type": "index_expression",
           "named": true
         },
         {
@@ -355,6 +371,10 @@
             "named": true
           },
           {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
             "type": "for_expression",
             "named": true
           },
@@ -367,7 +387,7 @@
             "named": true
           },
           {
-            "type": "if_expression",
+            "type": "index_expression",
             "named": true
           },
           {
@@ -511,6 +531,10 @@
             "named": true
           },
           {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
             "type": "for_expression",
             "named": true
           },
@@ -523,7 +547,7 @@
             "named": true
           },
           {
-            "type": "if_expression",
+            "type": "index_expression",
             "named": true
           },
           {
@@ -665,11 +689,23 @@
         "required": false,
         "types": [
           {
+            "type": "in_range_type",
+            "named": true
+          },
+          {
+            "type": "integer_domain_type",
+            "named": true
+          },
+          {
             "type": "named_results",
             "named": true
           },
           {
             "type": "proof_result_type",
+            "named": true
+          },
+          {
+            "type": "proposition_type",
             "named": true
           },
           {
@@ -723,6 +759,10 @@
             "named": true
           },
           {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
             "type": "for_expression",
             "named": true
           },
@@ -735,7 +775,7 @@
             "named": true
           },
           {
-            "type": "if_expression",
+            "type": "index_expression",
             "named": true
           },
           {
@@ -800,6 +840,10 @@
         {
           "type": "parameters",
           "named": true
+        },
+        {
+          "type": "refinement",
+          "named": true
         }
       ]
     }
@@ -841,6 +885,14 @@
           "named": true
         },
         {
+          "type": "destructure_statement",
+          "named": true
+        },
+        {
+          "type": "domain_expression",
+          "named": true
+        },
+        {
           "type": "for_expression",
           "named": true
         },
@@ -853,7 +905,7 @@
           "named": true
         },
         {
-          "type": "if_expression",
+          "type": "index_expression",
           "named": true
         },
         {
@@ -905,6 +957,10 @@
           "named": true
         },
         {
+          "type": "use_statement",
+          "named": true
+        },
+        {
           "type": "when_expression",
           "named": true
         },
@@ -919,16 +975,6 @@
     "type": "buf_set",
     "named": true,
     "fields": {
-      "base": {
-        "multiple": false,
-        "required": true,
-        "types": [
-          {
-            "type": "identifier",
-            "named": true
-          }
-        ]
-      },
       "value": {
         "multiple": false,
         "required": true,
@@ -950,6 +996,10 @@
             "named": true
           },
           {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
             "type": "for_expression",
             "named": true
           },
@@ -962,7 +1012,7 @@
             "named": true
           },
           {
-            "type": "if_expression",
+            "type": "index_expression",
             "named": true
           },
           {
@@ -1017,7 +1067,7 @@
       "required": true,
       "types": [
         {
-          "type": "argument_list",
+          "type": "index_expression",
           "named": true
         }
       ]
@@ -1070,7 +1120,19 @@
         "required": true,
         "types": [
           {
+            "type": "in_range_type",
+            "named": true
+          },
+          {
+            "type": "integer_domain_type",
+            "named": true
+          },
+          {
             "type": "proof_result_type",
+            "named": true
+          },
+          {
+            "type": "proposition_type",
             "named": true
           },
           {
@@ -1116,6 +1178,10 @@
             "named": true
           },
           {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
             "type": "for_expression",
             "named": true
           },
@@ -1128,7 +1194,7 @@
             "named": true
           },
           {
-            "type": "if_expression",
+            "type": "index_expression",
             "named": true
           },
           {
@@ -1183,6 +1249,178 @@
     "type": "compile_time_query",
     "named": true,
     "fields": {
+      "arguments": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "binary_expression",
+            "named": true
+          },
+          {
+            "type": "call_expression",
+            "named": true
+          },
+          {
+            "type": "cast_expression",
+            "named": true
+          },
+          {
+            "type": "compile_time_query",
+            "named": true
+          },
+          {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
+            "type": "for_expression",
+            "named": true
+          },
+          {
+            "type": "format_string",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "index_expression",
+            "named": true
+          },
+          {
+            "type": "literal",
+            "named": true
+          },
+          {
+            "type": "member_expression",
+            "named": true
+          },
+          {
+            "type": "parenthesized_expression",
+            "named": true
+          },
+          {
+            "type": "range_expression",
+            "named": true
+          },
+          {
+            "type": "self_expression",
+            "named": true
+          },
+          {
+            "type": "self_type",
+            "named": true
+          },
+          {
+            "type": "sequence_literal",
+            "named": true
+          },
+          {
+            "type": "type_identifier",
+            "named": true
+          },
+          {
+            "type": "unary_expression",
+            "named": true
+          },
+          {
+            "type": "when_expression",
+            "named": true
+          },
+          {
+            "type": "while_expression",
+            "named": true
+          }
+        ]
+      },
+      "code": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "binary_expression",
+            "named": true
+          },
+          {
+            "type": "call_expression",
+            "named": true
+          },
+          {
+            "type": "cast_expression",
+            "named": true
+          },
+          {
+            "type": "compile_time_query",
+            "named": true
+          },
+          {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
+            "type": "for_expression",
+            "named": true
+          },
+          {
+            "type": "format_string",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "index_expression",
+            "named": true
+          },
+          {
+            "type": "literal",
+            "named": true
+          },
+          {
+            "type": "member_expression",
+            "named": true
+          },
+          {
+            "type": "parenthesized_expression",
+            "named": true
+          },
+          {
+            "type": "range_expression",
+            "named": true
+          },
+          {
+            "type": "self_expression",
+            "named": true
+          },
+          {
+            "type": "self_type",
+            "named": true
+          },
+          {
+            "type": "sequence_literal",
+            "named": true
+          },
+          {
+            "type": "type_identifier",
+            "named": true
+          },
+          {
+            "type": "unary_expression",
+            "named": true
+          },
+          {
+            "type": "when_expression",
+            "named": true
+          },
+          {
+            "type": "while_expression",
+            "named": true
+          }
+        ]
+      },
       "field": {
         "multiple": false,
         "required": false,
@@ -1195,55 +1433,15 @@
       }
     },
     "children": {
-      "multiple": true,
+      "multiple": false,
       "required": false,
       "types": [
         {
-          "type": "binary_expression",
+          "type": "in_range_type",
           "named": true
         },
         {
-          "type": "call_expression",
-          "named": true
-        },
-        {
-          "type": "cast_expression",
-          "named": true
-        },
-        {
-          "type": "compile_time_query",
-          "named": true
-        },
-        {
-          "type": "for_expression",
-          "named": true
-        },
-        {
-          "type": "format_string",
-          "named": true
-        },
-        {
-          "type": "identifier",
-          "named": true
-        },
-        {
-          "type": "if_expression",
-          "named": true
-        },
-        {
-          "type": "literal",
-          "named": true
-        },
-        {
-          "type": "member_expression",
-          "named": true
-        },
-        {
-          "type": "named_argument",
-          "named": true
-        },
-        {
-          "type": "parenthesized_expression",
+          "type": "integer_domain_type",
           "named": true
         },
         {
@@ -1251,19 +1449,7 @@
           "named": true
         },
         {
-          "type": "range_expression",
-          "named": true
-        },
-        {
-          "type": "self_expression",
-          "named": true
-        },
-        {
-          "type": "self_type",
-          "named": true
-        },
-        {
-          "type": "sequence_literal",
+          "type": "proposition_type",
           "named": true
         },
         {
@@ -1275,10 +1461,6 @@
           "named": true
         },
         {
-          "type": "type_identifier",
-          "named": true
-        },
-        {
           "type": "type_union",
           "named": true
         },
@@ -1287,19 +1469,7 @@
           "named": true
         },
         {
-          "type": "unary_expression",
-          "named": true
-        },
-        {
           "type": "unit_type",
-          "named": true
-        },
-        {
-          "type": "when_expression",
-          "named": true
-        },
-        {
-          "type": "while_expression",
           "named": true
         }
       ]
@@ -1313,6 +1483,10 @@
       "multiple": true,
       "required": true,
       "types": [
+        {
+          "type": "private_member_block",
+          "named": true
+        },
         {
           "type": "record_field",
           "named": true
@@ -1357,6 +1531,10 @@
             "named": true
           },
           {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
             "type": "for_expression",
             "named": true
           },
@@ -1369,7 +1547,7 @@
             "named": true
           },
           {
-            "type": "if_expression",
+            "type": "index_expression",
             "named": true
           },
           {
@@ -1433,7 +1611,19 @@
         "required": false,
         "types": [
           {
+            "type": "in_range_type",
+            "named": true
+          },
+          {
+            "type": "integer_domain_type",
+            "named": true
+          },
+          {
             "type": "proof_result_type",
+            "named": true
+          },
+          {
+            "type": "proposition_type",
             "named": true
           },
           {
@@ -1480,6 +1670,10 @@
       "types": [
         {
           "type": "declaration_parameter",
+          "named": true
+        },
+        {
+          "type": "range_parameter",
           "named": true
         },
         {
@@ -1533,7 +1727,15 @@
           "named": true
         },
         {
+          "type": "numbered_variant",
+          "named": true
+        },
+        {
           "type": "range_type",
+          "named": true
+        },
+        {
+          "type": "self_expression",
           "named": true
         },
         {
@@ -1549,6 +1751,214 @@
           "named": true
         }
       ]
+    }
+  },
+  {
+    "type": "destructure_statement",
+    "named": true,
+    "fields": {
+      "fields": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "argument_list",
+            "named": true
+          }
+        ]
+      },
+      "type": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "self_type",
+            "named": true
+          },
+          {
+            "type": "type_identifier",
+            "named": true
+          }
+        ]
+      },
+      "value": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "binary_expression",
+            "named": true
+          },
+          {
+            "type": "call_expression",
+            "named": true
+          },
+          {
+            "type": "cast_expression",
+            "named": true
+          },
+          {
+            "type": "compile_time_query",
+            "named": true
+          },
+          {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
+            "type": "for_expression",
+            "named": true
+          },
+          {
+            "type": "format_string",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "index_expression",
+            "named": true
+          },
+          {
+            "type": "literal",
+            "named": true
+          },
+          {
+            "type": "member_expression",
+            "named": true
+          },
+          {
+            "type": "parenthesized_expression",
+            "named": true
+          },
+          {
+            "type": "range_expression",
+            "named": true
+          },
+          {
+            "type": "self_expression",
+            "named": true
+          },
+          {
+            "type": "self_type",
+            "named": true
+          },
+          {
+            "type": "sequence_literal",
+            "named": true
+          },
+          {
+            "type": "type_identifier",
+            "named": true
+          },
+          {
+            "type": "unary_expression",
+            "named": true
+          },
+          {
+            "type": "when_expression",
+            "named": true
+          },
+          {
+            "type": "while_expression",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "domain_expression",
+    "named": true,
+    "fields": {
+      "operand": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "binary_expression",
+            "named": true
+          },
+          {
+            "type": "call_expression",
+            "named": true
+          },
+          {
+            "type": "cast_expression",
+            "named": true
+          },
+          {
+            "type": "compile_time_query",
+            "named": true
+          },
+          {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
+            "type": "for_expression",
+            "named": true
+          },
+          {
+            "type": "format_string",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "index_expression",
+            "named": true
+          },
+          {
+            "type": "literal",
+            "named": true
+          },
+          {
+            "type": "member_expression",
+            "named": true
+          },
+          {
+            "type": "parenthesized_expression",
+            "named": true
+          },
+          {
+            "type": "range_expression",
+            "named": true
+          },
+          {
+            "type": "self_expression",
+            "named": true
+          },
+          {
+            "type": "self_type",
+            "named": true
+          },
+          {
+            "type": "sequence_literal",
+            "named": true
+          },
+          {
+            "type": "type_identifier",
+            "named": true
+          },
+          {
+            "type": "unary_expression",
+            "named": true
+          },
+          {
+            "type": "when_expression",
+            "named": true
+          },
+          {
+            "type": "while_expression",
+            "named": true
+          }
+        ]
+      }
     }
   },
   {
@@ -1590,6 +2000,10 @@
             "named": true
           },
           {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
             "type": "for_expression",
             "named": true
           },
@@ -1602,7 +2016,7 @@
             "named": true
           },
           {
-            "type": "if_expression",
+            "type": "index_expression",
             "named": true
           },
           {
@@ -1678,6 +2092,10 @@
             "named": true
           },
           {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
             "type": "for_expression",
             "named": true
           },
@@ -1690,7 +2108,7 @@
             "named": true
           },
           {
-            "type": "if_expression",
+            "type": "index_expression",
             "named": true
           },
           {
@@ -1752,159 +2170,6 @@
     },
     "children": {
       "multiple": true,
-      "required": false,
-      "types": [
-        {
-          "type": "aggregate_set",
-          "named": true
-        },
-        {
-          "type": "binary_expression",
-          "named": true
-        },
-        {
-          "type": "bind_statement",
-          "named": true
-        },
-        {
-          "type": "buf_set",
-          "named": true
-        },
-        {
-          "type": "call_expression",
-          "named": true
-        },
-        {
-          "type": "cast_expression",
-          "named": true
-        },
-        {
-          "type": "compile_time_query",
-          "named": true
-        },
-        {
-          "type": "for_expression",
-          "named": true
-        },
-        {
-          "type": "format_string",
-          "named": true
-        },
-        {
-          "type": "identifier",
-          "named": true
-        },
-        {
-          "type": "if_expression",
-          "named": true
-        },
-        {
-          "type": "literal",
-          "named": true
-        },
-        {
-          "type": "member_expression",
-          "named": true
-        },
-        {
-          "type": "parenthesized_expression",
-          "named": true
-        },
-        {
-          "type": "range_expression",
-          "named": true
-        },
-        {
-          "type": "record_set",
-          "named": true
-        },
-        {
-          "type": "self_expression",
-          "named": true
-        },
-        {
-          "type": "self_type",
-          "named": true
-        },
-        {
-          "type": "sequence_literal",
-          "named": true
-        },
-        {
-          "type": "type_identifier",
-          "named": true
-        },
-        {
-          "type": "unary_expression",
-          "named": true
-        },
-        {
-          "type": "unassigned_binding",
-          "named": true
-        },
-        {
-          "type": "when_expression",
-          "named": true
-        },
-        {
-          "type": "while_expression",
-          "named": true
-        }
-      ]
-    }
-  },
-  {
-    "type": "format_string",
-    "named": true,
-    "fields": {},
-    "children": {
-      "multiple": true,
-      "required": false,
-      "types": [
-        {
-          "type": "escape_sequence",
-          "named": true
-        },
-        {
-          "type": "interpolation",
-          "named": true
-        },
-        {
-          "type": "unterminated_string",
-          "named": true
-        }
-      ]
-    }
-  },
-  {
-    "type": "if_expression",
-    "named": true,
-    "fields": {
-      "condition": {
-        "multiple": false,
-        "required": true,
-        "types": [
-          {
-            "type": "is_condition",
-            "named": true
-          },
-          {
-            "type": "logical_condition",
-            "named": true
-          },
-          {
-            "type": "negated_condition",
-            "named": true
-          },
-          {
-            "type": "parenthesized_condition",
-            "named": true
-          }
-        ]
-      }
-    },
-    "children": {
-      "multiple": true,
       "required": true,
       "types": [
         {
@@ -1936,6 +2201,14 @@
           "named": true
         },
         {
+          "type": "destructure_statement",
+          "named": true
+        },
+        {
+          "type": "domain_expression",
+          "named": true
+        },
+        {
           "type": "for_expression",
           "named": true
         },
@@ -1948,7 +2221,7 @@
           "named": true
         },
         {
-          "type": "if_expression",
+          "type": "index_expression",
           "named": true
         },
         {
@@ -2000,11 +2273,38 @@
           "named": true
         },
         {
+          "type": "use_statement",
+          "named": true
+        },
+        {
           "type": "when_expression",
           "named": true
         },
         {
           "type": "while_expression",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "format_string",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "escape_sequence",
+          "named": true
+        },
+        {
+          "type": "interpolation",
+          "named": true
+        },
+        {
+          "type": "unterminated_string",
           "named": true
         }
       ]
@@ -2034,11 +2334,298 @@
     "named": true,
     "fields": {},
     "children": {
-      "multiple": true,
+      "multiple": false,
       "required": true,
       "types": [
         {
-          "type": "number",
+          "type": "range_type",
+          "named": true
+        },
+        {
+          "type": "tag",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "index_expression",
+    "named": true,
+    "fields": {
+      "base": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "binary_expression",
+            "named": true
+          },
+          {
+            "type": "call_expression",
+            "named": true
+          },
+          {
+            "type": "cast_expression",
+            "named": true
+          },
+          {
+            "type": "compile_time_query",
+            "named": true
+          },
+          {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
+            "type": "for_expression",
+            "named": true
+          },
+          {
+            "type": "format_string",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "index_expression",
+            "named": true
+          },
+          {
+            "type": "literal",
+            "named": true
+          },
+          {
+            "type": "member_expression",
+            "named": true
+          },
+          {
+            "type": "parenthesized_expression",
+            "named": true
+          },
+          {
+            "type": "range_expression",
+            "named": true
+          },
+          {
+            "type": "self_expression",
+            "named": true
+          },
+          {
+            "type": "self_type",
+            "named": true
+          },
+          {
+            "type": "sequence_literal",
+            "named": true
+          },
+          {
+            "type": "type_identifier",
+            "named": true
+          },
+          {
+            "type": "unary_expression",
+            "named": true
+          },
+          {
+            "type": "when_expression",
+            "named": true
+          },
+          {
+            "type": "while_expression",
+            "named": true
+          }
+        ]
+      },
+      "count": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "binary_expression",
+            "named": true
+          },
+          {
+            "type": "call_expression",
+            "named": true
+          },
+          {
+            "type": "cast_expression",
+            "named": true
+          },
+          {
+            "type": "compile_time_query",
+            "named": true
+          },
+          {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
+            "type": "for_expression",
+            "named": true
+          },
+          {
+            "type": "format_string",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "index_expression",
+            "named": true
+          },
+          {
+            "type": "literal",
+            "named": true
+          },
+          {
+            "type": "member_expression",
+            "named": true
+          },
+          {
+            "type": "parenthesized_expression",
+            "named": true
+          },
+          {
+            "type": "range_expression",
+            "named": true
+          },
+          {
+            "type": "self_expression",
+            "named": true
+          },
+          {
+            "type": "self_type",
+            "named": true
+          },
+          {
+            "type": "sequence_literal",
+            "named": true
+          },
+          {
+            "type": "type_identifier",
+            "named": true
+          },
+          {
+            "type": "unary_expression",
+            "named": true
+          },
+          {
+            "type": "when_expression",
+            "named": true
+          },
+          {
+            "type": "while_expression",
+            "named": true
+          }
+        ]
+      },
+      "index": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "binary_expression",
+            "named": true
+          },
+          {
+            "type": "call_expression",
+            "named": true
+          },
+          {
+            "type": "cast_expression",
+            "named": true
+          },
+          {
+            "type": "compile_time_query",
+            "named": true
+          },
+          {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
+            "type": "for_expression",
+            "named": true
+          },
+          {
+            "type": "format_string",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "index_expression",
+            "named": true
+          },
+          {
+            "type": "literal",
+            "named": true
+          },
+          {
+            "type": "member_expression",
+            "named": true
+          },
+          {
+            "type": "parenthesized_expression",
+            "named": true
+          },
+          {
+            "type": "range_expression",
+            "named": true
+          },
+          {
+            "type": "self_expression",
+            "named": true
+          },
+          {
+            "type": "self_type",
+            "named": true
+          },
+          {
+            "type": "sequence_literal",
+            "named": true
+          },
+          {
+            "type": "type_identifier",
+            "named": true
+          },
+          {
+            "type": "unary_expression",
+            "named": true
+          },
+          {
+            "type": "when_expression",
+            "named": true
+          },
+          {
+            "type": "while_expression",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "integer_domain_type",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "range_type",
+          "named": true
+        },
+        {
+          "type": "tag",
           "named": true
         }
       ]
@@ -2069,6 +2656,10 @@
           "named": true
         },
         {
+          "type": "domain_expression",
+          "named": true
+        },
+        {
           "type": "for_expression",
           "named": true
         },
@@ -2081,7 +2672,7 @@
           "named": true
         },
         {
-          "type": "if_expression",
+          "type": "index_expression",
           "named": true
         },
         {
@@ -2181,6 +2772,10 @@
             "named": true
           },
           {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
             "type": "for_expression",
             "named": true
           },
@@ -2193,7 +2788,7 @@
             "named": true
           },
           {
-            "type": "if_expression",
+            "type": "index_expression",
             "named": true
           },
           {
@@ -2254,6 +2849,10 @@
       "types": [
         {
           "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "in_range_type",
           "named": true
         },
         {
@@ -2330,11 +2929,23 @@
           "named": true
         },
         {
+          "type": "membership_condition",
+          "named": true
+        },
+        {
           "type": "negated_condition",
           "named": true
         },
         {
+          "type": "numeric_condition",
+          "named": true
+        },
+        {
           "type": "parenthesized_condition",
+          "named": true
+        },
+        {
+          "type": "proposition_condition",
           "named": true
         }
       ]
@@ -2373,6 +2984,10 @@
             "named": true
           },
           {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
             "type": "for_expression",
             "named": true
           },
@@ -2385,7 +3000,7 @@
             "named": true
           },
           {
-            "type": "if_expression",
+            "type": "index_expression",
             "named": true
           },
           {
@@ -2477,6 +3092,10 @@
             "named": true
           },
           {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
             "type": "for_expression",
             "named": true
           },
@@ -2489,7 +3108,7 @@
             "named": true
           },
           {
-            "type": "if_expression",
+            "type": "index_expression",
             "named": true
           },
           {
@@ -2506,6 +3125,10 @@
           },
           {
             "type": "range_expression",
+            "named": true
+          },
+          {
+            "type": "return_statement",
             "named": true
           },
           {
@@ -2565,6 +3188,10 @@
             "named": true
           },
           {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
             "type": "for_expression",
             "named": true
           },
@@ -2577,7 +3204,7 @@
             "named": true
           },
           {
-            "type": "if_expression",
+            "type": "index_expression",
             "named": true
           },
           {
@@ -2631,10 +3258,6 @@
         "required": true,
         "types": [
           {
-            "type": "argument_list",
-            "named": true
-          },
-          {
             "type": "identifier",
             "named": true
           },
@@ -2648,6 +3271,210 @@
           }
         ]
       }
+    }
+  },
+  {
+    "type": "membership_condition",
+    "named": true,
+    "fields": {
+      "domain": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "binary_expression",
+            "named": true
+          },
+          {
+            "type": "call_expression",
+            "named": true
+          },
+          {
+            "type": "cast_expression",
+            "named": true
+          },
+          {
+            "type": "compile_time_query",
+            "named": true
+          },
+          {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
+            "type": "for_expression",
+            "named": true
+          },
+          {
+            "type": "format_string",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "index_expression",
+            "named": true
+          },
+          {
+            "type": "literal",
+            "named": true
+          },
+          {
+            "type": "member_expression",
+            "named": true
+          },
+          {
+            "type": "parenthesized_expression",
+            "named": true
+          },
+          {
+            "type": "range_expression",
+            "named": true
+          },
+          {
+            "type": "self_expression",
+            "named": true
+          },
+          {
+            "type": "self_type",
+            "named": true
+          },
+          {
+            "type": "sequence_literal",
+            "named": true
+          },
+          {
+            "type": "type_identifier",
+            "named": true
+          },
+          {
+            "type": "unary_expression",
+            "named": true
+          },
+          {
+            "type": "when_expression",
+            "named": true
+          },
+          {
+            "type": "while_expression",
+            "named": true
+          }
+        ]
+      },
+      "subject": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "binary_expression",
+            "named": true
+          },
+          {
+            "type": "call_expression",
+            "named": true
+          },
+          {
+            "type": "cast_expression",
+            "named": true
+          },
+          {
+            "type": "compile_time_query",
+            "named": true
+          },
+          {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
+            "type": "for_expression",
+            "named": true
+          },
+          {
+            "type": "format_string",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "index_expression",
+            "named": true
+          },
+          {
+            "type": "literal",
+            "named": true
+          },
+          {
+            "type": "member_expression",
+            "named": true
+          },
+          {
+            "type": "parenthesized_expression",
+            "named": true
+          },
+          {
+            "type": "range_expression",
+            "named": true
+          },
+          {
+            "type": "self_expression",
+            "named": true
+          },
+          {
+            "type": "self_type",
+            "named": true
+          },
+          {
+            "type": "sequence_literal",
+            "named": true
+          },
+          {
+            "type": "type_identifier",
+            "named": true
+          },
+          {
+            "type": "unary_expression",
+            "named": true
+          },
+          {
+            "type": "when_expression",
+            "named": true
+          },
+          {
+            "type": "while_expression",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "method_bind_statement",
+    "named": true,
+    "fields": {
+      "receiver": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "tag",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "bind_statement",
+          "named": true
+        }
+      ]
     }
   },
   {
@@ -2716,6 +3543,10 @@
             "named": true
           },
           {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
             "type": "for_expression",
             "named": true
           },
@@ -2728,7 +3559,7 @@
             "named": true
           },
           {
-            "type": "if_expression",
+            "type": "index_expression",
             "named": true
           },
           {
@@ -2798,7 +3629,19 @@
         "required": true,
         "types": [
           {
+            "type": "in_range_type",
+            "named": true
+          },
+          {
+            "type": "integer_domain_type",
+            "named": true
+          },
+          {
             "type": "proof_result_type",
+            "named": true
+          },
+          {
+            "type": "proposition_type",
             "named": true
           },
           {
@@ -2834,11 +3677,23 @@
       "required": true,
       "types": [
         {
+          "type": "in_range_type",
+          "named": true
+        },
+        {
+          "type": "integer_domain_type",
+          "named": true
+        },
+        {
           "type": "named_result",
           "named": true
         },
         {
           "type": "proof_result_type",
+          "named": true
+        },
+        {
+          "type": "proposition_type",
           "named": true
         },
         {
@@ -2881,11 +3736,23 @@
           "named": true
         },
         {
+          "type": "membership_condition",
+          "named": true
+        },
+        {
           "type": "negated_condition",
           "named": true
         },
         {
+          "type": "numeric_condition",
+          "named": true
+        },
+        {
           "type": "parenthesized_condition",
+          "named": true
+        },
+        {
+          "type": "proposition_condition",
           "named": true
         }
       ]
@@ -2895,6 +3762,276 @@
     "type": "number",
     "named": true,
     "fields": {}
+  },
+  {
+    "type": "numbered_variant",
+    "named": true,
+    "fields": {
+      "discriminant": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "number",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "in_range_type",
+          "named": true
+        },
+        {
+          "type": "integer_domain_type",
+          "named": true
+        },
+        {
+          "type": "parameters",
+          "named": true
+        },
+        {
+          "type": "proof_result_type",
+          "named": true
+        },
+        {
+          "type": "proposition_type",
+          "named": true
+        },
+        {
+          "type": "sequence_type",
+          "named": true
+        },
+        {
+          "type": "tag",
+          "named": true
+        },
+        {
+          "type": "type_identifier",
+          "named": true
+        },
+        {
+          "type": "type_union",
+          "named": true
+        },
+        {
+          "type": "type_variable",
+          "named": true
+        },
+        {
+          "type": "unit_type",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "numeric_condition",
+    "named": true,
+    "fields": {
+      "left": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "binary_expression",
+            "named": true
+          },
+          {
+            "type": "call_expression",
+            "named": true
+          },
+          {
+            "type": "cast_expression",
+            "named": true
+          },
+          {
+            "type": "compile_time_query",
+            "named": true
+          },
+          {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
+            "type": "for_expression",
+            "named": true
+          },
+          {
+            "type": "format_string",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "index_expression",
+            "named": true
+          },
+          {
+            "type": "literal",
+            "named": true
+          },
+          {
+            "type": "member_expression",
+            "named": true
+          },
+          {
+            "type": "parenthesized_expression",
+            "named": true
+          },
+          {
+            "type": "range_expression",
+            "named": true
+          },
+          {
+            "type": "self_expression",
+            "named": true
+          },
+          {
+            "type": "self_type",
+            "named": true
+          },
+          {
+            "type": "sequence_literal",
+            "named": true
+          },
+          {
+            "type": "type_identifier",
+            "named": true
+          },
+          {
+            "type": "unary_expression",
+            "named": true
+          },
+          {
+            "type": "when_expression",
+            "named": true
+          },
+          {
+            "type": "while_expression",
+            "named": true
+          }
+        ]
+      },
+      "operator": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "<",
+            "named": false
+          },
+          {
+            "type": "<=",
+            "named": false
+          },
+          {
+            "type": "=",
+            "named": false
+          },
+          {
+            "type": ">",
+            "named": false
+          },
+          {
+            "type": ">=",
+            "named": false
+          }
+        ]
+      },
+      "right": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "binary_expression",
+            "named": true
+          },
+          {
+            "type": "call_expression",
+            "named": true
+          },
+          {
+            "type": "cast_expression",
+            "named": true
+          },
+          {
+            "type": "compile_time_query",
+            "named": true
+          },
+          {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
+            "type": "for_expression",
+            "named": true
+          },
+          {
+            "type": "format_string",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "index_expression",
+            "named": true
+          },
+          {
+            "type": "literal",
+            "named": true
+          },
+          {
+            "type": "member_expression",
+            "named": true
+          },
+          {
+            "type": "parenthesized_expression",
+            "named": true
+          },
+          {
+            "type": "range_expression",
+            "named": true
+          },
+          {
+            "type": "self_expression",
+            "named": true
+          },
+          {
+            "type": "self_type",
+            "named": true
+          },
+          {
+            "type": "sequence_literal",
+            "named": true
+          },
+          {
+            "type": "type_identifier",
+            "named": true
+          },
+          {
+            "type": "unary_expression",
+            "named": true
+          },
+          {
+            "type": "when_expression",
+            "named": true
+          },
+          {
+            "type": "while_expression",
+            "named": true
+          }
+        ]
+      }
+    }
   },
   {
     "type": "parameter",
@@ -2921,6 +4058,10 @@
             "named": true
           },
           {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
             "type": "for_expression",
             "named": true
           },
@@ -2933,7 +4074,7 @@
             "named": true
           },
           {
-            "type": "if_expression",
+            "type": "index_expression",
             "named": true
           },
           {
@@ -3019,6 +4160,18 @@
         "required": false,
         "types": [
           {
+            "type": "in_range_type",
+            "named": true
+          },
+          {
+            "type": "integer_domain_type",
+            "named": true
+          },
+          {
+            "type": "proposition_type",
+            "named": true
+          },
+          {
             "type": "sequence_type",
             "named": true
           },
@@ -3034,11 +4187,19 @@
       }
     },
     "children": {
-      "multiple": false,
+      "multiple": true,
       "required": false,
       "types": [
         {
           "type": "reference_group",
+          "named": true
+        },
+        {
+          "type": "refinement",
+          "named": true
+        },
+        {
+          "type": "trait_composition",
           "named": true
         }
       ]
@@ -3076,11 +4237,23 @@
           "named": true
         },
         {
+          "type": "membership_condition",
+          "named": true
+        },
+        {
           "type": "negated_condition",
           "named": true
         },
         {
+          "type": "numeric_condition",
+          "named": true
+        },
+        {
           "type": "parenthesized_condition",
+          "named": true
+        },
+        {
+          "type": "proposition_condition",
           "named": true
         }
       ]
@@ -3099,6 +4272,10 @@
           "named": true
         },
         {
+          "type": "bind_statement",
+          "named": true
+        },
+        {
           "type": "call_expression",
           "named": true
         },
@@ -3108,6 +4285,10 @@
         },
         {
           "type": "compile_time_query",
+          "named": true
+        },
+        {
+          "type": "domain_expression",
           "named": true
         },
         {
@@ -3123,7 +4304,7 @@
           "named": true
         },
         {
-          "type": "if_expression",
+          "type": "index_expression",
           "named": true
         },
         {
@@ -3212,7 +4393,19 @@
       "required": true,
       "types": [
         {
+          "type": "in_range_type",
+          "named": true
+        },
+        {
+          "type": "integer_domain_type",
+          "named": true
+        },
+        {
           "type": "proof_result_type",
+          "named": true
+        },
+        {
+          "type": "proposition_type",
           "named": true
         },
         {
@@ -3233,6 +4426,76 @@
         },
         {
           "type": "unit_type",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "predicate",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "compile_time_query",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "number",
+          "named": true
+        },
+        {
+          "type": "proof_arithmetic",
+          "named": true
+        },
+        {
+          "type": "proof_member",
+          "named": true
+        },
+        {
+          "type": "proof_proposition",
+          "named": true
+        },
+        {
+          "type": "type_identifier",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "private_member_block",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "argument_list",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "record_field",
+          "named": true
+        },
+        {
+          "type": "record_property",
+          "named": true
+        },
+        {
+          "type": "record_signature",
           "named": true
         }
       ]
@@ -3271,6 +4534,14 @@
           "named": true
         },
         {
+          "type": "destructure_statement",
+          "named": true
+        },
+        {
+          "type": "domain_expression",
+          "named": true
+        },
+        {
           "type": "for_expression",
           "named": true
         },
@@ -3283,7 +4554,7 @@
           "named": true
         },
         {
-          "type": "if_expression",
+          "type": "index_expression",
           "named": true
         },
         {
@@ -3295,15 +4566,15 @@
           "named": true
         },
         {
+          "type": "method_bind_statement",
+          "named": true
+        },
+        {
           "type": "parenthesized_expression",
           "named": true
         },
         {
           "type": "range_expression",
-          "named": true
-        },
-        {
-          "type": "return_statement",
           "named": true
         },
         {
@@ -3366,7 +4637,26 @@
           "named": true
         },
         {
+          "type": "proof_member",
+          "named": true
+        },
+        {
           "type": "type_identifier",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "proof_member",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "identifier",
           "named": true
         }
       ]
@@ -3416,6 +4706,10 @@
           "named": true
         },
         {
+          "type": "proof_member",
+          "named": true
+        },
+        {
           "type": "type_identifier",
           "named": true
         }
@@ -3435,7 +4729,49 @@
           "named": true
         },
         {
-          "type": "type_identifier",
+          "type": "tag",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "proposition_condition",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "call_expression",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "member_expression",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "proposition_type",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "predicate",
+          "named": true
+        },
+        {
+          "type": "proof_proposition",
           "named": true
         }
       ]
@@ -3507,6 +4843,10 @@
             "named": true
           },
           {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
             "type": "for_expression",
             "named": true
           },
@@ -3519,7 +4859,7 @@
             "named": true
           },
           {
-            "type": "if_expression",
+            "type": "index_expression",
             "named": true
           },
           {
@@ -3589,6 +4929,10 @@
             "named": true
           },
           {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
             "type": "for_expression",
             "named": true
           },
@@ -3601,7 +4945,7 @@
             "named": true
           },
           {
-            "type": "if_expression",
+            "type": "index_expression",
             "named": true
           },
           {
@@ -3653,6 +4997,32 @@
     }
   },
   {
+    "type": "range_parameter",
+    "named": true,
+    "fields": {
+      "end": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "start": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "range_type",
     "named": true,
     "fields": {},
@@ -3660,6 +5030,10 @@
       "multiple": true,
       "required": true,
       "types": [
+        {
+          "type": "identifier",
+          "named": true
+        },
         {
           "type": "number",
           "named": true
@@ -3671,6 +5045,16 @@
     "type": "record_field",
     "named": true,
     "fields": {
+      "modifier": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "own",
+            "named": false
+          }
+        ]
+      },
       "name": {
         "multiple": false,
         "required": true,
@@ -3686,7 +5070,19 @@
         "required": true,
         "types": [
           {
+            "type": "in_range_type",
+            "named": true
+          },
+          {
+            "type": "integer_domain_type",
+            "named": true
+          },
+          {
             "type": "proof_result_type",
+            "named": true
+          },
+          {
+            "type": "proposition_type",
             "named": true
           },
           {
@@ -3713,11 +5109,19 @@
       }
     },
     "children": {
-      "multiple": false,
+      "multiple": true,
       "required": false,
       "types": [
         {
+          "type": "attributes",
+          "named": true
+        },
+        {
           "type": "field_default",
+          "named": true
+        },
+        {
+          "type": "refinement",
           "named": true
         }
       ]
@@ -3743,6 +5147,10 @@
       "required": false,
       "types": [
         {
+          "type": "attributes",
+          "named": true
+        },
+        {
           "type": "field_default",
           "named": true
         },
@@ -3762,7 +5170,23 @@
         "required": true,
         "types": [
           {
+            "type": "call_expression",
+            "named": true
+          },
+          {
             "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "index_expression",
+            "named": true
+          },
+          {
+            "type": "member_expression",
+            "named": true
+          },
+          {
+            "type": "self_expression",
             "named": true
           }
         ]
@@ -3798,6 +5222,10 @@
             "named": true
           },
           {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
             "type": "for_expression",
             "named": true
           },
@@ -3810,7 +5238,7 @@
             "named": true
           },
           {
-            "type": "if_expression",
+            "type": "index_expression",
             "named": true
           },
           {
@@ -3880,11 +5308,23 @@
         "required": false,
         "types": [
           {
+            "type": "in_range_type",
+            "named": true
+          },
+          {
+            "type": "integer_domain_type",
+            "named": true
+          },
+          {
             "type": "named_results",
             "named": true
           },
           {
             "type": "proof_result_type",
+            "named": true
+          },
+          {
+            "type": "proposition_type",
             "named": true
           },
           {
@@ -3915,6 +5355,10 @@
       "required": true,
       "types": [
         {
+          "type": "attributes",
+          "named": true
+        },
+        {
           "type": "member_default",
           "named": true
         },
@@ -3924,6 +5368,10 @@
         },
         {
           "type": "qualified_member_name",
+          "named": true
+        },
+        {
+          "type": "refinement",
           "named": true
         }
       ]
@@ -3982,7 +5430,19 @@
         "required": true,
         "types": [
           {
+            "type": "in_range_type",
+            "named": true
+          },
+          {
+            "type": "integer_domain_type",
+            "named": true
+          },
+          {
             "type": "proof_result_type",
+            "named": true
+          },
+          {
+            "type": "proposition_type",
             "named": true
           },
           {
@@ -4020,6 +5480,25 @@
     }
   },
   {
+    "type": "refinement",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "predicate",
+          "named": true
+        },
+        {
+          "type": "proof_proposition",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "return_statement",
     "named": true,
     "fields": {},
@@ -4044,6 +5523,10 @@
           "named": true
         },
         {
+          "type": "domain_expression",
+          "named": true
+        },
+        {
           "type": "for_expression",
           "named": true
         },
@@ -4056,7 +5539,7 @@
           "named": true
         },
         {
-          "type": "if_expression",
+          "type": "index_expression",
           "named": true
         },
         {
@@ -4073,6 +5556,10 @@
         },
         {
           "type": "parenthesized_expression",
+          "named": true
+        },
+        {
+          "type": "proof_proposition",
           "named": true
         },
         {
@@ -4113,28 +5600,7 @@
   {
     "type": "self_expression",
     "named": true,
-    "fields": {
-      "arguments": {
-        "multiple": false,
-        "required": false,
-        "types": [
-          {
-            "type": "argument_list",
-            "named": true
-          }
-        ]
-      },
-      "member": {
-        "multiple": false,
-        "required": false,
-        "types": [
-          {
-            "type": "identifier",
-            "named": true
-          }
-        ]
-      }
-    }
+    "fields": {}
   },
   {
     "type": "self_parameter",
@@ -4166,6 +5632,10 @@
             "named": true
           },
           {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
             "type": "for_expression",
             "named": true
           },
@@ -4178,7 +5648,7 @@
             "named": true
           },
           {
-            "type": "if_expression",
+            "type": "index_expression",
             "named": true
           },
           {
@@ -4248,6 +5718,10 @@
             "named": true
           },
           {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
             "type": "for_expression",
             "named": true
           },
@@ -4260,7 +5734,7 @@
             "named": true
           },
           {
-            "type": "if_expression",
+            "type": "index_expression",
             "named": true
           },
           {
@@ -4331,6 +5805,10 @@
           "named": true
         },
         {
+          "type": "domain_expression",
+          "named": true
+        },
+        {
           "type": "for_expression",
           "named": true
         },
@@ -4343,7 +5821,7 @@
           "named": true
         },
         {
-          "type": "if_expression",
+          "type": "index_expression",
           "named": true
         },
         {
@@ -4422,6 +5900,10 @@
           "named": true
         },
         {
+          "type": "domain_expression",
+          "named": true
+        },
+        {
           "type": "for_expression",
           "named": true
         },
@@ -4434,7 +5916,15 @@
           "named": true
         },
         {
-          "type": "if_expression",
+          "type": "in_range_type",
+          "named": true
+        },
+        {
+          "type": "index_expression",
+          "named": true
+        },
+        {
+          "type": "integer_domain_type",
           "named": true
         },
         {
@@ -4455,6 +5945,10 @@
         },
         {
           "type": "proof_result_type",
+          "named": true
+        },
+        {
+          "type": "proposition_type",
           "named": true
         },
         {
@@ -4546,6 +6040,14 @@
           "named": true
         },
         {
+          "type": "destructure_statement",
+          "named": true
+        },
+        {
+          "type": "domain_expression",
+          "named": true
+        },
+        {
           "type": "for_expression",
           "named": true
         },
@@ -4558,7 +6060,7 @@
           "named": true
         },
         {
-          "type": "if_expression",
+          "type": "index_expression",
           "named": true
         },
         {
@@ -4567,6 +6069,10 @@
         },
         {
           "type": "member_expression",
+          "named": true
+        },
+        {
+          "type": "method_bind_statement",
           "named": true
         },
         {
@@ -4579,10 +6085,6 @@
         },
         {
           "type": "range_expression",
-          "named": true
-        },
-        {
-          "type": "return_statement",
           "named": true
         },
         {
@@ -4696,11 +6198,31 @@
           "named": true
         },
         {
+          "type": "domain_expression",
+          "named": true
+        },
+        {
           "type": "literal",
           "named": true
         },
         {
+          "type": "member_expression",
+          "named": true
+        },
+        {
+          "type": "named_argument",
+          "named": true
+        },
+        {
+          "type": "range_expression",
+          "named": true
+        },
+        {
           "type": "self_type",
+          "named": true
+        },
+        {
+          "type": "sequence_type",
           "named": true
         },
         {
@@ -4712,11 +6234,19 @@
           "named": true
         },
         {
+          "type": "type_union",
+          "named": true
+        },
+        {
           "type": "type_variable",
           "named": true
         },
         {
           "type": "unary_expression",
+          "named": true
+        },
+        {
+          "type": "unit_type",
           "named": true
         }
       ]
@@ -4731,11 +6261,19 @@
       "required": true,
       "types": [
         {
+          "type": "named_result",
+          "named": true
+        },
+        {
           "type": "proof_result_type",
           "named": true
         },
         {
           "type": "tag",
+          "named": true
+        },
+        {
+          "type": "type_variable",
           "named": true
         }
       ]
@@ -4766,6 +6304,10 @@
             "named": true
           },
           {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
             "type": "for_expression",
             "named": true
           },
@@ -4778,7 +6320,7 @@
             "named": true
           },
           {
-            "type": "if_expression",
+            "type": "index_expression",
             "named": true
           },
           {
@@ -4873,9 +6415,55 @@
           }
         ]
       },
+      "return_type": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "in_range_type",
+            "named": true
+          },
+          {
+            "type": "integer_domain_type",
+            "named": true
+          },
+          {
+            "type": "named_results",
+            "named": true
+          },
+          {
+            "type": "proof_result_type",
+            "named": true
+          },
+          {
+            "type": "proposition_type",
+            "named": true
+          },
+          {
+            "type": "sequence_type",
+            "named": true
+          },
+          {
+            "type": "tag",
+            "named": true
+          },
+          {
+            "type": "type_union",
+            "named": true
+          },
+          {
+            "type": "type_variable",
+            "named": true
+          },
+          {
+            "type": "unit_type",
+            "named": true
+          }
+        ]
+      },
       "type": {
         "multiple": false,
-        "required": true,
+        "required": false,
         "types": [
           {
             "type": "sequence_type",
@@ -4887,6 +6475,20 @@
           }
         ]
       }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "attributes",
+          "named": true
+        },
+        {
+          "type": "parameters",
+          "named": true
+        }
+      ]
     }
   },
   {
@@ -4933,7 +6535,19 @@
       "required": true,
       "types": [
         {
+          "type": "in_range_type",
+          "named": true
+        },
+        {
+          "type": "integer_domain_type",
+          "named": true
+        },
+        {
           "type": "literal",
+          "named": true
+        },
+        {
+          "type": "numbered_variant",
           "named": true
         },
         {
@@ -4942,6 +6556,10 @@
         },
         {
           "type": "proof_result_type",
+          "named": true
+        },
+        {
+          "type": "proposition_type",
           "named": true
         },
         {
@@ -4972,7 +6590,7 @@
     }
   },
   {
-    "type": "when_cond_arm",
+    "type": "when_comparison_arm",
     "named": true,
     "fields": {},
     "children": {
@@ -4981,6 +6599,10 @@
       "types": [
         {
           "type": "binary_expression",
+          "named": true
+        },
+        {
+          "type": "block_body",
           "named": true
         },
         {
@@ -4996,6 +6618,10 @@
           "named": true
         },
         {
+          "type": "domain_expression",
+          "named": true
+        },
+        {
           "type": "for_expression",
           "named": true
         },
@@ -5008,7 +6634,7 @@
           "named": true
         },
         {
-          "type": "if_expression",
+          "type": "index_expression",
           "named": true
         },
         {
@@ -5028,7 +6654,15 @@
           "named": true
         },
         {
+          "type": "membership_condition",
+          "named": true
+        },
+        {
           "type": "negated_condition",
+          "named": true
+        },
+        {
+          "type": "numeric_condition",
           "named": true
         },
         {
@@ -5040,7 +6674,15 @@
           "named": true
         },
         {
+          "type": "proposition_condition",
+          "named": true
+        },
+        {
           "type": "range_expression",
+          "named": true
+        },
+        {
+          "type": "return_statement",
           "named": true
         },
         {
@@ -5068,6 +6710,141 @@
           "named": true
         },
         {
+          "type": "when_guard",
+          "named": true
+        },
+        {
+          "type": "while_expression",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "when_cond_arm",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "binary_expression",
+          "named": true
+        },
+        {
+          "type": "block_body",
+          "named": true
+        },
+        {
+          "type": "call_expression",
+          "named": true
+        },
+        {
+          "type": "cast_expression",
+          "named": true
+        },
+        {
+          "type": "compile_time_query",
+          "named": true
+        },
+        {
+          "type": "domain_expression",
+          "named": true
+        },
+        {
+          "type": "for_expression",
+          "named": true
+        },
+        {
+          "type": "format_string",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "index_expression",
+          "named": true
+        },
+        {
+          "type": "is_condition",
+          "named": true
+        },
+        {
+          "type": "literal",
+          "named": true
+        },
+        {
+          "type": "logical_condition",
+          "named": true
+        },
+        {
+          "type": "member_expression",
+          "named": true
+        },
+        {
+          "type": "membership_condition",
+          "named": true
+        },
+        {
+          "type": "negated_condition",
+          "named": true
+        },
+        {
+          "type": "numeric_condition",
+          "named": true
+        },
+        {
+          "type": "parenthesized_condition",
+          "named": true
+        },
+        {
+          "type": "parenthesized_expression",
+          "named": true
+        },
+        {
+          "type": "proposition_condition",
+          "named": true
+        },
+        {
+          "type": "range_expression",
+          "named": true
+        },
+        {
+          "type": "return_statement",
+          "named": true
+        },
+        {
+          "type": "self_expression",
+          "named": true
+        },
+        {
+          "type": "self_type",
+          "named": true
+        },
+        {
+          "type": "sequence_literal",
+          "named": true
+        },
+        {
+          "type": "type_identifier",
+          "named": true
+        },
+        {
+          "type": "unary_expression",
+          "named": true
+        },
+        {
+          "type": "when_expression",
+          "named": true
+        },
+        {
+          "type": "when_guard",
+          "named": true
+        },
+        {
           "type": "while_expression",
           "named": true
         }
@@ -5087,6 +6864,10 @@
           "named": true
         },
         {
+          "type": "block_body",
+          "named": true
+        },
+        {
           "type": "call_expression",
           "named": true
         },
@@ -5096,6 +6877,10 @@
         },
         {
           "type": "compile_time_query",
+          "named": true
+        },
+        {
+          "type": "domain_expression",
           "named": true
         },
         {
@@ -5111,7 +6896,7 @@
           "named": true
         },
         {
-          "type": "if_expression",
+          "type": "index_expression",
           "named": true
         },
         {
@@ -5128,6 +6913,10 @@
         },
         {
           "type": "range_expression",
+          "named": true
+        },
+        {
+          "type": "return_statement",
           "named": true
         },
         {
@@ -5186,6 +6975,10 @@
             "named": true
           },
           {
+            "type": "domain_expression",
+            "named": true
+          },
+          {
             "type": "for_expression",
             "named": true
           },
@@ -5198,7 +6991,7 @@
             "named": true
           },
           {
-            "type": "if_expression",
+            "type": "index_expression",
             "named": true
           },
           {
@@ -5257,6 +7050,10 @@
           "named": true
         },
         {
+          "type": "block_body",
+          "named": true
+        },
+        {
           "type": "call_expression",
           "named": true
         },
@@ -5266,6 +7063,10 @@
         },
         {
           "type": "compile_time_query",
+          "named": true
+        },
+        {
+          "type": "domain_expression",
           "named": true
         },
         {
@@ -5281,7 +7082,7 @@
           "named": true
         },
         {
-          "type": "if_expression",
+          "type": "index_expression",
           "named": true
         },
         {
@@ -5301,7 +7102,15 @@
           "named": true
         },
         {
+          "type": "membership_condition",
+          "named": true
+        },
+        {
           "type": "negated_condition",
+          "named": true
+        },
+        {
+          "type": "numeric_condition",
           "named": true
         },
         {
@@ -5313,7 +7122,15 @@
           "named": true
         },
         {
+          "type": "proposition_condition",
+          "named": true
+        },
+        {
           "type": "range_expression",
+          "named": true
+        },
+        {
+          "type": "return_statement",
           "named": true
         },
         {
@@ -5334,6 +7151,10 @@
         },
         {
           "type": "unary_expression",
+          "named": true
+        },
+        {
+          "type": "when_comparison_arm",
           "named": true
         },
         {
@@ -5349,10 +7170,6 @@
           "named": true
         },
         {
-          "type": "when_is_arm",
-          "named": true
-        },
-        {
           "type": "when_pattern_arm",
           "named": true
         },
@@ -5364,7 +7181,7 @@
     }
   },
   {
-    "type": "when_is_arm",
+    "type": "when_guard",
     "named": true,
     "fields": {},
     "children": {
@@ -5372,83 +7189,31 @@
       "required": true,
       "types": [
         {
-          "type": "binary_expression",
+          "type": "is_condition",
           "named": true
         },
         {
-          "type": "call_expression",
+          "type": "logical_condition",
           "named": true
         },
         {
-          "type": "cast_expression",
+          "type": "membership_condition",
           "named": true
         },
         {
-          "type": "compile_time_query",
+          "type": "negated_condition",
           "named": true
         },
         {
-          "type": "for_expression",
+          "type": "numeric_condition",
           "named": true
         },
         {
-          "type": "format_string",
+          "type": "parenthesized_condition",
           "named": true
         },
         {
-          "type": "identifier",
-          "named": true
-        },
-        {
-          "type": "if_expression",
-          "named": true
-        },
-        {
-          "type": "is_pattern",
-          "named": true
-        },
-        {
-          "type": "literal",
-          "named": true
-        },
-        {
-          "type": "member_expression",
-          "named": true
-        },
-        {
-          "type": "parenthesized_expression",
-          "named": true
-        },
-        {
-          "type": "range_expression",
-          "named": true
-        },
-        {
-          "type": "self_expression",
-          "named": true
-        },
-        {
-          "type": "self_type",
-          "named": true
-        },
-        {
-          "type": "sequence_literal",
-          "named": true
-        },
-        {
-          "type": "type_identifier",
-          "named": true
-        },
-        {
-          "type": "unary_expression",
-          "named": true
-        },
-        {
-          "type": "when_expression",
-          "named": true
-        },
-        {
-          "type": "while_expression",
+          "type": "proposition_condition",
           "named": true
         }
       ]
@@ -5467,6 +7232,10 @@
             "named": true
           },
           {
+            "type": "block_body",
+            "named": true
+          },
+          {
             "type": "call_expression",
             "named": true
           },
@@ -5476,6 +7245,10 @@
           },
           {
             "type": "compile_time_query",
+            "named": true
+          },
+          {
+            "type": "domain_expression",
             "named": true
           },
           {
@@ -5491,7 +7264,7 @@
             "named": true
           },
           {
-            "type": "if_expression",
+            "type": "index_expression",
             "named": true
           },
           {
@@ -5508,6 +7281,10 @@
           },
           {
             "type": "range_expression",
+            "named": true
+          },
+          {
+            "type": "return_statement",
             "named": true
           },
           {
@@ -5556,7 +7333,39 @@
       "required": false,
       "types": [
         {
-          "type": "literal",
+          "type": "is_condition",
+          "named": true
+        },
+        {
+          "type": "is_pattern",
+          "named": true
+        },
+        {
+          "type": "logical_condition",
+          "named": true
+        },
+        {
+          "type": "membership_condition",
+          "named": true
+        },
+        {
+          "type": "negated_condition",
+          "named": true
+        },
+        {
+          "type": "numeric_condition",
+          "named": true
+        },
+        {
+          "type": "parenthesized_condition",
+          "named": true
+        },
+        {
+          "type": "proposition_condition",
+          "named": true
+        },
+        {
+          "type": "when_guard",
           "named": true
         }
       ]
@@ -5579,11 +7388,23 @@
             "named": true
           },
           {
+            "type": "membership_condition",
+            "named": true
+          },
+          {
             "type": "negated_condition",
             "named": true
           },
           {
+            "type": "numeric_condition",
+            "named": true
+          },
+          {
             "type": "parenthesized_condition",
+            "named": true
+          },
+          {
+            "type": "proposition_condition",
             "named": true
           }
         ]
@@ -5591,7 +7412,7 @@
     },
     "children": {
       "multiple": true,
-      "required": false,
+      "required": true,
       "types": [
         {
           "type": "aggregate_set",
@@ -5622,6 +7443,14 @@
           "named": true
         },
         {
+          "type": "destructure_statement",
+          "named": true
+        },
+        {
+          "type": "domain_expression",
+          "named": true
+        },
+        {
           "type": "for_expression",
           "named": true
         },
@@ -5634,7 +7463,7 @@
           "named": true
         },
         {
-          "type": "if_expression",
+          "type": "index_expression",
           "named": true
         },
         {
@@ -5655,6 +7484,10 @@
         },
         {
           "type": "record_set",
+          "named": true
+        },
+        {
+          "type": "return_statement",
           "named": true
         },
         {
@@ -5679,6 +7512,10 @@
         },
         {
           "type": "unassigned_binding",
+          "named": true
+        },
+        {
+          "type": "use_statement",
           "named": true
         },
         {
@@ -5833,11 +7670,15 @@
     "named": false
   },
   {
-    "type": "asm",
+    "type": "case",
     "named": false
   },
   {
     "type": "deref",
+    "named": false
+  },
+  {
+    "type": "do",
     "named": false
   },
   {
@@ -5846,7 +7687,15 @@
     "extra": true
   },
   {
+    "type": "domain",
+    "named": false
+  },
+  {
     "type": "else",
+    "named": false
+  },
+  {
+    "type": "emit",
     "named": false
   },
   {
@@ -5870,10 +7719,6 @@
     "named": true
   },
   {
-    "type": "if",
-    "named": false
-  },
-  {
     "type": "in",
     "named": false
   },
@@ -5891,10 +7736,6 @@
     "extra": true
   },
   {
-    "type": "loop",
-    "named": false
-  },
-  {
     "type": "module_doc_comment",
     "named": true,
     "extra": true
@@ -5905,6 +7746,10 @@
   },
   {
     "type": "not",
+    "named": false
+  },
+  {
+    "type": "of",
     "named": false
   },
   {
@@ -5921,10 +7766,6 @@
   },
   {
     "type": "ref",
-    "named": false
-  },
-  {
-    "type": "register",
     "named": false
   },
   {
@@ -5961,6 +7802,10 @@
   },
   {
     "type": "to",
+    "named": false
+  },
+  {
+    "type": "todo",
     "named": false
   },
   {

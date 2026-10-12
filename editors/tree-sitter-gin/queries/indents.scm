@@ -1,8 +1,6 @@
 [
   (declare_statement)
+  (block_body)
   (for_expression)
   (while_expression)
-  (if_expression)
 ] @indent
-
-"loop" @indent.end

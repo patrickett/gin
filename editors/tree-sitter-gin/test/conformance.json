@@ -1,5 +1,20 @@
 [
   {
+    "name": "while compound condition with do",
+    "source": "run: while index < limit and ready or not done do\n    observe\n",
+    "valid": true
+  },
+  {
+    "name": "while missing do",
+    "source": "run: while ready\n    observe\n",
+    "valid": false
+  },
+  {
+    "name": "while with then instead of do",
+    "source": "run: while ready then\n    observe\n",
+    "valid": false
+  },
+  {
     "name": "imports",
     "source": "use 'sample' Int, Byte\nuse self Bool\nuse Bool\n",
     "valid": true
@@ -46,33 +61,35 @@
   },
   {
     "name": "pointer annotations",
-    "source": "value Byte := 1\npointer @Byte := @value\nwrite(buf @Byte) Int extern\n",
+    "source": "value Byte := 1\npointer @Byte := @value\nwrite(buf @Byte) Int: return 0\n",
     "valid": true
   },
   {
     "name": "references and ownership",
-    "source": "f(value own Entity, other ref{root} Entity) ref{root} Entity: other\n",
+    "source": "f(value own Entity, other ref{root} Entity) ref{root} Entity: return other\n",
     "valid": true
   },
   {
     "name": "rebindings",
-    "source": "main:\n    value: 1\n    value:: 2\n    value+: 3\n    record.field:: 1\n    items.(index)*: 2\nreturn value\n",
+    "source": "main:\n    value: 1\n    value:: 2\n    value+: 3\n    record.field:: 1\n    items.[index]*: 2\n    return value\n",
     "valid": true
   },
   {
     "name": "compile-time queries",
-    "source": "f(value Int) Int: #asm('spec', value: #register(value))\narch := #target.arch\nsize := #size(@Byte)\nalign := #alignment(Byte)\nbits := #index_bits(Byte)\n",
+    "source": "f(value Int) Int: return value\narch := #target.arch\nsize := #size(@Byte)\nalign := #alignment(Byte)\nbits := #index_bits(Byte)\n",
     "valid": true
   },
   {
     "name": "format interpolation",
     "source": "msg := \"🫖 \\(outer(inner(1), 'text)')) done\"",
-    "valid": true
+    "valid": true,
+    "compiler": false
   },
   {
     "name": "multiline interpolation",
     "source": "msg := \"value \\(f(\n    1\n)) done\"\n",
-    "valid": true
+    "valid": true,
+    "compiler": false
   },
   {
     "name": "format text and escapes",
@@ -91,12 +108,12 @@
   },
   {
     "name": "conditionals",
-    "source": "result: when x is\n    1 then 'yes'\n    else 'no'\n",
+    "source": "result: when x is\n    case 1 then 'yes'\n    else 'no'\n",
     "valid": true
   },
   {
     "name": "named results",
-    "source": "pair() left Int, right Int:\nreturn left: 1, right: 2\n",
+    "source": "pair() left Int, right Int:\n    return left: 1, right: 2\n",
     "valid": true
   },
   {
@@ -115,8 +132,8 @@
     "valid": false
   },
   {
-    "name": "explicit loop and if conditions",
-    "source": "run: while x is True\n    consume(x)\nloop\ncheck: if x is True\n    consume(x)\nreturn\n",
+    "name": "indented loop and if conditions",
+    "source": "run: while x is True do\n    consume(x)\ncheck: when x is True then\n    consume(x)\n    return\n",
     "valid": true
   },
   {
@@ -136,7 +153,7 @@
   },
   {
     "name": "fixed-array annotations",
-    "source": "fill(data [Byte; 4]) [Byte; 4]: data\n",
+    "source": "fill(data [Byte; 4]) [Byte; 4]: return data\n",
     "valid": true
   },
   {
@@ -146,12 +163,12 @@
   },
   {
     "name": "generic parameter and return type",
-    "source": "identity(value t) t: value\nBox(t) has value t\n",
+    "source": "identity(value t) t: return value\nBox(t) has value t\n",
     "valid": true
   },
   {
     "name": "proof-bearing results",
-    "source": "check(value Int) Yes thus value = 1 or No: Yes\n",
+    "source": "check(value Int) Yes thus value = 1 or No: return Yes\n",
     "valid": true
   },
   {
@@ -161,12 +178,183 @@
   },
   {
     "name": "generic reference and variant result types",
-    "source": "copy(value ref t) t: deref value\nChoice is Ready -> Int or Missing -> Int\n",
+    "source": "copy(value ref t) t: return deref value\nChoice is Ready -> Int or Missing -> Int\n",
     "valid": true
   },
   {
     "name": "proof operators are contextual",
-    "source": "check(value Int) Yes thus value == 1 and value /= 2 or No: Yes\n",
+    "source": "check(value Int) Yes thus value == 1 and value /= 2 or No: return Yes\n",
     "valid": true
+  },
+  {
+    "name": "machine encoding declarations",
+    "source": "#machine(region)\nwrite(pointer @Byte, length Word)\n#machine(region)\nread(value Word) Word\n",
+    "valid": true,
+    "compiler": false
+  },
+  {
+    "name": "removed assembly expression",
+    "source": "write(): return #asm('spec')\n",
+    "valid": false
+  },
+  {
+    "name": "domain queries and range pattern parameters",
+    "source": "Range(lb to ub) is lb to ub\nRange(lb to ub) has\n    min: lb\n    max: ub\nWord is in Range(-128 to 127)\nWord has\n    lower(): return Range(domain of Self).min\n",
+    "valid": true
+  },
+  {
+    "name": "record methods with range elements and destructuring",
+    "valid": true,
+    "source": "Packet has Copy and Release\n    values Buffer(Byte)\n\n    --- Copies the input elements.\n    from_values(source [in Byte; count]) Self:\n        values: Buffer.with_capacity(Byte, count as Length)\n        for index in 0 to count\n            values.push(source.[index] as Byte)\n        return Self(values)\n\n    copy(self ref) Self: return Self(values: self.values.copy)\n\n    #infix('+')\n    merge(self own, other own Self) Self:\n        Packet(values) := self\n        Packet(values: right) := other\n        values.append(right)\n        return Self(values)\n\n    append(self mut, other own Self): return self.values.append(other.values)\n\nPrintable has render Packet\n"
+  },
+  {
+    "name": "private blocks mix fields and methods",
+    "source": "Record has\n    visible Word\n    #private\n        secret Word\n        hidden(self ref) Word:\n            return self.secret\n    read(self ref) Word: return self.secret\nOther has value Word\n",
+    "valid": true
+  },
+  {
+    "name": "private blocks with module grants",
+    "source": "Record has\n    #private(client, other.module)\n        secret Word\n        hidden(self ref) Word: return self.secret\n",
+    "valid": true
+  },
+  {
+    "name": "multiple private blocks and public members",
+    "source": "Record has\n    #private\n        first Word\n    middle Word\n    #private(client)\n        second Word\n    last Word\n",
+    "valid": true
+  },
+  {
+    "name": "indented function and conditional returns",
+    "source": "choose(flag Int) Int:\n    when flag = 1 then\n        return 7\n    return 8\nnext Int:\n    return 9\n",
+    "valid": true
+  },
+  {
+    "name": "nested loops end on dedent",
+    "source": "run:\n    for index in 0 to 3\n        while ready do\n            observe(index)\n        observe(index)\n    after\n    return\nnext: 1\n",
+    "valid": true
+  },
+  {
+    "name": "obsolete aligned function returns",
+    "source": "run Int:\n    value: 7\nreturn value\n",
+    "valid": false
+  },
+  {
+    "name": "obsolete aligned conditional returns",
+    "source": "run Int:\n    if ready\n        observe\n    return 7\n",
+    "valid": false
+  },
+  {
+    "name": "case value blocks",
+    "valid": true,
+    "source": "choose(value Byte) Byte:\n    result: when\n        case value < 4 then\n            adjusted: 7\n            adjusted\n        else\n            value\n    return result\n"
+  },
+  {
+    "name": "pattern cases with continued guards",
+    "valid": true,
+    "source": "result: when target is\n    case Some(value)\n        and value > 0\n    then value\n    case None then 0\n    else -1\n"
+  },
+  {
+    "name": "shared comparison cases",
+    "valid": true,
+    "source": "result: when value\n    case < 0 then -1\n    case = 0 then 0\n    else 1\n"
+  },
+  {
+    "name": "removed if conditional",
+    "valid": false,
+    "source": "choose(value Byte) Byte:\n    if value < 4\n        return 7\n    return value\n"
+  },
+  {
+    "name": "field and parameter refinements",
+    "source": "Storage(x) has\n    capacity Count(x) and capacity * #size(x) <= max_count\n    initialized Count(x) and <= capacity\n    initialize(self mut and self.initialized < self.capacity, index Count(x) and index = self.initialized, value own x): return thus self.initialized = index + 1\n",
+    "valid": true
+  },
+  {
+    "name": "shorthand binding refinements",
+    "source": "value is >= 0 and not = 5 and < 100: 2\npositive Int and > 0: 2\n",
+    "valid": true
+  },
+  {
+    "name": "named payload result contracts",
+    "source": "reserve(c Count(x)) storage Allocation(x) thus storage.initialized_count = 0 and storage.capacity_count >= c or AllocError: return OutOfMemory\n",
+    "valid": true
+  },
+  {
+    "name": "generic union results",
+    "source": "unpack(self) x or Empty: return Empty\nchoose(x) Block(x) or Error or Other(x): return Empty\n",
+    "valid": true
+  },
+  {
+    "name": "named and sequence type arguments",
+    "source": "forward(value Container(element: Byte, allocator: Arena)) Container(allocator: Arena, element: Byte): return value\nHolder has values Box([Byte; 4])\n",
+    "valid": true
+  },
+  {
+    "name": "nested member rebindings",
+    "source": "run:\n    self.inner.value :: 1\n    pointer.[0].field :: 2\n    return\n",
+    "valid": true
+  },
+  {
+    "name": "slice borrows",
+    "source": "borrow(source, start, count): return ref source.[start; count]\nborrow_mut(source, count): return mut source.[0; count]\n",
+    "valid": true
+  },
+  {
+    "name": "standalone method definitions",
+    "source": "Copy.release(self):\n    return\nBox(x).release(self): return\n",
+    "valid": true
+  },
+  {
+    "name": "bare inline returns preserve following declarations",
+    "source": "Reserved has release(self): return\nResult is Reserved or Error\nResult has\n    release(self): return\n",
+    "valid": true
+  },
+  {
+    "name": "multiline trait composition",
+    "source": "Word has Add and Eq\n         and Less and Greater\n    release(self):\n        return\n",
+    "valid": true
+  },
+  {
+    "name": "continued when branches",
+    "source": "choose(value) Int:\n    return when value > 0\n           then 1\n           else 0\n",
+    "valid": true
+  },
+  {
+    "name": "aligned case then branches",
+    "source": "choose(value):\n    return when\n        case value is Some(error)\n        then error\n        else 0\n",
+    "valid": true
+  },
+  {
+    "name": "domain membership patterns",
+    "source": "choose(value): return when value is in Byte then 1 else 0\n",
+    "valid": true
+  },
+  {
+    "name": "declaration self alias",
+    "source": "Identity is self\n",
+    "valid": true
+  },
+  {
+    "name": "removed empty value",
+    "source": "value: ()\n",
+    "valid": false
+  },
+  {
+    "name": "unsupported parameter type union",
+    "source": "choose(value True or False): return\n",
+    "valid": false
+  },
+  {
+    "name": "unsupported double colon method definitions",
+    "source": "Copy::release(self): return\n",
+    "valid": false
+  },
+  {
+    "name": "conditional branch imports",
+    "source": "main: when 1 = 1 then\n    use dev.tools as tools\n    tools.show_wireframe\nelse 7\n",
+    "valid": true
+  },
+  {
+    "name": "malformed conditional branch import",
+    "source": "main: when 0 = 1 then\n    use\nelse 7\n",
+    "valid": false
   }
 ]

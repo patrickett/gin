@@ -112,10 +112,10 @@ composed interface with qualified methods
 ================================================================================
 
 Combined has TraitA and TraitB
-    TraitA.run(self ref) Int := 1
-    TraitB.run(self ref) Int := 2
+    TraitA.run(self ref) Int := return 1
+    TraitB.run(self ref) Int := return 2
 
---------------------------------------------------------------------------------
+---
 
 (source_file
   (declare_statement
@@ -136,8 +136,9 @@ Combined has TraitA and TraitB
         return_type: (tag
           (type_identifier))
         (member_default
-          value: (literal
-            (number))))
+          value: (return_statement
+            (literal
+              (number)))))
       (record_signature
         (qualified_member_name
           trait: (type_identifier)
@@ -148,8 +149,9 @@ Combined has TraitA and TraitB
         return_type: (tag
           (type_identifier))
         (member_default
-          value: (literal
-            (number)))))))
+          value: (return_statement
+            (literal
+              (number))))))))
 
 ================================================================================
 declare union
@@ -188,9 +190,9 @@ x: 42
 bind with camelCase name
 ================================================================================
 
-regConstraint(reg Register) String: ''
+regConstraint(reg Register) String: return ''
 
---------------------------------------------------------------------------------
+---
 
 (source_file
   (bind_statement
@@ -202,8 +204,9 @@ regConstraint(reg Register) String: ''
           (type_identifier))))
     return_type: (tag
       (type_identifier))
-    value: (literal
-      (string))))
+    value: (return_statement
+      (literal
+        (string)))))
 
 ================================================================================
 auto trait
@@ -262,11 +265,11 @@ Copy has can_copy Bool: is_copy(Self)
 when arms with logical and body
 ================================================================================
 
-all_named_copy(fields List(NamedTy)) Bool := when fields is
-    []                  then True
-    [f, ...rest]        then is_copy(f.ty) and all_named_copy(rest)
+all_named_copy(fields List(NamedTy)) Bool := return when fields is
+    case []                  then True
+    case [f, ...rest]        then is_copy(f.ty) and all_named_copy(rest)
 
---------------------------------------------------------------------------------
+---
 
 (source_file
   (bind_statement
@@ -281,42 +284,43 @@ all_named_copy(fields List(NamedTy)) Bool := when fields is
               (type_identifier))))))
     return_type: (tag
       (type_identifier))
-    value: (when_expression
-      subject: (identifier)
-      (when_pattern_arm
-        pattern: (is_pattern
-          (list_pattern))
-        body: (type_identifier))
-      (when_pattern_arm
-        pattern: (is_pattern
-          (list_pattern
-            (is_pattern
-              (identifier))
-            (is_pattern
-              (identifier))))
-        body: (binary_expression
-          left: (call_expression
-            function: (identifier)
-            arguments: (argument_list
-              (member_expression
-                base: (identifier)
-                field: (identifier))))
-          right: (call_expression
-            function: (identifier)
-            arguments: (argument_list
-              (identifier))))))))
+    value: (return_statement
+      (when_expression
+        subject: (identifier)
+        (when_pattern_arm
+          pattern: (is_pattern
+            (list_pattern))
+          body: (type_identifier))
+        (when_pattern_arm
+          pattern: (is_pattern
+            (list_pattern
+              (is_pattern
+                (identifier))
+              (is_pattern
+                (identifier))))
+          body: (binary_expression
+            left: (call_expression
+              function: (identifier)
+              arguments: (argument_list
+                (member_expression
+                  base: (identifier)
+                  field: (identifier))))
+            right: (call_expression
+              function: (identifier)
+              arguments: (argument_list
+                (identifier)))))))))
 
 ================================================================================
 when is arms without repeated is
 ================================================================================
 
-is_copy(x Type) Bool := when x is
-    Primitive(_, _)     then True
-    Ref(_, False)       then True
-    Opaque(_)           then False
-    Array(elem, _)      then is_copy(elem)
+is_copy(x Type) Bool := return when x is
+    case Primitive(_, _)     then True
+    case Ref(_, False)       then True
+    case Opaque(_)           then False
+    case Array(elem, _)      then is_copy(elem)
 
---------------------------------------------------------------------------------
+---
 
 (source_file
   (bind_statement
@@ -328,43 +332,44 @@ is_copy(x Type) Bool := when x is
           (type_identifier))))
     return_type: (tag
       (type_identifier))
-    value: (when_expression
-      subject: (identifier)
-      (when_pattern_arm
-        pattern: (is_pattern
-          (tag
-            (type_application
-              (type_identifier)
-              (type_variable)
-              (type_variable))))
-        body: (type_identifier))
-      (when_pattern_arm
-        pattern: (is_pattern
-          (tag
-            (type_application
-              (type_identifier)
-              (type_variable)
-              (tag
-                (type_identifier)))))
-        body: (type_identifier))
-      (when_pattern_arm
-        pattern: (is_pattern
-          (tag
-            (type_application
-              (type_identifier)
-              (type_variable))))
-        body: (type_identifier))
-      (when_pattern_arm
-        pattern: (is_pattern
-          (tag
-            (type_application
-              (type_identifier)
-              (type_variable)
-              (type_variable))))
-        body: (call_expression
-          function: (identifier)
-          arguments: (argument_list
-            (identifier)))))))
+    value: (return_statement
+      (when_expression
+        subject: (identifier)
+        (when_pattern_arm
+          pattern: (is_pattern
+            (tag
+              (type_application
+                (type_identifier)
+                (type_variable)
+                (type_variable))))
+          body: (type_identifier))
+        (when_pattern_arm
+          pattern: (is_pattern
+            (tag
+              (type_application
+                (type_identifier)
+                (type_variable)
+                (tag
+                  (type_identifier)))))
+          body: (type_identifier))
+        (when_pattern_arm
+          pattern: (is_pattern
+            (tag
+              (type_application
+                (type_identifier)
+                (type_variable))))
+          body: (type_identifier))
+        (when_pattern_arm
+          pattern: (is_pattern
+            (tag
+              (type_application
+                (type_identifier)
+                (type_variable)
+                (type_variable))))
+          body: (call_expression
+            function: (identifier)
+            arguments: (argument_list
+              (identifier))))))))
 
 ================================================================================
 newline tests: call args
@@ -412,9 +417,9 @@ newline tests: function params
 add(
     a Int
     b Int
-) Int := a + b
+) Int := return a + b
 
---------------------------------------------------------------------------------
+---
 
 (source_file
   (bind_statement
@@ -430,9 +435,10 @@ add(
           (type_identifier))))
     return_type: (tag
       (type_identifier))
-    value: (binary_expression
-      left: (identifier)
-      right: (identifier))))
+    value: (return_statement
+      (binary_expression
+        left: (identifier)
+        right: (identifier)))))
 
 ================================================================================
 newline tests: record fields
@@ -477,9 +483,9 @@ declare member defaults
 Widget has
     label Str: 'ok'
     size Int := compute_size()
-    render(self) Str := label
+    render(self) Str := return label
 
---------------------------------------------------------------------------------
+---
 
 (source_file
   (declare_statement
@@ -508,7 +514,8 @@ Widget has
         (tag
           (type_identifier))
         (member_default
-          (identifier))))))
+          (return_statement
+            (identifier)))))))
 
 ================================================================================
 qualified trait members
@@ -516,9 +523,9 @@ qualified trait members
 
 Bool has ToString
     ToString.to_string: 'true'
-    ToString.format(self) Str := 'true'
+    ToString.format(self) Str := return 'true'
 
---------------------------------------------------------------------------------
+---
 
 (source_file
   (declare_statement
@@ -544,8 +551,9 @@ Bool has ToString
         (tag
           (type_identifier))
         (member_default
-          (literal
-            (string)))))))
+          (return_statement
+            (literal
+              (string))))))))
 
 ================================================================================
 parenthesized has members are rejected
@@ -573,9 +581,9 @@ grouped attributes are rejected
 ================================================================================
 
 #[inline, complexity(Constant)]
-get(i Int) Byte: buf.(i)
+get(i Int) Byte: return buf.[i]
 
---------------------------------------------------------------------------------
+---
 
 (source_file
   (ERROR)
@@ -594,19 +602,19 @@ get(i Int) Byte: buf.(i)
           (type_identifier))))
     (tag
       (type_identifier))
-    (member_expression
-      (identifier)
-      (argument_list
+    (return_statement
+      (index_expression
+        (identifier)
         (identifier)))))
 
 ================================================================================
 grouped references and prefix local bindings
 ================================================================================
 
-borrow(value ref{r} Entity) ref{r} Entity: value
+borrow(value ref{r} Entity) ref{r} Entity: return value
 mut current Entity: place
 
---------------------------------------------------------------------------------
+---
 
 (source_file
   (bind_statement
@@ -626,7 +634,8 @@ mut current Entity: place
           root: (identifier))
         type: (tag
           (type_identifier))))
-    value: (identifier))
+    value: (return_statement
+      (identifier)))
   (bind_statement
     name: (identifier)
     return_type: (tag
@@ -678,11 +687,11 @@ List(x, length PointerSize: ?, capacity PointerSize: ?, storage StorageIdentity:
 ownership modifiers and expressions
 ================================================================================
 
-drop(value own Entity): value
-inspect(value ref Entity, output mut Entity): update(value, output)
+drop(value own Entity): return value
+inspect(value ref Entity, output mut Entity): return update(value, output)
 main: drop(value)
 
---------------------------------------------------------------------------------
+---
 
 (source_file
   (bind_statement
@@ -692,7 +701,8 @@ main: drop(value)
         name: (identifier)
         type: (tag
           (type_identifier))))
-    value: (identifier))
+    value: (return_statement
+      (identifier)))
   (bind_statement
     name: (identifier)
     (parameters
@@ -706,11 +716,12 @@ main: drop(value)
         name: (identifier)
         type: (tag
           (type_identifier))))
-    value: (call_expression
-      function: (identifier)
-      arguments: (argument_list
-        (identifier)
-        (identifier))))
+    value: (return_statement
+      (call_expression
+        function: (identifier)
+        arguments: (argument_list
+          (identifier)
+          (identifier)))))
   (bind_statement
     name: (identifier)
     value: (call_expression
@@ -722,9 +733,9 @@ main: drop(value)
 semantic group paths
 ================================================================================
 
-power_up(entity ref{entities} Entity, ring mut{entities.rings.items} Ring): 0
+power_up(entity ref{entities} Entity, ring mut{entities.rings.items} Ring): return 0
 
---------------------------------------------------------------------------------
+---
 
 (source_file
   (bind_statement
@@ -746,5 +757,267 @@ power_up(entity ref{entities} Entity, ring mut{entities.rings.items} Ring): 0
           segment: (identifier))
         type: (tag
           (type_identifier))))
-    value: (literal
-      (number))))
+    value: (return_statement
+      (literal
+        (number)))))
+
+================================================================================
+integer domain annotations
+================================================================================
+
+Word is in -128 to 127
+identity(value is in Word) is in Word: return value
+Word has
+    subtract(self, rhs Self) Self:
+        left is in Self: self
+        right is in Self: rhs
+        return (left - right) as Self
+
+---
+
+(source_file
+  (declare_statement
+    (type_identifier)
+    (in_range_type
+      (range_type
+        (number)
+        (number))))
+  (bind_statement
+    (identifier)
+    (parameters
+      (parameter
+        (identifier)
+        (integer_domain_type
+          (tag
+            (type_identifier)))))
+    (integer_domain_type
+      (tag
+        (type_identifier)))
+    (return_statement
+      (identifier)))
+  (declare_statement
+    (type_identifier)
+    (decl_member_list
+      (record_signature
+        (identifier)
+        (parameters
+          (parameter
+            (self_parameter))
+          (parameter
+            (identifier)
+            (tag
+              (self_type))))
+        (tag
+          (self_type))
+        (member_default
+          (block_body
+            (bind_statement
+              (identifier)
+              (integer_domain_type
+                (tag
+                  (self_type)))
+              (self_expression))
+            (bind_statement
+              (identifier)
+              (integer_domain_type
+                (tag
+                  (self_type)))
+              (identifier))
+            (return_statement
+              (cast_expression
+                (parenthesized_expression
+                  (binary_expression
+                    (identifier)
+                    (identifier)))
+                (tag
+                  (self_type))))))))))
+
+==================
+generic operator traits and default methods
+==================
+Div(result) has
+    #infix('/'), #inline
+    divide(self, rhs Self) result
+Copy has
+    copy(value ref Self) Self:
+        bits is in Self: value
+        return bits as Self
+Word has Div(Outcome) and Copy
+    divide(self is in Self, rhs is in Self): return self / rhs
+
+---
+
+(source_file
+  (declare_statement
+    (type_identifier)
+    (declaration_parameters
+      (type_variable))
+    (decl_member_list
+      (record_signature
+        (attributes
+          (attribute_call
+            (identifier)
+            (argument_list
+              (literal
+                (string))))
+          (identifier))
+        (identifier)
+        (parameters
+          (parameter
+            (self_parameter))
+          (parameter
+            (identifier)
+            (tag
+              (self_type))))
+        (type_variable))))
+  (declare_statement
+    (type_identifier)
+    (decl_member_list
+      (record_signature
+        (identifier)
+        (parameters
+          (parameter
+            (identifier)
+            (tag
+              (reference_type
+                (tag
+                  (self_type))))))
+        (tag
+          (self_type))
+        (member_default
+          (block_body
+            (bind_statement
+              (identifier)
+              (integer_domain_type
+                (tag
+                  (self_type)))
+              (identifier))
+            (return_statement
+              (cast_expression
+                (identifier)
+                (tag
+                  (self_type)))))))))
+  (declare_statement
+    (type_identifier)
+    (trait_composition
+      (tag
+        (type_application
+          (type_identifier)
+          (tag
+            (type_identifier))))
+      (tag
+        (type_identifier)))
+    (decl_member_list
+      (record_signature
+        (identifier)
+        (parameters
+          (parameter
+            (self_parameter)
+            (integer_domain_type
+              (tag
+                (self_type))))
+          (parameter
+            (identifier)
+            (integer_domain_type
+              (tag
+                (self_type)))))
+        (member_default
+          (return_statement
+            (binary_expression
+              (self_expression)
+              (identifier))))))))
+
+================================================================================
+emission with typed arguments
+================================================================================
+
+run(value Word) Word: return #emit(code, Inputs(value: value))
+
+---
+
+(source_file
+  (bind_statement
+    name: (identifier)
+    (parameters
+      (parameter
+        name: (identifier)
+        type: (tag
+          (type_identifier))))
+    return_type: (tag
+      (type_identifier))
+    value: (return_statement
+      (compile_time_query
+        code: (identifier)
+        arguments: (call_expression
+          function: (type_identifier)
+          arguments: (argument_list
+            (named_argument
+              name: (identifier)
+              value: (identifier))))))))
+
+==================
+range patterns and domain queries
+==================
+
+Range(lb to ub) is lb to ub
+Range(lb to ub) has
+    min: lb
+    max: ub
+Word is in Range(-128 to 127)
+Word has
+    lower(): return Range(domain of Self).min
+
+---
+
+(source_file
+  (declare_statement
+    (type_identifier)
+    (declaration_parameters
+      (range_parameter
+        (identifier)
+        (identifier)))
+    (range_type
+      (identifier)
+      (identifier)))
+  (declare_statement
+    (type_identifier)
+    (declaration_parameters
+      (range_parameter
+        (identifier)
+        (identifier)))
+    (decl_member_list
+      (record_property
+        (identifier)
+        (field_default
+          (identifier)))
+      (record_property
+        (identifier)
+        (field_default
+          (identifier)))))
+  (declare_statement
+    (type_identifier)
+    (in_range_type
+      (tag
+        (type_application
+          (type_identifier)
+          (range_expression
+            (unary_expression
+              (literal
+                (number)))
+            (literal
+              (number)))))))
+  (declare_statement
+    (type_identifier)
+    (decl_member_list
+      (record_signature
+        (identifier)
+        (parameters)
+        (member_default
+          (return_statement
+            (member_expression
+              (call_expression
+                (type_identifier)
+                (argument_list
+                  (domain_expression
+                    (self_type))))
+              (identifier))))))))

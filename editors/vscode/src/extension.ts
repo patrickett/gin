@@ -24,7 +24,7 @@ function createClient(outputChannel: vscode.OutputChannel): LanguageClient {
   };
 
   const clientOptions: LanguageClientOptions = {
-    documentSelector: [{ scheme: "file", language: "gin" }],
+    documentSelector: [{ scheme: "file", language: "gin" }, { scheme: "file", language: "gin-flask" }],
     outputChannel,
     outputChannelName: "Gin Language Server",
   };
