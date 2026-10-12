@@ -1,0 +1,189 @@
+==================
+Numeric predicates and membership guards
+==================
+
+choose(value is in 0 to 255): return when value >= 0 and value < 16 then 1 else 0
+member(value is in 0 to 255): return when value in 0 to 15 then 1 else 0
+check(value is in 0 to 255):
+    when value = 3 then
+      return 1
+    return 0
+repeat(value mut is in 0 to 255):
+    while value < 16 do
+        value :: 16
+    return
+
+---
+
+(source_file
+  (bind_statement
+    (identifier)
+    (parameters
+      (parameter
+        (identifier)
+        (integer_domain_type
+          (range_type
+            (number)
+            (number)))))
+    (return_statement
+      (when_expression
+        (logical_condition
+          (numeric_condition
+            (identifier)
+            (literal
+              (number)))
+          (numeric_condition
+            (identifier)
+            (literal
+              (number))))
+        (literal
+          (number))
+        (when_else_arm
+          (literal
+            (number))))))
+  (bind_statement
+    (identifier)
+    (parameters
+      (parameter
+        (identifier)
+        (integer_domain_type
+          (range_type
+            (number)
+            (number)))))
+    (return_statement
+      (when_expression
+        (membership_condition
+          (identifier)
+          (range_expression
+            (literal
+              (number))
+            (literal
+              (number))))
+        (literal
+          (number))
+        (when_else_arm
+          (literal
+            (number))))))
+  (bind_statement
+    (identifier)
+    (parameters
+      (parameter
+        (identifier)
+        (integer_domain_type
+          (range_type
+            (number)
+            (number)))))
+    (block_body
+      (when_expression
+        (numeric_condition
+          (identifier)
+          (literal
+            (number)))
+        (block_body
+          (return_statement
+            (literal
+              (number)))))
+      (return_statement
+        (literal
+          (number)))))
+  (bind_statement
+    (identifier)
+    (parameters
+      (parameter
+        (identifier)
+        (tag
+          (reference_type
+            (integer_domain_type
+              (range_type
+                (number)
+                (number)))))))
+    (block_body
+      (while_expression
+        (numeric_condition
+          (identifier)
+          (literal
+            (number)))
+        (bind_statement
+          (identifier)
+          (literal
+            (number))))
+      (return_statement))))
+
+==================
+Stored propositions and explicit proposition parameters
+==================
+less(value is in 0 to 255, check is value < 16) is value < 16: return check
+run(value is in 0 to 255):
+    small is value < 16: value < 16
+    when small and value >= 0 then
+        return 1
+    return when small then 1 else 0
+
+---
+
+(source_file
+  (bind_statement
+    (identifier)
+    (parameters
+      (parameter
+        (identifier)
+        (integer_domain_type
+          (range_type
+            (number)
+            (number))))
+      (parameter
+        (identifier)
+        (proposition_type
+          (proof_proposition
+            (proof_relation
+              (identifier)
+              (number))))))
+    (proposition_type
+      (proof_proposition
+        (proof_relation
+          (identifier)
+          (number))))
+    (return_statement
+      (identifier)))
+  (bind_statement
+    (identifier)
+    (parameters
+      (parameter
+        (identifier)
+        (integer_domain_type
+          (range_type
+            (number)
+            (number)))))
+    (block_body
+      (bind_statement
+        (identifier)
+        (proposition_type
+          (proof_proposition
+            (proof_relation
+              (identifier)
+              (number))))
+        (binary_expression
+          (identifier)
+          (literal
+            (number))))
+      (when_expression
+        (logical_condition
+          (proposition_condition
+            (identifier))
+          (numeric_condition
+            (identifier)
+            (literal
+              (number))))
+        (block_body
+          (return_statement
+            (literal
+              (number)))))
+      (return_statement
+        (when_expression
+          (proposition_condition
+            (identifier))
+          (literal
+            (number))
+          (when_else_arm
+            (literal
+              (number))))))))

@@ -1,0 +1,563 @@
+==================
+field and parameter refinements
+==================
+
+Storage(x) has
+    capacity Count(x) and capacity * #size(x) <= max_count
+    initialized Count(x) and <= capacity
+    initialize(self mut and self.initialized < self.capacity, index Count(x) and index = self.initialized, value own x): return thus self.initialized = index + 1
+
+---
+
+(source_file
+  (declare_statement
+    (type_identifier)
+    (declaration_parameters
+      (type_variable))
+    (decl_member_list
+      (record_field
+        (identifier)
+        (tag
+          (type_application
+            (type_identifier)
+            (type_variable)))
+        (refinement
+          (proof_proposition
+            (proof_relation
+              (proof_arithmetic
+                (identifier)
+                (compile_time_query
+                  (type_variable)))
+              (identifier)))))
+      (record_field
+        (identifier)
+        (tag
+          (type_application
+            (type_identifier)
+            (type_variable)))
+        (refinement
+          (predicate
+            (identifier))))
+      (record_signature
+        (identifier)
+        (parameters
+          (parameter
+            (self_parameter)
+            (refinement
+              (proof_proposition
+                (proof_relation
+                  (proof_member
+                    (identifier))
+                  (proof_member
+                    (identifier))))))
+          (parameter
+            (identifier)
+            (tag
+              (type_application
+                (type_identifier)
+                (type_variable)))
+            (refinement
+              (proof_proposition
+                (proof_relation
+                  (identifier)
+                  (proof_member
+                    (identifier))))))
+          (parameter
+            (identifier)
+            (type_variable)))
+        (member_default
+          (return_statement
+            (proof_proposition
+              (proof_relation
+                (proof_member
+                  (identifier))
+                (proof_arithmetic
+                  (identifier)
+                  (number))))))))))
+
+==================
+shorthand binding refinements
+==================
+
+value is >= 0 and not = 5 and < 100: 2
+positive Int and > 0: 2
+
+---
+
+(source_file
+  (bind_statement
+    (identifier)
+    (proposition_type
+      (predicate
+        (number)))
+    (refinement
+      (predicate
+        (number))
+      (predicate
+        (number)))
+    (literal
+      (number)))
+  (bind_statement
+    (identifier)
+    (tag
+      (type_identifier))
+    (refinement
+      (predicate
+        (number)))
+    (literal
+      (number))))
+
+==================
+named payload result contracts
+==================
+
+reserve(c Count(x)) storage Allocation(x) thus storage.initialized_count = 0 and storage.capacity_count >= c or AllocError: return OutOfMemory
+
+---
+
+(source_file
+  (bind_statement
+    (identifier)
+    (parameters
+      (parameter
+        (identifier)
+        (tag
+          (type_application
+            (type_identifier)
+            (type_variable)))))
+    (named_results
+      (named_result
+        (identifier)
+        (type_union
+          (proof_result_type
+            (tag
+              (type_application
+                (type_identifier)
+                (type_variable)))
+            (proof_proposition
+              (proof_proposition
+                (proof_relation
+                  (proof_member
+                    (identifier)
+                    (identifier))
+                  (number)))
+              (proof_proposition
+                (proof_relation
+                  (proof_member
+                    (identifier)
+                    (identifier))
+                  (identifier)))))
+          (tag
+            (type_identifier)))))
+    (return_statement
+      (type_identifier))))
+
+==================
+generic union results
+==================
+
+unpack(self) x or Empty: return Empty
+choose(x) Block(x) or Error or Other(x): return Empty
+
+---
+
+(source_file
+  (bind_statement
+    (identifier)
+    (parameters
+      (parameter
+        (self_parameter)))
+    (type_union
+      (type_variable)
+      (tag
+        (type_identifier)))
+    (return_statement
+      (type_identifier)))
+  (bind_statement
+    (identifier)
+    (parameters
+      (parameter
+        (identifier)))
+    (type_union
+      (tag
+        (type_application
+          (type_identifier)
+          (type_variable)))
+      (tag
+        (type_identifier))
+      (tag
+        (type_application
+          (type_identifier)
+          (type_variable))))
+    (return_statement
+      (type_identifier))))
+
+==================
+named and sequence type arguments
+==================
+
+forward(value Container(element: Byte, allocator: Arena)) Container(allocator: Arena, element: Byte): return value
+Holder has values Box([Byte; 4])
+
+---
+
+(source_file
+  (bind_statement
+    (identifier)
+    (parameters
+      (parameter
+        (identifier)
+        (tag
+          (type_application
+            (type_identifier)
+            (named_argument
+              (identifier)
+              (type_identifier))
+            (named_argument
+              (identifier)
+              (type_identifier))))))
+    (tag
+      (type_application
+        (type_identifier)
+        (named_argument
+          (identifier)
+          (type_identifier))
+        (named_argument
+          (identifier)
+          (type_identifier))))
+    (return_statement
+      (identifier)))
+  (declare_statement
+    (type_identifier)
+    (decl_member_list
+      (record_field
+        (identifier)
+        (tag
+          (type_application
+            (type_identifier)
+            (sequence_type
+              (tag
+                (type_identifier))
+              (literal
+                (number)))))))))
+
+==================
+nested member rebindings
+==================
+
+run:
+    self.inner.value :: 1
+    pointer.[0].field :: 2
+    return
+
+---
+
+(source_file
+  (bind_statement
+    (identifier)
+    (block_body
+      (record_set
+        (member_expression
+          (self_expression)
+          (identifier))
+        (identifier)
+        (literal
+          (number)))
+      (record_set
+        (index_expression
+          (identifier)
+          (literal
+            (number)))
+        (identifier)
+        (literal
+          (number)))
+      (return_statement))))
+
+==================
+slice borrows
+==================
+
+borrow(source, start, count): return ref source.[start; count]
+borrow_mut(source, count): return mut source.[0; count]
+
+---
+
+(source_file
+  (bind_statement
+    (identifier)
+    (parameters
+      (parameter
+        (identifier))
+      (parameter
+        (identifier))
+      (parameter
+        (identifier)))
+    (return_statement
+      (unary_expression
+        (index_expression
+          (identifier)
+          (identifier)
+          (identifier)))))
+  (bind_statement
+    (identifier)
+    (parameters
+      (parameter
+        (identifier))
+      (parameter
+        (identifier)))
+    (return_statement
+      (unary_expression
+        (index_expression
+          (identifier)
+          (literal
+            (number))
+          (identifier))))))
+
+==================
+standalone method definitions
+==================
+
+Copy.release(self):
+    return
+Box(x).release(self): return
+
+---
+
+(source_file
+  (method_bind_statement
+    (tag
+      (type_identifier))
+    (bind_statement
+      (identifier)
+      (parameters
+        (parameter
+          (self_parameter)))
+      (block_body
+        (return_statement))))
+  (method_bind_statement
+    (tag
+      (type_application
+        (type_identifier)
+        (type_variable)))
+    (bind_statement
+      (identifier)
+      (parameters
+        (parameter
+          (self_parameter)))
+      (return_statement))))
+
+==================
+bare inline returns preserve following declarations
+==================
+
+Reserved has release(self): return
+Result is Reserved or Error
+Result has
+    release(self): return
+
+---
+
+(source_file
+  (declare_statement
+    (type_identifier)
+    (decl_member_list
+      (record_signature
+        (identifier)
+        (parameters
+          (parameter
+            (self_parameter)))
+        (member_default
+          (return_statement)))))
+  (declare_statement
+    (type_identifier)
+    (union_type
+      (variant
+        (tag
+          (type_identifier)))
+      (variant
+        (tag
+          (type_identifier)))))
+  (declare_statement
+    (type_identifier)
+    (decl_member_list
+      (record_signature
+        (identifier)
+        (parameters
+          (parameter
+            (self_parameter)))
+        (member_default
+          (return_statement))))))
+
+==================
+multiline trait composition
+==================
+
+Word has Add and Eq
+         and Less and Greater
+    release(self):
+        return
+
+---
+
+(source_file
+  (declare_statement
+    (type_identifier)
+    (trait_composition
+      (tag
+        (type_identifier))
+      (tag
+        (type_identifier))
+      (tag
+        (type_identifier))
+      (tag
+        (type_identifier)))
+    (decl_member_list
+      (record_signature
+        (identifier)
+        (parameters
+          (parameter
+            (self_parameter)))
+        (member_default
+          (block_body
+            (return_statement)))))))
+
+==================
+continued when branches
+==================
+
+choose(value) Int:
+    return when value > 0
+           then 1
+           else 0
+
+---
+
+(source_file
+  (bind_statement
+    (identifier)
+    (parameters
+      (parameter
+        (identifier)))
+    (tag
+      (type_identifier))
+    (block_body
+      (return_statement
+        (when_expression
+          (numeric_condition
+            (identifier)
+            (literal
+              (number)))
+          (literal
+            (number))
+          (when_else_arm
+            (literal
+              (number))))))))
+
+==================
+aligned case then branches
+==================
+
+choose(value):
+    return when
+        case value is Some(error)
+        then error
+        else 0
+
+---
+
+(source_file
+  (bind_statement
+    (identifier)
+    (parameters
+      (parameter
+        (identifier)))
+    (block_body
+      (return_statement
+        (when_expression
+          (when_cond_arm
+            (is_condition
+              (identifier)
+              (is_pattern
+                (tag
+                  (type_application
+                    (type_identifier)
+                    (type_variable)))))
+            (identifier))
+          (when_else_arm
+            (literal
+              (number))))))))
+
+==================
+domain membership patterns
+==================
+
+choose(value): return when value is in Byte then 1 else 0
+
+---
+
+(source_file
+  (bind_statement
+    (identifier)
+    (parameters
+      (parameter
+        (identifier)))
+    (return_statement
+      (when_expression
+        (is_condition
+          (identifier)
+          (is_pattern
+            (in_range_type
+              (tag
+                (type_identifier)))))
+        (literal
+          (number))
+        (when_else_arm
+          (literal
+            (number)))))))
+
+==================
+declaration self alias
+==================
+
+Identity is self
+
+---
+
+(source_file
+  (declare_statement
+    (type_identifier)
+    (self_expression)))
+
+==================
+conditional branch imports
+==================
+
+main: when 1 = 1 then
+    use dev.tools as tools
+    tools.show_wireframe
+else 7
+
+---
+
+(source_file
+  (bind_statement
+    (identifier)
+    (when_expression
+      (numeric_condition
+        (literal
+          (number))
+        (literal
+          (number)))
+      (block_body
+        (use_statement
+          (module_import
+            (path
+              (identifier)
+              (identifier))
+            (identifier)))
+        (member_expression
+          (identifier)
+          (identifier)))
+      (when_else_arm
+        (literal
+          (number))))))

@@ -1,0 +1,71 @@
+==================
+Return postconditions
+==================
+
+less(left ref is in 0 to 255, right is in 0 to 255):
+    when left < right is True then
+      return True thus left < right
+    return False thus left >= right
+
+clear(region mut Region):
+  return thus region.initialized_count = 0
+
+---
+
+(source_file
+  (bind_statement
+    (identifier)
+    (parameters
+      (parameter
+        (identifier)
+        (tag
+          (reference_type
+            (integer_domain_type
+              (range_type
+                (number)
+                (number))))))
+      (parameter
+        (identifier)
+        (integer_domain_type
+          (range_type
+            (number)
+            (number)))))
+    (block_body
+      (when_expression
+        (is_condition
+          (binary_expression
+            (identifier)
+            (identifier))
+          (is_pattern
+            (tag
+              (type_identifier))))
+        (block_body
+          (return_statement
+            (type_identifier)
+            (proof_proposition
+              (proof_relation
+                (identifier)
+                (identifier))))))
+      (return_statement
+        (type_identifier)
+        (proof_proposition
+          (proof_relation
+            (identifier)
+            (identifier))))))
+  (bind_statement
+    (identifier)
+    (parameters
+      (parameter
+        (identifier)
+        (tag
+          (reference_type
+            (tag
+              (type_identifier))))))
+    (block_body
+      (return_statement
+        (proof_proposition
+          (proof_relation
+            (proof_member
+              (identifier)
+              (identifier))
+            (number)))))))

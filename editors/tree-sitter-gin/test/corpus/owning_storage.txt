@@ -1,0 +1,36 @@
+==================
+Owning storage fields and ownership-passing parameters
+==================
+
+Allocation(x) has
+    address own x
+    capacity Count(x)
+    transfer(value own x) x: return value
+
+---
+
+(source_file
+  (declare_statement
+    (type_identifier)
+    (declaration_parameters
+      (type_variable))
+    (decl_member_list
+      (record_field
+        (identifier)
+        (type_variable))
+      (record_field
+        (identifier)
+        (tag
+          (type_application
+            (type_identifier)
+            (type_variable))))
+      (record_signature
+        (identifier)
+        (parameters
+          (parameter
+            (identifier)
+            (type_variable)))
+        (type_variable)
+        (member_default
+          (return_statement
+            (identifier)))))))

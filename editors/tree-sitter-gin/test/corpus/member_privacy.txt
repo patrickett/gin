@@ -1,0 +1,140 @@
+==================
+Private fields and methods
+==================
+
+Allocation(x) has
+    #private
+    address own x
+    capacity Count(x)
+    #private
+    inspect(self ref) x: return deref self.address
+
+---
+
+(source_file
+  (declare_statement
+    (type_identifier)
+    (declaration_parameters
+      (type_variable))
+    (decl_member_list
+      (record_field
+        (attributes
+          (identifier))
+        (identifier)
+        (type_variable))
+      (record_field
+        (identifier)
+        (tag
+          (type_application
+            (type_identifier)
+            (type_variable))))
+      (record_signature
+        (attributes
+          (identifier))
+        (identifier)
+        (parameters
+          (parameter
+            (self_parameter)))
+        (type_variable)
+        (member_default
+          (return_statement
+            (unary_expression
+              (member_expression
+                (self_expression)
+                (identifier)))))))))
+
+==================
+Private fields with an allocator module grant
+==================
+
+View(x) has
+    #private(alloc)
+    address ref @x
+
+---
+
+(source_file
+  (declare_statement
+    (type_identifier)
+    (declaration_parameters
+      (type_variable))
+    (decl_member_list
+      (record_field
+        (attributes
+          (attribute_call
+            (identifier)
+            (argument_list
+              (identifier))))
+        (identifier)
+        (tag
+          (reference_type
+            (tag
+              (pointer_type
+                (type_variable)))))))))
+
+==================
+Private blocks with fields, methods and module grants
+==================
+
+Record has
+    visible Word
+    #private(client, other.module)
+        secret Word
+        hidden(self ref) Word:
+            return self.secret
+    read(self ref) Word: return self.secret
+Other has value Word
+
+---
+
+(source_file
+  (declare_statement
+    (type_identifier)
+    (decl_member_list
+      (record_field
+        (identifier)
+        (tag
+          (type_identifier)))
+      (private_member_block
+        (identifier)
+        (argument_list
+          (identifier)
+          (member_expression
+            (identifier)
+            (identifier)))
+        (record_field
+          (identifier)
+          (tag
+            (type_identifier)))
+        (record_signature
+          (identifier)
+          (parameters
+            (parameter
+              (self_parameter)))
+          (tag
+            (type_identifier))
+          (member_default
+            (block_body
+              (return_statement
+                (member_expression
+                  (self_expression)
+                  (identifier)))))))
+      (record_signature
+        (identifier)
+        (parameters
+          (parameter
+            (self_parameter)))
+        (tag
+          (type_identifier))
+        (member_default
+          (return_statement
+            (member_expression
+              (self_expression)
+              (identifier)))))))
+  (declare_statement
+    (type_identifier)
+    (decl_member_list
+      (record_field
+        (identifier)
+        (tag
+          (type_identifier))))))

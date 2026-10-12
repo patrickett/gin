@@ -1,0 +1,184 @@
+==================
+Record methods with range elements and destructuring
+==================
+
+Packet has Copy and Release
+    values Buffer(Byte)
+
+    --- Copies the input elements.
+    from_values(source [in Byte; count]) Self:
+        values: Buffer.with_capacity(Byte, count as Length)
+        for index in 0 to count
+            values.push(source.[index] as Byte)
+        return Self(values)
+
+    copy(self ref) Self: return Self(values: self.values.copy)
+
+    #infix('+')
+    merge(self own, other own Self) Self:
+        Packet(values) := self
+        Packet(values: right) := other
+        values.append(right)
+        return Self(values)
+
+    append(self mut, other own Self): return self.values.append(other.values)
+
+Printable has render Packet
+
+---
+
+(source_file
+  (declare_statement
+    (type_identifier)
+    (trait_composition
+      (tag
+        (type_identifier))
+      (tag
+        (type_identifier)))
+    (decl_member_list
+      (record_field
+        (identifier)
+        (tag
+          (type_application
+            (type_identifier)
+            (tag
+              (type_identifier)))))
+      (doc_comment)
+      (record_signature
+        (identifier)
+        (parameters
+          (parameter
+            (identifier)
+            (sequence_type
+              (in_range_type
+                (tag
+                  (type_identifier)))
+              (identifier))))
+        (tag
+          (self_type))
+        (member_default
+          (block_body
+            (bind_statement
+              (identifier)
+              (call_expression
+                (member_expression
+                  (type_identifier)
+                  (identifier))
+                (argument_list
+                  (type_identifier)
+                  (cast_expression
+                    (identifier)
+                    (tag
+                      (type_identifier))))))
+            (for_expression
+              (pattern
+                (identifier))
+              (range_expression
+                (literal
+                  (number))
+                (identifier))
+              (call_expression
+                (member_expression
+                  (identifier)
+                  (identifier))
+                (argument_list
+                  (cast_expression
+                    (index_expression
+                      (identifier)
+                      (identifier))
+                    (tag
+                      (type_identifier))))))
+            (return_statement
+              (call_expression
+                (self_type)
+                (argument_list
+                  (identifier)))))))
+      (record_signature
+        (identifier)
+        (parameters
+          (parameter
+            (self_parameter)))
+        (tag
+          (self_type))
+        (member_default
+          (return_statement
+            (call_expression
+              (self_type)
+              (argument_list
+                (named_argument
+                  (identifier)
+                  (member_expression
+                    (member_expression
+                      (self_expression)
+                      (identifier))
+                    (identifier))))))))
+      (record_signature
+        (attributes
+          (attribute_call
+            (identifier)
+            (argument_list
+              (literal
+                (string)))))
+        (identifier)
+        (parameters
+          (parameter
+            (self_parameter))
+          (parameter
+            (identifier)
+            (tag
+              (self_type))))
+        (tag
+          (self_type))
+        (member_default
+          (block_body
+            (destructure_statement
+              (type_identifier)
+              (argument_list
+                (identifier))
+              (self_expression))
+            (destructure_statement
+              (type_identifier)
+              (argument_list
+                (named_argument
+                  (identifier)
+                  (identifier)))
+              (identifier))
+            (call_expression
+              (member_expression
+                (identifier)
+                (identifier))
+              (argument_list
+                (identifier)))
+            (return_statement
+              (call_expression
+                (self_type)
+                (argument_list
+                  (identifier)))))))
+      (record_signature
+        (identifier)
+        (parameters
+          (parameter
+            (self_parameter))
+          (parameter
+            (identifier)
+            (tag
+              (self_type))))
+        (member_default
+          (return_statement
+            (call_expression
+              (member_expression
+                (member_expression
+                  (self_expression)
+                  (identifier))
+                (identifier))
+              (argument_list
+                (member_expression
+                  (identifier)
+                  (identifier)))))))))
+  (declare_statement
+    (type_identifier)
+    (decl_member_list
+      (record_field
+        (identifier)
+        (tag
+          (type_identifier))))))

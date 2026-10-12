@@ -1,0 +1,99 @@
+==================
+Bracket indexing and array type annotations
+==================
+first: [1, 2].[0]
+read(values [Byte; count], index): return values.[index]
+write(pointer @Byte, value Byte):
+    pointer.[0]:: value
+    self.pointer.[1] +: value
+    return
+
+---
+
+(source_file
+  (bind_statement
+    (identifier)
+    (index_expression
+      (sequence_literal
+        (literal
+          (number))
+        (literal
+          (number)))
+      (literal
+        (number))))
+  (bind_statement
+    (identifier)
+    (parameters
+      (parameter
+        (identifier)
+        (sequence_type
+          (tag
+            (type_identifier))
+          (identifier)))
+      (parameter
+        (identifier)))
+    (return_statement
+      (index_expression
+        (identifier)
+        (identifier))))
+  (bind_statement
+    (identifier)
+    (parameters
+      (parameter
+        (identifier)
+        (tag
+          (pointer_type
+            (tag
+              (type_identifier)))))
+      (parameter
+        (identifier)
+        (tag
+          (type_identifier))))
+    (block_body
+      (buf_set
+        (index_expression
+          (identifier)
+          (literal
+            (number)))
+        (identifier))
+      (buf_set
+        (index_expression
+          (member_expression
+            (self_expression)
+            (identifier))
+          (literal
+            (number)))
+        (identifier))
+      (return_statement))))
+
+==================
+Parenthesized domain binding in a copy method
+==================
+Copy has
+    copy(self ref) Self: return (bits is in Self: self) as Self
+
+---
+
+(source_file
+  (declare_statement
+    (type_identifier)
+    (decl_member_list
+      (record_signature
+        (identifier)
+        (parameters
+          (parameter
+            (self_parameter)))
+        (tag
+          (self_type))
+        (member_default
+          (return_statement
+            (cast_expression
+              (parenthesized_expression
+                (bind_statement
+                  (identifier)
+                  (integer_domain_type
+                    (tag
+                      (self_type)))
+                  (self_expression)))
+              (tag
+                (self_type)))))))))

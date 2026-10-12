@@ -1,0 +1,30 @@
+==================
+Compiler hole expression
+==================
+#todo
+---
+(source_file
+  (compile_time_query))
+
+==================
+Compiler hole in a typed declaration
+==================
+unfinished Word: #todo
+---
+(source_file
+  (bind_statement
+    (identifier)
+    (tag
+      (type_identifier))
+    (compile_time_query)))
+
+==================
+Bare todo remains an identifier
+==================
+todo := 42
+---
+(source_file
+  (bind_statement
+    (identifier)
+    (literal
+      (number))))
