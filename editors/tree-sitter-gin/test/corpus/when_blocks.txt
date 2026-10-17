@@ -1,0 +1,143 @@
+==================
+nested alternatives with guarded block bodies
+==================
+result: when input is
+    Some(x) and x is
+        Left(y) and y > 0 then
+            adjusted: y + 1
+            adjusted
+        Right(y) then y
+    Some(_) then 0
+    None then -1
+
+---
+
+(source_file
+  (bind_statement
+    (identifier)
+    (when_expression
+      (identifier)
+      (when_pattern_arm
+        (is_pattern
+          (tag
+            (type_application
+              (type_identifier)
+              (type_variable))))
+        (when_is_block
+          (identifier)
+          (when_pattern_arm
+            (is_pattern
+              (tag
+                (type_application
+                  (type_identifier)
+                  (type_variable))))
+            (numeric_condition
+              (identifier)
+              (literal
+                (number)))
+            (block_body
+              (bind_statement
+                (identifier)
+                (binary_expression
+                  (identifier)
+                  (literal
+                    (number))))
+              (identifier)))
+          (when_pattern_arm
+            (is_pattern
+              (tag
+                (type_application
+                  (type_identifier)
+                  (type_variable))))
+            (identifier))))
+      (when_pattern_arm
+        (is_pattern
+          (tag
+            (type_application
+              (type_identifier)
+              (type_variable))))
+        (literal
+          (number)))
+      (when_pattern_arm
+        (is_pattern
+          (tag
+            (type_identifier)))
+        (unary_expression
+          (literal
+            (number)))))))
+
+==================
+nested constructor guards
+==================
+result: when input is
+    Some(Left(y)) and y > 0 then y
+    Some(_) then 0
+    None then -1
+
+---
+
+(source_file
+  (bind_statement
+    (identifier)
+    (when_expression
+      (identifier)
+      (when_pattern_arm
+        (is_pattern
+          (tag
+            (type_application
+              (type_identifier)
+              (tag
+                (type_application
+                  (type_identifier)
+                  (type_variable))))))
+        (numeric_condition
+          (identifier)
+          (literal
+            (number)))
+        (identifier))
+      (when_pattern_arm
+        (is_pattern
+          (tag
+            (type_application
+              (type_identifier)
+              (type_variable))))
+        (literal
+          (number)))
+      (when_pattern_arm
+        (is_pattern
+          (tag
+            (type_identifier)))
+        (unary_expression
+          (literal
+            (number)))))))
+
+==================
+condition prefix before nested is block
+==================
+result: when ready and input is
+    Some(x) then x
+    None then 0
+
+---
+
+(source_file
+  (bind_statement
+    (identifier)
+    (when_expression
+      (proposition_condition
+        (identifier))
+      (when_is_block
+        (identifier)
+        (when_pattern_arm
+          (is_pattern
+            (tag
+              (type_application
+                (type_identifier)
+                (type_variable))))
+          (identifier))
+        (when_pattern_arm
+          (is_pattern
+            (tag
+              (type_identifier)))
+          (literal
+            (number)))))))
