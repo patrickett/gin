@@ -1,16 +1,25 @@
 use super::*;
+use ast::prelude::Intern;
 use std::time::{Duration, Instant};
 use test_fixtures::TempPackage;
 
 const PACKAGE_NUMBERS: &str = r#"Signed64 is in -9223372036854775808 to 9223372036854775807
+Signed64 has
+    finish(self):
+        return
 Small is in 0 to 255
+Small has
+    finish(self):
+        return
 
 signed64_add_bits(lhs Signed64, rhs Signed64) Signed64:
     left is in -9223372036854775808 to 9223372036854775807: lhs
     right is in -9223372036854775808 to 9223372036854775807: rhs
-return (left + right) as Signed64
+    biased: left + right + 9223372036854775808
+    bits is in 0 to 18446744073709551615: biased & 18446744073709551615
+    return (bits - 9223372036854775808) as Signed64
 #infix('+')
-signed64_add(lhs Signed64, rhs Signed64) Signed64: signed64_add_bits(lhs, rhs)
+signed64_add(lhs Signed64, rhs Signed64) Signed64: return signed64_add_bits(lhs, rhs)
 "#;
 
 struct NativeSession {
@@ -27,15 +36,23 @@ impl NativeSession {
         let mut session = InterpreterSession::default();
         let submit = session.submit(
             r#"Signed64 is in -9223372036854775808 to 9223372036854775807
+Signed64 has
+    finish(self):
+        return
 Small is in 0 to 255
+Small has
+    finish(self):
+        return
 
 signed64_add_bits(lhs Signed64, rhs Signed64) Signed64:
     left is in -9223372036854775808 to 9223372036854775807: lhs
     right is in -9223372036854775808 to 9223372036854775807: rhs
-return (left + right) as Signed64
+    biased: left + right + 9223372036854775808
+    bits is in 0 to 18446744073709551615: biased & 18446744073709551615
+    return (bits - 9223372036854775808) as Signed64
 #infix('+')
 #inline
-signed64_add(lhs Signed64, rhs Signed64) Signed64: signed64_add_bits(lhs, rhs)
+signed64_add(lhs Signed64, rhs Signed64) Signed64: return signed64_add_bits(lhs, rhs)
 "#,
         );
         match submit {
@@ -70,43 +87,74 @@ impl PackageSession {
     }
 }
 
-#[test]
-fn native_integer_expression_evaluates() {
-    let mut native = NativeSession::new();
-    let submission = native.session.submit("40 + 2");
+fn declared(native: &mut NativeSession, src: &str) {
+    assert!(
+        matches!(
+            native.session.submit(src),
+            Submission::DeclarationAccepted { .. }
+        ),
+        "declaration should be accepted: {src}"
+    );
+}
 
+fn eval_int(native: &mut NativeSession, src: &str, expected: i64) {
+    let submission = native.session.submit(src);
     assert!(
         matches!(
             submission,
             Submission::Evaluated {
-                value: RuntimeValue {
-                    storage: RuntimeStorage::Int64(42),
+                value: crate::value::EvaluatedValue {
+                    storage: RuntimeStorage::Int64(value),
                     ..
                 },
                 ..
-            }
+            } if value == expected
         ),
         "unexpected submission: {submission:?}"
     );
 }
 
+fn rejected_with_code(response: Submission, code: &str) {
+    match response {
+        Submission::Rejected { diagnostics } => {
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.diagnostic().code.slug() == code),
+                "expected `{code}`, diagnostics: {diagnostics:?}"
+            );
+        }
+        other => panic!("expected `{code}` rejection, got: {other:?}"),
+    }
+}
+
+#[test]
+fn typed_integer_expression_evaluates() {
+    let mut native = NativeSession::new();
+    eval_int(&mut native, "40 + 2", 42);
+}
+
+#[test]
+fn nominal_signed_addition_can_choose_explicit_wrapping() {
+    let mut native = NativeSession::new();
+    for (left, right, expected) in [
+        (i64::MAX, 1, i64::MIN),
+        (i64::MIN, -1, i64::MAX),
+        (-40, -2, -42),
+        (40, 2, 42),
+    ] {
+        eval_int(
+            &mut native,
+            &format!("signed64_add_bits({left}, {right})"),
+            expected,
+        );
+    }
+}
+
 #[test]
 fn ordinary_double_quoted_text_uses_byte_array_operations() {
     let mut native = NativeSession::new();
-    let submission = native.session.submit(r#""Z".(0) as Signed64"#);
-    assert!(
-        matches!(
-            submission,
-            Submission::Evaluated {
-                value: RuntimeValue {
-                    storage: RuntimeStorage::Int64(90),
-                    ..
-                },
-                ..
-            }
-        ),
-        "unexpected submission: {submission:?}"
-    );
+    eval_int(&mut native, r#""Z".[0] as Signed64"#, 90);
 }
 
 #[test]
@@ -144,30 +192,13 @@ fn template_expression_is_rejected_until_library_defined_formatting_is_supported
 #[test]
 fn expression_can_use_prior_zero_parameter_function() {
     let mut native = NativeSession::new();
-    assert!(matches!(
-        native.session.submit("a() Signed64: 1 + 1"),
-        Submission::DeclarationAccepted { .. }
-    ));
+    declared(&mut native, "a() Signed64: return 1 + 1");
 
-    let submission = native.session.submit("3 + a");
-
-    assert!(
-        matches!(
-            &submission,
-            Submission::Evaluated {
-                value: RuntimeValue {
-                    storage: RuntimeStorage::Int64(5),
-                    ..
-                },
-                ..
-            }
-        ),
-        "{submission:#?}"
-    );
+    eval_int(&mut native, "3 + a", 5);
 }
 
 #[test]
-fn package_callable_executes_in_combined_native_module() {
+fn package_callable_executes_with_the_typed_evaluator() {
     let mut package = PackageSession::new();
     let declarations = package.session.declarations().to_string();
     assert!(!declarations.contains("signed64_add(lhs"));
@@ -177,7 +208,7 @@ fn package_callable_executes_in_combined_native_module() {
         matches!(
             submission,
             Submission::Evaluated {
-                value: RuntimeValue {
+                value: crate::value::EvaluatedValue {
                     storage: RuntimeStorage::Int64(42),
                     ..
                 },
@@ -192,54 +223,26 @@ fn package_callable_executes_in_combined_native_module() {
 #[test]
 fn expression_can_reference_prior_declaration() {
     let mut native = NativeSession::new();
-    assert!(matches!(
-        native.session.submit("value Signed64 := 40"),
-        Submission::DeclarationAccepted { .. }
-    ));
+    declared(&mut native, "value Signed64 := 40");
 
-    assert!(matches!(
-        native.session.submit("value + 2"),
-        Submission::Evaluated {
-            value: RuntimeValue {
-                storage: RuntimeStorage::Int64(42),
-                ..
-            },
-            ..
-        }
-    ));
+    eval_int(&mut native, "value + 2", 42);
 }
 
 #[test]
 fn expression_uses_latest_redefinition_slot() {
     let mut native = NativeSession::new();
-    assert!(matches!(
-        native.session.submit("value Signed64 := 40"),
-        Submission::DeclarationAccepted { .. }
-    ));
-    assert!(matches!(
-        native.session.submit("value Signed64 := 41"),
-        Submission::DeclarationAccepted { .. }
-    ));
+    declared(&mut native, "value Signed64 := 40");
+    declared(&mut native, "value Signed64 := 41");
 
-    assert!(matches!(
-        native.session.submit("value + 1"),
-        Submission::Evaluated {
-            value: RuntimeValue {
-                storage: RuntimeStorage::Int64(42),
-                ..
-            },
-            ..
-        }
-    ));
+    eval_int(&mut native, "value + 1", 42);
 }
 
 #[test]
 fn declaration_generates_live_runtime_entry() {
     let mut native = NativeSession::new();
     let before = native.session.live_runtime().generations().len();
-    let submit = native.session.submit("value Signed64 := 40");
+    declared(&mut native, "value Signed64 := 40");
 
-    assert!(matches!(submit, Submission::DeclarationAccepted { .. }));
     assert_eq!(
         native.session.live_runtime().generations().len(),
         before + 1
@@ -255,43 +258,9 @@ fn declaration_generates_live_runtime_entry() {
 }
 
 #[test]
-fn redeclaration_updates_live_generation_slot() {
-    let mut native = NativeSession::new();
-
-    let first_submit = native.session.submit("value Signed64 := 40");
-    assert!(matches!(
-        first_submit,
-        Submission::DeclarationAccepted { .. }
-    ));
-    let before = native.session.live_runtime().generations().len();
-    let first_slot = native
-        .session
-        .live_runtime()
-        .generation_for_symbol("value")
-        .expect("value is live");
-
-    let second_submit = native.session.submit("value Signed64 := 41");
-    assert!(matches!(
-        second_submit,
-        Submission::DeclarationAccepted { .. }
-    ));
-    let second_slot = native
-        .session
-        .live_runtime()
-        .generation_for_symbol("value")
-        .expect("value is still live");
-
-    assert_eq!(second_slot.0, first_slot.0 + 1);
-    assert_eq!(native.session.live_runtime().generations().len(), before,);
-}
-
-#[test]
 fn active_generation_is_retained_during_active_call_and_retired_after_completion() {
     let mut native = NativeSession::new();
-    assert!(matches!(
-        native.session.submit("value Signed64 := 40"),
-        Submission::DeclarationAccepted { .. }
-    ));
+    declared(&mut native, "value Signed64 := 40");
     let before = native.session.live_runtime().generations().len();
 
     let active_call = {
@@ -299,13 +268,10 @@ fn active_generation_is_retained_during_active_call_and_retired_after_completion
         native
             .session
             .live_runtime_mut()
-            .track_active_generations_for_symbols(&symbols)
+            .track_active_generations(symbols.values().copied())
     };
 
-    assert!(matches!(
-        native.session.submit("value Signed64 := 41"),
-        Submission::DeclarationAccepted { .. }
-    ));
+    declared(&mut native, "value Signed64 := 41");
     assert_eq!(
         native.session.live_runtime().generations().len(),
         before + 1,
@@ -321,10 +287,7 @@ fn active_generation_is_retained_during_active_call_and_retired_after_completion
 #[test]
 fn failed_declaration_does_not_change_live_runtime() {
     let mut native = NativeSession::new();
-    assert!(matches!(
-        native.session.submit("value Signed64 := 40"),
-        Submission::DeclarationAccepted { .. }
-    ));
+    declared(&mut native, "value Signed64 := 40");
 
     let before_len = native.session.live_runtime().generations().len();
 
@@ -349,10 +312,7 @@ fn failed_declaration_does_not_change_live_runtime() {
 fn clear_disposes_live_generations() {
     let mut native = NativeSession::new();
 
-    assert!(matches!(
-        native.session.submit("value Signed64 := 40"),
-        Submission::DeclarationAccepted { .. }
-    ));
+    declared(&mut native, "value Signed64 := 40");
     assert!(!native.session.live_runtime().generations().is_empty());
 
     assert!(matches!(
@@ -366,10 +326,7 @@ fn clear_disposes_live_generations() {
 #[test]
 fn failed_redeclaration_keeps_previous_live_generation() {
     let mut native = NativeSession::new();
-    assert!(matches!(
-        native.session.submit("value Signed64 := 40"),
-        Submission::DeclarationAccepted { .. }
-    ));
+    declared(&mut native, "value Signed64 := 40");
     let before = native.session.live_runtime().generations().len();
     let first = native
         .session
@@ -391,21 +348,91 @@ fn failed_redeclaration_keeps_previous_live_generation() {
 #[test]
 fn redeclaration_updates_live_runtime_slot() {
     let mut native = NativeSession::new();
-    assert!(matches!(
-        native.session.submit("value Signed64 := 40"),
-        Submission::DeclarationAccepted { .. }
-    ));
+    declared(&mut native, "value Signed64 := 40");
     let before = native.session.live_runtime().generations().len();
 
-    assert!(matches!(
-        native.session.submit("value Signed64 := 41"),
-        Submission::DeclarationAccepted { .. }
-    ));
+    declared(&mut native, "value Signed64 := 41");
     assert_eq!(
         native.session.live_runtime().generation_for_symbol("value"),
         Some(GenerationId(before as u64 + 1)),
     );
     assert_eq!(native.session.live_runtime().generations().len(), before);
+}
+
+#[test]
+fn redeclaration_preserves_siblings_and_their_live_generations() {
+    let mut native = NativeSession::new();
+    declared(&mut native, "value Signed64 := 40\nother Signed64 := 2");
+    let sibling_generation = native.session.live_runtime().generation_for_symbol("other");
+    let sibling_slot = native.session.source.symbol_slot("other");
+
+    declared(&mut native, "value Signed64 := 42");
+    eval_int(&mut native, "value", 42);
+    eval_int(&mut native, "other", 2);
+    assert_eq!(
+        native.session.live_runtime().generation_for_symbol("other"),
+        sibling_generation
+    );
+    assert_eq!(native.session.source.symbol_slot("other"), sibling_slot);
+
+    let before = native.session.declarations().to_owned();
+    assert!(matches!(
+        native.session.submit("value Signed64 := missing"),
+        Submission::Rejected { .. }
+    ));
+    assert_eq!(native.session.declarations(), before);
+    eval_int(&mut native, "value", 42);
+    eval_int(&mut native, "other", 2);
+
+    let saved = native
+        .session
+        .materialize()
+        .expect("valid declarations")
+        .to_owned();
+    let mut replay = InterpreterSession::default();
+    assert!(matches!(
+        replay.submit(&saved),
+        Submission::DeclarationAccepted { .. }
+    ));
+    for (expression, expected) in [("value", 42), ("other", 2)] {
+        let result = replay.submit(expression);
+        assert!(
+            matches!(result, Submission::Evaluated { value, .. } if value.storage == RuntimeStorage::Int64(expected))
+        );
+    }
+}
+
+#[test]
+fn public_redefinitions_after_a_private_section_reject_without_visibility_drift() {
+    let mut session = InterpreterSession::default();
+    let source = "visible := 1\nprivate\nsecret := 2";
+    assert!(matches!(
+        session.submit(source),
+        Submission::DeclarationAccepted { .. }
+    ));
+    for input in ["visible := 3", "another := 4", "PublicTag is Unit"] {
+        rejected_with_code(session.submit(input), "interpreter-private-section");
+        assert_eq!(session.declarations(), format!("{source}\n"));
+    }
+    let saved = session
+        .materialize()
+        .expect("accepted source remains valid");
+    let parsed = saved.parse_source_full();
+    assert!(
+        !parsed
+            .ast
+            .private_defs
+            .contains(&Intern::from_ref("visible"))
+    );
+    assert!(
+        parsed
+            .ast
+            .private_defs
+            .contains(&Intern::from_ref("secret"))
+    );
+    assert!(
+        matches!(session.submit("visible"), Submission::Evaluated { value, .. } if value.storage == RuntimeStorage::Int64(1))
+    );
 }
 
 #[test]
@@ -417,18 +444,7 @@ fn redeclaration_of_incompatible_scalar_type_is_rejected() {
     ));
 
     let response = package.session.submit("value Signed64 := 2");
-    match response {
-        Submission::Rejected { diagnostics } => {
-            assert!(
-                diagnostics
-                    .iter()
-                    .any(|diagnostic| diagnostic.diagnostic().code.slug()
-                        == "interpreter-incompatible-redefinition"),
-                "diagnostics: {diagnostics:?}"
-            );
-        }
-        other => panic!("expected incompatible redefinition to fail, got: {other:?}"),
-    }
+    rejected_with_code(response, "interpreter-incompatible-redefinition");
     assert_eq!(
         package
             .session
@@ -443,16 +459,10 @@ fn redeclaration_of_incompatible_scalar_type_is_rejected() {
 #[test]
 fn function_redeclaration_with_compatible_signature_updates_live_generation() {
     let mut native = NativeSession::new();
-    assert!(matches!(
-        native.session.submit("double(x Signed64) Signed64: x"),
-        Submission::DeclarationAccepted { .. }
-    ));
+    declared(&mut native, "double(x Signed64) Signed64: return x");
     let before = native.session.live_runtime().generations().len();
 
-    assert!(matches!(
-        native.session.submit("double(x Signed64) Signed64: x"),
-        Submission::DeclarationAccepted { .. }
-    ));
+    declared(&mut native, "double(x Signed64) Signed64: return x");
     assert_eq!(
         native
             .session
@@ -467,27 +477,13 @@ fn function_redeclaration_with_compatible_signature_updates_live_generation() {
 #[test]
 fn function_redefinition_rejects_incompatible_param_count() {
     let mut native = NativeSession::new();
-    assert!(matches!(
-        native.session.submit("double(x Signed64) Signed64: x"),
-        Submission::DeclarationAccepted { .. }
-    ));
+    declared(&mut native, "double(x Signed64) Signed64: return x");
 
     let before = native.session.live_runtime().generations().len();
     let response = native
         .session
-        .submit("double(x Signed64, y Signed64) Signed64: x + y");
-    match response {
-        Submission::Rejected { diagnostics } => {
-            assert!(
-                diagnostics
-                    .iter()
-                    .any(|diagnostic| diagnostic.diagnostic().code.slug()
-                        == "interpreter-incompatible-redefinition"),
-                "diagnostics: {diagnostics:?}"
-            );
-        }
-        other => panic!("expected incompatible redefinition to fail, got: {other:?}"),
-    }
+        .submit("double(x Signed64, y Signed64) Signed64: return x + y");
+    rejected_with_code(response, "interpreter-incompatible-redefinition");
     assert_eq!(
         native
             .session
@@ -501,55 +497,26 @@ fn function_redefinition_rejects_incompatible_param_count() {
 #[test]
 fn function_redefinition_rejects_incompatible_param_convention() {
     let mut native = NativeSession::new();
-    assert!(matches!(
-        native.session.submit("double(x Signed64) Signed64: x"),
-        Submission::DeclarationAccepted { .. }
-    ));
+    declared(&mut native, "double(x Signed64) Signed64: return x");
 
-    let response = native.session.submit("double(x ref Signed64) Signed64: 0");
-    match response {
-        Submission::Rejected { diagnostics } => {
-            assert!(
-                diagnostics
-                    .iter()
-                    .any(|diagnostic| diagnostic.diagnostic().code.slug()
-                        == "interpreter-incompatible-redefinition"),
-                "diagnostics: {diagnostics:?}"
-            );
-        }
-        other => panic!("expected incompatible redefinition to fail, got: {other:?}"),
-    }
+    let response = native
+        .session
+        .submit("double(x ref Signed64) Signed64: return 0");
+    rejected_with_code(response, "interpreter-incompatible-redefinition");
 }
 
 #[test]
 fn function_redefinition_rejects_value_kind_mismatch() {
     let mut native = NativeSession::new();
-    assert!(matches!(
-        native.session.submit("double(x Signed64) Signed64: x"),
-        Submission::DeclarationAccepted { .. }
-    ));
+    declared(&mut native, "double(x Signed64) Signed64: return x");
     let response = native.session.submit("double Signed64 := 12");
-    match response {
-        Submission::Rejected { diagnostics } => {
-            assert!(
-                diagnostics
-                    .iter()
-                    .any(|diagnostic| diagnostic.diagnostic().code.slug()
-                        == "interpreter-incompatible-redefinition"),
-                "diagnostics: {diagnostics:?}"
-            );
-        }
-        other => panic!("expected incompatible redefinition to fail, got: {other:?}"),
-    }
+    rejected_with_code(response, "interpreter-incompatible-redefinition");
 }
 
 #[test]
 fn declaration_stores_runtime_value_for_scalar_type() {
     let mut native = NativeSession::new();
-    assert!(matches!(
-        native.session.submit("value Signed64 := 40"),
-        Submission::DeclarationAccepted { .. }
-    ));
+    declared(&mut native, "value Signed64 := 40");
     let value = native
         .session
         .live_runtime()
@@ -579,10 +546,7 @@ fn expression_wrapper_does_not_persist() {
 #[test]
 fn failed_submissions_preserve_declarations() {
     let mut native = NativeSession::new();
-    assert!(matches!(
-        native.session.submit("value Signed64 := 40"),
-        Submission::DeclarationAccepted { .. }
-    ));
+    declared(&mut native, "value Signed64 := 40");
     let before = native.session.declarations().to_string();
 
     assert!(matches!(
@@ -598,36 +562,10 @@ fn failed_submissions_preserve_declarations() {
 }
 
 #[test]
-fn non_i64_expression_is_rejected() {
-    let mut native = NativeSession::new();
-    assert!(matches!(
-        native.session.submit("small Small := 7"),
-        Submission::DeclarationAccepted { .. }
-    ));
-    let before = native.session.declarations().to_string();
-
-    let response = native.session.submit("small");
-    if let Submission::Rejected { diagnostics, .. } = &response {
-        assert!(
-            diagnostics.iter().any(|diagnostic| {
-                diagnostic.diagnostic().code.slug() == "interpreter-unsupported-result-type"
-            }),
-            "diagnostics: {diagnostics:?}",
-        );
-    } else {
-        panic!("unexpected response: {response:?}");
-    }
-    assert_eq!(native.session.declarations(), before);
-}
-
-#[test]
 #[ignore = "debug"]
 fn debug_evaluation_candidate_metadata() {
     let mut native = NativeSession::new();
-    assert!(matches!(
-        native.session.submit("small Small := 7"),
-        Submission::DeclarationAccepted { .. }
-    ));
+    declared(&mut native, "small Small := 7");
     let declarations = native.session.declarations().to_string();
     let checked = native.session.check(&declarations);
     let typed = checked.primary_file().typed();
@@ -717,12 +655,10 @@ fn function_header_requests_more_input() {
 fn multiline_function_is_accepted_atomically() {
     let mut native = NativeSession::new();
 
-    assert!(matches!(
-        native
-            .session
-            .submit("forty_two() Signed64:\n    result Signed64 := 42\nreturn result"),
-        Submission::DeclarationAccepted { .. }
-    ));
+    declared(
+        &mut native,
+        "forty_two() Signed64:\n    result Signed64 := 42\n    return result",
+    );
     assert!(native.session.declarations().contains("forty_two()"));
 }
 
@@ -806,17 +742,7 @@ fn run_command_rejects_stop_for_unknown_task_id() {
     let mut native = NativeSession::new();
 
     let response = native.session.submit("#stop 99999");
-    match response {
-        Submission::Rejected { diagnostics } => {
-            assert!(
-                diagnostics
-                    .iter()
-                    .any(|diagnostic| diagnostic.diagnostic().code.slug()
-                        == "interpreter-invalid-task-id")
-            );
-        }
-        other => panic!("stop should fail for unknown id, got: {other:?}"),
-    }
+    rejected_with_code(response, "interpreter-invalid-task-id");
 }
 
 #[test]
@@ -824,17 +750,7 @@ fn run_command_requires_expression_argument() {
     let mut native = NativeSession::new();
 
     let response = native.session.submit("#run");
-    match response {
-        Submission::Rejected { diagnostics } => {
-            assert!(
-                diagnostics
-                    .iter()
-                    .any(|diagnostic| diagnostic.diagnostic().code.slug()
-                        == "interpreter-invalid-command-usage")
-            );
-        }
-        other => panic!("run without args should fail, got: {other:?}"),
-    }
+    rejected_with_code(response, "interpreter-invalid-command-usage");
 }
 
 #[test]
@@ -877,10 +793,7 @@ fn run_results_are_polled_to_completion() {
 fn reset_clears_running_tasks_and_runtime_state() {
     let mut native = NativeSession::new();
 
-    assert!(matches!(
-        native.session.submit("value Signed64 := 40"),
-        Submission::DeclarationAccepted { .. }
-    ));
+    declared(&mut native, "value Signed64 := 40");
     assert!(!native.session.live_runtime().generations().is_empty());
 
     let _started = match native.session.submit("#run value + 2") {
@@ -903,10 +816,7 @@ fn reset_clears_running_tasks_and_runtime_state() {
 #[test]
 fn parse_error_after_declaration_owns_raw_submission_source() {
     let mut native = NativeSession::new();
-    assert!(matches!(
-        native.session.submit("value Signed64 := 40"),
-        Submission::DeclarationAccepted { .. }
-    ));
+    declared(&mut native, "value Signed64 := 40");
 
     let Submission::Rejected { diagnostics } = native.session.submit("broken := @") else {
         panic!("invalid declaration should be rejected");
@@ -967,35 +877,150 @@ fn reserved_session_file_is_excluded_from_package_sources() {
 }
 
 #[test]
-fn wrapper_type_error_maps_to_user_expression() {
+fn aggregate_results_retain_values_and_types() {
     let mut native = NativeSession::new();
+    declared(&mut native, "small Small := 7");
+
+    let Submission::Evaluated { value, .. } = native.session.submit("[small, small]") else {
+        panic!("aggregate result should evaluate");
+    };
+    assert_eq!(value.display(), "[7, 7]");
+    assert!(value.gin_type.is_some());
+    assert!(native.session.pending().is_none());
+}
+
+#[test]
+fn empty_image_has_empty_scope_and_no_pending_condition() {
+    let session = InterpreterSession::default();
+    assert!(session.scope().is_empty());
+    assert!(session.pending().is_none());
+    assert!(session.restarts().is_empty());
+}
+
+#[test]
+fn expression_evaluates_without_any_declared_type() {
+    let mut session = InterpreterSession::default();
     assert!(matches!(
-        native.session.submit("small Small := 7"),
+        session.submit("40 + 2"),
+        Submission::Evaluated {
+            value: crate::value::EvaluatedValue {
+                storage: RuntimeStorage::Int64(42),
+                ..
+            },
+            ..
+        }
+    ));
+}
+
+#[test]
+fn inferred_value_declaration_evaluates_without_a_native_abi() {
+    let mut session = InterpreterSession::default();
+    assert!(matches!(
+        session.submit("count := 40 + 2"),
         Submission::DeclarationAccepted { .. }
     ));
-
-    let Submission::Rejected { diagnostics } = native.session.submit("small") else {
-        panic!("non-i64 expression should be rejected");
+    let Submission::Evaluated { value, diagnostics } = session.submit("count") else {
+        panic!("a singleton-typed integer should evaluate");
     };
-    let diagnostic = diagnostics
-        .iter()
-        .find(|diagnostic| {
-            diagnostic.diagnostic().code.slug() == "interpreter-unsupported-result-type"
-        })
-        .expect("unsupported result diagnostic");
-
-    assert_eq!(diagnostic.source(), "small");
-    assert_eq!(diagnostic.display_path(), "<interpreter>");
-    assert!(!diagnostic.source().contains("__gin_interpreter_eval_"));
+    assert_eq!(value.storage, RuntimeStorage::Int64(42));
     assert!(
-        !diagnostic
-            .display_path()
-            .contains("__gin_interpreter_eval_")
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.display_path() != "<interpreter-generated>"),
+        "{diagnostics:?}"
     );
+}
+
+#[test]
+fn scope_lists_bootstrapped_declarations() {
+    let native = NativeSession::new();
+    let scope = native.session.scope();
     assert!(
-        !diagnostic
-            .diagnostic()
-            .message
-            .contains("__gin_interpreter_eval_")
+        scope.iter().any(|entry| entry.name.contains("Signed64")),
+        "{scope:?}"
+    );
+}
+
+#[test]
+fn type_query_reports_expression_type() {
+    let mut native = NativeSession::new();
+    declared(&mut native, "value Signed64 := 40");
+    match native.session.type_of("value + 2") {
+        QueryOutcome::Answered(text) => assert!(text.contains("Signed64"), "{text}"),
+        other => panic!("expected type answer, got {other:?}"),
+    }
+}
+
+#[test]
+fn type_query_rejects_unknown_symbol() {
+    let mut native = NativeSession::new();
+    match native.session.type_of("missing + 2") {
+        QueryOutcome::Rejected(diagnostics) => assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.diagnostic().code.slug() == "type-unknown-symbol"),
+            "expected unknown symbol diagnostic",
+        ),
+        other => panic!("expected rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn failed_submission_offers_retry_and_abort() {
+    let mut native = NativeSession::new();
+    assert!(matches!(
+        native.session.submit("missing + 2"),
+        Submission::Rejected { .. }
+    ));
+    assert_eq!(native.session.pending(), Some("missing + 2"));
+    assert!(native.session.restarts().contains(&Restart::Retry));
+    assert!(native.session.restarts().contains(&Restart::Abort));
+    assert!(native.session.abort());
+    assert!(native.session.pending().is_none());
+    assert!(native.session.restarts().is_empty());
+}
+
+#[test]
+fn retry_after_defining_the_symbol_evaluates() {
+    let mut native = NativeSession::new();
+    assert!(matches!(
+        native.session.submit("missing + 2"),
+        Submission::Rejected { .. }
+    ));
+    declared(&mut native, "missing Signed64 := 40");
+    match native.session.retry() {
+        Some(Submission::Evaluated {
+            value:
+                crate::value::EvaluatedValue {
+                    storage: RuntimeStorage::Int64(42),
+                    ..
+                },
+            ..
+        }) => {}
+        other => panic!("expected 42 after retry, got {other:?}"),
+    }
+    assert!(native.session.pending().is_none());
+}
+
+#[test]
+fn materialize_emits_only_accepted_source() {
+    let mut native = NativeSession::new();
+    native.session.submit("missing + 2");
+    let source = native.session.materialize().unwrap().to_string();
+    assert!(source.contains("signed64_add_bits"), "{source}");
+    assert!(!source.contains("missing + 2"), "{source}");
+}
+
+#[test]
+fn materialized_image_recompiles_clean() {
+    let mut native = NativeSession::new();
+    let source = native.session.materialize().unwrap().to_string();
+    let mut replay = InterpreterSession::default();
+    assert!(
+        matches!(
+            replay.submit(&source),
+            Submission::DeclarationAccepted { .. }
+        ),
+        "materialized image should be accepted",
     );
 }

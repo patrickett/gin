@@ -10,6 +10,7 @@ pub struct GenerationId(pub u64);
 pub enum RuntimeStorage {
     Int64(i64),
     Bytes(Vec<u8>),
+    Constant(ast::ConstValue),
 }
 
 impl RuntimeStorage {
@@ -30,10 +31,6 @@ pub struct RuntimeType {
 
 impl RuntimeType {
     pub const I64: Self = Self { size: 8, align: 8 };
-
-    pub fn is_compatible_with(&self, other: &Self) -> bool {
-        self.size == other.size && self.align == other.align
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,13 +53,13 @@ pub struct RuntimeFunction {
 
 impl RuntimeFunction {
     pub fn is_compatible_with(&self, other: &Self) -> bool {
-        self.return_type.is_compatible_with(&other.return_type)
+        self.return_type == other.return_type
             && self.parameter_types.len() == other.parameter_types.len()
             && self
                 .parameter_types
                 .iter()
                 .zip(other.parameter_types.iter())
-                .all(|(a, b)| a.is_compatible_with(b))
+                .all(|(a, b)| a == b)
             && self
                 .parameter_conventions
                 .iter()
@@ -73,7 +70,7 @@ impl RuntimeFunction {
                 .capture_layout
                 .iter()
                 .zip(other.capture_layout.iter())
-                .all(|(a, b)| a.is_compatible_with(b))
+                .all(|(a, b)| a == b)
     }
 }
 
@@ -176,13 +173,6 @@ impl LiveRuntime {
         }
 
         ActiveGenerations { generation_ids }
-    }
-
-    pub fn track_active_generations_for_symbols(
-        &mut self,
-        symbols: &HashMap<String, GenerationId>,
-    ) -> ActiveGenerations {
-        self.track_active_generations(symbols.values().copied())
     }
 
     pub fn finish_active_generations(

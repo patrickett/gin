@@ -40,7 +40,7 @@ fn active_calls_pin_generations_until_call_finishes() {
         exports: generation_exports("value", 1),
     });
     let symbols = runtime.symbols().clone();
-    let active_call = runtime.track_active_generations_for_symbols(&symbols);
+    let active_call = runtime.track_active_generations(symbols.values().copied());
     runtime.install_generation(NativeGeneration {
         id: generation(2),
         engine: None,
@@ -62,7 +62,7 @@ fn clear_removes_active_generation_tracking() {
         exports: generation_exports("value", 1),
     });
     let symbols = runtime.symbols().clone();
-    let _active_call = runtime.track_active_generations_for_symbols(&symbols);
+    let _active_call = runtime.track_active_generations(symbols.values().copied());
     runtime.clear();
     assert!(runtime.generations().is_empty());
     assert!(runtime.symbols().is_empty());

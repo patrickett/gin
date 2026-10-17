@@ -7,38 +7,72 @@ use derive_more::From;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, From)]
 pub struct SymbolSlot(u64);
 
-impl SymbolSlot {
-    pub fn as_u64(self) -> u64 {
-        self.0
-    }
-}
-
+#[derive(Default)]
 pub struct SessionSource {
     declarations: Vec<SessionDeclaration>,
     declarations_text: String,
     runtime_declarations: HashMap<String, RuntimeDeclaration>,
     next_slot: u64,
     symbol_slots: HashMap<String, SymbolSlot>,
-    evaluation_type: String,
-}
-
-impl Default for SessionSource {
-    fn default() -> Self {
-        Self {
-            declarations: Vec::new(),
-            declarations_text: String::new(),
-            runtime_declarations: HashMap::new(),
-            next_slot: 0,
-            symbol_slots: HashMap::new(),
-            evaluation_type: "Signed64".to_string(),
-        }
-    }
 }
 
 #[derive(Clone)]
 struct SessionDeclaration {
     source: String,
     names: Vec<String>,
+    parts: Vec<parser::SourceDeclaration>,
+}
+
+impl SessionDeclaration {
+    fn new(source: String, names: Vec<String>) -> Self {
+        let parts = parser::source_declarations(&source);
+        Self {
+            source,
+            names,
+            parts,
+        }
+    }
+
+    fn append_without_shadowed(&self, output: &mut String, shadowed: &HashSet<&str>) {
+        let mut cursor = 0;
+        for part in &self.parts {
+            if !can_replace(part, shadowed) {
+                continue;
+            }
+            assert!(cursor <= part.range.start && part.range.end <= self.source.len());
+            output.push_str(&self.source[cursor..part.range.start]);
+            cursor = part.range.end;
+        }
+        output.push_str(&self.source[cursor..]);
+    }
+
+    fn remove_shadowed(&mut self, shadowed: &HashSet<&str>) {
+        let removed: HashSet<_> = self
+            .parts
+            .iter()
+            .filter(|part| can_replace(part, shadowed))
+            .flat_map(|part| part.names.iter().map(String::as_str))
+            .collect();
+        if removed.is_empty() {
+            return;
+        }
+        let mut retained = String::with_capacity(self.source.len());
+        self.append_without_shadowed(&mut retained, shadowed);
+        self.names.retain(|name| !removed.contains(name.as_str()));
+        self.parts = parser::source_declarations(&retained);
+        self.source = retained;
+    }
+}
+
+fn can_replace(part: &parser::SourceDeclaration, shadowed: &HashSet<&str>) -> bool {
+    part.owner
+        .as_ref()
+        .is_some_and(|owner| shadowed.contains(owner.as_str()))
+        || (!part.names.is_empty()
+            && part
+                .names
+                .iter()
+                .all(|name| shadowed.contains(name.as_str())))
 }
 
 #[derive(Debug)]
@@ -136,17 +170,8 @@ impl RuntimeDeclaration {
 }
 
 impl SessionSource {
-    pub fn with_evaluation_type(mut self, evaluation_type: impl Into<String>) -> Self {
-        self.evaluation_type = evaluation_type.into();
-        self
-    }
-
     pub fn declarations(&self) -> &str {
         &self.declarations_text
-    }
-
-    pub fn symbol_slots(&self) -> &HashMap<String, SymbolSlot> {
-        &self.symbol_slots
     }
 
     pub fn symbol_slot(&self, symbol: &str) -> Option<SymbolSlot> {
@@ -175,18 +200,30 @@ impl SessionSource {
         let mut candidate =
             String::with_capacity(self.declarations_text.len() + submission.len() + 1);
         for declaration in &self.declarations {
-            if declaration
-                .names
-                .iter()
-                .any(|name| shadowed.contains(name.as_str()))
-            {
-                continue;
-            }
-            candidate.push_str(&declaration.source);
+            declaration.append_without_shadowed(&mut candidate, &shadowed);
         }
         candidate.push_str(submission);
         candidate.push('\n');
         candidate
+    }
+
+    pub(crate) fn replacement_conflict(&self, declaration_names: &[String]) -> Option<String> {
+        let shadowed: HashSet<&str> = declaration_names.iter().map(String::as_str).collect();
+        self.declarations.iter().flat_map(|declaration| &declaration.parts).find_map(|part| {
+            let replaced = part.names.iter().find(|name| shadowed.contains(name.as_str()))?;
+            if can_replace(part, &shadowed) {
+                return None;
+            }
+            Some(match &part.owner {
+                Some(owner) => format!(
+                    "`{replaced}` belongs to `{owner}`; resubmit the type and its methods together"
+                ),
+                None => format!(
+                    "`{replaced}` shares an import with {}; resubmit the complete import",
+                    part.names.join(", ")
+                ),
+            })
+        })
     }
 
     pub fn accept_declaration(&mut self, submission: &str, declaration_names: Vec<String>) {
@@ -209,20 +246,19 @@ impl SessionSource {
             });
         }
 
-        self.declarations.retain(|declaration| {
-            !declaration
-                .names
-                .iter()
-                .any(|name| shadowed.contains(name.as_str()))
-        });
+        for declaration in &mut self.declarations {
+            declaration.remove_shadowed(&shadowed);
+        }
+        self.declarations
+            .retain(|declaration| !declaration.source.is_empty());
         for name in &declaration_names {
             self.runtime_declarations.remove(name);
         }
 
-        self.declarations.push(SessionDeclaration {
-            source: format!("{submission}\n"),
-            names: declaration_names,
-        });
+        self.declarations.push(SessionDeclaration::new(
+            format!("{submission}\n"),
+            declaration_names,
+        ));
 
         for declaration in runtime_declarations {
             self.runtime_declarations
@@ -244,23 +280,6 @@ impl SessionSource {
         self.next_slot = 0;
     }
 
-    pub fn evaluation_candidate(&self, submission: &str, generation: u64) -> GeneratedEvaluation {
-        let symbol = format!("__gin_interpreter_eval_{generation}");
-        let prefix = format!("{symbol}() {}: ", self.evaluation_type);
-        let expression_start = self.declarations_text.len() + prefix.len();
-        let mut source = String::with_capacity(expression_start + submission.len() + 1);
-        source.push_str(&self.declarations_text);
-        source.push_str(&prefix);
-        source.push_str(submission);
-        source.push('\n');
-        GeneratedEvaluation::new(
-            source,
-            symbol,
-            submission.to_string(),
-            expression_start..expression_start + submission.len(),
-        )
-    }
-
     pub fn evaluation_candidate_with_dispatches(
         &self,
         submission: &str,
@@ -269,7 +288,7 @@ impl SessionSource {
     ) -> GeneratedEvaluation {
         let symbol = format!("__gin_interpreter_eval_{generation}");
         let runtime_dispatches = self.runtime_dispatch_source(generations);
-        let prefix = format!("{symbol}() {}: ", self.evaluation_type);
+        let prefix = format!("{symbol}: ");
         let expression_start =
             self.declarations_text.len() + runtime_dispatches.len() + prefix.len();
         let mut source = String::with_capacity(expression_start + submission.len() + 1);
