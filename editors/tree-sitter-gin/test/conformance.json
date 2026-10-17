@@ -108,7 +108,7 @@
   },
   {
     "name": "conditionals",
-    "source": "result: when x is\n    case 1 then 'yes'\n    else 'no'\n",
+    "source": "result: when x is\n    1 then 'yes'\n    else 'no'\n",
     "valid": true
   },
   {
@@ -245,17 +245,17 @@
   {
     "name": "case value blocks",
     "valid": true,
-    "source": "choose(value Byte) Byte:\n    result: when\n        case value < 4 then\n            adjusted: 7\n            adjusted\n        else\n            value\n    return result\n"
+    "source": "choose(value Byte) Byte:\n    result: when\n        value < 4 then\n            adjusted: 7\n            adjusted\n        else\n            value\n    return result\n"
   },
   {
     "name": "pattern cases with continued guards",
     "valid": true,
-    "source": "result: when target is\n    case Some(value)\n        and value > 0\n    then value\n    case None then 0\n    else -1\n"
+    "source": "result: when target is\n    Some(value)\n        and value > 0\n    then value\n    None then 0\n    else -1\n"
   },
   {
     "name": "shared comparison cases",
     "valid": true,
-    "source": "result: when value\n    case < 0 then -1\n    case = 0 then 0\n    else 1\n"
+    "source": "result: when value\n    < 0 then -1\n    = 0 then 0\n    else 1\n"
   },
   {
     "name": "removed if conditional",
@@ -319,7 +319,7 @@
   },
   {
     "name": "aligned case then branches",
-    "source": "choose(value):\n    return when\n        case value is Some(error)\n        then error\n        else 0\n",
+    "source": "choose(value):\n    return when\n        value is Some(error)\n        then error\n        else 0\n",
     "valid": true
   },
   {
@@ -356,5 +356,20 @@
     "name": "malformed conditional branch import",
     "source": "main: when 0 = 1 then\n    use\nelse 7\n",
     "valid": false
+  },
+  {
+    "name": "nested is blocks with guards and outer fallthrough",
+    "valid": true,
+    "source": "result: when input is\n    Some(x) and x is\n        Left(y) and y > 0 then\n            adjusted: y + 1\n            adjusted\n        Right(y) then y\n    Some(_) then 0\n    None then -1\n"
+  },
+  {
+    "name": "nested constructors with guards",
+    "valid": true,
+    "source": "result: when input is\n    Some(Left(y)) and y > 0 then y\n    Some(_) then 0\n    None then -1\n"
+  },
+  {
+    "name": "removed case marker",
+    "valid": false,
+    "source": "result: when input is\n    case Some(x) then x\n    else 0\n"
   }
 ]

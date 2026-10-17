@@ -7,7 +7,7 @@
 enum TokenType {
   NEWLINE, UNTERMINATED_STRING, ERROR_RECOVERY, IMPORT_NEWLINE, INDENT, DEDENT,
   PRIVATE_INDENT,
-  RETURN_END,
+  RETURN_END, WHEN_ARM_END, EMPTY_HAS_END,
 };
 
 enum { INDENT_DEPTH_MAX = 128 };
@@ -88,6 +88,16 @@ bool tree_sitter_gin_external_scanner_scan(void *payload, TSLexer *lexer,
   const unsigned current = scanner->indents[scanner->depth - 1];
   if (valid_symbols[RETURN_END] && (newline || lexer->eof(lexer))) {
     lexer->result_symbol = RETURN_END;
+    return true;
+  }
+  if (valid_symbols[EMPTY_HAS_END] && (newline || lexer->eof(lexer)) &&
+      column <= current) {
+    lexer->result_symbol = EMPTY_HAS_END;
+    return true;
+  }
+  if (valid_symbols[WHEN_ARM_END] && (newline || lexer->eof(lexer)) &&
+      column <= current) {
+    lexer->result_symbol = WHEN_ARM_END;
     return true;
   }
   if (lexer->eof(lexer) || (newline && column < current)) {

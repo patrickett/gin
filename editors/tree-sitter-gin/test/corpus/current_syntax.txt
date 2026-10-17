@@ -459,7 +459,7 @@ aligned case then branches
 
 choose(value):
     return when
-        case value is Some(error)
+        value is Some(error)
         then error
         else 0
 

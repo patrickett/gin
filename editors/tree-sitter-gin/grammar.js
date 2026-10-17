@@ -17,14 +17,14 @@ module.exports = grammar({
     $._newline,
   ],
 
-  externals: ($) => [$._newline, $.unterminated_string, $._error_recovery, $._import_newline, $._indent, $._dedent, $._private_indent, $._return_end],
+  externals: ($) => [$._newline, $.unterminated_string, $._error_recovery, $._import_newline, $._indent, $._dedent, $._private_indent, $._return_end, $._when_arm_end, $._empty_has_end],
 
   word: ($) => $.identifier,
 
   reserved: {
     global: ($) => [
       "private", "return", "ref", "mut",
-      "own", "deref", "then", "to", "thus", "when", "case", "else", "self", "for",
+      "own", "deref", "then", "to", "thus", "when", "else", "self", "for",
       "while", "do", "use", "has", "and", "as", "in", "is", "not", "or",
     ],
   },
@@ -136,6 +136,7 @@ module.exports = grammar({
               "has",
               choice(
                 $.decl_member_list,
+                $._empty_has_end,
                 seq(
                   $.trait_composition,
                   optional(alias($._indented_decl_member_list, $.decl_member_list)),
@@ -473,6 +474,7 @@ module.exports = grammar({
     parenthesized_condition: ($) => seq("(", $._condition, ")"),
 
     when_expression: ($) => prec.right(choice(
+      seq("when", $._condition, "and", $.when_is_block),
       seq("when", $._condition, "then", $._when_body, optional($.when_else_arm)),
       seq("when", $._condition, $._indent,
         "then", $._when_body, optional($.when_else_arm), $._dedent),
@@ -483,12 +485,14 @@ module.exports = grammar({
     )),
     _when_body: ($) => choice($._expression, $.return_statement, $.block_body),
     when_guard: ($) => seq($._indent, repeat1(seq("and", $._condition)), $._dedent),
-    when_pattern_arm: ($) => seq("case", field("pattern", $.is_pattern),
+    when_pattern_arm: ($) => seq(field("pattern", $.is_pattern),
       repeat(seq("or", $.is_pattern)), optional(seq("and", $._condition)), optional($.when_guard),
-      "then", field("body", $._when_body)),
-    when_cond_arm: ($) => prec.right(seq("case", $._condition, optional($.when_guard), "then", $._when_body)),
-    when_comparison_arm: ($) => seq("case", choice("=", "<", "<=", ">", ">="), $._expression,
-      optional(seq("and", $._condition)), optional($.when_guard), "then", $._when_body),
+      choice(seq("then", field("body", $._when_body)), seq("and", $.when_is_block)), $._when_arm_end),
+    when_cond_arm: ($) => prec.right(seq($._condition, optional($.when_guard), choice(seq("then", $._when_body), seq("and", $.when_is_block)), $._when_arm_end)),
+    when_comparison_arm: ($) => seq(choice("=", "<", "<=", ">", ">="), $._expression,
+      optional(seq("and", $._condition)), optional($.when_guard), "then", $._when_body, $._when_arm_end),
+    when_is_block: ($) => seq(field("subject", $._expression), "is", $._indent,
+      repeat1($.when_pattern_arm), optional($.when_else_arm), $._dedent),
     when_else_arm: ($) => seq("else", $._when_body),
 
     for_expression: ($) =>

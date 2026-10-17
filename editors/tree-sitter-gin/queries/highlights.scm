@@ -100,7 +100,6 @@
 "to" @keyword.operator
 
 "return" @keyword.return
-"case" @keyword.conditional
 "when" @keyword.conditional
 "then" @keyword
 "else" @keyword.conditional

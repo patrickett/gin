@@ -266,8 +266,8 @@ when arms with logical and body
 ================================================================================
 
 all_named_copy(fields List(NamedTy)) Bool := return when fields is
-    case []                  then True
-    case [f, ...rest]        then is_copy(f.ty) and all_named_copy(rest)
+    []                  then True
+    [f, ...rest]        then is_copy(f.ty) and all_named_copy(rest)
 
 ---
 
@@ -315,10 +315,10 @@ when is arms without repeated is
 ================================================================================
 
 is_copy(x Type) Bool := return when x is
-    case Primitive(_, _)     then True
-    case Ref(_, False)       then True
-    case Opaque(_)           then False
-    case Array(elem, _)      then is_copy(elem)
+    Primitive(_, _)     then True
+    Ref(_, False)       then True
+    Opaque(_)           then False
+    Array(elem, _)      then is_copy(elem)
 
 ---
 

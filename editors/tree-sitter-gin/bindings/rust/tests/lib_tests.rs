@@ -209,8 +209,8 @@ fn constructor_union_variants_parse_without_errors() {
 #[test]
 fn js_style_list_rest_patterns_parse_without_errors() {
     let source = r#"check(xs List(Int)) Bool := return when xs is
-    case [] then True
-    case [head, ...tail] then False
+    [] then True
+    [head, ...tail] then False
 "#;
     let mut parser = parser();
     let tree = parser
@@ -341,12 +341,41 @@ fn while_requires_do_before_its_body() {
 #[test]
 fn aligned_returns_are_rejected_by_the_editor_grammar() {
     let mut parser = parser();
-    for source in [
-        "run Int:\n    value: 1\nreturn value\n",
-    ] {
+    for source in ["run Int:\n    value: 1\nreturn value\n"] {
         let tree = parser.parse(source, None).unwrap();
         assert!(
             tree.root_node().has_error(),
+            "{source}: {}",
+            tree.root_node().to_sexp()
+        );
+    }
+}
+
+#[test]
+fn when_alternatives_support_nested_is_blocks_and_block_bodies() {
+    let mut parser = parser();
+    for source in [
+        "value: when input is\n    Some(x) and x is\n        Left(y) and y > 0 then\n            adjusted: y + 1\n            adjusted\n        Right(y) then y\n    Some(_) then 0\n    None then -1\n",
+        "value: when input is\n    Some(Left(y)) and y > 0 then y\n    Some(_) then 0\n    None then -1\n",
+        "value: when\n    ready and input is\n        Some(x) then x\n        None then 0\n    else -1\n",
+        "value: when ready and input is\n    Some(x) then x\n    None then 0\n",
+    ] {
+        let tree = parser.parse(source, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
+            "{source}: {}",
+            tree.root_node().to_sexp()
+        );
+    }
+}
+
+#[test]
+fn empty_has_declarations_end_before_the_following_declaration() {
+    let mut parser = parser();
+    for source in ["Empty has\n", "Empty has\nOther has\n    value Word\n"] {
+        let tree = parser.parse(source, None).unwrap();
+        assert!(
+            !tree.root_node().has_error(),
             "{source}: {}",
             tree.root_node().to_sexp()
         );
