@@ -40,9 +40,9 @@ pub fn begin_run(
         return;
     }
 
-    // Resolve path dependencies relative to cwd (where flask.jsonc lives).
+    // Resolve path dependencies relative to cwd (where mod.flask lives).
     let config_dir = std::env::current_dir().unwrap_or_default();
-    let dependencies = super::resolve_path_dependencies(&config, &config_dir);
+    let dependencies = config.resolve_path_dependencies(&config_dir);
 
     eprintln!("Compiling {} v{}", config.name, config.version);
     let mut args = Args {
@@ -52,8 +52,7 @@ pub fn begin_run(
         ..Default::default()
     };
     let exe_path = match GinCompiler::compile(&mut args) {
-        CompileResult::Success { output: Some(path) }
-        | CompileResult::SuccessWithTypecheckDiagnostics { output: Some(path) } => path,
+        CompileResult::Success { output: Some(path) } => path,
         _ => {
             eprintln!("error: Compilation failed");
             std::process::exit(1);

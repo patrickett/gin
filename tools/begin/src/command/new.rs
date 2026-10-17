@@ -1,6 +1,6 @@
 use clap::Args;
 use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
-use flask::PACKAGE_CONFIG_NAME;
+use flask::MANIFEST_NAME;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -58,9 +58,9 @@ pub fn begin_new(args: NewArgs) {
         return;
     }
 
-    let flask_path = project_dir.join(PACKAGE_CONFIG_NAME);
+    let flask_path = project_dir.join(MANIFEST_NAME);
 
-    write_flask_json(&flask_path, &options.name, &options.author);
+    write_manifest(&flask_path, &options.name, &options.author);
 
     let starter_gin = match options.template {
         Template::HelloWorld => project_dir.join(super::DEFAULT_ENTRY),
@@ -122,27 +122,19 @@ fn prompt_new_options(pre_filled_name: Option<String>) -> Option<NewOptions> {
     })
 }
 
-pub fn write_flask_json(path: &Path, name: &str, author: &str) {
-    let authors_json = if author.is_empty() {
-        "[]".to_string()
+pub fn write_manifest(path: &Path, name: &str, author: &str) {
+    let quoted = serde_json::to_string(name).expect("package names serialize");
+    let authors = serde_json::to_string(&if author.is_empty() {
+        vec![]
     } else {
-        // Escape quotes in author name
-        let escaped = author.replace('\\', "\\\\").replace('"', "\\\"");
-        format!(r#"[\"{escaped}\"]"#)
-    };
-
+        vec![author]
+    })
+    .expect("authors serialize");
     let content = format!(
-        r#"{{
-  "name": "{name}",
-  "version": "0.1.0",
-  "authors": {authors_json},
-  "dependencies": {{}}
-}}
-"#
+        "#settings\nmodule: {quoted}\nversion: 0.1.0\nauthors: {authors}\n\n#dependencies\n"
     );
-
-    if let Err(e) = fs::write(path, content) {
-        eprintln!("error: could not write `{}`: {e}", path.display());
+    if let Err(error) = fs::write(path, content) {
+        eprintln!("error: cannot write {}: {error}", path.display());
     }
 }
 
@@ -151,7 +143,7 @@ pub fn write_main_gin(path: &Path, template: Template) {
         Template::HelloWorld => {
             r#"main:
     print("Hello, world!")
-return
+    return
 "#
         }
         Template::Library => {

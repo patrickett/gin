@@ -1,89 +1,71 @@
-use clap::Parser;
-use flask::{Dependency, DependencyKind, FlaskConfig};
-use std::path::PathBuf;
+use clap::Args;
+use flask::{FlaskConfig, FlaskConfigHandle, MinimumRequirement};
 
-#[derive(Parser, Debug)]
+#[derive(Args, Debug)]
 pub struct AddArgs {
-    /// Package to add (name@version for registry, path for local, URL for git)
     #[arg(value_name = "PACKAGE")]
     package: String,
+    #[arg(long)]
+    alias: Option<String>,
 }
 
-/// `begin add` adds a dependency to the current project
-pub fn begin_add(_config: FlaskConfig, args: AddArgs) {
-    let package = args.package;
-
-    let dependency = parse_package(&package);
-
-    let dep_name = extract_package_name(&dependency);
-
-    #[cfg(debug_assertions)]
-    println!(
-        "info: adding dependency `{dep_name}` from {source}",
-        source = match &dependency.kind {
-            DependencyKind::Version { version } => format!("registry version {version}"),
-            DependencyKind::Path { path } => format!("local path {path}"),
-            DependencyKind::Git { url } => format!("git repository {url}"),
-            _ => "unknown".to_string(),
+pub fn begin_add(_config: FlaskConfig, args: &AddArgs) -> Result<(), String> {
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let handle = FlaskConfigHandle::load(&cwd).map_err(|e| e.to_string())?;
+    if args.package.starts_with("./") || args.package.starts_with("../") {
+        let path = handle.source_dir().join(&args.package);
+        let (dependency, root) = FlaskConfig::discover(&path)?
+            .ok_or_else(|| "local dependency has no manifest".to_owned())?;
+        if root.canonicalize().map_err(|e| e.to_string())?
+            != path.canonicalize().map_err(|e| e.to_string())?
+        {
+            return Err("local dependency must name a package root".into());
         }
-    );
-
-    // TODO: Add dependency to flask.jsonc
-    // 1. Find flask.jsonc in current directory or parent directories
-    // 2. Parse existing config
-    // 3. Add new dependency to dependencies map
-    // 4. Write updated config back to flask.jsonc
-
-    eprintln!("warning: `begin add` is not yet implemented (would add dependency `{dep_name}`)");
-}
-
-fn parse_package(package: &str) -> Dependency {
-    if package.contains('@') && !package.contains("://") {
-        let parts: Vec<&str> = package.split('@').collect();
-        let _name = parts[0];
-        let version = parts[1];
-
-        Dependency {
-            kind: DependencyKind::Version {
-                version: version.to_string(),
-            },
-            common: Default::default(),
-        }
-    } else if package.contains("://") {
-        Dependency {
-            kind: DependencyKind::Git {
-                url: package.to_string(),
-            },
-            common: Default::default(),
-        }
+        let alias = args.alias.as_deref().unwrap_or(dependency.name());
+        handle
+            .add_path(alias, &args.package)
+            .map_err(|e| e.to_string())?;
     } else {
-        let _path = PathBuf::from(package);
-        Dependency {
-            kind: DependencyKind::Path {
-                path: package.to_string(),
-            },
-            common: Default::default(),
-        }
+        let (name, _) = args
+            .package
+            .split_once('@')
+            .ok_or_else(|| "expected package@version or a relative path".to_owned())?;
+        let alias = args.alias.as_deref().unwrap_or(name);
+        let requirement =
+            MinimumRequirement::parse(alias, &args.package).map_err(|e| e.to_string())?;
+        add_registry(&handle, alias, requirement)?;
     }
+    Ok(())
 }
 
-fn extract_package_name(dependency: &Dependency) -> String {
-    match &dependency.kind {
-        DependencyKind::Version { version } => {
-            // For registry packages, we'd need to query the package name
-            format!("package@{version}")
-        }
-        DependencyKind::Path { path } => {
-            let path = PathBuf::from(path);
-            path.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("unknown")
-                .to_string()
-        }
-        DependencyKind::Git { url } => {
-            let name_part = url.rsplit('/').next().unwrap_or(url);
-            name_part.replace(".git", "")
-        }
-        _ => "unknown".to_string(),
-    }
+fn add_registry(
+    handle: &FlaskConfigHandle,
+    alias: &str,
+    requirement: MinimumRequirement,
+) -> Result<(), String> {
+    let config = handle.read().config.clone();
+    let workspace = config
+        .with_workspace_requirements(&handle.source_dir())
+        .map_err(|e| e.to_string())?;
+    let client = super::registry_client()?;
+    let now = super::now_seconds()?;
+    let current = client.resolve(&workspace, now).map_err(|e| e.to_string())?;
+    let next = config
+        .with_minimum_floors(&current)
+        .map_err(|e| e.to_string())?
+        .with_minimum_requirement(alias, requirement)
+        .map_err(|e| e.to_string())?;
+    let effective = next
+        .with_workspace_requirements(&handle.source_dir())
+        .map_err(|e| e.to_string())?;
+    client
+        .fetch(&effective, now, false)
+        .map_err(|e| e.to_string())?;
+    handle
+        .update_minimums(
+            &next
+                .registry_minimum_requirements()
+                .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())
 }

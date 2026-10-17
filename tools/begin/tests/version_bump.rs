@@ -26,9 +26,9 @@ fn run(
 fn bump_checks_updates_preserves_comments_and_is_idempotent() {
     let root = tempfile::tempdir().unwrap();
     let cache = tempfile::tempdir().unwrap();
-    let raw = "{ // keep this\n name: 'pkg', version: '1.2.3', authors: [] }\n";
-    fs::write(root.path().join("flask.jsonc"), raw).unwrap();
-    fs::write(root.path().join("main.gin"), "ping:\nreturn\n").unwrap();
+    let raw = "-- keep this\n#settings\nmodule: 'pkg'\nversion: 1.2.3\n#dependencies\n";
+    fs::write(root.path().join("mod.flask"), raw).unwrap();
+    fs::write(root.path().join("main.gin"), "ping:\n    return\n").unwrap();
     let result = GinCompiler::compile(&mut Args {
         input: root.path().to_path_buf(),
         emit: Emit::Interface,
@@ -46,12 +46,12 @@ fn bump_checks_updates_preserves_comments_and_is_idempotent() {
     );
     assert!(String::from_utf8_lossy(&check.stdout).contains("1.2.4"));
     assert_eq!(
-        fs::read_to_string(root.path().join("flask.jsonc")).unwrap(),
+        fs::read_to_string(root.path().join("mod.flask")).unwrap(),
         raw
     );
     fs::write(
         root.path().join("main.gin"),
-        "ping:\nreturn\npong:\nreturn\n",
+        "ping:\n    return\npong:\n    return\n",
     )
     .unwrap();
     let apply = run(root.path(), cache.path(), &old, false);
@@ -60,9 +60,9 @@ fn bump_checks_updates_preserves_comments_and_is_idempotent() {
         "{}",
         String::from_utf8_lossy(&apply.stderr)
     );
-    let expected = raw.replace("'1.2.3'", "\"1.3.0\"");
+    let expected = raw.replace("version: 1.2.3", "version: 1.3.0");
     assert_eq!(
-        fs::read_to_string(root.path().join("flask.jsonc")).unwrap(),
+        fs::read_to_string(root.path().join("mod.flask")).unwrap(),
         expected
     );
     let again = run(root.path(), cache.path(), &old, false);
@@ -72,13 +72,13 @@ fn bump_checks_updates_preserves_comments_and_is_idempotent() {
         String::from_utf8_lossy(&again.stderr)
     );
     assert_eq!(
-        fs::read_to_string(root.path().join("flask.jsonc")).unwrap(),
+        fs::read_to_string(root.path().join("mod.flask")).unwrap(),
         expected
     );
     fs::write(root.path().join("main.gin"), "main: @\n").unwrap();
     assert!(!run(root.path(), cache.path(), &old, false).status.success());
     assert_eq!(
-        fs::read_to_string(root.path().join("flask.jsonc")).unwrap(),
+        fs::read_to_string(root.path().join("mod.flask")).unwrap(),
         expected
     );
     assert!(!root.path().join("target").exists());

@@ -4,11 +4,14 @@ fn run_compiles_into_user_cache_and_executes_in_sandbox() {
     let source = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     std::fs::write(
-        source.path().join("flask.jsonc"),
-        serde_json::to_vec(&serde_json::json!({"name":"app","version":"1.0.0","authors":[],"target":test_fixtures::host_target_triple()})).unwrap(),
+        source.path().join("mod.flask"),
+        format!(
+            "#settings\nmodule: 'app'\nversion: 1.0.0\ntarget: '{}'\n",
+            test_fixtures::host_target_triple()
+        ),
     )
     .unwrap();
-    std::fs::write(source.path().join("main.gin"), "main:\nreturn 0\n").unwrap();
+    std::fs::write(source.path().join("main.gin"), "main:\n    return 0\n").unwrap();
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_begin"))
         .current_dir(source.path())
         .env("GIN_HOME", home.path())
@@ -36,8 +39,13 @@ fn run_reports_a_failed_compilation_as_failure() {
     let source = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     std::fs::write(
-        source.path().join("flask.jsonc"),
-        r#"{"name":"app","version":"1.0.0","authors":[]}"#,
+        source.path().join("mod.flask"),
+        r#"#settings
+module: "app"
+version: 1.0.0
+
+#dependencies
+"#,
     )
     .unwrap();
     std::fs::write(source.path().join("main.gin"), "main:\n").unwrap();

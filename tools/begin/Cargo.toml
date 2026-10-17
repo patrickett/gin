@@ -12,19 +12,9 @@ ginc = { workspace = true }
 ginfmt = { workspace = true }
 ignore = { workspace = true }
 clap = { workspace = true }
-ratatui = {version="0.30.0", features=["unstable-widget-ref"]}
-crossterm = { version = "0.28.1", features = ["events"] }
 flask = { workspace = true }
-strum = { version = "0.27", features = ["derive"] }
-tui-tree-widget = "0.24.0"
-serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = { workspace = true }
-dirs = { workspace = true }
-tui-input = "0.14"
-crossbeam-channel = { workspace = true }
 dialoguer = "0.11"
-ast = { workspace = true }
 interface = { workspace = true }
 semver = { workspace = true }
 

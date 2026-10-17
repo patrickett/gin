@@ -58,8 +58,13 @@ fn check_reports_parse_and_input_failures() {
 fn check_from_subdirectory_checks_entire_package() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(
-        dir.path().join("flask.jsonc"),
-        r#"{"name":"fixture","version":"1.0.0","authors":[]}"#,
+        dir.path().join("mod.flask"),
+        r#"#settings
+module: "fixture"
+version: 1.0.0
+
+#dependencies
+"#,
     )
     .unwrap();
     fs::write(dir.path().join("lib.gin"), "value: missing_root_symbol\n").unwrap();
@@ -83,16 +88,31 @@ fn explicit_package_path_resolves_dependencies_relative_to_manifest() {
     let dependency = dir.path().join("dependency");
     fs::create_dir(&package).unwrap();
     fs::create_dir(&dependency).unwrap();
-    fs::write(package.join("flask.jsonc"), r#"{"name":"fixture","version":"1.0.0","authors":[],"dependencies":{"support":{"path":"../dependency"}}}"#).unwrap();
     fs::write(
-        dependency.join("flask.jsonc"),
-        r#"{"name":"support","version":"1.0.0","authors":[]}"#,
+        package.join("mod.flask"),
+        r#"#settings
+module: "fixture"
+version: 1.0.0
+
+#dependencies
+support: "../dependency"
+"#,
     )
     .unwrap();
-    fs::write(dependency.join("lib.gin"), "Thing is ()\n").unwrap();
+    fs::write(
+        dependency.join("mod.flask"),
+        r#"#settings
+module: "support"
+version: 1.0.0
+
+#dependencies
+"#,
+    )
+    .unwrap();
+    fs::write(dependency.join("lib.gin"), "Thing is First or Second\n").unwrap();
     fs::write(
         package.join("main.gin"),
-        "use support Thing\nvalue: Thing\n",
+        "use support Thing\nvalue: Thing.First\n",
     )
     .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_begin"))
@@ -147,7 +167,7 @@ fn json_check_is_machine_readable_and_limits_display_without_hiding_failure() {
         if limit > 0 {
             let diagnostic = &records[0];
             assert_eq!(diagnostic["code"], "type-unknown-symbol");
-            assert_eq!(diagnostic["severity"], "error");
+            assert_eq!(diagnostic["severity"], "flaw");
             assert_eq!(diagnostic["range"]["start"]["line"], 1);
             assert_eq!(diagnostic["range"]["start"]["column"], 8);
             assert_eq!(diagnostic["range"]["byte_start"], 7);
@@ -190,7 +210,7 @@ fn check_formats_success_input_errors_and_plain_text() {
         assert!(text.contains("Check failed: 1 errors"), "{text}");
         if format == "short" {
             assert!(
-                text.contains("main.gin:1:7: error[type-unknown-symbol]"),
+                text.contains("main.gin:1:7: flaw[type-unknown-symbol]"),
                 "{text}"
             );
         }
@@ -203,8 +223,13 @@ fn json_parse_errors_include_locations_and_dependency_origin() {
     let dep = dir.path().join("dependency");
     fs::create_dir(&dep).unwrap();
     fs::write(
-        dep.join("flask.jsonc"),
-        r#"{"name":"support","version":"1.0.0","authors":[]}"#,
+        dep.join("mod.flask"),
+        r#"#settings
+module: "support"
+version: 1.0.0
+
+#dependencies
+"#,
     )
     .unwrap();
     fs::write(
@@ -212,10 +237,14 @@ fn json_parse_errors_include_locations_and_dependency_origin() {
         "Thing is ()\nbroken: missing_dependency_symbol\n",
     )
     .unwrap();
-    fs::write(dir.path().join("flask.jsonc"), serde_json::to_vec(&serde_json::json!({"name":"app", "version":"1.0.0", "authors":[], "dependencies":{"support":{"path":"dependency"}}})).unwrap()).unwrap();
+    fs::write(
+        dir.path().join("mod.flask"),
+        "#settings\nmodule: 'app'\nversion: 1.0.0\n#dependencies\nsupport: './dependency'\n",
+    )
+    .unwrap();
     fs::write(
         dir.path().join("main.gin"),
-        "use support Thing\nvalue: Thing\n",
+        "use support Thing\nvalue: Thing.First\n",
     )
     .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_begin"))

@@ -10,29 +10,23 @@ use crate::command::{
     version::{VersionCommand, version},
 };
 use clap::*;
-use flask::{DependencyKind, FlaskConfig};
+use flask::FlaskConfig;
 use ginc::reporting::{CheckOptions, MessageFormat};
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub const DEFAULT_ENTRY: &str = "main.gin";
 pub const DEFAULT_LIB: &str = "lib.gin";
 
-/// Resolve path dependencies relative to a config directory.
-///
-/// Takes the FlaskConfig dependencies and resolves all `Path` dependencies
-/// to absolute paths based on the provided config directory.
-pub fn resolve_path_dependencies(
-    config: &FlaskConfig,
-    config_dir: &Path,
-) -> HashMap<String, PathBuf> {
-    let mut dependencies = HashMap::new();
-    for (name, dep) in config.dependencies() {
-        if let DependencyKind::Path { path: dep_path } = &dep.kind {
-            dependencies.insert(name.clone(), config_dir.join(dep_path));
-        }
-    }
-    dependencies
+pub fn registry_client() -> Result<flask::RegistryClient<flask::HttpsTransport>, String> {
+    flask::RegistryClient::load(flask::GinHome::discover().map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())
+}
+
+pub fn now_seconds() -> Result<u64, String> {
+    Ok(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs())
 }
 
 mod add;
@@ -49,8 +43,10 @@ mod version;
 
 #[derive(Subcommand, Debug)]
 pub enum BeginCommand {
-    /// Resolve eligible releases, fetch verified sources, and update flask.jsonc.
-    Update,
+    /// Upgrade eligible dependencies and record minimum versions.
+    Update {
+        package: Option<String>,
+    },
     /// Fetch the exact manifest resolution without changing versions.
     Fetch {
         /// Use unexpired cached metadata and cached archives only.
@@ -59,7 +55,7 @@ pub enum BeginCommand {
     },
     // begin add pkg_name
     // begin add "*.git" for git
-    Add,
+    Add(AddArgs),
 
     /// Runs a security audit on the dependencies of the current project
     Audit,
@@ -143,7 +139,7 @@ impl BeginCommand {
                 | BeginCommand::New(_)
                 | BeginCommand::Format
                 | BeginCommand::Version(_)
-                | BeginCommand::Update
+                | BeginCommand::Update { .. }
                 | BeginCommand::Fetch { .. }
         )
     }
@@ -183,10 +179,17 @@ impl BeginCommand {
             BeginCommand::Init => begin_init(),
             BeginCommand::New(args) => begin_new(args.clone()),
             BeginCommand::Version(cmd) => version(cmd),
-            BeginCommand::Update | BeginCommand::Fetch { .. } => {
-                let update = matches!(self, BeginCommand::Update);
+            BeginCommand::Update { .. } | BeginCommand::Fetch { .. } => {
+                let update = matches!(self, BeginCommand::Update { .. });
                 let offline = matches!(self, BeginCommand::Fetch { offline: true });
-                if let Err(error) = registry::registry(update, offline) {
+                if let Err(error) = registry::registry(
+                    update,
+                    offline,
+                    match self {
+                        BeginCommand::Update { package } => package.as_deref(),
+                        _ => None,
+                    },
+                ) {
                     eprintln!("begin: {error}");
                     std::process::exit(1);
                 }
@@ -200,7 +203,7 @@ impl BeginCommand {
             _ => {
                 let Some(config) = config else {
                     if matches!(self, BeginCommand::Build { .. }) {
-                        eprintln!("error: could not find flask.jsonc for this build");
+                        eprintln!("error: could not find mod.flask for this build");
                         std::process::exit(1);
                     }
                     return;
@@ -212,9 +215,11 @@ impl BeginCommand {
 
     fn run_with_config(&self, config: FlaskConfig) {
         match &self {
-            BeginCommand::Add => {
-                let args = AddArgs::parse_from(std::env::args());
-                begin_add(config, args)
+            BeginCommand::Add(args) => {
+                if let Err(error) = begin_add(config, args) {
+                    eprintln!("begin add: {error}");
+                    std::process::exit(1);
+                }
             }
             BeginCommand::Audit => begin_audit(config),
             BeginCommand::Build {
@@ -250,7 +255,7 @@ impl BeginCommand {
             | BeginCommand::New(_)
             | BeginCommand::Format
             | BeginCommand::Version(_)
-            | BeginCommand::Update
+            | BeginCommand::Update { .. }
             | BeginCommand::Fetch { .. } => {
                 unreachable!("commands without preloaded config are dispatched in `run`")
             }

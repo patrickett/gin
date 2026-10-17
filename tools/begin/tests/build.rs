@@ -4,16 +4,22 @@ use std::process::Command;
 fn build_forwards_timings_and_release_and_reports_artifacts() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
-        dir.path().join("flask.jsonc"),
+        dir.path().join("mod.flask"),
         format!(
-            r#"{{"name":"fixture","version":"0.1.0","authors":[],"target":"{}"}}"#,
+            r#"#settings
+module: "fixture"
+version: 0.1.0
+target: "{}"
+
+#dependencies
+"#,
             test_fixtures::host_target_triple()
         ),
     )
     .unwrap();
     std::fs::write(
         dir.path().join("lib.gin"),
-        "Word is in 0 to 255\nidentity(a Word) Word: a\n",
+        "Word is in 0 to 255\nWord.finish(self): return\nidentity(a Word) Word: return a\n",
     )
     .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_begin"))
@@ -70,10 +76,15 @@ fn build_failures_exit_nonzero() {
     };
     let missing_manifest = run();
     assert!(!missing_manifest.status.success());
-    assert!(String::from_utf8_lossy(&missing_manifest.stderr).contains("flask.jsonc"));
+    assert!(String::from_utf8_lossy(&missing_manifest.stderr).contains("mod.flask"));
     std::fs::write(
-        dir.path().join("flask.jsonc"),
-        r#"{"name":"fixture","version":"0.1.0","authors":[]}"#,
+        dir.path().join("mod.flask"),
+        r#"#settings
+module: "fixture"
+version: 0.1.0
+
+#dependencies
+"#,
     )
     .unwrap();
     let missing_source = run();

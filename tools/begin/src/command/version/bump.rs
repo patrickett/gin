@@ -12,13 +12,8 @@ pub fn bump(against: Option<&Path>, check: bool) -> Result<(), String> {
     let bytes = if let Some(path) = against {
         fs::read(path).map_err(|e| e.to_string())?
     } else {
-        let client =
-            flask::RegistryClient::load(flask::GinHome::discover().map_err(|e| e.to_string())?)
-                .map_err(|e| e.to_string())?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| e.to_string())?
-            .as_secs();
+        let client = crate::command::registry_client()?;
+        let now = crate::command::now_seconds()?;
         client
             .interface(
                 &config.name,

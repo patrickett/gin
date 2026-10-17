@@ -35,7 +35,7 @@ pub fn begin_build(
         return false;
     }
 
-    // Resolve path dependencies relative to cwd (where flask.jsonc lives).
+    // Resolve path dependencies relative to cwd (where mod.flask lives).
     let config_dir = match std::env::current_dir() {
         Ok(d) => d,
         Err(e) => {
@@ -43,7 +43,7 @@ pub fn begin_build(
             return false;
         }
     };
-    let dependencies = super::resolve_path_dependencies(&config, &config_dir);
+    let dependencies = config.resolve_path_dependencies(&config_dir);
 
     let mut args = Args {
         input: path,

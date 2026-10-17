@@ -1,18 +1,28 @@
-use flask::{FlaskConfig, GinHome, RegistryClient};
+use flask::FlaskConfig;
 
 pub fn begin_audit(config: FlaskConfig) {
     let result = (|| -> Result<(), String> {
-        let client = RegistryClient::load(GinHome::discover().map_err(|e| e.to_string())?)
+        let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+        let (_, root) =
+            FlaskConfig::discover(&cwd)?.ok_or_else(|| "no package manifest".to_owned())?;
+        let config = config
+            .with_workspace_requirements(&root)
             .map_err(|e| e.to_string())?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| e.to_string())?
-            .as_secs();
+        if config.minimum_version_selection
+            && config
+                .registry_minimum_requirements()
+                .map_err(|e| e.to_string())?
+                .is_empty()
+        {
+            return Ok(());
+        }
+        let client = super::registry_client()?;
+        let now = super::now_seconds()?;
         client.audit(&config, now).map_err(|e| e.to_string())
     })();
     match result {
         Ok(()) => println!(
-            "Every locked registry dependency is eligible under current signed security metadata"
+            "Every selected registry dependency is eligible under current signed security metadata"
         ),
         Err(error) => {
             eprintln!("begin audit: {error}");

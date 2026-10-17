@@ -1,4 +1,4 @@
-use flask::{FlaskConfig, PACKAGE_CONFIG_NAME};
+use flask::FlaskConfig;
 use ignore::WalkBuilder;
 use std::{fs, path::Path};
 
@@ -8,18 +8,14 @@ pub fn begin_format() -> Result<(), String> {
 }
 
 fn format_project(from: &Path) -> Result<(), String> {
-    let (_, root) = FlaskConfig::find_package_config(from).ok_or_else(|| {
-        format!(
-            "no valid {PACKAGE_CONFIG_NAME} found in or above {}",
-            from.display()
-        )
-    })?;
+    let (_, root) = FlaskConfig::discover(from)?
+        .ok_or_else(|| format!("no package manifest found in or above {}", from.display()))?;
     let entries = WalkBuilder::new(&root)
         .require_git(false)
         .filter_entry(|entry| {
             entry.depth() == 0
                 || !(entry.file_type().is_some_and(|kind| kind.is_dir())
-                    && entry.path().join(PACKAGE_CONFIG_NAME).is_file())
+                    && FlaskConfig::manifest_path(&entry.path()).is_file())
         })
         .build();
     for entry in entries {
@@ -45,30 +41,30 @@ mod tests {
     use super::*;
     use crate::{BeginArguments, command::BeginCommand};
     use clap::Parser;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use flask::MANIFEST_NAME;
 
     #[test]
     fn parses_format_command_and_alias() {
         for name in ["format", "fmt"] {
             let args = BeginArguments::try_parse_from(["begin", name]).unwrap();
-            assert!(matches!(args.command, Some(BeginCommand::Format)));
+            assert!(matches!(args.command, BeginCommand::Format));
         }
     }
 
     #[test]
     fn formats_package_from_subdirectory_and_leaves_excluded_files_unchanged() {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("begin-format-{}-{nonce}", std::process::id()));
+        let root = test_fixtures::unique_temp_dir("begin-format");
         for dir in ["src", "target", "dependency", "ignored"] {
             fs::create_dir_all(root.join(dir)).unwrap();
         }
-        let config = r#"{"name":"format-fixture","version":"0.1.0","authors":[]}"#;
-        fs::write(root.join(PACKAGE_CONFIG_NAME), config).unwrap();
-        fs::write(root.join("dependency").join(PACKAGE_CONFIG_NAME), config).unwrap();
+        let config = r#"#settings
+module: "format-fixture"
+version: 0.1.0
+
+#dependencies
+"#;
+        fs::write(root.join(MANIFEST_NAME), config).unwrap();
+        fs::write(root.join("dependency").join(MANIFEST_NAME), config).unwrap();
         fs::write(root.join(".gitignore"), "ignored/\n").unwrap();
         let source = "value:1\n";
         let included = ["main.gin", "src/value.gin", "target/value.gin"];

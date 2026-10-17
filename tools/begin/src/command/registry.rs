@@ -1,33 +1,62 @@
-use flask::{FlaskConfigHandle, GinHome, RegistryClient};
+use flask::FlaskConfigHandle;
 
-pub fn registry(update: bool, offline: bool) -> Result<(), String> {
+pub fn registry(update: bool, offline: bool, target: Option<&str>) -> Result<(), String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let handle = FlaskConfigHandle::load(&cwd).map_err(|e| e.to_string())?;
     let mut config = handle.read().config.clone();
-    let client = RegistryClient::load(GinHome::discover().map_err(|e| e.to_string())?)
+    let workspace = config
+        .with_workspace_requirements(&handle.source_dir())
         .map_err(|e| e.to_string())?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .as_secs();
+    if workspace.minimum_version_selection
+        && workspace
+            .registry_minimum_requirements()
+            .map_err(|e| e.to_string())?
+            .is_empty()
+    {
+        if target.is_some() {
+            return Err("update target is not a dependency; use begin add".into());
+        }
+        println!("No registry dependencies");
+        return Ok(());
+    }
+    let client = super::registry_client()?;
+    let now = super::now_seconds()?;
     if update {
-        let resolution = client.resolve(&config, now).map_err(|e| e.to_string())?;
-        config.resolution = Some(resolution.clone());
-        client
-            .fetch(&config, now, false)
+        let resolution = match target {
+            Some(target) => {
+                let (name, _) = target
+                    .split_once('@')
+                    .ok_or_else(|| "expected package@version".to_owned())?;
+                let requirement =
+                    flask::MinimumRequirement::parse(name, target).map_err(|e| e.to_string())?;
+                client.update_requirement(&workspace, &requirement, now)
+            }
+            None => client.update(&workspace, now),
+        }
+        .map_err(|e| e.to_string())?;
+        config = config
+            .with_minimum_floors(&resolution)
             .map_err(|e| e.to_string())?;
+        let next = config
+            .with_workspace_requirements(&handle.source_dir())
+            .map_err(|e| e.to_string())?;
+        client.fetch(&next, now, false).map_err(|e| e.to_string())?;
         handle
-            .update_resolution(resolution)
+            .update_minimums(
+                &config
+                    .registry_minimum_requirements()
+                    .map_err(|e| e.to_string())?,
+            )
             .map_err(|e| e.to_string())?;
-        println!("Updated and verified the manifest resolution");
+        println!("Updated minimum dependency versions");
     } else {
         if offline {
             client
-                .verify_cached(&config, now)
+                .verify_cached(&workspace, now)
                 .map_err(|e| e.to_string())?;
         } else {
             client
-                .fetch(&config, now, true)
+                .fetch(&workspace, now, true)
                 .map_err(|e| e.to_string())?;
         }
         println!("Verified dependencies are available in the user cache");

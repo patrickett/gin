@@ -1,48 +1,52 @@
 mod command;
-mod tui;
 
-use crate::{command::BeginCommand, tui::Tui};
+use crate::command::BeginCommand;
 use clap::*;
 use flask::FlaskConfig;
 
 #[derive(Parser, Debug)]
-#[command(version, about)]
+#[command(version, about, arg_required_else_help = true)]
 /// Begin is the package manager for the Gin programming language
 pub struct BeginArguments {
-    // path: PathBuf,
     #[command(subcommand)]
-    command: Option<BeginCommand>,
+    command: BeginCommand,
 }
 
 fn main() {
     let args = BeginArguments::parse();
 
-    // TODO: come up with a different pattern for this,
-    // we want to prompt when no flask
-    if let Some(cmd) = &args.command
-        && !cmd.needs_preloaded_config()
-    {
-        cmd.run(None);
+    if !args.command.needs_preloaded_config() {
+        args.command.run(None);
         return;
     }
 
     let config = match std::env::current_dir() {
-        Ok(dir) => FlaskConfig::find_package_config(&dir).map(|(cfg, _)| cfg),
+        Ok(dir) => match FlaskConfig::discover(&dir) {
+            Ok(found) => found.map(|(config, _)| config),
+            Err(error) => {
+                eprintln!("begin: {error}");
+                std::process::exit(1);
+            }
+        },
         Err(e) => {
             eprintln!("error: cannot get current directory: {e}");
             None
         }
     };
 
-    if let Some(cmd) = &args.command {
-        cmd.run(config)
-    } else if config.is_some() {
-        let terminal = ratatui::init();
-        let app_result = Tui::default().run(terminal);
-        ratatui::restore();
-        match app_result {
-            Ok(_) => {}
-            Err(e) => eprintln!("{e}"),
-        }
+    args.command.run(config);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_arguments_displays_help() {
+        let error = BeginArguments::try_parse_from(["begin"]).unwrap_err();
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        );
     }
 }
