@@ -232,3 +232,105 @@ fn unavailable_indices_have_unknown_overlap() {
         Overlap::Unknown
     );
 }
+
+fn field(base: ReferenceTargetGroup, index: usize) -> ReferenceTargetGroup {
+    ReferenceTargetGroup::Field {
+        base: Box::new(base),
+        index,
+    }
+}
+
+fn expect_symmetric_overlap(
+    left: &ReferenceTargetGroup,
+    right: &ReferenceTargetGroup,
+    expected: Overlap,
+) {
+    let constraints = ConstraintEnv::default();
+    assert_eq!(left.overlap(right, &constraints), expected);
+    assert_eq!(right.overlap(left, &constraints), expected);
+}
+
+#[test]
+fn nested_field_is_disjoint_from_a_sibling_of_its_parent() {
+    let root = ReferenceTargetGroup::Local(PlaceId(0));
+    let nested = field(field(root.clone(), 0), 0);
+    let sibling = field(root, 2);
+    expect_symmetric_overlap(&nested, &sibling, Overlap::Disjoint);
+}
+
+#[test]
+fn deeply_nested_field_is_disjoint_from_a_shallower_branch() {
+    let root = ReferenceTargetGroup::Param(GroupId(0));
+    let nested = field(field(field(root.clone(), 0), 1), 2);
+    let sibling = field(field(root, 1), 2);
+    expect_symmetric_overlap(&nested, &sibling, Overlap::Disjoint);
+}
+
+#[test]
+fn nested_fields_overlap_their_ancestors() {
+    let root = ReferenceTargetGroup::Local(PlaceId(0));
+    let parent = field(root.clone(), 0);
+    let nested = field(field(parent.clone(), 1), 2);
+    expect_symmetric_overlap(&nested, &parent, Overlap::Partial);
+    expect_symmetric_overlap(&nested, &root, Overlap::Partial);
+    expect_symmetric_overlap(&nested, &nested, Overlap::Equal);
+}
+
+#[test]
+fn nested_item_is_disjoint_from_a_different_shallower_item() {
+    let first = item(symbolic(NormalExpr::Value(int(0))));
+    let nested = ReferenceTargetGroup::ItemRegion {
+        base: Box::new(first.clone()),
+        index: symbolic(NormalExpr::Value(int(1))),
+    };
+    let second = item(symbolic(NormalExpr::Value(int(2))));
+    expect_symmetric_overlap(&nested, &second, Overlap::Disjoint);
+    expect_symmetric_overlap(&nested, &first, Overlap::Partial);
+}
+
+#[test]
+fn nested_variant_is_disjoint_from_a_different_shallower_variant() {
+    let parent = variant("Some");
+    let nested = ReferenceTargetGroup::Variant {
+        base: Box::new(parent.clone()),
+        name: Intern::from_ref("Some"),
+    };
+    expect_symmetric_overlap(&nested, &variant("None"), Overlap::Disjoint);
+    expect_symmetric_overlap(&nested, &parent, Overlap::Partial);
+}
+
+#[test]
+fn nested_ranges_preserve_disjointness_and_partial_overlap() {
+    let parent = range(NormalExpr::Value(int(0)), NormalExpr::Value(int(4)));
+    let nested = ReferenceTargetGroup::ItemRange {
+        base: Box::new(parent.clone()),
+        start: symbolic(NormalExpr::Value(int(0))),
+        end: symbolic(NormalExpr::Value(int(2))),
+    };
+    let sibling = range(NormalExpr::Value(int(4)), NormalExpr::Value(int(8)));
+    expect_symmetric_overlap(&nested, &sibling, Overlap::Disjoint);
+    expect_symmetric_overlap(&nested, &parent, Overlap::Partial);
+}
+
+#[test]
+fn nested_unknown_item_retains_unknown_overlap_with_shallower_item() {
+    let nested = ReferenceTargetGroup::ItemRegion {
+        base: Box::new(item(TargetIndex::Unknown)),
+        index: symbolic(NormalExpr::Value(int(0))),
+    };
+    expect_symmetric_overlap(
+        &nested,
+        &item(symbolic(NormalExpr::Value(int(1)))),
+        Overlap::Unknown,
+    );
+}
+
+#[test]
+fn nested_dereference_is_disjoint_from_sibling_pointer_storage() {
+    let root = ReferenceTargetGroup::Local(PlaceId(0));
+    let pointer = ReferenceTargetGroup::Deref(Box::new(field(root.clone(), 0)));
+    let nested = ReferenceTargetGroup::Deref(Box::new(pointer.clone()));
+    let sibling = ReferenceTargetGroup::Deref(Box::new(field(root, 1)));
+    expect_symmetric_overlap(&nested, &sibling, Overlap::Disjoint);
+    expect_symmetric_overlap(&nested, &pointer, Overlap::Partial);
+}

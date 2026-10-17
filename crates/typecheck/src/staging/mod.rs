@@ -8,10 +8,9 @@ mod prepare;
 pub use availability::analyze_availability;
 pub use call::CallInstantiation;
 pub use call::instantiate_call;
-pub use normalize::{
-    NormalExpr, NormalizeResult, normalize, normalize_resolved, require_compile_time,
-};
-pub use prepare::prepare_resolved_expressions;
+pub(crate) use call::{argument_order, normalize_inferred_value_type};
+pub use normalize::{NormalExpr, NormalizeResult, normalize, normalize_resolved};
+pub(crate) use prepare::{has_invalid_compile_time_argument, prepare_resolved_expressions};
 
 pub type CallableSignatures =
     std::collections::HashMap<crate::typed::DefId, crate::typed::TypedCallableSignature>;

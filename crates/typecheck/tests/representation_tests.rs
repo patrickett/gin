@@ -4,6 +4,8 @@ use ast::integer::{
     NominalIntegerSemantics,
 };
 use ast::ty::{DeclarationKey, NamedTypeInstance, PackageInstanceKey, TypeId};
+use diagnostic::DiagnosticCode;
+use diagnostic::code::{IntegerCode, TypeCode};
 use i256::I256;
 use internment::Intern;
 use typecheck::representation::{Repr, RepresentationError};
@@ -23,8 +25,12 @@ fn nominal_integer(name: &'static str, min: I256, max: I256) -> (Ty, TypeRegistr
             parameters: Vec::new(),
             definition: Ty::Unit,
             sequence_literal: None,
+            private_members: Default::default(),
+            private_fields: Default::default(),
+            field_refinements: Default::default(),
 
             reference: None,
+            discriminant: None,
             integer: Some(NominalIntegerSemantics {
                 validity: IntegerValidity::new(IntegerDomain::bounded(min, max).unwrap()),
                 representation_rule: IntegerRepresentationRule::InferFromValidity,
@@ -51,16 +57,19 @@ fn nominal_integer_runtime_width_is_validated_before_representation() {
     assert!(matches!(
         Repr::derive(&ty, Some(&registry)),
         Err(RepresentationError::InvalidInteger {
-            code: "type-integer-runtime-width-unsupported",
+            code: DiagnosticCode::Type(TypeCode::Integer(IntegerCode::RuntimeWidthUnsupported)),
             ..
         })
     ));
 }
 
 #[test]
-fn two_alternative_structural_result_family_uses_one_bit_sum_discriminant() {
+fn two_alternative_local_result_family_uses_one_bit_sum_discriminant() {
     let ty = Ty::ResultFamily {
-        owner: ast::ResultFamilyOwner::Structural(ast::OperatorRole::Less),
+        owner: ast::ResultFamilyOwner::LocalCallable(ast::BinderId::new(
+            0,
+            ast::BinderOwner::Expression(0),
+        )),
         alternatives: vec![
             ast::ResultAlternative {
                 label: Intern::from_ref("False"),
@@ -84,6 +93,16 @@ fn two_alternative_structural_result_family_uses_one_bit_sum_discriminant() {
             ..
         }
     ));
+}
+
+#[test]
+fn propositions_use_one_bit_without_a_result_family() {
+    let ty = Ty::Proposition(Box::new(ast::ProofProposition::Compare {
+        left: ast::ProofTerm::Name(Intern::from_ref("value")),
+        relation: ast::ProofRelation::Less,
+        right: ast::ProofTerm::Value(16.into()),
+    }));
+    assert_eq!(Repr::derive(&ty, None), Ok(Repr::Bits { width: 1 }));
 }
 
 #[test]

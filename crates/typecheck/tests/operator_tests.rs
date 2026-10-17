@@ -2,9 +2,7 @@ use ast::BinderOwner;
 use ast::normal_expr::BinderId;
 use ast::ty::Ty;
 use internment::Intern;
-use typecheck::typed::{
-    CallCapability, DefId, DefinitionStage, FunctionEffects, TypedCallableSignature,
-};
+use typecheck::typed::{CallCapability, DefId, DefinitionStage, TypedCallableSignature};
 
 fn signature(
     name: &str,
@@ -14,26 +12,32 @@ fn signature(
     symbol: &str,
 ) -> (DefId, TypedCallableSignature) {
     let sig = TypedCallableSignature {
-        dependent_binder: BinderId::new(0, BinderOwner::Definition(Intern::new(name.to_string()))),
+        param_constraints: Vec::new(),
+        references: Default::default(),
+        dependent_binder: BinderId::new(
+            0,
+            BinderOwner::Definition(typecheck::DefId::named(Intern::new(name.to_string()))),
+        ),
         return_type: ret,
         results: vec![],
         params: vec![
             (Intern::new("lhs".to_string()), lhs),
             (Intern::new("rhs".to_string()), rhs),
         ],
-        param_kinds: vec![],
-        param_conventions: vec![],
-        param_groups: vec![None, None],
+        param_kinds: Default::default(),
+        param_conventions: Default::default(),
+        param_groups: smallvec::smallvec![None, None],
         param_refinements: vec![None, None],
+            payload_postconditions: Default::default(),
         groups: vec![],
-        result_groups: vec![],
-        effects: FunctionEffects::default(),
-        param_requirements: vec![],
+        result_groups: Default::default(),
+        effects: Default::default(),
+        param_requirements: Default::default(),
         call_capability: CallCapability::StagePolymorphic,
         definition_stage: DefinitionStage::StagePolymorphic,
         infix_symbol: Some(Intern::new(symbol.to_string())),
     };
-    (DefId(Intern::new(name.to_string())), sig)
+    (DefId::named(Intern::new(name.to_string())), sig)
 }
 
 #[test]

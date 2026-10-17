@@ -88,6 +88,10 @@ pub struct ScopeInfo {
 
 /// Detect the cursor context from the AST and source text.
 pub fn detect_cursor_context(ast: &FileAst, source: &str, byte_pos: usize) -> CursorContext {
+    if source.get(..byte_pos).is_none() {
+        return CursorContext::Root;
+    }
+
     // 1. On a `use` line?
     if is_on_use_line(source, byte_pos) {
         return CursorContext::Use;
@@ -447,6 +451,14 @@ pub trait FileAstCompletionExt {
         byte_pos: usize,
         tag_types: Option<&HashMap<Intern<String>, Ty>>,
     ) -> Vec<CompletionCandidate>;
+
+    fn completions_with_scope(
+        &self,
+        source: &str,
+        byte_pos: usize,
+        tag_types: Option<&HashMap<Intern<String>, Ty>>,
+        symbols: &[CompletionCandidate],
+    ) -> Vec<CompletionCandidate>;
 }
 
 impl FileAstCompletionExt for FileAst {
@@ -456,27 +468,51 @@ impl FileAstCompletionExt for FileAst {
         byte_pos: usize,
         tag_types: Option<&HashMap<Intern<String>, Ty>>,
     ) -> Vec<CompletionCandidate> {
-        if let Some(items) = compiler_query_completions(source, byte_pos) {
-            return items;
-        }
-
-        // 1. Literal-union completions (cursor after `TypeName:` value area).
-        if let Some(tag_types) = tag_types {
-            let literal = literal_union_completions_at(source, byte_pos, tag_types);
-            if !literal.is_empty() {
-                return literal;
-            }
-        }
-
-        // 2. Dot-after-type completions (cursor after `TypeName.`).
-        if let Some(dot_items) = dot_completions_for_source(source, byte_pos, tag_types) {
-            return dot_items;
-        }
-
-        // 3. Context-aware completions.
-        let context = detect_cursor_context(self, source, byte_pos);
-        completions_for_context_inner(self, context)
+        context_completions(self, source, byte_pos, tag_types, None)
     }
+
+    fn completions_with_scope(
+        &self,
+        source: &str,
+        byte_pos: usize,
+        tag_types: Option<&HashMap<Intern<String>, Ty>>,
+        symbols: &[CompletionCandidate],
+    ) -> Vec<CompletionCandidate> {
+        context_completions(self, source, byte_pos, tag_types, Some(symbols))
+    }
+}
+
+fn context_completions(
+    ast: &FileAst,
+    source: &str,
+    byte_pos: usize,
+    tag_types: Option<&HashMap<Intern<String>, Ty>>,
+    symbols: Option<&[CompletionCandidate]>,
+) -> Vec<CompletionCandidate> {
+    if source.get(..byte_pos).is_none() {
+        return Vec::new();
+    }
+
+    if let Some(items) = compiler_query_completions(source, byte_pos) {
+        return items;
+    }
+
+    // 1. Literal-union completions (cursor after `TypeName:` value area).
+    if let Some(tag_types) = tag_types {
+        let literal = literal_union_completions_at(source, byte_pos, tag_types);
+        if !literal.is_empty() {
+            return literal;
+        }
+    }
+
+    // 2. Dot-after-type completions (cursor after `TypeName.`).
+    if let Some(dot_items) = dot_completions_for_source(source, byte_pos, tag_types) {
+        return dot_items;
+    }
+
+    // 3. Context-aware completions.
+    let context = detect_cursor_context(ast, source, byte_pos);
+    completions_for_context_inner(ast, context, symbols)
 }
 
 fn compiler_query_completions(source: &str, byte_pos: usize) -> Option<Vec<CompletionCandidate>> {
@@ -499,14 +535,22 @@ fn compiler_query_completions(source: &str, byte_pos: usize) -> Option<Vec<Compl
 fn completions_for_context_inner(
     ast: &FileAst,
     context: CursorContext,
+    symbols: Option<&[CompletionCandidate]>,
 ) -> Vec<CompletionCandidate> {
     match &context {
         CursorContext::Use => Vec::new(), // handled by path.rs in the LSP layer
-        CursorContext::Root => root_completions(ast),
+        CursorContext::Root => match symbols {
+            Some(symbols) => {
+                let mut items = symbols.to_vec();
+                items.push(CompletionCandidate::new("use", CompletionKind::Keyword));
+                items
+            }
+            None => root_completions(ast),
+        },
         CursorContext::BindBody(scope)
         | CursorContext::InsideIf(scope)
-        | CursorContext::InsideLoop(scope) => bind_body_completions(ast, scope, &context),
-        CursorContext::InsideWhen(scope) => when_completions(ast, scope),
+        | CursorContext::InsideLoop(scope) => bind_body_completions(ast, scope, &context, symbols),
+        CursorContext::InsideWhen(scope) => when_completions(ast, scope, symbols),
     }
 }
 
@@ -536,7 +580,7 @@ fn root_completions(ast: &FileAst) -> Vec<CompletionCandidate> {
         let mut detail = bind
             .params
             .as_ref()
-            .map(|p| format!("{}{}", name.as_str(), format_params(p)));
+            .map(|p| format!("{}{}", name.0.as_str(), format_params(p)));
         if let Some(complexity) = bind.attributes.complexity.as_ref() {
             let complexity_str = format!("complexity = {}", complexity.display_big_o());
             detail = Some(match detail {
@@ -546,7 +590,7 @@ fn root_completions(ast: &FileAst) -> Vec<CompletionCandidate> {
         }
         let documentation = bind.doc_comment.as_ref().map(|dc| dc.value.clone());
         items.push(CompletionCandidate {
-            label: name.as_str().to_string(),
+            label: name.0.as_str().to_string(),
             kind: if is_fn {
                 CompletionKind::Function
             } else {
@@ -569,12 +613,12 @@ fn bind_body_completions(
     ast: &FileAst,
     scope: &ScopeInfo,
     context: &CursorContext,
+    symbols: Option<&[CompletionCandidate]>,
 ) -> Vec<CompletionCandidate> {
     let mut items: Vec<CompletionCandidate> = Vec::new();
 
     // 1. Keywords
     let mut keywords: Vec<(&str, Option<&str>)> = vec![
-        ("if", None),
         ("for", None),
         ("while", None),
         ("in", None),
@@ -582,9 +626,6 @@ fn bind_body_completions(
         ("return", None),
     ];
 
-    // Snippet versions replace plain keyword for for/while/if.
-    // We add both: the snippet icon will show just the keyword label.
-    // The non-snippet version is for users who already typed part of it.
     if matches!(
         context,
         CursorContext::BindBody(_) | CursorContext::InsideLoop(_)
@@ -597,21 +638,21 @@ fn bind_body_completions(
             "for" => {
                 items.push(CompletionCandidate::snippet(
                     "for",
-                    "for ${1:} in ${2:}\nloop",
+                    "for ${1:} in ${2:}\n    iteration: 0\n",
                     CompletionKind::Keyword,
                 ));
             }
             "while" => {
                 items.push(CompletionCandidate::snippet(
                     "while",
-                    "while ${1:}\nloop",
+                    "while ${1:} do\n    iteration: 0\n",
                     CompletionKind::Keyword,
                 ));
             }
-            "if" => {
+            "when" => {
                 items.push(CompletionCandidate::snippet(
-                    "if",
-                    "if ${1:} is ${2:}\nreturn",
+                    "when",
+                    "when ${1:} is ${2:} then\n    return",
                     CompletionKind::Keyword,
                 ));
             }
@@ -643,6 +684,19 @@ fn bind_body_completions(
         });
     }
 
+    if let Some(symbols) = symbols {
+        items.extend(
+            symbols
+                .iter()
+                .filter(|symbol| {
+                    !scope.param_names.contains(&symbol.label)
+                        && !scope.local_var_names.contains(&symbol.label)
+                })
+                .cloned(),
+        );
+        return items;
+    }
+
     // 3. Root scope symbols (tags + defs from current file)
     for (name, decl) in &ast.tags {
         let detail = decl
@@ -663,9 +717,9 @@ fn bind_body_completions(
         let detail = bind
             .params
             .as_ref()
-            .map(|p| format!("{}{}", name.as_str(), format_params(p)));
+            .map(|p| format!("{}{}", name.0.as_str(), format_params(p)));
         items.push(CompletionCandidate {
-            label: name.as_str().to_string(),
+            label: name.0.as_str().to_string(),
             kind: if is_fn {
                 CompletionKind::Function
             } else {
@@ -681,8 +735,13 @@ fn bind_body_completions(
     items
 }
 
-fn when_completions(ast: &FileAst, scope: &ScopeInfo) -> Vec<CompletionCandidate> {
-    let mut items = bind_body_completions(ast, scope, &CursorContext::BindBody(scope.clone()));
+fn when_completions(
+    ast: &FileAst,
+    scope: &ScopeInfo,
+    symbols: Option<&[CompletionCandidate]>,
+) -> Vec<CompletionCandidate> {
+    let mut items =
+        bind_body_completions(ast, scope, &CursorContext::BindBody(scope.clone()), symbols);
 
     // Add `then` and `else` keywords specific to `when` expressions.
     items.push(CompletionCandidate::new("then", CompletionKind::Keyword));
@@ -802,14 +861,8 @@ pub fn dot_completions_for_ty(ty: Ty) -> Vec<CompletionCandidate> {
 
 /// If `byte_pos` sits in a value position after `name TypeName:`, return `TypeName`.
 pub fn expected_type_name_at(source: &str, byte_pos: usize) -> Option<Intern<String>> {
-    let line_start = source[..byte_pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
-    let line_end = source[byte_pos..]
-        .find('\n')
-        .map(|i| byte_pos + i)
-        .unwrap_or(source.len());
-    let line = &source[line_start..line_end];
-    let col = byte_pos.saturating_sub(line_start);
-    let prefix = line.get(..col.min(line.len()))?;
+    let before_cursor = source.get(..byte_pos)?;
+    let prefix = before_cursor.rsplit('\n').next()?;
 
     if let Some(type_name) = type_name_after_colon(prefix) {
         return Some(Intern::new(type_name.to_string()));
@@ -968,6 +1021,7 @@ pub fn format_params(params: &Parameters) -> String {
                 return format!("{short} {}", sp.value.format_surface());
             }
             match &parameter.kind {
+                ParameterKind::Proposition(predicate) => format!("{name} is {predicate}"),
                 ParameterKind::Generic => name.to_string(),
                 ParameterKind::Tagged(ty) => {
                     format!("{name} {}", ty.value.format_surface())
@@ -988,6 +1042,39 @@ pub fn format_params(params: &Parameters) -> String {
     format!("({})", parts.join(", "))
 }
 
-#[cfg(test)]
-#[path = "../tests/completions_tests.rs"]
-mod tests;
+pub fn member_completion_input(
+    source: &str,
+    byte_pos: usize,
+) -> Option<(String, std::ops::Range<usize>, String)> {
+    let prefix = source.get(..byte_pos)?;
+    let identifier = |ch: char| ch.is_alphanumeric() || ch == '_';
+    let partial_start = prefix
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| !identifier(*ch))
+        .map_or(0, |(index, ch)| index + ch.len_utf8());
+    let dot = partial_start.checked_sub(1)?;
+    if source.as_bytes().get(dot) != Some(&b'.') {
+        return None;
+    }
+    let before = source.get(..dot)?;
+    let start = before
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| !identifier(*ch) && *ch != '.')
+        .map_or(0, |(index, ch)| index + ch.len_utf8());
+    if start == dot || !source[start..dot].chars().next()?.is_alphabetic() {
+        return None;
+    }
+    let end = source[byte_pos..]
+        .char_indices()
+        .find(|(_, ch)| !identifier(*ch))
+        .map_or(source.len(), |(index, _)| byte_pos + index);
+    let mut probe = source.to_owned();
+    probe.replace_range(dot..end, &" ".repeat(end - dot));
+    Some((
+        probe,
+        start..dot,
+        source[partial_start..byte_pos].to_owned(),
+    ))
+}

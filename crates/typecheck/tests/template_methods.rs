@@ -1,16 +1,9 @@
-use parser::parse_from_str;
-use typecheck::transform::{TransformCtx, transform};
-use typecheck::{FileId, TypedExprKind, TypedFileAst};
+mod support;
 
-fn check(source: &str) -> TypedFileAst {
-    let parsed = parse_from_str(source);
-    assert!(
-        parsed.parse_warnings.is_empty(),
-        "{:?}",
-        parsed.parse_warnings
-    );
-    transform(&parsed, FileId(0), &TransformCtx::new())
-}
+use parser::parse_from_str;
+use support::check_lexed;
+use typecheck::transform::{TransformCtx, transform};
+use typecheck::{FileId, TypedExprKind};
 
 #[test]
 fn template_method_names_require_ordinary_declarations() {
@@ -19,7 +12,7 @@ fn template_method_names_require_ordinary_declarations() {
         "Template.release()",
         "TemplateSink.write()",
     ] {
-        let typed = check(&format!("main: {call}\n"));
+        let typed = check_lexed(&format!("main: {call}\n"));
         assert!(
             typed
                 .all_flaws()
@@ -40,18 +33,10 @@ fn template_method_names_require_ordinary_declarations() {
 
 #[test]
 fn user_defined_template_names_and_methods_have_ordinary_types() {
-    let typed = check(
-        r#"Word is in 0 to 255
-Template has value Word
-TemplateSink has value Word
-Template.render(self ref) Word: self.value
-Template.release(self ref) Word: self.value
-TemplateSink.write(self ref) Word: self.value
-render(value ref Template) Word: Template.render(ref value)
-release(value ref Template) Word: Template.release(ref value)
-write(value ref TemplateSink) Word: TemplateSink.write(ref value)
-"#,
-    );
+    let typed = check_lexed(&format!(
+        "{}Template has\n    value Word\n    finish(self):\n        return\nTemplateSink has\n    value Word\n    finish(self):\n        return\nTemplate.render(self ref) Word: return self.value\nTemplate.release(self ref) Word: return self.value\nTemplateSink.write(self ref) Word: return self.value\nrender(value ref Template) Word: return Template.render(value)\nrelease(value ref Template) Word: return Template.release(value)\nwrite(value ref TemplateSink) Word: return TemplateSink.write(value)\n",
+        test_fixtures::preludes::WORD_PRELUDE
+    ));
     assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
     for name in ["Template.render", "Template.release", "TemplateSink.write"] {
         assert!(typed.exprs.kind.iter().any(|kind| matches!(kind, TypedExprKind::FnCall { target, .. } if target.0.as_str() == name)), "missing ordinary call to {name}");

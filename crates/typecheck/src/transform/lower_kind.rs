@@ -5,14 +5,19 @@
 //! sibling modules for tag resolution, type resolution, and when-arm
 //! lowering.
 
+use crate::tag_declarations::TagDeclarations;
 use ast::prelude::*;
 use ast::span::{SpanId, SubSpan};
 use ast::{BinderId, BinderOwner, ConstValue, NormalExpr};
-use diagnostic::Diagnostic;
+use diagnostic::code::{
+    CallCode, ImportCode, MemberCode, ResultCode, SequenceCode, TextCode, TypeCode,
+};
+use diagnostic::{Diagnostic, DiagnosticCode};
 use internment::Intern;
 
-use crate::analysis::unify_type_args_with_registry;
+use crate::analysis::{TypeEnv, unify_type_args_with_registry};
 use crate::intrinsic::{ComparisonPredicate, IntegerComparison, IntrinsicOp};
+use crate::normal_expr::{SizeCallName, size_expr_to_normal};
 use crate::staging::instantiate_call;
 use crate::subst::{DepSubst, DependentInstantiation};
 use crate::ty::{Ty, reference_pointee_for_type};
@@ -23,18 +28,19 @@ use crate::typed::{
 };
 use ast::ty::IntegerInterpretation;
 
+use super::collect_result_exit_alternatives;
+use super::lower_exprs::{ExprLowerScope, FlowState, LocalCallable, join_loop_place_versions};
 use super::lower_exprs::{
-    ExprLowerScope, FlowState, join_loop_place_versions, join_place_versions,
+    contextualize_local_literal, lower_typed_expr, sequence_element_argument,
 };
-use super::lower_exprs::{contextualize_local_literal, lower_typed_expr};
-use super::lower_tag::{resolve_discriminant, resolve_tag_call_variant};
+use super::lower_tag::{resolve_discriminant, resolve_tag_call_variant, type_sum_member};
 use super::lower_ty::{
-    annotate_literal_union_literal, bind_explicit_ty_in_scope, resolve_expr_type,
-    resolve_fn_call_target, resolve_type_reference,
+    ExprTypeResolverCtx, annotate_literal_union_literal, bind_explicit_ty_in_scope,
+    resolve_expr_type, resolve_fn_call_target, resolve_type_reference,
 };
 use super::lower_when::lower_all_when_arms;
 
-fn root_place_versions_since(
+pub(super) fn root_place_versions_since(
     typed: &TypedFileAst,
     first: usize,
     matches_origin: impl Fn(&crate::typed::PlaceVersionOrigin) -> bool,
@@ -56,29 +62,48 @@ fn fallback_fixed_array_alloc_size(span: SpanId) -> NormalExpr {
     )))
 }
 
-fn as_fixed_array_alloc_size(size: &ast::Expr) -> Option<NormalExpr> {
-    match size {
-        ast::Expr::Lit(ast::Literal::Int(n)) => Some(NormalExpr::from(*n)),
-        ast::Expr::Lit(ast::Literal::Number(n)) => Some(NormalExpr::from(*n as i128)),
-        ast::Expr::FnCall(call) if call.args.is_none() => {
-            Some(NormalExpr::Var(call.path.value.root))
-        }
-        ast::Expr::Bind(bind) => Some(NormalExpr::Var(bind.name)),
-        ast::Expr::Binary(binary) => {
-            let lhs = as_fixed_array_alloc_size(&binary.lhs.value)?;
-            let rhs = as_fixed_array_alloc_size(&binary.rhs.value)?;
-            Some(match binary.op {
-                ast::expr::BinOp::Add => NormalExpr::Add(Box::new(lhs), Box::new(rhs)),
-                ast::expr::BinOp::Subtract => NormalExpr::Sub(Box::new(lhs), Box::new(rhs)),
-                ast::expr::BinOp::Multiply => NormalExpr::Mul(Box::new(lhs), Box::new(rhs)),
-                _ => return None,
-            })
-        }
-        _ => None,
+fn lower_array_length(
+    typed: &mut TypedFileAst,
+    length: &Typed<Expr>,
+    scope: &ExprLowerScope<'_>,
+    env: &mut FlowState,
+) -> NormalExpr {
+    let id = lower_typed_expr(typed, length, &scope.child(), env);
+    crate::staging::normalize(typed, id, &DepSubst::new())
+        .as_dependent_normal_expr()
+        .or_else(|| size_expr_to_normal(&length.value, SizeCallName::Mangled, false))
+        .unwrap_or_else(|| fallback_fixed_array_alloc_size(length.span_id))
+}
+
+fn read_anonymous_integer_operand(typed: &mut TypedFileAst, expression: ExprId) -> ExprId {
+    if matches!(typed.exprs.ty_of(expression), Some(Ty::Ref { inner, .. }) if matches!(inner.as_ref(), Ty::AnonymousInteger { .. }))
+    {
+        read_integer_operand(typed, expression)
+    } else {
+        expression
     }
 }
 
-fn materialize_integer_operand(typed: &mut TypedFileAst, expression: ExprId, expected: &Ty) {
+fn read_integer_operand(typed: &mut TypedFileAst, expression: ExprId) -> ExprId {
+    let Some(Ty::Ref { inner, .. }) = typed.exprs.ty_of(expression) else {
+        return expression;
+    };
+    if typed
+        .type_registry
+        .integer_validity_for_type(inner)
+        .is_none()
+    {
+        return expression;
+    }
+    let ty = *inner.clone();
+    super::lower_exprs::append_derived_expr(typed, expression, TypedExprKind::Deref(expression), ty)
+}
+
+fn materialize_integer_operand(
+    typed: &mut TypedFileAst,
+    expression: ExprId,
+    expected: Option<&Ty>,
+) {
     let Some(value) = typed
         .exprs
         .const_value_of(expression)
@@ -90,6 +115,8 @@ fn materialize_integer_operand(typed: &mut TypedFileAst, expression: ExprId, exp
         ast::ConstValue::Int(value) => *value,
         _ => return,
     };
+    let inferred = Ty::bounded_int(value, value);
+    let expected = expected.unwrap_or(&inferred);
     if expected
         .named_instance_stripping_reference_wrappers()
         .is_none()
@@ -111,15 +138,27 @@ fn materialize_integer_operand(typed: &mut TypedFileAst, expression: ExprId, exp
     }
 }
 
-fn is_numeric_comparison_op(op: &ast::expr::BinOp) -> bool {
-    matches!(
-        op,
-        ast::expr::BinOp::Less
-            | ast::expr::BinOp::LessOrEqual
-            | ast::expr::BinOp::GreaterOrEqual
-            | ast::expr::BinOp::Greater
-            | ast::expr::BinOp::Equal
-    )
+pub(super) fn lower_numeric_operands(
+    typed: &mut TypedFileAst,
+    left: &Typed<Expr>,
+    right: &Typed<Expr>,
+    scope: &ExprLowerScope<'_>,
+    env: &mut FlowState,
+) -> (ExprId, ExprId) {
+    let scope = scope.without_literal_materialization();
+    let left = lower_typed_expr(typed, left, &scope, env);
+    let right = lower_typed_expr(typed, right, &scope, env);
+    let left = read_integer_operand(typed, left);
+    let right = read_integer_operand(typed, right);
+    for operand in [left, right] {
+        if matches!(
+            typed.exprs.ty_of(operand),
+            Some(Ty::UnresolvedLiteral(ast::ty::LiteralKind::Integer))
+        ) {
+            materialize_integer_operand(typed, operand, None);
+        }
+    }
+    (left, right)
 }
 
 fn anonymous_integer_type() -> Ty {
@@ -131,20 +170,36 @@ fn fixed_array_element_type(typed: &TypedFileAst, expected: &Ty) -> Option<Ty> {
         Ty::Named { instance, .. } => {
             let declaration = typed.type_registry.declaration_for_instance(instance)?;
             let former = declaration.sequence_literal.as_ref()?;
-            instance.arguments.iter().find_map(|(parameter, argument)| {
-                (*parameter == former.element_parameter).then(|| match argument {
-                    ast::TyArg::Type(element) => Some(element.as_ref().clone()),
-                    ast::TyArg::Const(_) => None,
-                })?
-            })
+            let (_, argument) = sequence_element_argument(instance, former)?;
+            match argument {
+                ast::TyArg::Type(element) => Some(element.as_ref().clone()),
+                ast::TyArg::Const(_) => None,
+            }
         }
         Ty::Array { elem, .. } => Some(elem.as_ref().clone()),
         _ => None,
     }
 }
 
-fn operator_symbol(operator: &BinOp) -> &'static str {
-    operator.symbol()
+fn integer_binary_interpretation(
+    typed: &TypedFileAst,
+    role: OperatorRole,
+    operands: [&Ty; 2],
+) -> IntegerInterpretation {
+    let interpretations = operands.map(|ty| {
+        typed
+            .type_registry
+            .integer_operation_interpretation_for_type(ty)
+    });
+    if matches!(role, OperatorRole::Divide | OperatorRole::Modulo)
+        && interpretations.contains(&Some(IntegerInterpretation::Signed))
+    {
+        IntegerInterpretation::Signed
+    } else {
+        interpretations[0]
+            .or(interpretations[1])
+            .unwrap_or(IntegerInterpretation::Signed)
+    }
 }
 
 fn resolve_compound_operator(
@@ -158,7 +213,7 @@ fn resolve_compound_operator(
     let rhs_ty = typed.exprs.ty_of(rhs).cloned().unwrap_or(Ty::Unit);
     match scope
         .operator_registry
-        .resolve(operator_symbol(operator), lhs_ty, &rhs_ty)
+        .resolve(operator.symbol(), lhs_ty, &rhs_ty)
     {
         Ok((target, signature)) => ResolvedCompoundOperator::Callable {
             target,
@@ -170,15 +225,7 @@ fn resolve_compound_operator(
             if !anonymous(lhs_ty) || !anonymous(&rhs_ty) {
                 return ResolvedCompoundOperator::Invalid(error);
             }
-            let interpretation = typed
-                .type_registry
-                .integer_operation_interpretation_for_type(lhs_ty)
-                .or_else(|| {
-                    typed
-                        .type_registry
-                        .integer_operation_interpretation_for_type(&rhs_ty)
-                })
-                .unwrap_or(IntegerInterpretation::Signed);
+            let interpretation = integer_binary_interpretation(typed, role, [lhs_ty, &rhs_ty]);
             let intrinsic = match role {
                 OperatorRole::Add => IntrinsicOp::BitsAdd,
                 OperatorRole::Subtract => IntrinsicOp::BitsSubtract,
@@ -227,74 +274,8 @@ fn infer_return_type_from_expected(
     return_type: &Ty,
     expected: Option<&Ty>,
 ) -> Option<Ty> {
-    let expected = expected?;
-    let return_instance = return_type.named_instance_stripping_reference_wrappers()?;
-    let expected_instance = expected.named_instance_stripping_reference_wrappers()?;
-    if return_instance.declaration != expected_instance.declaration
-        || return_instance.arguments.len() != expected_instance.arguments.len()
-    {
-        return None;
-    }
-
-    let expected_args: Vec<_> = expected_instance
-        .arguments
-        .iter()
-        .map(|(_, arg)| arg.clone())
-        .collect();
-    let return_args: Vec<_> = return_instance
-        .arguments
-        .iter()
-        .map(|(_, arg)| arg.clone())
-        .collect();
-    if let Ok(subst) = unify_type_args_with_registry(
-        return_args.as_slice(),
-        expected_args.as_slice(),
-        Some(&typed.type_registry),
-    ) {
-        let inferred = subst.apply_to_ty(return_type);
-        return Some(inferred);
-    }
-
-    let mut inferred_arguments = Vec::with_capacity(return_instance.arguments.len());
-    let mut changed = false;
-    for (name, return_arg) in &return_instance.arguments {
-        let inferred_arg = expected_instance
-            .arguments
-            .iter()
-            .find(|(expected_name, _)| expected_name == name)
-            .map_or_else(
-                || return_arg.clone(),
-                |(_, expected_arg)| match (return_arg, expected_arg) {
-                    (ast::TyArg::Type(_), ast::TyArg::Type(_) | ast::TyArg::Const(_))
-                    | (ast::TyArg::Const(_), ast::TyArg::Type(_) | ast::TyArg::Const(_)) => {
-                        changed = true;
-                        expected_arg.clone()
-                    }
-                },
-            );
-        changed |= inferred_arg != *return_arg;
-        inferred_arguments.push((*name, inferred_arg));
-    }
-    if !changed {
-        return None;
-    }
-
-    let mut inferred = return_type.clone();
-    let inferred = match &mut inferred {
-        Ty::Named { instance, .. } => {
-            instance.arguments = inferred_arguments;
-            let inferred_instance = instance
-                .arguments
-                .iter()
-                .map(|(name, arg)| (*name, arg.clone()))
-                .collect::<Vec<_>>();
-            let substitution = DepSubst::from_ty_args(&inferred_instance);
-            substitution.apply_to_ty(&inferred)
-        }
-        _ => return None,
-    };
-
-    Some(inferred)
+    let substitution = substitution_from_expected_return(typed, return_type, expected)?;
+    Some(substitution.apply_to_ty(return_type))
 }
 
 fn substitution_from_expected_return(
@@ -306,7 +287,11 @@ fn substitution_from_expected_return(
     let return_instance = return_type.named_instance_stripping_reference_wrappers()?;
     let expected_instance = expected.named_instance_stripping_reference_wrappers()?;
     if return_instance.declaration != expected_instance.declaration
-        || return_instance.arguments.len() != expected_instance.arguments.len()
+        || !return_instance
+            .arguments
+            .iter()
+            .map(|(name, _)| name)
+            .eq(expected_instance.arguments.iter().map(|(name, _)| name))
     {
         return None;
     }
@@ -320,9 +305,7 @@ fn substitution_from_expected_return(
         .iter()
         .map(|(_, argument)| argument.clone())
         .collect::<Vec<_>>();
-    unify_type_args_with_registry(&return_args, &expected_args, Some(&typed.type_registry))
-        .ok()
-        .or_else(|| Some(DepSubst::from_ty_args(&expected_instance.arguments)))
+    unify_type_args_with_registry(&return_args, &expected_args, Some(&typed.type_registry)).ok()
 }
 
 /// Extract field names from TagCall args.
@@ -348,34 +331,123 @@ pub(crate) fn lower_call_arg(
     scope: &ExprLowerScope<'_>,
     env: &mut FlowState,
 ) -> ExprId {
-    if let Expr::Bind(b) = &arg.value
+    let arg = if let Expr::Bind(b) = &arg.value
         && b.params.is_none()
         && let BindValue::Expr(inner) = &b.value
     {
-        return lower_typed_expr(typed, inner, scope, env);
+        inner
+    } else {
+        arg
+    };
+    let existing_reference = match &arg.value {
+        Expr::FnCall(call) if call.args.is_none() && call.path.segments.is_empty() => {
+            env.types.get(&call.path.root)
+        }
+        Expr::SelfRef => env.types.get(&Intern::from_ref("self")),
+        _ => None,
     }
-    lower_typed_expr(typed, arg, scope, env)
+    .cloned();
+    let expected = scope
+        .expected_ty
+        .map(|ty| match (ty, existing_reference.as_ref()) {
+            (
+                Ty::Ref { inner, .. },
+                Some(
+                    actual @ Ty::Ref {
+                        inner: referent, ..
+                    },
+                ),
+            ) if inner == referent => actual,
+            (Ty::Ref { inner, .. }, _) => inner.as_ref(),
+            (ty, _) => ty,
+        });
+    let child = scope.child();
+    let argument_scope = child.with_expected(expected);
+    lower_typed_expr(typed, arg, &argument_scope, env)
+}
+
+fn lower_named_type_argument(
+    typed: &mut TypedFileAst,
+    argument: &Typed<Expr>,
+    scope: &ExprLowerScope<'_>,
+) -> Option<ExprId> {
+    let argument = match &argument.value {
+        Expr::Bind(bind) => match &bind.value {
+            BindValue::Expr(value) => value,
+            _ => return None,
+        },
+        _ => argument,
+    };
+    let name = match &argument.value {
+        Expr::AnonymousTag(name) => *name,
+        Expr::TagCall(call) => call.name,
+        _ => return None,
+    };
+    if !scope.tag_types.contains_key(&name) {
+        return None;
+    }
+    let ty = TypeEnv::new(scope.tag_types)
+        .with_tag_params(scope.tag_params)
+        .with_tag_declaration_lookup(scope.tag_decls)
+        .with_registry(&typed.type_registry)
+        .resolve_expr(&argument.value);
+    let id = ExprId(typed.exprs.kind.len() as u32);
+    typed.exprs.push(crate::typed::TypedExpr {
+        kind: TypedExprKind::TagCall {
+            variant_id: crate::typed::VariantId {
+                union: crate::TagId(name),
+                name,
+            },
+            discriminant: 0,
+            args: None,
+            field_names: Vec::new(),
+        },
+        ty,
+        span: argument.span_id,
+        facts: crate::typed::ExprFacts {
+            const_facts: crate::typed::ConstFacts {
+                const_value: None,
+                const_object: None,
+                sequence_literal: None,
+                literal_materialization: None,
+            },
+            semantic_facts: crate::typed::SemanticFacts {
+                integer_knowledge: None,
+                result_evidence: None,
+                projected_result_evidence: Default::default(),
+                availability: crate::typed::Availability::CompileTime,
+                flaws: Vec::new(),
+            },
+            ownership_facts: crate::typed::OwnershipFacts {
+                references: Default::default(),
+                reference_reads: Default::default(),
+                target_group: None,
+                result_target_groups: Vec::new(),
+                place: None,
+                place_version: None,
+            },
+        },
+    });
+    Some(id)
 }
 
 /// Convert a parse-tree [`Expr`] to a [`TypedExprKind`] by recursively
 /// lowering sub-expressions and resolving types.
 fn add_destructure_bindings(
-    typed: &TypedFileAst,
+    typed: &mut TypedFileAst,
     value: ExprId,
     tag_name: Intern<String>,
     field_bindings: &[(Intern<String>, Intern<String>)],
     env: &mut FlowState,
-) {
+) -> Vec<crate::typed::PlaceId> {
     let Some(value_ty) = typed.exprs.ty_of(value) else {
-        return;
+        return Vec::new();
     };
+    let borrowed = typed.borrows_value(value);
     let value_ty = reference_pointee_for_type(value_ty, Some(&typed.type_registry))
         .unwrap_or(value_ty.clone());
     let value_ty = typed.type_registry.resolved_definition_for_type(&value_ty);
-    let value_targets = typed
-        .exprs
-        .target_group_of(value)
-        .and_then(|targets| targets.as_ref());
+    let value_targets = typed.exprs.target_group_of(value).cloned().flatten();
     let (fields, variant_name, subst) = match &value_ty {
         Ty::Record { fields, .. } => (fields, None, None),
         Ty::Union {
@@ -384,7 +456,7 @@ fn add_destructure_bindings(
             ..
         } => {
             let Some(variant) = variants.iter().find(|variant| variant.name == tag_name) else {
-                return;
+                return Vec::new();
             };
             (
                 &variant.fields,
@@ -394,15 +466,18 @@ fn add_destructure_bindings(
                     .map(|args| DepSubst::from_ty_args(args)),
             )
         }
-        _ => return,
+        _ => return Vec::new(),
     };
-    let projected_base = variant_name.zip(value_targets).map(|(name, targets)| {
-        targets.projected(|target| ReferenceTargetGroup::Variant {
-            base: Box::new(target.clone()),
-            name,
-        })
-    });
-    for (field_name, binding_name) in field_bindings {
+    let projected_base = variant_name
+        .zip(value_targets.as_ref())
+        .map(|(name, targets)| {
+            targets.projected(|target| ReferenceTargetGroup::Variant {
+                base: Box::new(target.clone()),
+                name,
+            })
+        });
+    let mut places = Vec::new();
+    for (slot, (field_name, binding_name)) in field_bindings.iter().enumerate() {
         let Some((index, (_, field_type))) = fields
             .iter()
             .enumerate()
@@ -414,10 +489,40 @@ fn add_destructure_bindings(
             .as_ref()
             .map(|subst| subst.apply_to_ty(field_type))
             .unwrap_or_else(|| (**field_type).clone());
+        if !borrowed {
+            let place = typed.add_place(crate::typed::TypedPlace {
+                binder: BinderId::new(
+                    typed.file_id.0,
+                    BinderOwner::Pattern {
+                        expression: value.0,
+                        slot: slot as u32,
+                    },
+                ),
+                name: *binding_name,
+                parent: None,
+                projection: None,
+                mutable: true,
+                explicit_contract: true,
+                ty: field_type.clone(),
+            });
+            env.places.insert(*binding_name, place);
+            let version = typed.add_place_version(
+                place,
+                crate::typed::PlaceVersionOrigin::Initializer(value),
+                field_type.clone(),
+                None,
+            );
+            env.place_versions.insert(*binding_name, version);
+            places.push(place);
+        }
         env.types.insert(*binding_name, field_type);
         env.locals.insert(*binding_name);
-        env.constants.insert(*binding_name);
-        let base_targets = projected_base.as_ref().or(value_targets);
+        if borrowed {
+            env.constants.insert(*binding_name);
+        } else {
+            env.constants.remove(binding_name);
+        }
+        let base_targets = projected_base.as_ref().or(value_targets.as_ref());
         if let Some(base_targets) = base_targets {
             env.set_target_group(
                 *binding_name,
@@ -430,6 +535,7 @@ fn add_destructure_bindings(
             );
         }
     }
+    places
 }
 
 fn is_reference_type(typed: &TypedFileAst, ty: &Ty) -> bool {
@@ -467,34 +573,174 @@ pub(crate) fn lower_expr_kind(
     env: &mut FlowState,
     reserved_expr_id: Option<ExprId>,
 ) -> TypedExprKind {
-    match &expr.value {
-        Expr::Register(inner) => {
-            let inner_id = lower_typed_expr(typed, inner, &scope.child(), env);
-            TypedExprKind::Register(inner_id)
+    let normalized;
+    let expr = if let Expr::Bind(bind) = &expr.value {
+        if bind.params.is_none() {
+            if let BindValue::Body { exprs, ret } = &bind.value {
+                let mut items = exprs.clone();
+                items.push(Typed::infer(Expr::Return(ret.clone()), ret.span_id));
+                let mut bind = bind.clone();
+                bind.value =
+                    BindValue::Expr(Box::new(Typed::infer(Expr::Block(items), expr.span_id)));
+                normalized = Typed::infer(Expr::Bind(bind), expr.span_id);
+                &normalized
+            } else {
+                expr
+            }
+        } else {
+            expr
         }
-        Expr::Asm {
-            specification,
-            operands,
-        } => {
-            let specification = lower_typed_expr(typed, specification, &scope.child(), env);
-            let operands = operands
-                .iter()
-                .map(|operand| {
-                    (
-                        operand.name,
-                        lower_typed_expr(typed, &operand.value, &scope.child(), env),
-                    )
+    } else {
+        expr
+    };
+    match &expr.value {
+        Expr::Block(items) => {
+            let mut block_env = env.clone();
+            let mut statements = Vec::new();
+            let mut value = None;
+            for (index, item) in items.iter().enumerate() {
+                let child = scope.statement();
+                let item_scope = if scope.value_required && index + 1 == items.len() {
+                    scope
+                } else {
+                    &child
+                };
+                let lowered = lower_typed_expr(typed, item, item_scope, &mut block_env);
+                if scope.value_required && index + 1 == items.len() {
+                    value = Some(lowered);
+                } else {
+                    statements.push(lowered);
+                }
+            }
+            for (name, place) in env.places.clone() {
+                if block_env.places.get(&name) == Some(&place) {
+                    macro_rules! copy_binding {
+                        ($($field:ident),+ $(,)?) => {$(
+                            if let Some(value) = block_env.$field.get(&name) {
+                                env.$field.insert(name, value.clone());
+                            } else { env.$field.remove(&name); }
+                        )+};
+                    }
+                    copy_binding!(
+                        types,
+                        place_versions,
+                        const_values,
+                        target_groups,
+                        result_evidence,
+                        projected_result_evidence,
+                        result_names,
+                        result_target_groups
+                    );
+                }
+            }
+            env.integer_domains = block_env.integer_domains;
+            env.union_members = block_env.union_members;
+            env.projected_versions = block_env.projected_versions;
+            TypedExprKind::Block { statements, value }
+        }
+        Expr::Return(ret) => {
+            let result = match ret.values.as_slice() {
+                [value] => value.clone(),
+                values => Typed::infer(Expr::ResultValues(values.to_vec()), ret.span_id),
+            };
+            let value = if ret.values.is_empty() {
+                None
+            } else {
+                Some(lower_typed_expr(
+                    typed,
+                    &result,
+                    &scope.child().with_expected(scope.return_ty),
+                    env,
+                ))
+            };
+            TypedExprKind::Return {
+                value,
+                postcondition: crate::typed::TypedPostcondition::from_return(ret, &env.types)
+                    .map(Box::new),
+            }
+        }
+        Expr::Emit { code, arguments } => {
+            let specification = lower_typed_expr(typed, code, &scope.child(), env);
+            let signature = crate::emission::signature(
+                &typed.exprs.ty[specification.as_usize()],
+                &typed.type_registry,
+            );
+            let record = lower_typed_expr(
+                typed,
+                arguments,
+                &scope.with_expected(signature.as_ref().map(|(input, _)| input)),
+                env,
+            );
+            let ty = typed.exprs.ty[record.as_usize()].clone();
+            let fields = crate::emission::operand_fields(&ty, &typed.type_registry);
+            let operands = fields
+                .into_iter()
+                .enumerate()
+                .map(|(index, (name, ty))| {
+                    let id = super::lower_exprs::append_derived_expr(
+                        typed,
+                        record,
+                        TypedExprKind::AggregateGet {
+                            base: record,
+                            index,
+                        },
+                        ty,
+                    );
+                    (name, id)
                 })
                 .collect();
-            TypedExprKind::Asm {
+            TypedExprKind::Emit {
                 specification,
                 operands,
+                record,
                 state: crate::assembly::AssemblyState::Pending,
             }
         }
         Expr::Lit(lit) => TypedExprKind::Lit(lit.clone()),
 
         Expr::Binary(binary) => {
+            if let Some(relation) = ast::ProofRelation::for_bin_op(&binary.op) {
+                let (lhs, rhs) =
+                    lower_numeric_operands(typed, &binary.lhs, &binary.rhs, scope, env);
+                if [lhs, rhs].into_iter().any(|operand| {
+                    typed
+                        .type_registry
+                        .integer_validity_for_type(&typed.exprs.ty[operand.index()])
+                        .is_none()
+                }) {
+                    return TypedExprKind::InvalidOperator {
+                        op: binary.op.clone(),
+                        lhs,
+                        rhs,
+                        error: crate::operator::OperatorResolutionError::OperandDoesNotProvide,
+                    };
+                }
+                let signed = [lhs, rhs].into_iter().any(|operand| {
+                    typed
+                        .type_registry
+                        .integer_operation_interpretation_for_type(&typed.exprs.ty[operand.index()])
+                        == Some(IntegerInterpretation::Signed)
+                });
+                let predicate = match relation {
+                    ast::ProofRelation::Equal => ComparisonPredicate::Equal,
+                    ast::ProofRelation::Less => ComparisonPredicate::Less,
+                    ast::ProofRelation::LessOrEqual => ComparisonPredicate::LessOrEqual,
+                    ast::ProofRelation::Greater => ComparisonPredicate::Greater,
+                    ast::ProofRelation::GreaterOrEqual => ComparisonPredicate::GreaterOrEqual,
+                    ast::ProofRelation::NotEqual => unreachable!(),
+                };
+                return TypedExprKind::IntrinsicCall {
+                    op: IntrinsicOp::BitsCompare {
+                        interpretation: if signed {
+                            IntegerComparison::Signed
+                        } else {
+                            IntegerComparison::Unsigned
+                        },
+                        predicate,
+                    },
+                    args: vec![lhs, rhs],
+                };
+            }
             let lhs = lower_typed_expr(
                 typed,
                 &binary.lhs,
@@ -507,6 +753,8 @@ pub(crate) fn lower_expr_kind(
                 &scope.without_literal_materialization(),
                 env,
             );
+            let lhs = read_anonymous_integer_operand(typed, lhs);
+            let rhs = read_anonymous_integer_operand(typed, rhs);
             let mut lhs_ty = typed.exprs.ty_of(lhs).cloned().unwrap_or(Ty::Unit);
             let mut rhs_ty = typed.exprs.ty_of(rhs).cloned().unwrap_or(Ty::Unit);
             if let Some(expected) = scope.expected_ty
@@ -516,48 +764,32 @@ pub(crate) fn lower_expr_kind(
                     .is_some()
             {
                 if matches!(lhs_ty, Ty::UnresolvedLiteral(_)) {
-                    materialize_integer_operand(typed, lhs, expected);
+                    materialize_integer_operand(typed, lhs, Some(expected));
                     lhs_ty = typed.exprs.ty_of(lhs).cloned().unwrap_or(Ty::Unit);
                 }
                 if matches!(rhs_ty, Ty::UnresolvedLiteral(_)) {
-                    materialize_integer_operand(typed, rhs, expected);
+                    materialize_integer_operand(typed, rhs, Some(expected));
                     rhs_ty = typed.exprs.ty_of(rhs).cloned().unwrap_or(Ty::Unit);
                 }
             }
-            if is_numeric_comparison_op(&binary.op) {
-                if matches!(rhs_ty, Ty::UnresolvedLiteral(_))
-                    && lhs_ty
-                        .named_instance_stripping_reference_wrappers()
-                        .is_some()
-                {
-                    materialize_integer_operand(typed, rhs, &lhs_ty);
-                    rhs_ty = typed.exprs.ty_of(rhs).cloned().unwrap_or(Ty::Unit);
-                } else {
-                    if matches!(lhs_ty, Ty::UnresolvedLiteral(_)) {
-                        materialize_integer_operand(typed, lhs, &anonymous_integer_type());
-                        lhs_ty = typed.exprs.ty_of(lhs).cloned().unwrap_or(Ty::Unit);
-                    }
-                    if matches!(rhs_ty, Ty::UnresolvedLiteral(_)) {
-                        materialize_integer_operand(typed, rhs, &anonymous_integer_type());
-                        rhs_ty = typed.exprs.ty_of(rhs).cloned().unwrap_or(Ty::Unit);
-                    }
-                }
-            } else if matches!(lhs_ty, Ty::UnresolvedLiteral(_))
+            if matches!(lhs_ty, Ty::UnresolvedLiteral(_))
                 && !matches!(rhs_ty, Ty::UnresolvedLiteral(_))
             {
-                materialize_integer_operand(typed, lhs, &rhs_ty);
+                let expected = (!matches!(rhs_ty, Ty::AnonymousInteger { .. })).then_some(&rhs_ty);
+                materialize_integer_operand(typed, lhs, expected);
                 lhs_ty = typed.exprs.ty_of(lhs).cloned().unwrap_or(Ty::Unit);
             } else if matches!(rhs_ty, Ty::UnresolvedLiteral(_))
                 && !matches!(lhs_ty, Ty::UnresolvedLiteral(_))
             {
-                materialize_integer_operand(typed, rhs, &lhs_ty);
+                let expected = (!matches!(lhs_ty, Ty::AnonymousInteger { .. })).then_some(&lhs_ty);
+                materialize_integer_operand(typed, rhs, expected);
                 rhs_ty = typed.exprs.ty_of(rhs).cloned().unwrap_or(Ty::Unit);
             } else if is_numeric_non_comparison_op(&binary.op)
                 && matches!(lhs_ty, Ty::UnresolvedLiteral(_))
                 && matches!(rhs_ty, Ty::UnresolvedLiteral(_))
             {
-                materialize_integer_operand(typed, lhs, &anonymous_integer_type());
-                materialize_integer_operand(typed, rhs, &anonymous_integer_type());
+                materialize_integer_operand(typed, lhs, Some(&anonymous_integer_type()));
+                materialize_integer_operand(typed, rhs, Some(&anonymous_integer_type()));
                 lhs_ty = typed.exprs.ty_of(lhs).cloned().unwrap_or(Ty::Unit);
                 rhs_ty = typed.exprs.ty_of(rhs).cloned().unwrap_or(Ty::Unit);
             } else if is_numeric_non_comparison_op(&binary.op)
@@ -605,17 +837,9 @@ pub(crate) fn lower_expr_kind(
                     rhs,
                 };
             };
-            let is_comparison = matches!(
-                role,
-                OperatorRole::Less
-                    | OperatorRole::LessOrEqual
-                    | OperatorRole::Greater
-                    | OperatorRole::GreaterOrEqual
-                    | OperatorRole::Equal
-            );
             match scope
                 .operator_registry
-                .resolve(operator_symbol(&binary.op), &lhs_ty, &rhs_ty)
+                .resolve(binary.op.symbol(), &lhs_ty, &rhs_ty)
             {
                 Ok((target, signature)) => TypedExprKind::FnCall {
                     target,
@@ -636,20 +860,15 @@ pub(crate) fn lower_expr_kind(
                         && matches!(rhs_ty, Ty::UnresolvedLiteral(_))
                     {
                         let anonymous = anonymous_integer_type();
-                        materialize_integer_operand(typed, lhs, &anonymous);
-                        materialize_integer_operand(typed, rhs, &anonymous);
-                        lhs_ty = typed.exprs.ty_of(lhs).cloned().unwrap_or(Ty::Unit);
+                        materialize_integer_operand(typed, lhs, Some(&anonymous));
+                        materialize_integer_operand(typed, rhs, Some(&anonymous));
                     }
                     let anonymous_op = if lhs_is_anonymous_int && rhs_is_anonymous_int {
-                        let interpretation = typed
-                            .type_registry
-                            .integer_operation_interpretation_for_type(&lhs_ty)
-                            .or_else(|| {
-                                typed
-                                    .type_registry
-                                    .integer_operation_interpretation_for_type(&rhs_ty)
-                            })
-                            .unwrap_or(IntegerInterpretation::Signed);
+                        let interpretation = integer_binary_interpretation(
+                            typed,
+                            role,
+                            [&typed.exprs.ty[lhs.index()], &typed.exprs.ty[rhs.index()]],
+                        );
                         match role {
                             OperatorRole::Add => Some(IntrinsicOp::BitsAdd),
                             OperatorRole::Subtract => Some(IntrinsicOp::BitsSubtract),
@@ -687,35 +906,6 @@ pub(crate) fn lower_expr_kind(
                             args: vec![lhs, rhs],
                         };
                     }
-                    if is_comparison && lhs_is_anonymous_int && rhs_is_anonymous_int {
-                        let interpretation = typed
-                            .type_registry
-                            .integer_operation_interpretation_for_type(&lhs_ty)
-                            .unwrap_or(IntegerInterpretation::Signed);
-                        let predicate = match role {
-                            OperatorRole::Less => Some(ComparisonPredicate::Less),
-                            OperatorRole::LessOrEqual => Some(ComparisonPredicate::LessOrEqual),
-                            OperatorRole::Greater => Some(ComparisonPredicate::Greater),
-                            OperatorRole::GreaterOrEqual => {
-                                Some(ComparisonPredicate::GreaterOrEqual)
-                            }
-                            OperatorRole::Equal => Some(ComparisonPredicate::Equal),
-                            _ => None,
-                        };
-                        if let Some(predicate) = predicate {
-                            let op = IntrinsicOp::BitsCompare {
-                                interpretation: match interpretation {
-                                    IntegerInterpretation::Signed => IntegerComparison::Signed,
-                                    IntegerInterpretation::Unsigned => IntegerComparison::Unsigned,
-                                },
-                                predicate,
-                            };
-                            return TypedExprKind::IntrinsicCall {
-                                op,
-                                args: vec![lhs, rhs],
-                            };
-                        }
-                    }
                     TypedExprKind::InvalidOperator {
                         op: binary.op.clone(),
                         lhs,
@@ -726,185 +916,7 @@ pub(crate) fn lower_expr_kind(
             }
         }
 
-        Expr::FnCall(fn_call) => {
-            let mut target = resolve_fn_call_target(&fn_call.path.value, scope.tag_types);
-            let parsed_args = fn_call.args.as_deref().unwrap_or_default();
-            let self_qualified = !target.0.as_str().contains('.')
-                && parsed_args
-                    .first()
-                    .is_some_and(|argument| match &argument.value {
-                        Expr::SelfRef => true,
-                        Expr::AnonymousTag(name) => name.as_str() == "Self",
-                        Expr::TagCall(call) => call.name.as_str() == "Self" && call.args.is_empty(),
-                        _ => false,
-                    });
-            let call_args = if self_qualified {
-                &parsed_args[1..]
-            } else {
-                parsed_args
-            };
-            let mut lowered_receiver = None;
-            if fn_call.path.value.root.as_str() == "Self"
-                && let Some(receiver) = scope.receiver_type.and_then(Ty::type_name)
-            {
-                let mut parts = vec![receiver.as_str()];
-                parts.extend(
-                    fn_call
-                        .path
-                        .value
-                        .segments
-                        .iter()
-                        .map(|segment| segment.as_str()),
-                );
-                target = DefId(Intern::new(parts.join(".")));
-            }
-            let arity = call_args.len();
-            if !typed.defs.contains_key(&target)
-                && !scope.callable_signatures.contains_key(&target)
-                && !target.0.as_str().contains('.')
-                && let Some(receiver) = scope.receiver_type.and_then(Ty::type_name)
-            {
-                let receiver_target = DefId(Intern::new(format!("{receiver}.{}", target.0)));
-                let receiver_overload =
-                    DefId(Intern::new(format!("{}$arity{arity}", receiver_target.0)));
-                if typed.defs.contains_key(&receiver_target)
-                    || scope.callable_signatures.contains_key(&receiver_target)
-                    || typed.defs.contains_key(&receiver_overload)
-                    || scope.callable_signatures.contains_key(&receiver_overload)
-                {
-                    target = receiver_target;
-                }
-            }
-            let overload = DefId(Intern::new(format!("{}$arity{}", target.0, arity)));
-            if !typed.defs.contains_key(&target)
-                && !scope.callable_signatures.contains_key(&target)
-                && (typed.defs.contains_key(&overload)
-                    || scope.callable_signatures.contains_key(&overload))
-            {
-                target = overload;
-            }
-            if !typed.defs.contains_key(&target)
-                && !scope.callable_signatures.contains_key(&target)
-                && !target.0.as_str().contains('.')
-                && !env.local_callable_returns.contains_key(&target.0)
-                && let Some(receiver) = call_args.first()
-            {
-                let receiver = lower_call_arg(typed, receiver, &scope.child(), env);
-                lowered_receiver = Some(receiver);
-                if let Some(receiver_name) = typed.exprs.ty_of(receiver).and_then(Ty::type_name) {
-                    let receiver_target =
-                        DefId(Intern::new(format!("{receiver_name}.{}", target.0)));
-                    if typed.defs.contains_key(&receiver_target)
-                        || scope.callable_signatures.contains_key(&receiver_target)
-                    {
-                        target = receiver_target;
-                    }
-                }
-            }
-            if fn_call.path.value.segments.is_empty()
-                && let Some(return_type) = env.local_callable_returns.get(&target.0).cloned()
-            {
-                let args = call_args
-                    .iter()
-                    .map(|argument| lower_call_arg(typed, argument, &scope.child(), env))
-                    .collect();
-                return TypedExprKind::FnCall {
-                    target,
-                    args: fn_call.args.is_some().then_some(args),
-                    substituted_ty: Some(return_type),
-                };
-            }
-            let local_signature = typed.defs.get(&target).map(TypedCallableSignature::from);
-            let signature = local_signature
-                .as_ref()
-                .or_else(|| scope.callable_signatures.get(&target));
-            let args = call_args;
-            let lowered_args: Vec<ExprId> = args
-                .iter()
-                .enumerate()
-                .map(|(index, arg)| {
-                    let expected = signature
-                        .and_then(|signature| signature.params.get(index))
-                        .map(|(_, ty)| ty);
-                    let argument = if index == 0
-                        && let Some(receiver) = lowered_receiver
-                    {
-                        receiver
-                    } else {
-                        lower_call_arg(typed, arg, &scope.with_expected(expected), env)
-                    };
-                    if let Some(expected) = expected {
-                        contextualize_local_literal(typed, argument, expected, env);
-                    } else if signature.is_none() {
-                        typed.exprs.facts.semantic_facts.flaws[argument.as_usize()].retain(
-                            |flaw| {
-                                !matches!(
-                                    flaw.code.slug(),
-                                    "type-text-literal-requires-context"
-                                        | "type-sequence-literal-requires-context"
-                                        | "type-sequence-repeat-requires-context"
-                                )
-                            },
-                        );
-                    }
-                    argument
-                })
-                .collect();
-            let has_arg_exprs = fn_call.args.is_some();
-            let call_signature = signature.map(|signature| {
-                let call_id = reserved_expr_id.expect("function calls reserve an expression ID");
-                let binder = BinderId::new(typed.file_id.0, BinderOwner::Expression(call_id.0));
-                let mut instantiation =
-                    DependentInstantiation::new(signature.dependent_binder, binder);
-                let mut params: Vec<(Intern<String>, Ty)> = signature
-                    .params
-                    .iter()
-                    .map(|(name, ty)| (*name, instantiation.apply_to_ty(ty)))
-                    .collect();
-                let mut return_type = instantiation.apply_to_ty(&signature.return_type);
-                if let Some(substitution) =
-                    substitution_from_expected_return(typed, &return_type, scope.expected_ty)
-                {
-                    for (_, parameter) in &mut params {
-                        *parameter = substitution.apply_to_ty(parameter);
-                    }
-                    return_type = substitution.apply_to_ty(&return_type);
-                }
-                (signature.param_kinds.clone(), params, return_type)
-            });
-            let call_inst = call_signature
-                .as_ref()
-                .map(|(param_kinds, params, return_type)| {
-                    let instantiation =
-                        instantiate_call(&lowered_args, typed, param_kinds, params, return_type);
-                    (instantiation, return_type)
-                });
-            let lowered = call_inst
-                .as_ref()
-                .and_then(|(call_inst, _)| call_inst.args.clone())
-                .or_else(|| {
-                    if has_arg_exprs {
-                        Some(lowered_args.clone())
-                    } else {
-                        None
-                    }
-                });
-            let substituted_ty = if let Some((_, _, return_type)) = call_signature.as_ref() {
-                let by_call = call_inst.and_then(|(inst, _)| inst.substituted_ty);
-                let by_expected =
-                    infer_return_type_from_expected(typed, return_type, scope.expected_ty);
-                by_expected
-                    .or(by_call)
-                    .or_else(|| Some(return_type.clone()))
-            } else {
-                None
-            };
-            TypedExprKind::FnCall {
-                target,
-                args: lowered,
-                substituted_ty,
-            }
-        }
+        Expr::FnCall(fn_call) => lower_fn_call(typed, fn_call, scope, env, reserved_expr_id, None),
 
         Expr::TagCall(tag_call) => {
             let self_call;
@@ -929,12 +941,22 @@ pub(crate) fn lower_expr_kind(
                 scope.variant_map,
                 scope.tag_types,
                 scope.expected_ty,
+                &typed.type_registry,
             );
             let disc = result_alternative_discriminant(scope.expected_ty, variant_id.name)
-                .unwrap_or_else(|| resolve_discriminant(&variant_id, scope.variant_map));
+                .unwrap_or_else(|| {
+                    resolve_discriminant(
+                        &variant_id,
+                        scope.variant_map,
+                        scope.expected_ty,
+                        &typed.type_registry,
+                    )
+                });
             let field_names = extract_tag_call_field_names(&tag_call.args);
-            let expected_fields = scope
-                .expected_ty
+            let member = type_sum_member(scope.expected_ty, tag_call.name, &typed.type_registry);
+            let expected_fields = member
+                .as_ref()
+                .or(scope.expected_ty)
                 .and_then(|expected| {
                     match typed.type_registry.resolved_definition_for_type(expected) {
                         Ty::Record { fields, .. } => Some(fields.clone()),
@@ -946,11 +968,8 @@ pub(crate) fn lower_expr_kind(
                     }
                 })
                 .or_else(|| {
-                    typed.tags.get(&variant_id.union).and_then(|tag| {
-                        match typed
-                            .type_registry
-                            .resolved_definition_for_type(&tag.resolved_ty)
-                        {
+                    scope.tag_types.get(&variant_id.union.0).and_then(|ty| {
+                        match typed.type_registry.resolved_definition_for_type(ty) {
                             Ty::Record { fields, .. } => Some(fields.clone()),
                             Ty::Union { variants, .. } => variants
                                 .iter()
@@ -976,7 +995,30 @@ pub(crate) fn lower_expr_kind(
                                 .map(|(_, ty)| ty.as_ref())
                         }
                     });
-                    lower_call_arg(typed, arg, &scope.with_expected(expected), env)
+                    let argument = lower_call_arg(typed, arg, &scope.with_expected(expected), env);
+                    if let Some(expected) = expected.filter(|expected| {
+                        typed
+                            .type_registry
+                            .integer_validity_for_type(expected)
+                            .is_some()
+                    }) {
+                        let mut flaws = Vec::new();
+                        super::bounds_check::check_call_argument(
+                            typed, argument, expected, &mut flaws,
+                        );
+                        let span = typed.exprs.span[argument.index()];
+                        for diagnostic in flaws {
+                            let diagnostic = diagnostic.at_span_id(span, &typed.span_table);
+                            typed.exprs.facts.semantic_facts.flaws[argument.index()]
+                                .push(diagnostic);
+                        }
+                    }
+                    let argument = expected.map_or(argument, |expected| {
+                        typed.own_storage_argument(argument, expected)
+                    });
+                    expected.map_or(argument, |expected| {
+                        typed.borrow_call_argument(argument, expected)
+                    })
                 })
                 .collect();
             TypedExprKind::TagCall {
@@ -987,6 +1029,8 @@ pub(crate) fn lower_expr_kind(
             }
         }
 
+        Expr::DomainValue(domain) => TypedExprKind::Domain(Box::new((**domain).clone())),
+        Expr::TypeValue(_) | Expr::DomainOf(_) | Expr::IntegerDomain(_) => TypedExprKind::Invalid,
         Expr::AnonymousTag(name) => {
             let variant_id = resolve_tag_call_variant(
                 &ast::expr::TagCall {
@@ -997,9 +1041,17 @@ pub(crate) fn lower_expr_kind(
                 scope.variant_map,
                 scope.tag_types,
                 scope.expected_ty,
+                &typed.type_registry,
             );
             let disc = result_alternative_discriminant(scope.expected_ty, variant_id.name)
-                .unwrap_or_else(|| resolve_discriminant(&variant_id, scope.variant_map));
+                .unwrap_or_else(|| {
+                    resolve_discriminant(
+                        &variant_id,
+                        scope.variant_map,
+                        scope.expected_ty,
+                        &typed.type_registry,
+                    )
+                });
             TypedExprKind::TagCall {
                 variant_id,
                 discriminant: disc,
@@ -1009,6 +1061,13 @@ pub(crate) fn lower_expr_kind(
         }
 
         Expr::Bind(bind) => {
+            let argument_context =
+                super::type_arguments::TypeArgumentContext::new(scope.tag_params, scope.tag_decls);
+            for (span, diagnostic) in argument_context.bind_diagnostics(bind) {
+                typed
+                    .declaration_flaws
+                    .push((span, diagnostic.at_span_id(span, &typed.span_table)));
+            }
             // Register constant bindings for the `ReassignConstant` check.
             if bind.is_constant() {
                 env.constants.insert(bind.name);
@@ -1017,32 +1076,191 @@ pub(crate) fn lower_expr_kind(
             if bind.params.is_some() {
                 let bind_id = reserved_expr_id.expect("local callables reserve an expression ID");
                 let binder = BinderId::new(typed.file_id.0, BinderOwner::Expression(bind_id.0));
-                let expected = local_callable_result_type(bind, binder, scope.tag_decls);
+                let expected = TypeEnv::new(scope.tag_types)
+                    .with_registry(&typed.type_registry)
+                    .with_tag_params(scope.tag_params)
+                    .with_tag_declaration_lookup(scope.tag_decls)
+                    .resolve_result_alternatives(&bind.anonymous_result_alternatives)
+                    .or_else(|| local_callable_result_type(bind, binder, scope.tag_decls))
+                    .or_else(|| {
+                        bind_explicit_ty_in_scope(
+                            bind,
+                            &typed.type_registry,
+                            scope.tag_types,
+                            scope.tag_params,
+                            scope.tag_decls,
+                        )
+                    });
                 let has_explicit_contract = expected.is_some();
+                let parameters = super::declare::resolve_param_types(
+                    bind,
+                    &typed.type_registry,
+                    scope.tag_types,
+                    scope.tag_params,
+                    scope.tag_decls,
+                    binder,
+                    &std::collections::HashMap::new(),
+                );
+                let defaults: Vec<_> = bind
+                    .params
+                    .iter()
+                    .flat_map(|params| params.values())
+                    .map(|parameter| match &parameter.kind {
+                        ParameterKind::Default(value) => Some((**value).clone()),
+                        _ => None,
+                    })
+                    .collect();
                 if let Some(expected) = &expected {
-                    env.local_callable_returns
-                        .insert(bind.name, expected.clone());
+                    env.local_callables.insert(
+                        bind.name,
+                        LocalCallable {
+                            definition: bind_id,
+                            return_type: expected.clone(),
+                            parameters: parameters.clone(),
+                            defaults: defaults.clone(),
+                        },
+                    );
                 }
                 let mut callable_env = env.clone();
-                for name in bind.params.iter().flat_map(|params| params.keys()) {
-                    callable_env.types.insert(*name, Ty::Opaque(*name));
+                for (slot, (name, ty)) in parameters.iter().enumerate() {
+                    callable_env.remove_binding(*name);
+                    callable_env.types.insert(*name, ty.clone());
                     callable_env.locals.insert(*name);
+                    let place = typed.add_place(crate::typed::TypedPlace {
+                        binder: BinderId::new(
+                            typed.file_id.0,
+                            BinderOwner::LocalParameter {
+                                expression: bind_id.0,
+                                slot: u32::try_from(slot).expect("local parameter slot fits u32"),
+                            },
+                        ),
+                        name: *name,
+                        parent: None,
+                        projection: None,
+                        mutable: matches!(
+                            bind.param_conventions.get(name),
+                            Some(ParamConvention::Own | ParamConvention::Mutate)
+                        ),
+                        explicit_contract: true,
+                        ty: ty.clone(),
+                    });
+                    let version = typed.add_place_version(
+                        place,
+                        crate::typed::PlaceVersionOrigin::Parameter,
+                        ty.clone(),
+                        None,
+                    );
+                    callable_env.places.insert(*name, place);
+                    callable_env.place_versions.insert(*name, version);
                 }
-                let callable_scope = scope.with_expected(expected.as_ref());
-                let (stmts, body, has_value) = lower_local_callable_body(
-                    typed,
-                    &bind.value,
-                    &callable_scope,
-                    &mut callable_env,
+                typed.local_callable_parameters.insert(
+                    bind_id,
+                    parameters
+                        .iter()
+                        .map(|(name, ty)| crate::typed::LocalCallableParameter {
+                            name: *name,
+                            ty: ty.clone(),
+                            convention: bind
+                                .param_conventions
+                                .get(name)
+                                .copied()
+                                .unwrap_or_default(),
+                        })
+                        .collect(),
                 );
+                let mut callable_scope = scope.with_expected(expected.as_ref());
+                callable_scope.return_ty = expected.as_ref();
+                callable_scope.value_required = true;
+                let is_block_body = matches!(
+                    &bind.value,
+                    BindValue::Expr(expr) if matches!(expr.value, Expr::Block(_))
+                );
+                let allows_fallthrough = is_block_body
+                    && expected
+                        .as_ref()
+                        .is_none_or(super::return_types::has_no_results);
+                if allows_fallthrough {
+                    callable_scope = callable_scope.statement();
+                }
+                for (name, ty) in &parameters {
+                    if let Some(evidence) = super::lower_when::parameter_proposition_evidence(
+                        typed,
+                        ty,
+                        bind.name_span,
+                        &callable_scope,
+                        &mut callable_env,
+                    ) {
+                        callable_env.result_evidence.insert(*name, evidence);
+                    }
+                }
+                let (mut stmts, mut body, has_value) =
+                    lower_local_bind_body(typed, &bind.value, &callable_scope, &mut callable_env);
+                if is_block_body
+                    && !crate::analysis::expression_returns(typed.resolved_program(), body)
+                {
+                    if allows_fallthrough {
+                        super::return_types::validate_unit_fallthrough(typed, bind, body);
+                        stmts.push(body);
+                        body = lower_typed_expr(
+                            typed,
+                            &Typed::infer(Expr::Block(Vec::new()), bind.name_span),
+                            &callable_scope,
+                            &mut callable_env,
+                        );
+                    } else {
+                        typed.exprs.facts.semantic_facts.flaws[bind_id.index()].push(
+                            // type-missing-return
+                            Diagnostic::new(
+                                ResultCode::ReturnMissing,
+                                "block-bodied functions with results require an explicit return on every path",
+                            )
+                            .at_span_id(bind.name_span, &typed.span_table),
+                        );
+                    }
+                }
+                super::return_types::validate_proposition_returns(
+                    typed,
+                    bind,
+                    &BindBody::Body {
+                        exprs: stmts.clone(),
+                        ret: has_value.then_some(body),
+                    },
+                );
+                let inferred_integer_return_type =
+                    if expected.is_none() && super::return_types::infers_return_type(bind) {
+                        super::return_types::infer_integer_return_type(
+                            typed,
+                            bind,
+                            &BindBody::Body {
+                                exprs: stmts.clone(),
+                                ret: has_value.then_some(body),
+                            },
+                        )
+                    } else {
+                        None
+                    };
+                if let Some(return_type) = &inferred_integer_return_type {
+                    super::return_types::validate_integer_return_representation(
+                        typed,
+                        bind,
+                        return_type,
+                    );
+                }
                 let return_type = expected
+                    .or(inferred_integer_return_type)
                     .or_else(|| typed.exprs.ty_of(body).cloned())
                     .unwrap_or(Ty::Unit);
-                env.local_callable_returns
-                    .insert(bind.name, return_type.clone());
+                env.local_callables.insert(
+                    bind.name,
+                    LocalCallable {
+                        definition: bind_id,
+                        return_type: return_type.clone(),
+                        parameters,
+                        defaults,
+                    },
+                );
                 env.types.insert(bind.name, return_type.clone());
-                let place = crate::typed::PlaceId(typed.places.len() as u32);
-                typed.places.push(crate::typed::TypedPlace {
+                let place = typed.add_place(crate::typed::TypedPlace {
                     binder,
                     name: bind.name,
                     parent: None,
@@ -1069,15 +1287,20 @@ pub(crate) fn lower_expr_kind(
                 // Reassigning an existing variable — produce Reassign.
                 let value = match &bind.value {
                     BindValue::Expr(inner) => {
-                        let expected = env
-                            .places
-                            .get(&bind.name)
-                            .and_then(|place| typed.places.get(place.0 as usize))
-                            .filter(|place| place.explicit_contract)
-                            .map(|place| place.ty.clone());
+                        let expected = env.places.get(&bind.name).and_then(|place| {
+                            let info = &typed.places[place.0 as usize];
+                            info.explicit_contract.then(|| {
+                                typed
+                                    .borrowed_parameter_referent(*place)
+                                    .unwrap_or(&info.ty)
+                                    .clone()
+                            })
+                        });
                         if let ast::BindOperator::Compound(operator) = &bind.operator {
                             let lhs = Typed::infer(
                                 Expr::FnCall(ast::expr::FnCall {
+                                    syntax: ast::CallSyntax::Path,
+                                    definition: None,
                                     path: Spanned::new(
                                         ast::ModPath::new(bind.name, vec![]),
                                         bind.name_span,
@@ -1097,14 +1320,14 @@ pub(crate) fn lower_expr_kind(
                             lower_typed_expr(
                                 typed,
                                 &compound,
-                                &scope.with_expected(expected.as_ref()),
+                                &scope.child().with_expected(expected.as_ref()),
                                 env,
                             )
                         } else {
                             lower_typed_expr(
                                 typed,
                                 inner,
-                                &scope.with_expected(expected.as_ref()),
+                                &scope.child().with_expected(expected.as_ref()),
                                 env,
                             )
                         }
@@ -1117,7 +1340,7 @@ pub(crate) fn lower_expr_kind(
                         if !ret.values.is_empty() {
                             let row =
                                 Typed::infer(Expr::ResultValues(ret.values.clone()), ret.span_id);
-                            lower_typed_expr(typed, &row, &scope, env)
+                            lower_typed_expr(typed, &row, scope, env)
                         } else {
                             ret.values
                                 .first()
@@ -1128,7 +1351,7 @@ pub(crate) fn lower_expr_kind(
                     }
                     _ => ExprId(0),
                 };
-                if let Some(evidence) = typed.exprs.result_evidence_of(value).cloned().flatten() {
+                if let Some(evidence) = typed.exprs.value_evidence_of(value).cloned() {
                     env.result_evidence.insert(bind.name, evidence);
                 } else {
                     env.result_evidence.remove(&bind.name);
@@ -1153,7 +1376,9 @@ pub(crate) fn lower_expr_kind(
                     .cloned()
                     .unwrap_or_default();
                 env.set_result_target_groups(bind.name, Some(result_targets));
-                if let Some(place) = env.places.get(&bind.name).copied() {
+                if let Some(place) = env.places.get(&bind.name).copied()
+                    && typed.borrowed_parameter_referent(place).is_none()
+                {
                     let predecessor = env.place_versions.get(&bind.name).copied();
                     let version = typed.add_place_version(
                         place,
@@ -1172,42 +1397,19 @@ pub(crate) fn lower_expr_kind(
                     },
                 }
             } else {
-                let (stmts, body, has_value) = match &bind.value {
-                    BindValue::Expr(inner) => {
-                        let expected = bind_explicit_ty_in_scope(
-                            bind,
-                            scope.tag_types,
-                            scope.tag_params,
-                            scope.tag_decls,
-                        );
-                        (
-                            vec![],
-                            lower_typed_expr(
-                                typed,
-                                inner,
-                                &scope.with_expected(expected.as_ref()),
-                                env,
-                            ),
-                            true,
-                        )
-                    }
-                    BindValue::Body { exprs, ret } => {
-                        let mut lowered: Vec<ExprId> = exprs
-                            .iter()
-                            .map(|e| lower_typed_expr(typed, e, &scope.child(), env))
-                            .collect();
-                        let body = ret
-                            .values
-                            .first()
-                            .map(|e| lower_typed_expr(typed, e, &scope.child(), env))
-                            .or_else(|| lowered.pop());
-                        match body {
-                            Some(body) => (lowered, body, true),
-                            None => (vec![], ExprId(0), false),
-                        }
-                    }
-                    BindValue::Unassigned => (vec![], ExprId(0), false),
-                };
+                let expected = bind_explicit_ty_in_scope(
+                    bind,
+                    &typed.type_registry,
+                    scope.tag_types,
+                    scope.tag_params,
+                    scope.tag_decls,
+                );
+                let (stmts, mut body, has_value) = lower_local_bind_body(
+                    typed,
+                    &bind.value,
+                    &scope.child().with_expected(expected.as_ref()),
+                    env,
+                );
 
                 let bind_id = reserved_expr_id.expect("local binds reserve an expression ID");
                 let binder = BinderId::new(typed.file_id.0, BinderOwner::Expression(bind_id.0));
@@ -1216,18 +1418,64 @@ pub(crate) fn lower_expr_kind(
                     .flatten();
                 let declared_ty = super::lower_ty::bind_local_explicit_ty(
                     bind,
+                    &typed.type_registry,
                     scope.tag_types,
                     scope.tag_params,
                     scope.tag_decls,
                     binder,
                     initializer_ty.as_ref(),
-                );
+                )
+                .unwrap_or_else(|diagnostic| {
+                    typed.declaration_flaws.push((
+                        bind.name_span,
+                        diagnostic.at_span_id(bind.name_span, &typed.span_table),
+                    ));
+                    expected.clone()
+                });
+                if let Some(Ty::AnonymousInteger { validity }) = &declared_ty
+                    && !typed.type_registry.is_target_dependent_validity(validity)
+                    && let Err(error) = validity.resolve_runtime_representation(
+                        &ast::integer::IntegerRepresentationRule::InferFromValidity,
+                    )
+                {
+                    typed.declaration_flaws.push((
+                        bind.name_span,
+                        Diagnostic::new(
+                            error.diagnostic_code(),
+                            "integer binding requires finite bounds and a supported runtime width",
+                        )
+                        .at_span_id(bind.name_span, &typed.span_table),
+                    ));
+                }
+                if let Some(surface) = bind.return_tag.as_deref()
+                    && let Some(diagnostic) = TypeEnv::new(scope.tag_types)
+                        .with_registry(&typed.type_registry)
+                        .with_tag_params(scope.tag_params)
+                        .with_tag_declaration_lookup(scope.tag_decls)
+                        .integer_domain_diagnostic(surface, &typed.span_table)
+                {
+                    typed.declaration_flaws.push((surface.span_id, diagnostic));
+                }
+                if has_value && let Some(expected) = &declared_ty {
+                    if matches!(expected, Ty::AnonymousInteger { .. }) {
+                        body = read_integer_operand(typed, body);
+                    }
+                    super::lower_ty::validate_domain_annotation(
+                        typed,
+                        bind,
+                        body,
+                        expected,
+                        Some(bind_id),
+                    );
+                }
                 let has_explicit_contract = declared_ty.is_some();
                 if has_value
                     && let Some(explicit) = &declared_ty
                     && body.as_usize() < typed.exprs.ty.len()
                 {
-                    typed.exprs.ty[body.as_usize()] = explicit.clone();
+                    if !matches!(explicit, Ty::AnonymousInteger { .. }) {
+                        typed.exprs.ty[body.as_usize()] = explicit.clone();
+                    }
                     let literal_values = typed
                         .type_registry
                         .resolved_definition_for_type(explicit)
@@ -1250,8 +1498,7 @@ pub(crate) fn lower_expr_kind(
                 );
                 env.locals.insert(bind.name);
                 env.types.insert(bind.name, local_ty.clone());
-                let place = crate::typed::PlaceId(typed.places.len() as u32);
-                typed.places.push(crate::typed::TypedPlace {
+                let place = typed.add_place(crate::typed::TypedPlace {
                     binder,
                     name: bind.name,
                     parent: None,
@@ -1291,9 +1538,7 @@ pub(crate) fn lower_expr_kind(
                 {
                     env.const_values.insert(bind.name, cv.clone());
                 }
-                if has_value
-                    && let Some(evidence) = typed.exprs.result_evidence_of(body).cloned().flatten()
-                {
+                if has_value && let Some(evidence) = typed.exprs.value_evidence_of(body).cloned() {
                     env.result_evidence.insert(bind.name, evidence);
                 } else {
                     env.result_evidence.remove(&bind.name);
@@ -1307,23 +1552,27 @@ pub(crate) fn lower_expr_kind(
                 } else {
                     env.projected_result_evidence.remove(&bind.name);
                 }
-                let names = has_value
-                    .then(|| result_names_for_expr(typed, scope, body))
-                    .unwrap_or_default();
+                let names = if has_value {
+                    result_names_for_expr(typed, scope, body)
+                } else {
+                    Default::default()
+                };
                 if names.is_empty() {
                     env.result_names.remove(&bind.name);
                 } else {
                     env.result_names.insert(bind.name, names);
                 }
-                let result_targets = has_value
-                    .then(|| {
+                let result_targets = if has_value {
+                    {
                         typed
                             .exprs
                             .result_target_groups_of(body)
                             .cloned()
                             .unwrap_or_default()
-                    })
-                    .unwrap_or_default();
+                    }
+                } else {
+                    Default::default()
+                };
                 env.set_result_target_groups(bind.name, Some(result_targets));
 
                 TypedExprKind::Bind {
@@ -1340,23 +1589,39 @@ pub(crate) fn lower_expr_kind(
                 .subject
                 .as_ref()
                 .map(|s| lower_typed_expr(typed, s, &scope.child(), env));
+            if let Some(subject) = subject_id {
+                let _ = super::lower_exprs::ensure_temporary_owner(typed, env, subject);
+            }
 
             let subject_ty = subject_id.and_then(|id| typed.exprs.ty_of(id).cloned());
             let subject_targets =
                 subject_id.and_then(|id| typed.exprs.target_group_of(id).cloned().flatten());
 
             let first_join = typed.place_versions.len();
-            let arms = lower_all_when_arms(
+            let mut arm_scope = scope.with_expected(scope.expected_ty);
+            if let (Some(subject), Some(source)) = (subject_id, &when_expr.subject) {
+                arm_scope.when_subject = Some((source.span_id, subject));
+            }
+            let mut arms = lower_all_when_arms(
                 typed,
                 &when_expr.arms,
-                scope,
+                &arm_scope,
                 env,
                 subject_ty.as_ref(),
                 subject_targets.as_ref(),
                 subject_id,
             );
-            let place_joins = root_place_versions_since(typed, first_join, |origin| {
+            if scope.value_required && scope.expected_ty.is_none() {
+                super::when_values::materialize_inferred_union(typed, &mut arms);
+            }
+            let mut place_joins = root_place_versions_since(typed, first_join, |origin| {
                 matches!(origin, crate::typed::PlaceVersionOrigin::Join(_))
+            });
+            place_joins.retain(|version| {
+                let place = typed.place_versions[version.0 as usize].place;
+                let name = typed.places[place.0 as usize].name;
+                env.places.get(&name) == Some(&place)
+                    && env.place_versions.get(&name) == Some(version)
             });
 
             TypedExprKind::When(TypedWhenExpr {
@@ -1371,23 +1636,21 @@ pub(crate) fn lower_expr_kind(
             let condition =
                 super::lower_when::lower_condition(typed, &if_expr.condition, scope, env);
             let incoming = env.clone();
-            let mut branch_env = incoming.clone();
+            let (mut branch_env, owned_bindings) =
+                super::lower_when::with_condition_locals(typed, &incoming, &condition, scope);
             super::lower_when::refine_integer_locals_from_condition(
                 typed,
                 &condition,
                 true,
                 &mut branch_env,
             );
-            let branch_scope = scope.temporary_child();
-            let mut exit_scope = scope.with_expected(scope.expected_ty);
-            exit_scope.temporary_shadowing = true;
-            let last_statement = if_expr.body.len().saturating_sub(1);
+            let branch_scope = scope.child();
+            let exit_scope = scope.with_expected(scope.expected_ty);
             let stmts: Vec<ExprId> = if_expr
                 .body
                 .iter()
-                .enumerate()
-                .map(|(index, e)| {
-                    let expr_scope = if index == last_statement {
+                .map(|e| {
+                    let expr_scope = if matches!(e.value, Expr::If(_) | Expr::Loop(_)) {
                         &exit_scope
                     } else {
                         &branch_scope
@@ -1395,31 +1658,47 @@ pub(crate) fn lower_expr_kind(
                     lower_typed_expr(typed, e, expr_scope, &mut branch_env)
                 })
                 .collect();
-            let ret = if_expr
-                .ret
-                .values
-                .first()
-                .map(|e| lower_typed_expr(typed, e, &exit_scope, &mut branch_env));
-            let first_join = typed.place_versions.len();
-            join_place_versions(typed, env, &incoming, &[branch_env], true);
-            let place_joins = root_place_versions_since(typed, first_join, |origin| {
-                matches!(origin, crate::typed::PlaceVersionOrigin::Join(_))
-            });
-            TypedExprKind::If(TypedIfExpr {
+            let ret = match if_expr.ret.values.as_slice() {
+                [] => None,
+                [value] => Some(lower_typed_expr(typed, value, &exit_scope, &mut branch_env)),
+                values => {
+                    let value =
+                        Typed::infer(Expr::ResultValues(values.to_vec()), if_expr.ret.span_id);
+                    Some(lower_typed_expr(
+                        typed,
+                        &value,
+                        &exit_scope,
+                        &mut branch_env,
+                    ))
+                }
+            };
+            if ret.is_some() {
+                super::lower_when::refine_integer_locals_from_condition(
+                    typed, &condition, false, env,
+                );
+            }
+            TypedExprKind::If(Box::new(TypedIfExpr {
                 condition,
                 stmts,
                 ret,
-                place_joins,
+                postcondition: crate::typed::TypedPostcondition::from_return(
+                    &if_expr.ret,
+                    &branch_env.types,
+                ),
+                owned_bindings,
+                place_joins: Vec::new(),
                 body_span: SubSpan::new(SpanId::INVALID),
-            })
+            }))
         }
 
         Expr::Loop(loop_enum) => match loop_enum {
             ast::Loop::While(while_loop) => {
+                let incoming = env.clone();
+                super::lower_exprs::prepare_loop_place_versions(typed, env);
                 let condition =
                     super::lower_when::lower_condition(typed, &while_loop.condition, scope, env);
-                let incoming = env.clone();
-                let mut body_env = incoming.clone();
+                let (mut body_env, owned_bindings) =
+                    super::lower_when::with_condition_locals(typed, env, &condition, scope);
                 super::lower_when::refine_integer_locals_from_condition(
                     typed,
                     &condition,
@@ -1429,7 +1708,10 @@ pub(crate) fn lower_expr_kind(
                 let stmts: Vec<ExprId> = while_loop
                     .exprs
                     .iter()
-                    .map(|e| lower_typed_expr(typed, e, &scope.temporary_child(), &mut body_env))
+                    .map(|e| {
+                        let body_scope = scope.statement();
+                        lower_typed_expr(typed, e, &body_scope, &mut body_env)
+                    })
                     .collect();
                 let first_phi = typed.place_versions.len();
                 join_loop_place_versions(typed, env, &incoming, &body_env);
@@ -1437,87 +1719,22 @@ pub(crate) fn lower_expr_kind(
                     matches!(origin, crate::typed::PlaceVersionOrigin::LoopPhi { .. })
                 });
                 TypedExprKind::Loop(TypedLoop {
-                    kind: TypedLoopKind::While { condition },
-                    stmts,
+                    kind: TypedLoopKind::While {
+                        condition,
+                        stmts,
+                        owned_bindings,
+                    },
                     place_phis,
                     keyword_span: SubSpan::new(SpanId::INVALID),
                 })
             }
-            ast::Loop::ForIn(for_in) => {
-                let iter = lower_typed_expr(typed, &for_in.iter, &scope.child(), env);
-                let iter_ty = typed.exprs.ty_of(iter);
-                let iteration_plan = match typed.exprs.kind.get(iter.as_usize()) {
-                    Some(TypedExprKind::Range { .. }) => crate::typed::IterationPlan::Range,
-                    _ => match iter_ty {
-                        Some(Ty::Array { elem, size }) => crate::typed::IterationPlan::FixedArray {
-                            element: elem.as_ref().clone(),
-                            length: size.clone(),
-                        },
-                        _ => crate::typed::IterationPlan::Unresolved,
-                    },
-                };
-                let elem_ty = match &iteration_plan {
-                    crate::typed::IterationPlan::Range => Ty::i64(),
-                    crate::typed::IterationPlan::FixedArray { element, .. } => element.clone(),
-                    crate::typed::IterationPlan::Unresolved => {
-                        typed.exprs.facts.semantic_facts.flaws[iter.as_usize()].push(
-                            diagnostic::Diagnostic::new(
-                                "type-iterable-requires-contract",
-                                "for-in source has no resolved iterable contract",
-                            )
-                            .at_span_id(for_in.iter.span_id, &typed.span_table),
-                        );
-                        Ty::Unit
-                    }
-                };
-
-                let incoming = env.clone();
-                let mut body_env = incoming.clone();
-                let pat_bind_name = match &for_in.pat.value {
-                    Expr::Bind(b) => Some(b.name),
-                    Expr::FnCall(call) if call.args.is_none() && call.path.segments.is_empty() => {
-                        Some(call.path.root)
-                    }
-                    _ => None,
-                };
-                if let Some(name) = pat_bind_name {
-                    body_env.types.insert(name, elem_ty.clone());
-                }
-                let _pat_id = lower_typed_expr(typed, &for_in.pat, &scope.child(), &mut body_env);
-
-                let stmts: Vec<ExprId> = for_in
-                    .exprs
-                    .iter()
-                    .map(|e| lower_typed_expr(typed, e, &scope.temporary_child(), &mut body_env))
-                    .collect();
-
-                if let Some(name) = pat_bind_name {
-                    body_env.types.insert(name, elem_ty);
-                }
-                let first_phi = typed.place_versions.len();
-                join_loop_place_versions(typed, env, &incoming, &body_env);
-                let place_phis = root_place_versions_since(typed, first_phi, |origin| {
-                    matches!(origin, crate::typed::PlaceVersionOrigin::LoopPhi { .. })
-                });
-
-                let for_loop = TypedLoop {
-                    kind: TypedLoopKind::ForIn {
-                        variable: pat_bind_name.unwrap_or(Intern::new("_for_var".to_string())),
-                        iterable: iter,
-                        plan: iteration_plan,
-                    },
-                    stmts,
-                    place_phis,
-                    keyword_span: SubSpan::new(SpanId::INVALID),
-                };
-                TypedExprKind::Loop(for_loop)
-            }
+            ast::Loop::ForIn(for_in) => super::sequence::lower_for(typed, for_in, scope, env),
         },
 
         Expr::SelfRef => TypedExprKind::SelfRef {
             target: scope
                 .current_def_id
-                .unwrap_or(DefId(Intern::new("self".to_string()))),
+                .unwrap_or(DefId::named(Intern::new("self".to_string()))),
         },
 
         Expr::FormatString(_) => TypedExprKind::Invalid,
@@ -1561,18 +1778,12 @@ pub(crate) fn lower_expr_kind(
                 .as_ref()
                 .map(|ty| scope.with_expected(Some(ty)))
                 .or_else(|| {
-                    matches!(init.value, Expr::Lit(Literal::Int(_) | Literal::Number(_)))
+                    matches!(init.value, Expr::Lit(Literal::Int(_)))
                         .then(|| scope.with_expected(Some(&inferred_literal_ty)))
                 })
                 .unwrap_or_else(|| scope.without_literal_materialization());
             let init_id = lower_typed_expr(typed, init, &init_scope, env);
-            let size = as_fixed_array_alloc_size(&size.value)
-                .or_else(|| {
-                    let size_expr_id = lower_typed_expr(typed, size, &scope.child(), env);
-                    crate::staging::normalize(typed, size_expr_id, &DepSubst::new())
-                        .as_dependent_normal_expr()
-                })
-                .unwrap_or_else(|| fallback_fixed_array_alloc_size(size.span_id));
+            let size = lower_array_length(typed, size, scope, env);
             TypedExprKind::FixedArrayAlloc {
                 init: init_id,
                 size,
@@ -1585,11 +1796,12 @@ pub(crate) fn lower_expr_kind(
             value,
         } => {
             let value_id = lower_typed_expr(typed, value, &scope.child(), env);
-            add_destructure_bindings(typed, value_id, *tag_name, field_bindings, env);
+            let places = add_destructure_bindings(typed, value_id, *tag_name, field_bindings, env);
             TypedExprKind::Destructure {
                 tag_name: *tag_name,
                 value: value_id,
                 field_bindings: field_bindings.clone(),
+                places,
             }
         }
 
@@ -1600,9 +1812,10 @@ pub(crate) fn lower_expr_kind(
             operator,
         } => {
             let base_id = lower_typed_expr(typed, base, &scope.child(), env);
-            let base_definition = typed.type_registry.resolved_definition_for_type(
-                &typed.exprs.ty_of(base_id).cloned().unwrap_or(Ty::Unit),
-            );
+            let base_ty = typed.exprs.ty_of(base_id).cloned().unwrap_or(Ty::Unit);
+            let base_ty =
+                reference_pointee_for_type(&base_ty, Some(&typed.type_registry)).unwrap_or(base_ty);
+            let base_definition = typed.type_registry.resolved_definition_for_type(&base_ty);
             let sequence_field = if matches!(base_definition, Ty::Sequence(_)) {
                 base_definition.named_field(*field)
             } else {
@@ -1659,45 +1872,38 @@ pub(crate) fn lower_expr_kind(
             let base_ty = reference_pointee_for_type(&base_ty, Some(&typed.type_registry))
                 .unwrap_or(base_ty.clone());
             let base_definition = typed.type_registry.resolved_definition_for_type(&base_ty);
-            let field_idx =
-                match base_definition.named_field(*field) {
-                    Some((index, _)) => Some(index),
-                    None => {
-                        if let Some(TypedExprKind::Bind { name, .. }) = typed.exprs.kind_of(base_id)
-                            && let Some(index) = env.result_names.get(name).and_then(|names| {
-                                names.iter().position(|name| *name == Some(*field))
-                            })
-                        {
-                            Some(index)
-                        } else if let Some(TypedExprKind::SelfRef { target }) =
-                            typed.exprs.kind_of(base_id)
-                            && let Some(index) = env.result_names.get(&target.0).and_then(|names| {
-                                names.iter().position(|name| *name == Some(*field))
-                            })
-                        {
-                            Some(index)
-                        } else if let Some(TypedExprKind::FnCall { target, .. }) =
-                            typed.exprs.kind_of(base_id)
-                            && let Some(index) = env.result_names.get(&target.0).and_then(|names| {
-                                names.iter().position(|name| *name == Some(*field))
-                            })
-                        {
-                            Some(index)
-                        } else {
-                            let target = match typed.exprs.kind_of(base_id) {
-                                Some(TypedExprKind::FnCall { target, .. }) => Some(*target),
-                                _ => None,
-                            };
-                            target.and_then(|target| {
-                                let bind = typed.defs.get(&target)?;
-                                if let Some(index) = bind
-                                    .named_results
-                                    .iter()
-                                    .position(|result| result.name == Some(*field))
-                                {
-                                    return Some(index);
-                                }
-                                if let Some(index) = scope
+            let field_idx = match base_definition.named_field(*field) {
+                Some((index, _)) => Some(index),
+                None => {
+                    let base_kind = typed.exprs.kind_of(base_id);
+                    let result_key = match base_kind {
+                        Some(TypedExprKind::Bind { name, .. }) => Some(name),
+                        Some(TypedExprKind::SelfRef { target }) => Some(&target.0),
+                        Some(TypedExprKind::FnCall { target, .. }) => Some(&target.0),
+                        _ => None,
+                    };
+                    if let Some(index) = result_key.and_then(|key| {
+                        env.result_names
+                            .get(key)
+                            .and_then(|names| names.iter().position(|name| *name == Some(*field)))
+                    }) {
+                        Some(index)
+                    } else {
+                        let target = match base_kind {
+                            Some(TypedExprKind::FnCall { target, .. }) => Some(*target),
+                            _ => None,
+                        };
+                        target.and_then(|target| {
+                            let bind = typed.defs.get(&target)?;
+                            if let Some(index) = bind
+                                .named_results
+                                .iter()
+                                .position(|result| result.name == Some(*field))
+                            {
+                                return Some(index);
+                            }
+                            if let Some(index) =
+                                scope
                                     .callable_signatures
                                     .get(&target)
                                     .and_then(|signature| {
@@ -1706,34 +1912,50 @@ pub(crate) fn lower_expr_kind(
                                             .iter()
                                             .position(|result| result.name == Some(*field))
                                     })
-                                {
-                                    return Some(index);
+                            {
+                                return Some(index);
+                            }
+                            let body = match &bind.body {
+                                BindBody::Expr(expr) => Some(*expr),
+                                BindBody::Body { exprs, ret } => {
+                                    (*ret).or_else(|| exprs.last().copied())
                                 }
-                                let body = match &bind.body {
-                                    BindBody::Expr(expr) => Some(*expr),
-                                    BindBody::Body { exprs, ret } => {
-                                        (*ret).or_else(|| exprs.last().copied())
-                                    }
-                                    BindBody::Unlowered => None,
-                                }?;
-                                let tag_id = match typed.exprs.kind_of(body) {
-                                    Some(TypedExprKind::TagCall { variant_id, .. }) => {
-                                        Some(variant_id.union)
-                                    }
-                                    _ => None,
-                                }?;
-                                let tag = typed.tags.get(&tag_id)?;
-                                let Ty::Record { fields, .. } = typed
-                                    .type_registry
-                                    .resolved_definition_for_type(&tag.resolved_ty)
-                                else {
-                                    return None;
-                                };
-                                fields.iter().position(|(name, _)| name == field)
-                            })
-                        }
+                                BindBody::Unlowered => None,
+                            }?;
+                            let tag_id = match typed.exprs.kind_of(body) {
+                                Some(TypedExprKind::TagCall { variant_id, .. }) => {
+                                    Some(variant_id.union)
+                                }
+                                _ => None,
+                            }?;
+                            let tag = typed.tags.get(&tag_id)?;
+                            let Ty::Record { fields, .. } = typed
+                                .type_registry
+                                .resolved_definition_for_type(&tag.resolved_ty)
+                            else {
+                                return None;
+                            };
+                            fields.iter().position(|(name, _)| name == field)
+                        })
+                    }
+                }
+            };
+            if field_idx.is_none()
+                && let Some(methods) =
+                    super::overloads::Overloads::for_member(*field, &base_ty, typed, scope)
+            {
+                return match methods.member_call(base, expr.span_id, &[]) {
+                    Ok(call) => {
+                        lower_fn_call(typed, &call, scope, env, reserved_expr_id, Some(base_id))
+                    }
+                    Err(diagnostic) => {
+                        typed.exprs.facts.semantic_facts.flaws
+                            [reserved_expr_id.unwrap().as_usize()]
+                        .push(diagnostic.at_span_id(expr.span_id, &typed.span_table));
+                        TypedExprKind::Invalid
                     }
                 };
+            }
             if let Some(idx) = field_idx {
                 TypedExprKind::AggregateGet {
                     base: base_id,
@@ -1743,9 +1965,10 @@ pub(crate) fn lower_expr_kind(
                 if let Some(TypedExprKind::FnCall { target, .. }) = typed.exprs.kind_of(base_id)
                     && let Some(bind) = typed.defs.get_mut(target)
                 {
-                    bind.flaws.push(
+                    bind.push_flaw(
+                        // type-unknown-result-projection
                         Diagnostic::new(
-                            "type-unknown-result-projection",
+                            ResultCode::UnknownProjection,
                             format!("unknown result projection `{}`", field.as_str()),
                         )
                         .with_arg("name", field.as_str().to_string())
@@ -1755,8 +1978,9 @@ pub(crate) fn lower_expr_kind(
                 if matches!(base_definition, Ty::Record { .. } | Ty::Sequence(_)) {
                     let expr_id = reserved_expr_id.unwrap_or(base_id);
                     typed.exprs.facts.semantic_facts.flaws[expr_id.as_usize()].push(
+                        // type-unknown-field
                         Diagnostic::new(
-                            "type-unknown-field",
+                            MemberCode::Unknown,
                             format!("record has no field `{}`", field.as_str()),
                         )
                         .with_arg("name", field.as_str().to_string())
@@ -1765,8 +1989,9 @@ pub(crate) fn lower_expr_kind(
                 } else if !matches!(base_definition, Ty::Sequence(..)) {
                     let expr_id = reserved_expr_id.unwrap_or(base_id);
                     typed.exprs.facts.semantic_facts.flaws[expr_id.as_usize()].push(
+                        // type-projection-requires-aggregate
                         Diagnostic::new(
-                            "type-projection-requires-aggregate",
+                            MemberCode::ProjectionRequiresAggregate,
                             format!(
                                 "cannot project named result `{}` from `{}`",
                                 field.as_str(),
@@ -1776,7 +2001,7 @@ pub(crate) fn lower_expr_kind(
                         .at_span_id(base.span_id, &typed.span_table),
                     );
                 }
-                TypedExprKind::Lit(Literal::Number(0))
+                TypedExprKind::Lit(Literal::Int(0.into()))
             }
         }
 
@@ -1795,9 +2020,10 @@ pub(crate) fn lower_expr_kind(
             operator,
         } => {
             let base_id = lower_typed_expr(typed, base, &scope.child(), env);
-            let base_definition = typed.type_registry.resolved_definition_for_type(
-                &typed.exprs.ty_of(base_id).cloned().unwrap_or(Ty::Unit),
-            );
+            let base_ty = typed.exprs.ty_of(base_id).cloned().unwrap_or(Ty::Unit);
+            let base_ty =
+                reference_pointee_for_type(&base_ty, Some(&typed.type_registry)).unwrap_or(base_ty);
+            let base_definition = typed.type_registry.resolved_definition_for_type(&base_ty);
             let expected = match base_definition {
                 Ty::Record { fields, .. } => fields.get(*index).map(|(_, field)| (**field).clone()),
                 Ty::Sequence(fields) => fields.get(*index).map(|field| (*field.ty).clone()),
@@ -1822,6 +2048,12 @@ pub(crate) fn lower_expr_kind(
             }
         }
 
+        Expr::SliceGet { buf, start, length } => {
+            let buf = lower_typed_expr(typed, buf, &scope.child(), env);
+            let start = lower_typed_expr(typed, start, &scope.child(), env);
+            let length = lower_typed_expr(typed, length, &scope.child(), env);
+            TypedExprKind::SliceGet { buf, start, length }
+        }
         Expr::BufGet { buf, index } => {
             let base_id = lower_typed_expr(typed, buf, &scope.child(), env);
             let index_id = lower_typed_expr(typed, index, &scope.child(), env);
@@ -1872,8 +2104,13 @@ pub(crate) fn lower_expr_kind(
         }
 
         Expr::Cast { expr, ty } => {
-            let resolved_ty =
-                resolve_type_reference(ty, scope.tag_types, &env.types, Some(scope.tag_params));
+            let resolved_ty = resolve_type_reference(
+                ty,
+                scope.tag_types,
+                &env.types,
+                Some(scope.tag_params),
+                &typed.type_registry,
+            );
             let address_type = if let Expr::TakePtr(value) = &expr.value
                 && typed
                     .type_registry
@@ -1883,13 +2120,15 @@ pub(crate) fn lower_expr_kind(
                 Some(Ty::Ptr {
                     inner: Box::new(resolve_expr_type(
                         value,
-                        scope.tag_types,
-                        scope.variant_map,
-                        scope.receiver_type,
+                        &ExprTypeResolverCtx {
+                            tag_types: scope.tag_types,
+                            variant_map: scope.variant_map,
+                            receiver_type: scope.receiver_type,
+                            local_var_types: &env.types,
+                            fn_return_types: &typed.fn_return_types,
+                            type_registry: &typed.type_registry,
+                        },
                         None,
-                        &env.types,
-                        &typed.fn_return_types,
-                        &typed.type_registry,
                     )),
                 })
             } else {
@@ -1914,6 +2153,7 @@ pub(crate) fn lower_expr_kind(
                 scope.tag_types,
                 &env.types,
                 Some(scope.tag_params),
+                &typed.type_registry,
             ),
         },
 
@@ -1922,8 +2162,38 @@ pub(crate) fn lower_expr_kind(
             TypedExprKind::TakePtr(inner_id)
         }
 
-        Expr::Ref { inner, .. } => {
-            let inner_id = lower_typed_expr(typed, inner, &scope.child(), env);
+        Expr::Ref { inner, mutable, .. } => {
+            let inner_id = if let Expr::SliceGet { buf, start, length } = &inner.value {
+                let source = lower_typed_expr(typed, buf, &scope.child(), env);
+                let reference = Ty::Ref {
+                    inner: Box::new(
+                        typed.exprs.ty[source.index()]
+                            .without_reference_wrappers()
+                            .clone(),
+                    ),
+                    mutable: *mutable,
+                };
+                let source = typed.borrow_call_argument(source, &reference);
+                let start = lower_typed_expr(typed, start, &scope.child(), env);
+                let length = lower_typed_expr(typed, length, &scope.child(), env);
+                let ty = super::lower_exprs::slice_type(typed, source, length);
+                super::lower_exprs::append_derived_expr(
+                    typed,
+                    source,
+                    TypedExprKind::SliceGet {
+                        buf: source,
+                        start,
+                        length,
+                    },
+                    ty,
+                )
+            } else {
+                let expected = scope.expected_ty.and_then(|ty| match ty {
+                    Ty::Ref { inner, .. } => Some(inner.as_ref()),
+                    _ => None,
+                });
+                lower_typed_expr(typed, inner, &scope.with_expected(expected), env)
+            };
             TypedExprKind::Ref(inner_id)
         }
 
@@ -1935,8 +2205,6 @@ pub(crate) fn lower_expr_kind(
         Expr::Negate(inner) => {
             if let Expr::Lit(Literal::Int(value)) = &inner.value {
                 TypedExprKind::Lit(Literal::Int(-*value))
-            } else if let Expr::Lit(Literal::Number(value)) = &inner.value {
-                TypedExprKind::Lit(Literal::Int(-i256::I256::from(*value as u128)))
             } else {
                 let inner_id = lower_typed_expr(typed, inner, &scope.child(), env);
                 TypedExprKind::Negate(inner_id)
@@ -1965,7 +2233,20 @@ pub(crate) fn lower_expr_kind(
                 .collect();
             TypedExprKind::RecordValue(item_ids)
         }
+        Expr::Import(_) => {
+            typed.declaration_flaws.push((
+                expr.span_id,
+                // use-not-resolved
+                Diagnostic::new(
+                    ImportCode::NotResolved,
+                    "local import must be resolved before typechecking",
+                )
+                .at_span_id(expr.span_id, &typed.span_table),
+            ));
+            TypedExprKind::Invalid
+        }
         Expr::Invalid(_) => TypedExprKind::Invalid,
+        Expr::Todo => TypedExprKind::Todo,
         Expr::ResultValues(items) => {
             let item_ids: Vec<ExprId> = items
                 .iter()
@@ -1995,8 +2276,7 @@ pub(crate) fn lower_expr_kind(
                 })
                 .or_else(|| {
                     items.first().and_then(|item| {
-                        matches!(item.value, Expr::Lit(Literal::Int(_) | Literal::Number(_)))
-                            .then(Ty::i64)
+                        matches!(item.value, Expr::Lit(Literal::Int(_))).then(Ty::i64)
                     })
                 });
             let item_ids: Vec<ExprId> = items
@@ -2033,10 +2313,7 @@ pub(crate) fn lower_expr_kind(
                         }
                         _ => element_expected.clone(),
                     }
-                    .or_else(|| {
-                        matches!(item.value, Expr::Lit(Literal::Int(_) | Literal::Number(_)))
-                            .then(Ty::i64)
-                    });
+                    .or_else(|| matches!(item.value, Expr::Lit(Literal::Int(_))).then(Ty::i64));
                     lower_typed_expr(typed, &item.expr, &scope.with_expected(ty.as_ref()), env)
                 })
                 .collect();
@@ -2062,32 +2339,13 @@ pub(crate) fn lower_expr_kind(
             let seed_expected = scope
                 .expected_ty
                 .and_then(|expected| fixed_array_element_type(typed, expected))
-                .or_else(|| {
-                    matches!(seed.value, Expr::Lit(Literal::Int(_) | Literal::Number(_)))
-                        .then(Ty::i64)
-                });
+                .or_else(|| matches!(seed.value, Expr::Lit(Literal::Int(_))).then(Ty::i64));
             let seed_scope = seed_expected
                 .as_ref()
                 .map(|expected| scope.with_expected(Some(expected)))
                 .unwrap_or_else(|| scope.child());
             let seed_id = lower_typed_expr(typed, seed, &seed_scope, env);
-            let size = as_fixed_array_alloc_size(&count.value)
-                .or_else(|| {
-                    let count_id = lower_typed_expr(typed, count, &scope.child(), env);
-                    crate::staging::normalize(typed, count_id, &DepSubst::new())
-                        .as_dependent_normal_expr()
-                })
-                .unwrap_or_else(|| fallback_fixed_array_alloc_size(count.span_id));
-            if scope.expected_ty.is_none()
-                && let Some(length) = match &count.value {
-                    Expr::Lit(Literal::Number(v)) => Some(*v as u64),
-                    Expr::Lit(Literal::Int(v)) => ast::integer::to_u64(*v),
-                    _ => None,
-                }
-            {
-                let items = std::iter::repeat_n(seed_id, length as usize).collect();
-                return TypedExprKind::ArrayLit(items);
-            }
+            let size = lower_array_length(typed, count, scope, env);
             TypedExprKind::FixedArrayAlloc {
                 init: seed_id,
                 size,
@@ -2117,7 +2375,7 @@ fn result_alternative_discriminant(expected: Option<&Ty>, label: Intern<String>)
 fn local_callable_result_type(
     bind: &Bind,
     binder: BinderId,
-    tag_decls: &ast::TagMap,
+    tag_decls: TagDeclarations<'_>,
 ) -> Option<Ty> {
     let alternatives: Vec<ast::ResultAlternative> = if bind.anonymous_result_alternatives.is_empty()
         && bind.return_tag.is_none()
@@ -2149,66 +2407,26 @@ fn local_callable_result_type(
 
 fn collect_local_result_alternatives_from_value(
     value: &BindValue,
-    tag_decls: &ast::TagMap,
+    tag_decls: TagDeclarations<'_>,
     labels: &mut Vec<Intern<String>>,
 ) {
     match value {
-        BindValue::Expr(expr) => collect_local_result_alternatives(&expr.value, tag_decls, labels),
+        BindValue::Expr(expr) => collect_result_exit_alternatives(&expr.value, tag_decls, labels),
         BindValue::Body { exprs, ret } => {
             for expr in exprs {
-                if matches!(expr.value, Expr::If(_) | Expr::When(_)) {
-                    collect_local_result_alternatives(&expr.value, tag_decls, labels);
+                if matches!(expr.value, Expr::If(_) | Expr::Loop(_) | Expr::When(_)) {
+                    collect_result_exit_alternatives(&expr.value, tag_decls, labels);
                 }
             }
             for exit in &ret.values {
-                collect_local_result_alternatives(&exit.value, tag_decls, labels);
+                collect_result_exit_alternatives(&exit.value, tag_decls, labels);
             }
         }
         BindValue::Unassigned => {}
     }
 }
 
-fn collect_local_result_alternatives(
-    expr: &Expr,
-    tag_decls: &ast::TagMap,
-    labels: &mut Vec<Intern<String>>,
-) {
-    let label = match expr {
-        Expr::AnonymousTag(label) => Some(*label),
-        Expr::TagCall(call) if call.qual_path.is_none() && !tag_decls.contains_key(&call.name) => {
-            Some(call.name)
-        }
-        _ => None,
-    };
-    if let Some(label) = label {
-        if !labels.contains(&label) {
-            labels.push(label);
-        }
-        return;
-    }
-    match expr {
-        Expr::If(if_expr) => {
-            if let Some(exit) = if_expr.body.last() {
-                collect_local_result_alternatives(&exit.value, tag_decls, labels);
-            }
-            for exit in &if_expr.ret.values {
-                collect_local_result_alternatives(&exit.value, tag_decls, labels);
-            }
-        }
-        Expr::When(when_expr) => {
-            for arm in &when_expr.arms {
-                let exit = match arm {
-                    ast::WhenArm::Cond { body, .. } | ast::WhenArm::Is { body, .. } => body,
-                    ast::WhenArm::Else(body, _) => body,
-                };
-                collect_local_result_alternatives(&exit.value, tag_decls, labels);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn lower_local_callable_body(
+fn lower_local_bind_body(
     typed: &mut TypedFileAst,
     value: &BindValue,
     scope: &ExprLowerScope<'_>,
@@ -2219,19 +2437,21 @@ fn lower_local_callable_body(
         BindValue::Body { exprs, ret } => {
             let mut lowered = Vec::new();
             for expr in exprs {
-                let child = scope.child();
-                let expr_scope = if matches!(expr.value, Expr::If(_) | Expr::When(_)) {
-                    scope
-                } else {
-                    &child
-                };
-                lowered.push(lower_typed_expr(typed, expr, expr_scope, env));
+                lowered.push(lower_typed_expr(typed, expr, &scope.statement(), env));
             }
-            let body = ret
-                .values
-                .first()
-                .map(|exit| lower_typed_expr(typed, exit, scope, env))
-                .or_else(|| lowered.pop());
+            let body = match ret.values.as_slice() {
+                [] => Some(lower_typed_expr(
+                    typed,
+                    &Typed::infer(Expr::Block(Vec::new()), ret.span_id),
+                    scope,
+                    env,
+                )),
+                [exit] => Some(lower_typed_expr(typed, exit, scope, env)),
+                values => {
+                    let result = Typed::infer(Expr::ResultValues(values.to_vec()), ret.span_id);
+                    Some(lower_typed_expr(typed, &result, scope, env))
+                }
+            };
             match body {
                 Some(body) => (lowered, body, true),
                 None => (Vec::new(), ExprId(0), false),
@@ -2240,3 +2460,500 @@ fn lower_local_callable_body(
         BindValue::Unassigned => (Vec::new(), ExprId(0), false),
     }
 }
+
+fn local_argument_order(
+    callable: &LocalCallable,
+    arguments: &[Typed<Expr>],
+) -> Option<Vec<Option<usize>>> {
+    assert_eq!(
+        callable.parameters.len(),
+        callable.defaults.len(),
+        "local callable parameters must have aligned defaults"
+    );
+    let mut order = vec![None; callable.parameters.len()];
+    let mut positional = Vec::new();
+    for (index, argument) in arguments.iter().enumerate() {
+        if let Expr::Bind(bind) = &argument.value
+            && bind.params.is_none()
+        {
+            let slot = callable
+                .parameters
+                .iter()
+                .position(|(name, _)| *name == bind.name)?;
+            if order[slot].replace(index).is_some() {
+                return None;
+            }
+        } else {
+            positional.push(index);
+        }
+    }
+    let mut positional = positional.into_iter();
+    for slot in &mut order {
+        if slot.is_none() {
+            *slot = positional.next();
+        }
+    }
+    if positional.next().is_some() {
+        return None;
+    }
+    order
+        .iter()
+        .zip(&callable.defaults)
+        .all(|(argument, default)| argument.is_some() || default.is_some())
+        .then_some(order)
+}
+
+struct LocalCallSite<'a> {
+    fn_call: &'a ast::FnCall,
+    arguments: &'a [Typed<Expr>],
+    target: DefId,
+    callable: &'a LocalCallable,
+    call_id: ExprId,
+}
+
+fn lower_local_call(
+    typed: &mut TypedFileAst,
+    call: LocalCallSite<'_>,
+    scope: &ExprLowerScope<'_>,
+    env: &mut FlowState,
+) -> TypedExprKind {
+    let LocalCallSite {
+        fn_call,
+        arguments,
+        target,
+        callable,
+        call_id,
+    } = call;
+    typed
+        .local_callable_calls
+        .insert(call_id, callable.definition);
+    let Some(order) = local_argument_order(callable, arguments) else {
+        let required = callable
+            .defaults
+            .iter()
+            .filter(|default| default.is_none())
+            .count();
+        let code = if arguments.len() < required || arguments.len() > callable.parameters.len() {
+            // type-call-argument-count
+            DiagnosticCode::Type(TypeCode::Call(CallCode::ArgumentCount))
+        } else {
+            // type-call-argument-name
+            DiagnosticCode::Type(TypeCode::Call(CallCode::ArgumentName))
+        };
+        typed.exprs.facts.semantic_facts.flaws[call_id.as_usize()].push(
+            Diagnostic::new(
+                code,
+                "arguments do not match the local callable's parameters",
+            )
+            .at_span_id(fn_call.path.span_id, &typed.span_table),
+        );
+        let args = arguments
+            .iter()
+            .map(|argument| lower_call_arg(typed, argument, &scope.child(), env))
+            .collect();
+        return TypedExprKind::FnCall {
+            target,
+            args: fn_call.args.is_some().then_some(args),
+            substituted_ty: Some(callable.return_type.clone()),
+        };
+    };
+    let supplied: Vec<_> = arguments
+        .iter()
+        .enumerate()
+        .map(|(index, argument)| {
+            let parameter = order
+                .iter()
+                .position(|slot| *slot == Some(index))
+                .expect("every supplied argument has a parameter slot");
+            lower_call_arg(
+                typed,
+                argument,
+                &scope.with_expected(Some(&callable.parameters[parameter].1)),
+                env,
+            )
+        })
+        .collect();
+    let mut args = Vec::with_capacity(order.len());
+    for (parameter, argument) in order.into_iter().enumerate() {
+        let expected = &callable.parameters[parameter].1;
+        let value = match argument {
+            Some(index) => supplied[index],
+            None => lower_call_arg(
+                typed,
+                callable.defaults[parameter]
+                    .as_ref()
+                    .expect("an omitted argument has a default"),
+                &scope.with_expected(Some(expected)),
+                env,
+            ),
+        };
+        let value = typed.borrow_call_argument(value, expected);
+        args.push(value);
+    }
+    let mut substitution = crate::subst::DepSubst::new();
+    for ((name, _), argument) in callable.parameters.iter().zip(&args) {
+        if let Some(value) =
+            super::symbolic_values::normal_expr(typed, None, &Default::default(), *argument)
+        {
+            substitution.consts.insert(*name, value);
+        }
+    }
+    for ((_, expected), value) in callable.parameters.iter().zip(&args) {
+        let expected = if matches!(expected.without_reference_wrappers(), Ty::Proposition(_)) {
+            substitution.apply_to_ty(expected)
+        } else {
+            expected.clone()
+        };
+        let mut flaws = Vec::new();
+        super::bounds_check::check_call_argument(typed, *value, &expected, &mut flaws);
+        typed.exprs.facts.semantic_facts.flaws[value.as_usize()].extend(flaws);
+    }
+    TypedExprKind::FnCall {
+        target,
+        args: Some(args),
+        substituted_ty: Some(if matches!(callable.return_type, Ty::Proposition(_)) {
+            substitution.apply_to_ty(&callable.return_type)
+        } else {
+            callable.return_type.clone()
+        }),
+    }
+}
+
+fn lower_fn_call(
+    typed: &mut TypedFileAst,
+    fn_call: &ast::FnCall,
+    scope: &ExprLowerScope<'_>,
+    env: &mut FlowState,
+    reserved_expr_id: Option<ExprId>,
+    mut lowered_receiver: Option<ExprId>,
+) -> TypedExprKind {
+    let member = if fn_call.syntax == ast::CallSyntax::Receiver {
+        Some(fn_call.clone())
+    } else if fn_call.definition.is_none()
+        && (env.types.contains_key(&fn_call.path.root)
+            || env.places.contains_key(&fn_call.path.root)
+            || typed.defs.contains_key(&DefId::named(fn_call.path.root))
+            || scope
+                .callable_signatures
+                .contains_key(&DefId::named(fn_call.path.root)))
+    {
+        fn_call.with_path_receiver()
+    } else {
+        None
+    };
+    if let Some(member) = member
+        && let Some((source, args)) = member.args.as_deref().and_then(|args| args.split_first())
+    {
+        let receiver = lower_call_arg(typed, source, &scope.child(), env);
+        let ty = typed
+            .exprs
+            .ty_of(receiver)
+            .cloned()
+            .unwrap_or_else(|| Ty::Opaque(member.path.root));
+        if let Some(methods) =
+            super::overloads::Overloads::for_member(member.path.root, &ty, typed, scope)
+        {
+            return match methods.member_call(source, fn_call.path.span_id, args) {
+                Ok(call) => {
+                    typed
+                        .resolved_member_calls
+                        .insert(reserved_expr_id.unwrap(), call.clone());
+                    lower_fn_call(typed, &call, scope, env, reserved_expr_id, Some(receiver))
+                }
+                Err(diagnostic) => {
+                    typed.exprs.facts.semantic_facts.flaws[reserved_expr_id.unwrap().as_usize()]
+                        .push(diagnostic.at_span_id(fn_call.path.span_id, &typed.span_table));
+                    TypedExprKind::Invalid
+                }
+            };
+        }
+        lowered_receiver = Some(receiver);
+        return lower_fn_call(
+            typed,
+            &ast::FnCall {
+                syntax: ast::CallSyntax::Path,
+                ..member
+            },
+            scope,
+            env,
+            reserved_expr_id,
+            lowered_receiver,
+        );
+    }
+    if fn_call.args.is_none()
+        && fn_call.path.segments.is_empty()
+        && env.places.contains_key(&fn_call.path.root)
+        && !env.local_callables.contains_key(&fn_call.path.root)
+    {
+        return TypedExprKind::FnCall {
+            target: DefId::named(fn_call.path.root),
+            args: None,
+            substituted_ty: env.types.get(&fn_call.path.root).cloned(),
+        };
+    }
+
+    let mut target = fn_call
+        .definition
+        .unwrap_or_else(|| resolve_fn_call_target(&fn_call.path.value, scope.tag_types));
+    let parsed_args = fn_call.args.as_deref().unwrap_or_default();
+    let self_qualified = !target.0.as_str().contains('.')
+        && parsed_args
+            .first()
+            .is_some_and(|argument| match &argument.value {
+                Expr::SelfRef => true,
+                Expr::AnonymousTag(name) => name.as_str() == "Self",
+                Expr::TagCall(call) => call.name.as_str() == "Self" && call.args.is_empty(),
+                _ => false,
+            });
+    let call_args = if self_qualified {
+        &parsed_args[1..]
+    } else {
+        parsed_args
+    };
+
+    if fn_call.path.value.root.as_str() == "Self"
+        && let Some(receiver) = scope.receiver_type.and_then(Ty::type_name)
+    {
+        let mut parts = vec![receiver.as_str()];
+        parts.extend(
+            fn_call
+                .path
+                .value
+                .segments
+                .iter()
+                .map(|segment| segment.as_str()),
+        );
+        target = DefId::named(Intern::new(parts.join(".")));
+    }
+    if !typed.defs.contains_key(&target)
+        && !scope.callable_signatures.contains_key(&target)
+        && !target.0.as_str().contains('.')
+        && let Some(receiver) = scope.receiver_type.and_then(Ty::type_name)
+    {
+        let receiver_target = DefId::named(Intern::new(format!("{receiver}.{}", target.0)));
+        if typed.defs.contains_key(&receiver_target)
+            || scope.callable_signatures.contains_key(&receiver_target)
+        {
+            target = receiver_target;
+        }
+    }
+    if !typed.defs.contains_key(&target)
+        && !scope.callable_signatures.contains_key(&target)
+        && !target.0.as_str().contains('.')
+        && !env.local_callables.contains_key(&target.0)
+        && let Some(receiver) = call_args.first()
+    {
+        let receiver = lowered_receiver
+            .unwrap_or_else(|| lower_call_arg(typed, receiver, &scope.child(), env));
+        lowered_receiver = Some(receiver);
+        if let Some(receiver_name) = typed.exprs.ty_of(receiver).and_then(Ty::type_name) {
+            let receiver_target =
+                DefId::named(Intern::new(format!("{receiver_name}.{}", target.0)));
+            if typed.defs.contains_key(&receiver_target)
+                || scope.callable_signatures.contains_key(&receiver_target)
+            {
+                target = receiver_target;
+            }
+        }
+    }
+    if fn_call.path.value.segments.is_empty()
+        && let Some(callable) = env.local_callables.get(&target.0).cloned()
+    {
+        return lower_local_call(
+            typed,
+            LocalCallSite {
+                fn_call,
+                arguments: call_args,
+                target,
+                callable: &callable,
+                call_id: reserved_expr_id.expect("local calls reserve an expression ID"),
+            },
+            scope,
+            env,
+        );
+    }
+    let overloads = if fn_call.definition.is_some()
+        || (fn_call.path.segments.is_empty() && env.types.contains_key(&target.0))
+    {
+        None
+    } else {
+        super::overloads::Overloads::find(target, typed, scope)
+    };
+    let overloads = overloads.and_then(|overloads| {
+        if let Some(selected) = overloads.unique_for_arguments(call_args) {
+            target = selected;
+            None
+        } else {
+            Some(overloads)
+        }
+    });
+    let selected = if let Some(overloads) = overloads {
+        let args: Vec<_> = call_args
+            .iter()
+            .enumerate()
+            .map(|(index, arg)| {
+                if index == 0
+                    && let Some(receiver) = lowered_receiver
+                {
+                    receiver
+                } else {
+                    lower_call_arg(typed, arg, &scope.child(), env)
+                }
+            })
+            .collect();
+        match overloads.select(call_args, &args, typed) {
+            Ok((selected, signature, args)) => {
+                target = selected;
+                Some((signature, args))
+            }
+            Err(diagnostic) => {
+                let call = reserved_expr_id.expect("function calls reserve an expression ID");
+                typed.exprs.facts.semantic_facts.flaws[call.as_usize()]
+                    .push(diagnostic.at_span_id(fn_call.path.span_id, &typed.span_table));
+                return TypedExprKind::Invalid;
+            }
+        }
+    } else {
+        None
+    };
+    let local_signature = if let Some((signature, _)) = &selected {
+        Some(signature.clone())
+    } else {
+        typed
+            .defs
+            .get(&target)
+            .map(TypedCallableSignature::from)
+            .or_else(|| scope.callable_signatures.get(&target).cloned())
+    };
+    let signature = local_signature.as_ref();
+    let args = call_args;
+    let mut lowered_args: Vec<ExprId> = if let Some((_, args)) = selected {
+        args
+    } else {
+        let order = signature.and_then(|signature| {
+            let names: Vec<_> = args
+                .iter()
+                .map(|arg| match &arg.value {
+                    Expr::Bind(bind) if bind.params.is_none() => Some(bind.name),
+                    _ => None,
+                })
+                .collect();
+            crate::staging::argument_order(&names, &signature.params)
+        });
+        let lowered: Vec<_> = args
+            .iter()
+            .enumerate()
+            .map(|(index, arg)| {
+                let parameter = order
+                    .as_ref()
+                    .and_then(|order| order.iter().position(|argument| *argument == index))
+                    .unwrap_or(index);
+                let expected = signature
+                    .and_then(|signature| signature.params.get(parameter))
+                    .map(|(_, ty)| ty);
+                let type_argument = signature
+                    .and_then(|signature| signature.param_kinds.get(parameter))
+                    .filter(|kind| matches!(kind, ast::ParamKind::Type))
+                    .and_then(|_| lower_named_type_argument(typed, arg, scope));
+                let argument = if let Some(argument) = type_argument {
+                    argument
+                } else if index == 0
+                    && let Some(receiver) = lowered_receiver
+                {
+                    receiver
+                } else {
+                    lower_call_arg(typed, arg, &scope.with_expected(expected), env)
+                };
+                if signature.is_none() {
+                    typed.exprs.facts.semantic_facts.flaws[argument.as_usize()].retain(|flaw| {
+                        !matches!(
+                            flaw.code,
+                            DiagnosticCode::Type(TypeCode::Text(TextCode::RequiresContext))
+                                | DiagnosticCode::Type(TypeCode::Sequence(
+                                    SequenceCode::LiteralRequiresContext
+                                ))
+                                | DiagnosticCode::Type(TypeCode::Sequence(
+                                    SequenceCode::RepeatRequiresContext
+                                ))
+                        )
+                    });
+                }
+                argument
+            })
+            .collect();
+        if let Some(order) = order {
+            order.into_iter().map(|index| lowered[index]).collect()
+        } else {
+            lowered
+        }
+    };
+    if let Some(signature) = signature {
+        for (argument, (_, expected)) in lowered_args.iter_mut().zip(&signature.params) {
+            let value_type = match expected {
+                Ty::Ref { inner, .. } => inner.as_ref(),
+                ty => ty,
+            };
+            if !typed.exprs.ty[argument.as_usize()].is_ref() {
+                super::lower_exprs::contextualize_literal_value(typed, *argument, value_type);
+                contextualize_local_literal(typed, *argument, value_type, env);
+            }
+            *argument = typed.borrow_call_argument(*argument, expected);
+        }
+    }
+    let has_arg_exprs = fn_call.args.is_some();
+    let call_signature = signature.map(|signature| {
+        let call_id = reserved_expr_id.expect("function calls reserve an expression ID");
+        let binder = BinderId::new(typed.file_id.0, BinderOwner::Expression(call_id.0));
+        let mut instantiation = DependentInstantiation::new(signature.dependent_binder, binder);
+        let mut params: Vec<(Intern<String>, Ty)> = signature
+            .params
+            .iter()
+            .map(|(name, ty)| (*name, instantiation.apply_to_ty(ty)))
+            .collect();
+        let mut return_type = instantiation.apply_to_ty(&signature.return_type);
+        if let Some(substitution) =
+            substitution_from_expected_return(typed, &return_type, scope.expected_ty)
+        {
+            for (_, parameter) in &mut params {
+                *parameter = substitution.apply_to_ty(parameter);
+            }
+            return_type = substitution.apply_to_ty(&return_type);
+        }
+        (signature.param_kinds.clone(), params, return_type)
+    });
+    let call_inst = call_signature
+        .as_ref()
+        .map(|(param_kinds, params, return_type)| {
+            let instantiation =
+                instantiate_call(&lowered_args, typed, param_kinds, params, return_type);
+            (instantiation, return_type)
+        });
+    let lowered = call_inst
+        .as_ref()
+        .and_then(|(call_inst, _)| call_inst.args.clone())
+        .or_else(|| {
+            if has_arg_exprs {
+                Some(lowered_args.clone())
+            } else {
+                None
+            }
+        });
+    let substituted_ty = if let Some((_, _, return_type)) = call_signature.as_ref() {
+        let by_call = call_inst.and_then(|(inst, _)| inst.substituted_ty);
+        let by_expected = infer_return_type_from_expected(typed, return_type, scope.expected_ty);
+        by_expected
+            .or(by_call)
+            .or_else(|| Some(return_type.clone()))
+    } else {
+        None
+    };
+    TypedExprKind::FnCall {
+        target,
+        args: lowered,
+        substituted_ty,
+    }
+}
+
+#[cfg(test)]
+#[path = "lower_kind_tests.rs"]
+mod tests;

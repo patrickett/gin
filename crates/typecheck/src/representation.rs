@@ -2,7 +2,8 @@ use crate::normal_expr::Normalize;
 use crate::{TypeRegistry, ty::Ty};
 use ast::NormalExpr;
 use ast::ty::{TyArg, TypeId};
-use diagnostic::Diagnostic;
+use diagnostic::code::{LayoutCode, RepresentationCode};
+use diagnostic::{Diagnostic, DiagnosticCode};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use thiserror::Error;
@@ -15,11 +16,23 @@ enum RecursionKey {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Repr {
-    Bits { width: u32 },
-    Address { address_space: u32 },
-    Product { fields: Vec<Repr> },
-    Sum { variants: Vec<Repr> },
-    Array { element: Box<Repr>, length: u64 },
+    Bits {
+        width: u32,
+    },
+    Address {
+        address_space: u32,
+    },
+    Product {
+        fields: Vec<Repr>,
+    },
+    Sum {
+        variants: Vec<Repr>,
+        discriminant_width: Option<u32>,
+    },
+    Array {
+        element: Box<Repr>,
+        length: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +70,8 @@ fn fixed_array_length_argument(argument: Option<&ast::TyArg>) -> FixedArrayLengt
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RepresentationError {
+    #[error("integer type `{type_name}` requires a concrete target for layout")]
+    TargetDependentInteger { type_name: String },
     #[error("type `{type_name}` has no supported physical representation")]
     Unsupported { type_name: String },
     #[error("recursive representation at `{type_id:?}`")]
@@ -66,17 +81,30 @@ pub enum RepresentationError {
     #[error("integer type `{type_name}` has invalid representation")]
     InvalidInteger {
         type_name: String,
-        code: &'static str,
+        code: DiagnosticCode,
     },
 }
 
 impl RepresentationError {
-    pub fn code(&self) -> &'static str {
+    pub fn code(&self) -> DiagnosticCode {
         match self {
-            Self::Unsupported { .. } => "unsupported-type-representation",
-            Self::RecursiveRepresentation { .. } => "recursive-type-representation",
-            Self::InvalidArrayLength { .. } => "invalid-fixed-array-length",
-            Self::InvalidInteger { code, .. } => code,
+            Self::TargetDependentInteger { .. } => {
+                // type-target-dependent-layout
+                DiagnosticCode::Layout(LayoutCode::TargetDependent)
+            }
+            Self::Unsupported { .. } => {
+                // unsupported-type-representation
+                DiagnosticCode::Representation(RepresentationCode::Unsupported)
+            }
+            Self::RecursiveRepresentation { .. } => {
+                // recursive-type-representation
+                DiagnosticCode::Representation(RepresentationCode::Recursive)
+            }
+            Self::InvalidArrayLength { .. } => {
+                // invalid-fixed-array-length
+                DiagnosticCode::Representation(RepresentationCode::FixedArrayLengthInvalid)
+            }
+            Self::InvalidInteger { code, .. } => *code,
         }
     }
 
@@ -90,10 +118,6 @@ pub struct RepresentationContext<'a> {
 }
 
 impl Repr {
-    pub fn from_ty(ty: &Ty) -> Option<Self> {
-        Self::derive(ty, None).ok()
-    }
-
     pub fn derive(ty: &Ty, registry: Option<&TypeRegistry>) -> Result<Self, RepresentationError> {
         RepresentationContext { registry }.derive(ty)
     }
@@ -140,49 +164,74 @@ impl Repr {
 }
 
 pub fn has_symbolic_fixed_array_length(ty: &Ty, registry: Option<&TypeRegistry>) -> bool {
-    match ty {
-        Ty::Array { size, .. } => !matches!(array_length(size), ArrayLength::Concrete(_)),
-        Ty::Named { instance, .. } => {
-            let Some(declaration) =
-                registry.and_then(|registry| registry.declaration_for_instance(instance))
-            else {
-                return false;
-            };
-            if let Some(former) = &declaration.sequence_literal
-                && let Some(length_parameter) = former.fixed_array_length_parameter()
-            {
-                let length = instance.arguments.iter().find_map(|(parameter, argument)| {
-                    (*parameter == length_parameter).then_some(argument)
-                });
-                return !matches!(
-                    fixed_array_length_argument(length),
-                    FixedArrayLengthArgument::Concrete(_)
-                );
-            }
-            has_symbolic_fixed_array_length(&declaration.definition, registry)
-        }
-        Ty::Ref { inner, .. } | Ty::Ptr { inner, .. } | Ty::Address { pointee: inner, .. } => {
-            has_symbolic_fixed_array_length(inner, registry)
-        }
-        Ty::Record { fields, .. } => fields
-            .iter()
-            .any(|(_, field)| has_symbolic_fixed_array_length(field, registry)),
-        Ty::Sequence(fields) => fields
-            .iter()
-            .any(|field| has_symbolic_fixed_array_length(&field.ty, registry)),
-        Ty::Union { variants, .. } => variants.iter().any(|variant| {
-            variant
-                .fields
-                .iter()
-                .any(|(_, field)| has_symbolic_fixed_array_length(field, registry))
-        }),
-        _ => false,
-    }
+    RepresentationContext::new(registry).has_symbolic_fixed_array_length(ty)
 }
 
 impl<'a> RepresentationContext<'a> {
     pub fn new(registry: Option<&'a TypeRegistry>) -> Self {
         Self { registry }
+    }
+
+    pub fn has_symbolic_fixed_array_length(&self, ty: &Ty) -> bool {
+        self.has_symbolic_fixed_array_length_inner(ty, &mut HashSet::new())
+    }
+
+    fn has_symbolic_fixed_array_length_inner(&self, ty: &Ty, active: &mut HashSet<TypeId>) -> bool {
+        match ty {
+            Ty::Array { size, .. } => !matches!(array_length(size), ArrayLength::Concrete(_)),
+            Ty::Named { instance, .. } => {
+                let Some(declaration) = self
+                    .registry
+                    .and_then(|registry| registry.declaration_for_instance(instance))
+                else {
+                    return false;
+                };
+                if let Some(former) = &declaration.sequence_literal {
+                    let Some(length_parameter) = former.fixed_array_length_parameter() else {
+                        return false;
+                    };
+                    let element = instance.arguments.iter().find_map(|(parameter, argument)| {
+                        (*parameter == former.element_parameter).then_some(argument)
+                    });
+                    if !matches!(element, Some(TyArg::Type(_))) {
+                        return false;
+                    }
+                    let length = instance.arguments.iter().find_map(|(parameter, argument)| {
+                        (*parameter == length_parameter).then_some(argument)
+                    });
+                    return !matches!(
+                        fixed_array_length_argument(length),
+                        FixedArrayLengthArgument::Concrete(_)
+                    );
+                }
+                if !active.insert(instance.declaration) {
+                    return false;
+                }
+                let symbolic =
+                    self.has_symbolic_fixed_array_length_inner(&declaration.definition, active);
+                active.remove(&instance.declaration);
+                symbolic
+            }
+            Ty::Ref { inner, .. }
+            | Ty::Ptr { inner, .. }
+            | Ty::OwnedStorage { inner }
+            | Ty::Address { pointee: inner, .. } => {
+                self.has_symbolic_fixed_array_length_inner(inner, active)
+            }
+            Ty::Record { fields, .. } => fields
+                .iter()
+                .any(|(_, field)| self.has_symbolic_fixed_array_length_inner(field, active)),
+            Ty::Sequence(fields) => fields
+                .iter()
+                .any(|field| self.has_symbolic_fixed_array_length_inner(&field.ty, active)),
+            Ty::Union { variants, .. } => variants.iter().any(|variant| {
+                variant
+                    .fields
+                    .iter()
+                    .any(|(_, field)| self.has_symbolic_fixed_array_length_inner(field, active))
+            }),
+            _ => false,
+        }
     }
 
     pub fn derive(&self, ty: &Ty) -> Result<Repr, RepresentationError> {
@@ -202,6 +251,7 @@ impl<'a> RepresentationContext<'a> {
         }
 
         match ty {
+            Ty::Proposition(_) => Ok(Repr::Bits { width: 1 }),
             Ty::Ref { .. } => Ok(Repr::Address { address_space: 0 }),
             Ty::Named { instance, name } => {
                 let recursion_key = match self
@@ -232,18 +282,49 @@ impl<'a> RepresentationContext<'a> {
                     .and_then(|registry| registry.declaration_for_instance(instance))
                     .and_then(|declaration| declaration.integer.as_ref())
                 {
-                    let representation = ast::integer::resolve_runtime_representation(
-                        &integer.validity,
-                        &integer.representation_rule,
-                    )
-                    .map_err(|error| RepresentationError::InvalidInteger {
-                        type_name: name.to_string(),
-                        code: error.diagnostic_code(),
-                    })?;
+                    if self
+                        .registry
+                        .is_some_and(|registry| registry.is_target_dependent_integer(ty))
+                    {
+                        return Err(RepresentationError::TargetDependentInteger {
+                            type_name: name.to_string(),
+                        });
+                    }
+                    let representation = integer
+                        .validity
+                        .resolve_runtime_representation(&integer.representation_rule)
+                        .map_err(|error| RepresentationError::InvalidInteger {
+                            type_name: name.to_string(),
+                            code: error.diagnostic_code(),
+                        })?;
                     active.remove(&recursion_key);
                     return Ok(Repr::Bits {
                         width: representation.width().get(),
                     });
+                }
+                if let Some(discriminant) = self
+                    .registry
+                    .and_then(|registry| registry.discriminant_semantics_for_type(ty))
+                {
+                    let width = discriminant
+                        .validity
+                        .resolve_runtime_representation(&discriminant.representation_rule)
+                        .map_err(|error| RepresentationError::InvalidInteger {
+                            type_name: name.to_string(),
+                            code: error.diagnostic_code(),
+                        })?
+                        .width()
+                        .get();
+                    let definition = self.registry.unwrap().resolved_definition_for_type(ty);
+                    let mut repr = self.derive_inner(&definition, active)?;
+                    if let Repr::Sum {
+                        discriminant_width, ..
+                    } = &mut repr
+                    {
+                        *discriminant_width = Some(width);
+                    }
+                    active.remove(&recursion_key);
+                    return Ok(repr);
                 }
                 let definition = self
                     .registry
@@ -307,7 +388,6 @@ impl<'a> RepresentationContext<'a> {
                     })
                     .collect::<HashMap<_, _>>();
                 let substituted = definition.substitute(&type_substitution);
-                let substituted = normalize_for_representation(&substituted);
                 let result = self.derive_inner(&substituted, active);
                 active.remove(&recursion_key);
                 result.map_err(|error| match error {
@@ -318,25 +398,26 @@ impl<'a> RepresentationContext<'a> {
                 })
             }
             Ty::AnonymousInteger { validity } => {
-                let representation = ast::integer::resolve_runtime_representation(
-                    validity,
-                    &ast::integer::IntegerRepresentationRule::InferFromValidity,
-                )
-                .map_err(|error| RepresentationError::InvalidInteger {
-                    type_name: ty.format_for_hover(),
-                    code: error.diagnostic_code(),
-                })?;
+                let representation = validity
+                    .resolve_runtime_representation(
+                        &ast::integer::IntegerRepresentationRule::InferFromValidity,
+                    )
+                    .map_err(|error| RepresentationError::InvalidInteger {
+                        type_name: ty.format_for_hover(),
+                        code: error.diagnostic_code(),
+                    })?;
                 Ok(Repr::Bits {
                     width: representation.width().get(),
                 })
             }
             Ty::ResultFamily { alternatives, .. } => Ok(Repr::Sum {
+                discriminant_width: None,
                 variants: alternatives
                     .iter()
                     .map(|_| Repr::Product { fields: Vec::new() })
                     .collect(),
             }),
-            Ty::Ptr { .. } | Ty::Address { .. } => Ok(Repr::Address {
+            Ty::Ptr { .. } | Ty::OwnedStorage { .. } | Ty::Address { .. } => Ok(Repr::Address {
                 address_space: ty.address_space().unwrap_or(0),
             }),
             Ty::Record { fields, .. } => fields
@@ -359,18 +440,37 @@ impl<'a> RepresentationContext<'a> {
                 }
             }
             Ty::Unit => Ok(Repr::Product { fields: Vec::new() }),
-            Ty::Union { variants, .. } => variants
-                .iter()
-                .map(|variant| {
-                    let fields = variant
-                        .fields
-                        .iter()
-                        .map(|(_, field)| self.derive_inner(field, active))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    Ok(Repr::Product { fields })
+            Ty::Union { variants, .. } => {
+                let discriminant_width = ty
+                    .union_discriminant_domain()
+                    .map(|domain| {
+                        ast::integer::IntegerValidity::new(domain)
+                            .resolve_runtime_representation(
+                                &ast::integer::IntegerRepresentationRule::InferFromValidity,
+                            )
+                            .map(|representation| representation.width().get())
+                            .map_err(|error| RepresentationError::InvalidInteger {
+                                type_name: ty.format_for_hover(),
+                                code: error.diagnostic_code(),
+                            })
+                    })
+                    .transpose()?;
+                let variants = variants
+                    .iter()
+                    .map(|variant| {
+                        let fields = variant
+                            .fields
+                            .iter()
+                            .map(|(_, field)| self.derive_inner(field, active))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        Ok(Repr::Product { fields })
+                    })
+                    .collect::<Result<Vec<_>, RepresentationError>>()?;
+                Ok(Repr::Sum {
+                    variants,
+                    discriminant_width,
                 })
-                .collect::<Result<Vec<_>, RepresentationError>>()
-                .map(|variants| Repr::Sum { variants }),
+            }
             Ty::Array { elem, size } => {
                 let ArrayLength::Concrete(length) = array_length(size) else {
                     return Err(RepresentationError::InvalidArrayLength {
@@ -449,90 +549,3 @@ fn checked_i128_mul(left: Option<i128>, right: Option<i128>) -> Option<i128> {
         _ => None,
     }
 }
-
-fn normalize_for_representation(ty: &Ty) -> Ty {
-    match ty {
-        Ty::Named { instance, name } => Ty::Named {
-            instance: instance.clone(),
-            name: *name,
-        },
-        Ty::Ref { inner, mutable } => Ty::Ref {
-            inner: Box::new(normalize_for_representation(inner)),
-            mutable: *mutable,
-        },
-        Ty::Ptr { inner } => Ty::Ptr {
-            inner: Box::new(normalize_for_representation(inner)),
-        },
-        Ty::Address {
-            pointee,
-            address_space,
-        } => Ty::Address {
-            pointee: Box::new(normalize_for_representation(pointee)),
-            address_space: *address_space,
-        },
-        Ty::Record {
-            name,
-            fields,
-            resolved_params,
-        } => Ty::Record {
-            name: *name,
-            fields: fields
-                .iter()
-                .map(|(field_name, field_ty)| {
-                    (
-                        *field_name,
-                        Box::new(normalize_for_representation(field_ty)) as Box<Ty>,
-                    )
-                })
-                .collect(),
-            resolved_params: resolved_params.clone(),
-        },
-        Ty::Union {
-            name,
-            variants,
-            literal_values,
-            resolved_params,
-        } => Ty::Union {
-            name: *name,
-            variants: variants
-                .iter()
-                .map(|variant| ast::ty::UnionVariant {
-                    kind: variant.kind,
-                    name: variant.name,
-                    fields: variant
-                        .fields
-                        .iter()
-                        .map(|(field_name, field_ty)| {
-                            (
-                                *field_name,
-                                Box::new(normalize_for_representation(field_ty)) as Box<Ty>,
-                            )
-                        })
-                        .collect(),
-                    result_ty: variant.result_ty.as_ref().map(normalize_for_representation),
-                })
-                .collect(),
-            literal_values: literal_values.clone(),
-            resolved_params: resolved_params.clone(),
-        },
-        Ty::Sequence(fields) => Ty::Sequence(
-            fields
-                .iter()
-                .map(|field| ast::ty::SequenceTypeElement {
-                    name: field.name,
-                    ty: Box::new(normalize_for_representation(&field.ty)),
-                })
-                .collect(),
-        ),
-        Ty::Array { elem, size } => Ty::Array {
-            elem: Box::new(normalize_for_representation(elem)),
-            size: size.clone(),
-        },
-        Ty::Opaque(name) if name.as_str() == "Int" => Ty::i64(),
-        _ => ty.clone(),
-    }
-}
-
-#[cfg(test)]
-#[path = "../tests/representation_tests.rs"]
-mod tests;

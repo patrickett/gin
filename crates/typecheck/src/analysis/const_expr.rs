@@ -10,6 +10,7 @@ use std::iter::FromIterator;
 use internment::Intern;
 
 use crate::analysis::pattern::collect_pattern_bindings;
+use crate::assembly::target_const_record;
 use crate::prepare_target::eval_type_static_member;
 
 use ast::expr::{Expr, Literal, Typed};
@@ -86,6 +87,19 @@ impl<'a> CompTimeEvaluator<'a> {
         }
     }
 
+    pub(crate) fn for_layout(
+        const_binds: &'a ConstEnv,
+        ast: &'a FileAst,
+        target_layout: Option<crate::layout::TargetLayout>,
+    ) -> Self {
+        Self {
+            const_binds,
+            ast,
+            target_layout,
+            target: None,
+        }
+    }
+
     pub fn eval(&self, expr: &Expr) -> Option<ConstValue> {
         let mut call_stack = HashSet::new();
         EvalFrame::new(
@@ -119,6 +133,9 @@ struct EvalFrame<'a, 'b> {
     target: Option<flask::TargetTriple>,
     depth: usize,
     call_stack: &'b mut HashSet<ComptimeCall>,
+    returned: std::rc::Rc<std::cell::RefCell<Option<ConstValue>>>,
+    condition_bindings: ConstEnv,
+    when_subjects: HashMap<ast::SpanId, ConstValue>,
 }
 
 impl<'a, 'b> EvalFrame<'a, 'b> {
@@ -136,6 +153,9 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
             target,
             depth: 0,
             call_stack,
+            returned: Default::default(),
+            condition_bindings: ConstEnv::default(),
+            when_subjects: HashMap::new(),
         }
     }
 
@@ -146,36 +166,32 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
 
     pub fn eval(&mut self, expr: &Expr) -> Option<ConstValue> {
         self.check_depth().ok()?;
+        if let Some(value) = self.returned.borrow().clone() {
+            return Some(value);
+        }
         match expr {
-            Expr::Target => {
-                let target = self.target.as_ref()?;
-                Some(ConstValue::Record {
-                    fields: vec![
-                        (
-                            Intern::from_ref("arch"),
-                            ConstValue::Text(target.arch.as_str().into()),
-                        ),
-                        (
-                            Intern::from_ref("vendor"),
-                            ConstValue::Text(target.vendor.clone()),
-                        ),
-                        (
-                            Intern::from_ref("os"),
-                            ConstValue::Text(target.os.as_str().into()),
-                        ),
-                        (
-                            Intern::from_ref("triple"),
-                            ConstValue::Text(target.raw.clone()),
-                        ),
-                    ]
-                    .into(),
-                })
+            Expr::Block(items) => self.eval_sequence(items),
+            Expr::Return(ret) => {
+                let values = ret
+                    .values
+                    .iter()
+                    .map(|value| self.eval(&value.value))
+                    .collect::<Option<Vec<_>>>()?;
+                let value = match values.as_slice() {
+                    [] => ConstValue::Record {
+                        fields: Vec::new().into(),
+                    },
+                    [value] => value.clone(),
+                    _ => ConstValue::ResultRow(values.into()),
+                };
+                self.returned.replace(Some(value.clone()));
+                Some(value)
             }
+            Expr::Target => Some(target_const_record(self.target.as_ref()?)),
             Expr::Lit(lit) => match lit {
                 Literal::Int(n) => Some(ConstValue::Int(*n)),
                 Literal::Float(HashFloat(f)) => Some(ConstValue::Float(HashFloat(*f))),
                 Literal::String(s) => Some(ConstValue::Text(s.clone())),
-                Literal::Number(n) => Some(ConstValue::Int((*n as u128).into())),
             },
             Expr::FormatString(_) => None,
             Expr::ResultValues(items) => items
@@ -212,26 +228,9 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
             }
             Expr::TagCall(call) => {
                 let args = self.eval_args(Some(&call.args))?;
-                // `qual_path` is the prefix of the path, NOT including the last
-                // segment which is already captured in `name`. Skipping the last
-                // segment prevents double-appending in `to_hover_string`.
-                let qual_path = call.qual_path.as_ref().map(|p| {
-                    let use_segments =
-                        if p.segments.last().map(|s| s.as_str()) == Some(call.name.as_str()) {
-                            &p.segments[..p.segments.len().saturating_sub(1)]
-                        } else {
-                            &p.segments[..]
-                        };
-                    let mut s = p.root.as_str().to_string();
-                    for seg in use_segments {
-                        s.push('.');
-                        s.push_str(seg.as_str());
-                    }
-                    s
-                });
                 Some(ConstValue::Tag {
                     name: call.name,
-                    qual_path,
+                    qual_path: call.qualifier(),
                     args: args.into(),
                 })
             }
@@ -255,9 +254,19 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
                         .and_then(|params| params.keys().position(|param_name| param_name == field))
                         .or_else(|| {
                             declaration.and_then(|decl| match &decl.value {
-                                ast::DeclareValue::Has(members) => members.iter().position(|member| {
-                                    matches!(member, ast::HasMember::Property(property) if property.name == *field)
-                                }),
+                                ast::DeclareValue::Has(members) => members
+                                    .iter()
+                                    .filter_map(|member| match member {
+                                        ast::HasMember::Property(property)
+                                            if property.qualifier.as_ref().is_none_or(
+                                                |qualifier| qualifier.name == decl.name,
+                                            ) =>
+                                        {
+                                            Some(property)
+                                        }
+                                        _ => None,
+                                    })
+                                    .position(|property| property.name == *field),
                                 _ => None,
                             })
                         })
@@ -285,7 +294,6 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
                 if !bind.is_constant() && !bind.attributes.inline_always {
                     return None;
                 }
-                self.check_arity(&bind, &[]).ok()?;
                 self.eval_bind_call(&bind, &[], self.depth + 1)
             }
             Expr::ArrayLit(elems) => {
@@ -341,16 +349,38 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
                 Some(ConstValue::Int(i256::I256::from(value)))
             }
             Expr::When(when) => {
-                let subject = when
+                let has_patterns = when
+                    .arms
+                    .iter()
+                    .any(|arm| matches!(arm, WhenArm::Is { .. }));
+                if has_patterns && when.subject.is_none() {
+                    return None;
+                }
+                let subject = match &when.subject {
+                    Some(subject) => self.eval(&subject.value)?,
+                    None => ConstValue::ZERO,
+                };
+                let previous = when
                     .subject
                     .as_ref()
-                    .and_then(|s| self.eval(&s.value))
-                    .unwrap_or(ConstValue::ZERO);
-                self.eval_matching_when_arm(&when.arms, &subject)
+                    .and_then(|source| self.when_subjects.insert(source.span_id, subject.clone()));
+                let result = self.eval_matching_when_arm(&when.arms, &subject);
+                if let Some(source) = &when.subject {
+                    self.when_subjects.remove(&source.span_id);
+                    if let Some(previous) = previous {
+                        self.when_subjects.insert(source.span_id, previous);
+                    }
+                }
+                result
             }
             Expr::FnCall(call) if call.args.is_none() && call.path.value.segments.is_empty() => {
                 let name = call.path.value.root;
-                if let Some(cv) = self.const_binds.get(&name).and_then(|cv| cv.clone()) {
+                if let Some(cv) = self
+                    .condition_bindings
+                    .get(&name)
+                    .or_else(|| self.const_binds.get(&name))
+                    .and_then(|cv| cv.clone())
+                {
                     return Some(cv);
                 }
                 let final_name = call
@@ -359,21 +389,10 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
                     .segments
                     .last()
                     .unwrap_or(&call.path.value.root);
-                let bind = self
-                    .ast
-                    .defs
-                    .get(&name)
-                    .or_else(|| self.ast.defs.get(final_name))
-                    .or_else(|| {
-                        self.ast.defs.values().find(|bind| {
-                            bind.name.as_str().rsplit(['.', ':']).next()
-                                == Some(final_name.as_str())
-                        })
-                    })?;
+                let bind = self.resolve_bind_by_parts(&name, final_name)?;
                 if !bind.is_constant() && !bind.attributes.inline_always {
                     return None;
                 }
-                self.check_arity(bind, &[]).ok()?;
                 self.eval_bind_call(bind, &[], self.depth + 1)
             }
             Expr::FnCall(call) if call.args.is_none() && !call.path.value.segments.is_empty() => {
@@ -381,35 +400,8 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
                 if let Some(cv) = self.const_binds.get(&fq_name).and_then(|cv| cv.clone()) {
                     return Some(cv);
                 }
-                if call.path.value.root.as_str() == "target"
-                    && let Some(target) = &self.target
-                {
-                    let field = call.path.value.segments.last()?.as_str();
-                    let value = match field {
-                        "arch" => Some(ConstValue::Text(target.arch.as_str().into())),
-                        "vendor" => Some(ConstValue::Text(target.vendor.clone())),
-                        "os" => Some(ConstValue::Text(target.os.as_str().into())),
-                        "triple" => Some(ConstValue::Text(target.raw.clone())),
-                        _ => None,
-                    };
-                    if value.is_some() {
-                        return value;
-                    }
-                }
-                let final_name = call.path.value.segments.last().expect("qualified call");
-                let bind = self
-                    .ast
-                    .defs
-                    .get(&fq_name)
-                    .or_else(|| self.ast.defs.get(final_name))
-                    .or_else(|| {
-                        self.ast.defs.values().find(|bind| {
-                            bind.name.as_str().rsplit(['.', ':']).next()
-                                == Some(final_name.as_str())
-                        })
-                    });
+                let bind = self.resolve_bind(fq_name);
                 if let Some(bind) = bind {
-                    self.check_arity(bind, &[]).ok()?;
                     return self.eval_bind_call(bind, &[], self.depth + 1);
                 }
                 if call.path.value.segments.len() != 1 {
@@ -433,20 +425,20 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
             Expr::FnCall(call) if call.path.value.segments.is_empty() => {
                 let name = call.path.value.root;
                 let args = self.eval_args(call.args.as_deref())?;
-                if let Some(Some(cv)) = self.const_binds.get(&name) {
+                if args.is_empty()
+                    && let Some(Some(cv)) = self.const_binds.get(&name)
+                {
                     return Some(cv.clone());
                 }
-                if let Some(cv) = self.eval_helper(name.as_str(), &args) {
-                    return Some(cv);
-                }
                 let bind = self.resolve_bind(name)?.clone();
-                self.check_arity(&bind, &args).ok()?;
                 self.eval_bind_call(&bind, &args, self.depth + 1)
             }
             Expr::FnCall(call) => {
                 let name = self.qualified_name(&call.path.value);
                 let args = self.eval_args(call.args.as_deref())?;
-                if let Some(Some(cv)) = self.const_binds.get(&name) {
+                if args.is_empty()
+                    && let Some(Some(cv)) = self.const_binds.get(&name)
+                {
                     return Some(cv.clone());
                 }
                 let final_name = call
@@ -455,18 +447,7 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
                     .segments
                     .last()
                     .unwrap_or(&call.path.value.root);
-                let bind = self
-                    .ast
-                    .defs
-                    .get(&name)
-                    .or_else(|| self.ast.defs.get(final_name))
-                    .or_else(|| {
-                        self.ast.defs.values().find(|bind| {
-                            bind.name.as_str().rsplit(['.', ':']).next()
-                                == Some(final_name.as_str())
-                        })
-                    })?;
-                self.check_arity(bind, &args).ok()?;
+                let bind = self.resolve_bind_by_parts(&name, final_name)?;
                 self.eval_bind_call(bind, &args, self.depth + 1)
             }
             _ => None,
@@ -474,15 +455,64 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
     }
 
     fn eval_in_env(&mut self, env: &ConstEnv, depth: usize, expr: &Expr) -> Option<ConstValue> {
-        EvalFrame::new(
+        let mut frame = EvalFrame::new(
             env,
             self.ast,
             self.target_layout,
             self.target.clone(),
             self.call_stack,
         )
-        .with_depth(depth)
-        .eval(expr)
+        .with_depth(depth);
+        frame.returned = self.returned.clone();
+        frame.condition_bindings = self.condition_bindings.clone();
+        frame.when_subjects = self.when_subjects.clone();
+        frame.eval(expr)
+    }
+
+    fn eval_subject(&mut self, subject: &Typed<Expr>) -> Option<ConstValue> {
+        if let Some(value) = self.when_subjects.get(&subject.span_id) {
+            return Some(value.clone());
+        }
+        self.eval(&subject.value)
+    }
+
+    fn eval_sequence(&mut self, items: &[Typed<Expr>]) -> Option<ConstValue> {
+        let mut env = self.const_binds.clone();
+        let mut value = ConstValue::Record {
+            fields: Vec::new().into(),
+        };
+        for item in items {
+            if let Expr::Bind(bind) = &item.value {
+                if bind.params.is_some() {
+                    continue;
+                }
+                if matches!(
+                    bind.operator,
+                    ast::BindOperator::Rebind | ast::BindOperator::Compound(_)
+                ) && self.const_binds.contains_key(&bind.name)
+                {
+                    return None;
+                }
+                if let BindValue::Expr(initializer) = &bind.value {
+                    value = self.eval_in_env(&env, self.depth, &initializer.value)?;
+                    if let ast::BindOperator::Compound(operator) = &bind.operator {
+                        value = env
+                            .get(&bind.name)?
+                            .as_ref()?
+                            .eval_binop(operator, &value)?;
+                    }
+                    env.insert(bind.name, Some(value.clone()));
+                } else {
+                    return None;
+                }
+            } else {
+                value = self.eval_in_env(&env, self.depth, &item.value)?;
+            }
+            if let Some(returned) = self.returned.borrow().clone() {
+                return Some(returned);
+            }
+        }
+        Some(value)
     }
 
     fn eval_args(&mut self, args: Option<&[Typed<Expr>]>) -> Option<Vec<ConstValue>> {
@@ -490,21 +520,6 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
             || Some(Vec::new()),
             |args| args.iter().map(|arg| self.eval(&arg.value)).collect(),
         )
-    }
-
-    fn eval_helper(&self, name: &str, args: &[ConstValue]) -> Option<ConstValue> {
-        match (name, args) {
-            // Size helpers
-            ("add", [a, b]) => match (a.as_const_size_int(), b.as_const_size_int()) {
-                (Some(x), Some(y)) => Some(ConstValue::const_size_tag(x + y)),
-                _ => Some(ConstValue::dynamic_size_tag()),
-            },
-            ("max_size", [a, b]) => match (a.as_const_size_int(), b.as_const_size_int()) {
-                (Some(x), Some(y)) => Some(ConstValue::const_size_tag(if x >= y { x } else { y })),
-                _ => Some(ConstValue::dynamic_size_tag()),
-            },
-            _ => None,
-        }
     }
 
     fn eval_matching_when_arm(
@@ -517,14 +532,26 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
                 WhenArm::Cond {
                     condition, body, ..
                 } => {
-                    let matches = self.eval_condition(condition)?;
-                    if matches {
-                        return self.eval(&body.value);
+                    let bindings = self.condition_bindings.clone();
+                    let matches = self.eval_condition(condition);
+                    let result = matches.and_then(|matches| {
+                        if matches {
+                            self.eval(&body.value)
+                        } else {
+                            None
+                        }
+                    });
+                    self.condition_bindings = bindings;
+                    if matches? {
+                        return result;
                     }
                 }
                 WhenArm::Is { pattern, body, .. } => {
-                    let matches =
-                        crate::analysis::pattern::pattern_matches_public(&pattern.value, subject);
+                    let matches = crate::analysis::pattern::pattern_matches_with_integer_validity(
+                        &pattern.value,
+                        subject,
+                        None,
+                    )?;
                     if matches {
                         let mut arm_env = self.const_binds.clone();
                         let mut flat = HashMap::new();
@@ -539,16 +566,49 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
                 WhenArm::Else(body, _) => return self.eval(&body.value),
             }
         }
-        None
+        Some(ConstValue::Record {
+            fields: Vec::new().into(),
+        })
     }
 
     fn eval_condition(&mut self, condition: &ast::Condition) -> Option<bool> {
         match condition {
+            ast::Condition::Proposition { subject } => {
+                let ConstValue::Proposition(holds) = self.eval_subject(subject)? else {
+                    return None;
+                };
+                Some(holds)
+            }
+            ast::Condition::Compare {
+                left,
+                relation,
+                right,
+            } => {
+                let ConstValue::Int(left) = self.eval_subject(left)? else {
+                    return None;
+                };
+                let ConstValue::Int(right) = self.eval_subject(right)? else {
+                    return None;
+                };
+                Some(relation.holds(left, right))
+            }
             ast::Condition::Is { subject, pattern } => {
-                let value = self.eval(&subject.value)?;
-                let result =
-                    crate::analysis::pattern::pattern_matches_public(&pattern.value, &value);
-                Some(result)
+                let value = self.eval_subject(subject)?;
+                let matches = crate::analysis::pattern::pattern_matches_with_integer_validity(
+                    &pattern.value,
+                    &value,
+                    None,
+                )?;
+                if matches {
+                    let mut bindings = HashMap::new();
+                    collect_pattern_bindings(&pattern.value, &value, &mut bindings);
+                    self.condition_bindings.extend(
+                        bindings
+                            .into_iter()
+                            .map(|(name, value)| (name, Some(value))),
+                    );
+                }
+                Some(matches)
             }
             ast::Condition::Not(inner) => Some(!self.eval_condition(inner)?),
             ast::Condition::And(left, right) => {
@@ -566,6 +626,7 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
         args: &[ConstValue],
         depth: usize,
     ) -> Option<ConstValue> {
+        self.check_arity(bind, args).ok()?;
         let call_key = ComptimeCall {
             name: bind.name,
             args: args.into(),
@@ -574,12 +635,12 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
 
         let mut env = self.const_binds.clone();
         if let Some(params) = &bind.params {
-            let param_names: Vec<_> = params.keys().copied().collect();
-            for (name, cv) in param_names.into_iter().zip(args.iter().cloned()) {
-                env.insert(name, Some(cv));
+            for (name, value) in params.keys().zip(args) {
+                env.insert(*name, Some(value.clone()));
             }
         }
-        let result = match &bind.value {
+        let caller_return = std::mem::take(&mut self.returned);
+        let result = (|| match &bind.value {
             BindValue::Expr(expr) => self.eval_in_env(&env, depth, &expr.value),
             BindValue::Body { exprs, ret } => {
                 for expr in exprs {
@@ -587,33 +648,35 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
                         && local.params.is_none()
                         && let BindValue::Expr(initializer) = &local.value
                     {
-                        let value = self.eval_in_env(&env, depth, &initializer.value);
-                        if let Some(value) = value {
-                            env.insert(local.name, Some(value));
-                        }
+                        let value = self.eval_in_env(&env, depth, &initializer.value)?;
+                        let value = if let ast::BindOperator::Compound(operator) = &local.operator {
+                            env.get(&local.name)?
+                                .as_ref()?
+                                .eval_binop(operator, &value)?
+                        } else {
+                            value
+                        };
+                        env.insert(local.name, Some(value));
                     } else {
-                        let _ = self.eval_in_env(&env, depth, &expr.value);
+                        self.eval_in_env(&env, depth, &expr.value)?;
                     }
                 }
-                if !ret.values.is_empty() {
-                    let values = ret
-                        .values
-                        .iter()
-                        .map(|ret| self.eval_in_env(&env, depth, &ret.value))
-                        .collect::<Option<Vec<_>>>()?;
-                    match values.as_slice() {
+                if let Some(value) = self.returned.borrow().clone() {
+                    return Some(value);
+                }
+                ret.values
+                    .iter()
+                    .map(|ret| self.eval_in_env(&env, depth, &ret.value))
+                    .collect::<Option<Vec<_>>>()
+                    .and_then(|values| match values.as_slice() {
                         [] => None,
                         [value] => Some(value.clone()),
                         _ => Some(ConstValue::ResultRow(values.into())),
-                    }
-                } else {
-                    ret.values
-                        .first()
-                        .and_then(|ret| self.eval_in_env(&env, depth, &ret.value))
-                }
+                    })
             }
             BindValue::Unassigned => None,
-        };
+        })();
+        self.returned = caller_return;
         self.call_stack.remove(&call_key);
         result
     }
@@ -649,7 +712,7 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
         Intern::new(parts.join("."))
     }
 
-    fn resolve_bind(&self, name: Intern<String>) -> Option<&Bind> {
+    fn resolve_bind(&self, name: Intern<String>) -> Option<&'a Bind> {
         let final_name = name.as_str().rsplit(['.', ':']).next()?;
         self.ast
             .defs
@@ -662,12 +725,27 @@ impl<'a, 'b> EvalFrame<'a, 'b> {
                     .find(|bind| bind.name.as_str().rsplit(['.', ':']).next() == Some(final_name))
             })
     }
+
+    fn resolve_bind_by_parts(
+        &self,
+        name: &Intern<String>,
+        final_name: &Intern<String>,
+    ) -> Option<&'a Bind> {
+        self.ast
+            .defs
+            .get(name)
+            .or_else(|| self.ast.defs.get(final_name))
+            .or_else(|| {
+                self.ast.defs.values().find(|bind| {
+                    bind.name.as_str().rsplit(['.', ':']).next() == Some(final_name.as_str())
+                })
+            })
+    }
 }
 
 fn sequence_count_expr(expr: &Expr) -> Option<ast::NormalExpr> {
     match expr {
         Expr::Lit(Literal::Int(value)) => Some(ast::NormalExpr::from(*value)),
-        Expr::Lit(Literal::Number(value)) => Some(ast::NormalExpr::from(*value as i128)),
         Expr::FnCall(call) if call.args.is_none() => {
             Some(ast::NormalExpr::Var(call.path.value.root))
         }
@@ -716,3 +794,11 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "const_expr/call_tests.rs"]
+mod call_tests;
+
+#[cfg(test)]
+#[path = "const_expr/field_tests.rs"]
+mod field_tests;

@@ -9,10 +9,19 @@ use typecheck::DefId;
 fn slice_fields_preserve_declared_types() {
     let typed = check(
         r#"ViewByte is in 0 to 255
+ViewByte has
+    finish(self):
+        return
 ViewLength is in 0 to 18446744073709551615
-Slice(element) has ptr @element, len ViewLength
-pointer(text Slice(ViewByte)): text.ptr
-length(text Slice(ViewByte)): text.len
+ViewLength has
+    finish(self):
+        return
+Slice(element) has
+    ptr @element, len ViewLength
+    finish(self):
+        return
+pointer(text Slice(ViewByte)): return text.ptr
+length(text Slice(ViewByte)): return text.len
 "#,
     );
     assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
@@ -32,16 +41,10 @@ length(text Slice(ViewByte)): text.len
 
 #[test]
 fn text_slice_fields_convert_to_library_defined_pointer_and_size_types() {
-    let typed = check(
-        r#"ViewByte is in 0 to 255
-ViewLength is in 0 to 18446744073709551615
-Slice(element) has ptr @element, len ViewLength
-Byte is in 0 to 255
-Size is in 0 to 18446744073709551615
-pointer(text Slice(ViewByte)) @Byte: text.ptr as @Byte
-length(text Slice(ViewByte)) Size: text.len as Size
-"#,
-    );
+    let typed = check(&format!(
+        "ViewByte is in 0 to 255\nViewByte has\n    finish(self):\n        return\nViewLength is in 0 to 18446744073709551615\nViewLength has\n    finish(self):\n        return\nSlice(element) has\n    ptr @element, len ViewLength\n    finish(self):\n        return\n{}Size is in 0 to 18446744073709551615\nSize has\n    finish(self):\n        return\npointer(text Slice(ViewByte)) @Byte: return text.ptr as @Byte\nlength(text Slice(ViewByte)) Size: return text.len as Size\n",
+        test_fixtures::preludes::BYTE_PRELUDE
+    ));
     assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
 }
 
@@ -49,9 +52,18 @@ length(text Slice(ViewByte)) Size: text.len as Size
 fn text_slice_unknown_field_is_rejected() {
     let typed = check(
         r#"ViewByte is in 0 to 255
+ViewByte has
+    finish(self):
+        return
 ViewLength is in 0 to 18446744073709551615
-Slice(element) has ptr @element, len ViewLength
-unknown(text Slice(ViewByte)): text.capacity
+ViewLength has
+    finish(self):
+        return
+Slice(element) has
+    ptr @element, len ViewLength
+    finish(self):
+        return
+unknown(text Slice(ViewByte)): return text.capacity
 "#,
     );
     assert!(
@@ -66,11 +78,20 @@ unknown(text Slice(ViewByte)): text.capacity
 fn text_slice_length_counts_utf8_bytes_at_compile_time() {
     let typed = check(
         r#"ViewByte is in 0 to 255
+ViewByte has
+    finish(self):
+        return
 ViewLength is in 0 to 18446744073709551615
-Slice(element) has ptr @element, len ViewLength
+ViewLength has
+    finish(self):
+        return
+Slice(element) has
+    ptr @element, len ViewLength
+    finish(self):
+        return
 length:
     text := 'é🦀'
-return #size(text)
+    return #size(text)
 "#,
     );
     assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
@@ -88,12 +109,13 @@ return #size(text)
 
 #[test]
 fn inferred_self_uses_the_receiver_type_and_value_parameter_kind() {
-    let typed = check(
-        "Word is in 0 to 255\nItem has value Word\nItem.read(self ref) Word: self.value\nItem.release(self own):\n    Item(value: value) := self\nreturn\n",
-    );
+    let typed = check(&format!(
+        "{}Item has\n    value Word\n    finish(self):\n        return\nItem.read(self ref) Word: return self.value\nItem.release(self own):\n    Item(value: value) := self\n    return\n",
+        test_fixtures::preludes::WORD_PRELUDE
+    ));
     assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
     for name in ["Item.read", "Item.release"] {
-        let bind = &typed.defs[&DefId(Intern::from_ref(name))];
+        let bind = &typed.defs[&DefId::named(Intern::from_ref(name))];
         assert!(matches!(bind.param_kinds[0], ast::ParamKind::Value(_)));
         assert!(!matches!(bind.params[0].1, Ty::Opaque(_) | Ty::Unit));
     }

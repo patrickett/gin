@@ -1,19 +1,22 @@
 pub mod analysis;
 pub mod assembly;
-pub mod encoding;
-mod machine;
+mod domain;
+mod emission;
+mod tag_declarations;
 
+pub mod array_promotion;
 pub mod completions;
 pub mod constant_object;
-pub mod fragment_chain;
 pub use constant_object::{
     ConstObject, ConstObjectError, ConstObjectId, ConstObjectStore, ConstPath, ConstProjection,
     ConstRelocation,
 };
-pub use fragment_chain::{Fragment, FragmentChain};
 
 #[cfg(test)]
 extern crate self as typecheck;
+
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub mod resolved_program;
 pub mod ty;
@@ -25,35 +28,28 @@ pub use resolved_program::ResolvedProgram;
 pub use typed::{
     AlternativeEvidence, AppliedEffectTarget, Availability, BindBody, CallableResult, ConstFacts,
     DefId, EffectTarget, EvidenceProposition, ExprFacts, ExprId, FileId, FunctionEffects, GroupId,
-    HoverResult, HoverTarget, IterationPlan, MathematicalComparison, Overlap, OwnershipFacts,
+    HoverResult, HoverTarget, MathematicalComparison, Overlap, OwnershipFacts,
     PackageSemanticIndex, PlaceId, PlaceProjection, PlaceVersionComponent, PlaceVersionId,
     PlaceVersionOrigin, ReferenceTargetGroup, ResolvedCompoundOperator, ResultEvidence,
-    SemanticFacts, TagId, TargetIndex, TypedBind, TypedCallableSignature, TypedCondition,
-    TypedExpr, TypedExprKind, TypedFileAst, TypedGroup, TypedIfExpr, TypedLoop, TypedLoopKind,
-    TypedPlace, TypedPlaceVersion, TypedTag, TypedWhenArm, TypedWhenExpr, VariantId,
-    VariantLookupResult, VariantMap, VariantMapEntry, collect_package_variant_map,
-    format_ty_for_hover,
+    SemanticFacts, SequenceTraversal, TagId, TargetIndex, TypedBind, TypedCallableSignature,
+    TypedCondition, TypedExpr, TypedExprKind, TypedFileAst, TypedGroup, TypedIfExpr, TypedLoop,
+    TypedLoopKind, TypedPlace, TypedPlaceVersion, TypedTag, TypedWhenArm, TypedWhenExpr,
+    ValueEvidence, VariantId, VariantLookupResult, VariantMap, VariantMapEntry,
+    collect_package_variant_map, format_ty_for_hover,
 };
 
 pub mod staging;
 
-pub mod compile_time_trait;
-pub use compile_time_trait::{
-    CompileTimeTraitRegistry, REFLECTABLE_SHAPE_FIELD, REFLECTABLE_TRAIT, RESERVED_TRAITS,
-    synthesize_reflectable_trait, trait_field_for_ty, trait_field_for_type_name,
-};
-
-pub mod reflect;
-pub use reflect::{
-    const_value_for_provided_trait_field, const_value_to_expr, const_value_to_typed_expr,
-};
+pub mod const_value;
+pub use const_value::{const_value_to_expr, const_value_to_typed_expr};
 
 pub mod equality;
 pub mod eval;
 pub use eval::{
-    Address, CompileTimeHost, EvalHeap, EvalHost, EvalOutcome, EvalResult, EvalState, Evaluator,
-    Fuel,
+    Address, CompileTimeHost, EvalCondition, EvalFailure, EvalFrame, EvalHeap, EvalHost, EvalLocal,
+    EvalOutcome, EvalResult, EvalState, Evaluator, Fuel,
 };
+mod anonymous_arithmetic;
 pub mod integer_literal;
 pub mod intrinsic;
 pub mod intrinsic_fold;
@@ -72,7 +68,6 @@ pub use prepare::{prepare_package_asts, prepare_parse_ast};
 
 pub mod prepare_target;
 pub use prepare_target::{
-    apply_entry_target_merge, infer_when_declare_subject_ty, materialize_default_binds,
     materialize_type_static_access, materialize_when_declare_subjects_from_package,
     validate_when_declare_exhaustiveness,
 };
@@ -86,7 +81,8 @@ pub use subst::DepSubst;
 pub mod solver;
 pub use solver::{ConstraintEnv, Predicate, ProveResult, predicate_expr_to_predicate};
 
-pub mod range_bounds;
-pub use range_bounds::InclusiveBounds;
-
 pub mod transform;
+
+pub use analysis::expression_returns;
+
+pub mod discriminant;

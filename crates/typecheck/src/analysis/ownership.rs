@@ -1,3 +1,4 @@
+use crate::transform::finish_reads;
 use crate::ty::Ty;
 use crate::typed::{DefId, ExprId, TypedCallableSignature, TypedExprKind, TypedFileAst};
 use std::collections::HashMap;
@@ -9,7 +10,8 @@ pub trait TyOwnershipExt {
 impl TyOwnershipExt for Ty {
     fn is_structurally_discardable(&self) -> bool {
         match self {
-            Ty::AnonymousInteger { .. }
+            Ty::Proposition(_)
+            | Ty::AnonymousInteger { .. }
             | Ty::ResultFamily { .. }
             | Ty::UnresolvedLiteral(_)
             | Ty::Float { .. }
@@ -33,6 +35,7 @@ impl TyOwnershipExt for Ty {
             }),
             Ty::Named { .. }
             | Ty::Opaque(_)
+            | Ty::OwnedStorage { .. }
             | Ty::Ptr { .. }
             | Ty::Address { .. }
             | Ty::Literal(_) => false,
@@ -72,6 +75,7 @@ pub(crate) fn stage_rematerialize_owned_arguments(
     typed: &mut TypedFileAst,
     cross_file_signatures: &HashMap<DefId, TypedCallableSignature>,
 ) {
+    let _profile = compiler_profile::span(compiler_profile::Phase::Rematerialize);
     let original_len = typed.exprs.kind.len();
     for index in 0..original_len {
         propagate_local_constant_to_reference(typed, ExprId(index as u32));
@@ -103,9 +107,9 @@ pub(crate) fn stage_rematerialize_owned_arguments(
             .get(&target)
             .map(|definition| definition.param_conventions.clone())
             .or_else(|| {
-                cross_file_signatures
-                    .get(&target)
-                    .map(|signature| signature.param_conventions.clone())
+                let signature = cross_file_signatures.get(&target);
+                finish_reads::record_signature(target, signature);
+                signature.map(|signature| signature.param_conventions.clone())
             })
             .unwrap_or_default();
         let rewritten: Vec<_> = arguments
@@ -186,7 +190,19 @@ fn closed_constant(typed: &TypedFileAst, expression: ExprId) -> Option<ast::Cons
     let TypedExprKind::When(when_expr) = &typed.exprs.kind[expression.as_usize()] else {
         return None;
     };
-    if let Some(subject) = when_expr.subject
+    let has_conditions = when_expr
+        .arms
+        .iter()
+        .any(|arm| matches!(arm, crate::typed::TypedWhenArm::Cond { .. }));
+    let has_patterns = when_expr
+        .arms
+        .iter()
+        .any(|arm| matches!(arm, crate::typed::TypedWhenArm::Is { .. }));
+    if has_patterns && (has_conditions || when_expr.subject.is_none()) {
+        return None;
+    }
+    if !has_conditions
+        && let Some(subject) = when_expr.subject
         && let Some(subject_value) =
             typed.exprs.facts.const_facts.const_value[subject.as_usize()].as_ref()
     {
@@ -197,6 +213,7 @@ fn closed_constant(typed: &TypedFileAst, expression: ExprId) -> Option<ast::Cons
                         &pattern.value,
                         subject_value,
                         &typed.tag_types,
+                        &typed.type_registry,
                     ) =>
                 {
                     return closed_constant(typed, *body);
@@ -220,37 +237,63 @@ fn closed_constant(typed: &TypedFileAst, expression: ExprId) -> Option<ast::Cons
 }
 
 fn propagate_condition_singletons(typed: &mut TypedFileAst) {
-    let conditions: Vec<_> = typed
-        .exprs
-        .kind
-        .iter()
-        .filter_map(|kind| {
-            let TypedExprKind::If(if_expr) = kind else {
-                return None;
-            };
-            let crate::typed::TypedCondition::Is { subject, pattern } = &if_expr.condition else {
-                return None;
-            };
-            let TypedExprKind::FnCall { args: None, .. } =
-                typed.exprs.kind[subject.as_usize()].clone()
-            else {
-                return None;
-            };
-            let ast::Pattern::Literal(ast::Literal::Int(value), _) = pattern.value else {
-                return None;
-            };
-            Some((
-                typed.exprs.place_version_of(*subject).flatten()?,
-                value,
-                if_expr
+    let mut conditions = Vec::new();
+    for kind in &typed.exprs.kind {
+        let mut branches = Vec::new();
+        match kind {
+            TypedExprKind::If(branch) => branches.push((
+                branch.condition.clone(),
+                branch
                     .stmts
                     .iter()
                     .copied()
-                    .chain(if_expr.ret)
+                    .chain(branch.ret)
                     .collect::<Vec<_>>(),
-            ))
-        })
-        .collect();
+            )),
+            TypedExprKind::When(branch) => {
+                for arm in &branch.arms {
+                    match arm {
+                        crate::typed::TypedWhenArm::Cond {
+                            condition, body, ..
+                        } => {
+                            branches.push((condition.clone(), vec![*body]));
+                        }
+                        crate::typed::TypedWhenArm::Is { pattern, body, .. } => {
+                            if let Some(subject) = branch.subject {
+                                branches.push((
+                                    crate::typed::TypedCondition::Is {
+                                        subject,
+                                        pattern: pattern.clone(),
+                                    },
+                                    vec![*body],
+                                ));
+                            }
+                        }
+                        crate::typed::TypedWhenArm::Else(..) => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+        for (condition, roots) in branches {
+            let mut pending = vec![&condition];
+            while let Some(condition) = pending.pop() {
+                if let crate::typed::TypedCondition::And(left, right) = condition {
+                    pending.extend([left.as_ref(), right.as_ref()]);
+                    continue;
+                }
+                let crate::typed::TypedCondition::Is { subject, pattern } = condition else {
+                    continue;
+                };
+                let ast::Pattern::Literal(ast::Literal::Int(value), _) = pattern.value else {
+                    continue;
+                };
+                if let Some(version) = typed.exprs.place_version_of(*subject).flatten() {
+                    conditions.push((version, value, roots.clone()));
+                }
+            }
+        }
+    }
     for (version, value, roots) in conditions {
         let mut references = Vec::new();
         for root in roots {
@@ -289,65 +332,32 @@ fn append_rematerialization(typed: &mut TypedFileAst, source: ExprId) -> ExprId 
             Some(ast::ConstValue::Int(*value))
         })
         .expect("rematerializable expressions carry a closed constant proof");
-    let id = ExprId(typed.exprs.kind.len() as u32);
-    typed.exprs.kind.push(TypedExprKind::Rematerialize {
-        source,
-        constant: constant.clone(),
-    });
-    typed
-        .exprs
-        .ty
-        .push(typed.exprs.ty[source.as_usize()].clone());
-    typed.exprs.span.push(typed.exprs.span[source.as_usize()]);
-    typed
-        .exprs
-        .facts
-        .const_facts
-        .const_value
-        .push(Some(constant));
-    typed.exprs.facts.const_facts.const_object.push(None);
-    typed
-        .exprs
-        .facts
-        .semantic_facts
-        .sequence_provenance
-        .push(None);
-    typed.exprs.facts.const_facts.sequence_literal.push(None);
-    typed
-        .exprs
-        .facts
-        .const_facts
-        .literal_materialization
-        .push(None);
-    typed
-        .exprs
-        .facts
-        .semantic_facts
-        .integer_knowledge
-        .push(typed.exprs.facts.semantic_facts.integer_knowledge[source.as_usize()].clone());
-    typed
-        .exprs
-        .facts
-        .semantic_facts
-        .result_evidence
-        .push(typed.exprs.facts.semantic_facts.result_evidence[source.as_usize()].clone());
-    typed
-        .exprs
-        .facts
-        .semantic_facts
-        .projected_result_evidence
-        .push(
-            typed.exprs.facts.semantic_facts.projected_result_evidence[source.as_usize()].clone(),
-        );
-    typed
-        .exprs
-        .facts
-        .semantic_facts
-        .availability
-        .push(crate::Availability::CompileTime);
-    typed
-        .exprs
-        .push_ownership_facts(None, Vec::new(), None, None);
-    typed.exprs.facts.semantic_facts.flaws.push(Vec::new());
+    let source_ty = typed.exprs.ty[source.as_usize()].clone();
+    let source_span = typed.exprs.span[source.as_usize()];
+    let source_integer_knowledge =
+        typed.exprs.facts.semantic_facts.integer_knowledge[source.as_usize()].clone();
+    let source_result_evidence =
+        typed.exprs.facts.semantic_facts.result_evidence[source.as_usize()].clone();
+    let source_projected_result_evidence =
+        typed.exprs.facts.semantic_facts.projected_result_evidence[source.as_usize()].clone();
+    let id = typed.exprs.push_placeholder(
+        TypedExprKind::Rematerialize {
+            source,
+            constant: constant.clone(),
+        },
+        source_ty,
+        source_span,
+    );
+    let index = id.as_usize();
+    typed.exprs.facts.const_facts.const_value[index] = Some(constant);
+    typed.exprs.facts.semantic_facts.integer_knowledge[index] = source_integer_knowledge;
+    typed.exprs.facts.semantic_facts.result_evidence[index] = source_result_evidence;
+    typed.exprs.facts.semantic_facts.projected_result_evidence[index] =
+        source_projected_result_evidence;
+    typed.exprs.facts.semantic_facts.availability[index] = crate::Availability::CompileTime;
     id
 }
+
+#[cfg(test)]
+#[path = "ownership/when_tests.rs"]
+mod when_tests;

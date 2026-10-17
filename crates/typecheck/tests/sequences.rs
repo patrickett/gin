@@ -32,9 +32,12 @@ fn sequence_shapes_preserve_optional_names_and_element_types() {
 
 #[test]
 fn named_single_result_retains_its_projection() {
-    let typed = check("Byte is in 0 to 255\nget() value Byte: return 42\nmain: get().value\n");
+    let typed = check(&format!(
+        "{}get() value Byte: return 42\nmain: get().value\n",
+        test_fixtures::preludes::BYTE_PRELUDE
+    ));
     assert!(flaw_codes(&typed).is_empty(), "{:?}", typed.all_flaws());
-    let ty = &typed.defs[&typecheck::DefId(internment::Intern::from_ref("get"))].return_type;
+    let ty = &typed.defs[&typecheck::DefId::named(internment::Intern::from_ref("get"))].return_type;
     assert!(
         matches!(ty, Ty::Sequence(fields) if fields.len() == 1 && fields[0].name.unwrap().as_str() == "value"),
         "{ty:?}"
@@ -44,16 +47,40 @@ fn named_single_result_retains_its_projection() {
 #[test]
 fn return_sequences_support_named_unnamed_mixed_and_nested_results() {
     for source in [
-        "Byte is in 0 to 255\nFactory has\n    get() value Byte: return 42\nmain: Factory.get().value\n",
-        "Byte is in 0 to 255\nFactory has\n    get() first Byte, Byte: return 1, 2\nmain: Factory.get().1\n",
-        "Byte is in 0 to 255\nget() [Byte; 2]: return 1, 2\nmain: get().0\n",
-        "Byte is in 0 to 255\nget() first Byte, second Byte: return 1, 2\nmain: get().second\n",
-        "Byte is in 0 to 255\nget() Byte, Byte: return 1, 2\nmain: get().0\n",
-        "Byte is in 0 to 255\nget() first Byte, Byte: return 1, 2\nmain: get().1\n",
-        "Byte is in 0 to 255\nget() first Byte, second Byte: return [first: 1, second: 2]\nmain: get().first\n",
-        "Byte is in 0 to 255\nget() values [Byte; 2], count Byte: return [1, 2], 2\nmain: get().values.0\n",
+        format!(
+            "{}Factory has\n    get() value Byte: return 42\nmain: Factory.get().value\n",
+            test_fixtures::preludes::BYTE_PRELUDE
+        ),
+        format!(
+            "{}Factory has\n    get() first Byte, Byte: return 1, 2\nmain: Factory.get().1\n",
+            test_fixtures::preludes::BYTE_PRELUDE
+        ),
+        format!(
+            "{}get() [Byte; 2]: return 1, 2\nmain: get().0\n",
+            test_fixtures::preludes::BYTE_PRELUDE
+        ),
+        format!(
+            "{}get() first Byte, second Byte: return 1, 2\nmain: get().second\n",
+            test_fixtures::preludes::BYTE_PRELUDE
+        ),
+        format!(
+            "{}get() Byte, Byte: return 1, 2\nmain: get().0\n",
+            test_fixtures::preludes::BYTE_PRELUDE
+        ),
+        format!(
+            "{}get() first Byte, Byte: return 1, 2\nmain: get().1\n",
+            test_fixtures::preludes::BYTE_PRELUDE
+        ),
+        format!(
+            "{}get() first Byte, second Byte: return [first: 1, second: 2]\nmain: get().first\n",
+            test_fixtures::preludes::BYTE_PRELUDE
+        ),
+        format!(
+            "{}get() values [Byte; 2], count Byte: return [1, 2], 2\nmain: get().values.0\n",
+            test_fixtures::preludes::BYTE_PRELUDE
+        ),
     ] {
-        let typed = check(source);
+        let typed = check(&source);
         assert!(
             flaw_codes(&typed).is_empty(),
             "{source}: {:?}",
@@ -66,31 +93,41 @@ fn return_sequences_support_named_unnamed_mixed_and_nested_results() {
 fn sequence_context_checks_names_types_arity_and_indices() {
     for (source, code) in [
         (
-            "Byte is in 0 to 255\nget() first Byte, second Byte: return [second: 1, first: 2]\n",
+            format!(
+                "{}get() first Byte, second Byte: return [second: 1, first: 2]\n",
+                test_fixtures::preludes::BYTE_PRELUDE
+            ),
             "type-sequence-name-mismatch",
         ),
         (
-            "Byte is in 0 to 255\nget() first Byte, second Byte: return [1]\n",
+            format!(
+                "{}get() first Byte, second Byte: return [1]\n",
+                test_fixtures::preludes::BYTE_PRELUDE
+            ),
             "type-sequence-arity",
         ),
         (
-            "Byte is in 0 to 255\nFlag is On or Off\nget() first Byte, second Byte: return [1, On]\n",
+            format!(
+                "{}Flag is On or Off\nget() first Byte, second Byte: return [1, On]\n",
+                test_fixtures::preludes::BYTE_PRELUDE
+            ),
             "type-sequence-element-mismatch",
         ),
         (
-            "values: x: 1, y: 2\nmain: values.2\n",
+            "values: x: 1, y: 2\nmain: values.2\n".to_string(),
             "type-sequence-index-out-of-bounds",
         ),
         (
-            "values: x: 1, y: 2\nmain: values.missing\n",
+            "values: x: 1, y: 2\nmain: values.missing\n".to_string(),
             "type-unknown-field",
         ),
         (
-            "Index is in 0 to 1\nFlag is On or Off\nmain(index Index): [1, On].(index)\n",
+            "Index is in 0 to 1\nFlag is On or Off\nmain(index Index): return [1, On].[index]\n"
+                .to_string(),
             "type-sequence-dynamic-index",
         ),
     ] {
-        let typed = check(source);
+        let typed = check(&source);
         assert!(
             flaw_codes(&typed).iter().any(|found| found == code),
             "{source}: {:?}",
@@ -101,9 +138,10 @@ fn sequence_context_checks_names_types_arity_and_indices() {
 
 #[test]
 fn named_sequences_can_be_passed_stored_and_forwarded() {
-    let typed = check(
-        "Byte is in 0 to 255\nget() first Byte, second Byte: return 1, 2\nidentity(value [first Byte, second Byte]) [first Byte, second Byte]: value\nforward() first Byte, second Byte: return identity(get())\nmain:\n    saved: forward()\nreturn saved.second\n",
-    );
+    let typed = check(&format!(
+        "{}get() first Byte, second Byte: return 1, 2\nidentity(value [first Byte, second Byte]) [first Byte, second Byte]: return value\nforward() first Byte, second Byte: return identity(get())\nmain:\n    saved: forward()\n    return saved.second\n",
+        test_fixtures::preludes::BYTE_PRELUDE
+    ));
     assert!(flaw_codes(&typed).is_empty(), "{:?}", typed.all_flaws());
 }
 
@@ -152,8 +190,9 @@ fn constant_sequence_projection_preserves_names_positions_and_nesting() {
 
 #[test]
 fn named_single_reference_results_preserve_their_target_group() {
-    let typed = check(
-        "Byte is in 0 to 255\nget(value ref{a} Byte) selected ref{a} Byte: return value\nforward(value ref{a} Byte) selected ref{a} Byte: return get(ref value)\n",
-    );
+    let typed = check(&format!(
+        "{}get(value ref{{a}} Byte) selected ref{{a}} Byte: return value\nforward(value ref{{a}} Byte) selected ref{{a}} Byte: return get(value)\n",
+        test_fixtures::preludes::BYTE_PRELUDE
+    ));
     assert!(flaw_codes(&typed).is_empty(), "{:?}", typed.all_flaws());
 }

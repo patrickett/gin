@@ -49,7 +49,7 @@ pub(crate) fn closest_name<'a>(
         let dist = edit_distance(target, candidate);
         if dist <= 2 {
             match best {
-                Some((prev_dist, _)) if dist < prev_dist => {
+                Some((prev_dist, prev_name)) if (dist, candidate) < (prev_dist, prev_name) => {
                     best = Some((dist, candidate));
                 }
                 None => {
@@ -60,4 +60,16 @@ pub(crate) fn closest_name<'a>(
         }
     }
     best.map(|(_, name)| name.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::closest_name;
+
+    #[test]
+    fn equally_close_suggestions_are_independent_of_candidate_order() {
+        for names in [["fool", "food"], ["food", "fool"]] {
+            assert_eq!(closest_name("foo", names).as_deref(), Some("food"));
+        }
+    }
 }

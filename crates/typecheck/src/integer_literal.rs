@@ -1,4 +1,5 @@
-use diagnostic::Diagnostic;
+use diagnostic::code::IntegerCode;
+use diagnostic::{Diagnostic, DiagnosticCode};
 use i256::I256;
 
 use crate::representation::Repr;
@@ -8,8 +9,9 @@ use crate::typed::{ExprId, TypedFileAst};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IntegerLiteralMaterializationError {
     NonBitsExpected,
-    InvalidRepresentation { code: &'static str },
+    InvalidRepresentation { code: DiagnosticCode },
     MissingIntegerValidity,
+    OutsideSymbolicValidity,
     NegativeRejected { min: I256, max: I256 },
     OutsideValidity { min: I256, max: I256 },
 }
@@ -29,24 +31,24 @@ pub fn materialize(
     Ok(())
 }
 
-pub fn validate(value: I256, expected: &Ty) -> Result<(), IntegerLiteralMaterializationError> {
-    validate_with_optional_registry(value, expected, None)
-}
-
 pub fn validate_with_registry(
     value: I256,
     expected: &Ty,
     registry: &crate::TypeRegistry,
 ) -> Result<(), IntegerLiteralMaterializationError> {
-    validate_with_optional_registry(value, expected, Some(registry))
-}
-
-fn validate_with_optional_registry(
-    value: I256,
-    expected: &Ty,
-    registry: Option<&crate::TypeRegistry>,
-) -> Result<(), IntegerLiteralMaterializationError> {
-    match Repr::derive(expected, registry) {
+    if registry.is_target_dependent_integer(expected)
+        && let Some(validity) = registry.integer_validity_for_type(expected)
+    {
+        return match validity.domain().membership(value) {
+            ast::integer::ContainmentProof::Disproven => {
+                Err(IntegerLiteralMaterializationError::OutsideSymbolicValidity)
+            }
+            ast::integer::ContainmentProof::Proven | ast::integer::ContainmentProof::Unknown => {
+                Ok(())
+            }
+        };
+    }
+    match Repr::derive(expected, Some(registry)) {
         Ok(_) => {}
         Err(crate::representation::RepresentationError::InvalidInteger { code, .. }) => {
             return Err(IntegerLiteralMaterializationError::InvalidRepresentation { code });
@@ -54,7 +56,7 @@ fn validate_with_optional_registry(
         Err(_) => return Err(IntegerLiteralMaterializationError::NonBitsExpected),
     }
     let validity = registry
-        .and_then(|registry| registry.integer_validity_for_type(expected))
+        .integer_validity_for_type(expected)
         .or_else(|| expected.anonymous_integer_validity())
         .ok_or(IntegerLiteralMaterializationError::MissingIntegerValidity)?;
     let hull = validity
@@ -82,8 +84,9 @@ pub fn diagnostic(
     error: &IntegerLiteralMaterializationError,
 ) -> Diagnostic {
     match error {
+        // type-integer-literal-expected-non-bits
         IntegerLiteralMaterializationError::NonBitsExpected => Diagnostic::new(
-            "type-integer-literal-expected-non-bits",
+            IntegerCode::LiteralExpectedNonBits,
             format!(
                 "integer literal `{value}` cannot materialize as `{}`",
                 expected.format_for_hover()
@@ -96,15 +99,25 @@ pub fn diagnostic(
                 expected.format_for_hover()
             ),
         ),
+        // type-integer-literal-out-of-range
+        IntegerLiteralMaterializationError::OutsideSymbolicValidity => Diagnostic::new(
+            IntegerCode::LiteralOutOfRange,
+            format!(
+                "integer literal `{value}` is outside `{}` validity",
+                expected.format_for_hover()
+            ),
+        ),
+        // type-integer-literal-missing-validity
         IntegerLiteralMaterializationError::MissingIntegerValidity => Diagnostic::new(
-            "type-integer-literal-missing-validity",
+            IntegerCode::LiteralMissingValidity,
             format!(
                 "`{}` has bits representation but no integer validity",
                 expected.format_for_hover()
             ),
         ),
+        // type-negative-integer-literal-rejected
         IntegerLiteralMaterializationError::NegativeRejected { min, max } => Diagnostic::new(
-            "type-negative-integer-literal-rejected",
+            IntegerCode::LiteralNegativeRejected,
             format!(
                 "negative integer literal `{value}` is outside `{}` bounds {min} to {max}",
                 expected.format_for_hover()
@@ -112,8 +125,9 @@ pub fn diagnostic(
         )
         .with_arg("min", min.to_string())
         .with_arg("max", max.to_string()),
+        // type-integer-literal-out-of-range
         IntegerLiteralMaterializationError::OutsideValidity { min, max } => Diagnostic::new(
-            "type-integer-literal-out-of-range",
+            IntegerCode::LiteralOutOfRange,
             format!(
                 "integer literal `{value}` is outside `{}` bounds {min} to {max}",
                 expected.format_for_hover()

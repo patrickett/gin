@@ -1,0 +1,116 @@
+mod support;
+
+use internment::Intern;
+use support::check_lexed_with;
+use typecheck::TypedExprKind;
+
+const PRELUDE: &str = "Byte is in 0 to 255\nByte has finish(self): return\n";
+
+fn local_body(typed: &typecheck::TypedFileAst) -> typecheck::ExprId {
+    typed
+        .exprs
+        .kind
+        .iter()
+        .find_map(|kind| match kind {
+            TypedExprKind::Bind {
+                name,
+                body,
+                unassigned: false,
+                ..
+            } if *name == Intern::from_ref("local") => Some(*body),
+            _ => None,
+        })
+        .expect("local callable with a return value")
+}
+
+#[test]
+fn local_callable_preserves_all_named_results() {
+    let typed = check_lexed_with(
+        PRELUDE,
+        "outer() first Byte, second Byte:\n    local() first Byte, second Byte: return 1, 2\n    return local()\n",
+    );
+    assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
+    let body = local_body(&typed);
+    let TypedExprKind::ResultRow(items) = typed.exprs.kind_of(body).unwrap() else {
+        panic!("expected complete result row");
+    };
+    let ast::Ty::Sequence(fields) = typed.exprs.ty_of(body).unwrap() else {
+        panic!("expected result row type");
+    };
+    assert_eq!(items.len(), 2);
+    assert_eq!(fields.len(), 2);
+    assert_eq!(fields[0].name, Some(Intern::from_ref("first")));
+    assert_eq!(fields[1].name, Some(Intern::from_ref("second")));
+    for (item, field) in items.iter().zip(fields) {
+        assert_eq!(typed.exprs.ty_of(*item), Some(field.ty.as_ref()));
+    }
+}
+
+#[test]
+fn local_callable_materializes_all_array_elements() {
+    for result in ["Byte, Byte", "[Byte; 2]"] {
+        let typed = check_lexed_with(
+            PRELUDE,
+            &format!(
+                "outer() {result}:\n    local() Byte, Byte: return 1, 2\n    return local()\n"
+            ),
+        );
+        assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
+        let body = local_body(&typed);
+        let TypedExprKind::ArrayLit(items) = typed.exprs.kind_of(body).unwrap() else {
+            panic!("expected array literal");
+        };
+        let ast::Ty::Array { elem, .. } = typed.exprs.ty_of(body).unwrap() else {
+            panic!("expected array type");
+        };
+        assert_eq!(items.len(), 2);
+        for item in items {
+            assert_eq!(typed.exprs.ty_of(*item), Some(elem.as_ref()));
+        }
+    }
+}
+
+#[test]
+fn local_callable_checks_every_array_element() {
+    let typed = check_lexed_with(
+        PRELUDE,
+        "outer() [Byte; 2]:\n    local() Byte, Byte: return 1, 256\n    return local()\n",
+    );
+    assert!(
+        typed
+            .all_flaws()
+            .iter()
+            .any(|(_, flaw)| flaw.code.slug() == "type-integer-literal-out-of-range"),
+        "{:?}",
+        typed.all_flaws()
+    );
+}
+
+#[test]
+fn local_callable_checks_array_cardinality() {
+    let typed = check_lexed_with(
+        PRELUDE,
+        "outer() [Byte; 2]:\n    local() Byte, Byte: return 1, 2, 3\n    return local()\n",
+    );
+    assert!(
+        typed
+            .all_flaws()
+            .iter()
+            .any(|(_, flaw)| flaw.code.slug() == "type-fixed-array-length-mismatch"),
+        "{:?}",
+        typed.all_flaws()
+    );
+}
+
+#[test]
+fn local_callable_infers_a_complete_result_row() {
+    let typed = check_lexed_with(
+        PRELUDE,
+        "outer():\n    local(): return 1, 256\n    return local()\n",
+    );
+    assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
+    let body = local_body(&typed);
+    assert!(
+        matches!(typed.exprs.kind_of(body), Some(TypedExprKind::ResultRow(items)) if items.len() == 2)
+    );
+}

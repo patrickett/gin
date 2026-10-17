@@ -1,6 +1,8 @@
 use crate::representation::{Repr, RepresentationError};
 use crate::{TypeRegistry, ty::Ty};
-use flask::{CompileTarget, TargetArch};
+use diagnostic::DiagnosticCode;
+use diagnostic::code::{LayoutCode, RepresentationCode};
+use flask::{Architecture, CompileTarget};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,14 +73,23 @@ pub enum LayoutError {
 }
 
 impl LayoutError {
-    pub fn code(&self) -> &'static str {
+    pub fn code(&self) -> DiagnosticCode {
         match self {
-            Self::UnsupportedTarget => "unsupported-target-layout",
-            Self::UnsupportedRepresentation(_) => "unsupported-type-representation",
-            Self::SizeOverflow | Self::AlignmentOverflow => "aggregate-layout-overflow",
-            Self::ZeroSizedPointee => "zero-sized-pointee-offset",
+            // unsupported-target-layout
+            Self::UnsupportedTarget => DiagnosticCode::Layout(LayoutCode::TargetUnsupported),
+            Self::UnsupportedRepresentation(_) => {
+                // unsupported-type-representation
+                DiagnosticCode::Representation(RepresentationCode::Unsupported)
+            }
+            Self::SizeOverflow | Self::AlignmentOverflow => {
+                // aggregate-layout-overflow
+                DiagnosticCode::Layout(LayoutCode::AggregateOverflow)
+            }
+            // zero-sized-pointee-offset
+            Self::ZeroSizedPointee => DiagnosticCode::Layout(LayoutCode::ZeroSizedPointeeOffset),
             Self::NaturalAlignmentUnrepresentable { .. } => {
-                "target-layout-natural-alignment-unrepresentable"
+                // target-layout-natural-alignment-unrepresentable
+                DiagnosticCode::Layout(LayoutCode::NaturalAlignmentUnrepresentable)
             }
         }
     }
@@ -122,10 +133,11 @@ impl TargetLayout {
         let CompileTarget::Concrete(triple) = target else {
             return Err(LayoutError::UnsupportedTarget);
         };
-        let target = match triple.arch {
-            TargetArch::X86_64 => LayoutTarget::X86_64,
-            TargetArch::Arm64 => LayoutTarget::Arm64,
-            TargetArch::Wasm32 => LayoutTarget::Wasm32,
+        let target = match triple.architecture() {
+            Architecture::X86_64 => LayoutTarget::X86_64,
+            Architecture::Aarch64(_) => LayoutTarget::Arm64,
+            Architecture::Wasm32 => LayoutTarget::Wasm32,
+            _ => return Err(LayoutError::UnsupportedTarget),
         };
         Ok(Self::new(target))
     }
@@ -147,7 +159,9 @@ impl TargetLayout {
     }
 
     pub fn max_alignment(self) -> u64 {
-        1u64 << self.index_bits.saturating_sub(2)
+        1_u64
+            .checked_shl(self.index_bits.saturating_sub(2))
+            .unwrap_or(u64::MAX)
     }
 
     pub fn with_address_layout(
@@ -173,7 +187,7 @@ impl TargetLayout {
     pub fn layout_repr(&self, repr: &Repr) -> Result<Layout, LayoutError> {
         let layout = match repr {
             Repr::Bits { width } => {
-                let size = u64::from(width.div_ceil(8));
+                let size = scalar_size_bytes(*width);
                 Ok(Layout {
                     size,
                     alignment: scalar_alignment(size),
@@ -188,7 +202,10 @@ impl TargetLayout {
                 abi: AbiClass::Scalar,
             }),
             Repr::Product { fields } => self.layout_product(fields),
-            Repr::Sum { variants } => self.layout_sum(variants),
+            Repr::Sum {
+                variants,
+                discriminant_width,
+            } => self.layout_sum(variants, *discriminant_width),
             Repr::Array { element, length } => self.layout_array(element, *length),
         }?;
         self.validate_natural_alignment("representation", 0, layout.alignment)?;
@@ -292,9 +309,9 @@ impl TargetLayout {
         })
     }
 
-    fn layout_sum(&self, variants: &[Repr]) -> Result<Layout, LayoutError> {
+    fn layout_sum(&self, variants: &[Repr], width: Option<u32>) -> Result<Layout, LayoutError> {
         let discriminant = Repr::Bits {
-            width: discriminant_width(variants.len()),
+            width: width.unwrap_or_else(|| discriminant_width(variants.len())),
         };
         let discriminant_layout = self.layout_repr(&discriminant)?;
         let variant_layouts = variants
@@ -343,9 +360,7 @@ impl TargetLayout {
         address_space: u32,
         alignment: u64,
     ) -> Result<(), LayoutError> {
-        let max_alignment = 1_u64
-            .checked_shl(self.index_bits.saturating_sub(2))
-            .unwrap_or(u64::MAX);
+        let max_alignment = self.max_alignment();
         if self.index_bits < 2
             || alignment == 0
             || !alignment.is_power_of_two()
@@ -369,7 +384,14 @@ impl Default for TargetLayout {
     }
 }
 
-fn scalar_alignment(size: u64) -> u64 {
+/// Byte size of an integer of `width` bits.
+#[must_use]
+pub fn scalar_size_bytes(width: u32) -> u64 {
+    u64::from(width.div_ceil(8))
+}
+
+#[must_use]
+pub fn scalar_alignment(size: u64) -> u64 {
     size.next_power_of_two().clamp(1, 16)
 }
 

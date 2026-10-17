@@ -1,7 +1,8 @@
-use crate::compile_time_trait::CompileTimeTraitRegistry;
 use crate::{FileId, typed::TypedFileAst};
 use ast::FileAst;
 use ast_format::type_expr::ExprFormatExt;
+use diagnostic::DiagnosticCode;
+use diagnostic::code::InterfaceCode;
 use flask::CompileTarget;
 use interface::{
     DeclarationRef, Fingerprint, InterfaceDeclaration, InterfacePublication, PackageInstanceId,
@@ -10,12 +11,11 @@ use interface::{
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
-use super::{PackageTransformOptions, TransformCtx, transform_package};
+use super::{PackageCheckSession, PackageTransformOptions, TransformCtx, transform_package};
 
 pub struct PackageTransformArtifacts {
     pub typed_asts: Vec<TypedFileAst>,
     pub compile_time_eval_ast: Arc<FileAst>,
-    pub trait_registry: Option<CompileTimeTraitRegistry>,
     pub public_interface: PublicInterface,
     pub interface_publication: InterfacePublication,
     pub implementation_fingerprint: Fingerprint,
@@ -33,25 +33,51 @@ pub fn transform_package_with_shared_context(
 }
 
 pub fn transform_package_with_shared_context_and_package(
-    mut file_asts: Vec<FileAst>,
+    file_asts: Vec<FileAst>,
     options: PackageTransformOptions,
     package: ast::ty::PackageInstanceKey,
 ) -> PackageTransformArtifacts {
+    transform_package_with_context_impl(file_asts, options, package, None)
+}
+
+pub fn transform_package_with_shared_context_and_session(
+    file_asts: Vec<FileAst>,
+    options: PackageTransformOptions,
+    package: ast::ty::PackageInstanceKey,
+    session: &mut PackageCheckSession,
+) -> PackageTransformArtifacts {
+    transform_package_with_context_impl(file_asts, options, package, Some(session))
+}
+
+fn transform_package_with_context_impl(
+    mut file_asts: Vec<FileAst>,
+    options: PackageTransformOptions,
+    package: ast::ty::PackageInstanceKey,
+    session: Option<&mut PackageCheckSession>,
+) -> PackageTransformArtifacts {
+    let merge_profile = compiler_profile::span(compiler_profile::Phase::EvalAst);
     let mut compile_time_eval_ast = FileAst::default();
     for ast in &file_asts {
         compile_time_eval_ast.merge_from(ast.clone());
     }
 
-    let compile_time_eval_ast = Arc::new(compile_time_eval_ast);
-    let trait_registry = if options.ide_package {
-        None
-    } else {
-        Some(CompileTimeTraitRegistry::from_parse_ast(
-            &compile_time_eval_ast,
-            Arc::clone(&compile_time_eval_ast),
-        ))
-    };
+    let mut imported_constants = crate::prepare_target::const_env_from_prepared_ast(
+        &compile_time_eval_ast,
+        Some(&options.compile_target),
+    );
+    imported_constants.retain(|name, value| name.as_str().contains('.') && value.is_some());
+    if !imported_constants.is_empty() {
+        for ast in &mut file_asts {
+            crate::prepare_target::materialize_constant_predicates(ast, &imported_constants);
+        }
+        crate::prepare_target::materialize_constant_predicates(
+            &mut compile_time_eval_ast,
+            &imported_constants,
+        );
+    }
 
+    let compile_time_eval_ast = Arc::new(compile_time_eval_ast);
+    drop(merge_profile);
     let package_ctx =
         TransformCtx::with_package_compile_time_arc(Arc::clone(&compile_time_eval_ast))
             .with_package_instance(package);
@@ -62,8 +88,12 @@ pub fn transform_package_with_shared_context_and_package(
         .map(|(i, ast)| (ast, FileId(i as u32)))
         .collect();
 
-    let mut typed_asts = transform_package(&file_asts_with_ids, &package_ctx, options.clone());
+    let mut typed_asts = match session {
+        Some(session) => session.transform(&file_asts_with_ids, &package_ctx, options.clone()),
+        None => transform_package(&file_asts_with_ids, &package_ctx, options.clone()),
+    };
 
+    let _interface = compiler_profile::span(compiler_profile::Phase::Interface);
     let erasable_private_aliases: HashSet<_> = compile_time_eval_ast
         .private_tags
         .iter()
@@ -93,14 +123,13 @@ pub fn transform_package_with_shared_context_and_package(
                     owner: ast::ResultFamilyOwner::LocalCallable(_),
                     ..
                 }
-            ) && !bind
-                .flaws
-                .iter()
-                .any(|flaw| flaw.code.slug() == "interface-local-result-family-escapes")
-            {
-                bind.flaws.push(
+            ) && !bind.flaws.iter().any(|flaw| {
+                flaw.code == DiagnosticCode::Interface(InterfaceCode::LocalResultFamilyEscapes)
+            }) {
+                bind.push_flaw(
+                    // interface-local-result-family-escapes
                     diagnostic::Diagnostic::new(
-                        "interface-local-result-family-escapes",
+                        InterfaceCode::LocalResultFamilyEscapes,
                         "a session-local result family cannot appear in a public interface",
                     )
                     .at_span_id(bind.name_span, &typed.span_table),
@@ -114,14 +143,14 @@ pub fn transform_package_with_shared_context_and_package(
                 &erasable_private_aliases,
             );
             if exposes_private_identity
-                && !bind
-                    .flaws
-                    .iter()
-                    .any(|flaw| flaw.code.slug() == "interface-public-private-identity")
+                && !bind.flaws.iter().any(|flaw| {
+                    flaw.code == DiagnosticCode::Interface(InterfaceCode::PublicPrivateIdentity)
+                })
             {
-                bind.flaws.push(
+                bind.push_flaw(
+                    // interface-public-private-identity
                     diagnostic::Diagnostic::new(
-                        "interface-public-private-identity",
+                        InterfaceCode::PublicPrivateIdentity,
                         "a public declaration exposes a residual private nominal identity",
                     )
                     .at_span_id(bind.name_span, &typed.span_table),
@@ -146,7 +175,7 @@ pub fn transform_package_with_shared_context_and_package(
             })
             .unwrap_or_else(|| "".to_string());
 
-        for (id, tag) in &typed.tags {
+        for (id, tag) in &*typed.tags {
             if typed.private_tags.contains(id) {
                 continue;
             }
@@ -157,8 +186,44 @@ pub fn transform_package_with_shared_context_and_package(
                 encode_string(&mut bytes, &key);
                 encode_string(&mut bytes, &tag.declaration_text);
                 encode_ty(&mut bytes, &tag.resolved_ty);
+                if let Some(declaration) =
+                    typed.type_registry.declaration_for_type(&tag.resolved_ty)
+                {
+                    encode_ty(&mut bytes, &declaration.definition);
+                    let mut refinements: Vec<_> = declaration.field_refinements.iter().collect();
+                    refinements.sort_by_key(|(name, _)| name.as_str());
+                    encode_u32(&mut bytes, refinements.len());
+                    for (name, refinement) in refinements {
+                        encode_string(&mut bytes, name.as_str());
+                        encode_string(&mut bytes, &format!("{refinement:?}"));
+                    }
+                    let mut members: Vec<_> = declaration.private_members.iter().collect();
+                    members.sort_by_key(|(name, _)| name.as_str());
+                    encode_u32(&mut bytes, members.len());
+                    for (name, grants) in members {
+                        encode_string(&mut bytes, name.as_str());
+                        let mut grants: Vec<_> = grants
+                            .iter()
+                            .map(|path| {
+                                path.iter()
+                                    .map(|part| part.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(".")
+                            })
+                            .collect();
+                        grants.sort();
+                        encode_u32(&mut bytes, grants.len());
+                        for grant in grants {
+                            encode_string(&mut bytes, &grant);
+                        }
+                    }
+                }
+
                 for provided in &tag.provided_traits {
                     encode_string(&mut bytes, provided.trait_name.as_str());
+                    for arg in &provided.args {
+                        encode_string(&mut bytes, &arg.value.format_surface());
+                    }
                     for (name, value) in &provided.fields {
                         encode_string(&mut bytes, name.as_str());
                         encode_string(&mut bytes, &value.value.format_surface());
@@ -167,10 +232,6 @@ pub fn transform_package_with_shared_context_and_package(
                 if let Some(bits) = &tag.attributes.bits {
                     encode_string(&mut bytes, &bits.value.format_surface());
                 }
-                encode_string(
-                    &mut bytes,
-                    &format!("{:?}", tag.attributes.reflection_roles),
-                );
                 if !tag.provided_traits.is_empty() {
                     resolution_surfaces.insert(bytes.clone());
                 }
@@ -184,11 +245,9 @@ pub fn transform_package_with_shared_context_and_package(
             }
         }
 
-        for (_, bind) in typed
-            .defs
-            .iter()
-            .filter(|(def_id, _)| !typed.private_defs.contains(def_id))
-        {
+        for (_, bind) in typed.defs.iter().filter(|(def_id, bind)| {
+            !typed.private_defs.contains(def_id) && !bind.attributes.is_private()
+        }) {
             let declaration_path = format!("{module_path}::{}", bind.name.as_str());
             let declaration_key = format!("subject:{module_path}:{declaration_path}");
             let reference = DeclarationRef::Subject {
@@ -224,7 +283,7 @@ pub fn transform_package_with_shared_context_and_package(
         typed.exprs.kind.iter().any(|kind| {
             matches!(
                 kind,
-                crate::TypedExprKind::Asm {
+                crate::TypedExprKind::Emit {
                     state: crate::assembly::AssemblyState::Checked(_),
                     ..
                 }
@@ -285,7 +344,6 @@ pub fn transform_package_with_shared_context_and_package(
     PackageTransformArtifacts {
         typed_asts,
         compile_time_eval_ast,
-        trait_registry,
         public_interface,
         interface_publication,
         implementation_fingerprint,
@@ -297,17 +355,28 @@ fn encode_callable_surface(declaration_key: &str, bind: &crate::typed::TypedBind
     encode_string(&mut bytes, declaration_key);
     encode_string(&mut bytes, &format!("{:?}", bind.param_conventions));
     encode_string(&mut bytes, &format!("{:?}", bind.param_kinds));
+    for constraints in bind.param_constraints.iter() {
+        encode_u32(&mut bytes, constraints.len());
+        for constraint in constraints {
+            encode_ty(&mut bytes, constraint);
+        }
+    }
     encode_string(&mut bytes, &format!("{:?}", bind.call_capability));
     encode_string(&mut bytes, &format!("{:?}", bind.definition_stage));
     encode_string(&mut bytes, &format!("{:?}", bind.param_requirements));
     encode_string(&mut bytes, &format!("{:?}", bind.param_refinements));
+    encode_string(&mut bytes, &format!("{:?}", bind.effects.scalar_result));
+    encode_string(&mut bytes, &format!("{:?}", bind.effects.scalar_fields));
+    encode_string(&mut bytes, &format!("{:?}", bind.effects.postconditions));
+    encode_string(&mut bytes, &format!("{:?}", bind.payload_postconditions));
     encode_string(&mut bytes, &format!("{:?}", bind.param_groups));
+    encode_string(&mut bytes, &bind.references.surface_key());
     encode_string(
         &mut bytes,
         bind.infix_symbol.as_ref().map(|s| s.as_str()).unwrap_or(""),
     );
     encode_u32(&mut bytes, bind.params.len());
-    for (name, ty) in &bind.params {
+    for (name, ty) in bind.params.iter() {
         encode_string(&mut bytes, name.as_str());
         encode_ty(&mut bytes, ty);
     }
@@ -339,7 +408,7 @@ fn implementation_fingerprint(typed_asts: &[TypedFileAst], target: &CompileTarge
         .iter()
         .flat_map(|typed| {
             typed.exprs.kind.iter().filter_map(|kind| {
-                let crate::TypedExprKind::Asm {
+                let crate::TypedExprKind::Emit {
                     operands, state, ..
                 } = kind
                 else {
@@ -413,8 +482,17 @@ fn ty_contains_private_identity(
 ) -> bool {
     match ty {
         ast::Ty::Named { instance, .. } => {
-            private_names.contains(&instance.declaration.name)
-                && !erasable_aliases.contains(&instance.declaration.name)
+            (private_names.contains(&instance.declaration.name)
+                && !erasable_aliases.contains(&instance.declaration.name))
+                || instance
+                    .arguments
+                    .iter()
+                    .any(|(_, argument)| match argument {
+                        ast::TyArg::Type(ty) => {
+                            ty_contains_private_identity(ty, private_names, erasable_aliases)
+                        }
+                        ast::TyArg::Const(_) => false,
+                    })
         }
         ast::Ty::Record { fields, .. } => fields
             .iter()
@@ -430,6 +508,7 @@ fn ty_contains_private_identity(
         }),
         ast::Ty::Ref { inner, .. }
         | ast::Ty::Ptr { inner }
+        | ast::Ty::OwnedStorage { inner }
         | ast::Ty::Address { pointee: inner, .. } => {
             ty_contains_private_identity(inner, private_names, erasable_aliases)
         }
@@ -438,7 +517,7 @@ fn ty_contains_private_identity(
                 ty_contains_private_identity(field, private_names, erasable_aliases)
             })
         }),
-        ast::Ty::ResultFamily { .. } => false,
+        ast::Ty::Proposition(_) | ast::Ty::ResultFamily { .. } => false,
         ast::Ty::UnresolvedLiteral(_)
         | ast::Ty::AnonymousInteger { .. }
         | ast::Ty::Float { .. }
@@ -460,7 +539,3 @@ fn target_profiles_for_compile_target(
         .map(|target| vec![interface::TargetProfile { target }])
         .unwrap_or_default()
 }
-
-#[cfg(test)]
-#[path = "../../tests/transform_package_transform_tests.rs"]
-mod tests;

@@ -1,24 +1,17 @@
+mod support;
+
 use internment::Intern;
 use parser::cursor::TokenCursor;
 use parser::query::SourceParseExt;
+use support::flaw_codes_of;
 use typecheck::FileId;
 use typecheck::transform::{TransformCtx, transform as do_transform};
 use typecheck::{BindBody, DefId};
 
-fn flaws(source: &str) -> Vec<String> {
-    let ast = TokenCursor::parse_source(source);
-    let typed = do_transform(&ast, FileId(0), &TransformCtx::new());
-    typed
-        .all_flaws()
-        .into_iter()
-        .map(|(_, flaw)| flaw.code.slug().to_string())
-        .collect()
-}
-
 fn result_ty(source: &str, name: &str) -> ast::Ty {
     let ast = TokenCursor::parse_source(source);
     let typed = do_transform(&ast, FileId(0), &TransformCtx::new());
-    let body = match &typed.defs[&DefId(Intern::new(name.to_string()))].body {
+    let body = match &typed.defs[&DefId::named(Intern::new(name.to_string()))].body {
         BindBody::Expr(expression) => *expression,
         _ => panic!("expected expression body"),
     };
@@ -27,29 +20,18 @@ fn result_ty(source: &str, name: &str) -> ast::Ty {
 
 #[test]
 fn nominal_operator_missing_reports_nominal_operator_unavailable() {
-    let source = r#"
-Word is in 0 to 255
-Small is in 0 to 31
-add_small_word(lhs own Small, rhs own Word) Word: rhs
-#infix('+')
-#inline
-right_only(lhs Small, rhs Word) Word: add_small_word(lhs, rhs)
-left: Word: 1
-right: Word: 2
-bad_op: left + right
-"#;
-    let codes = flaws(source);
+    let source = format!(
+        "\n{}Small is in 0 to 31\nadd_small_word(lhs own Small, rhs own Word) Word: return rhs\n#infix('+')\n#inline\nright_only(lhs Small, rhs Word) Word: return add_small_word(lhs, rhs)\nleft: Word: 1\nright: Word: 2\nbad_op: left + right\n",
+        test_fixtures::preludes::WORD_PRELUDE
+    );
+    let codes = flaw_codes_of(&source);
     assert!(codes.contains(&"type-nominal-operator-unavailable".to_string()));
 }
 
 #[test]
 fn infix_declaration_requires_exactly_two_value_parameters() {
-    let source = "
-Word is in 0 to 10
-#infix('+')
-unary(value Word) Word: value
-";
-    let codes = flaws(source);
+    let source = "\nWord is in 0 to 10\nWord has\n    finish(self):\n        return\n#infix('+')\nunary(value Word) Word: return value\n";
+    let codes = flaw_codes_of(source);
     assert!(
         codes.contains(&"type-invalid-infix-declaration".to_string()),
         "expected infix arity diagnostic, got {codes:?}"
@@ -57,22 +39,17 @@ unary(value Word) Word: value
 }
 
 #[test]
-fn nominal_comparison_dispatch_preserves_declared_result_and_owned_conventions() {
-    let source = "
-Word is in 0 to 255
-Decision is Lower or NotLower
-#infix('<')
-less(lhs own Word, rhs own Word) Decision: Decision.Lower
-left Word: 1
-right Word: 2
-result: left < right
-";
+fn named_comparison_preserves_declared_result_and_owned_conventions() {
+    let source = format!(
+        "\n{}Decision is Lower or NotLower\nless(lhs own Word, rhs own Word) Decision: return Decision.Lower\nleft Word: 1\nright Word: 2\nresult: less(left, right)\n",
+        test_fixtures::preludes::WORD_PRELUDE
+    );
 
     assert!(matches!(
-        result_ty(source, "result"),
+        result_ty(&source, "result"),
         ast::Ty::Named { name, .. } if name.as_str() == "Decision"
     ));
-    let codes = flaws(source);
+    let codes = flaw_codes_of(&source);
     assert_eq!(
         codes
             .iter()
@@ -92,17 +69,12 @@ result: left < right
 }
 
 #[test]
-fn nominal_comparison_ref_conventions_observe_without_consuming() {
-    let source = "
-Word is in 0 to 255
-Decision is Lower or NotLower
-#infix('<')
-less(lhs ref Word, rhs ref Word) Decision: Decision.Lower
-left Word: 1
-right Word: 2
-result: left < right
-";
-    let codes = flaws(source);
+fn named_comparison_ref_conventions_observe_without_consuming() {
+    let source = format!(
+        "\n{}Decision is Lower or NotLower\nless(lhs ref Word, rhs ref Word) Decision: return Decision.Lower\nleft Word: 1\nright Word: 2\nresult: less(left, right)\n",
+        test_fixtures::preludes::WORD_PRELUDE
+    );
+    let codes = flaw_codes_of(&source);
 
     assert!(
         !codes.iter().any(|code| code == "type-consume-required"),
@@ -115,118 +87,83 @@ result: left < right
 }
 
 #[test]
-fn nominal_left_operand_contextualizes_unresolved_literal_rhs() {
-    let source = "
-Word is in 0 to 255
-Decision is Lower or NotLower
-#infix('<')
-less(lhs Word, rhs Word) Decision: Decision.Lower
-left Word: 1
-result: left < 10
-";
+fn numeric_comparison_preserves_the_literal_rhs_domain() {
+    let source =
+        "Word is in 0 to 255\nWord has finish(self): return\nleft Word: 1\nresult: left < 256\n";
     let ast = TokenCursor::parse_source(source);
     let typed = do_transform(&ast, FileId(0), &TransformCtx::new());
-    let BindBody::Expr(result) = typed.defs[&DefId(Intern::from_ref("result"))].body else {
-        panic!("expected comparison body");
+    let BindBody::Expr(result) = typed.defs[&DefId::named(Intern::from_ref("result"))].body else {
+        panic!("comparison body");
     };
-    let typecheck::TypedExprKind::FnCall {
-        target,
-        args: Some(args),
-        ..
-    } = &typed.exprs.kind[result.as_usize()]
+    let typecheck::TypedExprKind::IntrinsicCall { args, .. } = &typed.exprs.kind[result.index()]
     else {
-        panic!(
-            "expected nominal operator call, got {:?}",
-            typed.exprs.kind[result.as_usize()]
-        );
+        panic!("fixed numeric comparison");
     };
-
-    assert_eq!(target.0.as_str(), "less");
-    assert_eq!(
-        typed.exprs.ty[args[1].as_usize()],
-        typed.exprs.ty[args[0].as_usize()]
-    );
     assert!(matches!(
-        &typed.exprs.ty[args[1].as_usize()],
-        ast::Ty::Named { name, .. } if name.as_str() == "Word"
+        typed.exprs.ty[args[1].index()],
+        ast::Ty::AnonymousInteger { .. }
     ));
-    assert!(
-        typed
-            .all_flaws()
-            .iter()
-            .all(|(_, flaw)| { flaw.code.slug() != "type-mixed-anonymous-nominal-comparison" })
+    assert_eq!(
+        typed.exprs.const_value_of(args[1]).cloned().flatten(),
+        Some(ast::ConstValue::Int(256.into()))
     );
+    assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
 }
 
 #[test]
-fn anonymous_integer_less_uses_less_result_family() {
+fn anonymous_integer_less_is_a_less_proposition() {
     assert!(matches!(
         result_ty("lt: 1 < 2", "lt"),
-        ast::Ty::ResultFamily {
-            owner: ast::ResultFamilyOwner::Structural(ast::OperatorRole::Less),
-            ..
-        }
+        ast::Ty::Proposition(predicate) if matches!(*predicate, ast::ProofProposition::Compare { relation: ast::ProofRelation::Less, .. })
     ));
 }
 
 #[test]
-fn anonymous_integer_less_equal_uses_less_equal_result_family() {
+fn anonymous_integer_less_equal_is_a_less_equal_proposition() {
     assert!(matches!(
         result_ty("le: 1 <= 2", "le"),
-        ast::Ty::ResultFamily {
-            owner: ast::ResultFamilyOwner::Structural(ast::OperatorRole::LessOrEqual),
-            ..
-        }
+        ast::Ty::Proposition(predicate) if matches!(*predicate, ast::ProofProposition::Compare { relation: ast::ProofRelation::LessOrEqual, .. })
     ));
 }
 
 #[test]
-fn anonymous_integer_greater_uses_greater_result_family() {
+fn anonymous_integer_greater_is_a_greater_proposition() {
     assert!(matches!(
         result_ty("gt: 2 > 1", "gt"),
-        ast::Ty::ResultFamily {
-            owner: ast::ResultFamilyOwner::Structural(ast::OperatorRole::Greater),
-            ..
-        }
+        ast::Ty::Proposition(predicate) if matches!(*predicate, ast::ProofProposition::Compare { relation: ast::ProofRelation::Greater, .. })
     ));
 }
 
 #[test]
-fn anonymous_integer_greater_equal_uses_greater_equal_result_family() {
+fn anonymous_integer_greater_equal_is_a_greater_equal_proposition() {
     assert!(matches!(
         result_ty("ge: 2 >= 1", "ge"),
-        ast::Ty::ResultFamily {
-            owner: ast::ResultFamilyOwner::Structural(ast::OperatorRole::GreaterOrEqual),
-            ..
-        }
+        ast::Ty::Proposition(predicate) if matches!(*predicate, ast::ProofProposition::Compare { relation: ast::ProofRelation::GreaterOrEqual, .. })
     ));
 }
 
 #[test]
-fn anonymous_integer_equal_uses_equal_result_family() {
+fn anonymous_integer_equal_is_an_equal_proposition() {
     assert!(matches!(
         result_ty("eq: 1 = 2", "eq"),
-        ast::Ty::ResultFamily {
-            owner: ast::ResultFamilyOwner::Structural(ast::OperatorRole::Equal),
-            ..
-        }
+        ast::Ty::Proposition(predicate) if matches!(*predicate, ast::ProofProposition::Compare { relation: ast::ProofRelation::Equal, .. })
     ));
 }
 
 #[test]
-fn structural_operator_families_with_same_labels_are_incompatible() {
-    let codes = flaws("less: 1 < 2\nequal: 1 = 2\nbad: less = equal\n");
+fn propositions_are_not_numeric_operands() {
+    let codes = flaw_codes_of("less: 1 < 2\nequal: 1 = 2\nbad: less = equal\n");
     assert!(
-        codes.contains(&"type-result-family-incompatible".to_string()),
+        codes.contains(&"type-numeric-predicate-operands".to_string()),
         "{codes:?}"
     );
 }
 
 #[test]
-fn structural_less_records_true_and_false_evidence_on_the_value() {
+fn less_records_proposition_evidence() {
     let ast = TokenCursor::parse_source("less: 1 < 2");
     let typed = do_transform(&ast, FileId(0), &TransformCtx::new());
-    let body = match &typed.defs[&DefId(Intern::from_ref("less"))].body {
+    let body = match &typed.defs[&DefId::named(Intern::from_ref("less"))].body {
         BindBody::Expr(expression) => *expression,
         _ => panic!("expected expression body"),
     };
@@ -235,87 +172,33 @@ fn structural_less_records_true_and_false_evidence_on_the_value() {
         .expect("structural comparison evidence");
 
     assert!(matches!(
-        evidence.owner,
-        ast::ResultFamilyOwner::Structural(ast::OperatorRole::Less)
-    ));
-    assert!(matches!(
-        evidence.alternatives.as_slice(),
-        [
-            typecheck::AlternativeEvidence {
-                label: false_label,
-                proposition: typecheck::EvidenceProposition::IntegerComparison {
-                    comparison: typecheck::MathematicalComparison::GreaterOrEqual,
-                    ..
-                }
-            },
-            typecheck::AlternativeEvidence {
-                label: true_label,
-                proposition: typecheck::EvidenceProposition::IntegerComparison {
-                    comparison: typecheck::MathematicalComparison::Less,
-                    ..
-                }
-            }
-        ] if false_label.as_str() == "False" && true_label.as_str() == "True"
+        evidence.as_ref(),
+        typecheck::ValueEvidence::Proposition(typecheck::EvidenceProposition::IntegerComparison {
+            comparison: typecheck::MathematicalComparison::Less,
+            ..
+        })
     ));
 }
 
 #[test]
-fn mixed_anonymous_nominal_comparison_is_rejected_in_both_directions() {
-    let source = "
-Int is in 0 to 255
-value Int: 10
-from_named: 1 < value
-to_named: value < (2 + 0)
-";
-    let codes = flaws(source);
-    assert_eq!(
-        codes
-            .iter()
-            .filter(|code| *code == "type-mixed-anonymous-nominal-comparison")
-            .count(),
-        2,
-        "{codes:?}"
-    );
-}
-
-#[test]
-fn anonymous_left_nominal_right_comparison_is_rejected() {
-    let codes = flaws("Int is in 0 to 255\nvalue Int: 10\nbad: 1 < value\n");
-    assert!(
-        codes
-            .iter()
-            .any(|code| code == "type-mixed-anonymous-nominal-comparison"),
-        "{codes:?}"
-    );
-}
-
-#[test]
-fn nominal_left_anonymous_right_comparison_is_rejected() {
-    let codes = flaws("Int is in 0 to 255\nvalue Int: 10\nbad: value < (1 + 1)\n");
-    assert!(
-        codes
-            .iter()
-            .any(|code| code == "type-mixed-anonymous-nominal-comparison"),
-        "{codes:?}"
-    );
+fn numeric_domains_compare_in_both_directions() {
+    let source = "Int is in 0 to 255\nInt has finish(self): return\nvalue Int: 10\nfrom_named: 1 < value\nto_named: value < (2 + 0)\n";
+    let codes = flaw_codes_of(source);
+    assert!(codes.is_empty(), "{codes:?}");
 }
 
 #[test]
 fn is_in_range_pattern_bypasses_nominal_comparison_dispatch() {
-    let source = "
-Word is in 0 to 255
-Decision is Inside or Outside
-#infix('=')
-equal(lhs ref Word, rhs ref Word) Decision: Decision.Inside
-classify(value Word) Word: when value is in 0 to 127 then 1
-                              else 2
-";
+    let source = format!(
+        "\n{}Decision is Inside or Outside\nequal(lhs ref Word, rhs ref Word) Decision: return Decision.Inside\nclassify(value Word) Word: return when value is in 0 to 127 then 1\n                              else 2\n",
+        test_fixtures::preludes::WORD_PRELUDE
+    );
     let typed = do_transform(
-        &TokenCursor::parse_source(source),
+        &TokenCursor::parse_source(&source),
         FileId(0),
         &TransformCtx::new(),
     );
-    let BindBody::Expr(body) = typed.defs[&DefId(Intern::from_ref("classify"))].body else {
+    let BindBody::Expr(body) = typed.defs[&DefId::named(Intern::from_ref("classify"))].body else {
         panic!("expected expression body");
     };
     let typecheck::TypedExprKind::When(when_expr) = &typed.exprs.kind[body.as_usize()] else {
@@ -341,49 +224,31 @@ classify(value Word) Word: when value is in 0 to 127 then 1
 
 #[test]
 fn shift_operator_can_return_an_explicit_error_union() {
-    let source = "
-Word is in 0 to 255
-ShiftResult is Value(value Word) or InvalidShift
-#infix('<<')
-shift(lhs Word, rhs Word) ShiftResult: InvalidShift
-left Word: 1
-right Word: 8
-result: left << right
-";
-    let codes = flaws(source);
+    let source = format!(
+        "\n{}ShiftResult is Value(value Word) or InvalidShift\n#infix('<<')\nshift(lhs Word, rhs Word) ShiftResult: return InvalidShift\nleft Word: 1\nright Word: 8\nresult: left << right\n",
+        test_fixtures::preludes::WORD_PRELUDE
+    );
+    let codes = flaw_codes_of(&source);
     assert!(
         !codes.contains(&"type-invalid-operator-result".to_string()),
         "{codes:?}"
     );
     assert!(
-        matches!(result_ty(source, "result"), ast::Ty::Named { name, .. } if name.as_str() == "ShiftResult")
+        matches!(result_ty(&source, "result"), ast::Ty::Named { name, .. } if name.as_str() == "ShiftResult")
     );
 }
 
 #[test]
 fn self_in_numeric_methods_resolves_parameters_results_and_casts() {
-    let source = r#"
-Word is in 0 to 255
-Word has
-    #infix('+')
-    add(lhs Self, rhs Self) Self:
-        left is in 0 to 255: lhs
-        right is in 0 to 255: rhs
-    return (left + right) as Self
-    copy(value ref Self) Self:
-        bits is in 0 to 255: value
-    return bits as Self
-    replace(previous Self, next Self) Self:
-        discarded is in 0 to 255: previous
-    return next
-
-use_word(lhs Word, rhs Word) Word: lhs + rhs
-"#;
+    let source = format!(
+        "\n{}    #infix('+')\n    add(lhs Self, rhs Self) Self:\n        left is in 0 to 255: lhs\n        right is in 0 to 255: rhs\n        return ((left + right) & 255) as Self\n    copy(value ref Self) Self:\n        bits is in 0 to 255: value\n        return bits as Self\n    replace(previous Self, next Self) Self:\n        discarded is in 0 to 255: previous\n        return next\n\nuse_word(lhs Word, rhs Word) Word: return lhs + rhs\n",
+        test_fixtures::preludes::WORD_PRELUDE
+    );
     let parsed = source.parse_source_full();
     assert!(parsed.symptoms.is_empty(), "{:?}", parsed.symptoms);
-    let codes = flaws(source);
+    let codes = flaw_codes_of(&source);
     assert!(codes.is_empty(), "{codes:?}");
     assert!(
-        matches!(result_ty(source, "use_word"), ast::Ty::Named { name, .. } if name.as_str() == "Word")
+        matches!(result_ty(&source, "use_word"), ast::Ty::Named { name, .. } if name.as_str() == "Word")
     );
 }

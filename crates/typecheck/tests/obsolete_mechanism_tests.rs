@@ -1,6 +1,5 @@
 mod support;
 
-use parser::cursor::TokenCursor;
 use parser::query::SourceParseExt;
 use support::{check, flaw_codes};
 
@@ -29,7 +28,7 @@ fn removed_auto_attribute_is_rejected() {
     let codes: Vec<_> = parse_output
         .symptoms
         .iter()
-        .map(|diag| diag.code.slug().to_string())
+        .map(|diag| diag.code.to_string())
         .collect();
 
     assert!(
@@ -39,39 +38,14 @@ fn removed_auto_attribute_is_rejected() {
 }
 
 #[test]
-fn if_without_condition_pattern_is_rejected_by_parser() {
-    let parsed = "main:\n    if 1\n        1\n    return\n    return 0\n".parse_source_full();
-    let codes = parsed
-        .symptoms
-        .iter()
-        .map(|diagnostic| diagnostic.code.slug().to_string())
-        .collect::<Vec<_>>();
+fn integer_values_require_an_explicit_condition_pattern() {
+    let parsed = "main: when 1 then 1 else 0\n".parse_source_full();
+    assert!(parsed.symptoms.is_empty(), "{:?}", parsed.symptoms);
+    let typed = typecheck::transform::transform_file(parsed.ast, typecheck::FileId(0));
     assert!(
-        codes.contains(&"parse-expected-condition-pattern".to_string()),
-        "expected condition pattern requirement, got: {:?}",
-        codes
+        typed
+            .all_flaws()
+            .iter()
+            .any(|(_, flaw)| flaw.code.slug() == "type-condition-requires-proposition")
     );
-}
-
-#[test]
-fn intrinsic_attributes_and_external_bodies_are_rejected() {
-    for (source, expected) in [
-        (
-            "#intrinsic(BitsAdd)\nadd(a Int, b Int) Int: a\n",
-            "parse-removed-intrinsic",
-        ),
-        ("#intrinsic\nvalue: 0\n", "parse-removed-intrinsic"),
-        ("value() Int extern\n", "parse-removed-extern"),
-        ("value() Int: extern\n", "parse-removed-extern"),
-    ] {
-        let parsed = TokenCursor::parse_source(source);
-        assert!(
-            parsed
-                .parse_warnings
-                .iter()
-                .any(|flaw| flaw.code.slug() == expected),
-            "{source}: {:?}",
-            parsed.parse_warnings
-        );
-    }
 }

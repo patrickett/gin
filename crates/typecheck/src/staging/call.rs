@@ -54,7 +54,7 @@ pub fn instantiate_call(
             }
             ParamKind::Value(_) => {
                 lowered_args.push(arg);
-                if value_param_ty_is_inferred(param_ty) {
+                if value_param_ty_contains_generic_opaque(param_ty) {
                     let arg_ty = typed.exprs.ty[arg.index()].clone();
                     type_args.push(TyArg::Type(Box::new(normalize_inferred_value_type(
                         param_ty, &arg_ty,
@@ -73,7 +73,7 @@ pub fn instantiate_call(
             ParamKind::Type => TyArg::Type(Box::new(Ty::Opaque(params[i].0))),
             ParamKind::Value(_) => {
                 let param_ty = &params[i].1;
-                if value_param_ty_is_inferred(param_ty) {
+                if value_param_ty_contains_generic_opaque(param_ty) {
                     TyArg::Type(Box::new(param_ty.clone()))
                 } else {
                     TyArg::Const(NormalExpr::Var(params[i].0))
@@ -96,7 +96,7 @@ pub fn instantiate_call(
     }
 }
 
-fn normalize_inferred_value_type(param_ty: &Ty, arg_ty: &Ty) -> Ty {
+pub(crate) fn normalize_inferred_value_type(param_ty: &Ty, arg_ty: &Ty) -> Ty {
     if !value_param_ty_contains_generic_opaque(param_ty) {
         return arg_ty.clone();
     }
@@ -106,14 +106,13 @@ fn normalize_inferred_value_type(param_ty: &Ty, arg_ty: &Ty) -> Ty {
             64,
             arg_ty.anonymous_operation_interpretation() != Some(IntegerInterpretation::Unsigned),
         ),
-        Ty::ResultFamily { .. } => arg_ty.clone(),
         _ => arg_ty.clone(),
     }
 }
 
 fn value_param_ty_contains_generic_opaque(ty: &Ty) -> bool {
     match ty {
-        Ty::ResultFamily { .. } => false,
+        Ty::Proposition(_) | Ty::ResultFamily { .. } => false,
         Ty::Opaque(name) => name.as_str().chars().next().is_some_and(char::is_lowercase),
         Ty::Named { instance, .. } => instance.arguments.iter().any(|(_, arg)| match arg {
             ast::TyArg::Type(inner) => value_param_ty_contains_generic_opaque(inner),
@@ -155,7 +154,9 @@ fn value_param_ty_contains_generic_opaque(ty: &Ty) -> bool {
                 })
             })
         }
-        Ty::Ref { inner, .. } | Ty::Ptr { inner } => value_param_ty_contains_generic_opaque(inner),
+        Ty::Ref { inner, .. } | Ty::Ptr { inner } | Ty::OwnedStorage { inner } => {
+            value_param_ty_contains_generic_opaque(inner)
+        }
         Ty::Address { pointee, .. } => value_param_ty_contains_generic_opaque(pointee),
         Ty::Sequence(elements) => elements
             .iter()
@@ -170,10 +171,6 @@ fn value_param_ty_contains_generic_opaque(ty: &Ty) -> bool {
         | Ty::Float { .. }
         | Ty::Unit => false,
     }
-}
-
-fn value_param_ty_is_inferred(param_ty: &Ty) -> bool {
-    value_param_ty_contains_generic_opaque(param_ty)
 }
 
 fn expr_to_normal_expr(typed: &TypedFileAst, arg: ExprId) -> Option<NormalExpr> {
@@ -224,47 +221,36 @@ fn reorder_args_by_name(
     typed: &TypedFileAst,
     params: &[(Intern<String>, Ty)],
 ) -> Option<Vec<ExprId>> {
-    let has_named = args.iter().any(|arg| call_arg_name(typed, *arg).is_some());
-    if !has_named {
-        return Some(args.to_vec());
-    }
+    let names: Vec<_> = args.iter().map(|arg| call_arg_name(typed, *arg)).collect();
+    argument_order(&names, params).map(|order| order.into_iter().map(|index| args[index]).collect())
+}
 
-    let mut name_to_index = std::collections::HashMap::new();
-    for (index, (name, _)) in params.iter().enumerate() {
-        name_to_index.insert(*name, index);
-    }
-
-    let mut reordered = vec![None; args.len()];
-    let mut used_params = vec![false; args.len()];
-    let mut positional: Vec<ExprId> = Vec::new();
-
-    for &arg in args {
-        if let Some(name) = call_arg_name(typed, arg) {
-            let index = name_to_index.get(&name).copied()?;
-            if used_params[index] {
-                return None;
-            }
-            reordered[index] = Some(arg);
-            used_params[index] = true;
-        } else {
-            positional.push(arg);
-        }
-    }
-
-    let mut next_positional = 0;
-    for slot in &mut reordered {
-        if slot.is_none() {
-            let arg = positional.get(next_positional).copied()?;
-            *slot = Some(arg);
-            next_positional += 1;
-        }
-    }
-
-    if next_positional != positional.len() {
+pub(crate) fn argument_order(
+    names: &[Option<Intern<String>>],
+    params: &[(Intern<String>, Ty)],
+) -> Option<Vec<usize>> {
+    if names.len() != params.len() {
         return None;
     }
-
-    reordered.into_iter().collect()
+    let mut order = vec![None; params.len()];
+    for (argument, name) in names.iter().enumerate() {
+        if let Some(name) = name {
+            let parameter = params.iter().position(|(parameter, _)| parameter == name)?;
+            if order[parameter].replace(argument).is_some() {
+                return None;
+            }
+        }
+    }
+    let mut positional = names
+        .iter()
+        .enumerate()
+        .filter_map(|(index, name)| name.is_none().then_some(index));
+    for slot in &mut order {
+        if slot.is_none() {
+            *slot = positional.next();
+        }
+    }
+    order.into_iter().collect()
 }
 
 fn call_arg_name(typed: &TypedFileAst, arg: ExprId) -> Option<Intern<String>> {
@@ -276,7 +262,11 @@ fn call_arg_name(typed: &TypedFileAst, arg: ExprId) -> Option<Intern<String>> {
 
 fn call_arg_value_expr(typed: &TypedFileAst, arg: ExprId) -> ExprId {
     match typed.exprs.kind_of(arg) {
-        Some(TypedExprKind::Bind { body, .. }) => *body,
+        Some(TypedExprKind::Bind {
+            body,
+            unassigned: false,
+            ..
+        }) => *body,
         _ => arg,
     }
 }

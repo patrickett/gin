@@ -5,7 +5,6 @@
 
 use std::collections::HashMap;
 
-use i256::I256;
 use internment::Intern;
 
 use crate::ty::Ty;
@@ -14,6 +13,7 @@ use ast::InRangeBounds;
 use ast::WhenArm;
 use ast::expr::{Expr, Literal, Typed};
 use ast::parameter::ParameterKind;
+use ast::type_decl::TypeNameExt;
 use ast::{ConstValue, HashFloat, Pattern};
 
 /// Public entry: check whether a [`Pattern`] matches a [`ConstValue`].
@@ -21,38 +21,50 @@ pub fn pattern_matches_public(pattern: &Pattern, cv: &ConstValue) -> bool {
     pattern_matches(pattern, cv)
 }
 
-/// Like [`pattern_matches_public`] but resolves `InRangeBounds::Tag(name)`
-/// to actual literal bounds using the given tag types.
 pub fn pattern_matches_with_tag_types(
     pattern: &Pattern,
     cv: &ConstValue,
     tag_types: &HashMap<TagId, Ty>,
+    registry: &crate::TypeRegistry,
 ) -> bool {
-    let resolved = resolve_in_range_tag(pattern, tag_types);
-    pattern_matches(&resolved, cv)
+    let validity = match pattern {
+        Pattern::InRange {
+            bounds: InRangeBounds::Tag(name),
+            ..
+        } => tag_types
+            .get(&TagId(*name))
+            .and_then(|ty| registry.integer_validity_for_type(ty)),
+        _ => None,
+    };
+    pattern_matches_with_integer_validity(pattern, cv, validity).unwrap_or(false)
 }
 
-/// Replace `InRangeBounds::Tag(name)` with `InRangeBounds::Literal(min, max)`
-/// by looking up the tag's bounded int type.
-fn resolve_in_range_tag<'a>(
-    pattern: &'a Pattern,
-    tag_types: &HashMap<TagId, Ty>,
-) -> std::borrow::Cow<'a, Pattern> {
-    if let Pattern::InRange {
-        bounds: InRangeBounds::Tag(name),
-        span,
-    } = pattern
-        && let Some(hull) = tag_types
-            .get(&TagId(*name))
-            .and_then(Ty::anonymous_integer_validity)
-            .and_then(|validity| validity.domain().storage_hull())
-    {
-        return std::borrow::Cow::Owned(Pattern::InRange {
-            bounds: InRangeBounds::Literal(hull.min(), hull.max()),
-            span: *span,
-        });
+pub(crate) fn pattern_matches_with_integer_validity(
+    pattern: &Pattern,
+    value: &ConstValue,
+    validity: Option<&ast::integer::IntegerValidity>,
+) -> Option<bool> {
+    match (pattern, value) {
+        (
+            Pattern::InRange {
+                bounds: InRangeBounds::Tag(_),
+                ..
+            },
+            ConstValue::Int(value),
+        ) => match validity?.domain().membership(*value) {
+            ast::integer::ContainmentProof::Proven => Some(true),
+            ast::integer::ContainmentProof::Disproven => Some(false),
+            ast::integer::ContainmentProof::Unknown => None,
+        },
+        (
+            Pattern::InRange {
+                bounds: InRangeBounds::LiteralToTag(..),
+                ..
+            },
+            _,
+        ) => None,
+        _ => Some(pattern_matches(pattern, value)),
     }
-    std::borrow::Cow::Borrowed(pattern)
 }
 
 /// Check whether a when-arm's pattern matches a subject value.
@@ -62,20 +74,57 @@ fn resolve_in_range_tag<'a>(
 /// to select a when arm at compile time but don't need full evaluation.
 pub(crate) fn find_matching_when_body<'a>(
     arms: &'a [WhenArm],
+    subject: &Expr,
     cv: &ConstValue,
 ) -> Option<&'a Typed<Expr>> {
     for arm in arms {
         match arm {
             WhenArm::Is { pattern, body, .. } => {
-                if pattern_matches_public(&pattern.value, cv) {
+                if pattern_matches_with_integer_validity(&pattern.value, cv, None)? {
                     return Some(body);
                 }
             }
             WhenArm::Else(body, _) => return Some(body),
-            WhenArm::Cond { .. } => {}
+            WhenArm::Cond {
+                condition, body, ..
+            } => {
+                if condition_matches_subject(condition, subject, cv)? {
+                    return Some(body);
+                }
+            }
         }
     }
     None
+}
+
+fn condition_matches_subject(
+    condition: &ast::Condition,
+    subject: &Expr,
+    value: &ConstValue,
+) -> Option<bool> {
+    match condition {
+        ast::Condition::Is {
+            subject: tested,
+            pattern,
+        } if tested.value == *subject => {
+            pattern_matches_with_integer_validity(&pattern.value, value, None)
+        }
+        ast::Condition::Or(left, right) => {
+            if condition_matches_subject(left, subject, value)? {
+                Some(true)
+            } else {
+                condition_matches_subject(right, subject, value)
+            }
+        }
+        ast::Condition::And(left, right) => {
+            if condition_matches_subject(left, subject, value)? {
+                condition_matches_subject(right, subject, value)
+            } else {
+                Some(false)
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Core pattern matching — does a `Pattern` match a `ConstValue`?
@@ -86,9 +135,6 @@ pub(crate) fn pattern_matches(pattern: &Pattern, cv: &ConstValue) -> bool {
         (Pattern::Literal(Literal::Float(HashFloat(f)), _), ConstValue::Float(HashFloat(cv_f))) => {
             f.to_bits() == cv_f.to_bits()
         }
-        (Pattern::Literal(Literal::Number(n), _), ConstValue::Int(cv_n)) => {
-            I256::from(*n as u128) == *cv_n
-        }
         (
             Pattern::InRange {
                 bounds: InRangeBounds::Literal(min, max),
@@ -96,7 +142,9 @@ pub(crate) fn pattern_matches(pattern: &Pattern, cv: &ConstValue) -> bool {
             },
             ConstValue::Int(n),
         ) => *n >= *min && *n <= *max,
-        (Pattern::Nominal(name, _), _) if is_lowercase_type_var(name) || name.as_str() == "_" => {
+        (Pattern::Nominal(name, _), _)
+            if name.as_str().starts_with_lowercase() || name.as_str() == "_" =>
+        {
             true
         }
         (Pattern::Nominal(name, _), ConstValue::Tag { name: cv_name, .. }) if name == cv_name => {
@@ -104,11 +152,6 @@ pub(crate) fn pattern_matches(pattern: &Pattern, cv: &ConstValue) -> bool {
         }
         (Pattern::Qualified(path), ConstValue::Tag { name: cv_name, .. }) => {
             path.segments.last() == Some(cv_name)
-        }
-        (Pattern::Nominal(name, _), ConstValue::Record { fields })
-            if record_matches_reflect_tag(name.as_str(), fields) =>
-        {
-            true
         }
         (
             Pattern::Generic {
@@ -129,12 +172,10 @@ pub(crate) fn pattern_matches(pattern: &Pattern, cv: &ConstValue) -> bool {
                     .iter()
                     .zip(args.iter())
                     .all(|((pname, _), arg)| {
-                        let kind = params
+                        params
                             .iter()
                             .find(|(n, _)| n == pname)
-                            .map(|(_, k)| k)
-                            .unwrap_or(&ParameterKind::Generic);
-                        pattern_param_matches(pname, kind, arg)
+                            .is_some_and(|(_, kind)| pattern_param_matches(pname, kind, arg))
                     })
         }
         (Pattern::ListCons { head, tail }, ConstValue::Sequence(items)) => {
@@ -165,8 +206,9 @@ pub(crate) fn pattern_matches(pattern: &Pattern, cv: &ConstValue) -> bool {
 
 fn pattern_param_matches(name: &Intern<String>, kind: &ParameterKind, cv: &ConstValue) -> bool {
     match kind {
+        ParameterKind::Proposition(_) => matches!(cv, ConstValue::Proposition(_)),
         ParameterKind::Generic => {
-            is_lowercase_type_var(name)
+            name.as_str().starts_with_lowercase()
                 || name.as_str() == "_"
                 || matches!(cv, ConstValue::Tag { name: cv_name, .. } if name == cv_name)
         }
@@ -182,6 +224,25 @@ fn pattern_param_matches(name: &Intern<String>, kind: &ParameterKind, cv: &Const
 
 fn default_expr_matches(expr: &Expr, cv: &ConstValue) -> bool {
     match (expr, cv) {
+        (
+            Expr::TagCall(call),
+            ConstValue::Tag {
+                name,
+                qual_path,
+                args,
+            },
+        ) => {
+            call.name == *name
+                && call
+                    .qualifier()
+                    .is_none_or(|prefix| qual_path.as_deref() == Some(prefix.as_str()))
+                && call.args.len() == args.len()
+                && call
+                    .args
+                    .iter()
+                    .zip(args.iter())
+                    .all(|(expr, value)| default_expr_matches(&expr.value, value))
+        }
         (Expr::AnonymousTag(name), ConstValue::Tag { name: cv_name, .. }) => name == cv_name,
         (Expr::FnCall(call), ConstValue::Tag { name: cv_name, .. })
             if call.args.as_ref().is_none_or(|args| args.is_empty())
@@ -190,7 +251,6 @@ fn default_expr_matches(expr: &Expr, cv: &ConstValue) -> bool {
             call.path.value.root == *cv_name
         }
         (Expr::Lit(Literal::Int(n)), ConstValue::Int(cv_n)) => *n == *cv_n,
-        (Expr::Lit(Literal::Number(n)), ConstValue::Int(cv_n)) => I256::from(*n as u128) == *cv_n,
         (Expr::Lit(Literal::Float(HashFloat(f))), ConstValue::Float(HashFloat(cv_f))) => {
             f.to_bits() == cv_f.to_bits()
         }
@@ -200,22 +260,6 @@ fn default_expr_matches(expr: &Expr, cv: &ConstValue) -> bool {
 }
 
 /// Check if a tag name looks like a lowercase type variable.
-fn is_lowercase_type_var(name: &Intern<String>) -> bool {
-    name.as_str()
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_lowercase())
-}
-
-/// Check whether a record's fields match a known reflect tag shape.
-fn record_matches_reflect_tag(_name: &str, fields: &[(Intern<String>, ConstValue)]) -> bool {
-    let has = |field: &str| fields.iter().any(|(n, _)| n.as_str() == field);
-    if fields.len() < 2 {
-        return false;
-    }
-    (has("name") && has("ty")) || (has("name") && has("fields"))
-}
-
 /// Extract pattern bindings from matching a pattern against a value.
 ///
 /// For example, matching `Some(v)` against `Some(3)` pushes `v → 3` into the env.
@@ -254,7 +298,7 @@ fn collect_pattern_bindings_inner(
                     .iter()
                     .find(|(n, _)| n == pname)
                     .map(|(_, k)| k)
-                    .unwrap_or(&ParameterKind::Generic);
+                    .expect("a matching constructor pattern has metadata for every argument");
                 collect_pattern_param_binding(pname, kind, arg, env);
             }
         }
@@ -285,7 +329,7 @@ fn collect_pattern_param_binding(
     env: &mut HashMap<Intern<String>, ConstValue>,
 ) {
     match kind {
-        ParameterKind::Generic if name.as_str() != "_" && is_lowercase_type_var(name) => {
+        ParameterKind::Generic if name.as_str() != "_" && name.as_str().starts_with_lowercase() => {
             env.insert(*name, cv.clone());
         }
         ParameterKind::Tagged(sp)
@@ -294,9 +338,11 @@ fn collect_pattern_param_binding(
             let pattern = Pattern::from_expr(sp.value.clone());
             collect_pattern_bindings_inner(&pattern, cv, env)
         }
+        ParameterKind::Proposition(_) => {
+            if name.as_str() != "_" {
+                env.insert(*name, cv.clone());
+            }
+        }
         ParameterKind::Generic | ParameterKind::Default(_) => {}
     }
 }
-#[cfg(test)]
-#[path = "../../tests/pattern_tests.rs"]
-mod tests;

@@ -4,30 +4,33 @@
 //! [`TypedTag`] and [`TypedBind`], populates `tag_types`, `fn_return_types`,
 //! and `variant_map`, and detects declaration-level flaws.
 
+use crate::tag_declarations::TagDeclarations;
+use diagnostic::code::{
+    ArrayCode, CallCode, GenericCode, IntegerCode, MemberCode, OperatorCode, OwnershipCode,
+    ProofCode, ReferenceCode, ResultCode, SymbolCode, TargetGroupCode, TraitCode, TypeCode,
+};
 use internment::Intern;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 /// Enough for mutual refs (e.g. `Type` ↔ `NamedTy`); keep low — each pass re-resolves every tag.
 const TAG_RESOLVE_MAX_PASSES: usize = 8;
 
-use diagnostic::Diagnostic;
+use diagnostic::{Diagnostic, DiagnosticCode};
 
-use super::TransformCtx;
+use super::collect_result_exit_alternatives;
 use super::lower_ty::nominalize_explicit_ty_surface;
+use super::proof_walk::read::{ProofVisitor, walk_normal, walk_reference, walk_term};
+use super::{TransformCtx, flaw};
 use crate::analysis::expr_is_type_surface;
 use crate::analysis::{TyInfer, TyInferEnv, TypeEnv};
-use crate::compile_time_trait::CompileTimeTraitRegistry;
-use crate::compile_time_trait::{
-    RESERVED_TRAITS, ReflectionContractIssue, synthesize_reflectable_trait,
-};
-use crate::normal_expr::Normalize;
 use crate::representation::RepresentationError;
 use crate::ty::{Ty, TyChild, UnionVariant, reference_semantics_for_type};
 use crate::type_registry::ReferenceSemantics;
 use crate::typed::{
-    Availability, AvailabilityRequirement, CallCapability, DefId, ExprId, FileId, GroupId,
-    GroupProjection, TagId, TypedBind, TypedFileAst, TypedGroup, TypedTag, VariantMap,
+    AvailabilityRequirement, CallCapability, FileId, GroupId, GroupProjection, TagId, TypedBind,
+    TypedFileAst, TypedGroup, TypedTag, VariantMap,
 };
 use ast::integer::{IntegerDomain, IntegerValidity};
 use ast::parameter::Parameters;
@@ -41,84 +44,34 @@ use ast::{
 use ast_format::declare::{BindFormatExt, DeclareFormatExt};
 use ast_format::type_expr::{ExprFormatExt, PatternFormatExt};
 
-fn duplicate_parameter_name_diagnostics(
-    params: &Parameters,
-    span_table: &ast::SpanTable,
-) -> Vec<(ast::SpanId, Diagnostic)> {
-    let duplicated: Vec<_> = params
-        .iter()
-        .filter_map(|(name, parameter)| {
-            let type_name = match &parameter.kind {
-                ParameterKind::Tagged(type_expr)
-                | ParameterKind::ValueParam { ty: type_expr }
-                | ParameterKind::Inferred { ty: type_expr } => match &type_expr.value {
-                    ast::Expr::FnCall(call) if call.path.segments.is_empty() => {
-                        Some(call.path.root)
-                    }
-                    ast::Expr::TagCall(call) if call.qual_path.is_none() => Some(call.name),
-                    _ => None,
-                },
-                ParameterKind::Generic | ParameterKind::Default(_) => None,
-            }?;
-            name.as_str()
-                .eq_ignore_ascii_case(type_name.as_str())
-                .then_some((*name, type_name, parameter.name_span))
-        })
-        .collect();
-
-    duplicated
-        .iter()
-        .enumerate()
-        .map(|(index, (name, type_name, span))| {
-            let shorthand = (1..=type_name.as_str().chars().count())
-                .map(|length| type_name.as_str().chars().take(length).collect::<String>())
-                .find(|candidate| {
-                    duplicated
-                        .iter()
-                        .enumerate()
-                        .all(|(other_index, (_, other, _))| {
-                            other_index == index
-                                || !other
-                                    .as_str()
-                                    .to_ascii_lowercase()
-                                    .starts_with(&candidate.to_ascii_lowercase())
-                        })
-                })
-                .unwrap_or_else(|| {
-                    format!(
-                        "{}{}",
-                        type_name.as_str().chars().next().unwrap_or('p'),
-                        duplicated[..index]
-                            .iter()
-                            .filter(|(_, other, _)| *other == *type_name)
-                            .count()
-                            + 1
-                    )
-                })
-                .to_ascii_lowercase();
-            (
-                *span,
-                Diagnostic::new(
-                    "style-duplicate-parameter-name",
-                    format!(
-                        "parameter `{}` repeats its type name; consider `{shorthand}`",
-                        name.as_str()
-                    ),
-                )
-                .with_arg("parameter", name.as_str().to_string())
-                .with_arg("suggestion", shorthand)
-                .with_help("use a short role-based name when the type already provides the context")
-                .at_span_id(*span, span_table),
-            )
-        })
-        .collect()
-}
-
 fn nominal_integer_semantics(
     ty: &Ty,
     attributes: &ast::DeclareAttributes,
 ) -> Option<ast::integer::NominalIntegerSemantics> {
-    let validity = ty.anonymous_integer_validity()?;
+    integer_semantics(ty.anonymous_integer_validity()?, attributes).into()
+}
+
+fn checked_integer_operator_result(
+    registry: &crate::TypeRegistry,
+    operand: &Ty,
+    result: &Ty,
+) -> bool {
+    let Ty::Union { variants, .. } = registry.resolved_definition_for_type(result) else {
+        return false;
+    };
+    variants.len() == 2 && variants.iter().any(|variant| {
+        variant.kind == ast::ty::UnionVariantKind::Type
+            && matches!(variant.fields.as_slice(), [(_, payload)] if payload.as_ref() == operand)
+    }) && variants.iter().any(|variant| {
+        variant.kind == ast::ty::UnionVariantKind::Constructor
+            && variant.name.as_str().rsplit('.').next() == Some("Flaw")
+    })
+}
+
+fn integer_semantics(
+    validity: &IntegerValidity,
+    attributes: &ast::DeclareAttributes,
+) -> ast::integer::NominalIntegerSemantics {
     let interpretation = if validity
         .domain()
         .storage_hull()
@@ -131,7 +84,7 @@ fn nominal_integer_semantics(
     let representation_rule = attributes.bits.as_ref().map_or(
         ast::integer::IntegerRepresentationRule::InferFromValidity,
         |bits| {
-            let natural = if let Some(ast::ConstValue::Int(value)) = bits.const_value.as_ref() {
+            let natural = if let Some(ast::ConstValue::Int(value)) = bits.const_value.as_deref() {
                 ast::integer::to_u64(*value)
                     .and_then(|value| u32::try_from(value).ok())
                     .and_then(std::num::NonZeroU32::new)
@@ -150,11 +103,9 @@ fn nominal_integer_semantics(
                                 *value,
                             ))
                         }),
-                    ast::Expr::FnCall(call)
-                        if call.args.is_none() && call.path.value.segments.is_empty() =>
-                    {
+                    ast::Expr::FnCall(call) if call.args.is_none() => {
                         ast::integer::CanonicalNaturalExpr::Symbolic(ast::NormalExpr::Var(
-                            call.path.value.root,
+                            Intern::new(call.path.value.to_qualified_string()),
                         ))
                     }
                     _ => ast::integer::CanonicalNaturalExpr::Symbolic(ast::NormalExpr::Var(
@@ -165,51 +116,10 @@ fn nominal_integer_semantics(
             ast::integer::IntegerRepresentationRule::ExactBits(natural)
         },
     );
-    Some(ast::integer::NominalIntegerSemantics {
+    ast::integer::NominalIntegerSemantics {
         validity: validity.clone(),
         representation_rule,
         interpretation,
-    })
-}
-
-impl TypedTag {
-    pub fn resolve_param_kinds(
-        &self,
-        tag_types: &HashMap<Intern<String>, Ty>,
-    ) -> Vec<(Intern<String>, ParamKind)> {
-        let Some(params) = &self.params else {
-            return Vec::new();
-        };
-        params
-            .iter()
-            .map(|(name, kind)| {
-                let kind = match &kind.kind {
-                    ParameterKind::Generic => ParamKind::Type,
-                    ParameterKind::Tagged(sp) if is_type_param_marker(&sp.value) => ParamKind::Type,
-                    ParameterKind::Tagged(sp) => {
-                        let ty = TypeEnv::new(tag_types).resolve_expr(&sp.value);
-                        ParamKind::Value(Box::new(ty))
-                    }
-                    ParameterKind::ValueParam { ty } | ParameterKind::Inferred { ty } => {
-                        let ty = TypeEnv::new(tag_types).resolve_expr(&ty.value);
-                        ParamKind::Value(Box::new(ty))
-                    }
-                    ParameterKind::Default(expr) if expr_is_type_surface(&expr.value) => {
-                        ParamKind::Type
-                    }
-                    ParameterKind::Default(expr) => {
-                        let env = TyInferEnv {
-                            tag_types,
-                            fn_return_types: &HashMap::new(),
-                            locals: &HashMap::new(),
-                            tag_params: None,
-                        };
-                        ParamKind::Value(Box::new(expr.infer_ty(&env)))
-                    }
-                };
-                (*name, kind)
-            })
-            .collect()
     }
 }
 
@@ -217,15 +127,111 @@ impl TypedTag {
 /// resolved and the file-level index populated. The expression arena is left
 /// empty — it will be filled in Stage 2.
 pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) -> TypedFileAst {
+    declare_signatures(declare_types(file_ast, file_id, ctx), ctx)
+}
+
+#[derive(Clone)]
+pub(super) struct DeclaredTypes<'a> {
+    pub typed: TypedFileAst,
+    source: DeclarationSource<'a>,
+    tag_params: HashMap<Intern<String>, Parameters>,
+    anonymous_result_labels: HashSet<Intern<String>>,
+    target_dependent_names: Option<HashSet<Intern<String>>>,
+}
+
+#[derive(Clone)]
+enum DeclarationSource<'a> {
+    Borrowed(&'a FileAst),
+    Shared(Arc<FileAst>),
+}
+
+impl AsRef<FileAst> for DeclarationSource<'_> {
+    fn as_ref(&self) -> &FileAst {
+        match self {
+            Self::Borrowed(source) => source,
+            Self::Shared(source) => source,
+        }
+    }
+}
+
+impl DeclaredTypes<'_> {
+    pub(super) fn same(&self, other: &Self) -> bool {
+        let Self {
+            typed,
+            source,
+            tag_params,
+            anonymous_result_labels,
+            target_dependent_names,
+        } = self;
+        super::check_session::file_eq(typed, &other.typed, false)
+            && source.as_ref() == other.source.as_ref()
+            && super::check_session::same_ast_order(source.as_ref(), other.source.as_ref())
+            && tag_params == &other.tag_params
+            && anonymous_result_labels == &other.anonymous_result_labels
+            && target_dependent_names == &other.target_dependent_names
+    }
+
+    pub(super) fn snapshot(&self) -> DeclaredTypes<'static> {
+        self.snapshot_with_source(match &self.source {
+            DeclarationSource::Borrowed(source) => Arc::new((*source).clone()),
+            DeclarationSource::Shared(source) => Arc::clone(source),
+        })
+    }
+
+    pub(super) fn snapshot_with_source(&self, source: Arc<FileAst>) -> DeclaredTypes<'static> {
+        DeclaredTypes {
+            typed: self.typed.clone(),
+            source: DeclarationSource::Shared(match &self.source {
+                DeclarationSource::Borrowed(_) => source,
+                DeclarationSource::Shared(source) => Arc::clone(source),
+            }),
+            tag_params: self.tag_params.clone(),
+            anonymous_result_labels: self.anonymous_result_labels.clone(),
+            target_dependent_names: self.target_dependent_names.clone(),
+        }
+    }
+}
+
+pub(super) fn declare_types<'a>(
+    file_ast: &'a FileAst,
+    file_id: FileId,
+    ctx: &TransformCtx,
+) -> DeclaredTypes<'a> {
+    declare_types_with_aliases(file_ast, file_id, ctx, &HashMap::new())
+}
+
+pub(super) fn declare_types_with_aliases<'a>(
+    file_ast: &'a FileAst,
+    file_id: FileId,
+    ctx: &TransformCtx,
+    completed_aliases: &HashMap<TagId, Ty>,
+) -> DeclaredTypes<'a> {
+    let _profile = compiler_profile::span(compiler_profile::Phase::Declarations);
+    let defaults =
+        match super::trait_methods::TraitMethods::new(file_ast, &ctx.compile_time_eval_ast)
+            .expand_defaults()
+        {
+            std::borrow::Cow::Borrowed(_) => DeclarationSource::Borrowed(file_ast),
+            std::borrow::Cow::Owned(expanded) => DeclarationSource::Shared(Arc::new(expanded)),
+        };
+    let file_ast = defaults.as_ref();
     let mut typed = TypedFileAst::new(file_id, file_ast.span_table.clone());
+    super::bindings::validate(file_ast, &mut typed);
     typed.target_layout =
         crate::layout::TargetLayout::from_compile_target(&ctx.compile_target).ok();
     let anonymous_result_labels = anonymous_result_labels(file_ast);
-    typed.semantic_origin = file_ast.semantic_origin.clone();
-    typed.module_doc = file_ast.module_doc.clone();
+    typed.semantic_origin = Some(crate::typed::Shared::new(
+        file_ast
+            .semantic_origin
+            .clone()
+            .unwrap_or_else(|| ast::prelude::FileSemanticOrigin {
+                package: ctx.package_instance.clone(),
+                module: Vec::new(),
+            }),
+    ));
+    typed.overload_groups = crate::typed::Shared::new(file_ast.defs.groups().clone());
+    typed.module_doc = file_ast.module_doc.clone().map(crate::typed::Shared::new);
     typed.type_registry.merge_from(&ctx.type_registry);
-    let trait_registry =
-        CompileTimeTraitRegistry::from_parse_ast(file_ast, Arc::clone(&ctx.compile_time_eval_ast));
     for declare in file_ast.tags.values() {
         let ast::DeclareValue::Has(members) = &declare.value else {
             continue;
@@ -234,6 +240,7 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
             let ast::HasMember::Function(function) = member else {
                 continue;
             };
+            validate_payload_names(function, &mut typed.declaration_flaws, &typed.span_table);
             let self_name = Intern::<String>::from_ref("self");
             if !function.params.contains_key(&self_name) {
                 continue;
@@ -265,10 +272,14 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
         for mi in &import.0 {
             if let ast::ImportSource::Package(mp) = &mi.source {
                 typed.import_mod_paths.push(mp.clone());
+            } else if let ast::ImportSource::LocalBundle(bundle) = &mi.source
+                && let Some(path) = &bundle.module_path
+            {
+                typed.import_mod_paths.push(path.as_ref().clone());
             }
         }
     }
-    typed.imported_trait_names = file_ast.imported_trait_names();
+    typed.imported_trait_names = crate::typed::Shared::new(file_ast.imported_trait_names());
     typed.eval_ast = Arc::clone(&ctx.compile_time_eval_ast);
     let target_dependent_names = matches!(ctx.compile_target, flask::CompileTarget::Library)
         .then(|| crate::prepare_target::target_dependent_bind_names(&ctx.compile_time_eval_ast));
@@ -282,17 +293,21 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
             tag_params.entry(*name).or_insert_with(|| p.clone());
         }
     }
+    let domain_declarations =
+        TagDeclarations::overlay(&file_ast.tags, &ctx.compile_time_eval_ast.tags);
     let resolved_tags = resolve_tags_fixpoint(
         &file_ast.tags,
+        domain_declarations,
         &tag_params,
         &ctx.cross_file_tag_types,
         file_id,
         TAG_RESOLVE_MAX_PASSES,
+        completed_aliases,
     );
     let available_tags = nominal_types_for_definitions(&resolved_tags, &file_ast.tags, file_id);
     for (name, declare) in &file_ast.tags {
         let is_transparent_alias = matches!(&declare.value, ast::DeclareValue::Alias(alias)
-            if !matches!(&alias.value, ast::Expr::TakePtr(_))
+            if !matches!(&alias.value, ast::Expr::TakePtr(_) | ast::Expr::IntegerDomain(_))
         );
         if is_transparent_alias {
             continue;
@@ -326,11 +341,22 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                     .unwrap_or_default(),
                 definition: definition.clone(),
                 sequence_literal: validated_sequence_literal_acceptance(declare),
-
+                private_members: member_visibility(declare).0,
+                private_fields: member_visibility(declare).1,
+                field_refinements: field_refinements(declare),
                 reference: None,
                 integer: nominal_integer_semantics(definition, &declare.attributes),
+                discriminant: definition.union_discriminant_domain().map(|domain| {
+                    integer_semantics(&IntegerValidity::new(domain), &declare.attributes)
+                }),
             },
         );
+        if target_dependent_names
+            .as_ref()
+            .is_some_and(|names| declaration_depends_on_target(declare, names))
+        {
+            typed.type_registry.defer_integer_layout(handle);
+        }
     }
     for (name, declare) in &file_ast.tags {
         let tag_id = TagId(*name);
@@ -341,7 +367,7 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
             resolve_tag_pass(
                 name,
                 declare,
-                &file_ast.tags,
+                (&file_ast.tags).into(),
                 &tag_params,
                 &ctx.cross_file_tag_types,
                 &available_tags,
@@ -349,7 +375,7 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
             )
         });
         let is_transparent_alias = matches!(&declare.value, ast::DeclareValue::Alias(alias)
-            if !matches!(&alias.value, ast::Expr::TakePtr(_))
+            if !matches!(&alias.value, ast::Expr::TakePtr(_) | ast::Expr::IntegerDomain(_))
         );
         let instance = ast::ty::NamedTypeInstance::new(ast::ty::TypeId {
             file: file_id.0,
@@ -377,8 +403,9 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
         {
             typed.declaration_flaws.push((
                 declare.name_span,
+                // type-integer-domain-empty
                 Diagnostic::new(
-                    "type-integer-domain-empty",
+                    IntegerCode::DomainEmpty,
                     format!(
                         "integer domain `{start} to {end}` is empty",
                         start = start,
@@ -391,17 +418,26 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
             ));
         }
 
+        typed
+            .declaration_flaws
+            .extend(crate::discriminant::validate_declaration(
+                declare,
+                &definition,
+                &typed.span_table,
+            ));
+        let discriminant = definition
+            .union_discriminant_domain()
+            .map(|domain| integer_semantics(&IntegerValidity::new(domain), &declare.attributes));
         let sequence_literal = validated_sequence_literal_acceptance(declare);
         let integer = nominal_integer_semantics(&definition, &declare.attributes);
         if declare.attributes.bits_span.is_some()
             && !target_dependent_names
                 .as_ref()
                 .is_some_and(|names| declaration_depends_on_target(declare, names))
-            && let Some(integer) = &integer
-            && let Err(error) = ast::integer::resolve_runtime_representation(
-                &integer.validity,
-                &integer.representation_rule,
-            )
+            && let Some(integer) = integer.as_ref().or(discriminant.as_ref())
+            && let Err(error) = integer
+                .validity
+                .resolve_runtime_representation(&integer.representation_rule)
         {
             typed.declaration_flaws.push((
                 declare.attributes.bits_span.unwrap_or(declare.name_span),
@@ -472,9 +508,12 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                             .unwrap_or_default(),
                         definition: definition.clone(),
                         sequence_literal,
-
+                        private_members: member_visibility(declare).0,
+                        private_fields: member_visibility(declare).1,
+                        field_refinements: field_refinements(declare),
                         reference,
                         integer,
+                        discriminant,
                     },
                 );
             }
@@ -487,53 +526,21 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
             {
                 typed.declaration_flaws.push((
                     declare.name_span,
+                    // type-invalid-fixed-array-former
                     Diagnostic::new(
-                    "type-invalid-fixed-array-former",
+                    ArrayCode::FixedInvalidFormer,
                     "fixed-array former must name one element and one length parameter belonging to the declaration",
                     )
                     .at_span_id(declare.name_span, &typed.span_table),
                 ));
             }
         }
-        if resolved_ty.named_instance().is_some() {
-            let has_generic_parameters = declare.params.as_ref().is_some_and(|params| {
-                params
-                    .values()
-                    .any(|parameter| is_type_parameter(&parameter.kind))
-            });
-            if !has_generic_parameters
-                && !target_dependent_names
-                    .as_ref()
-                    .is_some_and(|names| declaration_depends_on_target(declare, names))
-            {
-                let representation_type = declaration_representation_type_root(&resolved_ty);
-                if declaration_has_symbolic_fixed_array_length(
-                    &representation_type,
-                    Some(&typed.type_registry),
-                ) {
-                    // Symbolic fixed array length declarations are valid in generic
-                    // usage and defer concrete layout checks to monomorphic codegen paths.
-                } else {
-                    match crate::representation::Repr::derive(
-                        &representation_type,
-                        Some(&typed.type_registry),
-                    ) {
-                        Ok(_) => {}
-                        Err(error) => {
-                            let diagnostic = error
-                                .diagnostic()
-                                .with_arg("declaration", declare.name.as_str().to_string())
-                                .with_arg("type_name", declare.name.as_str().to_string())
-                                .at_span_id(declare.name_span, &typed.span_table);
-                            typed
-                                .declaration_flaws
-                                .push((declare.name_span, diagnostic));
-                        }
-                    }
-                }
-            }
-        } else if let ast::DeclareValue::Alias(alias) = &declare.value
-            && !matches!(alias.value, ast::Expr::TakePtr(_))
+        if resolved_ty.named_instance().is_none()
+            && let ast::DeclareValue::Alias(alias) = &declare.value
+            && !matches!(
+                alias.value,
+                ast::Expr::TakePtr(_) | ast::Expr::IntegerDomain(_)
+            )
             && let Err(diagnostic) =
                 declaration_reference_semantics(&resolved_ty, &typed.type_registry)
         {
@@ -543,38 +550,13 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
             ));
         }
 
-        check_qualified_has_members(
-            declare,
-            file_ast,
-            ctx.compile_time_eval_ast.as_ref(),
-            &mut |span, diagnostic| {
-                typed
-                    .declaration_flaws
-                    .push((span, diagnostic.at_span_id(span, &typed.span_table)));
-            },
-        );
+        check_qualified_has_properties(declare, &mut |span, diagnostic| {
+            typed
+                .declaration_flaws
+                .push((span, diagnostic.at_span_id(span, &typed.span_table)));
+        });
 
-        for pt in &declare.provided_traits {
-            if RESERVED_TRAITS.contains(&pt.trait_name.as_str())
-                || trait_registry.is_reserved_trait_name(pt.trait_name.as_str(), &typed)
-            {
-                typed.declaration_flaws.push((
-                    pt.trait_name_span,
-                    Diagnostic::new(
-                        "type-reserved-trait-impl",
-                        format!(
-                            "trait `{}` is reserved and cannot be implemented explicitly",
-                            pt.trait_name.as_str()
-                        ),
-                    )
-                    .with_arg("trait_name", pt.trait_name.as_str().to_string()),
-                ));
-            }
-        }
-
-        let mut provided_traits = declare.provided_traits.clone();
-        provided_traits
-            .retain(|pt| !trait_registry.is_reserved_trait_name(pt.trait_name.as_str(), &typed));
+        let provided_traits = declare.provided_traits.clone();
 
         // Register provision expressions so references inside qualified trait members
         // remain available to hover and go-to-definition.
@@ -586,7 +568,6 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
         for pt in &provided_traits {
             for (_, expr) in &pt.fields {
                 if expr.span_id.is_valid() {
-                    let expr_id = ExprId(typed.exprs.kind.len() as u32);
                     // Try to resolve the expression type for better hover.
                     // If the expression is `self.field`, look up the field type.
                     let expr_ty: Ty = match &expr.value {
@@ -603,73 +584,14 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                         }
                         _ => resolved_ty.clone(),
                     };
-                    typed
-                        .exprs
-                        .kind
-                        .push(crate::typed::TypedExprKind::Lit(ast::Literal::Number(0)));
-                    typed.exprs.ty.push(expr_ty);
-                    typed.exprs.span.push(expr.span_id);
-                    typed.exprs.facts.const_facts.const_value.push(None);
-                    typed.exprs.facts.const_facts.const_object.push(None);
-                    typed
-                        .exprs
-                        .facts
-                        .semantic_facts
-                        .sequence_provenance
-                        .push(None);
-                    typed.exprs.facts.const_facts.sequence_literal.push(None);
-                    typed
-                        .exprs
-                        .facts
-                        .const_facts
-                        .literal_materialization
-                        .push(None);
-                    typed
-                        .exprs
-                        .facts
-                        .semantic_facts
-                        .integer_knowledge
-                        .push(None);
-                    typed.exprs.facts.semantic_facts.result_evidence.push(None);
-                    typed
-                        .exprs
-                        .facts
-                        .semantic_facts
-                        .projected_result_evidence
-                        .push(HashMap::new());
-                    typed
-                        .exprs
-                        .facts
-                        .semantic_facts
-                        .availability
-                        .push(Availability::Unknown);
-                    typed
-                        .exprs
-                        .push_ownership_facts(None, Vec::new(), None, None);
-                    typed.exprs.facts.semantic_facts.flaws.push(Vec::new());
-                    let span = typed.span_table.get(expr.span_id);
-                    typed
-                        .span_to_expr
-                        .entry(span.start_u32())
-                        .or_insert(expr_id);
+                    typed.exprs.push_placeholder(
+                        crate::typed::TypedExprKind::Lit(ast::Literal::Int(0.into())),
+                        expr_ty,
+                        expr.span_id,
+                    );
                 }
             }
         }
-
-        // Reflectable.shape materializes the whole `Type` graph; skip for IDE package transforms.
-        let has_reflection_member = declare
-            .provided_traits
-            .iter()
-            .any(|pt| trait_registry.is_reflection_trait_name(pt.trait_name.as_str(), &typed));
-        if !ctx.ide_package && !has_reflection_member {
-            provided_traits.extend(synthesize_reflectable_trait(
-                &resolved_ty,
-                &typed,
-                &trait_registry,
-                &typed.type_registry,
-            ));
-        }
-
         // Extract field/method type annotations from `has` bodies.
         let (record_field_types, record_field_docs, record_field_refinements) = match &declare.value
         {
@@ -687,6 +609,9 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                                 .is_some_and(|qualifier| qualifier.name != declare.name)
                             {
                                 continue;
+                            }
+                            if p.owned_storage {
+                                ty_surface.push_str("own ");
                             }
                             if let Some(ty) = &p.ty {
                                 let _ = write!(&mut ty_surface, "{}", ty.value.format_surface());
@@ -729,7 +654,8 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                                         ast::ParameterKind::Default(expr) => {
                                             let _ = write!(&mut ty_surface, ": {:?}", expr);
                                         }
-                                        ast::ParameterKind::Generic => {}
+                                        ast::ParameterKind::Generic
+                                        | ast::ParameterKind::Proposition(_) => {}
                                     }
                                     if let Some(conv) = f.conventions.get(param_name) {
                                         match conv {
@@ -753,10 +679,6 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                                     ty_surface.push(' ');
                                 }
                                 ty_surface.push_str(&rt.value.format_surface());
-                            }
-                            if let Some(et) = &f.error_ty {
-                                ty_surface.push_str(" or ");
-                                ty_surface.push_str(&et.value.format_surface());
                             }
                             if ty_surface.is_empty() {
                                 ty_surface.push_str("()");
@@ -809,14 +731,6 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
         &typed.type_registry,
     );
 
-    for bind in file_ast.defs.values() {
-        check_params_for_in_range_on_bounded_tag(
-            bind.params.as_ref(),
-            &typed.tag_types,
-            &mut typed.declaration_flaws,
-        );
-    }
-
     // 2a. Populate variant annotations (shape text, doc comments) from AST variants.
     for (tag_name, declare) in &file_ast.tags {
         if let DeclareValue::Union { variants } = &declare.value {
@@ -839,6 +753,47 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
         }
     }
 
+    DeclaredTypes {
+        typed,
+        source: defaults,
+        tag_params,
+        anonymous_result_labels,
+        target_dependent_names,
+    }
+}
+
+pub(super) fn complete_signatures(
+    mut declarations: DeclaredTypes<'_>,
+    ctx: &TransformCtx,
+) -> TypedFileAst {
+    let _profile = compiler_profile::span(compiler_profile::Phase::Signatures);
+    declarations.typed.type_registry = ctx.type_registry.clone();
+    declarations.typed.variant_map.clear();
+    declare_signatures(declarations, ctx)
+}
+
+fn declare_signatures(declarations: DeclaredTypes<'_>, ctx: &TransformCtx) -> TypedFileAst {
+    let DeclaredTypes {
+        mut typed,
+        source,
+        tag_params,
+        anonymous_result_labels,
+        target_dependent_names,
+    } = declarations;
+    let file_ast = source.as_ref();
+    let argument_declarations =
+        TagDeclarations::overlay(&file_ast.tags, &ctx.compile_time_eval_ast.tags);
+    let argument_context =
+        super::type_arguments::TypeArgumentContext::new(&tag_params, argument_declarations);
+
+    for bind in file_ast.defs.values() {
+        check_params_for_in_range_on_bounded_tag(
+            bind.params.as_ref(),
+            &typed.tag_types,
+            &mut typed.declaration_flaws,
+        );
+    }
+
     // 3. Merge cross-file variant map entries (not spliced into own to avoid O(n²)).
     for (variant_name, entries) in &ctx.cross_file_variant_map {
         typed
@@ -848,19 +803,35 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
             .extend(entries.iter().cloned());
     }
 
+    let trait_methods =
+        super::trait_methods::TraitMethods::new(file_ast, &ctx.compile_time_eval_ast);
+    trait_methods.check_implementations(|span, diagnostic| {
+        typed
+            .declaration_flaws
+            .push((span, diagnostic.at_span_id(span, &typed.span_table)));
+    });
+
+    let shared_tag_types = std::cell::OnceCell::new();
     // 4. Walk binds and build bind index.
     for (name, declare) in &file_ast.defs {
-        let def_id = DefId(*name);
-        if file_ast.private_defs.contains(name) {
+        let effective = trait_methods.public_signature(declare);
+        let declare = effective.as_ref();
+        let def_id = *name;
+        if file_ast.private_defs.contains(&name.0) {
             typed.private_defs.insert(def_id);
         }
-        let dependent_binder = BinderId::new(typed.file_id.0, BinderOwner::Definition(def_id.0));
-        let own_tag_types: HashMap<Intern<String>, Ty> = typed
-            .tag_types
-            .iter()
-            .map(|(id, ty)| (id.0, ty.clone()))
-            .collect();
-        let tag_types_by_name = resolved_types(&own_tag_types, &ctx.cross_file_tag_types);
+        let dependent_binder = BinderId::new(typed.file_id.0, BinderOwner::Definition(def_id));
+        let shared = shared_tag_types.get_or_init(|| {
+            let types = signature_tag_types(&typed.tag_types, &ctx.cross_file_tag_types);
+            (!types.values().any(|ty| matches!(ty, Ty::Union { .. }))).then_some(types)
+        });
+        let tag_types_by_name = match shared {
+            Some(types) => std::borrow::Cow::Borrowed(types),
+            None => std::borrow::Cow::Owned(signature_tag_types(
+                &typed.tag_types,
+                &ctx.cross_file_tag_types,
+            )),
+        };
         let receiver_type = declare.receiver_type_surface().map(|receiver| {
             TypeEnv::new(&tag_types_by_name)
                 .with_tag_params(&tag_params)
@@ -881,7 +852,7 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                             ast::Expr::AnonymousTag(name)
                                 if name.as_str().chars().next().is_some_and(char::is_lowercase) =>
                             {
-                                Some((*name, Ty::i64()))
+                                Some((*name, Ty::Opaque(*name)))
                             }
                             _ => None,
                         })
@@ -891,28 +862,40 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
             .unwrap_or_default();
         let result_family_owner = file_ast.semantic_origin.as_ref().map_or_else(
             || {
-                ast::ResultFamilyOwner::Callable(ast::ty::DeclarationKey::from_qualified_name(
-                    ctx.package_instance.clone(),
-                    *name,
+                ast::ResultFamilyOwner::Callable(Box::new(
+                    ast::ty::DeclarationKey::from_qualified_name(
+                        ctx.package_instance.clone(),
+                        name.0,
+                    )
+                    .with_member(name.1),
                 ))
             },
             |origin| {
-                ast::ResultFamilyOwner::Callable(ast::ty::DeclarationKey::new(
-                    origin.package.clone(),
-                    origin.module.clone(),
-                    declare.name,
+                ast::ResultFamilyOwner::Callable(Box::new(
+                    ast::ty::DeclarationKey::new(
+                        origin.package.clone(),
+                        origin.module.clone(),
+                        declare.name,
+                    )
+                    .with_member(name.1),
                 ))
             },
         );
-        let mut method_tag_types = tag_types_by_name.clone();
+        let mut method_tag_types = match shared {
+            Some(_) => std::borrow::Cow::Borrowed(tag_types_by_name.as_ref()),
+            None => std::borrow::Cow::Owned(tag_types_by_name.as_ref().clone()),
+        };
         if let Some(receiver_type) = &receiver_type {
-            method_tag_types.insert(Intern::<String>::from_ref("Self"), receiver_type.clone());
+            method_tag_types
+                .to_mut()
+                .insert(Intern::<String>::from_ref("Self"), receiver_type.clone());
         }
-        let return_ty = resolve_return_type(
+        let mut return_ty = resolve_return_type(
             declare,
+            &typed.type_registry,
             &method_tag_types,
             &tag_params,
-            &file_ast.tags,
+            (&file_ast.tags).into(),
             dependent_binder,
             &method_typevar_subst,
             receiver_type.as_ref(),
@@ -921,11 +904,38 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                 .map(|receiver| &receiver.value),
             &result_family_owner,
         );
+        if return_ty == Ty::Unit
+            && declare.is_constant()
+            && target_dependent_names
+                .as_ref()
+                .is_some_and(|names| names.contains(&name.0))
+            && let BindValue::Expr(expr) = &declare.value
+        {
+            let inferred = expr.infer_ty(&TyInferEnv {
+                tag_types: &method_tag_types,
+                fn_return_types: &HashMap::new(),
+                locals: &HashMap::new(),
+                tag_params: Some(&tag_params),
+            });
+            if inferred.is_int()
+                || matches!(
+                    inferred,
+                    Ty::UnresolvedLiteral(ast::ty::LiteralKind::Integer)
+                )
+            {
+                return_ty = Ty::AnonymousInteger {
+                    validity: ast::integer::IntegerValidity::new(IntegerDomain::symbolic(
+                        ast::NormalExpr::Var(name.0),
+                    )),
+                };
+            }
+        }
         let param_types = resolve_param_types(
             declare,
+            &typed.type_registry,
             &method_tag_types,
             &tag_params,
-            &file_ast.tags,
+            (&file_ast.tags).into(),
             dependent_binder,
             &method_typevar_subst,
         );
@@ -939,11 +949,16 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                     .zip(&param_types)
                     .map(|((name, parameter), (_, ty))| {
                         if declare.param_refinements.contains_key(name)
+                            || super::parameters::is_inferred_value(declare, *name)
                             || (name.as_str() == "self" && receiver_type.is_some())
+                            || matches!(&parameter.kind, ParameterKind::Tagged(surface) if matches!(surface.value, Expr::IntegerDomain(_)))
                         {
                             ParamKind::Value(Box::new(ty.clone()))
                         } else {
-                            param_kind_from_parameter_kind(&parameter.kind, &tag_types_by_name)
+                            match param_kind_from_parameter_kind(&parameter.kind, &tag_types_by_name) {
+                                ParamKind::Value(_) => ParamKind::Value(Box::new(ty.clone())),
+                                kind => kind,
+                            }
                         }
                     })
                     .collect()
@@ -965,7 +980,7 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                     .collect()
             })
             .unwrap_or_default();
-        let param_refinements = declare
+        let param_refinements: Vec<_> = declare
             .params
             .as_ref()
             .map(|params| {
@@ -985,14 +1000,60 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
         let param_count = param_types.len();
 
         let mut bind_flaws = Vec::new();
-        if let Some(params) = &declare.params {
-            typed
-                .declaration_flaws
-                .extend(duplicate_parameter_name_diagnostics(
-                    params,
+        if declare.attributes.is_private() {
+            if receiver_type.is_none() {
+                // type-private-member-context
+                bind_flaws.push(flaw(
                     &typed.span_table,
+                    declare.name_span,
+                    DiagnosticCode::Type(TypeCode::Member(MemberCode::PrivateContext)),
+                    "#private belongs on a field or method",
                 ));
+            } else {
+                typed.type_registry.insert_private_method(
+                    def_id,
+                    crate::type_registry::PrivateMethod {
+                        origin: file_ast.semantic_origin.clone(),
+                        file: typed.file_id.0,
+                        grants: private_grants(&declare.attributes),
+                    },
+                );
+            }
         }
+
+        for (span, diagnostic) in super::parameters::constraint_diagnostics(
+            declare,
+            &file_ast.tags,
+            &ctx.compile_time_eval_ast.tags,
+        ) {
+            bind_flaws.push(diagnostic.at_span_id(span, &typed.span_table));
+        }
+        let domain_types = TypeEnv::new(&method_tag_types)
+            .with_registry(&typed.type_registry)
+            .with_tag_params(&tag_params)
+            .with_tag_decls(&file_ast.tags)
+            .with_dependent_binder(dependent_binder);
+        let param_constraints = super::parameters::resolve_constraints(declare, &domain_types);
+        for (span, diagnostic) in argument_context.bind_diagnostics(declare) {
+            bind_flaws.push(diagnostic.at_span_id(span, &typed.span_table));
+        }
+        for surface in declare
+            .params
+            .iter()
+            .flat_map(|params| params.values())
+            .filter_map(|param| match &param.kind {
+                ParameterKind::Tagged(surface) => Some(surface.as_ref()),
+                _ => None,
+            })
+            .chain(declare.return_tag.as_deref())
+        {
+            if let Some(diagnostic) =
+                domain_types.integer_domain_diagnostic(surface, &typed.span_table)
+            {
+                bind_flaws.push(diagnostic);
+            }
+        }
+
         if param_types
             .iter()
             .any(|(_, ty)| contains_unresolved_result_label(ty, &anonymous_result_labels))
@@ -1013,8 +1074,9 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
             && ast::BinOp::from_symbol(symbol.as_str()).is_none()
         {
             bind_flaws.push(
+                // type-unknown-infix-operator
                 Diagnostic::new(
-                    "type-unknown-infix-operator",
+                    OperatorCode::UnknownInfix,
                     format!("unknown infix operator `{}`", symbol.as_str()),
                 )
                 .with_arg("operator", symbol.as_str().to_string())
@@ -1027,18 +1089,30 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                 ),
             );
         }
+        if let Some(symbol) = declare.attributes.infix_symbol
+            && let Some(op) = ast::BinOp::from_symbol(symbol.as_str())
+            && ast::ProofRelation::for_bin_op(&op).is_some()
+        {
+            // type-fixed-numeric-comparison
+            bind_flaws.push(flaw(
+                &typed.span_table,
+                declare.name_span,
+                DiagnosticCode::Type(TypeCode::Operator(OperatorCode::FixedNumericComparison)),
+                "numeric comparison operators have fixed semantics; use a named comparison function for custom orderings",
+            ));
+        }
         let value_param_count = param_kinds
             .iter()
             .filter(|kind| matches!(kind, ParamKind::Value(_)))
             .count();
         if declare.attributes.infix_symbol.is_some() && value_param_count != 2 {
-            bind_flaws.push(
-                Diagnostic::new(
-                    "type-invalid-infix-declaration",
-                    "an infix declaration must have exactly two value parameters",
-                )
-                .at_span_id(declare.name_span, &typed.span_table),
-            );
+            // type-invalid-infix-declaration
+            bind_flaws.push(flaw(
+                &typed.span_table,
+                declare.name_span,
+                DiagnosticCode::Type(TypeCode::Operator(OperatorCode::InvalidInfixDeclaration)),
+                "an infix declaration must have exactly two value parameters",
+            ));
         }
         if matches!(
             declare
@@ -1047,45 +1121,170 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                 .as_ref()
                 .map(|symbol| symbol.as_str()),
             Some("+") | Some("-") | Some("*") | Some("&") | Some("|") | Some("^")
-        ) && param_types
-            .first()
-            .is_some_and(|(_, operand)| operand != &return_ty)
-        {
-            bind_flaws.push(
-                Diagnostic::new(
-                    "type-invalid-operator-result",
-                    "an integer operator implementation must return its left operand type",
-                )
-                .at_span_id(declare.name_span, &typed.span_table),
+        ) && param_types.first().is_some_and(|(_, operand)| {
+            typed
+                .type_registry
+                .integer_validity_for_type(operand.without_reference_wrappers())
+                .is_some()
+                && operand != &return_ty
+                && !(matches!(
+                    declare
+                        .attributes
+                        .infix_symbol
+                        .as_deref()
+                        .map(String::as_str),
+                    Some("+" | "-" | "*")
+                ) && checked_integer_operator_result(
+                    &typed.type_registry,
+                    operand,
+                    &return_ty,
+                ))
+        }) {
+            // type-invalid-operator-result
+            bind_flaws.push(flaw(
+                &typed.span_table,
+                declare.name_span,
+                DiagnosticCode::Type(TypeCode::Operator(OperatorCode::InvalidResult)),
+                "an integer operator must return its left operand type; arithmetic may also return a union of that type and Flaw",
+            ));
+        }
+        for contract in trait_methods.contracts(declare) {
+            let mut expected = declare.clone();
+            expected.params = Some(contract.method.params.as_ref().clone());
+            expected.param_conventions = contract.method.conventions.as_ref().clone();
+            expected.param_refinements = contract.method.param_refinements.as_ref().clone();
+            expected.return_tag = contract.method.return_ty.clone();
+            expected.anonymous_result_alternatives =
+                contract.method.anonymous_result_alternatives.clone();
+            let expected_params = resolve_param_types(
+                &expected,
+                &typed.type_registry,
+                &method_tag_types,
+                &tag_params,
+                (&file_ast.tags).into(),
+                dependent_binder,
+                &method_typevar_subst,
             );
+            let expected_return = resolve_return_type(
+                &expected,
+                &typed.type_registry,
+                &method_tag_types,
+                &tag_params,
+                (&file_ast.tags).into(),
+                dependent_binder,
+                &method_typevar_subst,
+                receiver_type.as_ref(),
+                declare.receiver_type_surface().map(|r| &r.value),
+                &result_family_owner,
+            );
+            let expected_conventions: Vec<_> = contract
+                .method
+                .params
+                .keys()
+                .map(|name| {
+                    contract
+                        .method
+                        .conventions
+                        .get(name)
+                        .copied()
+                        .unwrap_or_default()
+                })
+                .collect();
+            if !param_types
+                .iter()
+                .map(|(_, ty)| ty)
+                .eq(expected_params.iter().map(|(_, ty)| ty))
+                || param_conventions != expected_conventions
+                || param_constraints
+                    != super::parameters::resolve_constraints(&expected, &domain_types)
+                || !return_contract_matches(&typed.type_registry, &return_ty, &expected_return)
+                || contract
+                    .method
+                    .attributes
+                    .infix_symbol
+                    .is_some_and(|s| Some(s) != declare.attributes.infix_symbol)
+            {
+                // type-trait-method-mismatch
+                bind_flaws.push(Diagnostic::new(
+                    TraitCode::MethodMismatch,
+                    format!("implementation does not match `{}.{}`; use a qualified method name for conflicting contracts", contract.owner, contract.method.name),
+                ).with_arg("trait_name", contract.owner.as_str().to_string())
+                 .with_arg("method_name", contract.method.name.as_str().to_string())
+                 .at_span_id(declare.name_span, &typed.span_table));
+            }
         }
         let typed_bind = TypedBind {
-            name: *name,
+            name: name.0,
             dependent_binder,
             name_span: declare.name_span,
+            terminal_exit_span: match &declare.value {
+                ast::BindValue::Body { ret, .. } => ret.span_id,
+                ast::BindValue::Expr(expr) => {
+                    let end = typed.span_table.get(expr.span_id).end();
+                    typed.span_table.insert(ast::Span::new(end, end))
+                }
+                ast::BindValue::Unassigned => declare.name_span,
+            },
             return_type: return_ty.clone(),
-            named_results: declare.named_results.clone(),
-            declared_return_type: return_ty.clone(),
+            named_results: declare.named_results.clone().into(),
+            declared_return_type: std::sync::Arc::new(return_ty.clone()),
             return_evidence: None,
-            params: param_types,
-            param_kinds,
-            param_conventions,
-            param_groups,
-            param_refinements,
-            groups,
-            result_groups,
+            postcondition: None,
+            params: param_types.into(),
+            param_kinds: param_kinds.into(),
+            param_constraints: param_constraints.into(),
+            param_conventions: param_conventions.into(),
+            param_groups: param_groups.into(),
+            param_refinements: param_refinements.into(),
+            payload_postconditions: declare
+                .payload_postconditions
+                .iter()
+                .map(|proof| {
+                    let is_self = matches!(
+                        &proof.ty.value,
+                        Expr::AnonymousTag(name) if name.as_str() == "Self"
+                    );
+                    let ty = if is_self {
+                        receiver_type
+                            .clone()
+                            .unwrap_or(Ty::Opaque(Intern::from_ref("Self")))
+                    } else {
+                        TypeEnv::new(&method_tag_types)
+                            .with_registry(&typed.type_registry)
+                            .with_subst(&method_typevar_subst)
+                            .with_tag_params(&tag_params)
+                            .with_tag_declaration_lookup((&file_ast.tags).into())
+                            .with_dependent_binder(dependent_binder)
+                            .resolve_expr(&proof.ty.value)
+                    };
+                    crate::typed::TypedPayloadPostcondition {
+                        name: proof.name,
+                        ty,
+                        proposition: proof.proposition.clone(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .into(),
+            groups: groups.into(),
+            result_groups: result_groups.into(),
+            references: Default::default(),
             effects: Default::default(),
+            body_type_parameters: std::sync::Arc::new(receiver_body_type_parameters(
+                declare,
+                receiver_type.as_ref(),
+            )),
             receiver_type,
             unassigned_decl: matches!(declare.value, BindValue::Unassigned),
+            is_callable: declare.params.is_some(),
             is_constant: declare.is_constant(),
             body: crate::typed::BindBody::Unlowered,
-            flaws: bind_flaws,
-            param_requirements: vec![AvailabilityRequirement::Any; param_count],
+            flaws: std::sync::Arc::new(bind_flaws),
+            param_requirements: smallvec::smallvec![AvailabilityRequirement::Any; param_count],
             call_capability: CallCapability::StagePolymorphic,
             definition_stage: crate::typed::DefinitionStage::StagePolymorphic,
-            signature_surface: declare.signature_surface(),
-            doc_comment: declare.doc_comment.clone(),
-            attributes: declare.attributes.clone(),
+            signature_surface: declare.signature_surface().into(),
+            doc_comment: declare.doc_comment.clone().map(std::sync::Arc::new),
+            attributes: std::sync::Arc::new(declare.attributes.clone()),
             infix_symbol: declare.attributes.infix_symbol,
         };
         if declare.params.is_some() {
@@ -1094,53 +1293,75 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
         typed.defs.insert(def_id, typed_bind);
     }
 
+    for declare in file_ast.tags.values() {
+        if let ast::DeclareValue::Has(members) = &declare.value {
+            for member in members {
+                let ast::HasMember::Property(field) = member else {
+                    continue;
+                };
+                if field.owned_storage && (field.body.is_some() || field.qualifier.is_some()) {
+                    typed.declaration_flaws.push((
+                        field.name_span,
+                        // type-invalid-owned-storage-field
+                        Diagnostic::new(
+                            OwnershipCode::StorageFieldInvalid,
+                            "own storage must be a stored field",
+                        )
+                        .at_span_id(field.name_span, &typed.span_table),
+                    ));
+                }
+            }
+        }
+        for attribute in declare.attributes.raw_attributes.iter().flatten() {
+            if matches!(attribute, ast::AttributeItem::Flag { name, .. } | ast::AttributeItem::Call { name, .. } if name.as_str() == "private")
+            {
+                typed.declaration_flaws.push((
+                    declare.name_span,
+                    // type-private-member-context
+                    Diagnostic::new(
+                        MemberCode::PrivateContext,
+                        "#private belongs on a field or method",
+                    )
+                    .at_span_id(declare.name_span, &typed.span_table),
+                ));
+            }
+        }
+        if let ast::DeclareValue::Has(members) = &declare.value {
+            for member in members {
+                let (span, attributes) = match member {
+                    ast::HasMember::Property(field) => (field.name_span, &field.attributes),
+                    ast::HasMember::Function(method) => (method.name_span, &method.attributes),
+                };
+                for attribute in attributes.raw_attributes.iter().flatten() {
+                    if let ast::AttributeItem::Call { name, args, .. } = attribute
+                        && name.as_str() == "private"
+                        && (args.is_empty() || private_grants(attributes).len() != args.len())
+                    {
+                        typed.declaration_flaws.push((
+                            span,
+                            // type-invalid-private-grant
+                            Diagnostic::new(
+                                MemberCode::PrivateGrantInvalid,
+                                "private grants require module names",
+                            )
+                            .at_span_id(span, &typed.span_table),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     // 5. Build type scope for declarations.
     let scope_names = build_type_scope(file_ast, ctx);
     let type_scope: HashSet<Intern<String>> = scope_names.into_iter().collect();
 
-    // 6. Check type annotations in declarations.
-    let reflection_contract_issues = trait_registry.reflection_contract_with_issues(&typed);
-    for issue in reflection_contract_issues.issues {
-        let span = match &issue {
-            ReflectionContractIssue::MissingRole { contract_span, .. } => *contract_span,
-            ReflectionContractIssue::DuplicateRole { declarations, .. } => declarations
-                .first()
-                .map(|(_, span)| *span)
-                .unwrap_or(SpanId::INVALID),
-            ReflectionContractIssue::DuplicateReflectionTrait { declarations } => declarations
-                .first()
-                .map(|(_, span)| *span)
-                .unwrap_or(SpanId::INVALID),
-            ReflectionContractIssue::MalformedRole {
-                declaration_span, ..
-            } => *declaration_span,
-            ReflectionContractIssue::RolesWithoutReflectionTrait { declarations } => declarations
-                .first()
-                .map(|(_, span)| *span)
-                .unwrap_or(SpanId::INVALID),
-            ReflectionContractIssue::ReflectionContractIsInvalid => SpanId::INVALID,
-        };
-        typed
-            .declaration_flaws
-            .push((span, issue.diagnostic().at_span_id(span, &typed.span_table)));
-    }
-
     for declare in file_ast.tags.values() {
-        for (role, span) in &declare.attributes.invalid_reflection_roles {
-            typed.declaration_flaws.push((
-                *span,
-                Diagnostic::new(
-                    "type-unknown-reflection-role",
-                    format!("unknown reflection role `{}`", role.as_str()),
-                )
-                .with_arg("role", role.as_str().to_string())
-                .at_span_id(*span, &typed.span_table),
-            ));
-        }
         for provided in &declare.provided_traits {
             if !type_scope.contains(&provided.trait_name) {
+                // type-unknown-symbol
                 let diagnostic = Diagnostic::new(
-                    "type-unknown-symbol",
+                    SymbolCode::Unknown,
                     format!("unknown symbol `{}`", provided.trait_name.as_str()),
                 )
                 .with_arg("name", provided.trait_name.as_str().to_string())
@@ -1160,8 +1381,9 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                 if !parameters.contains_key(phantom) {
                     typed.declaration_flaws.push((
                         declare.name_span,
+                        // type-unknown-phantom-parameter
                         Diagnostic::new(
-                            "type-unknown-phantom-parameter",
+                            GenericCode::UnknownPhantomParameter,
                             format!("unknown phantom parameter `{}`", phantom.as_str()),
                         )
                         .with_arg("parameter", phantom.as_str().to_string())
@@ -1179,8 +1401,9 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                 {
                     typed.declaration_flaws.push((
                         declare.name_span,
+                        // type-unused-generic-parameter
                         Diagnostic::new(
-                            "type-unused-generic-parameter",
+                            GenericCode::UnusedParameter,
                             format!(
                                 "generic parameter `{}` does not participate in `{}`",
                                 parameter.as_str(),
@@ -1205,9 +1428,10 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
             .chain(bind.params.iter().map(|(_, ty)| ty))
             .find_map(|ty| unsaturated_type_name(ty, &typed.type_registry));
         if let Some(name) = unsaturated {
-            bind.flaws.push(
+            bind.push_flaw(
+                // type-unsaturated-application
                 Diagnostic::new(
-                    "type-unsaturated-application",
+                    GenericCode::UnsaturatedApplication,
                     format!("generic type `{}` requires type arguments", name.as_str()),
                 )
                 .with_arg("type_name", name.as_str().to_string())
@@ -1223,10 +1447,11 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
         let Some(type_name) = unsaturated_type_surface(&surface.value, &tag_params) else {
             continue;
         };
-        if let Some(typed_bind) = typed.defs.get_mut(&DefId(*name)) {
-            typed_bind.flaws.push(
+        if let Some(typed_bind) = typed.defs.get_mut(name) {
+            typed_bind.push_flaw(
+                // type-unsaturated-application
                 Diagnostic::new(
-                    "type-unsaturated-application",
+                    GenericCode::UnsaturatedApplication,
                     format!(
                         "generic type `{}` requires type arguments",
                         type_name.as_str()
@@ -1239,6 +1464,11 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
     }
 
     for (name, declare) in &file_ast.tags {
+        for (span, diagnostic) in argument_context.declaration_diagnostics(declare) {
+            typed
+                .declaration_flaws
+                .push((span, diagnostic.at_span_id(span, &typed.span_table)));
+        }
         let unsaturated = match &declare.value {
             DeclareValue::Alias(surface) => unsaturated_type_surface(&surface.value, &tag_params),
             DeclareValue::Has(members) => members.iter().find_map(|member| match member {
@@ -1258,8 +1488,9 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
                 .unwrap_or(declare.name_span);
             typed.declaration_flaws.push((
                 span,
+                // type-unsaturated-application
                 Diagnostic::new(
-                    "type-unsaturated-application",
+                    GenericCode::UnsaturatedApplication,
                     format!(
                         "generic type `{}` requires type arguments",
                         type_name.as_str()
@@ -1271,7 +1502,7 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
         }
     }
 
-    for (tag_id, tag) in &typed.tags {
+    for (tag_id, tag) in &*typed.tags {
         let is_own_nominal_root = tag
             .resolved_ty
             .named_instance()
@@ -1287,8 +1518,9 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
         if let Some(name) = unsaturated_type_name(&subject, &typed.type_registry) {
             typed.declaration_flaws.push((
                 tag.name_span,
+                // type-unsaturated-application
                 Diagnostic::new(
-                    "type-unsaturated-application",
+                    GenericCode::UnsaturatedApplication,
                     format!("generic type `{}` requires type arguments", name.as_str()),
                 )
                 .with_arg("type_name", name.as_str().to_string())
@@ -1297,6 +1529,7 @@ pub fn stage_declare(file_ast: &FileAst, file_id: FileId, ctx: &TransformCtx) ->
         }
     }
 
+    crate::typed::sort_variant_map(&mut typed.variant_map);
     typed
 }
 
@@ -1335,6 +1568,7 @@ fn unsaturated_type_name(
         }),
         Ty::Array { elem, .. }
         | Ty::Ptr { inner: elem }
+        | Ty::OwnedStorage { inner: elem }
         | Ty::Address { pointee: elem, .. }
         | Ty::Ref { inner: elem, .. } => unsaturated_type_name(elem, registry),
         Ty::UnresolvedSequence { element, .. } => element
@@ -1343,7 +1577,8 @@ fn unsaturated_type_name(
         Ty::Sequence(fields) => fields
             .iter()
             .find_map(|field| unsaturated_type_name(&field.ty, registry)),
-        Ty::ResultFamily { .. }
+        Ty::Proposition(_)
+        | Ty::ResultFamily { .. }
         | Ty::AnonymousInteger { .. }
         | Ty::UnresolvedLiteral(_)
         | Ty::Float { .. }
@@ -1360,7 +1595,14 @@ fn unsaturated_type_surface(
     match expression {
         Expr::AnonymousTag(name) => tag_params
             .get(name)
-            .is_some_and(|parameters| !parameters.is_empty())
+            .is_some_and(|parameters| {
+                parameters.values().any(|parameter| {
+                    !matches!(
+                        parameter.kind,
+                        ParameterKind::Default(_) | ParameterKind::Inferred { .. }
+                    )
+                })
+            })
             .then_some(*name),
         Expr::TagCall(call) => tag_params
             .get(&call.name)
@@ -1418,7 +1660,9 @@ fn declaration_ty_refers_to_name(
     recursion_stack: &mut HashSet<Intern<String>>,
 ) -> bool {
     let name = match ty {
-        Ty::Ref { .. } | Ty::Ptr { .. } | Ty::Address { .. } => return false,
+        Ty::Ref { .. } | Ty::Ptr { .. } | Ty::OwnedStorage { .. } | Ty::Address { .. } => {
+            return false;
+        }
         Ty::Named { instance, .. } => &instance.declaration.name,
         Ty::Opaque(name) => name,
         _ => {
@@ -1447,8 +1691,9 @@ fn declaration_reference_semantics(
     };
 
     if is_nested_reference_former(ty, Some(type_registry)) {
+        // type-invalid-reference-former
         return Err(Box::new(Diagnostic::new(
-            "type-invalid-reference-former",
+            ReferenceCode::InvalidFormer,
             "reference former declarations cannot be nested",
         )));
     }
@@ -1456,175 +1701,109 @@ fn declaration_reference_semantics(
     Ok(Some(reference))
 }
 
-fn declaration_representation_type_root(ty: &Ty) -> Ty {
-    declaration_representation_type(ty)
-}
-
-fn declaration_has_symbolic_fixed_array_length(
-    ty: &Ty,
-    registry: Option<&crate::TypeRegistry>,
-) -> bool {
-    declaration_has_symbolic_fixed_array_length_with_seen(ty, registry, &mut Vec::new())
-}
-
-fn declaration_has_symbolic_fixed_array_length_with_seen(
-    ty: &Ty,
-    registry: Option<&crate::TypeRegistry>,
-    stack: &mut Vec<ast::ty::NamedTypeInstance>,
-) -> bool {
-    match ty {
-        Ty::Array { size, .. } => match size.normalize().normalize_to_value() {
-            Some(ast::ConstValue::Int(value)) => ast::integer::to_u64(value).is_none(),
-            Some(_) => true,
-            None => true,
-        },
-        Ty::Named { instance, .. } => {
-            let Some(declaration) =
-                registry.and_then(|registry| registry.declaration_for_instance(instance))
-            else {
-                return false;
-            };
-
-            if stack
-                .iter()
-                .any(|prior| prior.declaration == instance.declaration)
-            {
-                return false;
-            }
-            stack.push(instance.clone());
-
-            let definition = &declaration.definition;
-            let symbolic = if let Some(former) = declaration.sequence_literal.as_ref() {
-                let Some(length_parameter) = former.fixed_array_length_parameter() else {
-                    stack.pop();
-                    return false;
-                };
-                let element = instance.arguments.iter().find_map(|(parameter, argument)| {
-                    (*parameter == former.element_parameter).then_some(argument)
-                });
-                let length = instance.arguments.iter().find_map(|(parameter, argument)| {
-                    (*parameter == length_parameter).then_some(argument)
-                });
-                if let Some(ast::TyArg::Type(_)) = element {
-                    if let Some(ast::TyArg::Const(expr)) = length {
-                        expr.normalize()
-                            .normalize_to_value()
-                            .is_none_or(|value| match value {
-                                ast::ConstValue::Int(value) => {
-                                    ast::integer::to_u64(value).is_none()
-                                }
-                                _ => true,
-                            })
-                    } else {
-                        true
-                    }
-                } else {
-                    false
-                }
-            } else {
-                declaration_has_symbolic_fixed_array_length_with_seen(definition, registry, stack)
-            };
-            let _ = stack.pop();
-            symbolic
-        }
-        Ty::Ref { inner, .. } | Ty::Ptr { inner, .. } | Ty::Address { pointee: inner, .. } => {
-            declaration_has_symbolic_fixed_array_length_with_seen(inner, registry, stack)
-        }
-        Ty::Record { fields, .. } => fields.iter().any(|(_, field)| {
-            declaration_has_symbolic_fixed_array_length_with_seen(field, registry, stack)
-        }),
-        Ty::Sequence(fields) => fields.iter().any(|field| {
-            declaration_has_symbolic_fixed_array_length_with_seen(&field.ty, registry, stack)
-        }),
-        Ty::Union { variants, .. } => variants.iter().any(|variant| {
-            variant.fields.iter().any(|(_, field)| {
-                declaration_has_symbolic_fixed_array_length_with_seen(field, registry, stack)
-            })
-        }),
-        _ => false,
+fn receiver_body_type_parameters(
+    bind: &ast::Bind,
+    receiver: Option<&Ty>,
+) -> BTreeSet<Intern<String>> {
+    let candidates: BTreeSet<_> = receiver
+        .and_then(Ty::named_instance)
+        .into_iter()
+        .flat_map(|instance| &instance.arguments)
+        .filter_map(|(_, argument)| match argument {
+            ast::TyArg::Type(ty) => match ty.as_ref() {
+                Ty::Opaque(name) => Some(*name),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    struct Uses<'a> {
+        candidates: &'a BTreeSet<Intern<String>>,
+        names: BTreeSet<Intern<String>>,
     }
+    impl Uses<'_> {
+        fn name(&mut self, name: Intern<String>) {
+            if name.as_str() == "Self" {
+                self.names.extend(self.candidates.iter().copied());
+            } else if self.candidates.contains(&name) {
+                self.names.insert(name);
+            }
+        }
+    }
+    impl ProofVisitor for Uses<'_> {
+        fn visit_reference(&mut self, ty: &ast::TypeReference) -> ControlFlow<()> {
+            if let Some(name) = ty.head_name() {
+                self.name(name);
+            }
+            walk_reference(self, ty)
+        }
+    }
+    impl ast::folder::Visitor for Uses<'_> {
+        fn visit_expr(&mut self, expr: &ast::Expr) -> std::ops::ControlFlow<()> {
+            match expr {
+                Expr::AnonymousTag(name) => self.name(*name),
+                Expr::FnCall(call) => self.name(call.path.root),
+                Expr::TagCall(call) => self.name(call.name),
+                Expr::Cast { ty, .. } | Expr::TargetQuery { operand: ty, .. } => {
+                    let _ = self.visit_reference(ty);
+                }
+                _ => {}
+            }
+            ast::folder::walk_expr(self, expr)
+        }
+    }
+    use ast::folder::Visitor;
+    let mut uses = Uses {
+        candidates: &candidates,
+        names: BTreeSet::new(),
+    };
+    let _ = uses.visit_bind_value(&bind.value);
+    uses.names
 }
 
-fn declaration_representation_type(ty: &Ty) -> Ty {
-    match ty {
-        Ty::Named { .. } => ty.clone(),
-        Ty::Ref { inner, mutable } => Ty::Ref {
-            inner: Box::new(declaration_representation_type(inner)),
-            mutable: *mutable,
-        },
-        Ty::Record {
-            name,
-            fields,
-            resolved_params,
-        } => Ty::Record {
-            name: *name,
-            fields: fields
-                .iter()
-                .map(|(field_name, field_ty)| {
-                    (
-                        *field_name,
-                        Box::new(declaration_representation_type(field_ty)),
-                    )
-                })
-                .collect(),
-            resolved_params: resolved_params.clone(),
-        },
-        Ty::Union {
-            name,
-            variants,
-            literal_values,
-            resolved_params,
-        } => Ty::Union {
-            name: *name,
-            variants: variants
-                .iter()
-                .map(|variant| UnionVariant {
-                    kind: variant.kind,
-                    name: variant.name,
-                    fields: variant
-                        .fields
-                        .iter()
-                        .map(|(field_name, field_ty)| {
-                            (
-                                *field_name,
-                                Box::new(declaration_representation_type(field_ty)),
-                            )
-                        })
-                        .collect(),
-                    result_ty: variant
-                        .result_ty
-                        .as_ref()
-                        .map(declaration_representation_type),
-                })
-                .collect(),
-            literal_values: literal_values.clone(),
-            resolved_params: resolved_params.clone(),
-        },
-        Ty::Sequence(elements) => Ty::Sequence(
-            elements
-                .iter()
-                .map(|element| ast::ty::SequenceTypeElement {
-                    name: element.name,
-                    ty: Box::new(declaration_representation_type(&element.ty)),
-                })
-                .collect(),
-        ),
-        Ty::Array { elem, size } => Ty::Array {
-            elem: Box::new(declaration_representation_type(elem)),
-            size: size.clone(),
-        },
-        Ty::Ptr { inner } => Ty::Ptr {
-            inner: Box::new(declaration_representation_type(inner)),
-        },
-        Ty::Address {
-            pointee,
-            address_space,
-        } => Ty::Address {
-            pointee: Box::new(declaration_representation_type(pointee)),
-            address_space: *address_space,
-        },
-        Ty::Opaque(name) if name.as_str() == "Int" => Ty::i64(),
-        ty => ty.clone(),
+pub(super) fn validate_declaration_representations(
+    typed: &mut TypedFileAst,
+    file_ast: &FileAst,
+    ctx: &TransformCtx,
+) {
+    let _profile = compiler_profile::span(compiler_profile::Phase::Representations);
+    let target_dependent_names = matches!(ctx.compile_target, flask::CompileTarget::Library)
+        .then(|| crate::prepare_target::target_dependent_bind_names(&ctx.compile_time_eval_ast));
+    for (name, declare) in &file_ast.tags {
+        let Some(tag) = typed.tags.get(&TagId(*name)) else {
+            continue;
+        };
+        let resolved_ty = &tag.resolved_ty;
+        if resolved_ty.named_instance().is_some() {
+            let has_generic_parameters = declare.params.as_ref().is_some_and(|params| {
+                params
+                    .values()
+                    .any(|parameter| is_type_parameter(&parameter.kind))
+            });
+            if !has_generic_parameters
+                && !target_dependent_names
+                    .as_ref()
+                    .is_some_and(|names| declaration_depends_on_target(declare, names))
+                && !crate::representation::has_symbolic_fixed_array_length(
+                    resolved_ty,
+                    Some(&typed.type_registry),
+                )
+            {
+                match crate::representation::Repr::derive(resolved_ty, Some(&typed.type_registry)) {
+                    Ok(_) | Err(RepresentationError::TargetDependentInteger { .. }) => {}
+                    Err(error) => {
+                        let diagnostic = error
+                            .diagnostic()
+                            .with_arg("declaration", declare.name.as_str().to_string())
+                            .with_arg("type_name", declare.name.as_str().to_string())
+                            .at_span_id(declare.name_span, &typed.span_table);
+                        typed
+                            .declaration_flaws
+                            .push((declare.name_span, diagnostic));
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1653,11 +1832,32 @@ fn declaration_instance_arguments(
     };
     params
         .iter()
-        .map(|(parameter, _)| {
-            (
-                *parameter,
-                ast::TyArg::Type(Box::new(Ty::Opaque(*parameter))),
-            )
+        .map(|(name, parameter)| {
+            let argument = if is_type_parameter(&parameter.kind) {
+                ast::TyArg::Type(Box::new(Ty::Opaque(*name)))
+            } else {
+                ast::TyArg::Const(ast::NormalExpr::Var(*name))
+            };
+            (*name, argument)
+        })
+        .collect()
+}
+
+fn preserve_resolved_params(
+    params: &[(Intern<String>, ast::TyArg)],
+    declaration_name: Intern<String>,
+    instance: &ast::ty::NamedTypeInstance,
+) -> Vec<(Intern<String>, ast::TyArg)> {
+    params
+        .iter()
+        .map(|(name, arg)| {
+            let arg = match arg {
+                ast::TyArg::Type(ty) => ast::TyArg::Type(Box::new(
+                    preserve_self_reference_with_instance(ty, declaration_name, instance),
+                )),
+                ast::TyArg::Const(expr) => ast::TyArg::Const(expr.clone()),
+            };
+            (*name, arg)
         })
         .collect()
 }
@@ -1730,24 +1930,9 @@ fn preserve_self_reference_with_instance(
                     )
                 })
                 .collect(),
-            resolved_params: resolved_params.as_ref().map(|params| {
-                params
-                    .iter()
-                    .map(|(name, arg)| {
-                        let arg = match arg {
-                            ast::TyArg::Type(ty) => {
-                                ast::TyArg::Type(Box::new(preserve_self_reference_with_instance(
-                                    ty,
-                                    declaration_name,
-                                    instance,
-                                )))
-                            }
-                            ast::TyArg::Const(expr) => ast::TyArg::Const(expr.clone()),
-                        };
-                        (*name, arg)
-                    })
-                    .collect()
-            }),
+            resolved_params: resolved_params
+                .as_ref()
+                .map(|params| preserve_resolved_params(params, declaration_name, instance)),
         },
         Ty::Union {
             name,
@@ -1760,6 +1945,7 @@ fn preserve_self_reference_with_instance(
                 .iter()
                 .map(|variant| UnionVariant {
                     kind: variant.kind,
+                    discriminant: variant.discriminant,
                     name: variant.name,
                     fields: variant
                         .fields
@@ -1781,24 +1967,9 @@ fn preserve_self_reference_with_instance(
                 })
                 .collect(),
             literal_values: literal_values.clone(),
-            resolved_params: resolved_params.as_ref().map(|params| {
-                params
-                    .iter()
-                    .map(|(name, arg)| {
-                        let arg = match arg {
-                            ast::TyArg::Type(ty) => {
-                                ast::TyArg::Type(Box::new(preserve_self_reference_with_instance(
-                                    ty,
-                                    declaration_name,
-                                    instance,
-                                )))
-                            }
-                            ast::TyArg::Const(expr) => ast::TyArg::Const(expr.clone()),
-                        };
-                        (*name, arg)
-                    })
-                    .collect()
-            }),
+            resolved_params: resolved_params
+                .as_ref()
+                .map(|params| preserve_resolved_params(params, declaration_name, instance)),
         },
         Ty::Opaque(name) if *name == declaration_name => Ty::Named {
             instance: instance.clone(),
@@ -1821,6 +1992,13 @@ fn preserve_self_reference_with_instance(
                 ))
             }),
             length: length.clone(),
+        },
+        Ty::OwnedStorage { inner } => Ty::OwnedStorage {
+            inner: Box::new(preserve_self_reference_with_instance(
+                inner,
+                declaration_name,
+                instance,
+            )),
         },
         Ty::Ptr { inner } => Ty::Ptr {
             inner: Box::new(preserve_self_reference_with_instance(
@@ -1845,12 +2023,17 @@ fn preserve_self_reference_with_instance(
                 .iter()
                 .map(|element| ast::ty::SequenceTypeElement {
                     name: element.name,
-                    ty: Box::new(declaration_representation_type(&element.ty)),
+                    ty: Box::new(preserve_self_reference_with_instance(
+                        &element.ty,
+                        declaration_name,
+                        instance,
+                    )),
                 })
                 .collect(),
         ),
         Ty::Literal(v) => Ty::Literal(v.clone()),
         Ty::AnonymousInteger { .. }
+        | Ty::Proposition(_)
         | Ty::ResultFamily { .. }
         | Ty::UnresolvedLiteral(_)
         | Ty::Float { .. }
@@ -1862,7 +2045,7 @@ fn preserve_self_reference_with_instance(
 fn build_type_scope(file_ast: &FileAst, _ctx: &TransformCtx) -> HashSet<Intern<String>> {
     let mut names: HashSet<Intern<String>> = HashSet::new();
     names.extend(file_ast.tags.keys().copied());
-    names.extend(file_ast.defs.keys().copied());
+    names.extend(file_ast.defs.keys().map(|id| id.0));
     for import in &file_ast.uses {
         collect_import_scope_names(import, &mut names);
     }
@@ -1908,8 +2091,9 @@ fn check_expr_value_scope(
             if !type_scope.contains(&name) {
                 push_flaw(
                     expr.span_id,
+                    // type-unknown-symbol
                     Diagnostic::new(
-                        "type-unknown-symbol",
+                        SymbolCode::Unknown,
                         format!("unknown symbol `{}`", name.as_str()),
                     )
                     .with_arg("name", name.as_str().to_string()),
@@ -1942,8 +2126,9 @@ fn check_union_variant_shape_type_scope(
                         {
                             push_flaw(
                                 sp.span_id,
+                                // type-unknown-symbol
                                 Diagnostic::new(
-                                    "type-unknown-symbol",
+                                    SymbolCode::Unknown,
                                     format!("unknown symbol `{}`", name.as_str()),
                                 )
                                 .with_arg("name", name.as_str().to_string()),
@@ -1969,8 +2154,9 @@ fn check_union_variant_shape_type_scope(
                         {
                             push_flaw(
                                 span,
+                                // type-unknown-symbol
                                 Diagnostic::new(
-                                    "type-unknown-symbol",
+                                    SymbolCode::Unknown,
                                     format!("unknown symbol `{}`", name.as_str()),
                                 )
                                 .with_arg("name", name.as_str().to_string()),
@@ -1985,10 +2171,8 @@ fn check_union_variant_shape_type_scope(
     }
 }
 
-fn check_qualified_has_members(
+fn check_qualified_has_properties(
     declare: &ast::Declare,
-    file_ast: &FileAst,
-    eval_ast: &FileAst,
     push_flaw: &mut dyn FnMut(SpanId, Diagnostic),
 ) {
     let DeclareValue::Has(members) = &declare.value else {
@@ -1998,7 +2182,7 @@ fn check_qualified_has_members(
     for member in members {
         let qualifier = match member {
             ast::HasMember::Property(property) => property.qualifier.as_ref(),
-            ast::HasMember::Function(function) => function.qualifier.as_ref(),
+            ast::HasMember::Function(_) => continue,
         };
         let Some(qualifier) = qualifier else {
             continue;
@@ -2013,8 +2197,9 @@ fn check_qualified_has_members(
         {
             push_flaw(
                 qualifier.span,
+                // type-uninherited-trait-qualifier
                 Diagnostic::new(
-                    "type-uninherited-trait-qualifier",
+                    TraitCode::UninheritedQualifier,
                     format!(
                         "`{}` does not inherit trait `{}`",
                         declare.name.as_str(),
@@ -2026,92 +2211,6 @@ fn check_qualified_has_members(
             );
             continue;
         }
-
-        let mut visited = HashSet::new();
-        let ast::HasMember::Function(function) = member else {
-            continue;
-        };
-        match trait_method_lookup(
-            qualifier.name,
-            function.name,
-            file_ast,
-            eval_ast,
-            &mut visited,
-        ) {
-            TraitMethodLookup::Found => {}
-            TraitMethodLookup::Missing => push_flaw(
-                function.name_span,
-                Diagnostic::new(
-                    "type-unknown-trait-method",
-                    format!(
-                        "trait `{}` has no method `{}`",
-                        qualifier.name.as_str(),
-                        function.name.as_str()
-                    ),
-                )
-                .with_arg("trait_name", qualifier.name.as_str().to_string())
-                .with_arg("method_name", function.name.as_str().to_string()),
-            ),
-            TraitMethodLookup::UnknownTrait(name) => push_flaw(
-                qualifier.span,
-                Diagnostic::new(
-                    "type-unknown-trait",
-                    format!("unknown trait `{}`", name.as_str()),
-                )
-                .with_arg("trait_name", name.as_str().to_string()),
-            ),
-        }
-    }
-}
-
-enum TraitMethodLookup {
-    Found,
-    Missing,
-    UnknownTrait(Intern<String>),
-}
-
-fn trait_method_lookup(
-    trait_name: Intern<String>,
-    method_name: Intern<String>,
-    file_ast: &FileAst,
-    eval_ast: &FileAst,
-    visited: &mut HashSet<Intern<String>>,
-) -> TraitMethodLookup {
-    if !visited.insert(trait_name) {
-        return TraitMethodLookup::Missing;
-    }
-    let Some(declaration) = file_ast
-        .tags
-        .get(&trait_name)
-        .or_else(|| eval_ast.tags.get(&trait_name))
-    else {
-        return TraitMethodLookup::UnknownTrait(trait_name);
-    };
-    if let DeclareValue::Has(members) = &declaration.value
-        && members.iter().any(|member| {
-            matches!(member, ast::HasMember::Function(function) if function.name == method_name)
-        })
-    {
-        return TraitMethodLookup::Found;
-    }
-    let mut unknown_trait = None;
-    for provided in &declaration.provided_traits {
-        match trait_method_lookup(
-            provided.trait_name,
-            method_name,
-            file_ast,
-            eval_ast,
-            visited,
-        ) {
-            TraitMethodLookup::Found => return TraitMethodLookup::Found,
-            TraitMethodLookup::Missing => {}
-            TraitMethodLookup::UnknownTrait(name) => unknown_trait = Some(name),
-        }
-    }
-    if let Some(name) = unknown_trait {
-        TraitMethodLookup::UnknownTrait(name)
-    } else {
-        TraitMethodLookup::Missing
     }
 }
 
@@ -2150,8 +2249,9 @@ fn check_has_associated_method_self(
         for span in spans {
             push_flaw(
                 span,
+                // no-self-in-associated-method
                 Diagnostic::new(
-                    "no-self-in-associated-method",
+                    CallCode::AssociatedMethodMissingSelf,
                     "associated method has no `self` parameter",
                 )
                 .with_help("add a `self`, `self ref`, or `self mut` parameter, or call through an explicit value"),
@@ -2218,8 +2318,9 @@ fn check_params_for_in_range_on_bounded_tag(
         {
             flaws.push((
                 range.start.span_id,
+                // type-in-range-on-bounded-int-tag
                 Diagnostic::new(
-                    "type-in-range-on-bounded-int-tag",
+                    IntegerCode::BoundedTagRangeConstraint,
                     format!(
                         "`in {}(...)` on a bounded int tag `{}`",
                         tag.as_str(),
@@ -2254,7 +2355,7 @@ fn references_nominal_type(ty: &Ty, target: Intern<String>) -> bool {
 fn resolve_tag_pass(
     tag_name: &Intern<String>,
     declare: &ast::declare::Declare,
-    all_tags: &ast::TagMap,
+    all_tags: TagDeclarations<'_>,
     tag_params: &HashMap<Intern<String>, Parameters>,
     cross_file_tag_types: &HashMap<TagId, Ty>,
     resolved: &HashMap<Intern<String>, Ty>,
@@ -2282,6 +2383,22 @@ fn resolve_tag_pass(
     preserve_self_reference_with_instance(&resolved, *tag_name, &instance)
 }
 
+pub(super) fn nominal_type(declare: &ast::Declare, file_id: FileId) -> Option<Ty> {
+    if matches!(&declare.value, DeclareValue::Alias(alias)
+        if !matches!(&alias.value, Expr::TakePtr(_) | Expr::IntegerDomain(_)))
+    {
+        return None;
+    }
+    Some(Ty::Named {
+        instance: ast::ty::NamedTypeInstance::new(ast::ty::TypeId {
+            file: file_id.0,
+            name: declare.name,
+        })
+        .with_arguments(declaration_instance_arguments(declare)),
+        name: declare.name,
+    })
+}
+
 fn nominal_types_for_definitions(
     definitions: &HashMap<Intern<String>, Ty>,
     tags: &ast::TagMap,
@@ -2293,23 +2410,9 @@ fn nominal_types_for_definitions(
             let Some(declare) = tags.get(name) else {
                 return (*name, definition.clone());
             };
-            let is_transparent_alias = matches!(&declare.value, DeclareValue::Alias(alias)
-                if !matches!(&alias.value, Expr::TakePtr(_))
-            );
-            if is_transparent_alias {
-                return (*name, definition.clone());
-            }
-            let instance = ast::ty::NamedTypeInstance::new(ast::ty::TypeId {
-                file: file_id.0,
-                name: *name,
-            })
-            .with_arguments(declaration_instance_arguments(declare));
             (
                 *name,
-                Ty::Named {
-                    instance,
-                    name: *name,
-                },
+                nominal_type(declare, file_id).unwrap_or_else(|| definition.clone()),
             )
         })
         .collect()
@@ -2317,12 +2420,32 @@ fn nominal_types_for_definitions(
 
 pub(crate) fn resolve_tags_fixpoint(
     tags: &ast::TagMap,
+    all_tags: TagDeclarations<'_>,
     tag_params: &HashMap<Intern<String>, Parameters>,
     cross_file_tag_types: &HashMap<TagId, Ty>,
     file_id: FileId,
     max_passes: usize,
+    completed_aliases: &HashMap<TagId, Ty>,
 ) -> HashMap<Intern<String>, Ty> {
-    let mut resolved: HashMap<Intern<String>, Ty> = HashMap::new();
+    let completed: HashMap<_, _> = tags
+        .iter()
+        .filter_map(|(name, declare)| {
+            let ty = completed_aliases.get(&TagId(*name))?;
+            let instance = ast::ty::NamedTypeInstance::new(ast::ty::TypeId {
+                file: file_id.0,
+                name: *name,
+            })
+            .with_arguments(declaration_instance_arguments(declare));
+            Some((
+                *name,
+                preserve_self_reference_with_instance(ty, *name, &instance),
+            ))
+        })
+        .collect();
+    if completed.len() == tags.len() {
+        return completed;
+    }
+    let mut resolved: HashMap<Intern<String>, Ty> = completed.clone();
     for _pass in 0..max_passes {
         let available = nominal_types_for_definitions(&resolved, tags, file_id);
         let next: HashMap<_, _> = tags
@@ -2330,15 +2453,17 @@ pub(crate) fn resolve_tags_fixpoint(
             .map(|(name, declare)| {
                 (
                     *name,
-                    resolve_tag_pass(
-                        name,
-                        declare,
-                        tags,
-                        tag_params,
-                        cross_file_tag_types,
-                        &available,
-                        file_id,
-                    ),
+                    completed.get(name).cloned().unwrap_or_else(|| {
+                        resolve_tag_pass(
+                            name,
+                            declare,
+                            all_tags,
+                            tag_params,
+                            cross_file_tag_types,
+                            &available,
+                            file_id,
+                        )
+                    }),
                 )
             })
             .collect();
@@ -2405,7 +2530,6 @@ fn literal_const_from_type_expr(expr: &Pattern) -> Option<ConstValue> {
     match expr {
         Pattern::Literal(Literal::String(s), _) => Some(ConstValue::Text(s.clone())),
         Pattern::Literal(Literal::Int(n), _) => Some(ConstValue::Int(*n)),
-        Pattern::Literal(Literal::Number(n), _) => Some(ConstValue::Int((*n as u128).into())),
         Pattern::Literal(Literal::Float(HashFloat(f)), _) => Some(ConstValue::Float(HashFloat(*f))),
         _ => None,
     }
@@ -2414,7 +2538,7 @@ fn literal_const_from_type_expr(expr: &Pattern) -> Option<ConstValue> {
 fn resolve_declare_value(
     declaring_name: &Intern<String>,
     value: &DeclareValue,
-    all_tags: &ast::TagMap,
+    all_tags: TagDeclarations<'_>,
     tag_params: &HashMap<Intern<String>, Parameters>,
     cross_file_tag_types: &HashMap<TagId, Ty>,
     resolved: &HashMap<Intern<String>, Ty>,
@@ -2423,7 +2547,7 @@ fn resolve_declare_value(
     let tag_types = resolved_types(resolved, cross_file_tag_types);
     let env = TypeEnv::new(&tag_types)
         .with_tag_params(tag_params)
-        .with_tag_decls(all_tags);
+        .with_tag_declaration_lookup(all_tags);
 
     match value {
         DeclareValue::Alias(sp) => env.resolve_expr(&sp.value),
@@ -2440,6 +2564,18 @@ fn resolve_declare_value(
                 .iter()
                 .map(|v| {
                     let shape = v.shape();
+                    if let Pattern::Generic { name, params, .. } = &shape.value
+                        && env.tag_types.contains_key(name)
+                    {
+                        let ty = env.resolve_generic(name, params);
+                        return UnionVariant {
+                            kind: ast::ty::UnionVariantKind::Type,
+                            discriminant: v.discriminant().map(|value| value.value),
+                            name: *name,
+                            fields: vec![(Intern::from_ref("value"), Box::new(ty))],
+                            result_ty: v.result_ty().map(|rt| env.resolve_expr(&rt.value)),
+                        };
+                    }
                     let (name, fields) = match &shape.value {
                         Pattern::Generic { name, params, .. } => {
                             let fields: Vec<(Intern<String>, Box<Ty>)> = params
@@ -2450,6 +2586,9 @@ fn resolve_declare_value(
                                         ParameterKind::ValueParam { ty }
                                         | ParameterKind::Inferred { ty } => {
                                             env.resolve_expr(&ty.value)
+                                        }
+                                        ParameterKind::Proposition(predicate) => {
+                                            Ty::Proposition(predicate.clone())
                                         }
                                         ParameterKind::Generic => Ty::Opaque(*name),
                                         ParameterKind::Default(expr)
@@ -2487,6 +2626,7 @@ fn resolve_declare_value(
                     };
                     let result_ty = v.result_ty().map(|rt| env.resolve_expr(&rt.value));
                     UnionVariant {
+                        discriminant: v.discriminant().map(|value| value.value),
                         kind: if matches!(shape.value, Pattern::Nominal(_, _)) && !fields.is_empty()
                         {
                             ast::ty::UnionVariantKind::Type
@@ -2528,6 +2668,13 @@ fn resolve_declare_value(
                             p.ty.as_ref()
                                 .map(|ty| env.resolve_expr(&ty.value))
                                 .unwrap_or(Ty::Unit);
+                        let field_ty = if p.owned_storage {
+                            Ty::OwnedStorage {
+                                inner: Box::new(field_ty),
+                            }
+                        } else {
+                            field_ty
+                        };
                         Some((p.name, Box::new(field_ty)))
                     }
                     HasMember::Property(_) | HasMember::Function(_) => None,
@@ -2573,6 +2720,14 @@ fn resolve_declare_value(
     }
 }
 
+fn signature_tag_types(
+    own: &HashMap<TagId, Ty>,
+    cross_file: &HashMap<TagId, Ty>,
+) -> HashMap<Intern<String>, Ty> {
+    let own = own.iter().map(|(id, ty)| (id.0, ty.clone())).collect();
+    resolved_types(&own, cross_file)
+}
+
 fn resolved_types<'a>(
     resolved: &'a HashMap<Intern<String>, Ty>,
     cross_file: &'a HashMap<TagId, Ty>,
@@ -2587,10 +2742,26 @@ fn resolved_types<'a>(
 fn resolve_type_from_typed_expr(expr: &Typed<Expr>, tag_types: &HashMap<Intern<String>, Ty>) -> Ty {
     match &expr.value {
         Expr::AnonymousTag(name) => tag_types.get(name).cloned().unwrap_or(Ty::Opaque(*name)),
-        Expr::TagCall(tc) => tag_types
-            .get(&tc.name)
-            .cloned()
-            .unwrap_or(Ty::Opaque(tc.name)),
+        Expr::Lit(Literal::Int(value)) => Ty::AnonymousInteger {
+            validity: IntegerValidity::new(
+                IntegerDomain::bounded(*value, *value).expect("singleton integer domain"),
+            ),
+        },
+        Expr::SequenceLiteral(ast::SequenceLiteral::Elements(elements)) => Ty::sequence(
+            elements
+                .iter()
+                .map(|element| ast::ty::SequenceTypeElement {
+                    name: element.name,
+                    ty: Box::new(resolve_type_from_typed_expr(&element.expr, tag_types)),
+                })
+                .collect(),
+        ),
+        Expr::Lit(_) | Expr::TagCall(_) => expr.infer_ty(&TyInferEnv {
+            tag_types,
+            fn_return_types: &HashMap::new(),
+            locals: &HashMap::new(),
+            tag_params: None,
+        }),
         _ => Ty::Unit,
     }
 }
@@ -2629,8 +2800,9 @@ fn resolve_target_groups(
                 ) {
                     flaws.push((
                         bind.name_span,
+                        // type-incompatible-target-group
                         Diagnostic::new(
-                            "type-incompatible-target-group",
+                            TargetGroupCode::Incompatible,
                             format!(
                                 "target group `{}` is used with incompatible referent types",
                                 group_name
@@ -2667,8 +2839,9 @@ fn resolve_target_groups(
         if !named.contains_key(&root) && missing_roots.insert(root.clone()) {
             flaws.push((
                 bind.name_span,
+                // type-unknown-target-group
                 Diagnostic::new(
-                    "type-unknown-target-group",
+                    TargetGroupCode::Unknown,
                     format!("derived target group `{path}` has no root group `{root}`"),
                 )
                 .with_arg("group", path.to_string())
@@ -2699,8 +2872,9 @@ fn resolve_target_groups(
                 if !same_group_referent(&resolved_type, &group.referent_type, type_registry) {
                     flaws.push((
                         bind.name_span,
+                        // type-incompatible-target-group
                         Diagnostic::new(
-                            "type-incompatible-target-group",
+                            TargetGroupCode::Incompatible,
                             format!(
                                 "target group `{path}` resolves to `{}`, but is used with `{}`",
                                 resolved_type.format_for_hover(),
@@ -2726,8 +2900,9 @@ fn resolve_target_groups(
                 None => {
                     flaws.push((
                         spanned.span_id,
+                        // type-unknown-target-group
                         Diagnostic::new(
-                            "type-unknown-target-group",
+                            TargetGroupCode::Unknown,
                             format!("unknown target group `{name}`"),
                         )
                         .with_arg("group", name.to_string()),
@@ -2741,8 +2916,9 @@ fn resolve_target_groups(
                 count => {
                     flaws.push((
                         spanned.span_id,
+                        // type-ambiguous-reference-return-target-group
                         Diagnostic::new(
-                            "type-ambiguous-reference-return-target-group",
+                            ReferenceCode::AmbiguousReturnTargetGroup,
                             "reference return has multiple eligible reference input groups",
                         )
                         .with_arg("group_count", count.to_string()),
@@ -2788,20 +2964,23 @@ enum GroupPathError {
 impl GroupPathError {
     fn diagnostic(&self, path: &ast::GroupPath) -> Diagnostic {
         match self {
+            // type-unknown-target-group-field
             Self::UnknownField(field) => Diagnostic::new(
-                "type-unknown-target-group-field",
+                TargetGroupCode::UnknownField,
                 format!("target group `{path}` refers to unknown field `{field}`"),
             )
             .with_arg("group", path.to_string())
             .with_arg("field", field.to_string()),
+            // type-unknown-target-group-variant
             Self::UnknownVariant(variant) => Diagnostic::new(
-                "type-unknown-target-group-variant",
+                TargetGroupCode::UnknownVariant,
                 format!("target group `{path}` refers to unknown variant `{variant}`"),
             )
             .with_arg("group", path.to_string())
             .with_arg("variant", variant.to_string()),
+            // type-invalid-target-group-projection
             Self::InvalidProjection { segment, ty } => Diagnostic::new(
-                "type-invalid-target-group-projection",
+                TargetGroupCode::InvalidProjection,
                 format!(
                     "target group segment `{segment}` cannot project from `{}`",
                     ty.format_for_hover()
@@ -2832,21 +3011,23 @@ impl GroupPathCursor {
     }
 
     fn unwrapped(self, type_registry: &crate::type_registry::TypeRegistry) -> Self {
-        match self {
-            Self::Type(ty) => {
-                if let Some(reference) = reference_semantics_for_type(&ty, Some(type_registry)) {
-                    Self::Type(reference.pointee).unwrapped(type_registry)
-                } else {
-                    match ty {
-                        Ty::Named { .. } => {
-                            Self::Type(type_registry.resolved_definition_for_type(&ty))
-                                .unwrapped(type_registry)
-                        }
-                        _ => Self::Type(ty),
-                    }
-                }
+        let Self::Type(mut ty) = self else {
+            return self;
+        };
+        let mut seen = HashSet::new();
+        loop {
+            if let Ty::Named { instance, .. } = &ty
+                && !seen.insert(instance.declaration)
+            {
+                return Self::Type(ty);
             }
-            cursor => cursor,
+            if let Some(reference) = reference_semantics_for_type(&ty, Some(type_registry)) {
+                ty = reference.pointee;
+            } else if matches!(ty, Ty::Named { .. }) {
+                ty = type_registry.resolved_definition_for_type(&ty);
+            } else {
+                return Self::Type(ty);
+            }
         }
     }
 }
@@ -2869,30 +3050,24 @@ fn resolve_group_path(
     let mut projections = Vec::with_capacity(path.segments.len());
     for segment in &path.segments {
         cursor = cursor.unwrapped(type_registry);
+        let invalid_projection = |cursor: GroupPathCursor| GroupPathError::InvalidProjection {
+            segment: *segment,
+            ty: Box::new(cursor.into_type()),
+        };
         match segment.as_str() {
             "items" => match cursor {
                 GroupPathCursor::Type(Ty::Array { elem, .. }) => {
                     projections.push(GroupProjection::Items);
                     cursor = GroupPathCursor::Type(*elem);
                 }
-                cursor => {
-                    return Err(GroupPathError::InvalidProjection {
-                        segment: *segment,
-                        ty: Box::new(cursor.into_type()),
-                    });
-                }
+                cursor => return Err(invalid_projection(cursor)),
             },
             "pointee" => match cursor {
                 GroupPathCursor::Type(ty) if ty.pointee_ty().is_some() => {
                     projections.push(GroupProjection::Pointee);
                     cursor = GroupPathCursor::Type(ty.pointee_ty().cloned().unwrap());
                 }
-                cursor => {
-                    return Err(GroupPathError::InvalidProjection {
-                        segment: *segment,
-                        ty: Box::new(cursor.into_type()),
-                    });
-                }
+                cursor => return Err(invalid_projection(cursor)),
             },
             _ if segment
                 .as_str()
@@ -2911,12 +3086,7 @@ fn resolve_group_path(
                         projections.push(GroupProjection::Variant { name: *segment });
                         cursor = GroupPathCursor::Variant(variant.fields);
                     }
-                    cursor => {
-                        return Err(GroupPathError::InvalidProjection {
-                            segment: *segment,
-                            ty: Box::new(cursor.into_type()),
-                        });
-                    }
+                    cursor => return Err(invalid_projection(cursor)),
                 }
             }
             _ => match cursor {
@@ -2935,12 +3105,7 @@ fn resolve_group_path(
                     });
                     cursor = GroupPathCursor::Type(*field_type);
                 }
-                cursor => {
-                    return Err(GroupPathError::InvalidProjection {
-                        segment: *segment,
-                        ty: Box::new(cursor.into_type()),
-                    });
-                }
+                cursor => return Err(invalid_projection(cursor)),
             },
         }
     }
@@ -2950,15 +3115,40 @@ fn resolve_group_path(
 #[allow(clippy::too_many_arguments)]
 fn resolve_return_type(
     bind: &Bind,
+    registry: &crate::TypeRegistry,
     tag_types: &HashMap<Intern<String>, Ty>,
     tag_params: &HashMap<Intern<String>, Parameters>,
-    tag_decls: &ast::TagMap,
+    tag_decls: TagDeclarations<'_>,
     dependent_binder: BinderId,
     typevar_subst: &HashMap<Intern<String>, Ty>,
     receiver_type: Option<&Ty>,
     receiver_type_surface: Option<&ast::Expr>,
     result_family_owner: &ast::ResultFamilyOwner,
 ) -> Ty {
+    let normalized;
+    let bind = if let BindValue::Body { exprs, ret } = &bind.value
+        && exprs.is_empty()
+        && let [value] = ret.values.as_slice()
+    {
+        normalized = {
+            let mut bind = bind.clone();
+            bind.value = BindValue::Expr(Box::new(value.clone()));
+            bind
+        };
+        &normalized
+    } else {
+        bind
+    };
+    if let Some(ty) = TypeEnv::new(tag_types)
+        .with_registry(registry)
+        .with_subst(typevar_subst)
+        .with_tag_params(tag_params)
+        .with_tag_declaration_lookup(tag_decls)
+        .with_dependent_binder(dependent_binder)
+        .resolve_result_alternatives(&bind.anonymous_result_alternatives)
+    {
+        return ty;
+    }
     if !bind.anonymous_result_alternatives.is_empty() {
         let mut alternatives = Vec::new();
         for alternative in &bind.anonymous_result_alternatives {
@@ -2989,16 +3179,17 @@ fn resolve_return_type(
                 .into_iter()
                 .map(|label| ast::ResultAlternative {
                     label,
-                    proposition: None,
+                    proposition: super::postconditions::alternative(bind, label),
                 })
                 .collect(),
         };
     }
     if !bind.named_results.is_empty() {
         let env = TypeEnv::new(tag_types)
+            .with_registry(registry)
             .with_subst(typevar_subst)
             .with_tag_params(tag_params)
-            .with_tag_decls(tag_decls)
+            .with_tag_declaration_lookup(tag_decls)
             .with_dependent_binder(dependent_binder);
         let elements = bind
             .named_results
@@ -3009,6 +3200,11 @@ fn resolve_return_type(
             })
             .collect::<Vec<_>>();
         return Ty::results(elements);
+    }
+    if bind.return_tag.is_none()
+        && let Some(ast::PredicateExpr::Proposition(predicate)) = &bind.return_refinement
+    {
+        return Ty::Proposition(predicate.clone());
     }
     if let Some(predicate) = &bind.return_refinement {
         return Ty::AnonymousInteger {
@@ -3038,9 +3234,10 @@ fn resolve_return_type(
             return receiver_type.clone();
         }
         let ty = TypeEnv::new(tag_types)
+            .with_registry(registry)
             .with_subst(typevar_subst)
             .with_tag_params(tag_params)
-            .with_tag_decls(tag_decls)
+            .with_tag_declaration_lookup(tag_decls)
             .with_dependent_binder(dependent_binder)
             .resolve(&sp.value);
         return nominalize_explicit_ty_surface(&sp.value, ty);
@@ -3052,9 +3249,10 @@ fn resolve_return_type(
             args: args.clone(),
         });
         let ty = TypeEnv::new(tag_types)
+            .with_registry(registry)
             .with_subst(typevar_subst)
             .with_tag_params(tag_params)
-            .with_tag_decls(tag_decls)
+            .with_tag_declaration_lookup(tag_decls)
             .with_dependent_binder(dependent_binder)
             .resolve(&annotated);
         return nominalize_explicit_ty_surface(&annotated, ty);
@@ -3082,13 +3280,20 @@ fn resolve_return_type(
                     .and_then(|params| params.get(&parameter))
             {
                 return match &kind.kind {
+                    ParameterKind::Generic
+                        if super::parameters::is_inferred_value(bind, parameter) =>
+                    {
+                        super::parameters::inferred_value_type(bind, parameter)
+                    }
+                    ParameterKind::Proposition(predicate) => Ty::Proposition(predicate.clone()),
                     ParameterKind::Generic => Ty::Opaque(parameter),
                     ParameterKind::Tagged(surface)
                     | ParameterKind::ValueParam { ty: surface }
                     | ParameterKind::Inferred { ty: surface } => TypeEnv::new(tag_types)
+                        .with_registry(registry)
                         .with_subst(typevar_subst)
                         .with_tag_params(tag_params)
-                        .with_tag_decls(tag_decls)
+                        .with_tag_declaration_lookup(tag_decls)
                         .with_dependent_binder(dependent_binder)
                         .resolve_expr(&surface.value),
                     ParameterKind::Default(default) => {
@@ -3115,8 +3320,7 @@ fn resolve_return_type(
                 let fields = ret
                     .values
                     .iter()
-                    .enumerate()
-                    .map(|(_index, expr)| ast::ty::SequenceTypeElement {
+                    .map(|expr| ast::ty::SequenceTypeElement {
                         name: None,
                         ty: Box::new(resolve_type_from_typed_expr(expr, tag_types)),
                     })
@@ -3133,7 +3337,10 @@ fn resolve_return_type(
     }
 }
 
-fn inferred_result_alternatives(value: &BindValue, tag_decls: &ast::TagMap) -> Vec<Intern<String>> {
+fn inferred_result_alternatives(
+    value: &BindValue,
+    tag_decls: TagDeclarations<'_>,
+) -> Vec<Intern<String>> {
     let mut alternatives = Vec::new();
     match value {
         BindValue::Expr(expr) => {
@@ -3141,7 +3348,7 @@ fn inferred_result_alternatives(value: &BindValue, tag_decls: &ast::TagMap) -> V
         }
         BindValue::Body { exprs, ret } => {
             for expr in exprs {
-                if matches!(expr.value, Expr::If(_) | Expr::When(_)) {
+                if matches!(expr.value, Expr::If(_) | Expr::Loop(_) | Expr::When(_)) {
                     collect_result_exit_alternatives(&expr.value, tag_decls, &mut alternatives);
                 }
             }
@@ -3169,7 +3376,7 @@ fn validate_result_proof_surfaces(
             compile_time_ast
                 .defs
                 .iter()
-                .filter_map(|(name, bind)| bind.is_constant().then_some(*name)),
+                .filter_map(|(name, bind)| bind.is_constant().then_some(name.0)),
         )
         .collect::<HashSet<_>>();
     let mut propositions = HashMap::new();
@@ -3181,8 +3388,9 @@ fn validate_result_proof_surfaces(
             && previous != proposition
         {
             flaws.push(
+                // type-result-proof-conflict
                 Diagnostic::new(
-                    "type-result-proof-conflict",
+                    ResultCode::ProofConflict,
                     format!(
                         "alternative `{}` has conflicting `thus` contracts",
                         alternative.value.label
@@ -3193,11 +3401,12 @@ fn validate_result_proof_surfaces(
             );
         }
         let mut names = HashSet::new();
-        proof_proposition_names(proposition, &mut names);
+        let _ = ProofNameCollector(&mut names).visit_proposition(proposition);
         for name in names.difference(&allowed_names) {
             flaws.push(
+                // type-proof-contract-unknown-name
                 Diagnostic::new(
-                    "type-proof-contract-unknown-name",
+                    ProofCode::ProofContractUnknownName,
                     format!("proof contract refers to unknown incoming value `{name}`"),
                 )
                 .with_arg("name", name.as_str().to_string())
@@ -3227,29 +3436,150 @@ fn verify_result_constructions(
     if contracts.is_empty() || matches!(bind.value, BindValue::Unassigned) {
         return;
     }
-    let mut facts = Vec::new();
-    match &bind.value {
-        BindValue::Expr(expr) => verify_result_exit(expr, &facts, &contracts, flaws, span_table),
+    enum Work<'a> {
+        Sequence(
+            &'a [Typed<Expr>],
+            &'a [Typed<Expr>],
+            Vec<ast::ProofProposition>,
+        ),
+        Expression(&'a Typed<Expr>, Vec<ast::ProofProposition>, bool),
+    }
+    let mut pending = match &bind.value {
+        BindValue::Expr(expr) => vec![Work::Expression(expr, Vec::new(), true)],
         BindValue::Body { exprs, ret } => {
-            for expr in exprs {
-                if let Expr::If(if_expr) = &expr.value {
-                    let mut taken = facts.clone();
-                    taken.extend(proof_facts_for_condition(&if_expr.condition, true));
-                    if let Some(exit) = if_expr.body.last() {
-                        verify_result_exit(exit, &taken, &contracts, flaws, span_table);
+            vec![Work::Sequence(exprs, &ret.values, Vec::new())]
+        }
+        BindValue::Unassigned => return,
+    };
+    while let Some(work) = pending.pop() {
+        match work {
+            Work::Sequence(statements, exits, mut facts) => {
+                let mut terminated = false;
+                for expression in statements {
+                    pending.push(Work::Expression(expression, facts.clone(), false));
+                    if let Expr::Bind(local) = &expression.value
+                        && local.params.is_none()
+                        && let Some(refinement) = &local.return_refinement
+                    {
+                        facts.extend(proof_facts_for_refinement(refinement, local.name));
                     }
-                    facts.extend(proof_facts_for_condition(&if_expr.condition, false));
+                    if let Expr::When(branch) = &expression.value {
+                        for arm in &branch.arms {
+                            if let ast::WhenArm::Cond {
+                                condition, body, ..
+                            } = arm
+                                && surface_expression_returns(&body.value)
+                            {
+                                facts.extend(proof_facts_for_condition(condition, false));
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    if surface_expression_returns(&expression.value) {
+                        terminated = true;
+                        break;
+                    }
+                }
+                if !terminated {
+                    for exit in exits {
+                        pending.push(Work::Expression(exit, facts.clone(), true));
+                    }
                 }
             }
-            for exit in &ret.values {
-                verify_result_exit(exit, &facts, &contracts, flaws, span_table);
-            }
+            Work::Expression(expression, mut facts, value) => match &expression.value {
+                Expr::Return(ret) => {
+                    for result in &ret.values {
+                        pending.push(Work::Expression(result, facts.clone(), true));
+                    }
+                }
+                Expr::Block(items) => {
+                    let (statements, exits) = if value && !items.is_empty() {
+                        items.split_at(items.len() - 1)
+                    } else {
+                        (items.as_slice(), &[][..])
+                    };
+                    pending.push(Work::Sequence(statements, exits, facts));
+                }
+                Expr::Bind(local) if local.params.is_none() => match &local.value {
+                    BindValue::Expr(body) => {
+                        pending.push(Work::Expression(body, facts, false));
+                    }
+                    BindValue::Body { exprs, ret } => {
+                        pending.push(Work::Sequence(exprs, &ret.values, facts));
+                    }
+                    BindValue::Unassigned => {}
+                },
+                Expr::Bind(_) => {}
+                Expr::When(branch) => {
+                    for arm in &branch.arms {
+                        let (body, condition) = match arm {
+                            ast::WhenArm::Cond {
+                                condition, body, ..
+                            } => (body, Some(condition.clone())),
+                            ast::WhenArm::Is { pattern, body, .. } => (
+                                body,
+                                branch.subject.as_ref().map(|subject| ast::Condition::Is {
+                                    subject: subject.clone(),
+                                    pattern: pattern.clone(),
+                                }),
+                            ),
+                            ast::WhenArm::Else(body, _) => (body, None),
+                        };
+                        let mut taken = facts.clone();
+                        if let Some(condition) = condition {
+                            taken.extend(proof_facts_for_condition(&condition, true));
+                            facts.extend(proof_facts_for_condition(&condition, false));
+                        }
+                        pending.push(Work::Expression(body, taken, value));
+                    }
+                }
+                Expr::Loop(ast::Loop::While(body)) => {
+                    facts.extend(proof_facts_for_condition(&body.condition, true));
+                    pending.push(Work::Sequence(&body.exprs, &[], facts));
+                }
+                Expr::Loop(ast::Loop::ForIn(body)) => {
+                    pending.push(Work::Sequence(&body.exprs, &[], facts));
+                }
+                _ if value => {
+                    verify_result_alternative(expression, &facts, &contracts, flaws, span_table);
+                }
+                _ => {}
+            },
         }
-        BindValue::Unassigned => {}
     }
 }
 
-fn verify_result_exit(
+fn surface_expression_returns(expression: &Expr) -> bool {
+    match expression {
+        Expr::Return(_) => true,
+        Expr::Block(items) => items
+            .iter()
+            .any(|item| surface_expression_returns(&item.value)),
+        Expr::Bind(bind) if bind.params.is_none() => match &bind.value {
+            BindValue::Body { .. } => true,
+            BindValue::Expr(value) => surface_expression_returns(&value.value),
+            BindValue::Unassigned => false,
+        },
+        Expr::When(branch) => {
+            branch
+                .arms
+                .iter()
+                .any(|arm| matches!(arm, ast::WhenArm::Else(..)))
+                && branch.arms.iter().all(|arm| {
+                    let body = match arm {
+                        ast::WhenArm::Cond { body, .. }
+                        | ast::WhenArm::Is { body, .. }
+                        | ast::WhenArm::Else(body, _) => body,
+                    };
+                    surface_expression_returns(&body.value)
+                })
+        }
+        _ => false,
+    }
+}
+
+fn verify_result_alternative(
     exit: &Typed<Expr>,
     facts: &[ast::ProofProposition],
     contracts: &HashMap<Intern<String>, &ast::ProofProposition>,
@@ -3271,12 +3601,14 @@ fn verify_result_exit(
         .is_some_and(|complement| proof_is_implied(complement, facts))
     {
         Some((
-            "type-result-proof-failed",
+            // type-result-proof-failed
+            DiagnosticCode::Type(TypeCode::Result(ResultCode::ProofFailed)),
             format!("construction of `{label}` contradicts its `thus` contract `{contract}`"),
         ))
     } else {
         Some((
-            "type-result-proof-unproven",
+            // type-result-proof-unproven
+            DiagnosticCode::Type(TypeCode::Result(ResultCode::ProofUnproven)),
             format!("construction of `{label}` does not prove its `thus` contract `{contract}`"),
         ))
     };
@@ -3290,7 +3622,19 @@ fn verify_result_exit(
 }
 
 fn proof_is_implied(proposition: &ast::ProofProposition, facts: &[ast::ProofProposition]) -> bool {
-    if facts.contains(proposition) {
+    let mut leaves = Vec::new();
+    let mut pending = facts.iter().collect::<Vec<_>>();
+    while let Some(fact) = pending.pop() {
+        if let ast::ProofProposition::And(left, right) = fact {
+            pending.extend([left.as_ref(), right.as_ref()]);
+        } else {
+            leaves.push(fact);
+        }
+    }
+    if leaves
+        .iter()
+        .any(|fact| proof_propositions_equal(proposition, fact, &leaves))
+    {
         return true;
     }
     match proposition {
@@ -3298,7 +3642,7 @@ fn proof_is_implied(proposition: &ast::ProofProposition, facts: &[ast::ProofProp
             left,
             relation: ast::ProofRelation::Equal,
             right,
-        } => left == right,
+        } => proof_terms_equal(left, right, &leaves),
         ast::ProofProposition::And(left, right) => {
             proof_is_implied(left, facts) && proof_is_implied(right, facts)
         }
@@ -3312,24 +3656,192 @@ fn proof_is_implied(proposition: &ast::ProofProposition, facts: &[ast::ProofProp
     }
 }
 
+fn proof_propositions_equal(
+    left: &ast::ProofProposition,
+    right: &ast::ProofProposition,
+    facts: &[&ast::ProofProposition],
+) -> bool {
+    match (left, right) {
+        (
+            ast::ProofProposition::Compare {
+                left: a,
+                relation: ar,
+                right: b,
+            },
+            ast::ProofProposition::Compare {
+                left: c,
+                relation: cr,
+                right: d,
+            },
+        ) => ar == cr && proof_terms_equal(a, c, facts) && proof_terms_equal(b, d, facts),
+        _ => left == right,
+    }
+}
+
+fn proof_terms_equal(
+    left: &ast::ProofTerm,
+    right: &ast::ProofTerm,
+    facts: &[&ast::ProofProposition],
+) -> bool {
+    use ast::ProofTerm;
+    if left == right {
+        return true;
+    }
+    match (left, right) {
+        (ProofTerm::Name(left), ProofTerm::Name(right)) => {
+            let mut pending = vec![*left];
+            let mut seen = HashSet::new();
+            while let Some(name) = pending.pop() {
+                if name == *right {
+                    return true;
+                }
+                if !seen.insert(name) {
+                    continue;
+                }
+                for fact in facts {
+                    if let ast::ProofProposition::Compare {
+                        left: ProofTerm::Name(a),
+                        relation: ast::ProofRelation::Equal,
+                        right: ProofTerm::Name(b),
+                    } = fact
+                    {
+                        if *a == name {
+                            pending.push(*b);
+                        }
+                        if *b == name {
+                            pending.push(*a);
+                        }
+                    }
+                }
+            }
+            false
+        }
+        (ProofTerm::Add(a, b), ProofTerm::Add(c, d))
+        | (ProofTerm::Sub(a, b), ProofTerm::Sub(c, d))
+        | (ProofTerm::Mul(a, b), ProofTerm::Mul(c, d))
+        | (ProofTerm::Remainder(a, b), ProofTerm::Remainder(c, d)) => {
+            proof_terms_equal(a, c, facts) && proof_terms_equal(b, d, facts)
+        }
+        (ProofTerm::PowerOfTwo(a), ProofTerm::PowerOfTwo(b)) => proof_terms_equal(a, b, facts),
+        _ => false,
+    }
+}
+
+fn proof_facts_for_refinement(
+    refinement: &ast::PredicateExpr,
+    name: Intern<String>,
+) -> Vec<ast::ProofProposition> {
+    use ast::{PredicateExpr, ProofProposition, ProofRelation, ProofTerm};
+    let (relation, right) = match refinement {
+        PredicateExpr::Lt(right) => (ProofRelation::Less, right),
+        PredicateExpr::Gt(right) => (ProofRelation::Greater, right),
+        PredicateExpr::Le(right) => (ProofRelation::LessOrEqual, right),
+        PredicateExpr::Ge(right) => (ProofRelation::GreaterOrEqual, right),
+        PredicateExpr::Eq(right) => (ProofRelation::Equal, right),
+        PredicateExpr::Ne(right) => (ProofRelation::NotEqual, right),
+        PredicateExpr::And(children) => {
+            return children
+                .iter()
+                .flat_map(|child| proof_facts_for_refinement(child, name))
+                .collect();
+        }
+        PredicateExpr::Proposition(proposition) => return vec![proposition.as_ref().clone()],
+    };
+    proof_term_for_normal(right)
+        .map(|right| ProofProposition::Compare {
+            left: ProofTerm::Name(name),
+            relation,
+            right,
+        })
+        .into_iter()
+        .collect()
+}
+
+fn proof_term_for_normal(expr: &ast::NormalExpr) -> Option<ast::ProofTerm> {
+    use ast::{NormalExpr, ProofTerm};
+    match expr {
+        NormalExpr::Var(name) => Some(ProofTerm::Name(*name)),
+        NormalExpr::Value(ast::ConstValue::Int(value)) => Some(ProofTerm::Value(*value)),
+        NormalExpr::Add(left, right) => Some(ProofTerm::Add(
+            Box::new(proof_term_for_normal(left)?),
+            Box::new(proof_term_for_normal(right)?),
+        )),
+        NormalExpr::Sub(left, right) => Some(ProofTerm::Sub(
+            Box::new(proof_term_for_normal(left)?),
+            Box::new(proof_term_for_normal(right)?),
+        )),
+        NormalExpr::Mul(left, right) => Some(ProofTerm::Mul(
+            Box::new(proof_term_for_normal(left)?),
+            Box::new(proof_term_for_normal(right)?),
+        )),
+        _ => None,
+    }
+}
+
 fn proof_facts_for_condition(
     condition: &ast::Condition,
     taken: bool,
 ) -> Vec<ast::ProofProposition> {
     match condition {
+        ast::Condition::Proposition { subject } => proof_for_comparison_expr(&subject.value)
+            .and_then(|proof| {
+                if taken {
+                    Some(proof)
+                } else {
+                    proof_complement(&proof)
+                }
+            })
+            .into_iter()
+            .collect(),
+        ast::Condition::Compare {
+            left,
+            relation,
+            right,
+        } => {
+            let Some(left) = proof_term_for_expr(&left.value) else {
+                return Vec::new();
+            };
+            let Some(right) = proof_term_for_expr(&right.value) else {
+                return Vec::new();
+            };
+            vec![ast::ProofProposition::Compare {
+                left,
+                relation: if taken {
+                    *relation
+                } else {
+                    relation.complement()
+                },
+                right,
+            }]
+        }
         ast::Condition::Is { subject, pattern } => {
-            let ast::Pattern::Nominal(label, _) = &pattern.value else {
-                return Vec::new();
-            };
-            let Some(proposition) = proof_for_comparison_expr(&subject.value) else {
-                return Vec::new();
-            };
-            let selected_true = (label.as_str() == "True") == taken;
-            if selected_true {
-                vec![proposition]
-            } else {
-                proof_complement(&proposition).into_iter().collect()
+            if taken
+                && let ast::Pattern::InRange { bounds, .. } = &pattern.value
+                && let Some(value) = proof_term_for_expr(&subject.value)
+            {
+                let (start, end) = match bounds {
+                    ast::InRangeBounds::Literal(start, end) => {
+                        (ast::ProofTerm::Value(*start), ast::ProofTerm::Value(*end))
+                    }
+                    ast::InRangeBounds::LiteralToTag(start, end) => {
+                        (ast::ProofTerm::Value(*start), ast::ProofTerm::Name(*end))
+                    }
+                    ast::InRangeBounds::Tag(_) => return Vec::new(),
+                };
+                return vec![
+                    ast::ProofProposition::Compare {
+                        left: value.clone(),
+                        relation: ast::ProofRelation::GreaterOrEqual,
+                        right: start,
+                    },
+                    ast::ProofProposition::Compare {
+                        left: value,
+                        relation: ast::ProofRelation::LessOrEqual,
+                        right: end,
+                    },
+                ];
             }
+            Vec::new()
         }
         ast::Condition::Not(inner) => proof_facts_for_condition(inner, !taken),
         ast::Condition::And(left, right) if taken => {
@@ -3350,14 +3862,7 @@ fn proof_for_comparison_expr(expr: &Expr) -> Option<ast::ProofProposition> {
     let Expr::Binary(binary) = expr else {
         return None;
     };
-    let relation = match binary.op {
-        ast::BinOp::Equal => ast::ProofRelation::Equal,
-        ast::BinOp::Less => ast::ProofRelation::Less,
-        ast::BinOp::LessOrEqual => ast::ProofRelation::LessOrEqual,
-        ast::BinOp::Greater => ast::ProofRelation::Greater,
-        ast::BinOp::GreaterOrEqual => ast::ProofRelation::GreaterOrEqual,
-        _ => return None,
-    };
+    let relation = ast::ProofRelation::for_bin_op(&binary.op)?;
     Some(ast::ProofProposition::Compare {
         left: proof_term_for_expr(&binary.lhs.value)?,
         relation,
@@ -3372,7 +3877,6 @@ fn proof_term_for_expr(expr: &Expr) -> Option<ast::ProofTerm> {
         }
         Expr::SelfRef => Some(ast::ProofTerm::Name(Intern::from_ref("self"))),
         Expr::Lit(Literal::Int(value)) => Some(ast::ProofTerm::Value(*value)),
-        Expr::Lit(Literal::Number(value)) => Some(ast::ProofTerm::Value((*value as u128).into())),
         Expr::Binary(binary) => {
             let left = Box::new(proof_term_for_expr(&binary.lhs.value)?);
             let right = Box::new(proof_term_for_expr(&binary.rhs.value)?);
@@ -3397,41 +3901,12 @@ fn proof_complement(proposition: &ast::ProofProposition) -> Option<ast::ProofPro
     else {
         return None;
     };
-    let relation = match relation {
-        ast::ProofRelation::Equal => ast::ProofRelation::NotEqual,
-        ast::ProofRelation::NotEqual => ast::ProofRelation::Equal,
-        ast::ProofRelation::Less => ast::ProofRelation::GreaterOrEqual,
-        ast::ProofRelation::LessOrEqual => ast::ProofRelation::Greater,
-        ast::ProofRelation::Greater => ast::ProofRelation::LessOrEqual,
-        ast::ProofRelation::GreaterOrEqual => ast::ProofRelation::Less,
-    };
+    let relation = relation.complement();
     Some(ast::ProofProposition::Compare {
         left: left.clone(),
         relation,
         right: right.clone(),
     })
-}
-
-fn proof_proposition_names(
-    proposition: &ast::ProofProposition,
-    names: &mut HashSet<Intern<String>>,
-) {
-    match proposition {
-        ast::ProofProposition::Compare { left, right, .. } => {
-            proof_term_names(left, names);
-            proof_term_names(right, names);
-        }
-        ast::ProofProposition::InRange { value, start, end } => {
-            proof_term_names(value, names);
-            proof_term_names(start, names);
-            proof_term_names(end, names);
-        }
-        ast::ProofProposition::Not(inner) => proof_proposition_names(inner, names),
-        ast::ProofProposition::And(left, right) | ast::ProofProposition::Or(left, right) => {
-            proof_proposition_names(left, names);
-            proof_proposition_names(right, names);
-        }
-    }
 }
 
 fn declaration_depends_on_target(
@@ -3450,7 +3925,7 @@ fn declaration_depends_on_target(
         return false;
     };
     let mut names = HashSet::new();
-    predicate_expr_names(predicate, &mut names);
+    let _ = ProofNameCollector(&mut names).visit_predicate(predicate);
     names
         .iter()
         .any(|name| target_dependent_names.contains(name))
@@ -3465,77 +3940,32 @@ fn expr_references_target_dependency(
             expr,
             ast::Expr::FnCall(call)
                 if call.args.is_none()
-                    && call.path.value.segments.is_empty()
-                    && target_dependent_names.contains(&call.path.value.root)
+                    && target_dependent_names.contains(&Intern::new(call.path.value.to_qualified_string()))
         )
 }
 
-fn predicate_expr_names(predicate: &ast::ty::PredicateExpr, names: &mut HashSet<Intern<String>>) {
-    match predicate {
-        ast::ty::PredicateExpr::Lt(expr)
-        | ast::ty::PredicateExpr::Gt(expr)
-        | ast::ty::PredicateExpr::Le(expr)
-        | ast::ty::PredicateExpr::Ge(expr)
-        | ast::ty::PredicateExpr::Eq(expr)
-        | ast::ty::PredicateExpr::Ne(expr) => normal_expr_names(expr, names),
-        ast::ty::PredicateExpr::And(predicates) => {
-            for predicate in predicates {
-                predicate_expr_names(predicate, names);
-            }
-        }
-        ast::ty::PredicateExpr::Proposition(proposition) => {
-            proof_proposition_names(proposition, names);
-        }
-    }
-}
+struct ProofNameCollector<'a>(&'a mut HashSet<Intern<String>>);
 
-fn normal_expr_names(expr: &ast::NormalExpr, names: &mut HashSet<Intern<String>>) {
-    match expr {
-        ast::NormalExpr::Var(name) => {
-            names.insert(*name);
+impl ProofVisitor for ProofNameCollector<'_> {
+    fn visit_normal(&mut self, expr: &ast::NormalExpr) -> ControlFlow<()> {
+        if let ast::NormalExpr::Var(name) = expr {
+            self.0.insert(*name);
         }
-        ast::NormalExpr::Add(left, right)
-        | ast::NormalExpr::Sub(left, right)
-        | ast::NormalExpr::Mul(left, right) => {
-            normal_expr_names(left, names);
-            normal_expr_names(right, names);
-        }
-        ast::NormalExpr::TargetQuery { operand, .. } => type_reference_names(operand, names),
-        ast::NormalExpr::Value(_) | ast::NormalExpr::Inferred(_) => {}
+        walk_normal(self, expr)
     }
-}
 
-fn proof_term_names(term: &ast::ProofTerm, names: &mut HashSet<Intern<String>>) {
-    match term {
-        ast::ProofTerm::Name(name) => {
-            names.insert(*name);
+    fn visit_term(&mut self, term: &ast::ProofTerm) -> ControlFlow<()> {
+        if let ast::ProofTerm::Name(name) = term {
+            self.0.insert(*name);
         }
-        ast::ProofTerm::Add(left, right)
-        | ast::ProofTerm::Sub(left, right)
-        | ast::ProofTerm::Mul(left, right)
-        | ast::ProofTerm::Remainder(left, right) => {
-            proof_term_names(left, names);
-            proof_term_names(right, names);
-        }
-        ast::ProofTerm::PowerOfTwo(inner) => proof_term_names(inner, names),
-        ast::ProofTerm::TargetQuery { operand, .. } => type_reference_names(operand, names),
-        ast::ProofTerm::Value(_) => {}
+        walk_term(self, term)
     }
-}
 
-fn type_reference_names(reference: &ast::TypeReference, names: &mut HashSet<Intern<String>>) {
-    match reference {
-        ast::TypeReference::Unit => {}
-        ast::TypeReference::Nominal(name) => {
-            names.insert(*name);
+    fn visit_reference(&mut self, reference: &ast::TypeReference) -> ControlFlow<()> {
+        if let Some(name) = reference.head_name() {
+            self.0.insert(name);
         }
-        ast::TypeReference::Application { name, arguments } => {
-            names.insert(*name);
-            for argument in arguments {
-                type_reference_names(argument, names);
-            }
-        }
-        ast::TypeReference::Pointer(inner) => type_reference_names(inner, names),
+        walk_reference(self, reference)
     }
 }
 
@@ -3547,7 +3977,10 @@ fn anonymous_result_labels(file_ast: &FileAst) -> HashSet<Intern<String>> {
             bind.anonymous_result_alternatives
                 .iter()
                 .map(|alternative| alternative.value.label)
-                .chain(inferred_result_alternatives(&bind.value, &file_ast.tags))
+                .chain(inferred_result_alternatives(
+                    &bind.value,
+                    (&file_ast.tags).into(),
+                ))
         })
         .collect()
 }
@@ -3555,7 +3988,7 @@ fn anonymous_result_labels(file_ast: &FileAst) -> HashSet<Intern<String>> {
 fn contains_unresolved_result_label(ty: &Ty, labels: &HashSet<Intern<String>>) -> bool {
     match ty {
         Ty::Opaque(name) => labels.contains(name),
-        Ty::Named { .. } | Ty::Array { .. } | Ty::Ptr { .. } | Ty::Address { .. } | Ty::Ref { .. } => {
+        Ty::Named { .. } | Ty::Array { .. } | Ty::Ptr { .. } | Ty::OwnedStorage { .. } | Ty::Address { .. } | Ty::Ref { .. } => {
             ty.any_child(|child| child.ty().is_some_and(|ty| contains_unresolved_result_label(ty, labels)))
         }
         Ty::Record { .. } | Ty::Union { .. } => ty.any_child(|child| {
@@ -3569,60 +4002,21 @@ fn anonymous_result_annotation_diagnostic(
     span: ast::SpanId,
     span_table: &ast::SpanTable,
 ) -> Diagnostic {
+    // type-anonymous-result-not-nameable
     Diagnostic::new(
-        "type-anonymous-result-not-nameable",
+        ResultCode::AnonymousNotNameable,
         "an anonymous result-family type cannot be named in a source annotation",
     )
     .with_help("use inference, transparent forwarding, or translate to a named union")
     .at_span_id(span, span_table)
 }
 
-fn collect_result_exit_alternatives(
-    expr: &Expr,
-    tag_decls: &ast::TagMap,
-    alternatives: &mut Vec<Intern<String>>,
-) {
-    let label = match expr {
-        Expr::AnonymousTag(label) => Some(*label),
-        Expr::TagCall(call) if call.qual_path.is_none() && !tag_decls.contains_key(&call.name) => {
-            Some(call.name)
-        }
-        _ => None,
-    };
-    if let Some(label) = label {
-        if !alternatives.contains(&label) {
-            alternatives.push(label);
-        }
-        return;
-    }
-    match expr {
-        Expr::If(if_expr) => {
-            if let Some(exit) = if_expr.body.last() {
-                collect_result_exit_alternatives(&exit.value, tag_decls, alternatives);
-            }
-            for exit in &if_expr.ret.values {
-                collect_result_exit_alternatives(&exit.value, tag_decls, alternatives);
-            }
-        }
-        Expr::When(when_expr) => {
-            for arm in &when_expr.arms {
-                let body = match arm {
-                    ast::WhenArm::Cond { body, .. }
-                    | ast::WhenArm::Is { body, .. }
-                    | ast::WhenArm::Else(body, _) => body,
-                };
-                collect_result_exit_alternatives(&body.value, tag_decls, alternatives);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn resolve_param_types(
+pub(super) fn resolve_param_types(
     bind: &Bind,
+    registry: &crate::TypeRegistry,
     tag_types: &HashMap<Intern<String>, Ty>,
     tag_params: &HashMap<Intern<String>, Parameters>,
-    tag_decls: &ast::TagMap,
+    tag_decls: TagDeclarations<'_>,
     dependent_binder: BinderId,
     typevar_subst: &HashMap<Intern<String>, Ty>,
 ) -> Vec<(Intern<String>, Ty)> {
@@ -3634,16 +4028,18 @@ fn resolve_param_types(
         .map(|(name, kind)| {
             let ty = match &kind.kind {
                 ParameterKind::Tagged(sp) => TypeEnv::new(tag_types)
+                    .with_registry(registry)
                     .with_subst(typevar_subst)
                     .with_tag_params(tag_params)
-                    .with_tag_decls(tag_decls)
+                    .with_tag_declaration_lookup(tag_decls)
                     .with_dependent_binder(dependent_binder)
                     .resolve_expr(&sp.value),
                 ParameterKind::ValueParam { ty } | ParameterKind::Inferred { ty } => {
                     TypeEnv::new(tag_types)
+                        .with_registry(registry)
                         .with_subst(typevar_subst)
                         .with_tag_params(tag_params)
-                        .with_tag_decls(tag_decls)
+                        .with_tag_declaration_lookup(tag_decls)
                         .with_dependent_binder(dependent_binder)
                         .resolve_expr(&ty.value)
                 }
@@ -3664,6 +4060,10 @@ fn resolve_param_types(
                         _ => receiver,
                     }
                 }
+                ParameterKind::Generic if super::parameters::is_inferred_value(bind, *name) => {
+                    super::parameters::inferred_value_type(bind, *name)
+                }
+                ParameterKind::Proposition(predicate) => Ty::Proposition(predicate.clone()),
                 ParameterKind::Generic => bind
                     .param_refinements
                     .get(name)
@@ -3683,7 +4083,95 @@ fn resolve_param_types(
                     expr.infer_ty(&env)
                 }
             };
+            let ty = match bind.param_conventions.get(name) {
+                Some(convention @ (ParamConvention::Observe | ParamConvention::Mutate))
+                    if !ty.is_ref() =>
+                {
+                    Ty::Ref {
+                        inner: Box::new(ty),
+                        mutable: *convention == ParamConvention::Mutate,
+                    }
+                }
+                _ => ty,
+            };
             (*name, ty)
+        })
+        .collect()
+}
+
+fn field_refinements(declare: &ast::Declare) -> HashMap<Intern<String>, ast::PredicateExpr> {
+    let ast::DeclareValue::Has(members) = &declare.value else {
+        return HashMap::new();
+    };
+    members
+        .iter()
+        .filter_map(|member| match member {
+            ast::HasMember::Property(property)
+                if property
+                    .qualifier
+                    .as_ref()
+                    .is_none_or(|qualifier| qualifier.name == declare.name) =>
+            {
+                property
+                    .refinement
+                    .as_ref()
+                    .map(|refinement| (property.name, refinement.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+type PrivateMemberGrants = HashMap<Intern<String>, Vec<Vec<Intern<String>>>>;
+type PrivateFieldNames = HashSet<Intern<String>>;
+
+fn member_visibility(declare: &ast::Declare) -> (PrivateMemberGrants, PrivateFieldNames) {
+    let mut private_members = HashMap::new();
+    let mut private_fields = HashSet::new();
+    if let ast::DeclareValue::Has(members) = &declare.value {
+        for member in members {
+            let (name, attributes, stored) = match member {
+                ast::HasMember::Property(field) => (
+                    field.name,
+                    &field.attributes,
+                    field
+                        .qualifier
+                        .as_ref()
+                        .is_none_or(|qualifier| qualifier.name == declare.name),
+                ),
+                ast::HasMember::Function(method) => (method.name, &method.attributes, false),
+            };
+            if attributes.is_private() {
+                private_members.insert(name, private_grants(attributes));
+                if stored {
+                    private_fields.insert(name);
+                }
+            }
+        }
+    }
+    (private_members, private_fields)
+}
+
+fn private_grants(attributes: &ast::BindAttributes) -> Vec<Vec<Intern<String>>> {
+    attributes
+        .raw_attributes
+        .iter()
+        .flatten()
+        .filter_map(|attribute| match attribute {
+            ast::AttributeItem::Call { name, args, .. } if name.as_str() == "private" => Some(args),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|argument| {
+            if let ast::Expr::FnCall(call) = &argument.value
+                && call.args.is_none()
+            {
+                let mut module = vec![call.path.value.root];
+                module.extend(call.path.value.segments.iter().copied());
+                Some(module)
+            } else {
+                None
+            }
         })
         .collect()
 }
@@ -3695,14 +4183,7 @@ fn validated_sequence_literal_acceptance(
     let element_is_type = |element_parameter: Intern<String>| {
         params
             .get(&element_parameter)
-            .is_some_and(|parameter| match &parameter.kind {
-                ParameterKind::Generic => true,
-                ParameterKind::Tagged(ty) => is_type_param_marker(&ty.value),
-                ParameterKind::ValueParam { ty } | ParameterKind::Inferred { ty } => {
-                    is_type_param_marker(&ty.value)
-                }
-                _ => false,
-            })
+            .is_some_and(|parameter| matches!(parameter.kind, ParameterKind::Generic))
     };
     if let Some(contract) = declare.attributes.fixed_array.as_ref() {
         if contract.element_parameter == contract.length_parameter {
@@ -3728,14 +4209,6 @@ fn validated_sequence_literal_acceptance(
             },
         );
     }
-    if let Some(contract) = declare.attributes.sequence_view.as_ref() {
-        return params.contains_key(&contract.element_parameter).then_some(
-            crate::SequenceLiteralAcceptance {
-                element_parameter: contract.element_parameter,
-                materialization: crate::SequenceLiteralMaterialization::BorrowStatic,
-            },
-        );
-    }
     let contract = declare.attributes.sequence_builder.as_ref()?;
     params
         .contains_key(&contract.element_parameter)
@@ -3748,17 +4221,15 @@ fn validated_sequence_literal_acceptance(
         })
 }
 
-fn is_type_param_marker(ty: &Expr) -> bool {
-    matches!(ty, Expr::AnonymousTag(name) if name.as_str() == "Type")
-}
-
 fn param_kind_from_parameter_kind(
     kind: &ParameterKind,
     tag_types: &HashMap<Intern<String>, Ty>,
 ) -> ParamKind {
     match kind {
+        ParameterKind::Proposition(predicate) => {
+            ParamKind::Value(Box::new(Ty::Proposition(predicate.clone())))
+        }
         ParameterKind::Generic => ParamKind::Type,
-        ParameterKind::Tagged(sp) if is_type_param_marker(&sp.value) => ParamKind::Type,
         ParameterKind::Tagged(sp) => {
             let ty = TypeEnv::new(tag_types).resolve_expr(&sp.value);
             ParamKind::Value(Box::new(ty))
@@ -3782,10 +4253,11 @@ fn param_kind_from_parameter_kind(
 
 fn is_type_parameter(kind: &ParameterKind) -> bool {
     match kind {
+        ParameterKind::Proposition(_) => false,
         ParameterKind::Generic => true,
-        ParameterKind::Tagged(ty)
-        | ParameterKind::ValueParam { ty }
-        | ParameterKind::Inferred { ty } => is_type_param_marker(&ty.value),
+        ParameterKind::Tagged(_)
+        | ParameterKind::ValueParam { .. }
+        | ParameterKind::Inferred { .. } => false,
         ParameterKind::Default(expr) => expr_is_type_surface(&expr.value),
     }
 }
@@ -3794,6 +4266,172 @@ fn is_type_parameter(kind: &ParameterKind) -> bool {
 mod tests {
     use super::*;
     use ast::ty::{NamedTypeInstance, SequenceTypeElement, TypeId};
+
+    #[test]
+    fn target_group_paths_reject_missing_nominal_definitions() {
+        let name = Intern::from_ref("Missing");
+        let ty = Ty::Named {
+            instance: NamedTypeInstance::new(TypeId { file: 7, name }),
+            name,
+        };
+        let mut path = ast::GroupPath::root(Intern::from_ref("group"));
+        path.segments.push(Intern::from_ref("field"));
+        assert!(matches!(
+            resolve_group_path(&ty, &path, &crate::TypeRegistry::default()),
+            Err(GroupPathError::InvalidProjection { .. })
+        ));
+    }
+
+    #[test]
+    fn target_group_paths_reject_recursive_nominal_definitions() {
+        let parsed = parser::parse_from_str("Node has\n    next ref Node\n");
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "{:?}",
+            parsed.parse_warnings
+        );
+        let typed = stage_declare(&parsed, FileId(7), &TransformCtx::new());
+        let node = &typed.tags[&TagId(Intern::from_ref("Node"))].resolved_ty;
+        let id = node.type_id().expect("nominal Node");
+        let mut path = ast::GroupPath::root(Intern::from_ref("group"));
+        path.segments.push(Intern::from_ref("next"));
+        for definition in [
+            node.clone(),
+            Ty::Ref {
+                inner: Box::new(node.clone()),
+                mutable: false,
+            },
+        ] {
+            let mut registry = typed.type_registry.clone();
+            let mut semantics = registry.declaration(id).expect("Node declaration").clone();
+            semantics.definition = definition;
+            registry.insert(id, semantics);
+            assert!(matches!(
+                resolve_group_path(node, &path, &registry),
+                Err(GroupPathError::InvalidProjection { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn target_group_paths_unwrap_finite_reference_prefixes() {
+        let parsed = parser::parse_from_str("Node has\n    next ref Node\n");
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "{:?}",
+            parsed.parse_warnings
+        );
+        let typed = stage_declare(&parsed, FileId(7), &TransformCtx::new());
+        let node = &typed.tags[&TagId(Intern::from_ref("Node"))].resolved_ty;
+        let field = Intern::from_ref("next");
+        let mut path = ast::GroupPath::root(Intern::from_ref("group"));
+        path.segments.push(field);
+        let reference = Ty::Ref {
+            inner: Box::new(node.clone()),
+            mutable: false,
+        };
+        let root = Ty::Ref {
+            inner: Box::new(reference.clone()),
+            mutable: true,
+        };
+        assert_eq!(
+            resolve_group_path(&root, &path, &typed.type_registry),
+            Ok((
+                vec![GroupProjection::Field {
+                    name: field,
+                    index: 0
+                }],
+                typed.type_registry.resolved_definition_for_type(node)
+            ))
+        );
+    }
+
+    #[test]
+    fn stored_sequence_references_resolve_to_their_enclosing_nominal_type() {
+        let parsed = parser::parse_from_str("Node has\n    next [ref Node, mut Node]\n");
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "{:?}",
+            parsed.parse_warnings
+        );
+        let typed = stage_declare(&parsed, FileId(7), &TransformCtx::new());
+        assert!(
+            typed.declaration_flaws.is_empty(),
+            "{:?}",
+            typed.declaration_flaws
+        );
+        let node = &typed.tags[&TagId(Intern::from_ref("Node"))].resolved_ty;
+        let Ty::Record { fields, .. } = typed.type_registry.resolved_definition_for_type(node)
+        else {
+            panic!("Node record");
+        };
+        assert_eq!(
+            fields,
+            vec![(
+                Intern::from_ref("next"),
+                Box::new(Ty::Sequence(vec![
+                    SequenceTypeElement {
+                        name: None,
+                        ty: Box::new(Ty::Ref {
+                            inner: Box::new(node.clone()),
+                            mutable: false
+                        })
+                    },
+                    SequenceTypeElement {
+                        name: None,
+                        ty: Box::new(Ty::Ref {
+                            inner: Box::new(node.clone()),
+                            mutable: true
+                        })
+                    },
+                ]))
+            )]
+        );
+    }
+
+    #[test]
+    fn sequence_self_references_preserve_the_declaration_instance() {
+        let name = Intern::from_ref("Node");
+        let field = Intern::from_ref("next");
+        let unrelated = Ty::Opaque(Intern::from_ref("Other"));
+        let instance = NamedTypeInstance::new(TypeId { file: 7, name }).with_arguments(vec![(
+            Intern::from_ref("element"),
+            ast::TyArg::Type(Box::new(unrelated.clone())),
+        )]);
+        let ty = Ty::Sequence(vec![
+            SequenceTypeElement {
+                name: Some(field),
+                ty: Box::new(Ty::Ref {
+                    inner: Box::new(Ty::Opaque(name)),
+                    mutable: true,
+                }),
+            },
+            SequenceTypeElement {
+                name: None,
+                ty: Box::new(unrelated.clone()),
+            },
+        ]);
+        let expected = Ty::Sequence(vec![
+            SequenceTypeElement {
+                name: Some(field),
+                ty: Box::new(Ty::Ref {
+                    inner: Box::new(Ty::Named {
+                        instance: instance.clone(),
+                        name,
+                    }),
+                    mutable: true,
+                }),
+            },
+            SequenceTypeElement {
+                name: None,
+                ty: Box::new(unrelated),
+            },
+        ]);
+        assert_eq!(
+            preserve_self_reference_with_instance(&ty, name, &instance),
+            expected
+        );
+    }
 
     #[test]
     fn nominal_and_anonymous_label_queries_keep_distinct_traversal_rules() {
@@ -3858,6 +4496,34 @@ mod tests {
                 "{ty:?}"
             );
             assert!(!references_nominal_type(&ty, Intern::from_ref("Absent")));
+        }
+    }
+}
+
+fn return_contract_matches(registry: &crate::TypeRegistry, actual: &Ty, expected: &Ty) -> bool {
+    actual == expected || super::return_types::same_union_layout(registry, actual, expected)
+}
+
+fn validate_payload_names(
+    method: &ast::HasFunction,
+    flaws: &mut Vec<(SpanId, Diagnostic)>,
+    spans: &ast::SpanTable,
+) {
+    for proof in &method.payload_postconditions {
+        let surface = ast::PredicateExpr::Proposition(Box::new(proof.proposition.clone()));
+        for name in super::refinement_terms::predicate_names(&surface) {
+            let root = Intern::from_ref(name.as_str().split('.').next().unwrap_or(name.as_str()));
+            if root != proof.name && !method.params.contains_key(&root) {
+                flaws.push((
+                    method.name_span,
+                    // type-constraint-unknown-name
+                    Diagnostic::new(
+                        ProofCode::UnknownName,
+                        format!("payload contract refers to unknown value `{root}`"),
+                    )
+                    .at_span_id(method.name_span, spans),
+                ));
+            }
         }
     }
 }

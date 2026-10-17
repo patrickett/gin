@@ -1,14 +1,14 @@
-use std::collections::HashSet;
-
 use crate::subst::DepSubst;
 use crate::ty::{ParamKind, Ty};
 use crate::typed::{
     Availability, AvailabilityRequirement, BindBody, CallCapability, ExprId, TypedExprKind,
-    TypedFileAst, walk_expr_children_of,
+    TypedFileAst, walk_expr_preorder,
 };
-use diagnostic::Diagnostic;
+use diagnostic::code::{CallCode, EvaluationCode, TypeCode};
+use diagnostic::{Diagnostic, DiagnosticCode};
 
-use super::{NormalizeResult, normalize};
+use super::NormalizeResult;
+use super::normalize::Normalizer;
 
 /// Populate compile-time values from resolved expressions.
 ///
@@ -16,9 +16,11 @@ use super::{NormalizeResult, normalize};
 /// normalization operate on the typed expression arena and therefore see the
 /// same calls, substitutions, and effects as later compiler stages.
 pub fn prepare_resolved_expressions(typed: &mut TypedFileAst) {
+    let _profile = compiler_profile::span(compiler_profile::Phase::Staging);
     validate_resolved_staging_calls(typed);
     validate_resolved_compile_time_binds(typed);
 
+    let normalizer = Normalizer::new(typed.resolved_program());
     let values: Vec<_> = (0..typed.exprs.kind.len())
         .map(|index| {
             if typed.exprs.facts.semantic_facts.availability[index] != Availability::CompileTime {
@@ -31,7 +33,7 @@ pub fn prepare_resolved_expressions(typed: &mut TypedFileAst) {
                 return None;
             }
 
-            match normalize(typed, ExprId(index as u32), &DepSubst::new()) {
+            match normalizer.normalize(ExprId(index as u32), &DepSubst::new()) {
                 NormalizeResult::Value(mut value) => {
                     if let ast::ConstValue::Tag { qual_path, .. } = &mut value
                         && qual_path.is_none()
@@ -82,13 +84,14 @@ fn validate_resolved_compile_time_binds(typed: &mut TypedFileAst) {
         let index = runtime_expr.index();
         if typed.exprs.facts.semantic_facts.flaws[index]
             .iter()
-            .any(|flaw| flaw.code.slug() == "compile-time-runtime-call")
+            .any(|flaw| flaw.code == DiagnosticCode::Evaluation(EvaluationCode::RuntimeCall))
         {
             continue;
         }
         typed.exprs.facts.semantic_facts.flaws[index].push(
+            // compile-time-runtime-call
             Diagnostic::new(
-                "compile-time-runtime-call",
+                EvaluationCode::RuntimeCall,
                 format!("runtime call in compile-time bind `{}`", bind_name.as_str()),
             )
             .with_arg("bind_name", bind_name.as_str().to_string()),
@@ -106,48 +109,53 @@ fn is_resolved_compile_time_bind(bind: &crate::typed::TypedBind) -> bool {
 }
 
 fn first_runtime_expr(typed: &TypedFileAst, root: ExprId) -> Option<ExprId> {
-    let mut pending = vec![root];
-    let mut visited = HashSet::new();
-    while let Some(expr) = pending.pop() {
-        if !visited.insert(expr) {
-            continue;
-        }
-        if *typed
+    let mut first = None;
+    let _ = walk_expr_preorder(typed, root, &mut |expr| {
+        let runtime = *typed
             .exprs
             .availability_of(expr)
             .unwrap_or(&Availability::Unknown)
             == Availability::Runtime
-        {
-            return Some(expr);
-        }
-        if let Some(TypedExprKind::FnCall { target, .. }) = typed.exprs.kind_of(expr)
-            && typed.defs.get(target).is_some_and(|bind| !bind.is_constant)
-        {
-            return Some(expr);
-        }
-        let _ = walk_expr_children_of(typed, expr, &mut |child| {
-            pending.push(child);
+            || matches!(
+                typed.exprs.kind_of(expr),
+                Some(TypedExprKind::FnCall { target, .. })
+                    if typed.defs.get(target).is_some_and(|bind| !bind.is_constant)
+            );
+        if runtime {
+            first = Some(expr);
+            std::ops::ControlFlow::Break(())
+        } else {
             std::ops::ControlFlow::Continue(())
-        });
-    }
-    None
+        }
+    });
+    first
 }
 
 fn validate_resolved_staging_calls(typed: &mut TypedFileAst) {
     for index in 0..typed.exprs.kind.len() {
-        if let TypedExprKind::Asm { specification, .. } = typed.exprs.kind[index].clone()
+        if let TypedExprKind::Emit { specification, .. } = typed.exprs.kind[index].clone()
             && typed.exprs.availability_of(specification) != Some(&Availability::CompileTime)
+            && !typed
+                .exprs
+                .const_value_of(specification)
+                .is_some_and(Option::is_some)
             && !typed.exprs.facts.semantic_facts.flaws[index]
                 .iter()
-                .any(|flaw| flaw.code.slug() == "type-cannot-call-comptime-with-runtime-args")
+                .any(|flaw| {
+                    flaw.code
+                        == DiagnosticCode::Type(TypeCode::Call(
+                            CallCode::CompileTimeRequiresConstantArguments,
+                        ))
+                })
         {
             typed.exprs.facts.semantic_facts.flaws[index].push(
+                // type-cannot-call-comptime-with-runtime-args
                 Diagnostic::new(
-                    "type-cannot-call-comptime-with-runtime-args",
-                    "#asm specification must be available at compile time",
+                    CallCode::CompileTimeRequiresConstantArguments,
+                    "instruction encoding must be available at compile time",
                 )
-                .with_arg("fn_name", "#asm")
-                .with_arg("detail", "runtime assembly specification"),
+                .with_arg("fn_name", "#emit")
+                .with_arg("detail", "runtime instruction encoding"),
             );
         }
         let TypedExprKind::FnCall {
@@ -165,26 +173,21 @@ fn validate_resolved_staging_calls(typed: &mut TypedFileAst) {
             continue;
         }
 
-        let invalid = args
-            .iter()
-            .zip(&bind.param_requirements)
-            .any(|(arg, requirement)| {
-                *requirement == AvailabilityRequirement::CompileTime
-                    && (typed
-                        .exprs
-                        .availability_of(*arg)
-                        .unwrap_or(&Availability::Unknown)
-                        != &Availability::CompileTime
-                        || is_runtime_form_type_argument(typed, *arg))
-            });
+        let invalid = has_invalid_compile_time_argument(typed, bind, &args);
         if invalid
             && !typed.exprs.facts.semantic_facts.flaws[index]
                 .iter()
-                .any(|flaw| flaw.code.slug() == "type-cannot-call-comptime-with-runtime-args")
+                .any(|flaw| {
+                    flaw.code
+                        == DiagnosticCode::Type(TypeCode::Call(
+                            CallCode::CompileTimeRequiresConstantArguments,
+                        ))
+                })
         {
             typed.exprs.facts.semantic_facts.flaws[index].push(
+                // type-cannot-call-comptime-with-runtime-args
                 Diagnostic::new(
-                    "type-cannot-call-comptime-with-runtime-args",
+                    CallCode::CompileTimeRequiresConstantArguments,
                     format!(
                         "cannot call comptime function `{}` with runtime arguments",
                         bind.name.as_str()
@@ -195,6 +198,24 @@ fn validate_resolved_staging_calls(typed: &mut TypedFileAst) {
             );
         }
     }
+}
+
+pub(crate) fn has_invalid_compile_time_argument(
+    typed: &TypedFileAst,
+    bind: &crate::typed::TypedBind,
+    args: &[ExprId],
+) -> bool {
+    args.iter()
+        .zip(&bind.param_requirements)
+        .any(|(arg, requirement)| {
+            *requirement == AvailabilityRequirement::CompileTime
+                && (typed
+                    .exprs
+                    .availability_of(*arg)
+                    .unwrap_or(&Availability::Unknown)
+                    != &Availability::CompileTime
+                    || is_runtime_form_type_argument(typed, *arg))
+        })
 }
 
 fn is_runtime_form_type_argument(typed: &TypedFileAst, arg: ExprId) -> bool {

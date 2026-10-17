@@ -9,9 +9,8 @@ use std::collections::HashMap;
 
 use internment::Intern;
 
-use crate::analysis::type_surface::{
-    TypeEnv, expr_is_type_surface, mangled_fn_call_name, typevars_from_receiver_expr,
-};
+use crate::analysis::type_surface::{TypeEnv, expr_is_type_surface, typevars_from_receiver_expr};
+use crate::normal_expr::{SizeCallName, size_expr_to_normal};
 use crate::ty::Ty;
 use ast::{
     BinOp, Binary, Bind, BindValue, Expr, FnCall, HashFloat, Literal, NormalExpr, ParameterKind,
@@ -52,9 +51,7 @@ pub trait TyInfer {
 impl TyInfer for Literal {
     fn infer_ty(&self, _env: &TyInferEnv) -> Ty {
         match self {
-            Literal::Int(_) | Literal::Number(_) => {
-                Ty::UnresolvedLiteral(ast::ty::LiteralKind::Integer)
-            }
+            Literal::Int(_) => Ty::UnresolvedLiteral(ast::ty::LiteralKind::Integer),
             Literal::Float(HashFloat(f)) => Ty::Float {
                 value: Some(HashFloat(*f)),
             },
@@ -68,12 +65,15 @@ impl TyInfer for Literal {
 
 impl TyInfer for Binary {
     fn infer_ty(&self, env: &TyInferEnv) -> Ty {
-        if self.op == BinOp::Equal {
-            return env
-                .tag_types
-                .get(&Intern::from_ref("Bool"))
-                .cloned()
-                .unwrap_or(Ty::Opaque(Intern::from_ref("Bool")));
+        if matches!(
+            self.op,
+            BinOp::Equal
+                | BinOp::Less
+                | BinOp::LessOrEqual
+                | BinOp::Greater
+                | BinOp::GreaterOrEqual
+        ) {
+            return super::propositions::comparison_type(self).expect("comparison operator");
         }
         let lhs_ty = self.lhs.infer_ty(env);
         let rhs_ty = self.rhs.infer_ty(env);
@@ -117,7 +117,7 @@ impl TyInfer for FnCall {
             if let Some(local_ty) = env.locals.get_type(&name) {
                 return local_ty;
             }
-            let mangled = mangled_fn_call_name(self);
+            let mangled = self.mangled_name();
             return env
                 .fn_return_types
                 .get(&mangled)
@@ -149,7 +149,7 @@ impl TyInfer for FnCall {
             return ty;
         }
 
-        let mangled = mangled_fn_call_name(self);
+        let mangled = self.mangled_name();
         env.fn_return_types
             .get(&mangled)
             .cloned()
@@ -259,6 +259,13 @@ impl TyInfer for Bind {
 
 impl TyInfer for TagCall {
     fn infer_ty(&self, env: &TyInferEnv) -> Ty {
+        if let Some(path) = &self.qual_path {
+            let mut owner = path.value.clone();
+            owner.segments.pop();
+            if let Some(ty) = env.tag_types.get(&Intern::new(owner.to_qualified_string())) {
+                return ty.clone();
+            }
+        }
         if let Some(ty) = env.tag_types.values().find_map(|ty| {
             if let Ty::Union { variants, .. } = ty
                 && variants.iter().any(|v| v.name == self.name)
@@ -305,19 +312,24 @@ impl TyInfer for WhenExpr {
 impl TyInfer for Expr {
     fn infer_ty(&self, env: &TyInferEnv) -> Ty {
         match self {
-            Expr::Asm { .. } => Ty::Opaque(Intern::<String>::from_ref("assembly-result")),
+            Expr::Emit { .. } => Ty::Opaque(Intern::<String>::from_ref("assembly-result")),
             Expr::Lit(lit) => lit.infer_ty(env),
             Expr::Binary(bin) => bin.infer_ty(env),
             Expr::FnCall(call) => call.infer_ty(env),
             Expr::Bind(bind) => bind.infer_ty(env),
             Expr::TagCall(tc) => tc.infer_ty(env),
             Expr::When(w) => w.infer_ty(env),
+            Expr::Block(items) => items.last().map_or(Ty::Unit, |item| item.infer_ty(env)),
+            Expr::Return(_) => Ty::Unit,
 
             Expr::AnonymousTag(name) => Ty::Opaque(*name),
-            Expr::Register(inner) => inner.value.infer_ty(env),
             Expr::FormatString(_) => Ty::Unit,
             Expr::Loop(_) => Ty::Unit,
             Expr::If(_) => Ty::Unit,
+            Expr::TypeValue(ty) => (**ty).clone(),
+            Expr::DomainValue(domain) => Ty::Literal(ast::ConstValue::Domain(domain.clone())),
+            Expr::DomainOf(_) => Ty::Opaque(Intern::from_ref("domain")),
+            Expr::IntegerDomain(_) => TypeEnv::new(env.tag_types).resolve_expr(self),
             Expr::Range(_) => Ty::Opaque(Intern::<String>::from_ref("range_expr")),
             Expr::AggregateSet { value, .. } => value.infer_ty(env),
             Expr::BufSet { value, .. } => value.infer_ty(env),
@@ -345,12 +357,13 @@ impl TyInfer for Expr {
 
             Expr::FixedArrayAlloc { init, size } => {
                 let elem = init.infer_ty(env);
-                let size = as_size_normal_expr_with_arithmetic(&size.value).unwrap_or_else(|| {
-                    NormalExpr::Var(Intern::new(format!(
-                        "_unsupported_array_size_{:?}",
-                        size.span_id
-                    )))
-                });
+                let size = size_expr_to_normal(&size.value, SizeCallName::Mangled, false)
+                    .unwrap_or_else(|| {
+                        NormalExpr::Var(Intern::new(format!(
+                            "_unsupported_array_size_{:?}",
+                            size.span_id
+                        )))
+                    });
                 Ty::Array {
                     elem: Box::new(elem),
                     size,
@@ -382,6 +395,17 @@ impl TyInfer for Expr {
                 .map(|(_, ty)| ty)
                 .unwrap_or_else(|| Ty::Opaque(*field)),
 
+            Expr::SliceGet { buf, length, .. } => Ty::Array {
+                elem: Box::new(match buf.infer_ty(env).without_reference_wrappers() {
+                    Ty::Array { elem, .. } => *elem.clone(),
+                    ty => ty.pointee_ty().cloned().unwrap_or(Ty::Unit),
+                }),
+                size: match &length.value {
+                    Expr::Lit(ast::Literal::Int(value)) => (*value).into(),
+                    Expr::FnCall(call) => ast::NormalExpr::Var(call.path.root),
+                    _ => ast::NormalExpr::Var(Intern::from_ref("unresolved-slice-length")),
+                },
+            },
             Expr::BufGet { buf, .. } => {
                 let buffer_ty = buf.infer_ty(env);
                 buffer_ty
@@ -428,7 +452,9 @@ impl TyInfer for Expr {
                     .collect(),
                 resolved_params: None,
             },
+            Expr::Import(_) => Ty::Unit,
             Expr::Invalid(_) => Ty::Opaque(Intern::from_ref("invalid-expression")),
+            Expr::Todo => Ty::Opaque(Intern::from_ref("#todo")),
             Expr::ResultValues(_) => Ty::Opaque(Intern::from_ref("result-values")),
             Expr::SequenceLiteral(ast::SequenceLiteral::Elements(elems)) => Ty::sequence(
                 elems
@@ -452,8 +478,8 @@ impl TyInfer for Expr {
                     .collect(),
             ),
             Expr::SequenceLiteral(ast::SequenceLiteral::Repeat { seed, count }) => {
-                let length =
-                    as_size_normal_expr_with_arithmetic(&count.value).unwrap_or_else(|| {
+                let length = size_expr_to_normal(&count.value, SizeCallName::Mangled, false)
+                    .unwrap_or_else(|| {
                         NormalExpr::Var(Intern::new(format!(
                             "_unsupported_sequence_length_{:?}",
                             count.span_id
@@ -461,7 +487,6 @@ impl TyInfer for Expr {
                     });
                 let element = seed.infer_ty(env);
                 let literal_length = match &count.value {
-                    Expr::Lit(ast::Literal::Number(value)) => Some(*value as u64),
                     Expr::Lit(ast::Literal::Int(value)) => ast::integer::to_u64(*value),
                     _ => None,
                 };
@@ -489,23 +514,101 @@ impl TyInfer for Expr {
     }
 }
 
-fn as_size_normal_expr_with_arithmetic(expr: &Expr) -> Option<NormalExpr> {
-    match expr {
-        Expr::Lit(Literal::Int(n)) => Some(NormalExpr::from(*n)),
-        Expr::Lit(Literal::Number(n)) => Some(NormalExpr::from(*n as i128)),
-        Expr::FnCall(call) if call.args.is_none() => Some(NormalExpr::Var(call.path.value.root)),
-        Expr::Bind(b) => Some(NormalExpr::Var(b.name)),
-        Expr::Binary(binary) => {
-            let lhs = as_size_normal_expr_with_arithmetic(&binary.lhs.value)?;
-            let rhs = as_size_normal_expr_with_arithmetic(&binary.rhs.value)?;
-            Some(match binary.op {
-                BinOp::Add => NormalExpr::Add(Box::new(lhs), Box::new(rhs)),
-                BinOp::Subtract => NormalExpr::Sub(Box::new(lhs), Box::new(rhs)),
-                BinOp::Multiply => NormalExpr::Mul(Box::new(lhs), Box::new(rhs)),
-                _ => return None,
-            })
+/// Resolve a `ParameterKind` to a `Ty`, consulting a method-scoped
+/// type-variable substitution map. Takes the parameter `name` so bare-id
+/// (`Generic`) params can be resolved as a fresh `Ty::Opaque(name)`
+/// type variable rather than the legacy `Int64` fallback.
+///
+/// This makes `start` and `end` in `CustomRange has start, end)` (and the
+/// matching `CustomRange.new(start, end) ...` method) into independent fresh
+/// type variables — call sites can then bind each to any type without
+/// rejecting mixed inputs (`CustomRange.new(1, "hi")`). For shared-type
+/// parameters use `start x, end x` with an explicit type-variable name.
+///
+/// `subst` lets `start x` and `end x` in
+/// `Range[x].new(start x, end x) Range[x]: ...` both resolve to the same
+/// `Ty::Opaque(x)`. Pass an empty map for non-method binds.
+pub fn resolve_parameter_kind_with_subst(
+    name: Intern<String>,
+    kind: &ParameterKind,
+    tag_types: &HashMap<Intern<String>, Ty>,
+    fn_return_types: &HashMap<Intern<String>, Ty>,
+    subst: &HashMap<Intern<String>, Ty>,
+    tag_params: Option<&HashMap<Intern<String>, Parameters>>,
+) -> Ty {
+    match kind {
+        ParameterKind::Tagged(sp)
+        | ParameterKind::ValueParam { ty: sp }
+        | ParameterKind::Inferred { ty: sp } => {
+            if expr_is_type_surface(&sp.value) {
+                TypeEnv::new(tag_types)
+                    .with_subst(subst)
+                    .with_opt_tag_params(tag_params)
+                    .resolve_expr(&sp.value)
+            } else {
+                Ty::Opaque(Intern::<String>::from_ref("?"))
+            }
         }
-        _ => None,
+        ParameterKind::Proposition(predicate) => Ty::Proposition(predicate.clone()),
+        ParameterKind::Generic => Ty::Opaque(name),
+        ParameterKind::Default(expr) => {
+            let env = TyInferEnv {
+                tag_types,
+                fn_return_types,
+                locals: &HashMap::new(),
+                tag_params,
+            };
+            expr.infer_ty(&env)
+        }
+    }
+}
+
+/// A layered local-types overlay: wraps a parent with a small Vec of new bindings.
+pub struct LayeredLocals<'a> {
+    parent: &'a dyn LocalTypes,
+    bindings: Vec<(Intern<String>, Ty)>,
+}
+
+impl<'a> LayeredLocals<'a> {
+    pub fn new(parent: &'a dyn LocalTypes) -> Self {
+        Self {
+            parent,
+            bindings: Vec::new(),
+        }
+    }
+
+    pub fn insert(&mut self, name: Intern<String>, ty: Ty) {
+        self.bindings.push((name, ty));
+    }
+
+    pub fn contains_key(&self, name: &Intern<String>) -> bool {
+        self.bindings.iter().rev().any(|(n, _)| n == name) || self.parent.get_type(name).is_some()
+    }
+}
+
+impl LocalTypes for LayeredLocals<'_> {
+    fn get_type(&self, name: &Intern<String>) -> Option<Ty> {
+        self.bindings
+            .iter()
+            .rev()
+            .find(|(n, _)| n == name)
+            .map(|(_, t)| t.clone())
+            .or_else(|| self.parent.get_type(name))
+    }
+}
+
+impl TyInfer for ast::Typed<ast::Expr> {
+    fn infer_ty(&self, env: &TyInferEnv) -> Ty {
+        if let Some(ty) = self.ty.current_ty() {
+            return ty.clone();
+        }
+        self.value.infer_ty(env)
+    }
+}
+
+impl TyInfer for Box<ast::Typed<ast::Expr>> {
+    fn infer_ty(&self, env: &TyInferEnv) -> Ty {
+        (**self).infer_ty(env)
     }
 }
 
@@ -530,6 +633,59 @@ mod tests {
             locals: &locals,
             tag_params: None,
         })
+    }
+
+    #[test]
+    fn symbolic_sequence_lengths_preserve_qualified_names() {
+        for name in ["count", "sizes.count", "package.sizes.count"] {
+            let mut segments = name.split('.');
+            let root = Intern::from_ref(segments.next().unwrap());
+            let expr = Expr::FnCall(FnCall {
+                syntax: ast::CallSyntax::Path,
+                definition: None,
+                path: ast::Spanned::new(
+                    ast::ModPath::new(root, segments.map(Intern::from_ref).collect()),
+                    ast::SpanId::INVALID,
+                ),
+                args: None,
+            });
+            let expected = NormalExpr::Var(Intern::from_ref(name));
+            assert_eq!(
+                crate::normal_expr::size_expr_to_normal(
+                    &expr,
+                    crate::normal_expr::SizeCallName::Mangled,
+                    false,
+                ),
+                Some(expected.clone())
+            );
+            let expr = Expr::Binary(Binary {
+                op: BinOp::Add,
+                lhs: Box::new(ast::Typed::infer(expr, ast::SpanId::INVALID)),
+                rhs: Box::new(ast::Typed::infer(
+                    Expr::Lit(Literal::Int(1_i128.into())),
+                    ast::SpanId::INVALID,
+                )),
+            });
+            assert_eq!(
+                crate::normal_expr::size_expr_to_normal(
+                    &expr,
+                    crate::normal_expr::SizeCallName::Mangled,
+                    false,
+                ),
+                Some(NormalExpr::Add(Box::new(expected), Box::new(1_i128.into())))
+            );
+        }
+    }
+
+    #[test]
+    fn associated_sequence_lengths_preserve_qualified_names() {
+        for name in ["Sizes.count", "Sizes.dimensions.count"] {
+            let Ty::UnresolvedSequence { length, .. } = infer_expression(&format!("[1; {name}]"))
+            else {
+                panic!("expected symbolic sequence");
+            };
+            assert_eq!(length, NormalExpr::Var(Intern::from_ref(name)));
+        }
     }
 
     #[test]
@@ -591,102 +747,5 @@ mod tests {
                 length: NormalExpr::from(0),
             }
         );
-    }
-}
-
-/// Resolve a `ParameterKind` to a `Ty`, consulting a method-scoped
-/// type-variable substitution map. Takes the parameter `name` so bare-id
-/// (`Generic`) params can be resolved as a fresh `Ty::Opaque(name)`
-/// type variable rather than the legacy `Int64` fallback.
-///
-/// This makes `start` and `end` in `CustomRange has start, end)` (and the
-/// matching `CustomRange.new(start, end) ...` method) into independent fresh
-/// type variables — call sites can then bind each to any type without
-/// rejecting mixed inputs (`CustomRange.new(1, "hi")`). For shared-type
-/// parameters use `start x, end x` with an explicit type-variable name.
-///
-/// `subst` lets `start x` and `end x` in
-/// `Range[x].new(start x, end x) Range[x]: ...` both resolve to the same
-/// `Ty::Opaque(x)`. Pass an empty map for non-method binds.
-pub fn resolve_parameter_kind_with_subst(
-    name: Intern<String>,
-    kind: &ParameterKind,
-    tag_types: &HashMap<Intern<String>, Ty>,
-    fn_return_types: &HashMap<Intern<String>, Ty>,
-    subst: &HashMap<Intern<String>, Ty>,
-    tag_params: Option<&HashMap<Intern<String>, Parameters>>,
-) -> Ty {
-    match kind {
-        ParameterKind::Tagged(sp)
-        | ParameterKind::ValueParam { ty: sp }
-        | ParameterKind::Inferred { ty: sp } => {
-            if expr_is_type_surface(&sp.value) {
-                TypeEnv::new(tag_types)
-                    .with_subst(subst)
-                    .with_opt_tag_params(tag_params)
-                    .resolve_expr(&sp.value)
-            } else {
-                Ty::Opaque(Intern::<String>::from_ref("?"))
-            }
-        }
-        ParameterKind::Generic => Ty::Opaque(name),
-        ParameterKind::Default(expr) => {
-            let env = TyInferEnv {
-                tag_types,
-                fn_return_types,
-                locals: &HashMap::new(),
-                tag_params,
-            };
-            expr.infer_ty(&env)
-        }
-    }
-}
-
-/// A layered local-types overlay: wraps a parent with a small Vec of new bindings.
-pub struct LayeredLocals<'a> {
-    parent: &'a dyn LocalTypes,
-    bindings: Vec<(Intern<String>, Ty)>,
-}
-
-impl<'a> LayeredLocals<'a> {
-    pub fn new(parent: &'a dyn LocalTypes) -> Self {
-        Self {
-            parent,
-            bindings: Vec::new(),
-        }
-    }
-
-    pub fn insert(&mut self, name: Intern<String>, ty: Ty) {
-        self.bindings.push((name, ty));
-    }
-
-    pub fn contains_key(&self, name: &Intern<String>) -> bool {
-        self.bindings.iter().rev().any(|(n, _)| n == name) || self.parent.get_type(name).is_some()
-    }
-}
-
-impl LocalTypes for LayeredLocals<'_> {
-    fn get_type(&self, name: &Intern<String>) -> Option<Ty> {
-        self.bindings
-            .iter()
-            .rev()
-            .find(|(n, _)| n == name)
-            .map(|(_, t)| t.clone())
-            .or_else(|| self.parent.get_type(name))
-    }
-}
-
-impl TyInfer for ast::Typed<ast::Expr> {
-    fn infer_ty(&self, env: &TyInferEnv) -> Ty {
-        if let Some(ty) = self.current_ty() {
-            return ty.clone();
-        }
-        self.value.infer_ty(env)
-    }
-}
-
-impl TyInfer for Box<ast::Typed<ast::Expr>> {
-    fn infer_ty(&self, env: &TyInferEnv) -> Ty {
-        (**self).infer_ty(env)
     }
 }

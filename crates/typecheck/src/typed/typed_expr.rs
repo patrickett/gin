@@ -7,16 +7,15 @@ use soa_derive::StructOfArray;
 pub struct ConstFacts {
     pub const_value: Option<ast::ConstValue>,
     pub const_object: Option<crate::ConstObjectId>,
-    pub sequence_literal: Option<TypedSequenceLiteral>,
-    pub literal_materialization: Option<LiteralMaterializationPlan>,
+    pub sequence_literal: Option<Box<TypedSequenceLiteral>>,
+    pub literal_materialization: Option<Box<LiteralMaterializationPlan>>,
 }
 
 #[derive(Debug, Clone, PartialEq, StructOfArray)]
 #[soa_derive(Debug, Clone, PartialEq)]
 pub struct SemanticFacts {
-    pub sequence_provenance: Option<SequenceProvenance>,
     pub integer_knowledge: Option<ast::integer::IntegerKnowledge>,
-    pub result_evidence: Option<ResultEvidence>,
+    pub result_evidence: Option<Box<ValueEvidence>>,
     pub projected_result_evidence: ProjectedResultEvidence,
     pub availability: Availability,
     pub flaws: Vec<Diagnostic>,
@@ -25,6 +24,8 @@ pub struct SemanticFacts {
 #[derive(Debug, Clone, PartialEq, StructOfArray)]
 #[soa_derive(Debug, Clone, PartialEq)]
 pub struct OwnershipFacts {
+    pub references: Option<Box<ReferenceValue>>,
+    pub reference_reads: HashSet<ReferenceLoan>,
     pub target_group: Option<ReferenceTargetSet>,
     pub result_target_groups: Vec<Option<ReferenceTargetSet>>,
     pub place: Option<PlaceId>,
@@ -63,29 +64,6 @@ pub enum TypedSequenceLiteral {
     Repeat { seed: ExprId, count: NormalExpr },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SequenceProvenance {
-    Static(crate::ConstObjectId),
-    Scoped,
-}
-
-impl SequenceProvenance {
-    pub fn is_static(self) -> bool {
-        matches!(self, Self::Static(_))
-    }
-
-    pub fn is_scoped(self) -> bool {
-        matches!(self, Self::Scoped)
-    }
-
-    pub fn join(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Static(left), Self::Static(right)) if left == right => Self::Static(left),
-            _ => Self::Scoped,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LiteralMaterializationPlan {
     FixedArray {
@@ -99,11 +77,6 @@ pub enum LiteralMaterializationPlan {
         empty: DefId,
         push: DefId,
     },
-    BorrowedSequence {
-        declaration: ast::ty::TypeId,
-        element: Ty,
-        backing: Option<crate::ConstObjectId>,
-    },
 }
 
 impl TypedExprVec {
@@ -114,6 +87,11 @@ impl TypedExprVec {
         place: Option<PlaceId>,
         place_version: Option<PlaceVersionId>,
     ) {
+        self.facts.ownership_facts.references.push(None);
+        self.facts
+            .ownership_facts
+            .reference_reads
+            .push(HashSet::new());
         self.facts.ownership_facts.target_group.push(target_group);
         self.facts
             .ownership_facts
@@ -121,6 +99,31 @@ impl TypedExprVec {
             .push(result_target_groups);
         self.facts.ownership_facts.place.push(place);
         self.facts.ownership_facts.place_version.push(place_version);
+    }
+
+    /// Append a row for `kind` with placeholder facts, returning its id.
+    pub(crate) fn push_placeholder(&mut self, kind: TypedExprKind, ty: Ty, span: SpanId) -> ExprId {
+        let id = ExprId(self.kind.len() as u32);
+        self.kind.push(kind);
+        self.ty.push(ty);
+        self.span.push(span);
+        self.facts.const_facts.const_value.push(None);
+        self.facts.const_facts.const_object.push(None);
+        self.facts.const_facts.sequence_literal.push(None);
+        self.facts.const_facts.literal_materialization.push(None);
+        self.facts.semantic_facts.integer_knowledge.push(None);
+        self.facts.semantic_facts.result_evidence.push(None);
+        self.facts
+            .semantic_facts
+            .projected_result_evidence
+            .push(HashMap::new());
+        self.facts
+            .semantic_facts
+            .availability
+            .push(Availability::Unknown);
+        self.push_ownership_facts(None, Vec::new(), None, None);
+        self.facts.semantic_facts.flaws.push(Vec::new());
+        id
     }
 
     pub(crate) fn set_ownership_facts(
@@ -169,11 +172,26 @@ impl TypedExprVec {
     }
 
     #[inline]
-    pub fn result_evidence_of(&self, expr_id: ExprId) -> Option<&Option<ResultEvidence>> {
+    pub fn result_evidence_of(&self, expr_id: ExprId) -> Option<&ResultEvidence> {
+        match self.value_evidence_of(expr_id)? {
+            ValueEvidence::Alternatives(evidence) => Some(evidence),
+            ValueEvidence::Proposition(_) => None,
+        }
+    }
+
+    pub fn proposition_evidence_of(&self, expr_id: ExprId) -> Option<&EvidenceProposition> {
+        match self.value_evidence_of(expr_id)? {
+            ValueEvidence::Proposition(evidence) => Some(evidence),
+            ValueEvidence::Alternatives(_) => None,
+        }
+    }
+
+    pub fn value_evidence_of(&self, expr_id: ExprId) -> Option<&ValueEvidence> {
         self.facts
             .semantic_facts
             .result_evidence
             .get(expr_id.index())
+            .and_then(|evidence| evidence.as_deref())
     }
 
     #[inline]
@@ -188,13 +206,35 @@ impl TypedExprVec {
     }
 
     #[inline]
-    pub fn flaws_of(&self, expr_id: ExprId) -> Option<&Vec<Diagnostic>> {
-        self.facts.semantic_facts.flaws.get(expr_id.index())
+    pub fn availability_of(&self, expr_id: ExprId) -> Option<&Availability> {
+        self.facts.semantic_facts.availability.get(expr_id.index())
     }
 
     #[inline]
-    pub fn availability_of(&self, expr_id: ExprId) -> Option<&Availability> {
-        self.facts.semantic_facts.availability.get(expr_id.index())
+    pub fn references_of(&self, index: usize) -> &ReferenceValue {
+        let value = match self
+            .facts
+            .ownership_facts
+            .references
+            .get(index)
+            .and_then(|value| value.as_deref())
+        {
+            Some(value) => value,
+            None => ReferenceValue::empty(),
+        };
+        crate::transform::semantic_reads::reference(ExprId(index as u32), value);
+        value
+    }
+
+    #[inline]
+    pub fn references_of_mut(&mut self, index: usize) -> &mut ReferenceValue {
+        self.facts
+            .ownership_facts
+            .references
+            .get_mut(index)
+            .expect("expression index within arena")
+            .get_or_insert_with(|| Box::new(ReferenceValue::default()))
+            .as_mut()
     }
 
     #[inline]
@@ -269,13 +309,16 @@ pub struct TypedWhenExpr {
 pub enum TypedWhenArm {
     Cond {
         condition: TypedCondition,
+        coverage: Vec<ast::Pattern>,
         body: ExprId,
+        owned_bindings: Vec<PlaceId>,
         /// Span of this arm (condition and body).
         arm_span: SubSpan,
     },
     Is {
         pattern: Box<ast::span::Spanned<ast::Pattern>>,
         body: ExprId,
+        owned_bindings: Vec<PlaceId>,
         /// Span of this is-arm (pattern and body).
         arm_span: SubSpan,
     },
@@ -284,6 +327,14 @@ pub enum TypedWhenArm {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypedCondition {
+    Proposition {
+        subject: ExprId,
+    },
+    Compare {
+        left: ExprId,
+        relation: ast::ProofRelation,
+        right: ExprId,
+    },
     Is {
         subject: ExprId,
         pattern: Box<ast::span::Spanned<ast::Pattern>>,
@@ -294,29 +345,41 @@ pub enum TypedCondition {
 }
 
 impl TypedCondition {
-    pub fn visit_subjects(&self, visit: &mut impl FnMut(ExprId)) {
-        match self {
-            Self::Is { subject, .. } => visit(*subject),
-            Self::Not(inner) => inner.visit_subjects(visit),
-            Self::And(left, right) | Self::Or(left, right) => {
-                left.visit_subjects(visit);
-                right.visit_subjects(visit);
+    fn walk<'s>(&'s self, visit: &mut impl FnMut(&'s Self)) {
+        let mut pending = vec![self];
+        while let Some(condition) = pending.pop() {
+            visit(condition);
+            match condition {
+                Self::Proposition { .. } | Self::Compare { .. } | Self::Is { .. } => {}
+                Self::Not(inner) => pending.push(inner),
+                Self::And(left, right) | Self::Or(left, right) => {
+                    pending.push(right);
+                    pending.push(left);
+                }
             }
         }
+    }
+
+    pub fn visit_subjects(&self, visit: &mut impl FnMut(ExprId)) {
+        self.walk(&mut |condition| match condition {
+            Self::Compare { left, right, .. } => {
+                visit(*left);
+                visit(*right);
+            }
+            Self::Proposition { subject } | Self::Is { subject, .. } => visit(*subject),
+            Self::Not(_) | Self::And(..) | Self::Or(..) => {}
+        });
     }
 
     pub fn pattern_subjects<'a>(
         &'a self,
         output: &mut Vec<(ExprId, &'a ast::span::Spanned<ast::Pattern>)>,
     ) {
-        match self {
-            Self::Is { subject, pattern } => output.push((*subject, pattern)),
-            Self::Not(inner) => inner.pattern_subjects(output),
-            Self::And(left, right) | Self::Or(left, right) => {
-                left.pattern_subjects(output);
-                right.pattern_subjects(output);
+        self.walk(&mut |condition| {
+            if let Self::Is { subject, pattern } = condition {
+                output.push((*subject, pattern.as_ref()));
             }
-        }
+        });
     }
 }
 
@@ -326,6 +389,8 @@ pub struct TypedIfExpr {
     pub condition: TypedCondition,
     pub stmts: Vec<ExprId>,
     pub ret: Option<ExprId>,
+    pub postcondition: Option<TypedPostcondition>,
+    pub owned_bindings: Vec<PlaceId>,
     pub place_joins: Vec<PlaceVersionId>,
     /// Covers from condition start to end (excludes the `if` keyword).
     /// The full expression span (including `if`) is on the `TypedExpr` arena entry.
@@ -336,9 +401,8 @@ pub struct TypedIfExpr {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedLoop {
     pub kind: TypedLoopKind,
-    pub stmts: Vec<ExprId>,
     pub place_phis: Vec<PlaceVersionId>,
-    /// Span of the `loop` keyword only.
+    /// Span of the `for` or `while` keyword only.
     /// The full expression span is on the `TypedExpr` arena entry.
     pub keyword_span: SubSpan,
 }
@@ -347,34 +411,81 @@ pub struct TypedLoop {
 pub enum TypedLoopKind {
     While {
         condition: TypedCondition,
+        stmts: Vec<ExprId>,
+        owned_bindings: Vec<PlaceId>,
     },
     ForIn {
-        variable: Intern<String>,
         iterable: ExprId,
-        plan: IterationPlan,
+        traversal: SequenceTraversal,
     },
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum IterationPlan {
-    Range,
-    FixedArray {
-        element: Ty,
-        length: ast::NormalExpr,
+pub enum SequenceTraversal {
+    IntegerRange {
+        variable: Intern<String>,
+        start: ExprId,
+        end: ExprId,
+        stmts: Vec<ExprId>,
+    },
+    RuntimeView {
+        index: Intern<String>,
+        length: ExprId,
+        stmts: Vec<ExprId>,
+    },
+    Fixed {
+        iterations: Vec<Vec<ExprId>>,
     },
     Unresolved,
 }
 
+impl TypedLoop {
+    pub fn statement_batches(&self) -> impl DoubleEndedIterator<Item = &[ExprId]> {
+        let (repeated, fixed) = match &self.kind {
+            TypedLoopKind::While { stmts, .. }
+            | TypedLoopKind::ForIn {
+                traversal:
+                    SequenceTraversal::IntegerRange { stmts, .. }
+                    | SequenceTraversal::RuntimeView { stmts, .. },
+                ..
+            } => (Some(stmts.as_slice()), &[][..]),
+            TypedLoopKind::ForIn {
+                traversal: SequenceTraversal::Fixed { iterations },
+                ..
+            } => (None, iterations.as_slice()),
+            TypedLoopKind::ForIn {
+                traversal: SequenceTraversal::Unresolved,
+                ..
+            } => (None, &[][..]),
+        };
+        repeated.into_iter().chain(fixed.iter().map(Vec::as_slice))
+    }
+
+    pub fn statements(&self) -> impl Iterator<Item = &ExprId> {
+        self.statement_batches().flatten()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypedExprKind {
+    Block {
+        statements: Vec<ExprId>,
+        value: Option<ExprId>,
+    },
+    Return {
+        value: Option<ExprId>,
+        postcondition: Option<Box<TypedPostcondition>>,
+    },
     Invalid,
-    Asm {
+    Todo,
+    Emit {
         specification: ExprId,
         operands: Vec<(Intern<String>, ExprId)>,
+        record: ExprId,
         state: crate::assembly::AssemblyState,
     },
-    Register(ExprId),
     Lit(Literal),
+    Domain(Box<ast::integer::IntegerDomain>),
     Binary {
         op: BinOp,
         lhs: ExprId,
@@ -420,7 +531,7 @@ pub enum TypedExprKind {
         operator: Option<BinOp>,
     },
     When(TypedWhenExpr),
-    If(TypedIfExpr),
+    If(Box<TypedIfExpr>),
     Loop(TypedLoop),
     SelfRef {
         target: DefId,
@@ -474,6 +585,7 @@ pub enum TypedExprKind {
         tag_name: Intern<String>,
         value: ExprId,
         field_bindings: Vec<(Intern<String>, Intern<String>)>,
+        places: Vec<PlaceId>,
     },
 
     /// Record field write: `base.field:: value`
@@ -482,6 +594,11 @@ pub enum TypedExprKind {
         field: Intern<String>,
         value: ExprId,
         operator: Option<ResolvedCompoundOperator>,
+    },
+    SliceGet {
+        buf: ExprId,
+        start: ExprId,
+        length: ExprId,
     },
     BufGet {
         buf: ExprId,
@@ -515,19 +632,27 @@ pub fn typed_walk_expr_children(
     use std::ops::ControlFlow::Continue;
 
     match kind {
-        TypedExprKind::Register(inner) => {
-            visit(*inner)?;
+        TypedExprKind::Block { statements, value } => {
+            for child in statements {
+                visit(*child)?;
+            }
+            if let Some(child) = value {
+                visit(*child)?;
+            }
         }
-        TypedExprKind::Invalid => {}
-        TypedExprKind::Asm {
+        TypedExprKind::Return { value, .. } => {
+            if let Some(child) = value {
+                visit(*child)?;
+            }
+        }
+        TypedExprKind::Invalid | TypedExprKind::Todo => {}
+        TypedExprKind::Emit {
             specification,
-            operands,
+            record,
             ..
         } => {
             visit(*specification)?;
-            for (_, operand) in operands {
-                visit(*operand)?;
-            }
+            visit(*record)?;
         }
         TypedExprKind::Binary { lhs, rhs, .. }
         | TypedExprKind::InvalidOperator { lhs, rhs, .. } => {
@@ -618,7 +743,7 @@ pub fn typed_walk_expr_children(
                 }
                 TypedLoopKind::ForIn { iterable, .. } => visit(*iterable)?,
             }
-            for child in &loop_expr.stmts {
+            for child in loop_expr.statements() {
                 visit(*child)?;
             }
         }
@@ -648,6 +773,11 @@ pub fn typed_walk_expr_children(
             visit(*base)?;
             visit(*value)?;
         }
+        TypedExprKind::SliceGet { buf, start, length } => {
+            visit(*buf)?;
+            visit(*start)?;
+            visit(*length)?;
+        }
         TypedExprKind::BufGet { buf, index } => {
             visit(*buf)?;
             visit(*index)?;
@@ -659,7 +789,8 @@ pub fn typed_walk_expr_children(
             visit(*index)?;
             visit(*value)?;
         }
-        TypedExprKind::Lit(_)
+        TypedExprKind::Domain(_)
+        | TypedExprKind::Lit(_)
         | TypedExprKind::SelfRef { .. }
         | TypedExprKind::TargetQuery { .. }
         | TypedExprKind::Target
@@ -684,21 +815,123 @@ pub fn typed_walk_expr_preorder(
     root: ExprId,
     visit: &mut impl FnMut(ExprId) -> std::ops::ControlFlow<()>,
 ) -> std::ops::ControlFlow<()> {
-    fn walk(
-        typed: &TypedFileAst,
-        expr_id: ExprId,
-        visited: &mut std::collections::HashSet<ExprId>,
-        visit: &mut impl FnMut(ExprId) -> std::ops::ControlFlow<()>,
-    ) -> std::ops::ControlFlow<()> {
+    let mut pending = vec![root];
+    let mut visited = std::collections::HashSet::new();
+    while let Some(expr_id) = pending.pop() {
         if !visited.insert(expr_id) {
-            return std::ops::ControlFlow::Continue(());
+            continue;
         }
         let Some(kind) = typed.exprs.kind.get(expr_id.as_usize()) else {
-            return std::ops::ControlFlow::Continue(());
+            continue;
         };
         visit(expr_id)?;
-        typed_walk_expr_children(kind, &mut |child| walk(typed, child, visited, visit))
+        let start = pending.len();
+        typed_walk_expr_children(kind, &mut |child| {
+            pending.push(child);
+            std::ops::ControlFlow::Continue(())
+        })?;
+        pending[start..].reverse();
+    }
+    std::ops::ControlFlow::Continue(())
+}
+
+#[cfg(test)]
+mod condition_traversal_tests {
+    use super::*;
+    use parser::query::SourceParseExt;
+
+    fn check_on_small_stack(patterns: bool, test: &str) {
+        const CHILD: &str = "GIN_TYPED_CONDITION_SMALL_STACK";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test, "--nocapture"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let parsed =
+            "choose(flag is in 0 to 1):\n    when flag is 1 then\n        return 1\n    return 0\n"
+                .parse_source_full();
+        assert!(parsed.symptoms.is_empty(), "{:?}", parsed.symptoms);
+        let typed = crate::transform::transform_file(parsed.ast, FileId(0));
+        assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
+        let leaf = typed
+            .exprs
+            .kind
+            .iter()
+            .find_map(|kind| match kind {
+                TypedExprKind::When(branch) => match &branch.arms[0] {
+                    TypedWhenArm::Cond { condition, .. } => Some(condition.clone()),
+                    TypedWhenArm::Is { pattern, .. } => Some(TypedCondition::Is {
+                        subject: branch.subject.unwrap(),
+                        pattern: pattern.clone(),
+                    }),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("condition fixture");
+        let leaf = |index| {
+            let mut leaf = leaf.clone();
+            let TypedCondition::Is { subject, .. } = &mut leaf else {
+                panic!("leaf condition")
+            };
+            *subject = ExprId(index);
+            leaf
+        };
+        let count = 2000;
+        let mut condition = leaf(0);
+        for index in 1..count {
+            let right = TypedCondition::Not(Box::new(leaf(index)));
+            condition = if index % 2 == 0 {
+                TypedCondition::And(Box::new(condition), Box::new(right))
+            } else {
+                TypedCondition::Or(Box::new(condition), Box::new(right))
+            };
+        }
+        let subjects = std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(64 * 1024)
+                .spawn_scoped(scope, || {
+                    if patterns {
+                        let mut pairs = Vec::new();
+                        condition.pattern_subjects(&mut pairs);
+                        pairs
+                            .into_iter()
+                            .map(|(subject, _)| subject)
+                            .collect::<Vec<_>>()
+                    } else {
+                        let mut subjects = Vec::new();
+                        condition.visit_subjects(&mut |subject| subjects.push(subject));
+                        subjects
+                    }
+                })
+                .unwrap()
+                .join()
+                .unwrap()
+        });
+        assert_eq!(subjects, (0..count).map(ExprId).collect::<Vec<_>>());
     }
 
-    walk(typed, root, &mut std::collections::HashSet::new(), visit)
+    #[test]
+    fn deep_subject_visits_preserve_order_on_a_small_stack() {
+        check_on_small_stack(
+            false,
+            "typed::typed_expr::condition_traversal_tests::deep_subject_visits_preserve_order_on_a_small_stack",
+        );
+    }
+
+    #[test]
+    fn deep_pattern_visits_preserve_order_on_a_small_stack() {
+        check_on_small_stack(
+            true,
+            "typed::typed_expr::condition_traversal_tests::deep_pattern_visits_preserve_order_on_a_small_stack",
+        );
+    }
 }

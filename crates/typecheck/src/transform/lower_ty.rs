@@ -6,10 +6,14 @@
 //! indices, converting [`ConstValue`]s to [`Literal`]s, and resolving
 //! function-call targets.
 
+use crate::tag_declarations::TagDeclarations;
+use diagnostic::Diagnostic;
+use diagnostic::code::{BindingCode, PropositionCode};
 use internment::Intern;
 use std::collections::HashMap;
 
 use crate::analysis::{TyInfer, TyInferEnv, TypeEnv, expr_is_type_surface};
+use crate::normal_expr::{SizeCallName, size_expr_to_normal};
 use ast::path::ModPath;
 use ast::prelude::*;
 use ast::{BinderId, ConstValue, HashFloat, NormalExpr, Parameters, TypeReference};
@@ -20,47 +24,27 @@ use crate::typed::{DefId, ExprId, TypedExprKind, TypedFileAst, VariantMap};
 use super::lower_exprs::LocalVarTypes;
 use super::lower_tag::resolve_tag_call_type;
 
-fn fixed_array_size_expr(size: &Expr) -> Option<NormalExpr> {
-    match size {
-        Expr::Lit(ast::Literal::Int(n)) => Some(NormalExpr::from(*n)),
-        Expr::Lit(ast::Literal::Number(n)) => Some(NormalExpr::from(*n as i128)),
-        Expr::FnCall(call) if call.args.is_none() => Some(NormalExpr::Var(call.path.value.root)),
-        Expr::Bind(bind) => Some(NormalExpr::Var(bind.name)),
-        Expr::Binary(binary) => {
-            let lhs = fixed_array_size_expr(&binary.lhs.value)?;
-            let rhs = fixed_array_size_expr(&binary.rhs.value)?;
-            Some(match binary.op {
-                ast::expr::BinOp::Add => NormalExpr::Add(Box::new(lhs), Box::new(rhs)),
-                ast::expr::BinOp::Subtract => NormalExpr::Sub(Box::new(lhs), Box::new(rhs)),
-                ast::expr::BinOp::Multiply => NormalExpr::Mul(Box::new(lhs), Box::new(rhs)),
-                _ => return None,
-            })
-        }
-        _ => None,
-    }
-}
-
 pub(crate) fn resolve_type_reference(
     reference: &TypeReference,
     tag_types: &HashMap<Intern<String>, Ty>,
     local_types: &LocalVarTypes,
     tag_params: Option<&HashMap<Intern<String>, Parameters>>,
+    registry: &crate::TypeRegistry,
 ) -> Ty {
     match reference {
         TypeReference::Unit => Ty::Unit,
-        TypeReference::Nominal(name) => match name.as_str() {
-            _ => local_types
-                .get(name)
-                .or_else(|| tag_types.get(name))
-                .cloned()
-                .unwrap_or(Ty::Opaque(*name)),
-        },
+        TypeReference::Nominal(name) => local_types
+            .get(name)
+            .or_else(|| tag_types.get(name))
+            .cloned()
+            .unwrap_or(Ty::Opaque(*name)),
         TypeReference::Pointer(inner) => Ty::Ptr {
             inner: Box::new(resolve_type_reference(
                 inner,
                 tag_types,
                 local_types,
                 tag_params,
+                registry,
             )),
         },
         TypeReference::Application { name, arguments } => {
@@ -68,6 +52,11 @@ pub(crate) fn resolve_type_reference(
             let parameter_names = tag_params
                 .and_then(|all| all.get(name))
                 .map(|parameters| parameters.keys().copied().collect::<Vec<_>>())
+                .or_else(|| {
+                    registry
+                        .declaration_for_type(&resolved)
+                        .map(|declaration| declaration.parameters.clone())
+                })
                 .unwrap_or_default();
             let arguments = arguments
                 .iter()
@@ -84,6 +73,7 @@ pub(crate) fn resolve_type_reference(
                             tag_types,
                             local_types,
                             tag_params,
+                            registry,
                         ))),
                     )
                 })
@@ -105,28 +95,53 @@ pub(crate) fn resolve_type_reference(
     }
 }
 
+/// Resolution context threaded through [`resolve_expr_type`]'s recursive calls.
+///
+/// `Copy` so the body can destructure it back into the original parameter names.
+#[derive(Clone, Copy)]
+pub(crate) struct ExprTypeResolverCtx<'a> {
+    pub(crate) tag_types: &'a HashMap<Intern<String>, Ty>,
+    pub(crate) variant_map: &'a VariantMap,
+    pub(crate) receiver_type: Option<&'a Ty>,
+    pub(crate) local_var_types: &'a LocalVarTypes,
+    pub(crate) fn_return_types: &'a HashMap<DefId, Ty>,
+    pub(crate) type_registry: &'a crate::TypeRegistry,
+}
+
 /// Resolve the [`Ty`] of a typed parse expression by walking its AST and
 /// applying type inference / tag resolution.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_expr_type(
     expr: &Typed<Expr>,
-    tag_types: &HashMap<Intern<String>, Ty>,
-    variant_map: &VariantMap,
-    receiver_type: Option<&Ty>,
+    ctx: &ExprTypeResolverCtx<'_>,
     expected_ty: Option<&Ty>,
-    local_var_types: &LocalVarTypes,
-    fn_return_types: &HashMap<DefId, Ty>,
-    type_registry: &crate::TypeRegistry,
 ) -> Ty {
-    if let Some(resolved) = expr.resolved_ty() {
+    let ExprTypeResolverCtx {
+        tag_types,
+        variant_map,
+        receiver_type,
+        local_var_types,
+        fn_return_types,
+        type_registry,
+    } = *ctx;
+    if let Some(resolved) = expr.ty.resolved_ty()
+        && !(expected_ty.is_some() && matches!(expr.value, Expr::TagCall(_)))
+    {
         return resolved.clone();
     }
     match &expr.value {
-        Expr::Asm { .. } => expected_ty.cloned().unwrap_or(Ty::Unit),
-        Expr::Register(inner) => inner
-            .resolved_ty()
-            .cloned()
-            .unwrap_or_else(|| expected_ty.cloned().unwrap_or(Ty::Unit)),
+        Expr::Return(_) => Ty::Unit,
+        Expr::Block(items) => items
+            .last()
+            .map_or(Ty::Unit, |item| resolve_expr_type(item, ctx, expected_ty)),
+        Expr::IntegerDomain(_) => TypeEnv::new(tag_types)
+            .with_registry(type_registry)
+            .resolve_expr(&expr.value),
+        Expr::Emit { code, .. } => {
+            let ty = resolve_expr_type(code, ctx, None);
+            crate::emission::signature(&ty, type_registry)
+                .map(|(_, result)| result)
+                .unwrap_or_else(|| expected_ty.cloned().unwrap_or(Ty::Unit))
+        }
         Expr::Lit(lit) => lit_to_ty(lit),
         Expr::Binary(bin) => {
             let returns: HashMap<Intern<String>, Ty> = fn_return_types
@@ -142,7 +157,15 @@ pub(crate) fn resolve_expr_type(
             bin.infer_ty(&env)
         }
         Expr::FnCall(fn_call) => {
-            let mut target = resolve_fn_call_target(&fn_call.path.value, tag_types);
+            if fn_call.args.is_none()
+                && fn_call.path.segments.is_empty()
+                && let Some(ty) = local_var_types.get(&fn_call.path.root)
+            {
+                return ty.clone();
+            }
+            let mut target = fn_call
+                .definition
+                .unwrap_or_else(|| resolve_fn_call_target(&fn_call.path.value, tag_types));
             if fn_call.path.value.root.as_str() == "Self"
                 && let Some(receiver) = receiver_type.and_then(Ty::type_name)
             {
@@ -155,17 +178,9 @@ pub(crate) fn resolve_expr_type(
                         .iter()
                         .map(|segment| segment.as_str()),
                 );
-                target = DefId(Intern::new(parts.join(".")));
+                target = DefId::named(Intern::new(parts.join(".")));
             }
-            let overload = DefId(Intern::new(format!(
-                "{}$arity{}",
-                target.0,
-                fn_call.args.as_ref().map_or(0, Vec::len)
-            )));
-            if let Some(return_type) = fn_return_types
-                .get(&target)
-                .or_else(|| fn_return_types.get(&overload))
-            {
+            if let Some(return_type) = fn_return_types.get(&target) {
                 return return_type.clone();
             }
             let returns: HashMap<Intern<String>, Ty> = fn_return_types
@@ -184,13 +199,37 @@ pub(crate) fn resolve_expr_type(
             receiver_type.cloned().unwrap_or(Ty::Opaque(tag_call.name))
         }
         Expr::TagCall(tag_call) => {
-            resolve_tag_call_type(&tag_call.name, tag_types, variant_map, expected_ty)
+            if let Some(path) = &tag_call.qual_path {
+                let mut owner = path.value.clone();
+                owner.segments.pop();
+                let owner = Intern::new(owner.to_qualified_string());
+                if let Some(ty) = tag_types.get(&owner)
+                    && variant_map.get(&tag_call.name).is_some_and(|variants| {
+                        variants.iter().any(|(union, _, _)| *union == owner)
+                    })
+                {
+                    if let Some(expected) = expected_ty
+                        && let Some(declaration) = ty.type_id()
+                        && expected.type_id() == Some(declaration)
+                    {
+                        return expected.clone();
+                    }
+                    return ty.clone();
+                }
+            }
+            resolve_tag_call_type(
+                &tag_call.name,
+                tag_types,
+                variant_map,
+                expected_ty,
+                type_registry,
+            )
         }
         Expr::AnonymousTag(name) if name.as_str() == "Self" => {
             receiver_type.cloned().unwrap_or(Ty::Opaque(*name))
         }
         Expr::AnonymousTag(name) => {
-            resolve_tag_call_type(name, tag_types, variant_map, expected_ty)
+            resolve_tag_call_type(name, tag_types, variant_map, expected_ty, type_registry)
         }
         Expr::Bind(local_bind) => {
             if let Some(ty) = bind_explicit_ty(local_bind, tag_types) {
@@ -198,33 +237,13 @@ pub(crate) fn resolve_expr_type(
             }
 
             match &local_bind.value {
-                BindValue::Expr(e) => resolve_expr_type(
-                    e,
-                    tag_types,
-                    variant_map,
-                    receiver_type,
-                    expected_ty,
-                    local_var_types,
-                    fn_return_types,
-                    type_registry,
-                ),
+                BindValue::Expr(e) => resolve_expr_type(e, ctx, expected_ty),
                 BindValue::Body { exprs: _, ret } => {
                     if !ret.values.is_empty() {
                         let types = ret
                             .values
                             .iter()
-                            .map(|typed_expr| {
-                                resolve_expr_type(
-                                    typed_expr,
-                                    tag_types,
-                                    variant_map,
-                                    receiver_type,
-                                    expected_ty,
-                                    local_var_types,
-                                    fn_return_types,
-                                    type_registry,
-                                )
-                            })
+                            .map(|typed_expr| resolve_expr_type(typed_expr, ctx, expected_ty))
                             .collect::<Vec<_>>();
                         if local_bind.named_results.len() == types.len() && types.len() > 1 {
                             Ty::Sequence(
@@ -253,16 +272,7 @@ pub(crate) fn resolve_expr_type(
                         }
                     } else {
                         match ret.values.first() {
-                            Some(typed_expr) => resolve_expr_type(
-                                typed_expr,
-                                tag_types,
-                                variant_map,
-                                receiver_type,
-                                expected_ty,
-                                local_var_types,
-                                fn_return_types,
-                                type_registry,
-                            ),
+                            Some(typed_expr) => resolve_expr_type(typed_expr, ctx, expected_ty),
                             None => Ty::Unit,
                         }
                     }
@@ -274,53 +284,27 @@ pub(crate) fn resolve_expr_type(
             .arms
             .first()
             .map(|arm| match arm {
-                WhenArm::Cond { body, .. } | WhenArm::Is { body, .. } => resolve_expr_type(
-                    body,
-                    tag_types,
-                    variant_map,
-                    receiver_type,
-                    expected_ty,
-                    local_var_types,
-                    fn_return_types,
-                    type_registry,
-                ),
-                WhenArm::Else(body, _) => resolve_expr_type(
-                    body,
-                    tag_types,
-                    variant_map,
-                    receiver_type,
-                    expected_ty,
-                    local_var_types,
-                    fn_return_types,
-                    type_registry,
-                ),
+                WhenArm::Cond { body, .. } | WhenArm::Is { body, .. } => {
+                    resolve_expr_type(body, ctx, expected_ty)
+                }
+                WhenArm::Else(body, _) => resolve_expr_type(body, ctx, expected_ty),
             })
             .unwrap_or_else(|| {
                 expected_ty
                     .cloned()
                     .unwrap_or(Ty::Opaque(Intern::new("infer".to_string())))
             }),
-        Expr::If(if_expr) => if_expr
-            .body
-            .first()
-            .map(|e| {
-                resolve_expr_type(
-                    e,
-                    tag_types,
-                    variant_map,
-                    receiver_type,
-                    None,
-                    local_var_types,
-                    fn_return_types,
-                    type_registry,
-                )
-            })
-            .unwrap_or(Ty::Unit),
+        Expr::If(_) => Ty::Unit,
         Expr::Loop(_) => Ty::Unit,
-        Expr::SelfRef => receiver_type
+        Expr::SelfRef => local_var_types
+            .get(&Intern::from_ref("self"))
+            .or(receiver_type)
             .cloned()
             .unwrap_or_else(|| Ty::Opaque(Intern::new("self".to_string()))),
         Expr::FormatString(_) => Ty::Unit,
+        Expr::TypeValue(ty) => (**ty).clone(),
+        Expr::DomainValue(domain) => Ty::Literal(ast::ConstValue::Domain(domain.clone())),
+        Expr::DomainOf(_) => Ty::Opaque(Intern::from_ref("domain")),
         Expr::Range(_) => Ty::Opaque(Intern::new("range_expr".to_string())),
         Expr::FixedArrayAlloc { init, size } => {
             let expected_ty = expected_ty.map(Ty::without_reference_wrappers);
@@ -336,16 +320,7 @@ pub(crate) fn resolve_expr_type(
                 }
                 _ => {}
             }
-            let elem_ty = resolve_expr_type(
-                init,
-                tag_types,
-                variant_map,
-                receiver_type,
-                None,
-                local_var_types,
-                fn_return_types,
-                type_registry,
-            );
+            let elem_ty = resolve_expr_type(init, ctx, None);
             let elem_ty = if matches!(
                 elem_ty,
                 Ty::UnresolvedLiteral(ast::ty::LiteralKind::Integer)
@@ -354,61 +329,25 @@ pub(crate) fn resolve_expr_type(
             } else {
                 elem_ty
             };
-            let size = fixed_array_size_expr(size).unwrap_or_else(|| {
-                NormalExpr::Var(Intern::new(format!(
-                    "_unsupported_fixed_array_size_{:?}",
-                    size.span_id
-                )))
-            });
+            let size =
+                size_expr_to_normal(size, SizeCallName::PathRoot, false).unwrap_or_else(|| {
+                    NormalExpr::Var(Intern::new(format!(
+                        "_unsupported_fixed_array_size_{:?}",
+                        size.span_id
+                    )))
+                });
             Ty::Array {
                 elem: Box::new(elem_ty),
                 size,
             }
         }
-        Expr::AggregateGet { base, .. } => extract_element_type(
-            &resolve_expr_type(
-                base,
-                tag_types,
-                variant_map,
-                receiver_type,
-                None,
-                local_var_types,
-                fn_return_types,
-                type_registry,
-            ),
-            Some(type_registry),
-        ),
-        Expr::Destructure { value, .. } => resolve_expr_type(
-            value,
-            tag_types,
-            variant_map,
-            receiver_type,
-            expected_ty,
-            local_var_types,
-            fn_return_types,
-            type_registry,
-        ),
-        Expr::RecordSet { value, .. } => resolve_expr_type(
-            value,
-            tag_types,
-            variant_map,
-            receiver_type,
-            expected_ty,
-            local_var_types,
-            fn_return_types,
-            type_registry,
-        ),
+        Expr::AggregateGet { base, .. } => {
+            extract_element_type(&resolve_expr_type(base, ctx, None), Some(type_registry))
+        }
+        Expr::Destructure { value, .. } => resolve_expr_type(value, ctx, expected_ty),
+        Expr::RecordSet { value, .. } => resolve_expr_type(value, ctx, expected_ty),
         Expr::RecordGet { base, field } => {
-            let base_ty = resolve_expr_type(
-                base,
-                tag_types,
-                variant_map,
-                receiver_type,
-                None,
-                local_var_types,
-                fn_return_types,
-                type_registry,
-            );
+            let base_ty = resolve_expr_type(base, ctx, None);
             let base_definition =
                 type_registry.resolved_definition_for_type(reference_referent_or_named(&base_ty));
             base_definition
@@ -416,17 +355,10 @@ pub(crate) fn resolve_expr_type(
                 .map(|(_, ty)| ty)
                 .unwrap_or_else(|| Ty::Opaque(*field))
         }
-        Expr::AggregateSet { value, .. } => resolve_expr_type(
-            value,
-            tag_types,
-            variant_map,
-            receiver_type,
-            expected_ty,
-            local_var_types,
-            fn_return_types,
-            type_registry,
-        ),
-        Expr::Cast { ty, .. } => resolve_type_reference(ty, tag_types, local_var_types, None),
+        Expr::AggregateSet { value, .. } => resolve_expr_type(value, ctx, expected_ty),
+        Expr::Cast { ty, .. } => {
+            resolve_type_reference(ty, tag_types, local_var_types, None, type_registry)
+        }
         Expr::Target => Ty::Opaque(Intern::from_ref("Target")),
         Expr::TargetQuery { kind, operand } => Ty::AnonymousInteger {
             validity: ast::integer::IntegerValidity::new(ast::integer::IntegerDomain::symbolic(
@@ -436,40 +368,23 @@ pub(crate) fn resolve_expr_type(
                 },
             )),
         },
+        Expr::SliceGet { buf, length, .. } => {
+            let source = resolve_expr_type(buf, ctx, None);
+            Ty::Array {
+                elem: Box::new(extract_element_type(&source, Some(type_registry))),
+                size: size_expr_to_normal(&length.value, SizeCallName::PathRoot, false)
+                    .unwrap_or_else(|| {
+                        NormalExpr::Var(Intern::from_ref("unresolved-slice-length"))
+                    }),
+            }
+        }
         Expr::BufGet { buf, .. } => extract_element_type(
-            &resolve_expr_type(
-                buf,
-                tag_types,
-                variant_map,
-                receiver_type,
-                expected_ty,
-                local_var_types,
-                fn_return_types,
-                type_registry,
-            ),
+            &resolve_expr_type(buf, ctx, expected_ty),
             Some(type_registry),
         ),
-        Expr::BufSet { value, .. } => resolve_expr_type(
-            value,
-            tag_types,
-            variant_map,
-            receiver_type,
-            expected_ty,
-            local_var_types,
-            fn_return_types,
-            type_registry,
-        ),
+        Expr::BufSet { value, .. } => resolve_expr_type(value, ctx, expected_ty),
         Expr::TakePtr(inner) => {
-            let pointee = resolve_expr_type(
-                inner,
-                tag_types,
-                variant_map,
-                receiver_type,
-                None,
-                local_var_types,
-                fn_return_types,
-                type_registry,
-            );
+            let pointee = resolve_expr_type(inner, ctx, None);
             expected_ty
                 .map(|ty| type_registry.resolved_definition_for_type(ty))
                 .filter(|ty| ty.address_space().is_some())
@@ -479,29 +394,11 @@ pub(crate) fn resolve_expr_type(
                 })
         }
         Expr::Ref { inner, mutable, .. } => Ty::Ref {
-            inner: Box::new(resolve_expr_type(
-                inner,
-                tag_types,
-                variant_map,
-                receiver_type,
-                expected_ty,
-                local_var_types,
-                fn_return_types,
-                type_registry,
-            )),
+            inner: Box::new(resolve_expr_type(inner, ctx, expected_ty)),
             mutable: *mutable,
         },
         Expr::Deref(inner) => {
-            let inner_ty = resolve_expr_type(
-                inner,
-                tag_types,
-                variant_map,
-                receiver_type,
-                expected_ty,
-                local_var_types,
-                fn_return_types,
-                type_registry,
-            );
+            let inner_ty = resolve_expr_type(inner, ctx, expected_ty);
             reference_pointee_for_type(&inner_ty, Some(type_registry))
                 .or_else(|| {
                     type_registry
@@ -511,39 +408,20 @@ pub(crate) fn resolve_expr_type(
                 })
                 .unwrap_or(Ty::Unit)
         }
-        Expr::Negate(inner) => resolve_expr_type(
-            inner,
-            tag_types,
-            variant_map,
-            receiver_type,
-            expected_ty,
-            local_var_types,
-            fn_return_types,
-            type_registry,
-        ),
+        Expr::Negate(inner) => resolve_expr_type(inner, ctx, expected_ty),
         Expr::RecordLit(fields) => Ty::Record {
             name: Intern::from_ref("Record"),
             fields: fields
                 .iter()
-                .map(|(name, item)| {
-                    (
-                        *name,
-                        Box::new(resolve_expr_type(
-                            item,
-                            tag_types,
-                            variant_map,
-                            receiver_type,
-                            None,
-                            local_var_types,
-                            fn_return_types,
-                            type_registry,
-                        )),
-                    )
-                })
+                .map(|(name, item)| (*name, Box::new(resolve_expr_type(item, ctx, None))))
                 .collect(),
             resolved_params: None,
         },
+        Expr::Import(_) => Ty::Unit,
         Expr::Invalid(_) => Ty::Opaque(Intern::from_ref("invalid-expression")),
+        Expr::Todo => expected_ty
+            .cloned()
+            .unwrap_or_else(|| Ty::Opaque(Intern::from_ref("#todo"))),
         Expr::ResultValues(items) if items.is_empty() => Ty::Unit,
         Expr::ResultValues(_) => Ty::Opaque(Intern::from_ref("result-values")),
         Expr::ArrayLit(items) => {
@@ -557,18 +435,7 @@ pub(crate) fn resolve_expr_type(
             }
             let elem_ty = items
                 .first()
-                .map(|item| {
-                    resolve_expr_type(
-                        item,
-                        tag_types,
-                        variant_map,
-                        receiver_type,
-                        None,
-                        local_var_types,
-                        fn_return_types,
-                        type_registry,
-                    )
-                })
+                .map(|item| resolve_expr_type(item, ctx, None))
                 .unwrap_or(Ty::Unit);
             let elem_ty = if matches!(
                 elem_ty,
@@ -601,16 +468,7 @@ pub(crate) fn resolve_expr_type(
                 items
                     .iter()
                     .map(|item| {
-                        let ty = resolve_expr_type(
-                            &item.expr,
-                            tag_types,
-                            variant_map,
-                            receiver_type,
-                            None,
-                            local_var_types,
-                            fn_return_types,
-                            type_registry,
-                        );
+                        let ty = resolve_expr_type(&item.expr, ctx, None);
                         let ty =
                             if matches!(ty, Ty::UnresolvedLiteral(ast::ty::LiteralKind::Integer)) {
                                 Ty::i64()
@@ -640,16 +498,7 @@ pub(crate) fn resolve_expr_type(
                     _ => None,
                 });
             let elem_ty = expected_elem.unwrap_or_else(|| {
-                let resolved = resolve_expr_type(
-                    seed,
-                    tag_types,
-                    variant_map,
-                    receiver_type,
-                    None,
-                    local_var_types,
-                    fn_return_types,
-                    type_registry,
-                );
+                let resolved = resolve_expr_type(seed, ctx, None);
                 if matches!(
                     resolved,
                     Ty::UnresolvedLiteral(ast::ty::LiteralKind::Integer)
@@ -661,27 +510,20 @@ pub(crate) fn resolve_expr_type(
             });
             Ty::Array {
                 elem: Box::new(elem_ty),
-                size: fixed_array_size_expr(count).unwrap_or_else(|| {
-                    NormalExpr::Var(Intern::new(format!(
-                        "_unsupported_sequence_size_{:?}",
-                        count.span_id
-                    )))
-                }),
+                size: size_expr_to_normal(count, SizeCallName::PathRoot, false).unwrap_or_else(
+                    || {
+                        NormalExpr::Var(Intern::new(format!(
+                            "_unsupported_sequence_size_{:?}",
+                            count.span_id
+                        )))
+                    },
+                ),
             }
         }
         Expr::List(items) => Ty::UnresolvedSequence {
-            element: items.first().map(|item| {
-                Box::new(resolve_expr_type(
-                    item,
-                    tag_types,
-                    variant_map,
-                    receiver_type,
-                    None,
-                    local_var_types,
-                    fn_return_types,
-                    type_registry,
-                ))
-            }),
+            element: items
+                .first()
+                .map(|item| Box::new(resolve_expr_type(item, ctx, None))),
             length: NormalExpr::from(items.len() as i128),
         },
     }
@@ -743,40 +585,84 @@ pub(crate) fn nominalize_explicit_ty_surface(surface: &ast::Expr, ty: Ty) -> Ty 
 
 pub(crate) fn bind_local_explicit_ty(
     bind: &Bind,
+    registry: &crate::TypeRegistry,
     tag_types: &HashMap<Intern<String>, Ty>,
     tag_params: &HashMap<Intern<String>, Parameters>,
-    tag_decls: &ast::TagMap,
+    tag_decls: TagDeclarations<'_>,
     binder: BinderId,
     initializer_ty: Option<&Ty>,
-) -> Option<Ty> {
+) -> Result<Option<Ty>, Diagnostic> {
     if let Some(ty) = bind_refinement_ty(bind) {
-        return Some(ty);
+        return Ok(Some(ty));
     }
+    let applied_surface = bind.type_annotation.as_ref().map(|(name, args)| {
+        Expr::TagCall(ast::expr::TagCall {
+            name: *name,
+            qual_path: bind.type_annotation_qual.clone(),
+            args: args.clone(),
+        })
+    });
     let surface = bind
         .return_tag
         .as_ref()
         .map(|sp| &sp.value)
-        .filter(|surface| expr_is_type_surface(surface));
+        .filter(|surface| expr_is_type_surface(surface))
+        .or(applied_surface.as_ref());
     let Some(surface) = surface else {
-        return bind_explicit_ty_in_scope(bind, tag_types, tag_params, tag_decls);
+        return Ok(bind_explicit_ty_in_scope(
+            bind, registry, tag_types, tag_params, tag_decls,
+        ));
     };
     let resolved = TypeEnv::new(tag_types)
+        .with_registry(registry)
         .with_tag_params(tag_params)
-        .with_tag_decls(tag_decls)
+        .with_tag_declaration_lookup(tag_decls)
         .with_dependent_binder(binder)
         .resolve(surface);
     let resolved = nominalize_explicit_ty_surface(surface, resolved);
 
-    if let (Some(initializer), Some(initializer_instance), Some(resolved_instance)) = (
-        initializer_ty,
-        initializer_ty.and_then(Ty::named_instance),
-        resolved.named_instance(),
-    ) && initializer_instance.declaration == resolved_instance.declaration
+    if let Some(initializer) = initializer_ty
+        && resolved
+            .named_instance_stripping_reference_wrappers()
+            .is_some()
+        && initializer
+            .named_instance_stripping_reference_wrappers()
+            .is_some()
     {
-        return Some(initializer.clone());
+        if matches!(surface, Expr::AnonymousTag(_))
+            && let (
+                Ty::Named {
+                    instance: expected,
+                    name,
+                },
+                Ty::Named {
+                    instance: actual, ..
+                },
+            ) = (&resolved, initializer)
+            && expected.declaration == actual.declaration
+            && tag_params.get(name).is_some_and(|parameters| {
+                parameters
+                    .values()
+                    .all(|parameter| !matches!(parameter.kind, ast::ParameterKind::Default(_)))
+            })
+        {
+            return Ok(Some(initializer.clone()));
+        }
+        let substitution = crate::analysis::unify_type_args_with_registry(
+            &[ast::ty::TyArg::Type(Box::new(
+                resolved.without_reference_wrappers().clone(),
+            ))],
+            &[ast::ty::TyArg::Type(Box::new(
+                initializer.without_reference_wrappers().clone(),
+            ))],
+            Some(registry),
+        )
+        // type-binding-mismatch
+        .map_err(|message| Diagnostic::new(BindingCode::Mismatch, message))?;
+        return Ok(Some(substitution.apply_to_ty(&resolved)));
     }
 
-    match (initializer_ty, &resolved) {
+    Ok(match (initializer_ty, &resolved) {
         (
             Some(
                 initializer @ Ty::Record {
@@ -802,7 +688,7 @@ pub(crate) fn bind_local_explicit_ty(
             },
         ) if initializer_name == resolved_name => Some(initializer.clone()),
         _ => Some(resolved),
-    }
+    })
 }
 
 pub(crate) fn bind_explicit_ty(bind: &Bind, tag_types: &HashMap<Intern<String>, Ty>) -> Option<Ty> {
@@ -850,17 +736,19 @@ pub(crate) fn bind_explicit_ty(bind: &Bind, tag_types: &HashMap<Intern<String>, 
 
 pub(crate) fn bind_explicit_ty_in_scope(
     bind: &Bind,
+    registry: &crate::TypeRegistry,
     tag_types: &HashMap<Intern<String>, Ty>,
     tag_params: &HashMap<Intern<String>, Parameters>,
-    tag_decls: &ast::TagMap,
+    tag_decls: TagDeclarations<'_>,
 ) -> Option<Ty> {
     if let Some(ty) = bind_refinement_ty(bind) {
         return Some(ty);
     }
     if !bind.named_results.is_empty() {
         let env = TypeEnv::new(tag_types)
+            .with_registry(registry)
             .with_tag_params(tag_params)
-            .with_tag_decls(tag_decls);
+            .with_tag_declaration_lookup(tag_decls);
         let elements = bind
             .named_results
             .iter()
@@ -875,8 +763,9 @@ pub(crate) fn bind_explicit_ty_in_scope(
         && expr_is_type_surface(&sp.value)
     {
         let ty = TypeEnv::new(tag_types)
+            .with_registry(registry)
             .with_tag_params(tag_params)
-            .with_tag_decls(tag_decls)
+            .with_tag_declaration_lookup(tag_decls)
             .resolve(&sp.value);
         return Some(nominalize_explicit_ty_surface(&sp.value, ty));
     }
@@ -887,8 +776,9 @@ pub(crate) fn bind_explicit_ty_in_scope(
             args: args.clone(),
         });
         let ty = TypeEnv::new(tag_types)
+            .with_registry(registry)
             .with_tag_params(tag_params)
-            .with_tag_decls(tag_decls)
+            .with_tag_declaration_lookup(tag_decls)
             .resolve(&annotated);
         let resolved = nominalize_explicit_ty_surface(&annotated, ty);
         return Some(resolved);
@@ -896,8 +786,145 @@ pub(crate) fn bind_explicit_ty_in_scope(
     bind_explicit_ty(bind, tag_types)
 }
 
+pub(super) fn validate_domain_annotation(
+    typed: &mut TypedFileAst,
+    bind: &Bind,
+    value: ExprId,
+    expected: &Ty,
+    diagnostic_expression: Option<ExprId>,
+) {
+    if matches!(expected, Ty::Proposition(_))
+        || typed
+            .exprs
+            .ty_of(value)
+            .is_some_and(|ty| matches!(ty, Ty::Proposition(_)))
+    {
+        if typed.exprs.ty_of(value) != Some(expected) {
+            typed.declaration_flaws.push((
+                bind.name_span,
+                // type-proposition-mismatch
+                diagnostic::Diagnostic::new(
+                    PropositionCode::Mismatch,
+                    "the comparison does not match the declared proposition",
+                )
+                .at_span_id(bind.name_span, &typed.span_table),
+            ));
+        }
+        return;
+    }
+    if bind.return_refinement.is_none()
+        && !bind
+            .return_tag
+            .as_ref()
+            .is_some_and(|surface| matches!(surface.value, Expr::IntegerDomain(_)))
+    {
+        return;
+    }
+    let Some(expected) = expected.anonymous_integer_validity() else {
+        return;
+    };
+    let expected = expected.clone();
+    validate_integer_validity(typed, bind, value, &expected, diagnostic_expression);
+}
+
+pub(super) fn validate_projected_return(
+    typed: &mut TypedFileAst,
+    bind: &Bind,
+    value: ExprId,
+    expected: &Ty,
+) {
+    if !typed
+        .exprs
+        .ty_of(value)
+        .is_some_and(|ty| ty.anonymous_integer_validity().is_some())
+    {
+        return;
+    }
+    let Some(validity) = typed
+        .type_registry
+        .integer_validity_for_type(expected)
+        .cloned()
+    else {
+        return;
+    };
+    validate_integer_validity(typed, bind, value, &validity, None);
+    typed.exprs.ty[value.as_usize()] = expected.clone();
+}
+
+fn validate_integer_validity(
+    typed: &mut TypedFileAst,
+    bind: &Bind,
+    value: ExprId,
+    expected: &ast::integer::IntegerValidity,
+    diagnostic_expression: Option<ExprId>,
+) {
+    if let Some(crate::typed::TypedExprKind::When(expression)) = typed.exprs.kind_of(value) {
+        let bodies = expression
+            .arms
+            .iter()
+            .map(|arm| match arm {
+                crate::typed::TypedWhenArm::Cond { body, .. }
+                | crate::typed::TypedWhenArm::Is { body, .. }
+                | crate::typed::TypedWhenArm::Else(body, _) => *body,
+            })
+            .collect::<Vec<_>>();
+        for body in bodies {
+            if !crate::analysis::expression_returns(typed.resolved_program(), body) {
+                validate_integer_validity(typed, bind, body, expected, diagnostic_expression);
+            }
+        }
+        return;
+    }
+    let actual = typed
+        .exprs
+        .integer_knowledge_of(value)
+        .and_then(Option::as_ref)
+        .and_then(super::place::knowledge_domain)
+        .or_else(|| {
+            typed
+                .exprs
+                .ty_of(value)
+                .and_then(|ty| {
+                    typed
+                        .type_registry
+                        .integer_validity_for_type(ty.without_reference_wrappers())
+                })
+                .map(|validity| validity.domain().clone())
+        });
+    let proof = actual
+        .as_ref()
+        .map_or(ast::integer::ContainmentProof::Unknown, |actual| {
+            actual.prove_containment(expected.domain())
+        });
+    if let Some(code) = proof.diagnostic_code()
+        && !(proof == ast::integer::ContainmentProof::Unknown
+            && (typed.type_registry.is_target_dependent_validity(expected)
+                || (typed.target_layout.is_none()
+                    && typed
+                        .exprs
+                        .ty_of(value)
+                        .is_some_and(|ty| typed.type_registry.is_target_dependent_integer(ty)))))
+    {
+        let diagnostic = diagnostic::Diagnostic::new(
+            code,
+            "integer domain annotation requires the value to satisfy the target validity",
+        )
+        .at_span_id(bind.name_span, &typed.span_table);
+        if let Some(expression) = diagnostic_expression {
+            typed.exprs.facts.semantic_facts.flaws[expression.index()].push(diagnostic);
+        } else {
+            typed.declaration_flaws.push((bind.name_span, diagnostic));
+        }
+    }
+}
+
 fn bind_refinement_ty(bind: &Bind) -> Option<Ty> {
     let predicate = bind.return_refinement.as_ref()?;
+    if bind.return_tag.is_none()
+        && let ast::PredicateExpr::Proposition(proposition) = predicate
+    {
+        return Some(Ty::Proposition(proposition.clone()));
+    }
     Some(Ty::AnonymousInteger {
         validity: ast::integer::IntegerValidity::new(
             ast::integer::IntegerDomain::from_named_refinement(predicate, bind.name),
@@ -915,7 +942,6 @@ fn reference_referent_or_named(ty: &Ty) -> &Ty {
 /// Convert a parsed [`Literal`] to its corresponding [`Ty`].
 pub(crate) fn lit_to_ty(lit: &Literal) -> Ty {
     match lit {
-        Literal::Number(_) => Ty::UnresolvedLiteral(ast::ty::LiteralKind::Integer),
         Literal::Float(HashFloat(f)) => Ty::Float {
             value: Some(HashFloat(*f)),
         },
@@ -978,5 +1004,5 @@ pub(crate) fn resolve_fn_call_target(
         }
         Intern::new(parts.join("."))
     };
-    DefId(fq_name)
+    DefId::named(fq_name)
 }

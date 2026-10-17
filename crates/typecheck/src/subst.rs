@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use ast::{BinderId, DependentArgId, NormalExpr, Ty, TyArg, UnionVariant};
+use ast::{BinderId, DependentArgId, NormalExpr, Ty, TyArg};
 use internment::Intern;
 
 pub struct DependentInstantiation {
@@ -19,103 +19,7 @@ impl DependentInstantiation {
     }
 
     pub fn apply_to_ty(&mut self, ty: &Ty) -> Ty {
-        match ty {
-            Ty::Named { instance, name } => Ty::Named {
-                instance: instance.clone().with_arguments(
-                    instance
-                        .arguments
-                        .iter()
-                        .map(|(name, arg)| (*name, self.apply_to_arg(arg)))
-                        .collect(),
-                ),
-                name: *name,
-            },
-            Ty::Record {
-                name,
-                fields,
-                resolved_params,
-            } => Ty::Record {
-                name: *name,
-                fields: fields
-                    .iter()
-                    .map(|(name, ty)| (*name, Box::new(self.apply_to_ty(ty))))
-                    .collect(),
-                resolved_params: resolved_params.as_ref().map(|params| {
-                    params
-                        .iter()
-                        .map(|(name, arg)| (*name, self.apply_to_arg(arg)))
-                        .collect()
-                }),
-            },
-            Ty::Union {
-                name,
-                variants,
-                literal_values,
-                resolved_params,
-            } => Ty::Union {
-                name: *name,
-                variants: variants
-                    .iter()
-                    .map(|variant| UnionVariant {
-                        kind: variant.kind,
-                        name: variant.name,
-                        fields: variant
-                            .fields
-                            .iter()
-                            .map(|(name, ty)| (*name, Box::new(self.apply_to_ty(ty))))
-                            .collect(),
-                        result_ty: variant.result_ty.as_ref().map(|ty| self.apply_to_ty(ty)),
-                    })
-                    .collect(),
-                literal_values: literal_values.clone(),
-                resolved_params: resolved_params.as_ref().map(|params| {
-                    params
-                        .iter()
-                        .map(|(name, arg)| (*name, self.apply_to_arg(arg)))
-                        .collect()
-                }),
-            },
-            Ty::Sequence(elements) => Ty::Sequence(
-                elements
-                    .iter()
-                    .map(|element| ast::ty::SequenceTypeElement {
-                        name: element.name,
-                        ty: Box::new(self.apply_to_ty(&element.ty)),
-                    })
-                    .collect(),
-            ),
-            Ty::Array { elem, size } => Ty::Array {
-                elem: Box::new(self.apply_to_ty(elem)),
-                size: self.apply_to_normal(size),
-            },
-            Ty::UnresolvedSequence { element, length } => Ty::UnresolvedSequence {
-                element: element
-                    .as_deref()
-                    .map(|element| Box::new(self.apply_to_ty(element))),
-                length: self.apply_to_normal(length),
-            },
-            Ty::Ptr { inner } => Ty::Ptr {
-                inner: Box::new(self.apply_to_ty(inner)),
-            },
-            Ty::Address {
-                pointee,
-                address_space,
-            } => Ty::Address {
-                pointee: Box::new(self.apply_to_ty(pointee)),
-                address_space: *address_space,
-            },
-            Ty::Ref { inner, mutable } => Ty::Ref {
-                inner: Box::new(self.apply_to_ty(inner)),
-                mutable: *mutable,
-            },
-            Ty::AnonymousInteger { .. }
-            | Ty::ResultFamily { .. }
-            | Ty::Float { .. }
-            | Ty::Unit
-            | Ty::Opaque(_)
-            | Ty::Literal(_)
-            | Ty::UnresolvedLiteral(_) => ty.clone(),
-        }
+        ty.map_children(self)
     }
 
     pub fn apply_to_arg(&mut self, arg: &TyArg) -> TyArg {
@@ -151,6 +55,18 @@ impl DependentInstantiation {
             | NormalExpr::Inferred(_)
             | NormalExpr::TargetQuery { .. } => expr.clone(),
         }
+    }
+}
+
+impl ast::ty::TyChildMapper for DependentInstantiation {
+    fn map_ty(&mut self, ty: &Ty) -> Ty {
+        self.apply_to_ty(ty)
+    }
+    fn map_arg(&mut self, arg: &TyArg) -> TyArg {
+        self.apply_to_arg(arg)
+    }
+    fn map_constant(&mut self, expr: &NormalExpr) -> NormalExpr {
+        self.apply_to_normal(expr)
     }
 }
 
@@ -192,132 +108,25 @@ impl DepSubst {
         DepSubst { types, consts }
     }
 
-    /// Merge another substitution into this one.
-    pub fn extend(&mut self, other: DepSubst) {
-        self.types.extend(other.types);
-        self.consts.extend(other.consts);
-    }
-
     /// Apply this substitution to a [`Ty`], replacing type variables and
     /// substituting const variables in [`NormalExpr`] positions.
     pub fn apply_to_ty(&self, ty: &Ty) -> Ty {
-        match ty {
-            Ty::Named { instance, name } => Ty::Named {
-                instance: instance.clone().with_arguments(
-                    instance
-                        .arguments
-                        .iter()
-                        .map(|(name, arg)| {
-                            let arg = match arg {
-                                TyArg::Type(ty) => TyArg::Type(Box::new(self.apply_to_ty(ty))),
-                                TyArg::Const(expr) => TyArg::Const(self.apply_to_normal(expr)),
-                            };
-                            (*name, arg)
-                        })
-                        .collect(),
-                ),
-                name: *name,
-            },
-            Ty::Opaque(name) => self.types.get(name).cloned().unwrap_or(Ty::Opaque(*name)),
-            Ty::Record {
-                name,
-                fields,
-                resolved_params,
-            } => Ty::Record {
-                name: *name,
-                fields: fields
-                    .iter()
-                    .map(|(n, t)| (*n, Box::new(self.apply_to_ty(t))))
-                    .collect(),
-                resolved_params: resolved_params.as_ref().map(|params| {
-                    params
-                        .iter()
-                        .map(|(name, arg)| {
-                            let arg = match arg {
-                                TyArg::Type(ty) => TyArg::Type(Box::new(self.apply_to_ty(ty))),
-                                TyArg::Const(expr) => TyArg::Const(self.apply_to_normal(expr)),
-                            };
-                            (*name, arg)
-                        })
-                        .collect()
-                }),
-            },
-            Ty::Union {
-                name,
-                variants,
-                literal_values,
-                resolved_params,
-            } => Ty::Union {
-                name: *name,
-                variants: variants
-                    .iter()
-                    .map(|v| {
-                        let new_fields = v
-                            .fields
-                            .iter()
-                            .map(|(n, t)| (*n, Box::new(self.apply_to_ty(t))))
-                            .collect();
-                        UnionVariant {
-                            kind: v.kind,
-                            name: v.name,
-                            fields: new_fields,
-                            result_ty: v.result_ty.as_ref().map(|ty| self.apply_to_ty(ty)),
-                        }
-                    })
-                    .collect(),
-                literal_values: literal_values.clone(),
-                resolved_params: resolved_params.as_ref().map(|params| {
-                    params
-                        .iter()
-                        .map(|(name, arg)| {
-                            let arg = match arg {
-                                TyArg::Type(ty) => TyArg::Type(Box::new(self.apply_to_ty(ty))),
-                                TyArg::Const(expr) => TyArg::Const(self.apply_to_normal(expr)),
-                            };
-                            (*name, arg)
-                        })
-                        .collect()
-                }),
-            },
-            Ty::Literal(v) => Ty::Literal(v.clone()),
-            Ty::ResultFamily { .. } => ty.clone(),
-            Ty::Sequence(elements) => Ty::Sequence(
-                elements
-                    .iter()
-                    .map(|element| ast::ty::SequenceTypeElement {
-                        name: element.name,
-                        ty: Box::new(self.apply_to_ty(&element.ty)),
-                    })
-                    .collect(),
-            ),
-            Ty::Array { elem, size } => Ty::Array {
-                elem: Box::new(self.apply_to_ty(elem)),
-                size: self.apply_to_normal(size),
-            },
-            Ty::UnresolvedSequence { element, length } => Ty::UnresolvedSequence {
-                element: element
-                    .as_deref()
-                    .map(|element| Box::new(self.apply_to_ty(element))),
-                length: self.apply_to_normal(length),
-            },
-            Ty::Ptr { inner } => Ty::Ptr {
-                inner: Box::new(self.apply_to_ty(inner)),
-            },
-            Ty::Address {
-                pointee,
-                address_space,
-            } => Ty::Address {
-                pointee: Box::new(self.apply_to_ty(pointee)),
-                address_space: *address_space,
-            },
-            Ty::Ref { inner, mutable } => Ty::Ref {
-                inner: Box::new(self.apply_to_ty(inner)),
-                mutable: *mutable,
-            },
-            Ty::AnonymousInteger { .. }
-            | Ty::Float { .. }
-            | Ty::Unit
-            | Ty::UnresolvedLiteral(_) => ty.clone(),
+        if let Ty::Opaque(name) = ty {
+            return self.types.get(name).cloned().unwrap_or(Ty::Opaque(*name));
+        }
+        if let Ty::Proposition(predicate) = ty {
+            return Ty::Proposition(Box::new(crate::analysis::propositions::substitute_names(
+                predicate,
+                |name| self.apply_to_normal(&NormalExpr::Var(name)),
+            )));
+        }
+        ty.map_children(&mut DepSubstMapper(self))
+    }
+
+    fn apply_to_arg(&self, arg: &TyArg) -> TyArg {
+        match arg {
+            TyArg::Type(ty) => TyArg::Type(Box::new(self.apply_to_ty(ty))),
+            TyArg::Const(expr) => TyArg::Const(self.apply_to_normal(expr)),
         }
     }
 
@@ -373,7 +182,21 @@ impl DepSubst {
     }
 }
 
-fn type_reference_for_ty(ty: &Ty) -> Option<ast::TypeReference> {
+struct DepSubstMapper<'a>(&'a DepSubst);
+
+impl ast::ty::TyChildMapper for DepSubstMapper<'_> {
+    fn map_ty(&mut self, ty: &Ty) -> Ty {
+        self.0.apply_to_ty(ty)
+    }
+    fn map_arg(&mut self, arg: &TyArg) -> TyArg {
+        self.0.apply_to_arg(arg)
+    }
+    fn map_constant(&mut self, expr: &NormalExpr) -> NormalExpr {
+        self.0.apply_to_normal(expr)
+    }
+}
+
+pub(crate) fn type_reference_for_ty(ty: &Ty) -> Option<ast::TypeReference> {
     match ty {
         Ty::Unit => Some(ast::TypeReference::Unit),
         Ty::Opaque(name) => Some(ast::TypeReference::Nominal(*name)),
@@ -385,16 +208,16 @@ fn type_reference_for_ty(ty: &Ty) -> Option<ast::TypeReference> {
             arguments: instance
                 .arguments
                 .iter()
-                .filter_map(|(_, argument)| match argument {
+                .map(|(_, argument)| match argument {
                     TyArg::Type(ty) => type_reference_for_ty(ty),
                     TyArg::Const(_) => None,
                 })
-                .collect(),
+                .collect::<Option<Vec<_>>>()?,
         }),
         _ => None,
     }
 }
 
 #[cfg(test)]
-#[path = "../tests/subst_tests.rs"]
+#[path = "../tests/subst/conversion.rs"]
 mod tests;

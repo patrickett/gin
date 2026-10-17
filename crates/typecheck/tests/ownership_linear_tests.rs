@@ -1,28 +1,19 @@
+mod support;
+
 use ast::ty::{NamedTypeInstance, TypeId};
 use internment::Intern;
 use parser::cursor::TokenCursor;
+use support::flaw_codes_of;
 use typecheck::analysis::TyOwnershipExt;
 use typecheck::transform::{TransformCtx, transform};
 use typecheck::ty::Ty;
 use typecheck::{BindBody, DefId, FileId, TypedExprKind};
 
-fn codes(source: &str) -> Vec<String> {
-    transform(
-        &TokenCursor::parse_source(source),
-        FileId(0),
-        &TransformCtx::new(),
-    )
-    .all_flaws()
-    .into_iter()
-    .map(|(_, flaw)| flaw.code.slug().to_string())
-    .collect()
-}
-
 #[test]
 fn non_singleton_anonymous_integer_moves_at_owned_call() {
-    let diagnostics = codes(
-        r#"source() is in 0 to 10: 0
-take(value x): 0
+    let diagnostics = flaw_codes_of(
+        r#"source() is in 0 to 10: return 0
+take(value x): return 0
 main:
 	value: source()
 	take(value)
@@ -40,7 +31,7 @@ main:
 fn exact_anonymous_integer_can_be_rematerialized_at_owned_calls() {
     let typed = transform(
         &TokenCursor::parse_source(
-            "take(value x): 0\nmain:\n\tvalue: 7\n\ttake(value)\n\ttake(value)\n\treturn 0",
+            "take(value x): return 0\nmain:\n\tvalue: 7\n\ttake(value)\n\ttake(value)\n\treturn 0",
         ),
         FileId(0),
         &TransformCtx::new(),
@@ -48,9 +39,10 @@ fn exact_anonymous_integer_can_be_rematerialized_at_owned_calls() {
     let diagnostics: Vec<_> = typed
         .all_flaws()
         .into_iter()
-        .map(|(_, flaw)| flaw.code.slug().to_string())
+        .map(|(_, flaw)| flaw.code.to_string())
         .collect();
-    let BindBody::Body { exprs, .. } = &typed.defs[&DefId(Intern::from_ref("main"))].body else {
+    let BindBody::Body { exprs, .. } = &typed.defs[&DefId::named(Intern::from_ref("main"))].body
+    else {
         panic!("expected main body");
     };
 
@@ -82,8 +74,8 @@ fn equal_singleton_join_can_be_rematerialized() {
     let typed = transform(
         &TokenCursor::parse_source(
             r#"Bool is True or False
-coin() Bool: 0
-take(value x): 0
+coin() Bool: return 0
+take(value x): return 0
 main:
 	value: when coin() is True then 7 else 7
 	take(value)
@@ -102,7 +94,7 @@ main:
                 target,
                 args: Some(arguments),
                 ..
-            } if target.0.as_str() == "take" => Some(arguments[0]),
+            } if target.0.as_str().starts_with("take$specialized$") => Some(arguments[0]),
             _ => None,
         })
         .collect();
@@ -119,14 +111,14 @@ fn flow_singleton_can_be_rematerialized_inside_the_proven_branch() {
     let typed = transform(
         &TokenCursor::parse_source(
             r#"Bool is True or False
-coin() Bool: 0
-take(value x): 0
+coin() Bool: return 0
+take(value x): return 0
 main:
 	value: when coin() is True then 1 else 2
-	if value is 1
+	when value is 1 then
 		take(value)
 		take(value)
-	return
+		return
 	return 0"#,
         ),
         FileId(0),
@@ -141,7 +133,7 @@ main:
                 target,
                 args: Some(arguments),
                 ..
-            } if target.0.as_str() == "take" => Some(arguments[0]),
+            } if target.0.as_str().starts_with("take$specialized$") => Some(arguments[0]),
             _ => None,
         })
         .collect();
@@ -157,7 +149,7 @@ main:
 fn folded_control_expression_can_be_rematerialized() {
     let typed = transform(
         &TokenCursor::parse_source(
-            "Bool is True or False\ntake(value x): 0\nmain:\n\tvalue: when True is True then 7 else 8\n\ttake(value)\n\ttake(value)\n\treturn 0",
+            "Bool is True or False\ntake(value x): return 0\nmain:\n\tvalue: when True is True then 7 else 8\n\ttake(value)\n\ttake(value)\n\treturn 0",
         ),
         FileId(0),
         &TransformCtx::new(),
@@ -171,7 +163,7 @@ fn folded_control_expression_can_be_rematerialized() {
                 target,
                 args: Some(arguments),
                 ..
-            } if target.0.as_str() == "take" => Some(arguments[0]),
+            } if target.0.as_str().starts_with("take$specialized$") => Some(arguments[0]),
             _ => None,
         })
         .collect();
@@ -185,8 +177,8 @@ fn folded_control_expression_can_be_rematerialized() {
 
 #[test]
 fn nominal_singleton_is_never_rematerializable() {
-    let diagnostics = codes(
-        "Only is in 1 to 1\ntake(value x): 0\nmain(value Only):\n\ttake(value)\n\ttake(value)\n\treturn 0",
+    let diagnostics = flaw_codes_of(
+        "Only is in 1 to 1\ntake(value x): return 0\nmain(value Only):\n\ttake(value)\n\ttake(value)\n\treturn 0",
     );
 
     assert!(
@@ -197,10 +189,10 @@ fn nominal_singleton_is_never_rematerializable() {
 
 #[test]
 fn different_singleton_join_still_moves() {
-    let diagnostics = codes(
+    let diagnostics = flaw_codes_of(
         r#"Bool is True or False
-coin() Bool: 0
-take(value x): 0
+coin() Bool: return 0
+take(value x): return 0
 main:
 	value: when coin() is True then 1 else 2
 	take(value)
@@ -221,7 +213,8 @@ fn symbolic_anonymous_integer_is_not_rematerializable() {
         FileId(0),
         &TransformCtx::new(),
     );
-    let BindBody::Expr(expression) = typed.defs[&DefId(Intern::from_ref("main"))].body else {
+    let BindBody::Expr(expression) = typed.defs[&DefId::named(Intern::from_ref("main"))].body
+    else {
         panic!("expected expression body");
     };
     typed.exprs.facts.const_facts.const_value[expression.as_usize()] = None;
@@ -238,8 +231,8 @@ fn symbolic_anonymous_integer_is_not_rematerializable() {
 
 #[test]
 fn payload_alternative_still_moves() {
-    let diagnostics = codes(
-        "Payload has value @Int\nOption(Payload) is Some(Payload) or None\ntake(value x): 0\nmain:\n\tvalue: Some(Payload(value: @7))\n\ttake(value)\n\ttake(value)\n\treturn 0",
+    let diagnostics = flaw_codes_of(
+        "Payload has\n    value @Int\n    finish(self):\n    \treturn\nOption(element) is Some(element) or None\nOption(element) has\n    finish(self):\n    \treturn\ntake(value x): return 0\nmain:\n\tvalue: Some(Payload(value: @7))\n\ttake(value)\n\ttake(value)\n\treturn 0",
     );
 
     assert!(
@@ -250,8 +243,8 @@ fn payload_alternative_still_moves() {
 
 #[test]
 fn moving_named_result_field_twice_is_rejected() {
-    let diagnostics = codes(
-        "Int is in 0 to 255\nPayload has pointer @Int\npair() left Payload, right Payload:\n\treturn Payload(pointer: @1), Payload(pointer: @2)\ndrop(value Payload): 0\nmain:\n\tresult: pair()\n\tdrop(result.left)\n\tdrop(result.left)\n\treturn 0",
+    let diagnostics = flaw_codes_of(
+        "Int is in 0 to 255\nPayload has\n    pointer @Int\n    finish(self):\n    \treturn\npair() left Payload, right Payload:\n\treturn Payload(pointer: @1), Payload(pointer: @2)\ndrop(value Payload): return 0\nmain:\n\tresult: pair()\n\tdrop(result.left)\n\tdrop(result.left)\n\treturn 0",
     );
 
     assert!(
@@ -262,8 +255,8 @@ fn moving_named_result_field_twice_is_rejected() {
 
 #[test]
 fn moving_named_result_field_preserves_its_sibling() {
-    let diagnostics = codes(
-        "Int is in 0 to 255\nPayload has pointer @Int\npair() left Payload, right Payload:\n\treturn Payload(pointer: @1), Payload(pointer: @2)\ndrop(value Payload): 0\nmain:\n\tresult: pair()\n\tdrop(result.left)\n\tdrop(result.right)\n\treturn 0",
+    let diagnostics = flaw_codes_of(
+        "Int is in 0 to 255\nPayload has\n    pointer @Int\n    finish(self):\n    \treturn\npair() left Payload, right Payload:\n\treturn Payload(pointer: @1), Payload(pointer: @2)\ndrop(value Payload): return 0\nmain:\n\tresult: pair()\n\tdrop(result.left)\n\tdrop(result.right)\n\treturn 0",
     );
 
     assert!(
@@ -274,10 +267,10 @@ fn moving_named_result_field_preserves_its_sibling() {
 
 #[test]
 fn conversion_consumes_a_nonrematerializable_anonymous_integer() {
-    let diagnostics = codes(
+    let diagnostics = flaw_codes_of(
         r#"Bool is True or False
 Tiny is in 0 to 5
-coin() Bool: 0
+coin() Bool: return 0
 main:
 	value: when coin() is True then 1 else 2
 	first: value as Tiny
@@ -325,8 +318,8 @@ fn conversion_rematerializes_an_exact_anonymous_integer() {
 
 #[test]
 fn by_value_pattern_binding_moves_only_the_matching_path() {
-    let diagnostics = codes(
-        "Payload has value @Int\nOption(Payload) is Some(Payload) or None\ndrop(value Option(Payload)): 0\ninspect(value Option(Payload)):\n\twhen value is\n\t\tSome(payload) then drop(value)\n\t\tNone then drop(value)\n\treturn 0",
+    let diagnostics = flaw_codes_of(
+        "Payload has\n    value @Int\n    finish(self):\n    \treturn\nOption(element) is Some(element) or None\nOption(element) has\n    finish(self):\n    \treturn\ndrop(value Option(Payload)): return 0\ninspect(value Option(Payload)):\n\twhen value is\n\t\tSome(payload) then drop(value)\n\t\tNone then 0\n\treturn 0",
     );
 
     assert_eq!(
@@ -341,8 +334,8 @@ fn by_value_pattern_binding_moves_only_the_matching_path() {
 
 #[test]
 fn reference_pattern_binding_preserves_the_subject() {
-    let diagnostics = codes(
-        "Payload has value @Int\nOption(Payload) is Some(Payload) or None\ndrop(value Option(Payload)): 0\ninspect(value Option(Payload)):\n\twhen value is\n\t\tSome(ref payload) then drop(value)\n\t\tNone then drop(value)\n\treturn 0",
+    let diagnostics = flaw_codes_of(
+        "Payload has\n    value @Int\n    finish(self):\n    \treturn\nOption(element) is Some(element) or None\nOption(element) has\n    finish(self):\n    \treturn\ndrop(value Option(Payload)): return 0\ninspect(value Option(Payload)):\n\twhen value is\n\t\tSome(ref payload) then drop(value)\n\t\tNone then 0\n\treturn 0",
     );
 
     assert!(
@@ -353,8 +346,8 @@ fn reference_pattern_binding_preserves_the_subject() {
 
 #[test]
 fn mutable_pattern_binding_preserves_the_subject() {
-    let diagnostics = codes(
-        "Payload has value @Int\nOption(Payload) is Some(Payload) or None\ndrop(value Option(Payload)): 0\ninspect(value Option(Payload)):\n\twhen value is\n\t\tSome(mut payload) then drop(value)\n\t\tNone then drop(value)\n\treturn 0",
+    let diagnostics = flaw_codes_of(
+        "Payload has\n    value @Int\n    finish(self):\n    \treturn\nOption(element) is Some(element) or None\nOption(element) has\n    finish(self):\n    \treturn\ndrop(value Option(Payload)): return 0\ninspect(value Option(Payload)):\n\twhen value is\n\t\tSome(mut payload) then drop(value)\n\t\tNone then 0\n\treturn 0",
     );
 
     assert!(
@@ -365,8 +358,8 @@ fn mutable_pattern_binding_preserves_the_subject() {
 
 #[test]
 fn nonbinding_pattern_preserves_the_subject() {
-    let diagnostics = codes(
-        "Payload has value @Int\nOption(Payload) is Some(Payload) or None\ndrop(value Option(Payload)): 0\ninspect(value Option(Payload)):\n\twhen value is\n\t\tSome(_) then drop(value)\n\t\tNone then drop(value)\n\treturn 0",
+    let diagnostics = flaw_codes_of(
+        "Payload has\n    value @Int\n    finish(self):\n    \treturn\nOption(element) is Some(element) or None\nOption(element) has\n    finish(self):\n    \treturn\ndrop(value Option(Payload)): return 0\ninspect(value Option(Payload)):\n\twhen value is\n\t\tSome(_) then drop(value)\n\t\tNone then 0\n\treturn 0",
     );
 
     assert!(

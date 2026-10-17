@@ -6,11 +6,10 @@ use typecheck::transform::{TransformCtx, transform};
 fn for_binder_is_available_only_in_loop_body() {
     let positive = transform(
         &TokenCursor::parse_source(
-            r#"observe(value Int) Int: value
+            r#"observe(value Int) Int: return value
 main:
     for index in 0 to 3
         observe(index)
-    loop
 "#,
         ),
         FileId(0),
@@ -24,11 +23,10 @@ main:
 
     let typed = transform(
         &TokenCursor::parse_source(
-            r#"observe(value Int) Int: value
+            r#"observe(value Int) Int: return value
 main:
     for index in 0 to 3
         observe(index)
-    loop
     observe(index)
 "#,
         ),

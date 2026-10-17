@@ -15,15 +15,15 @@ fn operator_source(expressions: usize) -> String {
 add_bits(a Word, b Word) Word:
     left is in 0 to 255: a
     right is in 0 to 255: b
-return (left + right) as Word
+    return (left + right) as Word
 #infix('+')
 #inline
-word_add(a Word, b Word) Word: add_bits(a, b)
+word_add(a Word, b Word) Word: return add_bits(a, b)
 "#,
     );
     for index in 0..expressions {
         source.push_str(&format!(
-            "apply{index}(a Word, b Word) Word: a + b + a + b\n"
+            "apply{index}(a Word, b Word) Word: return a + b + a + b\n"
         ));
     }
     source

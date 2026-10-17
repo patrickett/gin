@@ -1,7 +1,5 @@
 use super::*;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, From)]
-pub struct GroupId(pub u32);
+use crate::solver::{Predicate, ProveResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Overlap {
@@ -10,6 +8,9 @@ pub enum Overlap {
     Partial,
     Unknown,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, From)]
+pub struct GroupId(pub u32);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TargetIndex {
@@ -48,6 +49,7 @@ pub struct AppliedEffectTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ReferenceTargetGroup {
+    Static,
     Param(GroupId),
     Local(PlaceId),
     Field {
@@ -239,30 +241,45 @@ impl<const N: usize> From<[ReferenceTargetGroup; N]> for ReferenceTargetSet {
 
 impl EffectTarget {
     pub fn from_reference(target: &ReferenceTargetGroup) -> Option<Self> {
-        match target {
-            ReferenceTargetGroup::Param(group) => Some(Self::Group(*group)),
-            ReferenceTargetGroup::Field { base, index } => Some(Self::Field {
-                base: Box::new(Self::from_reference(base)?),
-                index: *index,
-            }),
-            ReferenceTargetGroup::Variant { base, name } => Some(Self::Variant {
-                base: Box::new(Self::from_reference(base)?),
-                name: *name,
-            }),
-            ReferenceTargetGroup::ItemRegion { base, index } => Some(Self::ItemRegion {
-                base: Box::new(Self::from_reference(base)?),
-                index: index.clone(),
-            }),
-            ReferenceTargetGroup::ItemRange { base, start, end } => Some(Self::ItemRange {
-                base: Box::new(Self::from_reference(base)?),
-                start: start.clone(),
-                end: end.clone(),
-            }),
-            ReferenceTargetGroup::Deref(base) => {
-                Some(Self::Deref(Box::new(Self::from_reference(base)?)))
-            }
-            ReferenceTargetGroup::Local(_) => None,
+        let mut current = target;
+        let mut projections = Vec::new();
+        while let Some(base) = current.parent() {
+            projections.push(current);
+            current = base;
         }
+        let mut effect = match current {
+            ReferenceTargetGroup::Param(group) => Self::Group(*group),
+            ReferenceTargetGroup::Local(_) | ReferenceTargetGroup::Static => return None,
+            _ => unreachable!("a reference target without a parent is a root"),
+        };
+        for projection in projections.into_iter().rev() {
+            effect = match projection {
+                ReferenceTargetGroup::Field { index, .. } => Self::Field {
+                    base: Box::new(effect),
+                    index: *index,
+                },
+                ReferenceTargetGroup::Variant { name, .. } => Self::Variant {
+                    base: Box::new(effect),
+                    name: *name,
+                },
+                ReferenceTargetGroup::ItemRegion { index, .. } => Self::ItemRegion {
+                    base: Box::new(effect),
+                    index: index.clone(),
+                },
+                ReferenceTargetGroup::ItemRange { start, end, .. } => Self::ItemRange {
+                    base: Box::new(effect),
+                    start: start.clone(),
+                    end: end.clone(),
+                },
+                ReferenceTargetGroup::Deref(_) => Self::Deref(Box::new(effect)),
+                ReferenceTargetGroup::Param(_)
+                | ReferenceTargetGroup::Local(_)
+                | ReferenceTargetGroup::Static => {
+                    unreachable!("a reference projection has a parent")
+                }
+            };
+        }
+        Some(effect)
     }
 
     pub fn substitute(
@@ -270,95 +287,86 @@ impl EffectTarget {
         group: GroupId,
         actual: &ReferenceTargetGroup,
     ) -> Option<AppliedEffectTarget> {
-        let (target, descendants) = self.substitute_inner(group, actual)?;
+        let mut current = self;
+        let mut projections = Vec::new();
+        let mut target = loop {
+            match current {
+                Self::Group(effect_group) => {
+                    if *effect_group != group {
+                        return None;
+                    }
+                    break actual.clone();
+                }
+                Self::Field { base, .. }
+                | Self::Variant { base, .. }
+                | Self::ItemRegion { base, .. }
+                | Self::ItemRange { base, .. }
+                | Self::Deref(base)
+                | Self::Descendants(base) => {
+                    projections.push(current);
+                    current = base;
+                }
+            }
+        };
+        let mut descendants = false;
+        for projection in projections.into_iter().rev() {
+            target = match projection {
+                Self::Field { index, .. } => ReferenceTargetGroup::Field {
+                    base: Box::new(target),
+                    index: *index,
+                },
+                Self::Variant { name, .. } => ReferenceTargetGroup::Variant {
+                    base: Box::new(target),
+                    name: *name,
+                },
+                Self::ItemRegion { index, .. } => ReferenceTargetGroup::ItemRegion {
+                    base: Box::new(target),
+                    index: index.clone(),
+                },
+                Self::ItemRange { start, end, .. } => ReferenceTargetGroup::ItemRange {
+                    base: Box::new(target),
+                    start: start.clone(),
+                    end: end.clone(),
+                },
+                Self::Deref(_) => ReferenceTargetGroup::Deref(Box::new(target)),
+                Self::Descendants(_) => {
+                    descendants = true;
+                    target
+                }
+                Self::Group(_) => unreachable!("an effect projection is not a root group"),
+            };
+        }
         Some(AppliedEffectTarget {
             target,
             descendants,
         })
     }
-
-    fn substitute_inner(
-        &self,
-        group: GroupId,
-        actual: &ReferenceTargetGroup,
-    ) -> Option<(ReferenceTargetGroup, bool)> {
-        match self {
-            Self::Group(effect_group) => (*effect_group == group).then(|| (actual.clone(), false)),
-            Self::Field { base, index } => {
-                let (base, descendants) = base.substitute_inner(group, actual)?;
-                Some((
-                    ReferenceTargetGroup::Field {
-                        base: Box::new(base),
-                        index: *index,
-                    },
-                    descendants,
-                ))
-            }
-            Self::Variant { base, name } => {
-                let (base, descendants) = base.substitute_inner(group, actual)?;
-                Some((
-                    ReferenceTargetGroup::Variant {
-                        base: Box::new(base),
-                        name: *name,
-                    },
-                    descendants,
-                ))
-            }
-            Self::ItemRegion { base, index } => {
-                let (base, descendants) = base.substitute_inner(group, actual)?;
-                Some((
-                    ReferenceTargetGroup::ItemRegion {
-                        base: Box::new(base),
-                        index: index.clone(),
-                    },
-                    descendants,
-                ))
-            }
-            Self::ItemRange { base, start, end } => {
-                let (base, descendants) = base.substitute_inner(group, actual)?;
-                Some((
-                    ReferenceTargetGroup::ItemRange {
-                        base: Box::new(base),
-                        start: start.clone(),
-                        end: end.clone(),
-                    },
-                    descendants,
-                ))
-            }
-            Self::Deref(base) => {
-                let (base, descendants) = base.substitute_inner(group, actual)?;
-                Some((ReferenceTargetGroup::Deref(Box::new(base)), descendants))
-            }
-            Self::Descendants(base) => {
-                let (target, _) = base.substitute_inner(group, actual)?;
-                Some((target, true))
-            }
-        }
-    }
 }
 
 impl ReferenceTargetGroup {
+    fn root(&self) -> &Self {
+        let mut current = self;
+        while let Some(parent) = current.parent() {
+            current = parent;
+        }
+        current
+    }
+
+    pub fn is_static(&self) -> bool {
+        matches!(self.root(), Self::Static)
+    }
+
     pub fn root_local(&self) -> Option<PlaceId> {
-        match self {
+        match self.root() {
             Self::Local(place) => Some(*place),
-            Self::Param(_) => None,
-            Self::Field { base, .. }
-            | Self::Variant { base, .. }
-            | Self::ItemRegion { base, .. }
-            | Self::ItemRange { base, .. }
-            | Self::Deref(base) => base.root_local(),
+            _ => None,
         }
     }
 
     pub fn root_param(&self) -> Option<GroupId> {
-        match self {
+        match self.root() {
             Self::Param(group) => Some(*group),
-            Self::Local(_) => None,
-            Self::Field { base, .. }
-            | Self::Variant { base, .. }
-            | Self::ItemRegion { base, .. }
-            | Self::ItemRange { base, .. }
-            | Self::Deref(base) => base.root_param(),
+            _ => None,
         }
     }
 
@@ -368,39 +376,31 @@ impl ReferenceTargetGroup {
         projections: &[GroupProjection],
         constraints: &ConstraintEnv,
     ) -> bool {
-        let Some((projection, prefix)) = projections.split_last() else {
-            return self.overlap(ancestor, constraints) == Overlap::Equal;
-        };
-        match projection {
-            GroupProjection::Field { index, .. } => match self {
-                Self::Field {
-                    base,
-                    index: actual_index,
-                } if actual_index == index => {
-                    base.matches_projection_from(ancestor, prefix, constraints)
+        let mut current = self;
+        for projection in projections.iter().rev() {
+            current = match (current, projection) {
+                (
+                    Self::Field {
+                        base,
+                        index: actual,
+                        ..
+                    },
+                    GroupProjection::Field { index, .. },
+                ) if actual == index => base,
+                (Self::Variant { base, name: actual }, GroupProjection::Variant { name })
+                    if actual == name =>
+                {
+                    base
                 }
-                _ => false,
-            },
-            GroupProjection::Items => match self {
-                Self::ItemRegion { base, .. } | Self::ItemRange { base, .. } => {
-                    base.matches_projection_from(ancestor, prefix, constraints)
-                }
-                _ => false,
-            },
-            GroupProjection::Pointee => match self {
-                Self::Deref(base) => base.matches_projection_from(ancestor, prefix, constraints),
-                _ => false,
-            },
-            GroupProjection::Variant { name } => match self {
-                Self::Variant {
-                    base,
-                    name: actual_name,
-                } if actual_name == name => {
-                    base.matches_projection_from(ancestor, prefix, constraints)
-                }
-                _ => false,
-            },
+                (
+                    Self::ItemRegion { base, .. } | Self::ItemRange { base, .. },
+                    GroupProjection::Items,
+                )
+                | (Self::Deref(base), GroupProjection::Pointee) => base,
+                _ => return false,
+            };
         }
+        current.overlap(ancestor, constraints) == Overlap::Equal
     }
 
     pub fn is_strict_descendant_of(&self, ancestor: &Self, constraints: &ConstraintEnv) -> bool {
@@ -414,127 +414,101 @@ impl ReferenceTargetGroup {
         false
     }
 
+    pub(crate) fn is_within_items_of(&self, ancestor: &Self, constraints: &ConstraintEnv) -> bool {
+        let mut target = Some(self);
+        while let Some(current) = target {
+            if matches!(
+                current,
+                Self::ItemRegion { base, .. } | Self::ItemRange { base, .. }
+                    if base.overlap(ancestor, constraints) == Overlap::Equal
+            ) {
+                return true;
+            }
+            target = current.parent();
+        }
+        false
+    }
+
     pub fn overlap(&self, other: &Self, constraints: &ConstraintEnv) -> Overlap {
-        match (self, other) {
-            (Self::Param(left), Self::Param(right)) => {
-                if left == right {
-                    Overlap::Equal
-                } else {
-                    Overlap::Disjoint
-                }
+        let left_depth = self.depth();
+        let right_depth = other.depth();
+        let mut left = self;
+        let mut right = other;
+        for _ in 0..left_depth.saturating_sub(right_depth) {
+            left = left.parent().expect("positive target depth has a parent");
+        }
+        for _ in 0..right_depth.saturating_sub(left_depth) {
+            right = right.parent().expect("positive target depth has a parent");
+        }
+        let mut pairs = Vec::new();
+        while let (Some(left_parent), Some(right_parent)) = (left.parent(), right.parent()) {
+            pairs.push((left, right));
+            left = left_parent;
+            right = right_parent;
+        }
+        let mut overlap = match (left, right) {
+            (Self::Static, Self::Static) => Overlap::Equal,
+            (Self::Local(left), Self::Local(right)) if left == right => Overlap::Equal,
+            (Self::Param(left), Self::Param(right)) if left == right => Overlap::Equal,
+            _ => Overlap::Disjoint,
+        };
+        for (left, right) in pairs.into_iter().rev() {
+            if overlap != Overlap::Equal {
+                return overlap;
             }
-            (Self::Local(left), Self::Local(right)) => {
-                if left == right {
-                    Overlap::Equal
-                } else {
-                    Overlap::Disjoint
-                }
-            }
-            (
-                Self::Field {
-                    base: left_base,
-                    index: left_index,
-                },
-                Self::Field {
-                    base: right_base,
-                    index: right_index,
-                },
-            ) => match left_base.overlap(right_base, constraints) {
-                Overlap::Disjoint => Overlap::Disjoint,
-                Overlap::Equal if left_index == right_index => Overlap::Equal,
-                Overlap::Equal => Overlap::Disjoint,
-                Overlap::Partial => Overlap::Partial,
-                Overlap::Unknown => Overlap::Unknown,
-            },
-            (
-                Self::Variant {
-                    base: left_base,
-                    name: left_name,
-                },
-                Self::Variant {
-                    base: right_base,
-                    name: right_name,
-                },
-            ) => match left_base.overlap(right_base, constraints) {
-                Overlap::Disjoint => Overlap::Disjoint,
-                Overlap::Equal if left_name == right_name => Overlap::Equal,
-                Overlap::Equal => Overlap::Disjoint,
-                Overlap::Partial => Overlap::Partial,
-                Overlap::Unknown => Overlap::Unknown,
-            },
-            (
-                Self::ItemRegion {
-                    base: left_base,
-                    index: left_index,
-                },
-                Self::ItemRegion {
-                    base: right_base,
-                    index: right_index,
-                },
-            ) => match left_base.overlap(right_base, constraints) {
-                Overlap::Disjoint => Overlap::Disjoint,
-                Overlap::Equal => index_overlap(left_index, right_index, constraints),
-                Overlap::Partial => Overlap::Partial,
-                Overlap::Unknown => Overlap::Unknown,
-            },
-            (
-                Self::ItemRegion {
-                    base: item_base,
-                    index,
-                },
-                Self::ItemRange {
-                    base: range_base,
-                    start,
-                    end,
-                },
-            ) => match item_base.overlap(range_base, constraints) {
-                Overlap::Disjoint => Overlap::Disjoint,
-                Overlap::Equal => index_range_overlap(index, start, end, constraints),
-                Overlap::Partial => Overlap::Partial,
-                Overlap::Unknown => Overlap::Unknown,
-            },
-            (Self::ItemRange { .. }, Self::ItemRegion { .. }) => other.overlap(self, constraints),
-            (
-                Self::ItemRange {
-                    base: left_base,
-                    start: left_start,
-                    end: left_end,
-                },
-                Self::ItemRange {
-                    base: right_base,
-                    start: right_start,
-                    end: right_end,
-                },
-            ) => match left_base.overlap(right_base, constraints) {
-                Overlap::Disjoint => Overlap::Disjoint,
-                Overlap::Equal => {
-                    range_overlap(left_start, left_end, right_start, right_end, constraints)
-                }
-                Overlap::Partial => Overlap::Partial,
-                Overlap::Unknown => Overlap::Unknown,
-            },
-            (Self::Deref(left), Self::Deref(right)) => left.overlap(right, constraints),
-            _ => match self.depth().cmp(&other.depth()) {
-                std::cmp::Ordering::Greater => self
-                    .parent()
-                    .map(|parent| descendant_overlap(parent.overlap(other, constraints)))
-                    .unwrap_or(Overlap::Disjoint),
-                std::cmp::Ordering::Less => other
-                    .parent()
-                    .map(|parent| descendant_overlap(self.overlap(parent, constraints)))
-                    .unwrap_or(Overlap::Disjoint),
-                std::cmp::Ordering::Equal => match (self.parent(), other.parent()) {
-                    (Some(left), Some(right)) => {
-                        descendant_overlap(left.overlap(right, constraints))
+            overlap = match (left, right) {
+                (Self::Field { index: left, .. }, Self::Field { index: right, .. }) => {
+                    if left == right {
+                        Overlap::Equal
+                    } else {
+                        Overlap::Disjoint
                     }
-                    _ => Overlap::Disjoint,
-                },
-            },
+                }
+                (Self::Variant { name: left, .. }, Self::Variant { name: right, .. }) => {
+                    if left == right {
+                        Overlap::Equal
+                    } else {
+                        Overlap::Disjoint
+                    }
+                }
+                (Self::ItemRegion { index: left, .. }, Self::ItemRegion { index: right, .. }) => {
+                    index_overlap(left, right, constraints)
+                }
+                (Self::ItemRegion { index, .. }, Self::ItemRange { start, end, .. })
+                | (Self::ItemRange { start, end, .. }, Self::ItemRegion { index, .. }) => {
+                    index_range_overlap(index, start, end, constraints)
+                }
+                (
+                    Self::ItemRange {
+                        start: left_start,
+                        end: left_end,
+                        ..
+                    },
+                    Self::ItemRange {
+                        start: right_start,
+                        end: right_end,
+                        ..
+                    },
+                ) => range_overlap(left_start, left_end, right_start, right_end, constraints),
+                (Self::Deref(_), Self::Deref(_)) => Overlap::Equal,
+                _ => Overlap::Partial,
+            };
+        }
+        if left_depth != right_depth {
+            descendant_overlap(overlap)
+        } else {
+            overlap
         }
     }
 
     fn depth(&self) -> usize {
-        self.parent().map_or(0, |parent| parent.depth() + 1)
+        let mut current = self;
+        let mut depth = 0;
+        while let Some(parent) = current.parent() {
+            depth += 1;
+            current = parent;
+        }
+        depth
     }
 
     fn parent(&self) -> Option<&Self> {
@@ -544,7 +518,7 @@ impl ReferenceTargetGroup {
             | Self::ItemRegion { base, .. }
             | Self::ItemRange { base, .. }
             | Self::Deref(base) => Some(base),
-            Self::Param(_) | Self::Local(_) => None,
+            Self::Param(_) | Self::Local(_) | Self::Static => None,
         }
     }
 }

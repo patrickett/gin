@@ -11,6 +11,20 @@ use std::collections::HashMap;
 use crate::ty::Ty;
 use crate::typed::{ExprId, TagId, TypedFileAst, VariantId, VariantMap};
 
+pub(crate) fn type_sum_member(
+    expected: Option<&Ty>,
+    name: Intern<String>,
+    registry: &crate::TypeRegistry,
+) -> Option<Ty> {
+    let Ty::Union { variants, .. } = registry.resolved_definition_for_type(expected?) else {
+        return None;
+    };
+    variants
+        .iter()
+        .find(|variant| variant.name == name && variant.kind == ast::ty::UnionVariantKind::Type)
+        .and_then(|variant| variant.fields.first().map(|(_, ty)| ty.as_ref().clone()))
+}
+
 /// Resolve a tag call to the most likely [`VariantId`] given the available
 /// variant map, tag types, and an optional expected return type.
 pub(crate) fn resolve_tag_call_variant(
@@ -18,8 +32,25 @@ pub(crate) fn resolve_tag_call_variant(
     variant_map: &VariantMap,
     tag_types: &HashMap<Intern<String>, Ty>,
     expected_ty: Option<&Ty>,
+    registry: &crate::TypeRegistry,
 ) -> VariantId {
     let name = tag_call.name;
+    let member = type_sum_member(expected_ty, name, registry);
+    let expected_ty = member.as_ref().or(expected_ty);
+    if let (Some(expected), Some(declared)) = (expected_ty, tag_types.get(&name))
+        && expected
+            .named_instance_stripping_reference_wrappers()
+            .is_some_and(|instance| {
+                declared
+                    .named_instance_stripping_reference_wrappers()
+                    .is_some_and(|other| instance.declaration == other.declaration)
+            })
+    {
+        return VariantId {
+            union: TagId(name),
+            name,
+        };
+    }
     if let Some(Ty::Union {
         name: union,
         variants,
@@ -33,14 +64,9 @@ pub(crate) fn resolve_tag_call_variant(
         };
     }
     if let Some(qual_path) = &tag_call.qual_path {
-        // `qual_path` includes the variant as the last segment.
-        // For `Bool.False`: root="Bool", segments=["False"] → union is root.
-        // For `Mod.Bool.False`: root="Mod", segments=["Bool","False"] → union is segments[len-2].
-        let qual_name = if qual_path.segments.len() > 1 {
-            qual_path.segments[qual_path.segments.len() - 2]
-        } else {
-            qual_path.root
-        };
+        let mut owner = qual_path.value.clone();
+        owner.segments.pop();
+        let qual_name = Intern::new(owner.to_qualified_string());
         return VariantId {
             union: TagId(qual_name),
             name,
@@ -49,7 +75,7 @@ pub(crate) fn resolve_tag_call_variant(
     if let Some(expected) = expected_ty
         && let Some(union_name) = union_name_from_ty(expected)
         && (variant_belongs_to_union(name, union_name, variant_map, tag_types)
-            || matches!(expected, Ty::Opaque(_)))
+            || (matches!(expected, Ty::Opaque(_)) && !tag_types.contains_key(&name)))
     {
         return VariantId {
             union: TagId(union_name),
@@ -81,7 +107,20 @@ pub(crate) fn resolve_tag_call_variant(
 
 /// Look up the discriminant (ordinal) of a variant within its union from the
 /// variant map.
-pub(crate) fn resolve_discriminant(variant_id: &VariantId, variant_map: &VariantMap) -> usize {
+pub(crate) fn resolve_discriminant(
+    variant_id: &VariantId,
+    variant_map: &VariantMap,
+    expected: Option<&Ty>,
+    registry: &crate::TypeRegistry,
+) -> usize {
+    if let Some(expected) = expected
+        && let Ty::Union { variants, .. } = registry.resolved_definition_for_type(expected)
+        && let Some(position) = variants
+            .iter()
+            .position(|variant| variant.name == variant_id.name)
+    {
+        return position;
+    }
     if let Some(candidates) = variant_map.get(&variant_id.name) {
         for (union_name, disc, _) in candidates {
             if *union_name == variant_id.union.0 {
@@ -99,8 +138,13 @@ pub(crate) fn resolve_tag_call_type(
     tag_types: &HashMap<Intern<String>, Ty>,
     variant_map: &VariantMap,
     expected_ty: Option<&Ty>,
+    registry: &crate::TypeRegistry,
 ) -> Ty {
-    if let Some(expected @ Ty::Union { variants, .. }) = expected_ty
+    if let Some(member) = type_sum_member(expected_ty, *name, registry) {
+        return member.clone();
+    }
+    if let Some(expected) = expected_ty
+        && let Ty::Union { variants, .. } = registry.resolved_definition_for_type(expected)
         && variants.iter().any(|variant| variant.name == *name)
     {
         return expected.clone();
@@ -125,7 +169,7 @@ pub(crate) fn resolve_tag_call_type(
     if let Some(expected) = expected_ty
         && let Some(union_name) = union_name_from_ty(expected)
         && (variant_belongs_to_union(*name, union_name, variant_map, tag_types)
-            || matches!(expected, Ty::Opaque(_)))
+            || (matches!(expected, Ty::Opaque(_)) && !tag_types.contains_key(name)))
     {
         return expected.clone();
     }

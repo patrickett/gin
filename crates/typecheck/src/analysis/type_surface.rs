@@ -4,16 +4,23 @@
 //! `HashMap`. Resolution unfolds aliases, computes union variants and const-unions,
 //! and produces the canonical [`Ty`] that other passes consume.
 
-use crate::analysis::{TyInfer, TyInferEnv};
+use crate::normal_expr::{SizeCallName, size_expr_to_normal};
 use crate::subst::DepSubst;
+use crate::tag_declarations::TagDeclarations;
+use crate::transform::when_values::union_type;
 use crate::ty::Ty;
+use ast::type_decl::TypeNameExt;
 use ast::{
-    BinderId, DeclareValue, DependentArgId, FnCall, InRangeBounds, Literal, NormalExpr, ParamKind,
+    BinderId, DeclareValue, DependentArgId, InRangeBounds, Literal, NormalExpr, ParamKind,
     ParameterKind, Parameters, TyArg,
 };
 use ast_format::type_expr::ExprFormatExt;
+use diagnostic::Diagnostic;
+use diagnostic::code::DomainCode;
 use internment::Intern;
-use std::collections::HashMap;
+use span::SpanTable;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 
 /// Bundles the context needed to resolve [`TypeExpr`] to [`Ty`].
 ///
@@ -22,40 +29,69 @@ use std::collections::HashMap;
 /// only need `tag_types`.
 pub struct TypeEnv<'a> {
     pub tag_types: &'a HashMap<Intern<String>, Ty>,
+    pub registry: Option<&'a crate::TypeRegistry>,
     pub subst: Option<&'a HashMap<Intern<String>, Ty>>,
     pub tag_params: Option<&'a HashMap<Intern<String>, Parameters>>,
     pub tag_decls: Option<&'a ast::TagMap>,
+    fallback_tag_decls: Option<&'a ast::TagMap>,
     pub dependent_binder: Option<BinderId>,
+    type_reads: Option<&'a RefCell<HashSet<Intern<String>>>>,
 }
 
 impl<'a> TypeEnv<'a> {
     pub fn new(tag_types: &'a HashMap<Intern<String>, Ty>) -> Self {
         TypeEnv {
             tag_types,
+            registry: None,
             subst: None,
             tag_params: None,
             tag_decls: None,
+            fallback_tag_decls: None,
             dependent_binder: None,
+            type_reads: None,
         }
+    }
+
+    pub(crate) fn with_type_reads(mut self, reads: &'a RefCell<HashSet<Intern<String>>>) -> Self {
+        self.type_reads = Some(reads);
+        self
+    }
+
+    fn tag_type(&self, name: &Intern<String>) -> Option<&Ty> {
+        if let Some(reads) = self.type_reads {
+            reads.borrow_mut().insert(*name);
+        }
+        self.tag_types.get(name)
+    }
+
+    pub fn with_registry(mut self, registry: &'a crate::TypeRegistry) -> Self {
+        self.registry = Some(registry);
+        self
     }
 
     pub fn with_subst(&self, subst: &'a HashMap<Intern<String>, Ty>) -> Self {
         TypeEnv {
             tag_types: self.tag_types,
+            registry: self.registry,
             subst: Some(subst),
             tag_params: self.tag_params,
             tag_decls: self.tag_decls,
+            fallback_tag_decls: self.fallback_tag_decls,
             dependent_binder: self.dependent_binder,
+            type_reads: self.type_reads,
         }
     }
 
     pub fn with_tag_params(&self, tag_params: &'a HashMap<Intern<String>, Parameters>) -> Self {
         TypeEnv {
             tag_types: self.tag_types,
+            registry: self.registry,
             subst: self.subst,
             tag_params: Some(tag_params),
             tag_decls: self.tag_decls,
+            fallback_tag_decls: self.fallback_tag_decls,
             dependent_binder: self.dependent_binder,
+            type_reads: self.type_reads,
         }
     }
 
@@ -67,10 +103,13 @@ impl<'a> TypeEnv<'a> {
             Some(p) => self.with_tag_params(p),
             None => TypeEnv {
                 tag_types: self.tag_types,
+                registry: self.registry,
                 subst: self.subst,
                 tag_params: None,
                 tag_decls: self.tag_decls,
+                fallback_tag_decls: self.fallback_tag_decls,
                 dependent_binder: self.dependent_binder,
+                type_reads: self.type_reads,
             },
         }
     }
@@ -78,20 +117,39 @@ impl<'a> TypeEnv<'a> {
     pub fn with_tag_decls(&self, tag_decls: &'a ast::TagMap) -> Self {
         TypeEnv {
             tag_types: self.tag_types,
+            registry: self.registry,
             subst: self.subst,
             tag_params: self.tag_params,
             tag_decls: Some(tag_decls),
+            fallback_tag_decls: None,
             dependent_binder: self.dependent_binder,
+            type_reads: self.type_reads,
         }
+    }
+
+    pub(crate) fn with_tag_declaration_lookup(&self, declarations: TagDeclarations<'a>) -> Self {
+        let mut env = self.with_tag_decls(declarations.local);
+        env.fallback_tag_decls = declarations.package;
+        env
+    }
+
+    fn tag_declarations(&self) -> Option<TagDeclarations<'a>> {
+        self.tag_decls.map(|local| TagDeclarations {
+            local,
+            package: self.fallback_tag_decls,
+        })
     }
 
     pub fn with_dependent_binder(&self, dependent_binder: BinderId) -> Self {
         TypeEnv {
             tag_types: self.tag_types,
+            registry: self.registry,
             subst: self.subst,
             tag_params: self.tag_params,
             tag_decls: self.tag_decls,
+            fallback_tag_decls: self.fallback_tag_decls,
             dependent_binder: Some(dependent_binder),
+            type_reads: self.type_reads,
         }
     }
 
@@ -104,7 +162,7 @@ impl<'a> TypeEnv<'a> {
         let mut types = HashMap::new();
         let mut consts = HashMap::new();
         let fixed_array_length_param = self
-            .tag_decls
+            .tag_declarations()
             .and_then(|tag_decls| tag_decls.get(tag_name))
             .and_then(|declare| declare.attributes.fixed_array.as_ref())
             .map(|former| former.length_parameter);
@@ -116,23 +174,12 @@ impl<'a> TypeEnv<'a> {
         if let Some(tag_params) = self.tag_params
             && let Some(decl_params) = tag_params.get(tag_name)
         {
-            // Validate that use-site param kinds match declared param kinds.
             let declared: Vec<(Intern<String>, ParamKind)> = decl_params
                 .iter()
                 .map(|(n, k)| (*n, param_kind_from_decl_parameter_kind(&k.kind)))
                 .collect();
             let decl_entries: Vec<_> = decl_params.iter().collect();
-            let defaulted = decl_entries
-                .iter()
-                .rev()
-                .take_while(|(_, parameter)| {
-                    matches!(
-                        parameter.kind,
-                        ParameterKind::Default(_) | ParameterKind::Inferred { .. }
-                    )
-                })
-                .count();
-            let _ = check_type_application_with_defaults(&declared, use_site_params, defaulted);
+            let mut supplied_names = HashSet::new();
             for (i, (name, kind)) in use_site_params.iter().enumerate() {
                 let decl_name = decl_entries
                     .iter()
@@ -140,12 +187,15 @@ impl<'a> TypeEnv<'a> {
                     .map(|(decl_name, _)| **decl_name)
                     .or_else(|| decl_entries.get(i).map(|(decl_name, _)| **decl_name));
                 if let Some(decl_name) = decl_name {
+                    supplied_names.insert(decl_name);
                     match kind {
                         ParameterKind::Tagged(sp) | ParameterKind::ValueParam { ty: sp } => {
                             let is_length_parameter =
                                 is_fixed_array_length(&decl_name, &fixed_array_length_param);
                             if is_length_parameter {
-                                if let Some(cv) = expr_as_size_normal_expr(&sp.value) {
+                                if let Some(cv) =
+                                    size_expr_to_normal(&sp.value, SizeCallName::Mangled, true)
+                                {
                                     consts.insert(decl_name, cv);
                                 }
                             } else if is_literal_expr(&sp.value) {
@@ -157,6 +207,9 @@ impl<'a> TypeEnv<'a> {
                                 types.insert(decl_name, ty);
                             }
                         }
+                        ParameterKind::Proposition(predicate) => {
+                            types.insert(decl_name, Ty::Proposition(predicate.clone()));
+                        }
                         ParameterKind::Generic => {
                             types.insert(decl_name, Ty::Opaque(*name));
                         }
@@ -167,12 +220,16 @@ impl<'a> TypeEnv<'a> {
                                         *name == decl_name && matches!(kind, ParamKind::Value(_))
                                     });
                             if value_parameter {
-                                if let Some(value) = expr_as_size_normal_expr(&expr.value) {
+                                if let Some(value) =
+                                    size_expr_to_normal(&expr.value, SizeCallName::Mangled, true)
+                                {
                                     consts.insert(decl_name, value);
                                 }
                             } else if expr_is_type_surface(&expr.value) {
                                 types.insert(decl_name, self.resolve_expr(&expr.value));
-                            } else if let Some(value) = expr_as_size_normal_expr(&expr.value) {
+                            } else if let Some(value) =
+                                size_expr_to_normal(&expr.value, SizeCallName::Mangled, true)
+                            {
                                 consts.insert(decl_name, value);
                             }
                         }
@@ -180,14 +237,17 @@ impl<'a> TypeEnv<'a> {
                     }
                 }
             }
-            for (ordinal, (decl_name, decl_kind)) in
-                decl_entries.iter().enumerate().skip(use_site_params.len())
-            {
+            for (ordinal, (decl_name, decl_kind)) in decl_entries.iter().enumerate() {
+                if supplied_names.contains(*decl_name) {
+                    continue;
+                }
                 match &decl_kind.kind {
                     ParameterKind::Default(expr) => {
                         if expr_is_type_surface(&expr.value) {
                             types.insert(**decl_name, self.resolve_expr(&expr.value));
-                        } else if let Some(value) = expr_as_size_normal_expr(&expr.value) {
+                        } else if let Some(value) =
+                            size_expr_to_normal(&expr.value, SizeCallName::Mangled, true)
+                        {
                             consts.insert(**decl_name, value);
                         }
                     }
@@ -208,15 +268,11 @@ impl<'a> TypeEnv<'a> {
                     ParameterKind::Tagged(sp) | ParameterKind::ValueParam { ty: sp } => {
                         let is_length_parameter = fixed_array_length_param.is_some() && index == 1;
                         if is_length_parameter {
-                            if let Some(cv) = expr_as_size_normal_expr(&sp.value)
+                            if let Some(cv) =
+                                size_expr_to_normal(&sp.value, SizeCallName::Mangled, true)
                                 && let Some(length_name) = fixed_array_length_param
                             {
                                 consts.insert(length_name, cv);
-                            }
-                            if fixed_array_length_param.is_none()
-                                && let Some(cv) = expr_as_size_normal_expr(&sp.value)
-                            {
-                                consts.insert(*name, cv);
                             }
                         } else if is_literal_expr(&sp.value) {
                             if let Some(cv) = literal_expr_as_const(&sp.value) {
@@ -227,13 +283,18 @@ impl<'a> TypeEnv<'a> {
                             types.insert(*name, ty);
                         }
                     }
+                    ParameterKind::Proposition(predicate) => {
+                        types.insert(*name, Ty::Proposition(predicate.clone()));
+                    }
                     ParameterKind::Generic => {
                         types.insert(*name, Ty::Opaque(*name));
                     }
                     ParameterKind::Default(expr) => {
                         if expr_is_type_surface(&expr.value) {
                             types.insert(*name, self.resolve_expr(&expr.value));
-                        } else if let Some(value) = expr_as_size_normal_expr(&expr.value) {
+                        } else if let Some(value) =
+                            size_expr_to_normal(&expr.value, SizeCallName::Mangled, true)
+                        {
                             consts.insert(*name, value);
                         }
                     }
@@ -250,26 +311,27 @@ impl<'a> TypeEnv<'a> {
                 self.resolve_sum(expr)
             }
             ast::Expr::AnonymousTag(name) => {
-                match name.as_str() {
-                    _ => {}
-                }
                 if let Some(subst) = self.subst
                     && let Some(t) = subst.get(name)
                 {
                     return t.clone();
                 }
-                if name
-                    .as_str()
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_ascii_lowercase())
-                {
+                if name.as_str().starts_with_lowercase() {
                     return Ty::Opaque(*name);
                 }
-                self.tag_types
-                    .get(name)
-                    .cloned()
-                    .unwrap_or(Ty::Opaque(*name))
+                if self
+                    .tag_params
+                    .and_then(|params| params.get(name))
+                    .is_some_and(|params| {
+                        !params.is_empty()
+                            && params
+                                .values()
+                                .all(|param| matches!(param.kind, ParameterKind::Default(_)))
+                    })
+                {
+                    return self.resolve_generic(name, &[]);
+                }
+                self.tag_type(name).cloned().unwrap_or(Ty::Opaque(*name))
             }
             ast::Expr::TagCall(call) => {
                 let params = self.generic_params_from_call(&call.name, &call.args);
@@ -286,16 +348,16 @@ impl<'a> TypeEnv<'a> {
                 if call.path.value.segments.is_empty() {
                     self.resolve(&ast::Expr::AnonymousTag(call.path.value.root))
                 } else {
-                    self.tag_types
-                        .get(&call.path.value.root)
+                    self.tag_type(&call.path.value.root)
                         .cloned()
                         .unwrap_or(Ty::Opaque(call.path.value.root))
                 }
             }
+            ast::Expr::ResultValues(values) if values.is_empty() => Ty::Unit,
             ast::Expr::Lit(_) => Ty::Opaque(Intern::new(String::new())),
             ast::Expr::FixedArrayAlloc { init, size } => Ty::Array {
                 elem: Box::new(self.resolve_expr(&init.value)),
-                size: expr_as_size_normal_expr(&size.value)
+                size: size_expr_to_normal(&size.value, SizeCallName::Mangled, true)
                     .unwrap_or_else(|| NormalExpr::Var(Intern::from_ref("<array-size>"))),
             },
             ast::Expr::SequenceLiteral(ast::SequenceLiteral::Elements(elems)) => Ty::sequence(
@@ -309,23 +371,16 @@ impl<'a> TypeEnv<'a> {
             ),
             ast::Expr::SequenceLiteral(ast::SequenceLiteral::Repeat { seed, count }) => Ty::Array {
                 elem: Box::new(self.resolve_expr(&seed.value)),
-                size: expr_as_size_normal_expr(&count.value)
+                size: size_expr_to_normal(&count.value, SizeCallName::Mangled, true)
                     .unwrap_or_else(|| NormalExpr::Var(Intern::from_ref("<array-size>"))),
             },
+            ast::Expr::TypeValue(ty) => (**ty).clone(),
+            ast::Expr::DomainValue(domain) => Ty::Literal(ast::ConstValue::Domain(domain.clone())),
+            ast::Expr::IntegerDomain(inner) => self.resolve_integer_domain(&inner.value),
             ast::Expr::Range(range) => match (&range.start.value, &range.end.value) {
                 (ast::Expr::AnonymousTag(start), ast::Expr::AnonymousTag(end)) if start == end => {
-                    resolve_in_range_bounds(&InRangeBounds::Tag(*start), self.tag_types)
+                    self.resolve_integer_domain(&range.start.value)
                 }
-                (
-                    ast::Expr::Lit(ast::Literal::Number(start)),
-                    ast::Expr::Lit(ast::Literal::Number(end)),
-                ) => resolve_in_range_bounds(
-                    &InRangeBounds::Literal(
-                        i256::I256::from_u128(*start as u128),
-                        i256::I256::from_u128(*end as u128),
-                    ),
-                    self.tag_types,
-                ),
                 (
                     ast::Expr::Lit(ast::Literal::Int(start)),
                     ast::Expr::Lit(ast::Literal::Int(end)),
@@ -334,6 +389,105 @@ impl<'a> TypeEnv<'a> {
             },
             _ => Ty::Opaque(Intern::from_ref("<expr>")),
         }
+    }
+
+    fn resolve_integer_domain(&self, expr: &ast::Expr) -> Ty {
+        let ty = self.resolve_expr(expr);
+        if let Ty::Literal(ast::ConstValue::Domain(domain)) = &ty {
+            return Ty::AnonymousInteger {
+                validity: ast::integer::IntegerValidity::new((**domain).clone()),
+            };
+        }
+        self.registry
+            .and_then(|registry| registry.integer_validity_for_type(&ty))
+            .or_else(|| ty.anonymous_integer_validity())
+            .map(|validity| Ty::AnonymousInteger {
+                validity: validity.clone(),
+            })
+            .unwrap_or_else(|| Ty::Opaque(Intern::from_ref("<non-integer-domain>")))
+    }
+
+    pub(crate) fn integer_domain_diagnostic(
+        &self,
+        surface: &ast::Spanned<ast::Expr>,
+        spans: &SpanTable,
+    ) -> Option<Diagnostic> {
+        let ast::Expr::IntegerDomain(inner) = &surface.value else {
+            return None;
+        };
+        if !matches!(self.resolve_integer_domain(&inner.value), Ty::Opaque(name) if name.as_str() == "<non-integer-domain>")
+        {
+            return None;
+        }
+        let ty = self.resolve_expr(&inner.value);
+        let name = match &ty {
+            Ty::Record { name, .. } => name.to_string(),
+            _ => ty.format_for_hover(),
+        };
+        let is_record = self.registry.map_or_else(
+            || ty.is_record(),
+            |registry| registry.resolved_definition_for_type(&ty).is_record(),
+        );
+        let operand = inner.value.format_surface();
+        let actual = if is_record {
+            "record type"
+        } else {
+            "non-integer type"
+        };
+        let reason = if operand == name {
+            format!("`{name}` is a {actual}")
+        } else {
+            format!("`{operand}` resolves to {actual} `{name}`")
+        };
+        Some(
+            // type-non-integer-domain
+            Diagnostic::new(
+                DomainCode::NonInteger,
+                format!("`is in` requires an integer domain, but {reason}"),
+            )
+            .with_arg("type", name)
+            .with_help(if is_record {
+                "records have no integer domain; use the record type directly and implement operations using its fields"
+            } else {
+                "use an integer type or an integer domain after `is in`"
+            })
+            .at_span_id(inner.span_id, spans),
+        )
+    }
+
+    pub(crate) fn resolve_result_alternatives(
+        &self,
+        alternatives: &[ast::Spanned<ast::ResultAlternative>],
+    ) -> Option<Ty> {
+        if alternatives.len() < 2
+            || alternatives
+                .iter()
+                .any(|alternative| alternative.value.proposition.is_some())
+            || !alternatives.iter().any(|alternative| {
+                self.tag_types.contains_key(&alternative.value.label)
+                    || self
+                        .subst
+                        .is_some_and(|subst| subst.contains_key(&alternative.value.label))
+            })
+        {
+            return None;
+        }
+        let surface = alternatives
+            .iter()
+            .map(|alternative| {
+                ast::Typed::infer(
+                    ast::Expr::AnonymousTag(alternative.value.label),
+                    alternative.span_id,
+                )
+            })
+            .reduce(|lhs, rhs| {
+                let span_id = lhs.span_id;
+                ast::Typed::infer(
+                    ast::Expr::Binary(ast::Binary::new(lhs, ast::BinOp::LogicalOr, rhs)),
+                    span_id,
+                )
+            })?;
+        Some(self.resolve(&surface.value))
     }
 
     fn resolve_sum(&self, expr: &ast::Expr) -> Ty {
@@ -383,22 +537,21 @@ impl<'a> TypeEnv<'a> {
                 }
             })
             .collect();
-        Ty::Union {
-            name: Intern::new(format!(
-                "({})",
-                variants
-                    .iter()
-                    .map(|variant| variant.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" or ")
-            )),
-            variants,
-            literal_values: None,
-            resolved_params: None,
-        }
+        union_type(variants)
     }
 
     pub fn resolve_expr(&self, expr: &ast::Expr) -> Ty {
+        if let Some(declarations) = self.tag_declarations() {
+            let domains = crate::domain::Domains::new(
+                self.with_tag_declaration_lookup(declarations),
+                declarations,
+            );
+            if matches!(expr, ast::Expr::TagCall(call) if declarations.get(&call.name).and_then(|d| d.params.as_ref()).is_some_and(|p| p.values().any(|p| p.range_pattern.is_some())))
+                && let Ok(Some(value)) = domains.value(expr)
+            {
+                return Ty::Literal(value);
+            }
+        }
         self.resolve(expr)
     }
 
@@ -476,69 +629,11 @@ impl<'a> TypeEnv<'a> {
             .collect()
     }
 
-    fn resolve_generic(
+    pub(crate) fn resolve_generic(
         &self,
         name: &Intern<String>,
         params: &[(Intern<String>, ParameterKind)],
     ) -> Ty {
-        let validated_array = self
-            .tag_decls
-            .and_then(|decls| decls.get(name))
-            .and_then(|declare| declare.attributes.fixed_array.as_ref())
-            .is_some();
-        if !validated_array
-            && params.len() == 2
-            && self.tag_decls.is_none_or(|decls| !decls.contains_key(name))
-        {
-            let (element_name, element_kind) = &params[0];
-            let element = match element_kind {
-                ParameterKind::Tagged(ty)
-                | ParameterKind::ValueParam { ty }
-                | ParameterKind::Inferred { ty } => self.resolve_expr(&ty.value),
-                ParameterKind::Generic => self
-                    .subst
-                    .and_then(|subst| subst.get(element_name))
-                    .cloned()
-                    .unwrap_or(Ty::Opaque(*element_name)),
-                ParameterKind::Default(expr) => infer_default_type_arg(expr, self),
-            };
-            let (size_name, size_kind) = &params[1];
-            let size = match size_kind {
-                ParameterKind::Default(expr) => {
-                    let size = expr_as_size_normal_expr(&expr.value)
-                        .unwrap_or(NormalExpr::Var(*size_name));
-                    let Some(decl_params) =
-                        self.tag_params.and_then(|tag_params| tag_params.get(name))
-                    else {
-                        return Ty::Array {
-                            elem: Box::new(element),
-                            size,
-                        };
-                    };
-                    let length_param = decl_params
-                        .iter()
-                        .nth(1)
-                        .map(|(decl_name, _)| *decl_name)
-                        .filter(|decl_name| !decl_name.as_str().is_empty());
-                    let mappings: Vec<_> = length_param
-                        .into_iter()
-                        .map(|length| (length, *size_name))
-                        .collect();
-                    rewrite_normal_expr(size, &mappings)
-                }
-                ParameterKind::Tagged(ty)
-                | ParameterKind::ValueParam { ty }
-                | ParameterKind::Inferred { ty } => {
-                    expr_as_size_normal_expr(&ty.value).unwrap_or(NormalExpr::Var(*size_name))
-                }
-                ParameterKind::Generic => NormalExpr::Var(*size_name),
-            };
-            return Ty::Array {
-                elem: Box::new(element),
-                size,
-            };
-        }
-
         if let Some(subst) = self.subst
             && params
                 .iter()
@@ -555,9 +650,25 @@ impl<'a> TypeEnv<'a> {
         let with_subst = self.with_subst(&merged_types);
         let any_subst = !local_dep.types.is_empty() || !local_dep.consts.is_empty();
         if any_subst
-            && let Some(tag_decls) = self.tag_decls
+            && let Some(tag_decls) = self.tag_declarations()
             && let Some(ast::DeclareValue::Has(members)) = tag_decls.get(name).map(|d| &d.value)
         {
+            if let Some(Ty::Named {
+                instance,
+                name: display_name,
+                ..
+            }) = self.tag_type(name)
+            {
+                return Ty::Named {
+                    instance: ast::ty::NamedTypeInstance {
+                        declaration: instance.declaration,
+                        arguments: self
+                            .resolved_params(name, params, &local_dep)
+                            .unwrap_or_default(),
+                    },
+                    name: *display_name,
+                };
+            }
             let fields: Vec<(Intern<String>, Box<Ty>)> = members
                 .iter()
                 .filter_map(|member| match member {
@@ -572,42 +683,19 @@ impl<'a> TypeEnv<'a> {
                     ast::HasMember::Function(_) => None,
                 })
                 .collect();
-            let definition = Ty::Record {
+            return Ty::Record {
                 name: *name,
                 fields,
                 resolved_params: self.resolved_params(name, params, &local_dep),
             };
-            if let Some(Ty::Named {
-                instance,
-                name: display_name,
-                ..
-            }) = self.tag_types.get(name)
-            {
-                return Ty::Named {
-                    instance: ast::ty::NamedTypeInstance {
-                        declaration: instance.declaration,
-                        arguments: self
-                            .resolved_params(name, params, &local_dep)
-                            .unwrap_or_default(),
-                    },
-                    name: *display_name,
-                };
-            }
-            return definition;
         }
         if params.is_empty()
-            && let Some(tag_decls) = self.tag_decls
+            && let Some(tag_decls) = self.tag_declarations()
             && let Some(ast::DeclareValue::Alias(sp)) = tag_decls.get(name).map(|d| &d.value)
         {
             return with_subst.resolve_expr(&sp.value);
         }
-        let base = match name.as_str() {
-            _ => self
-                .tag_types
-                .get(name)
-                .cloned()
-                .unwrap_or(Ty::Opaque(*name)),
-        };
+        let base = self.tag_type(name).cloned().unwrap_or(Ty::Opaque(*name));
         if merged_types.is_empty() && local_dep.consts.is_empty() {
             base
         } else {
@@ -689,20 +777,6 @@ fn resolve_in_range_bounds(bounds: &InRangeBounds, tag_types: &HashMap<Intern<St
             }
             Ty::Opaque(*name)
         }
-    }
-}
-
-/// Flattens a qualified path into a single symbol name for codegen (e.g. `io.print`).
-pub fn mangled_fn_call_name(call: &FnCall) -> Intern<String> {
-    if call.path.segments.is_empty() {
-        call.path.root
-    } else {
-        let mut joined = call.path.root.as_str().to_string();
-        for seg in &call.path.segments {
-            joined.push('.');
-            joined.push_str(seg.as_str());
-        }
-        Intern::<String>::new(joined)
     }
 }
 
@@ -792,23 +866,23 @@ fn check_type_application_with_defaults(
         });
     }
 
-    for (i, ((_decl_name, decl_kind), (_, prov_kind))) in declared_params
-        .iter()
-        .zip(provided_params.iter())
-        .enumerate()
+    for ((decl_name, decl_kind), (_, prov_kind)) in
+        declared_params.iter().zip(provided_params.iter())
     {
         match (decl_kind, prov_kind) {
             (ParamKind::Type, ParameterKind::Tagged(_))
             | (ParamKind::Type, ParameterKind::Generic)
             | (ParamKind::Type, ParameterKind::Default(_)) => {}
-            (ParamKind::Type, ParameterKind::ValueParam { .. })
+            (ParamKind::Type, ParameterKind::Proposition(_))
+            | (ParamKind::Type, ParameterKind::ValueParam { .. })
             | (ParamKind::Type, ParameterKind::Inferred { .. }) => {
                 return Err(format!(
                     "expected type argument for `{}`, found const value",
-                    declared_params[i].0.as_str()
+                    decl_name.as_str()
                 ));
             }
-            (ParamKind::Value(_), ParameterKind::Tagged(_))
+            (ParamKind::Value(_), ParameterKind::Proposition(_))
+            | (ParamKind::Value(_), ParameterKind::Tagged(_))
             | (ParamKind::Value(_), ParameterKind::Generic)
             | (ParamKind::Value(_), ParameterKind::ValueParam { .. })
             | (ParamKind::Value(_), ParameterKind::Inferred { .. })
@@ -823,23 +897,20 @@ fn check_type_application_with_defaults(
 /// discriminant is used during kind-checking.
 fn param_kind_from_decl_parameter_kind(kind: &ParameterKind) -> ParamKind {
     match kind {
+        ParameterKind::Proposition(predicate) => {
+            ParamKind::Value(Box::new(Ty::Proposition(predicate.clone())))
+        }
         ParameterKind::Generic => ParamKind::Type,
         ParameterKind::Default(expr) if expr_is_type_surface(&expr.value) => ParamKind::Type,
         ParameterKind::Default(_) => ParamKind::Value(Box::new(crate::ty::Ty::i64())),
-        ParameterKind::Tagged(ty)
-        | ParameterKind::ValueParam { ty }
-        | ParameterKind::Inferred { ty } => {
-            if matches!(&ty.value, ast::Expr::AnonymousTag(name) if name.as_str() == "Type") {
-                ParamKind::Type
-            } else {
-                ParamKind::Value(Box::new(crate::ty::Ty::i64()))
-            }
-        }
+        ParameterKind::Tagged(_)
+        | ParameterKind::ValueParam { .. }
+        | ParameterKind::Inferred { .. } => ParamKind::Value(Box::new(crate::ty::Ty::i64())),
     }
 }
 
 fn is_literal_expr(expr: &ast::Expr) -> bool {
-    matches!(expr, ast::Expr::Lit(Literal::Int(_) | Literal::Number(_)))
+    matches!(expr, ast::Expr::Lit(Literal::Int(_)))
 }
 
 fn named_generic_argument(
@@ -860,17 +931,19 @@ fn named_generic_argument(
 fn literal_expr_as_const(expr: &ast::Expr) -> Option<NormalExpr> {
     match expr {
         ast::Expr::Lit(Literal::Int(n)) => Some(NormalExpr::from(*n)),
-        ast::Expr::Lit(Literal::Number(n)) => Some(NormalExpr::from(*n as i128)),
         _ => None,
     }
 }
 
 pub(crate) fn expr_is_type_surface(expr: &ast::Expr) -> bool {
     match expr {
+        ast::Expr::ResultValues(values) if values.is_empty() => true,
         ast::Expr::Binary(binary) if binary.op == ast::BinOp::LogicalOr => {
             expr_is_type_surface(&binary.lhs.value) && expr_is_type_surface(&binary.rhs.value)
         }
-        ast::Expr::AnonymousTag(_)
+        ast::Expr::TypeValue(_)
+        | ast::Expr::IntegerDomain(_)
+        | ast::Expr::AnonymousTag(_)
         | ast::Expr::TagCall(_)
         | ast::Expr::FnCall(ast::FnCall { args: None, .. }) => true,
         ast::Expr::Ref { inner, .. } | ast::Expr::TakePtr(inner) => {
@@ -878,18 +951,19 @@ pub(crate) fn expr_is_type_surface(expr: &ast::Expr) -> bool {
         }
         ast::Expr::Range(range) => match (&range.start.value, &range.end.value) {
             (ast::Expr::AnonymousTag(start), ast::Expr::AnonymousTag(end)) if start == end => true,
-            (ast::Expr::Lit(ast::Literal::Number(_)), ast::Expr::Lit(ast::Literal::Number(_)))
-            | (ast::Expr::Lit(ast::Literal::Int(_)), ast::Expr::Lit(ast::Literal::Int(_))) => true,
+            (ast::Expr::Lit(ast::Literal::Int(_)), ast::Expr::Lit(ast::Literal::Int(_))) => true,
             _ => false,
         },
         ast::Expr::FixedArrayAlloc { init, size } => {
-            expr_is_type_surface(&init.value) && expr_as_size_normal_expr(&size.value).is_some()
+            expr_is_type_surface(&init.value)
+                && size_expr_to_normal(&size.value, SizeCallName::Mangled, true).is_some()
         }
         ast::Expr::SequenceLiteral(ast::SequenceLiteral::Elements(elems)) => {
             elems.iter().all(|elem| expr_is_type_surface(&elem.value))
         }
         ast::Expr::SequenceLiteral(ast::SequenceLiteral::Repeat { seed, count }) => {
-            expr_is_type_surface(&seed.value) && expr_as_size_normal_expr(&count.value).is_some()
+            expr_is_type_surface(&seed.value)
+                && size_expr_to_normal(&count.value, SizeCallName::Mangled, true).is_some()
         }
         _ => false,
     }
@@ -902,11 +976,7 @@ pub(crate) fn typevars_from_receiver_expr(expr: &ast::Expr) -> HashMap<Intern<St
     };
     for arg in &call.args {
         if let ast::Expr::AnonymousTag(name) = arg.value
-            && name
-                .as_str()
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_lowercase())
+            && name.as_str().starts_with_lowercase()
         {
             out.insert(name, Ty::Opaque(name));
         }
@@ -914,94 +984,6 @@ pub(crate) fn typevars_from_receiver_expr(expr: &ast::Expr) -> HashMap<Intern<St
     out
 }
 
-fn expr_as_size_normal_expr(expr: &ast::Expr) -> Option<NormalExpr> {
-    match expr {
-        ast::Expr::Lit(Literal::Int(n)) => Some(NormalExpr::from(*n)),
-        ast::Expr::Lit(Literal::Number(n)) => Some(NormalExpr::from(*n as i128)),
-        ast::Expr::FnCall(call) if call.args.is_none() => {
-            Some(NormalExpr::Var(call.path.value.root))
-        }
-        _ => expr_as_size_normal_expr_without_calls(expr),
-    }
-}
-
-fn expr_as_size_normal_expr_without_calls(expr: &ast::Expr) -> Option<NormalExpr> {
-    match expr {
-        ast::Expr::Lit(Literal::Int(n)) => Some(NormalExpr::from(*n)),
-        ast::Expr::Lit(Literal::Number(n)) => Some(NormalExpr::from(*n as i128)),
-        ast::Expr::AnonymousTag(name) => {
-            if name
-                .as_str()
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_lowercase())
-            {
-                Some(NormalExpr::Var(*name))
-            } else {
-                None
-            }
-        }
-        ast::Expr::FnCall(call) if call.args.is_none() => {
-            Some(NormalExpr::Var(call.path.value.root))
-        }
-        ast::Expr::Bind(bind) => Some(NormalExpr::Var(bind.name)),
-        ast::Expr::Binary(binary) => {
-            let lhs = expr_as_size_normal_expr_without_calls(&binary.lhs.value)?;
-            let rhs = expr_as_size_normal_expr_without_calls(&binary.rhs.value)?;
-            Some(match binary.op {
-                ast::expr::BinOp::Add => NormalExpr::Add(Box::new(lhs), Box::new(rhs)),
-                ast::expr::BinOp::Subtract => NormalExpr::Sub(Box::new(lhs), Box::new(rhs)),
-                ast::expr::BinOp::Multiply => NormalExpr::Mul(Box::new(lhs), Box::new(rhs)),
-                _ => return None,
-            })
-        }
-        _ => None,
-    }
-}
-
-fn rewrite_normal_expr(
-    expr: NormalExpr,
-    mapping: &[(Intern<String>, Intern<String>)],
-) -> NormalExpr {
-    fn rewrite(expr: NormalExpr, mapping: &[(Intern<String>, Intern<String>)]) -> NormalExpr {
-        let replace = |name| {
-            mapping
-                .iter()
-                .find_map(|(from, to)| (*from == name).then_some(*to))
-                .unwrap_or(name)
-        };
-        match expr {
-            NormalExpr::Var(name) => NormalExpr::Var(replace(name)),
-            NormalExpr::Add(lhs, rhs) => NormalExpr::Add(
-                Box::new(rewrite(*lhs, mapping)),
-                Box::new(rewrite(*rhs, mapping)),
-            ),
-            NormalExpr::Sub(lhs, rhs) => NormalExpr::Sub(
-                Box::new(rewrite(*lhs, mapping)),
-                Box::new(rewrite(*rhs, mapping)),
-            ),
-            NormalExpr::Mul(lhs, rhs) => NormalExpr::Mul(
-                Box::new(rewrite(*lhs, mapping)),
-                Box::new(rewrite(*rhs, mapping)),
-            ),
-            NormalExpr::Value(value) => NormalExpr::Value(value),
-            NormalExpr::Inferred(dependent_arg_id) => NormalExpr::Inferred(dependent_arg_id),
-            NormalExpr::TargetQuery { kind, operand } => NormalExpr::TargetQuery { kind, operand },
-        }
-    }
-
-    rewrite(expr, mapping)
-}
-
-fn infer_default_type_arg(expr: &ast::Typed<ast::Expr>, env: &TypeEnv<'_>) -> Ty {
-    if expr_is_type_surface(&expr.value) {
-        return env.resolve_expr(&expr.value);
-    }
-    let infer_env = TyInferEnv {
-        tag_types: env.tag_types,
-        fn_return_types: &HashMap::new(),
-        locals: &HashMap::new(),
-        tag_params: env.tag_params,
-    };
-    expr.infer_ty(&infer_env)
-}
+#[cfg(test)]
+#[path = "type_surface_tests.rs"]
+mod nominal_tests;

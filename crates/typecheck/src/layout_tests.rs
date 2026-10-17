@@ -33,7 +33,7 @@ fn zero_natural_alignment_is_rejected() {
     let error = TargetLayout::with_address_layout(LayoutTarget::X86_64, 8, 0, 64)
         .expect_err("zero alignment");
     assert_eq!(
-        error.code(),
+        error.code().slug().as_str(),
         "target-layout-natural-alignment-unrepresentable"
     );
     assert!(matches!(

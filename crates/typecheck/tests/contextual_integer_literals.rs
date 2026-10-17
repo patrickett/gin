@@ -10,7 +10,9 @@ use typecheck::ty::Ty;
 
 #[test]
 fn annotation_materializes_literal_with_nominal_identity_and_value() {
-    let typed = check("LibraryInt is in 0 to 255\nvalue LibraryInt: 42\n");
+    let typed = check(
+        "LibraryInt is in 0 to 255\nLibraryInt has\n    finish(self):\n        return\nvalue LibraryInt: 42\n",
+    );
     let expr = body(&typed, "value");
     let declared = &typed.tags[&typecheck::TagId(Intern::from_ref("LibraryInt"))].resolved_ty;
 
@@ -27,7 +29,8 @@ fn annotation_materializes_literal_with_nominal_identity_and_value() {
 
 #[test]
 fn nominal_integer_metadata_separates_validity_interpretation_and_representation() {
-    let typed = check("LibraryInt is in 250 to 260\n");
+    let typed =
+        check("LibraryInt is in 250 to 260\nLibraryInt has\n    finish(self):\n        return\n");
     let declared = &typed.tags[&typecheck::TagId(Intern::from_ref("LibraryInt"))].resolved_ty;
     let semantics = typed
         .type_registry
@@ -42,7 +45,9 @@ fn nominal_integer_metadata_separates_validity_interpretation_and_representation
     assert!(semantics.validity.domain().contains(i256::I256::from(260)));
     assert!(!semantics.validity.domain().contains(i256::I256::from(261)));
     assert_eq!(
-        ast::integer::resolve_representation(&semantics.validity, &semantics.representation_rule)
+        semantics
+            .validity
+            .resolve_representation(&semantics.representation_rule)
             .unwrap()
             .width()
             .get(),
@@ -52,7 +57,8 @@ fn nominal_integer_metadata_separates_validity_interpretation_and_representation
 
 #[test]
 fn bits_attribute_selects_exact_width_without_changing_validity() {
-    let typed = check("#bits(16)\nWide is in 0 to 256\n");
+    let typed =
+        check("#bits(16)\nWide is in 0 to 256\nWide has\n    finish(self):\n        return\n");
     let declared = &typed.tags[&typecheck::TagId(Intern::from_ref("Wide"))].resolved_ty;
     let semantics = typed
         .type_registry
@@ -69,7 +75,8 @@ fn bits_attribute_selects_exact_width_without_changing_validity() {
 
 #[test]
 fn bits_attribute_rejects_width_smaller_than_validity() {
-    let typed = check("#bits(8)\nWide is in 0 to 256\n");
+    let typed =
+        check("#bits(8)\nWide is in 0 to 256\nWide has\n    finish(self):\n        return\n");
 
     assert!(flaw_codes(&typed).contains(&"type-integer-representation-too-small".to_string()));
 }
@@ -83,14 +90,16 @@ fn bits_attribute_rejects_zero_width() {
 
 #[test]
 fn bits_attribute_rejects_runtime_width_above_128() {
-    let typed = check("#bits(129)\nWide is in 0 to 1\n");
+    let typed =
+        check("#bits(129)\nWide is in 0 to 1\nWide has\n    finish(self):\n        return\n");
 
     assert!(flaw_codes(&typed).contains(&"type-integer-runtime-width-unsupported".to_string()));
 }
 
 #[test]
 fn bits_attribute_rejects_unresolved_width() {
-    let typed = check("#bits(width)\nWide is in 0 to 1\n");
+    let typed =
+        check("#bits(width)\nWide is in 0 to 1\nWide has\n    finish(self):\n        return\n");
 
     assert!(flaw_codes(&typed).contains(&"type-integer-representation-width-invalid".to_string()));
 }
@@ -98,9 +107,7 @@ fn bits_attribute_rejects_unresolved_width() {
 #[test]
 fn occurrence_integer_knowledge_is_separate_from_nominal_type_identity() {
     let typed = check(
-        "Window is in 0 to 10\n\
-         known Window: 5\n\
-         passthrough(value Window) Window: value\n",
+        "Window is in 0 to 10\nknown Window: 5\npassthrough(value Window) Window: return value\n",
     );
     let window = &typed.tags[&typecheck::TagId(Intern::from_ref("Window"))].resolved_ty;
     let known = body(&typed, "known");
@@ -172,7 +179,7 @@ fn compile_time_literal_above_128_bits_preserves_exact_value() {
 fn runtime_materialization_of_wide_source_integer_is_rejected() {
     let literal = "1606938044258990275541962092341162602522202993782792835301376";
     let typed = check(&format!(
-        "Wide is in 0 to {literal}\nvalue Wide: {literal}\n"
+        "Wide is in 0 to {literal}\nWide has\n    finish(self):\n        return\nvalue Wide: {literal}\n"
     ));
 
     assert!(flaw_codes(&typed).contains(&"type-integer-runtime-width-unsupported".to_string()));
@@ -198,10 +205,7 @@ fn compile_time_addition_uses_mathematical_result_width() {
 #[test]
 fn parameter_and_return_types_materialize_literals() {
     let typed = check(
-        "LibraryInt is in 0 to 255\n\
-         take(value LibraryInt) LibraryInt: value\n\
-         result LibraryInt: take(42)\n\
-         make() LibraryInt: 43\n",
+        "LibraryInt is in 0 to 255\nLibraryInt has\n    finish(self):\n        return\ntake(value LibraryInt) LibraryInt: return value\nresult LibraryInt: take(42)\nmake() LibraryInt: return 43\n",
     );
     let call = body(&typed, "result");
     let argument = match &typed.exprs.kind[call.as_usize()] {
@@ -272,7 +276,9 @@ fn bounds_and_negative_validity_are_diagnosed() {
             .contains(&"type-negative-integer-literal-rejected".to_string())
     );
 
-    let signed = check("SignedTiny is in -128 to 127\nvalue SignedTiny: -1\n");
+    let signed = check(
+        "SignedTiny is in -128 to 127\nSignedTiny has\n    finish(self):\n        return\nvalue SignedTiny: -1\n",
+    );
     let expr = body(&signed, "value");
     assert_eq!(
         signed.exprs.facts.const_facts.const_value[expr.as_usize()],
@@ -289,13 +295,17 @@ fn bounds_and_negative_validity_are_diagnosed() {
 
 #[test]
 fn unbounded_source_refinement_requires_finite_runtime_bounds() {
-    let typed = check("main:\n    value is > 0: 2\n    return value\n");
-
-    assert!(
-        flaw_codes(&typed).contains(&"type-integer-refinement-requires-finite-bounds".to_string()),
-        "{:?}",
-        typed.all_flaws()
-    );
+    for predicate in ["> 0", "< 10", "> 0 and < limit"] {
+        let typed = check(&format!(
+            "main:\n    value is {predicate}: 2\n    return value\n"
+        ));
+        assert!(
+            flaw_codes(&typed)
+                .contains(&"type-integer-refinement-requires-finite-bounds".to_string()),
+            "{predicate}: {:?}",
+            typed.all_flaws()
+        );
+    }
 }
 
 #[test]
@@ -323,15 +333,10 @@ fn bounded_source_refinement_normalizes_strict_endpoints() {
 
 #[test]
 fn operator_operands_use_the_nominal_peer_or_anonymous_integer() {
-    let typed = check(
-        r#"Word is in 0 to 255
-#infix('+')
-plus(left Word, right Word) Word: left
-right(value Word) Word: value + 1
-left(value Word) Word: 1 + value
-both := 1 + 2
-"#,
-    );
+    let typed = check(&format!(
+        "{}#infix('+')\nplus(left Word, right Word) Word: return left\nright(value Word) Word: return value + 1\nleft(value Word) Word: return 1 + value\nboth := 1 + 2\n",
+        test_fixtures::preludes::WORD_PRELUDE
+    ));
     let expected = typed.tags[&typecheck::TagId(Intern::from_ref("Word"))]
         .resolved_ty
         .type_id();

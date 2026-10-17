@@ -1,5 +1,6 @@
 use ast::ConstValue;
-use diagnostic::Diagnostic;
+use diagnostic::code::{AddressCode, IntrinsicCode, TypeCode};
+use diagnostic::{Diagnostic, DiagnosticCode};
 use i256::I256;
 
 use crate::representation::Repr;
@@ -59,14 +60,6 @@ pub enum IntrinsicContract {
     AddressStore,
     AddressOffset,
     AddressConversion,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IntrinsicRuntimePrecondition {
-    None,
-    NonZeroDivisor,
-    NonZeroDivisorAndNoSignedOverflow,
-    RawAddressValidity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,18 +226,12 @@ impl IntrinsicOp {
         }
     }
 
-    pub const fn runtime_precondition(self) -> IntrinsicRuntimePrecondition {
-        match self {
-            Self::BitsSignedDivide | Self::BitsSignedRemainder => {
-                IntrinsicRuntimePrecondition::NonZeroDivisorAndNoSignedOverflow
-            }
-            Self::BitsUnsignedDivide | Self::BitsUnsignedRemainder => {
-                IntrinsicRuntimePrecondition::NonZeroDivisor
-            }
-            Self::AddressLoad | Self::AddressStore | Self::AddressOffset => {
-                IntrinsicRuntimePrecondition::RawAddressValidity
-            }
-            _ => IntrinsicRuntimePrecondition::None,
+    fn arity(self) -> usize {
+        match self.contract() {
+            IntrinsicContract::SameWidthBinary | IntrinsicContract::Comparison => 2,
+            IntrinsicContract::Extension | IntrinsicContract::Truncation => 1,
+            IntrinsicContract::AddressLoad | IntrinsicContract::AddressConversion => 1,
+            IntrinsicContract::AddressStore | IntrinsicContract::AddressOffset => 2,
         }
     }
 
@@ -254,12 +241,7 @@ impl IntrinsicOp {
         result: &Ty,
         registry: Option<&crate::TypeRegistry>,
     ) -> Result<(), IntrinsicValidationError> {
-        let expected = match self.contract() {
-            IntrinsicContract::SameWidthBinary | IntrinsicContract::Comparison => 2,
-            IntrinsicContract::Extension | IntrinsicContract::Truncation => 1,
-            IntrinsicContract::AddressLoad | IntrinsicContract::AddressConversion => 1,
-            IntrinsicContract::AddressStore | IntrinsicContract::AddressOffset => 2,
-        };
+        let expected = self.arity();
         if operands.len() != expected {
             return Err(IntrinsicValidationError::WrongArity {
                 expected,
@@ -288,9 +270,6 @@ impl IntrinsicOp {
             }
         }
         if matches!(self.contract(), IntrinsicContract::Comparison) {
-            if widths[0] != widths[1] {
-                return Err(IntrinsicValidationError::MismatchedOperandWidths { operands: widths });
-            }
             let integer_truth_domain = registry
                 .and_then(|registry| registry.integer_validity_for_type(result))
                 .or_else(|| result.anonymous_integer_validity())
@@ -298,22 +277,7 @@ impl IntrinsicOp {
                     validity.domain().contains(I256::from(0))
                         && validity.domain().contains(I256::from(1))
                 });
-            let structural_truth_domain = matches!(
-                result,
-                Ty::ResultFamily { alternatives, .. }
-                    if alternatives.as_slice()
-                        == [
-                            ast::ResultAlternative {
-                                label: internment::Intern::from_ref("False"),
-                                proposition: None,
-                            },
-                            ast::ResultAlternative {
-                                label: internment::Intern::from_ref("True"),
-                                proposition: None,
-                            },
-                        ]
-            );
-            if !integer_truth_domain && !structural_truth_domain {
+            if !integer_truth_domain && !matches!(result, Ty::Proposition(_)) {
                 return Err(IntrinsicValidationError::InvalidComparisonResult);
             }
             return Ok(());
@@ -365,11 +329,11 @@ impl IntrinsicOp {
                         return ty.clone();
                     }
                     let resolved = registry.resolved_definition_for_type(ty);
-                    resolved
-                        .address_space()
-                        .is_some()
-                        .then_some(resolved)
-                        .unwrap_or_else(|| ty.clone())
+                    if resolved.address_space().is_some() {
+                        resolved
+                    } else {
+                        ty.clone()
+                    }
                 })
                 .collect::<Vec<_>>()
         });
@@ -446,42 +410,75 @@ impl IntrinsicOp {
 
     pub fn diagnostic(self, error: &IntrinsicValidationError) -> Diagnostic {
         let code = match error {
-            IntrinsicValidationError::WrongArity { .. } => "type-intrinsic-wrong-arity",
+            IntrinsicValidationError::WrongArity { .. } => {
+                // type-intrinsic-wrong-arity
+                DiagnosticCode::Type(TypeCode::Intrinsic(IntrinsicCode::WrongArity))
+            }
             IntrinsicValidationError::NonBitsOperand { .. }
-            | IntrinsicValidationError::NonBitsResult => "type-intrinsic-non-bits",
+            | IntrinsicValidationError::NonBitsResult => {
+                // type-intrinsic-non-bits
+                DiagnosticCode::Type(TypeCode::Intrinsic(IntrinsicCode::NonBits))
+            }
             IntrinsicValidationError::MismatchedBinaryWidths { .. } => {
-                "type-intrinsic-mismatched-widths"
+                // type-intrinsic-mismatched-widths
+                DiagnosticCode::Type(TypeCode::Intrinsic(IntrinsicCode::MismatchedWidths))
             }
             IntrinsicValidationError::MismatchedOperandWidths { .. } => {
-                "type-intrinsic-mismatched-widths"
+                // type-intrinsic-mismatched-widths
+                DiagnosticCode::Type(TypeCode::Intrinsic(IntrinsicCode::MismatchedWidths))
             }
             IntrinsicValidationError::InvalidComparisonResult => {
-                "type-intrinsic-invalid-comparison-result"
+                // type-intrinsic-invalid-comparison-result
+                DiagnosticCode::Type(TypeCode::Intrinsic(IntrinsicCode::InvalidComparisonResult))
             }
-            IntrinsicValidationError::InvalidExtension { .. } => "type-intrinsic-invalid-extension",
+            IntrinsicValidationError::InvalidExtension { .. } => {
+                // type-intrinsic-invalid-extension
+                DiagnosticCode::Type(TypeCode::Intrinsic(IntrinsicCode::InvalidExtension))
+            }
             IntrinsicValidationError::InvalidTruncation { .. } => {
-                "type-intrinsic-invalid-truncation"
+                // type-intrinsic-invalid-truncation
+                DiagnosticCode::Type(TypeCode::Intrinsic(IntrinsicCode::InvalidTruncation))
             }
-            IntrinsicValidationError::UnsupportedWidth { .. } => "type-intrinsic-unsupported-width",
-            IntrinsicValidationError::DivisionByZero => "type-intrinsic-division-by-zero",
+            IntrinsicValidationError::UnsupportedWidth { .. } => {
+                // type-intrinsic-unsupported-width
+                DiagnosticCode::Type(TypeCode::Intrinsic(IntrinsicCode::UnsupportedWidth))
+            }
+            IntrinsicValidationError::DivisionByZero => {
+                // type-intrinsic-division-by-zero
+                DiagnosticCode::Type(TypeCode::Intrinsic(IntrinsicCode::DivisionByZero))
+            }
             IntrinsicValidationError::SignedDivisionOverflow => {
-                "type-intrinsic-signed-division-overflow"
+                // type-intrinsic-signed-division-overflow
+                DiagnosticCode::Type(TypeCode::Intrinsic(IntrinsicCode::SignedDivisionOverflow))
             }
             IntrinsicValidationError::NonAddressOperand { .. }
-            | IntrinsicValidationError::NonAddressResult => "type-intrinsic-non-address",
-            IntrinsicValidationError::PointeeMismatch => "type-raw-address-pointee-mismatch",
+            | IntrinsicValidationError::NonAddressResult => {
+                // type-intrinsic-non-address
+                DiagnosticCode::Type(TypeCode::Intrinsic(IntrinsicCode::NonAddress))
+            }
+            IntrinsicValidationError::PointeeMismatch => {
+                // type-raw-address-pointee-mismatch
+                DiagnosticCode::Type(TypeCode::Address(AddressCode::RawPointeeMismatch))
+            }
             IntrinsicValidationError::InvalidAddressOffsetIndex => {
-                "type-invalid-pointer-offset-index"
+                // type-invalid-pointer-offset-index
+                DiagnosticCode::Type(TypeCode::Address(AddressCode::PointerOffsetIndexInvalid))
             }
             IntrinsicValidationError::InvalidAddressConversionWidth { .. } => {
-                "type-invalid-address-conversion-width"
+                // type-invalid-address-conversion-width
+                DiagnosticCode::Type(TypeCode::Address(AddressCode::ConversionWidthInvalid))
             }
             IntrinsicValidationError::UnsupportedAddressSpace { .. } => {
-                "type-unsupported-address-space"
+                // type-unsupported-address-space
+                DiagnosticCode::Type(TypeCode::Address(AddressCode::SpaceUnsupported))
             }
-            IntrinsicValidationError::PointerTypeMismatch => "type-pointer-type-mismatch",
+            IntrinsicValidationError::PointerTypeMismatch => {
+                // type-pointer-type-mismatch
+                DiagnosticCode::Type(TypeCode::Address(AddressCode::PointerTypeMismatch))
+            }
             IntrinsicValidationError::InvalidAddressStoreResult => {
-                "type-invalid-address-store-result"
+                // type-invalid-address-store-result
+                DiagnosticCode::Type(TypeCode::Address(AddressCode::StoreResultInvalid))
             }
         };
         let diagnostic = Diagnostic::new(
@@ -530,6 +527,16 @@ impl IntrinsicOp {
         }
     }
 
+    pub(crate) fn fold_comparison(self, args: &[ConstValue]) -> Option<ConstValue> {
+        let Self::BitsCompare { predicate, .. } = self else {
+            return None;
+        };
+        let [ConstValue::Int(left), ConstValue::Int(right)] = args else {
+            return None;
+        };
+        Some(ConstValue::Proposition(predicate.compare(*left, *right)))
+    }
+
     pub fn fold(
         self,
         args: &[ConstValue],
@@ -558,7 +565,19 @@ impl IntrinsicOp {
         ) {
             return Ok(None);
         }
-        let values: Vec<u128> = args
+        let expected = self.arity();
+        if args.len() != expected {
+            return Err(IntrinsicValidationError::WrongArity {
+                expected,
+                actual: args.len(),
+            });
+        }
+        for width in [source_width, result_width] {
+            if !(1..=128).contains(&width) {
+                return Err(IntrinsicValidationError::UnsupportedWidth { width });
+            }
+        }
+        let Some(values) = args
             .iter()
             .map(|value| match value {
                 ConstValue::Int(value) => ast::integer::to_u128(*value)
@@ -566,11 +585,10 @@ impl IntrinsicOp {
                     .map(|value| value & Self::mask(source_width)),
                 _ => None,
             })
-            .collect::<Option<_>>()
-            .unwrap_or_default();
-        if values.len() != args.len() {
+            .collect::<Option<Vec<_>>>()
+        else {
             return Ok(None);
-        }
+        };
         let mask = Self::mask(result_width);
         let binary = |f: fn(u128, u128) -> u128| (f(values[0], values[1]) & mask) as i128;
         let value = match self {
@@ -634,7 +652,7 @@ impl IntrinsicOp {
                     }
                     IntegerComparison::Unsigned => predicate.compare(values[0], values[1]),
                 };
-                i128::from(compared)
+                return Ok(Some(ConstValue::Proposition(compared)));
             }
             Self::AddressLoad
             | Self::AddressStore
@@ -671,7 +689,7 @@ impl IntrinsicOp {
 }
 
 impl ComparisonPredicate {
-    fn compare<T: Ord>(self, lhs: T, rhs: T) -> bool {
+    pub(crate) fn compare<T: Ord>(self, lhs: T, rhs: T) -> bool {
         match self {
             Self::Less => lhs < rhs,
             Self::LessOrEqual => lhs <= rhs,

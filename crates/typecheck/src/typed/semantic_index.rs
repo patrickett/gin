@@ -7,6 +7,7 @@ pub(crate) fn param_kind_surface_for_hover(kind: &ParameterKind) -> String {
         ParameterKind::Inferred { ty } => {
             format!("{}: ?", ty.value.format_surface())
         }
+        ParameterKind::Proposition(predicate) => format!("is {predicate}"),
         ParameterKind::Generic => String::new(),
         ParameterKind::Default(expr) => format!(": {:?}", expr.value),
     }
@@ -29,45 +30,39 @@ impl HoverResult {
 
     /// Prefix hover with `{module}` when the tag's declaring module is known.
     pub fn with_tag_module(
-        mut self,
+        self,
         package: Option<&PackageSemanticIndex>,
         tag_name: &Intern<String>,
     ) -> Self {
-        if self.module_prefix.is_none()
-            && let Some(pkg) = package
-            && let Some(module) = pkg.tag_module.get(tag_name)
-        {
-            self.module_prefix = Some(module.clone());
-        }
-        self
+        let prefix = package.and_then(|pkg| pkg.tag_module.get(tag_name).cloned());
+        self.with_prefix(prefix)
     }
 
     /// Prefix hover with `{module}.{def}` when the definition's declaring module is known.
     pub fn with_def_module(
-        mut self,
+        self,
         package: Option<&PackageSemanticIndex>,
         def_name: &Intern<String>,
     ) -> Self {
-        if self.module_prefix.is_none()
-            && let Some(pkg) = package
-            && let Some(path) = pkg.qualified_def_path(def_name)
-        {
-            self.module_prefix = Some(path);
-        }
-        self
+        let prefix = package.and_then(|pkg| pkg.qualified_def_path(def_name));
+        self.with_prefix(prefix)
     }
 
     /// Prefix hover with `{module}.{union}` when the union's declaring module is known.
     pub fn with_qualified_union(
-        mut self,
+        self,
         package: Option<&PackageSemanticIndex>,
         union_name: &Intern<String>,
     ) -> Self {
+        let prefix = package.and_then(|pkg| pkg.qualified_union_path(union_name));
+        self.with_prefix(prefix)
+    }
+
+    fn with_prefix(mut self, prefix: Option<String>) -> Self {
         if self.module_prefix.is_none()
-            && let Some(pkg) = package
-            && let Some(path) = pkg.qualified_union_path(union_name)
+            && let Some(prefix) = prefix
         {
-            self.module_prefix = Some(path);
+            self.module_prefix = Some(prefix);
         }
         self
     }
@@ -85,6 +80,9 @@ pub struct PackageSemanticIndex {
     pub tag_module: HashMap<Intern<String>, String>,
     /// Tag declarations from across the package for cross-file name hovers.
     pub tag_decls: HashMap<Intern<String>, TypedTag>,
+    /// Source signatures for declared member functions, keyed by method name.
+    pub member_functions: HashMap<Intern<String>, Vec<(Intern<String>, ast::HasFunction)>>,
+    member_definitions: HashMap<DefId, (Intern<String>, Intern<String>, SpanId)>,
     /// Declaring module per definition name (`Default` → `core.default`).
     pub def_module: HashMap<Intern<String>, String>,
     /// Merged module-level doc comments (`--|`), keyed by qualified module path.
@@ -94,6 +92,19 @@ pub struct PackageSemanticIndex {
 }
 
 impl PackageSemanticIndex {
+    pub(super) fn member_function_for_definition(
+        &self,
+        id: &DefId,
+    ) -> Option<(Intern<String>, &ast::HasFunction)> {
+        let (owner, name, span) = self.member_definitions.get(id)?;
+        self.member_functions
+            .get(name)?
+            .iter()
+            .find_map(|(candidate, function)| {
+                (*candidate == *owner && function.name_span == *span).then_some((*owner, function))
+            })
+    }
+
     pub fn tag_decl_for_word(&self, name: &Intern<String>) -> Option<(&String, &TypedTag)> {
         self.tag_module.get(name).zip(self.tag_decls.get(name))
     }
@@ -106,15 +117,35 @@ impl PackageSemanticIndex {
         let mut type_registry = crate::TypeRegistry::default();
         let mut tag_module = HashMap::new();
         let mut tag_decls = HashMap::new();
+        let mut member_functions =
+            HashMap::<Intern<String>, Vec<(Intern<String>, ast::HasFunction)>>::new();
+        let mut member_definitions = HashMap::new();
         let mut def_module = HashMap::new();
         let mut module_docs: HashMap<String, Vec<String>> = HashMap::new();
 
         for ast in asts {
             type_registry.merge_from(&ast.type_registry);
-            for (tag_id, ty) in &ast.tag_types {
+            for id in ast.defs.keys() {
+                if let Some((owner, function)) = ast.member_function_for_definition(id) {
+                    member_definitions.insert(*id, (owner, function.name, function.name_span));
+                }
+            }
+            for (owner, declaration) in &ast.eval_ast.tags {
+                if let ast::DeclareValue::Has(members) = &declaration.value {
+                    for member in members {
+                        if let ast::HasMember::Function(function) = member {
+                            member_functions
+                                .entry(function.name)
+                                .or_default()
+                                .push((*owner, function.as_ref().clone()));
+                        }
+                    }
+                }
+            }
+            for (tag_id, ty) in ast.tag_types.iter() {
                 tag_types.insert(tag_id.0, ty.clone());
             }
-            for (tag_id, tag) in &ast.tags {
+            for (tag_id, tag) in &*ast.tags {
                 if let Some(params) = &tag.params {
                     tag_params.insert(tag_id.0, params.clone());
                 }
@@ -131,7 +162,7 @@ impl PackageSemanticIndex {
                 } else {
                     format!("{}.{}", origin.package.name.as_str(), simple_module)
                 };
-                for (tag_id, tag) in &ast.tags {
+                for (tag_id, tag) in &*ast.tags {
                     tag_module.entry(tag_id.0).or_insert_with(|| module.clone());
                     tag_decls.insert(tag_id.0, tag.clone());
                 }
@@ -162,17 +193,14 @@ impl PackageSemanticIndex {
             variant_map,
             tag_module,
             tag_decls,
+            member_functions,
+            member_definitions,
             def_module,
             module_docs: module_docs
                 .into_iter()
                 .map(|(module, docs)| (module, docs.join("\n\n")))
                 .collect(),
         }
-    }
-
-    pub fn module_for_variant_word(&self, variant: &Intern<String>) -> Option<&String> {
-        let (union, _, _) = self.variant_map.get(variant)?.first()?;
-        self.tag_module.get(union)
     }
 
     /// `core.primitive.Bool` for union `Bool` declared in module `core.primitive`.
@@ -196,11 +224,58 @@ pub(crate) fn const_union_variant_label(ty: &Ty, discriminant: usize) -> Option<
     }
 }
 
+/// Tag metadata lookup shared by package-level and per-file hover formatting.
+pub(crate) trait TagLookup {
+    fn ty_of(&self, name: &Intern<String>) -> Option<&Ty>;
+    fn params_of(&self, name: &Intern<String>) -> Option<&Parameters>;
+    fn tag_name_for_ty(&self, ty: &Ty) -> Option<&str>;
+}
+
+impl TagLookup for TypedFileAst {
+    fn ty_of(&self, name: &Intern<String>) -> Option<&Ty> {
+        self.tag_types.get(&TagId(*name))
+    }
+
+    fn params_of(&self, name: &Intern<String>) -> Option<&Parameters> {
+        self.tags
+            .get(&TagId(*name))
+            .and_then(|tag| tag.params.as_ref())
+    }
+
+    fn tag_name_for_ty(&self, ty: &Ty) -> Option<&str> {
+        self.tag_types
+            .iter()
+            .find(|(_, tag_ty)| *tag_ty == ty)
+            .map(|(id, _)| id.0.as_str())
+    }
+}
+
+impl<'a> TagLookup
+    for (
+        &'a HashMap<Intern<String>, Ty>,
+        Option<&'a HashMap<Intern<String>, Parameters>>,
+    )
+{
+    fn ty_of(&self, name: &Intern<String>) -> Option<&Ty> {
+        self.0.get(name)
+    }
+
+    fn params_of(&self, name: &Intern<String>) -> Option<&Parameters> {
+        self.1.and_then(|params| params.get(name))
+    }
+
+    fn tag_name_for_ty(&self, ty: &Ty) -> Option<&str> {
+        self.0
+            .iter()
+            .find(|(_, tag_ty)| *tag_ty == ty)
+            .map(|(name, _)| name.as_str())
+    }
+}
+
 pub(crate) fn format_variant_pattern_label(
     name: &str,
     fields: &[(Intern<String>, Ty)],
-    tag_types: &HashMap<Intern<String>, Ty>,
-    tag_params: Option<&HashMap<Intern<String>, Parameters>>,
+    tags: &impl TagLookup,
 ) -> String {
     if fields.is_empty() {
         return name.to_string();
@@ -208,7 +283,7 @@ pub(crate) fn format_variant_pattern_label(
     let parts: Vec<String> = fields
         .iter()
         .map(|(n, t)| {
-            let type_str = variant_pattern_field_type_surface(t, tag_types, tag_params);
+            let type_str = type_annotation_surface_for_hover(t, tags);
             if type_str == n.as_str() {
                 // Opaque generic matching the field name — show just the name.
                 n.as_str().to_string()
@@ -220,94 +295,27 @@ pub(crate) fn format_variant_pattern_label(
     format!("{}({})", name, parts.join(", "))
 }
 
-pub(crate) fn format_variant_pattern_label_local(
-    name: &str,
-    fields: &[(Intern<String>, Ty)],
-    tag_types: &HashMap<TagId, Ty>,
-    tags: &HashMap<TagId, TypedTag>,
-) -> String {
-    if fields.is_empty() {
-        return name.to_string();
-    }
-    let parts: Vec<String> = fields
-        .iter()
-        .map(|(n, t)| {
-            let type_str = variant_pattern_field_type_surface_local(t, tag_types, tags);
-            if type_str == n.as_str() {
-                n.as_str().to_string()
-            } else {
-                format!("{} {}", n.as_str(), type_str)
-            }
-        })
-        .collect();
-    format!("{}({})", name, parts.join(", "))
-}
-
-pub(crate) fn variant_pattern_field_type_surface(
-    ty: &Ty,
-    tag_types: &HashMap<Intern<String>, Ty>,
-    tag_params: Option<&HashMap<Intern<String>, Parameters>>,
-) -> String {
-    if let Ty::Record { name, .. } = ty
-        && name.as_str() != "List"
-    {
-        return format_ty_for_hover(ty).replace("Union(Type)", "Union(union)");
-    } else if let Ty::Record { name, .. } = ty
-        && name.as_str() == "List"
-    {
-        return "List".to_string();
-    }
-    type_annotation_surface_for_hover(ty, tag_types, tag_params)
-}
-
-pub(crate) fn variant_pattern_field_type_surface_local(
-    ty: &Ty,
-    tag_types: &HashMap<TagId, Ty>,
-    tags: &HashMap<TagId, TypedTag>,
-) -> String {
-    if let Ty::Record { name, .. } = ty
-        && name.as_str() != "List"
-    {
-        return format_ty_for_hover(ty).replace("Union(Type)", "Union(union)");
-    } else if let Ty::Record { name, .. } = ty
-        && name.as_str() == "List"
-    {
-        return "List".to_string();
-    }
-    type_annotation_surface_for_hover_local(ty, tag_types, tags)
-}
-
 /// Type name as written in a `name Type` declare (e.g. `List(NamedTy)` not `pointer: …`).
-pub(crate) fn type_annotation_surface_for_hover(
-    ty: &Ty,
-    tag_types: &HashMap<Intern<String>, Ty>,
-    tag_params: Option<&HashMap<Intern<String>, Parameters>>,
-) -> String {
+pub(crate) fn type_annotation_surface_for_hover(ty: &Ty, tags: &impl TagLookup) -> String {
     match ty {
         Ty::Union { name, .. } => {
             if name.as_str() == "union"
-                && let Some((tag_name, _)) = tag_types.iter().find(|(_, tag_ty)| *tag_ty == ty)
+                && let Some(tag_name) = tags.tag_name_for_ty(ty)
             {
-                return tag_name.as_str().to_string();
+                return tag_name.to_string();
             }
             name.as_str().to_string()
         }
         Ty::Opaque(name) => name.as_str().to_string(),
         Ty::Record {
             name,
-            fields,
             resolved_params,
+            ..
         } => {
-            if let Some(surface) = generic_record_surface(
-                name,
-                fields,
-                resolved_params.as_deref(),
-                tag_types,
-                tag_params,
-            ) {
+            if let Some(surface) = generic_record_surface(name, resolved_params.as_deref(), tags) {
                 return surface;
             }
-            if tag_types.contains_key(name) && !tag_has_generic_params(name, tag_params) {
+            if tags.ty_of(name).is_some() && !tag_has_generic_params(name, tags) {
                 return name.as_str().to_string();
             }
             format_ty_for_hover(ty)
@@ -316,148 +324,30 @@ pub(crate) fn type_annotation_surface_for_hover(
     }
 }
 
-pub(crate) fn type_annotation_surface_for_hover_local(
-    ty: &Ty,
-    tag_types: &HashMap<TagId, Ty>,
-    tags: &HashMap<TagId, TypedTag>,
-) -> String {
-    match ty {
-        Ty::Union { name, .. } => {
-            if name.as_str() == "union"
-                && let Some((tag_name, _)) = tag_types.iter().find(|(_, tag_ty)| *tag_ty == ty)
-            {
-                return tag_name.0.as_str().to_string();
-            }
-            name.as_str().to_string()
-        }
-        Ty::Opaque(name) => name.as_str().to_string(),
-        Ty::Record {
-            name,
-            fields,
-            resolved_params,
-        } => {
-            if let Some(surface) = generic_record_surface_local(
-                name,
-                fields,
-                resolved_params.as_deref(),
-                tag_types,
-                tags,
-            ) {
-                return surface;
-            }
-            if tag_types.contains_key(&TagId(*name)) && !tag_has_generic_params_local(name, tags) {
-                return name.as_str().to_string();
-            }
-            format_ty_for_hover(ty)
-        }
-        other => format_ty_for_hover(other),
-    }
-}
-
-pub(crate) fn tag_has_generic_params(
-    name: &Intern<String>,
-    tag_params: Option<&HashMap<Intern<String>, Parameters>>,
-) -> bool {
-    tag_params
-        .and_then(|tp| tp.get(name))
-        .is_some_and(|params| {
-            params
-                .iter()
-                .any(|(_, k)| matches!(k.kind, ParameterKind::Generic))
-        })
-}
-
-pub(crate) fn tag_has_generic_params_local(
-    name: &Intern<String>,
-    tags: &HashMap<TagId, TypedTag>,
-) -> bool {
-    tags.get(&TagId(*name))
-        .and_then(|tag| tag.params.as_ref())
-        .is_some_and(|params| {
-            params
-                .iter()
-                .any(|(_, kind)| matches!(kind.kind, ParameterKind::Generic))
-        })
-}
-
-pub(crate) fn generic_record_surface(
-    name: &Intern<String>,
-    fields: &[(Intern<String>, Box<Ty>)],
-    resolved_params: Option<&[(Intern<String>, TyArg)]>,
-    tag_types: &HashMap<Intern<String>, Ty>,
-    tag_params: Option<&HashMap<Intern<String>, Parameters>>,
-) -> Option<String> {
-    if !tag_has_generic_params(name, tag_params) {
-        return None;
-    }
-    match name.as_str() {
-        "List" => {
-            let elem = list_element_ty_from_resolved_params(resolved_params)
-                .or_else(|| list_element_ty_from_record_fields(fields))?;
-            Some(format!(
-                "List({})",
-                type_annotation_surface_for_hover(&elem, tag_types, tag_params)
-            ))
-        }
-        _ => None,
-    }
-}
-
-pub(crate) fn generic_record_surface_local(
-    name: &Intern<String>,
-    fields: &[(Intern<String>, Box<Ty>)],
-    resolved_params: Option<&[(Intern<String>, TyArg)]>,
-    tag_types: &HashMap<TagId, Ty>,
-    tags: &HashMap<TagId, TypedTag>,
-) -> Option<String> {
-    if !tag_has_generic_params_local(name, tags) {
-        return None;
-    }
-    match name.as_str() {
-        "List" => Some(format!(
-            "List({})",
-            type_annotation_surface_for_hover_local(
-                &list_element_ty_from_resolved_params(resolved_params)
-                    .or_else(|| list_element_ty_from_record_fields(fields))?,
-                tag_types,
-                tags,
-            )
-        )),
-        _ => None,
-    }
-}
-
-pub(crate) fn list_element_ty_from_resolved_params(
-    params: Option<&[(Intern<String>, TyArg)]>,
-) -> Option<Ty> {
-    params?.iter().find_map(|(_, arg)| match arg {
-        TyArg::Type(ty) => Some((**ty).clone()),
-        TyArg::Const(_) => None,
+fn tag_has_generic_params(name: &Intern<String>, tags: &impl TagLookup) -> bool {
+    tags.params_of(name).is_some_and(|params| {
+        params
+            .iter()
+            .any(|(_, kind)| matches!(kind.kind, ParameterKind::Generic))
     })
 }
 
-pub(crate) fn is_capitalized_type_name(name: &str) -> bool {
-    name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
-}
-
-pub(crate) fn list_element_ty_from_record_fields(
-    fields: &[(Intern<String>, Box<Ty>)],
-) -> Option<Ty> {
-    let (_, pointer) = fields.iter().find(|(n, _)| n.as_str() == "pointer")?;
-    if let Some(pointee) = pointer.pointee_ty() {
-        return Some(pointee.clone());
+fn generic_record_surface(
+    name: &Intern<String>,
+    resolved_params: Option<&[(Intern<String>, TyArg)]>,
+    tags: &impl TagLookup,
+) -> Option<String> {
+    if !tag_has_generic_params(name, tags) {
+        return None;
     }
-    match pointer.as_ref() {
-        Ty::Opaque(name) if is_capitalized_type_name(name.as_str()) => {
-            Some(pointer.as_ref().clone())
-        }
-        Ty::Record { name, .. }
-            if is_capitalized_type_name(name.as_str()) && name.as_str() != "List" =>
-        {
-            Some(pointer.as_ref().clone())
-        }
-        _ => None,
-    }
+    let arguments = resolved_params?
+        .iter()
+        .map(|(_, argument)| match argument {
+            TyArg::Type(ty) => type_annotation_surface_for_hover(ty, tags),
+            TyArg::Const(value) => value.to_string(),
+        })
+        .collect::<Vec<_>>();
+    Some(format!("{name}({})", arguments.join(", ")))
 }
 
 /// Format a `Ty` for hover display.
@@ -465,7 +355,7 @@ pub fn format_ty_for_hover(ty: &Ty) -> String {
     match ty {
         Ty::Named { .. } => ty.format_for_hover(),
         Ty::AnonymousInteger { .. } => ty.format_for_hover(),
-        Ty::ResultFamily { .. } => ty.format_for_hover(),
+        Ty::Proposition(_) | Ty::ResultFamily { .. } => ty.format_for_hover(),
         Ty::Address { .. } => ty.format_for_hover(),
         Ty::UnresolvedLiteral(ast::ty::LiteralKind::Integer) => "integer literal".to_string(),
         Ty::UnresolvedLiteral(ast::ty::LiteralKind::Text) => "text literal".to_string(),
@@ -488,6 +378,7 @@ pub fn format_ty_for_hover(ty: &Ty) -> String {
         Ty::Union { name, .. } => format!("Union({})", name.as_str()),
         Ty::Opaque(name) => name.as_str().to_string(),
         Ty::Array { elem, size } => format!("[{}; {}]", format_ty_for_hover(elem), size),
+        Ty::OwnedStorage { inner } => format!("own {}", format_ty_for_hover(inner)),
         Ty::Ptr { inner } => format!("*{}", format_ty_for_hover(inner)),
         Ty::Ref { inner, mutable } => {
             let prefix = if *mutable { "mut " } else { "ref " };
@@ -505,5 +396,58 @@ pub fn format_ty_for_hover(ty: &Ty) -> String {
             ast::ConstValue::Text(s) => format!("'{s}'"),
             other => other.to_hover_string(),
         },
+    }
+}
+
+impl TypedFileAst {
+    pub(super) fn result_evidence_hover(&self, expr_id: ExprId, source: &str) -> Option<String> {
+        if let Some(EvidenceProposition::IntegerComparison {
+            lhs,
+            rhs,
+            comparison,
+        }) = self.exprs.proposition_evidence_of(expr_id)
+        {
+            let left = self.comparison_operand_surface(*lhs, source)?;
+            let right = self.comparison_operand_surface(*rhs, source)?;
+            let relation = ast::ProofRelation::from(*comparison);
+            return Some(format!("{left} {relation} {right}"));
+        }
+        let Ty::ResultFamily {
+            owner,
+            alternatives,
+        } = self.exprs.ty_of(expr_id)?
+        else {
+            return None;
+        };
+        let evidence = self.exprs.result_evidence_of(expr_id)?;
+        if evidence.owner != *owner {
+            return None;
+        }
+        let mut alternatives = alternatives.iter().collect::<Vec<_>>();
+        alternatives.sort_by_key(|alternative| alternative.label.as_str() != "True");
+        let mut outcomes = Vec::with_capacity(alternatives.len());
+        for outcome in alternatives {
+            let label = outcome.label.as_str();
+            let alternative = evidence
+                .alternatives
+                .iter()
+                .find(|alternative| alternative.label.as_str() == label)?;
+            let EvidenceProposition::IntegerComparison {
+                lhs,
+                rhs,
+                comparison,
+            } = alternative.proposition;
+            let left = self.comparison_operand_surface(lhs, source)?;
+            let right = self.comparison_operand_surface(rhs, source)?;
+            let relation = ast::ProofRelation::from(comparison);
+            outcomes.push(format!("{label} thus {left} {relation} {right}"));
+        }
+        Some(outcomes.join(" or "))
+    }
+
+    fn comparison_operand_surface<'a>(&self, operand: ExprId, source: &'a str) -> Option<&'a str> {
+        let span = self.span_table.get(self.exprs.span_of(operand)?);
+        let surface = source.get(span.start()..span.end())?.trim();
+        (!surface.is_empty()).then_some(surface)
     }
 }

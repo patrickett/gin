@@ -4,7 +4,17 @@ use typecheck::transform::{TransformCtx, transform};
 use typecheck::{FileId, TypedFileAst};
 
 fn check(source: &str) -> TypedFileAst {
-    let file = TokenCursor::parse_source(source);
+    let metadata = r#"
+#phantom(input, output)
+MemorySignature(input, output) has
+    version Len
+    finish(self):
+        return
+memory_signature MemorySignature([pointer ref Word, length Len], ()): MemorySignature(version: 1)
+write_code := [signature: memory_signature, target: #target.triple, bytes: [144], inputs: [pointer: [architecture: "x86_64", bank: "general", index: 7, width: 64], length: [architecture: "x86_64", bank: "general", index: 6, width: 64]], outputs: [], clobbers: [], reads: [], writes: [[pointer: 0, length: 1]]]
+read_code := [signature: memory_signature, target: #target.triple, bytes: [144], inputs: [pointer: [architecture: "x86_64", bank: "general", index: 7, width: 64], length: [architecture: "x86_64", bank: "general", index: 6, width: 64]], outputs: [], clobbers: [], reads: [[pointer: 0, length: 1]], writes: []]
+"#;
+    let file = TokenCursor::parse_source(&format!("{source}\n{metadata}"));
     assert!(
         file.parse_warnings.is_empty(),
         "parse warnings: {:?}",
@@ -17,33 +27,33 @@ fn check(source: &str) -> TypedFileAst {
     assert!(
         typed.exprs.kind.iter().any(|kind| matches!(
             kind,
-            typecheck::TypedExprKind::Asm {
+            typecheck::TypedExprKind::Emit {
                 state: typecheck::assembly::AssemblyState::Checked(_),
                 ..
             }
         )),
-        "assembly was not checked"
+        "emission was not checked: {:?}",
+        typed.all_flaws()
     );
     typed
 }
 
-const ASM: &str = "'gin-asm 1\\ntarget \"x86_64-unknown-linux-gnu\"\\ndialect att\\ninput \"pointer\" fixed \"rdi\"\\ninput \"length\" fixed \"rsi\"\\nmemory write pointer=\"pointer\" length=\"length\"\\ntemplate \"nop\"'";
-const READ_ASM: &str = "'gin-asm 1\\ntarget \"x86_64-unknown-linux-gnu\"\\ndialect att\\ninput \"pointer\" fixed \"rdi\"\\ninput \"length\" fixed \"rsi\"\\nmemory read pointer=\"pointer\" length=\"length\"\\ntemplate \"nop\"'";
-
 #[test]
 fn assembly_reader_allows_shared_aliases() {
-    let source = format!(
-        "Len is in 0 to 18446744073709551615\nWord is in 0 to 255\nreader(length Len, pointer ref{{shared}} Word): #asm({READ_ASM}, pointer: pointer, length: length)\nwrapper(length Len, left ref{{shared}} Word, right ref{{shared}} Word): reader(length, ref left)\nmain(value mut Word, length Len): wrapper(length, ref value, ref value)\n"
-    );
+    let source = String::from(format!(
+        "Len is in 0 to 18446744073709551615\nLen has\n    finish(self):\n        return\n{}reader(pointer ref{{shared}} Word, length Len): return #emit(read_code, [pointer: pointer, length: length])\nwrapper(length Len, left ref{{shared}} Word, right ref{{shared}} Word): return reader(left, length)\nmain(value mut Word, length Len): return wrapper(length, value, value)\n",
+        test_fixtures::preludes::WORD_PRELUDE
+    ));
     let typed = check(&source);
     assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
 }
 
 #[test]
 fn assembly_wrapper_rejects_shared_mut_aliases() {
-    let source = format!(
-        "Len is in 0 to 18446744073709551615\nWord is in 0 to 255\nwrite(length Len, pointer ref{{shared}} Word): #asm({ASM}, pointer: pointer, length: length)\nwrapper(length Len, left ref{{shared}} Word, right mut{{shared}} Word): write(length, ref left)\nmain(value mut Word, length Len): wrapper(length, ref value, mut value)\n"
-    );
+    let source = String::from(format!(
+        "Len is in 0 to 18446744073709551615\nLen has\n    finish(self):\n        return\n{}write(pointer ref{{shared}} Word, length Len): return #emit(write_code, [pointer: pointer, length: length])\nwrapper(length Len, left ref{{shared}} Word, right mut{{shared}} Word): return write(left, length)\nmain(value mut Word, length Len): return wrapper(length, value, value)\n",
+        test_fixtures::preludes::WORD_PRELUDE
+    ));
     let typed = check(&source);
     let flaws = typed.all_flaws();
     assert!(!flaws.is_empty());
@@ -56,18 +66,20 @@ fn assembly_wrapper_rejects_shared_mut_aliases() {
 
 #[test]
 fn assembly_write_preserves_unrelated_reference_on_reuse() {
-    let source = format!(
-        "Len is in 0 to 18446744073709551615\nWord is in 0 to 255\nwrite(pointer ref Word, length Len): #asm({ASM}, pointer: pointer, length: length)\nmain(left mut Word, right mut Word, length Len) Word:\n    ref saved Word: right\n    write(ref left, length)\n    result: saved\n    return 0\n"
-    );
+    let source = String::from(format!(
+        "Len is in 0 to 18446744073709551615\nLen has\n    finish(self):\n        return\n{}write(pointer ref Word, length Len): return #emit(write_code, [pointer: pointer, length: length])\nmain(left mut Word, right mut Word, length Len) Word:\n    ref saved Word: right\n    write(left, length)\n    result: saved\n    return 0\n",
+        test_fixtures::preludes::WORD_PRELUDE
+    ));
     let typed = check(&source);
     assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
 }
 
 #[test]
 fn assembly_write_invalidates_affected_reference_on_reuse() {
-    let source = format!(
-        "Len is in 0 to 18446744073709551615\nWord is in 0 to 255\nwrite(pointer ref Word, length Len): #asm({ASM}, pointer: pointer, length: length)\nmain(length Len) Word:\n    items: [0; 2]\n    ref saved Word: items.(0)\n    write(ref items.(0), length)\n    result: saved\n    return 0\n"
-    );
+    let source = String::from(format!(
+        "Len is in 0 to 18446744073709551615\nLen has\n    finish(self):\n        return\n{}write(pointer ref Word, length Len): return #emit(write_code, [pointer: pointer, length: length])\nmain(length Len) Word:\n    items: [0; 2]\n    ref saved Word: items.[0]\n    write(items.[0], length)\n    result: saved\n    return 0\n",
+        test_fixtures::preludes::WORD_PRELUDE
+    ));
     let typed = check(&source);
     let flaws = typed.all_flaws();
     assert!(
@@ -76,28 +88,4 @@ fn assembly_write_invalidates_affected_reference_on_reuse() {
                 .iter()
                 .all(|(_, flaw)| flaw.code.slug() == "type-use-of-invalidated-reference")
     );
-}
-
-#[test]
-fn direct_assembly_write_invalidates_affected_reference_on_reuse() {
-    let source = format!(
-        "Len is in 0 to 18446744073709551615\nWord is in 0 to 255\nmain(length Len) Word:\n    items: [0; 2]\n    ref saved Word: items.(0)\n    written: #asm({ASM}, pointer: ref items.(0), length: length)\n    result: saved\n    return 0\n"
-    );
-    let typed = check(&source);
-    let flaws = typed.all_flaws();
-    assert!(!flaws.is_empty());
-    assert!(
-        flaws
-            .iter()
-            .all(|(_, flaw)| flaw.code.slug() == "type-use-of-invalidated-reference")
-    );
-}
-
-#[test]
-fn direct_assembly_write_preserves_unrelated_reference_on_reuse() {
-    let source = format!(
-        "Len is in 0 to 18446744073709551615\nWord is in 0 to 255\nmain(length Len) Word:\n    items: [0; 2]\n    ref saved Word: items.(1)\n    written: #asm({ASM}, pointer: ref items.(0), length: length)\n    result: saved\n    return 0\n"
-    );
-    let typed = check(&source);
-    assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
 }

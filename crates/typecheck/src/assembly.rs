@@ -1,7 +1,7 @@
+use diagnostic::code::EmissionCode;
 use internment::Intern;
 use std::collections::HashSet;
 
-use crate::subst::DepSubst;
 use crate::ty::Ty;
 use crate::typed::TypedFileAst;
 use ast::ConstValue;
@@ -23,18 +23,19 @@ pub struct AssemblySpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssemblyState {
     Pending,
-    Checked(CheckedAssembly),
+    Checked(Box<CheckedAssembly>),
     Invalid,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckedAssembly {
-    pub evaluation: Option<crate::DefId>,
     pub target: String,
     pub dialect: String,
     pub template: String,
     pub inputs: Vec<AssemblyInput>,
     pub operands: Vec<(Intern<String>, crate::typed::ExprId)>,
+    pub record: crate::typed::ExprId,
+    pub construction: Vec<crate::typed::ExprId>,
     pub result: Option<String>,
     pub outputs: Vec<AssemblyOutput>,
     pub clobbers: Vec<String>,
@@ -48,9 +49,9 @@ impl CheckedAssembly {
         spec: AssemblySpec,
         operands: Vec<(Intern<String>, crate::typed::ExprId)>,
         tied_output_indices: Vec<Option<usize>>,
+        record: crate::typed::ExprId,
     ) -> Self {
         Self {
-            evaluation: None,
             target: spec.target,
             dialect: spec.dialect,
             template: spec.template,
@@ -61,6 +62,8 @@ impl CheckedAssembly {
             memory: spec.memory,
             side_effects: spec.side_effects,
             operands,
+            record,
+            construction: Vec::new(),
             tied_output_indices,
         }
     }
@@ -85,7 +88,7 @@ impl CheckedAssembly {
     }
 
     pub fn canonical_form(&self) -> String {
-        self.as_spec().canonical_form()
+        format!("{:?}", self.as_spec())
     }
 }
 
@@ -108,79 +111,7 @@ pub struct AssemblyMemory {
     pub writes: Vec<(String, String)>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AssemblyParseError {
-    pub line: usize,
-    pub message: String,
-}
-
 impl AssemblySpec {
-    pub fn with_output(mut self, name: impl Into<String>, register: impl Into<String>) -> Self {
-        self.outputs.push(AssemblyOutput {
-            name: name.into(),
-            register: register.into(),
-        });
-        self
-    }
-
-    pub fn canonical_form(&self) -> String {
-        let mut result = format!(
-            "gin-asm 1\ntarget \"{}\"\ndialect {}\n",
-            self.target, self.dialect
-        );
-        for input in &self.inputs {
-            result.push_str(&format!(
-                "input \"{}\" {} \"{}\"\n",
-                input.parameter,
-                if input.tie { "tied" } else { "fixed" },
-                input.register
-            ));
-        }
-        if let Some(register) = &self.result {
-            result.push_str(&format!("result fixed \"{register}\"\n"));
-        }
-        for output in &self.outputs {
-            result.push_str(&format!(
-                "output \"{}\" fixed \"{}\"\n",
-                output.name, output.register
-            ));
-        }
-        for register in &self.clobbers {
-            result.push_str(&format!("clobber \"{register}\"\n"));
-        }
-        for (pointer, length) in &self.memory.reads {
-            result.push_str(&format!(
-                "memory read pointer=\"{pointer}\" length=\"{length}\"\n"
-            ));
-        }
-        for (pointer, length) in &self.memory.writes {
-            result.push_str(&format!(
-                "memory write pointer=\"{pointer}\" length=\"{length}\"\n"
-            ));
-        }
-        if self.side_effects {
-            result.push_str("option side_effects\n");
-        }
-        result.push_str(&format!("template \"{}\"", self.template));
-        result
-    }
-
-    pub fn llvm_constraints(&self) -> Vec<String> {
-        let ties = self
-            .inputs
-            .iter()
-            .map(|input| {
-                if !input.tie {
-                    return None;
-                }
-                self.output_registers()
-                    .iter()
-                    .position(|register| *register == &input.register)
-            })
-            .collect::<Vec<_>>();
-        self.llvm_constraints_with_ties(&ties)
-    }
-
     fn output_registers(&self) -> Vec<&String> {
         self.result
             .iter()
@@ -189,6 +120,12 @@ impl AssemblySpec {
     }
 
     fn llvm_constraints_with_ties(&self, ties: &[Option<usize>]) -> Vec<String> {
+        assert_eq!(
+            ties.len(),
+            self.inputs.len(),
+            "checked assembly tie count must match inputs"
+        );
+        let output_registers = self.output_registers();
         let mut constraints = self
             .result
             .as_ref()
@@ -201,9 +138,18 @@ impl AssemblySpec {
         );
         constraints.extend(self.inputs.iter().zip(ties.iter()).map(|(input, tie)| {
             if input.tie {
-                tie.map(|index| index.to_string())
-                    .unwrap_or_else(|| "0".to_string())
+                let index = tie.expect("checked tied input must identify an output");
+                assert_eq!(
+                    output_registers.get(index).copied(),
+                    Some(&input.register),
+                    "checked tied output must match the input register"
+                );
+                index.to_string()
             } else {
+                assert!(
+                    tie.is_none(),
+                    "checked untied input must not identify an output"
+                );
                 format!("{{{}}}", input.register)
             }
         }));
@@ -217,115 +163,6 @@ impl AssemblySpec {
         }
         constraints
     }
-
-    pub fn parse(source: &str) -> Result<Self, Vec<AssemblyParseError>> {
-        let mut version = None;
-        let mut target = None;
-        let mut dialect = None;
-        let mut inputs = Vec::new();
-        let mut result = None;
-        let mut outputs = Vec::new();
-        let mut clobbers = Vec::new();
-        let mut memory = AssemblyMemory::default();
-        let mut side_effects = true;
-        let mut template = None;
-        let mut errors = Vec::new();
-        let mut seen = HashSet::new();
-
-        for (line_index, line) in source.lines().enumerate() {
-            let line_number = line_index + 1;
-            let mut fields = line.splitn(2, ' ');
-            let Some(kind) = fields.next() else { continue };
-            let rest = fields.next().unwrap_or_default().trim();
-            if kind.is_empty() {
-                continue;
-            }
-            let duplicate =
-                !matches!(kind, "input" | "output" | "clobber" | "memory") && !seen.insert(kind);
-            if duplicate {
-                errors.push(AssemblyParseError {
-                    line: line_number,
-                    message: format!("duplicate `{kind}` field"),
-                });
-                continue;
-            }
-            match kind {
-                "gin-asm" => version = rest.parse::<u32>().ok(),
-                "target" => target = quoted(rest),
-                "dialect" => dialect = Some(rest.to_string()),
-                "input" => match parse_input(rest) {
-                    Some(input) => inputs.push(input),
-                    None => errors.push(error(
-                        line_number,
-                        "expected `input \"name\" fixed \"register\"`",
-                    )),
-                },
-                "result" => match parse_fixed(rest) {
-                    Some(register) => result = Some(register),
-                    None => errors.push(error(line_number, "expected `result fixed \"register\"`")),
-                },
-                "output" => match parse_output(rest) {
-                    Some(output) => outputs.push(output),
-                    None => errors.push(error(
-                        line_number,
-                        "expected `output \"name\" fixed \"register\"`",
-                    )),
-                },
-                "clobber" => match quoted(rest) {
-                    Some(register) => clobbers.push(register),
-                    None => errors.push(error(line_number, "expected quoted clobber register")),
-                },
-                "memory" => match parse_memory(rest) {
-                    Some((kind, pointer, length)) => match kind {
-                        "read" => memory.reads.push((pointer, length)),
-                        "write" => memory.writes.push((pointer, length)),
-                        _ => errors.push(error(
-                            line_number,
-                            "memory effect must be `read` or `write`",
-                        )),
-                    },
-                    None => errors.push(error(
-                        line_number,
-                        "expected `memory read|write pointer=\"p\" length=\"n\"`",
-                    )),
-                },
-                "option" if rest == "side_effects" => side_effects = true,
-                "template" => template = quoted_template(rest),
-                _ => errors.push(error(
-                    line_number,
-                    format!("unknown assembly field `{kind}`"),
-                )),
-            }
-        }
-
-        if version != Some(1) {
-            errors.push(error(1, "unsupported or missing `gin-asm 1` version"));
-        }
-        if target.is_none() {
-            errors.push(error(1, "missing target"));
-        }
-        if dialect.is_none() {
-            errors.push(error(1, "missing dialect"));
-        }
-        if template.is_none() {
-            errors.push(error(1, "missing template"));
-        }
-        if errors.is_empty() {
-            Ok(Self {
-                target: target.unwrap(),
-                dialect: dialect.unwrap(),
-                inputs,
-                result,
-                outputs,
-                clobbers,
-                memory,
-                side_effects,
-                template: template.unwrap(),
-            })
-        } else {
-            Err(errors)
-        }
-    }
 }
 
 pub(crate) fn populate_package_specifications(
@@ -336,7 +173,7 @@ pub(crate) fn populate_package_specifications(
     let mut values = Vec::new();
     for (file, program) in programs.iter().copied().enumerate() {
         for kind in &program.exprs.kind {
-            let crate::typed::TypedExprKind::Asm { specification, .. } = kind else {
+            let crate::typed::TypedExprKind::Emit { specification, .. } = kind else {
                 continue;
             };
             let mut evaluator =
@@ -353,6 +190,30 @@ pub(crate) fn populate_package_specifications(
 }
 
 pub fn validate_assembly_expressions(typed: &mut TypedFileAst, target: &flask::CompileTarget) {
+    validate_with_programs(typed, target, &[]);
+}
+
+pub(crate) fn validate_package_assembly_expressions(
+    files: &mut [TypedFileAst],
+    target: &flask::CompileTarget,
+) {
+    for index in 0..files.len() {
+        let (before, rest) = files.split_at_mut(index);
+        let (typed, after) = rest.split_first_mut().unwrap();
+        let programs: Vec<_> = before
+            .iter()
+            .chain(after.iter())
+            .map(TypedFileAst::resolved_program)
+            .collect();
+        validate_with_programs(typed, target, &programs);
+    }
+}
+
+fn validate_with_programs(
+    typed: &mut TypedFileAst,
+    target: &flask::CompileTarget,
+    programs: &[crate::ResolvedProgram<'_>],
+) {
     populate_target_constants(typed, target);
     let ids: Vec<_> = typed
         .exprs
@@ -360,47 +221,55 @@ pub fn validate_assembly_expressions(typed: &mut TypedFileAst, target: &flask::C
         .iter()
         .enumerate()
         .filter_map(|(index, kind)| {
-            matches!(kind, crate::typed::TypedExprKind::Asm { .. })
+            matches!(kind, crate::typed::TypedExprKind::Emit { .. })
                 .then_some(crate::typed::ExprId(index as u32))
         })
         .collect();
-    validate_assembly_ids(typed, target, ids);
+    validate_assembly_ids(typed, target, ids, programs);
+}
+
+pub(crate) fn target_const_record(target: &flask::TargetTriple) -> ConstValue {
+    ConstValue::Record {
+        fields: vec![
+            (
+                Intern::from_ref("arch"),
+                ConstValue::Text(target.arch_literal().into_owned().into()),
+            ),
+            (
+                Intern::from_ref("vendor"),
+                ConstValue::Text(target.vendor_literal().into()),
+            ),
+            (
+                Intern::from_ref("os"),
+                ConstValue::Text(target.os_literal().into_owned().into()),
+            ),
+            (
+                Intern::from_ref("triple"),
+                ConstValue::Text(target.raw.clone()),
+            ),
+        ]
+        .into(),
+    }
 }
 
 pub fn populate_target_constants(typed: &mut TypedFileAst, target: &flask::CompileTarget) {
     if let flask::CompileTarget::Concrete(target) = target {
-        let value = ConstValue::Record {
-            fields: vec![
-                (
-                    Intern::from_ref("arch"),
-                    ConstValue::Text(target.arch.as_str().into()),
-                ),
-                (
-                    Intern::from_ref("vendor"),
-                    ConstValue::Text(target.vendor.clone()),
-                ),
-                (
-                    Intern::from_ref("os"),
-                    ConstValue::Text(target.os.as_str().into()),
-                ),
-                (
-                    Intern::from_ref("triple"),
-                    ConstValue::Text(target.raw.clone()),
-                ),
-            ]
-            .into(),
-        };
-        for (index, kind) in typed.exprs.kind.iter().enumerate() {
-            if matches!(kind, crate::typed::TypedExprKind::Target) {
-                typed.exprs.facts.const_facts.const_value[index] = Some(value.clone());
-            }
-        }
-        for (index, kind) in typed.exprs.kind.iter().enumerate() {
-            let crate::typed::TypedExprKind::TargetField(field) = kind else {
-                continue;
-            };
-            typed.exprs.facts.const_facts.const_value[index] =
-                value.get_field(field.as_str()).cloned();
+        let value = target_const_record(target);
+        let updates: Vec<(usize, Option<ConstValue>)> = typed
+            .exprs
+            .kind
+            .iter()
+            .enumerate()
+            .filter_map(|(index, kind)| match kind {
+                crate::typed::TypedExprKind::Target => Some((index, Some(value.clone()))),
+                crate::typed::TypedExprKind::TargetField(field) => {
+                    Some((index, value.get_field(field.as_str()).cloned()))
+                }
+                _ => None,
+            })
+            .collect();
+        for (index, update) in updates {
+            typed.exprs.facts.const_facts.const_value[index] = update;
         }
     }
 }
@@ -409,17 +278,48 @@ fn validate_assembly_ids(
     typed: &mut TypedFileAst,
     target: &flask::CompileTarget,
     ids: Vec<crate::typed::ExprId>,
+    programs: &[crate::ResolvedProgram<'_>],
 ) {
     for id in ids {
-        let (specification, operands) = match typed.exprs.kind_of(id).cloned() {
-            Some(crate::typed::TypedExprKind::Asm {
+        let (specification, operands, record) = match typed.exprs.kind_of(id).cloned() {
+            Some(crate::typed::TypedExprKind::Emit {
                 specification,
                 operands,
+                record,
                 ..
-            }) => (specification, operands),
+            }) => (specification, operands, record),
             _ => continue,
         };
         let mut errors = Vec::new();
+        {
+            match crate::emission::signature(
+                &typed.exprs.ty[specification.as_usize()],
+                &typed.type_registry,
+            ) {
+                Some((input, output)) => {
+                    if !matches!(
+                        typed.type_registry.resolved_definition_for_type(&input),
+                        Ty::Record { .. } | Ty::Sequence(_) | Ty::Unit
+                    ) {
+                        errors.push("#emit input signature must be a record".into());
+                    }
+                    if typed.exprs.ty[record.as_usize()] != input {
+                        errors.push(
+                            "#emit arguments must match the code signature's input type".into(),
+                        );
+                    }
+                    if typed.exprs.ty[id.as_usize()] != output {
+                        errors.push(
+                            "#emit result must match the code signature's output type".into(),
+                        );
+                    }
+                }
+                None => errors.push(
+                    "#emit code requires a signature field with input and output type arguments"
+                        .into(),
+                ),
+            }
+        }
         let defer_target = matches!(target, flask::CompileTarget::Library);
         let mut supplied_names = HashSet::new();
         for (name, _) in &operands {
@@ -427,144 +327,72 @@ fn validate_assembly_ids(
                 errors.push(format!("duplicate assembly operand `{name}`"));
             }
         }
-        let normalized =
-            (!defer_target).then(|| evaluate_specification(typed, specification, target));
+        let mut construction = Vec::new();
         let mut tied_output_indices = Vec::new();
-        let mut evaluation = None;
-        let checked = match normalized {
-            None => None,
-            Some(crate::staging::NormalizeResult::Value(
-                value @ (ConstValue::Record { .. } | ConstValue::Tag { .. }),
-            )) => {
-                let leaf = value.get_field("machine_leaf").is_some();
-                let machine = leaf || value.get_field("machine_backend").is_some();
-                let result = if leaf {
-                    crate::machine::backend::compile_leaf(&value, typed.resolved_program(), target)
-                        .map(|(spec, method)| {
-                            evaluation = method;
-                            spec
-                        })
-                } else if machine {
-                    crate::machine::backend::compile(&value, typed.resolved_program(), target)
-                } else {
-                    crate::encoding::EncodingRegion::from_value(&value, typed.resolved_program())
-                        .and_then(|region| {
-                            evaluation = region.evaluation_method(typed.resolved_program())?;
-                            region
-                                .compile(typed.resolved_program(), target)
-                                .map(|region| region.into_assembly())
-                        })
-                };
-                match result {
-                    Ok(spec) => {
-                        if machine && evaluation.is_none() {
-                            let source = spec.canonical_form();
-                            typed.exprs.kind[specification.as_usize()] =
-                                crate::typed::TypedExprKind::Lit(ast::Literal::String(
-                                    source.clone(),
-                                ));
-                            typed.exprs.ty[specification.as_usize()] =
-                                Ty::Literal(ConstValue::Text(source.clone()));
-                            typed.exprs.facts.const_facts.const_value[specification.as_usize()] =
-                                Some(ConstValue::Text(source));
+        let mut checked = if defer_target {
+            None
+        } else {
+            let context = crate::emission::EmissionContext::new(typed.resolved_program(), programs);
+            match crate::emission::evaluate(context, id, specification, target) {
+                Ok((value, prefix)) => {
+                    construction = prefix;
+                    let result = crate::emission::compile(
+                        &value,
+                        &typed.exprs.ty[specification.as_usize()],
+                        context,
+                        target,
+                    );
+                    typed.exprs.facts.const_facts.const_value[specification.as_usize()] =
+                        Some(value);
+                    match result {
+                        Ok(spec) => Some(spec),
+                        Err(error) => {
+                            errors.push(error.message);
+                            None
                         }
-                        Some(spec)
-                    }
-                    Err(error) => {
-                        typed.exprs.facts.semantic_facts.flaws[id.as_usize()].push(
-                            error.at_span_id(
-                                typed.exprs.span[specification.as_usize()],
-                                &typed.span_table,
-                            ),
-                        );
-                        None
                     }
                 }
-            }
-            Some(crate::staging::NormalizeResult::Value(value)) => {
-                if let Some(source) = value.as_utf8() {
-                    if source.trim().is_empty() {
-                        errors.push(
-                            "no checked assembly implementation is available for the active target"
-                                .to_string(),
-                        );
-                        None
+                Err(failure) => {
+                    if failure.frames.is_empty() {
+                        errors.push(failure.diagnostic.message);
                     } else {
-                        match AssemblySpec::parse(&source) {
-                            Ok(spec) => Some(spec),
-                            Err(parse_errors) => {
-                                errors.extend(parse_errors.into_iter().map(|e| e.message));
-                                None
-                            }
-                        }
+                        typed.record_eval_failure(id, *failure);
                     }
-                } else {
-                    errors.push("assembly specification must be compile-time UTF-8 bytes or an instruction region".to_string());
                     None
                 }
             }
-            Some(crate::staging::NormalizeResult::Residual(_)) => {
-                let rendered = match typed.exprs.kind_of(specification) {
-                    _ => evaluate_builder_call(typed, specification, target),
-                };
-                match rendered {
-                    Some(source) => match AssemblySpec::parse(&source) {
-                        Ok(spec) => Some(spec),
-                        Err(parse_errors) => {
-                            errors.extend(parse_errors.into_iter().map(|error| error.message));
-                            None
-                        }
-                    },
-                    None => {
-                        errors.push("could not evaluate compile-time assembly builder".to_string());
-                        None
+        };
+        if let Some(spec) = &mut checked {
+            {
+                let ty = &typed.exprs.ty[id.as_usize()];
+                let fields = crate::emission::operand_fields(ty, &typed.type_registry);
+                if fields.is_empty() && *ty != Ty::Unit {
+                    if spec.outputs.len() == 1 && spec.outputs[0].name == "value" {
+                        let output = spec.outputs.remove(0);
+                        validate_assembly_repr(typed, ty, "value", &output.register, &mut errors);
+                        spec.result = Some(output.register);
+                    } else {
+                        errors.push(
+                            "scalar #emit result requires exactly one output named `value`".into(),
+                        );
                     }
+                } else {
+                    spec.outputs.sort_by_key(|output| {
+                        fields
+                            .iter()
+                            .position(|(name, _)| name.as_str() == output.name)
+                    });
                 }
             }
-            Some(_) => {
-                errors.push(
-                    "assembly specification must be compile-time text or an instruction region"
-                        .to_string(),
-                );
-                None
-            }
-        };
-        if let Some(spec) = &checked {
-            if spec.result.is_some() && !spec.outputs.is_empty() {
-                errors.push("assembly cannot mix legacy result with ordered outputs".to_string());
-            }
             if !defer_target {
-                let declared_results = match &typed.exprs.ty[id.as_usize()] {
-                    Ty::Sequence(fields) => fields
-                        .iter()
-                        .map(|field| {
-                            (
-                                field.name.map(|name| name.to_string()).unwrap_or_default(),
-                                (*field.ty).clone(),
-                            )
-                        })
-                        .collect::<Vec<_>>(),
-                    Ty::Unit => Vec::new(),
-                    ty => typed
-                        .defs
-                        .values()
-                        .find_map(|bind| {
-                            (matches!(bind.body, crate::typed::BindBody::Expr(expr) if expr == id))
-                                .then(|| bind.named_results.first())
-                                .flatten()
-                                .map(|result| {
-                                    vec![(
-                                        result
-                                            .name
-                                            .map(|name| name.to_string())
-                                            .unwrap_or_default(),
-                                        ty.clone(),
-                                    )]
-                                })
-                        })
-                        .unwrap_or_default(),
-                };
-                if !spec.outputs.is_empty() {
+                let declared_results: Vec<_> = crate::emission::operand_fields(
+                    &typed.exprs.ty[id.as_usize()],
+                    &typed.type_registry,
+                )
+                .into_iter()
+                .map(|(name, ty)| (name.to_string(), ty))
+                .collect();
+                if spec.result.is_none() {
                     let declared_names = declared_results
                         .iter()
                         .map(|(name, _)| name.as_str())
@@ -627,7 +455,9 @@ fn validate_assembly_ids(
                                 ));
                             }
                         }
-                        Ok(crate::representation::Repr::Address { .. }) => {}
+                        Ok(crate::representation::Repr::Address { .. }) => {
+                            validate_address_register(typed, &input.parameter, &input.register, &mut errors);
+                        }
                         Ok(repr) => errors.push(format!(
                             "assembly operand `{}` has unsupported physical representation `{repr:?}`",
                             input.parameter
@@ -676,10 +506,11 @@ fn validate_assembly_ids(
                         spec.target, active.raw
                     ));
                 }
-                let supported = match active.arch {
-                    flask::TargetArch::X86_64 => matches!(spec.dialect.as_str(), "att" | "intel"),
-                    flask::TargetArch::Arm64 => spec.dialect == "att",
-                    flask::TargetArch::Wasm32 => false,
+                let supported = match active.architecture() {
+                    flask::Architecture::X86_64 => matches!(spec.dialect.as_str(), "att" | "intel"),
+                    flask::Architecture::Aarch64(_) => spec.dialect == "att",
+                    flask::Architecture::Wasm32 => false,
+                    _ => false,
                 };
                 if !supported {
                     errors.push(format!(
@@ -694,7 +525,7 @@ fn validate_assembly_ids(
                     .chain(spec.result.iter().map(String::as_str))
                     .chain(spec.outputs.iter().map(|output| output.register.as_str()))
                 {
-                    if !valid_register(active.arch, register) {
+                    if !valid_register(active.architecture(), register) {
                         errors.push(format!(
                             "assembly register `{register}` is unsupported for target `{}`",
                             active.raw
@@ -702,7 +533,7 @@ fn validate_assembly_ids(
                     }
                 }
                 for register in spec.clobbers.iter().map(String::as_str) {
-                    if !valid_clobber(active.arch, register) {
+                    if !valid_clobber(active.architecture(), register) {
                         errors.push(format!(
                             "assembly register `{register}` is unsupported for target `{}`",
                             active.raw
@@ -782,12 +613,9 @@ fn validate_assembly_ids(
                     if !input.tie {
                         return None;
                     }
-                    let Some(index) = output_registers
+                    let index = output_registers
                         .iter()
-                        .position(|register| *register == &input.register)
-                    else {
-                        return None;
-                    };
+                        .position(|register| *register == &input.register)?;
                     if !tied_outputs.insert(index) {
                         errors.push(format!(
                             "multiple tied inputs target assembly output {index}"
@@ -805,44 +633,16 @@ fn validate_assembly_ids(
                     "assembly without a result has type Unit".to_string()
                 });
             }
-            if let Some(method) = evaluation {
-                let bind = &typed.defs[&method];
-                if matches!(bind.body, crate::typed::BindBody::Unlowered)
-                    || !spec.memory.reads.is_empty()
-                    || !spec.memory.writes.is_empty()
-                {
-                    errors.push("compile-time assembly evaluation requires a Gin method and a contract without memory access".into());
-                }
-                if bind.return_type != typed.exprs.ty[id.as_usize()] {
-                    errors.push(
-                        "assembly evaluation method must return the assembly result type".into(),
-                    );
-                }
-                for (input, (_, param)) in spec.inputs.iter().zip(&bind.params) {
-                    if let Some((_, operand)) = operands
-                        .iter()
-                        .find(|(name, _)| name.as_str() == input.parameter)
-                        && typed.exprs.ty_of(*operand).is_none_or(|ty| {
-                            typed.type_registry.resolved_definition_for_type(ty)
-                                != typed.type_registry.resolved_definition_for_type(param)
-                        })
-                    {
-                        errors.push(format!(
-                            "assembly evaluation parameter for `{}` must match its operand type",
-                            input.parameter
-                        ));
-                    }
-                }
-            }
         }
         let flaws = errors
             .iter()
             .map(|message| {
-                Diagnostic::new("type-invalid-assembly", message.clone())
+                // type-invalid-assembly
+                Diagnostic::new(EmissionCode::AssemblyInvalid, message.clone())
                     .at_span_id(typed.exprs.span[id.as_usize()], &typed.span_table)
             })
             .collect::<Vec<_>>();
-        if let Some(crate::typed::TypedExprKind::Asm { .. }) = typed.exprs.kind_of(id) {
+        if let Some(crate::typed::TypedExprKind::Emit { .. }) = typed.exprs.kind_of(id) {
             typed.exprs.facts.semantic_facts.flaws[id.as_usize()].extend(flaws);
             let state = if defer_target {
                 AssemblyState::Pending
@@ -863,15 +663,16 @@ fn validate_assembly_ids(
                             spec,
                             resolved_operands,
                             tied_output_indices,
+                            record,
                         );
-                        assembly.evaluation = evaluation;
-                        AssemblyState::Checked(assembly)
+                        assembly.construction = construction;
+                        AssemblyState::Checked(Box::new(assembly))
                     })
                     .unwrap_or(AssemblyState::Invalid)
             } else {
                 AssemblyState::Invalid
             };
-            if let Some(crate::typed::TypedExprKind::Asm { state: slot, .. }) =
+            if let Some(crate::typed::TypedExprKind::Emit { state: slot, .. }) =
                 typed.exprs.kind.get_mut(id.as_usize())
             {
                 *slot = state;
@@ -880,40 +681,33 @@ fn validate_assembly_ids(
     }
 }
 
-fn valid_register(arch: flask::TargetArch, register: &str) -> bool {
+/// x86-64 general-purpose registers in encoding index order (0 = rax, 4 = rsp).
+pub(super) const X86_64_GENERAL_REGISTERS: [&str; 16] = [
+    "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13",
+    "r14", "r15",
+];
+
+fn is_x86_64_general_register(register: &str) -> bool {
+    X86_64_GENERAL_REGISTERS.contains(&register)
+}
+
+fn valid_register(arch: flask::Architecture, register: &str) -> bool {
     match arch {
-        flask::TargetArch::X86_64 => matches!(
-            register,
-            "rax"
-                | "rbx"
-                | "rcx"
-                | "rdx"
-                | "rsi"
-                | "rdi"
-                | "rbp"
-                | "rsp"
-                | "r8"
-                | "r9"
-                | "r10"
-                | "r11"
-                | "r12"
-                | "r13"
-                | "r14"
-                | "r15"
-        ),
-        flask::TargetArch::Arm64 => {
+        flask::Architecture::X86_64 => is_x86_64_general_register(register),
+        flask::Architecture::Aarch64(_) => {
             register == "sp"
                 || register
-                    .strip_prefix('x')
+                    .strip_prefix(['x', 'w'])
                     .is_some_and(|n| n.parse::<u8>().is_ok_and(|index| index <= 30))
         }
-        flask::TargetArch::Wasm32 => false,
+        flask::Architecture::Wasm32 => false,
+        _ => false,
     }
 }
 
-fn valid_clobber(arch: flask::TargetArch, register: &str) -> bool {
+fn valid_clobber(arch: flask::Architecture, register: &str) -> bool {
     valid_register(arch, register)
-        || (matches!(register, "memory" | "cc") && !matches!(arch, flask::TargetArch::Wasm32))
+        || (matches!(register, "memory" | "cc") && !matches!(arch, flask::Architecture::Wasm32))
 }
 
 fn validate_assembly_repr(
@@ -937,9 +731,25 @@ fn validate_assembly_repr(
                 "assembly output `{name}` has {width}-bit representation, incompatible with register `{register}` ({expected} bits)"
             ));
         }
-    } else if !matches!(repr, crate::representation::Repr::Address { .. }) {
+    } else if matches!(repr, crate::representation::Repr::Address { .. }) {
+        validate_address_register(typed, name, register, errors);
+    } else {
         errors.push(format!(
             "assembly output `{name}` has unsupported physical representation"
+        ));
+    }
+}
+
+fn validate_address_register(
+    typed: &TypedFileAst,
+    name: &str,
+    register: &str,
+    errors: &mut Vec<String>,
+) {
+    let width = typed.target_layout.map(|layout| layout.pointer_bits());
+    if width != register_width(register).map(u64::from) {
+        errors.push(format!(
+            "assembly address `{name}` requires a register with the target pointer width"
         ));
     }
 }
@@ -959,25 +769,7 @@ fn register_width(register: &str) -> Option<u32> {
     {
         return Some(32);
     }
-    if matches!(
-        name,
-        "rax"
-            | "rbx"
-            | "rcx"
-            | "rdx"
-            | "rsi"
-            | "rdi"
-            | "rbp"
-            | "rsp"
-            | "r8"
-            | "r9"
-            | "r10"
-            | "r11"
-            | "r12"
-            | "r13"
-            | "r14"
-            | "r15"
-    ) {
+    if is_x86_64_general_register(name) {
         return Some(64);
     }
     if matches!(
@@ -989,226 +781,6 @@ fn register_width(register: &str) -> Option<u32> {
     None
 }
 
-fn evaluate_builder_call(
-    typed: &TypedFileAst,
-    specification: crate::typed::ExprId,
-    target: &flask::CompileTarget,
-) -> Option<String> {
-    let mut evaluator = crate::eval::Evaluator::new(
-        typed.resolved_program(),
-        crate::eval::CompileTimeHost::new(target),
-    );
-    match evaluator.eval(specification).ok()? {
-        crate::eval::EvalOutcome::Complete(value) => value.as_utf8().map(|text| text.into_owned()),
-        crate::eval::EvalOutcome::Address(_)
-        | crate::eval::EvalOutcome::Residual(_)
-        | crate::eval::EvalOutcome::RuntimeDependency(_)
-        | crate::eval::EvalOutcome::Trap(_)
-        | crate::eval::EvalOutcome::Cancelled => None,
-    }
-}
-
-fn evaluate_specification(
-    typed: &TypedFileAst,
-    specification: crate::typed::ExprId,
-    target: &flask::CompileTarget,
-) -> crate::staging::NormalizeResult {
-    if let Some(Some(value)) = typed.exprs.const_value_of(specification) {
-        return crate::staging::NormalizeResult::Value(value.clone());
-    }
-    let mut evaluator = crate::eval::Evaluator::new(
-        typed.resolved_program(),
-        crate::eval::CompileTimeHost::new(target),
-    );
-    match evaluator.eval(specification) {
-        Ok(crate::eval::EvalOutcome::Complete(value)) => {
-            crate::staging::NormalizeResult::Value(value)
-        }
-        Ok(crate::eval::EvalOutcome::RuntimeDependency(_))
-        | Ok(crate::eval::EvalOutcome::Residual(_))
-        | Ok(crate::eval::EvalOutcome::Cancelled)
-        | Ok(crate::eval::EvalOutcome::Address(_))
-        | Ok(crate::eval::EvalOutcome::Trap(_))
-        | Err(_) => crate::staging::normalize(typed, specification, &DepSubst::new()),
-    }
-}
-
-fn error(line: usize, message: impl Into<String>) -> AssemblyParseError {
-    AssemblyParseError {
-        line,
-        message: message.into(),
-    }
-}
-
-fn quoted(value: &str) -> Option<String> {
-    value
-        .strip_prefix('"')
-        .and_then(|value| value.strip_suffix('"'))
-        .map(ToOwned::to_owned)
-}
-
-fn quoted_template(value: &str) -> Option<String> {
-    Some(quoted(value)?.replace("\\n", "\n"))
-}
-
-fn parse_fixed(value: &str) -> Option<String> {
-    let mut fields = value.splitn(2, ' ');
-    (fields.next()? == "fixed")
-        .then(|| quoted(fields.next()?.trim()))
-        .flatten()
-}
-
-fn parse_output(value: &str) -> Option<AssemblyOutput> {
-    let name = value.strip_prefix('"')?.split_once('"')?;
-    let rest = name.1.trim();
-    Some(AssemblyOutput {
-        name: name.0.to_string(),
-        register: parse_fixed(rest)?,
-    })
-}
-
-fn parse_input(value: &str) -> Option<AssemblyInput> {
-    let parameter = value.strip_prefix('"')?.split_once('"')?;
-    let rest = parameter.1.trim();
-    let mut fields = rest.splitn(2, ' ');
-    let binding = fields.next()?;
-    if !matches!(binding, "fixed" | "tied") {
-        return None;
-    }
-    Some(AssemblyInput {
-        parameter: parameter.0.to_string(),
-        register: quoted(fields.next()?.trim())?,
-        tie: binding == "tied",
-    })
-}
-
-fn parse_memory(value: &str) -> Option<(&str, String, String)> {
-    let mut fields = value.split_whitespace();
-    let kind = fields.next()?;
-    let pointer = fields.next()?.strip_prefix("pointer=").and_then(quoted)?;
-    let length = fields.next()?.strip_prefix("length=").and_then(quoted)?;
-    (fields.next().is_none()).then_some((kind, pointer, length))
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_versioned_assembly_protocol() {
-        let spec = AssemblySpec::parse("gin-asm 1\ntarget \"x86_64-unknown-linux-gnu\"\ndialect intel\ninput \"fd\" fixed \"rdi\"\nresult fixed \"rax\"\nclobber \"rcx\"\nmemory read pointer=\"buf\" length=\"len\"\noption side_effects\ntemplate \"syscall\"").unwrap();
-        assert_eq!(spec.inputs[0].parameter, "fd");
-        assert_eq!(spec.result.as_deref(), Some("rax"));
-        assert!(spec.side_effects);
-    }
-
-    #[test]
-    fn parses_ordered_named_outputs_and_constraints() {
-        let spec = AssemblySpec::parse(
-            "gin-asm 1\ntarget \"x86_64-unknown-linux-gnu\"\ndialect intel\noutput \"sum\" fixed \"rax\"\noutput \"overflow\" fixed \"rdx\"\ntemplate \"add\"",
-        )
-        .unwrap();
-        assert_eq!(
-            spec.outputs,
-            vec![
-                AssemblyOutput {
-                    name: "sum".into(),
-                    register: "rax".into()
-                },
-                AssemblyOutput {
-                    name: "overflow".into(),
-                    register: "rdx".into()
-                },
-            ]
-        );
-        assert_eq!(
-            spec.llvm_constraints(),
-            vec!["={rax}", "={rdx}", "~{memory}"]
-        );
-    }
-
-    #[test]
-    fn builder_appends_ordered_outputs() {
-        let spec = AssemblySpec {
-            target: "x86_64-unknown-linux-gnu".into(),
-            dialect: "intel".into(),
-            inputs: Vec::new(),
-            result: None,
-            outputs: Vec::new(),
-            clobbers: Vec::new(),
-            memory: AssemblyMemory::default(),
-            side_effects: false,
-            template: "add".into(),
-        }
-        .with_output("sum", "rax")
-        .with_output("overflow", "rdx");
-
-        assert_eq!(
-            spec.outputs,
-            vec![
-                AssemblyOutput {
-                    name: "sum".into(),
-                    register: "rax".into()
-                },
-                AssemblyOutput {
-                    name: "overflow".into(),
-                    register: "rdx".into()
-                },
-            ]
-        );
-        assert_eq!(spec.llvm_constraints(), vec!["={rax}", "={rdx}"]);
-    }
-
-    #[test]
-    fn rejects_unknown_fields_and_unsupported_versions_together() {
-        let errors = AssemblySpec::parse("gin-asm 2\nunknown value\ntemplate \"x\"").unwrap_err();
-        assert!(
-            errors
-                .iter()
-                .any(|error| error.message.contains("unknown assembly field"))
-        );
-        assert!(
-            errors
-                .iter()
-                .any(|error| error.message.contains("unsupported"))
-        );
-    }
-
-    #[test]
-    fn preserves_explicit_input_result_ties_without_llvm_ordering() {
-        let spec = AssemblySpec::parse(
-            "gin-asm 1\ntarget \"x86_64-unknown-linux-gnu\"\ndialect intel\ninput \"value\" tied \"rax\"\nresult fixed \"rax\"\ntemplate \"inc rax\"",
-        )
-        .unwrap();
-        assert!(spec.inputs[0].tie);
-        assert_eq!(spec.inputs[0].register, "rax");
-        assert!(spec.side_effects);
-        assert_eq!(spec.llvm_constraints(), vec!["={rax}", "0", "~{memory}"]);
-        assert!(
-            spec.canonical_form()
-                .contains("input \"value\" tied \"rax\"")
-        );
-    }
-
-    #[test]
-    fn resolves_ties_to_ordered_output_indices() {
-        let spec = AssemblySpec::parse(
-            "gin-asm 1\ntarget \"x86_64-unknown-linux-gnu\"\ndialect intel\ninput \"lhs\" tied \"rax\"\ninput \"rhs\" tied \"rdx\"\noutput \"sum\" fixed \"rax\"\noutput \"carry\" fixed \"rdx\"\ntemplate \"add\"",
-        )
-        .unwrap();
-
-        assert_eq!(
-            spec.llvm_constraints(),
-            vec!["={rax}", "={rdx}", "0", "1", "~{memory}"]
-        );
-    }
-
-    #[test]
-    fn preserves_escaped_newlines_in_real_assembly_templates() {
-        let spec = AssemblySpec::parse(
-            "gin-asm 1\ntarget \"x86_64-unknown-linux-gnu\"\ndialect intel\ntemplate \"mov rax, 1\\nsyscall\"",
-        )
-        .unwrap();
-        assert_eq!(spec.template, "mov rax, 1\nsyscall");
-    }
-}
+#[path = "assembly_constraints_tests.rs"]
+mod constraints_tests;

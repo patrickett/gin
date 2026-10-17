@@ -1,3 +1,5 @@
+mod support;
+
 use internment::Intern;
 use parser::cursor::TokenCursor;
 use test_fixtures::semantic_fixtures::INDEXED_COPY;
@@ -5,26 +7,15 @@ use typecheck::transform::{TransformCtx, transform};
 use typecheck::{FileId, TypedFileAst};
 
 fn check(replacement: &str) -> TypedFileAst {
-    let source = format!(
-        "Byte is in 0 to 255\n\
-         replace(previous Byte, next Byte) Byte: next\n\
-         inspect(previous ref Byte, next Byte) Byte: next\n\
-         copy_one(source ref Buffer(Byte,4), destination mut Buffer(Byte,4), index is in 0 to 3) Byte:\n    \
-             destination.(index) :: {replacement}\n\
-         return destination.(index)\n\n\
-         #fixed_array(element,count)\n\
-         Buffer(element Type,count BigInt) has\n"
-    );
-    transform(
-        &TokenCursor::parse_source(&source),
-        FileId(0),
-        &TransformCtx::new(),
-    )
+    support::check(&format!(
+        "{}replace(previous Byte, next Byte) Byte: return next\ninspect(previous ref Byte, next Byte) Byte: return next\ncopy_one(source ref Buffer(Byte,4), destination mut Buffer(Byte,4), index is in 0 to 3) Byte:\n    destination.[index] :: {replacement}\n    return destination.[index]\n\n#fixed_array(element,count)\nBuffer(element,count BigInt) has\n    finish(self):\n        return\n",
+        test_fixtures::preludes::BYTE_PRELUDE
+    ))
 }
 
 #[test]
 fn indexed_replacement_explicitly_consumes_the_previous_byte() {
-    let typed = check("replace(destination.(index), source.(index))");
+    let typed = check("replace(destination.[index], source.[index])");
     assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
     let byte = &typed.tags[&typecheck::TagId(Intern::from_ref("Byte"))].resolved_ty;
     for (id, kind) in typed.exprs.kind.iter().enumerate() {
@@ -40,9 +31,9 @@ fn indexed_replacement_explicitly_consumes_the_previous_byte() {
 #[test]
 fn indexed_replacement_cannot_silently_discard_a_byte() {
     for replacement in [
-        "source.(index)",
-        "inspect(ref destination.(index), source.(index))",
-        "replace(destination.(0), source.(index))",
+        "source.[index]",
+        "inspect(destination.[index], source.[index])",
+        "replace(destination.[0], source.[index])",
     ] {
         let typed = check(replacement);
         assert!(
@@ -73,7 +64,7 @@ fn compile_time_copy_updates_the_callers_buffer() {
     for count in 0..=4 {
         let result = evaluator
             .call(
-                typecheck::DefId(Intern::from_ref("run")),
+                typecheck::DefId::named(Intern::from_ref("run")),
                 &[ast::ConstValue::Int(count.into())],
             )
             .unwrap();
@@ -102,7 +93,7 @@ fn a_closed_copy_call_normalizes_to_a_frozen_buffer() {
     );
     assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
     let typecheck::BindBody::Expr(expr) =
-        typed.defs[&typecheck::DefId(Intern::from_ref("copied"))].body
+        typed.defs[&typecheck::DefId::named(Intern::from_ref("copied"))].body
     else {
         panic!("expected expression body")
     };
@@ -121,7 +112,7 @@ fn a_closed_copy_call_normalizes_to_a_frozen_buffer() {
 #[test]
 fn copying_overlapping_buffers_is_rejected() {
     let source = format!(
-        "overlap(buffer mut Buffer(Byte,4)): copy(ref buffer, mut buffer, 4)\n{}",
+        "overlap(buffer mut Buffer(Byte,4)): return copy(buffer, buffer, 4)\n{}",
         INDEXED_COPY
     );
     let typed = transform(
@@ -190,7 +181,7 @@ fn projections_share_storage_with_their_parent_and_siblings() {
 #[test]
 fn compile_time_out_of_bounds_access_is_a_trap() {
     let source = format!(
-        "bad(source ref Buffer(Byte,4)) Byte: source.(4)\nfail:\n    buffer Buffer(Byte,4): [41;4]\nreturn bad(ref buffer)\n{}",
+        "bad(source ref Buffer(Byte,4)) Byte: return source.[4]\nfail:\n    buffer Buffer(Byte,4): [41;4]\n    return bad(buffer)\n{}",
         INDEXED_COPY
     );
     let typed = transform(
@@ -205,16 +196,17 @@ fn compile_time_out_of_bounds_access_is_a_trap() {
     );
     assert_eq!(
         evaluator
-            .call(typecheck::DefId(Intern::from_ref("fail")), &[])
+            .call(typecheck::DefId::named(Intern::from_ref("fail")), &[])
             .unwrap_err()
             .code
-            .slug(),
+            .slug()
+            .as_str(),
         "compile-time-index-out-of-bounds"
     );
     assert!(
         evaluator
             .call(
-                typecheck::DefId(Intern::from_ref("run")),
+                typecheck::DefId::named(Intern::from_ref("run")),
                 &[ast::ConstValue::ZERO]
             )
             .is_ok()
@@ -229,7 +221,7 @@ fn mutating_a_callers_storage_is_not_folded_away() {
         FileId(0),
         &TransformCtx::new(),
     );
-    let bind = &typed.defs[&typecheck::DefId(Intern::from_ref("forward"))];
+    let bind = &typed.defs[&typecheck::DefId::named(Intern::from_ref("forward"))];
     assert_eq!(
         bind.call_capability,
         typecheck::typed::CallCapability::StagePolymorphic
@@ -266,7 +258,7 @@ fn repeated_aggregate_seeds_remain_nested_values() {
     );
     assert_eq!(
         evaluator
-            .call(typecheck::DefId(Intern::from_ref("nested")), &[])
+            .call(typecheck::DefId::named(Intern::from_ref("nested")), &[])
             .unwrap(),
         ast::ConstValue::FixedArray(vec![row.clone(), row].into())
     );

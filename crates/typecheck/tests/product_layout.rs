@@ -80,7 +80,7 @@ fn product_layout_is_padded_in_declaration_order_and_pointer_stride_uses_it() {
 #[test]
 fn empty_product_is_unit_and_target_address_width_is_authoritative() {
     assert_eq!(
-        Repr::from_ty(&ast::Ty::Unit),
+        Repr::derive(&ast::Ty::Unit, None).ok(),
         Some(Repr::Product { fields: vec![] })
     );
     assert_eq!(

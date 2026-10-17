@@ -1,4 +1,4 @@
-use ast::{OperatorRole, ResultAlternative, ResultFamilyOwner, Ty};
+use ast::{ResultAlternative, ResultFamilyOwner, Ty};
 use flask::{CompileTarget, TargetTriple};
 use internment::Intern;
 use parser::cursor::TokenCursor;
@@ -16,20 +16,12 @@ fn unsigned_less() -> IntrinsicOp {
 }
 
 #[test]
-fn comparison_accepts_the_structural_truth_result_family() {
-    let result = Ty::ResultFamily {
-        owner: ResultFamilyOwner::Structural(OperatorRole::Less),
-        alternatives: vec![
-            ResultAlternative {
-                label: Intern::from_ref("False"),
-                proposition: None,
-            },
-            ResultAlternative {
-                label: Intern::from_ref("True"),
-                proposition: None,
-            },
-        ],
-    };
+fn comparison_accepts_a_structural_proposition() {
+    let result = Ty::Proposition(Box::new(ast::ProofProposition::Compare {
+        left: ast::ProofTerm::Name(Intern::from_ref("left")),
+        relation: ast::ProofRelation::Less,
+        right: ast::ProofTerm::Name(Intern::from_ref("right")),
+    }));
 
     assert_eq!(
         unsigned_less().validate_signature(
@@ -47,7 +39,10 @@ fn comparison_accepts_the_structural_truth_result_family() {
 #[test]
 fn comparison_rejects_a_result_family_without_boolean_alternatives() {
     let result = Ty::ResultFamily {
-        owner: ResultFamilyOwner::Structural(OperatorRole::Less),
+        owner: ResultFamilyOwner::LocalCallable(ast::BinderId::new(
+            0,
+            ast::BinderOwner::Expression(0),
+        )),
         alternatives: vec![ResultAlternative {
             label: Intern::from_ref("Maybe"),
             proposition: None,
@@ -85,24 +80,6 @@ fn address_store_requires_unit_result() {
 }
 
 #[test]
-fn address_store_rejects_product_result() {
-    let pointee = Ty::anonymous_integer_for_width(8, false);
-    let address = Ty::Address {
-        pointee: Box::new(pointee.clone()),
-        address_space: 0,
-    };
-    let product = Ty::Record {
-        name: Intern::from_ref("Pair"),
-        fields: vec![(Intern::from_ref("value"), Box::new(pointee.clone()))],
-        resolved_params: None,
-    };
-    assert_eq!(
-        IntrinsicOp::AddressStore.validate_signature(&[address, pointee], &product, None),
-        Err(IntrinsicValidationError::InvalidAddressStoreResult)
-    );
-}
-
-#[test]
 fn address_store_accepts_unit_and_rejects_pointee_mismatch() {
     let pointee = Ty::anonymous_integer_for_width(8, false);
     let address = Ty::Address {
@@ -125,8 +102,11 @@ fn address_store_accepts_unit_and_rejects_pointee_mismatch() {
 
 #[test]
 fn ordinary_pointer_loads_and_stores_accept_named_pointees() {
-    let source = "Word is in 0 to 255\nOtherWord is in 0 to 255\nPointerToWord is @Word\nPointerToPointer is @PointerToWord\nload(address PointerToWord) Word: address.(0)\nreplace_word(previous Word, next Word) Word: next\nstore(address PointerToWord, value Word):\n    pointer PointerToWord: address\n    pointer.(0):: replace_word(pointer.(0), value)\nreturn\nload_pointer(address PointerToPointer) PointerToWord: address.(0)\nreplace_pointer(previous PointerToWord, next PointerToWord) PointerToWord: next\nstore_pointer(address PointerToPointer, value PointerToWord):\n    pointer PointerToPointer: address\n    pointer.(0):: replace_pointer(pointer.(0), value)\nreturn\n";
-    let file = TokenCursor::parse_source(source);
+    let source = format!(
+        "{}OtherWord is in 0 to 255\nOtherWord has\n    finish(self):\n        return\nPointerToWord is @Word\nPointerToWord has\n    finish(self):\n        return\nPointerToPointer is @PointerToWord\nPointerToPointer has\n    finish(self):\n        return\nload(address PointerToWord) Word: return address.[0]\nreplace_word(previous Word, next Word) Word: return next\nstore(address PointerToWord, value Word):\n    pointer PointerToWord: address\n    pointer.[0]:: replace_word(pointer.[0], value)\n    return\nload_pointer(address PointerToPointer) PointerToWord: return address.[0]\nreplace_pointer(previous PointerToWord, next PointerToWord) PointerToWord: return next\nstore_pointer(address PointerToPointer, value PointerToWord):\n    pointer PointerToPointer: address\n    pointer.[0]:: replace_pointer(pointer.[0], value)\n    return\n",
+        test_fixtures::preludes::WORD_PRELUDE
+    );
+    let file = TokenCursor::parse_source(&source);
     assert!(file.parse_warnings.is_empty(), "{:?}", file.parse_warnings);
     let mut context = TransformCtx::new();
     context.compile_target =

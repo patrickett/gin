@@ -7,10 +7,7 @@ use support::{body, check};
 #[test]
 fn renamed_fixed_array_former_retains_named_application_and_array_repr() {
     let typed = check(
-        "Byte is in 0 to 255\n\
-         #fixed_array(element, count)\n\
-         LibraryBuffer(element Type, count BigInt) has\n\
-         make(value Byte) LibraryBuffer(Byte, 4): [value; 4]\n",
+        "Byte is in 0 to 255\n#fixed_array(element, count)\nLibraryBuffer(element, count BigInt) has\nmake(value Byte) LibraryBuffer(Byte, 4): return [value; 4]\n",
     );
     let result = &typed.exprs.ty[body(&typed, "LibraryBuffer.make").as_usize()];
     let former = &typed.tags[&typecheck::TagId(Intern::from_ref("LibraryBuffer"))].resolved_ty;
@@ -32,7 +29,7 @@ fn renamed_fixed_array_former_retains_named_application_and_array_repr() {
     ));
     assert!(
         matches!(
-            &typed.exprs.facts.const_facts.literal_materialization[body(&typed, "LibraryBuffer.make").as_usize()],
+            typed.exprs.facts.const_facts.literal_materialization[body(&typed, "LibraryBuffer.make").as_usize()].as_deref(),
             Some(typecheck::typed::LiteralMaterializationPlan::FixedArray {
                 declaration: Some(materializer),
                 ..
@@ -43,7 +40,7 @@ fn renamed_fixed_array_former_retains_named_application_and_array_repr() {
             [body(&typed, "LibraryBuffer.make").as_usize()]
     );
     assert!(matches!(
-        &typed.exprs.facts.const_facts.sequence_literal[body(&typed, "LibraryBuffer.make").as_usize()],
+        typed.exprs.facts.const_facts.sequence_literal[body(&typed, "LibraryBuffer.make").as_usize()].as_deref(),
         Some(typecheck::typed::TypedSequenceLiteral::Repeat { count, .. })
             if count.as_const_int() == Some(4)
     ));
@@ -59,10 +56,7 @@ fn renamed_fixed_array_former_retains_named_application_and_array_repr() {
 #[test]
 fn uncontextualized_fixed_array_construction_infers_structural_array() {
     let typed = check(
-        "Byte is in 0 to 255\n\
-         #fixed_array(element, count)\n\
-         LibraryBuffer(element Type, count BigInt) has\n\
-         make(value Byte): [value; 4]\n",
+        "Byte is in 0 to 255\n#fixed_array(element, count)\nLibraryBuffer(element, count BigInt) has\nmake(value Byte): return [value; 4]\n",
     );
     let result = &typed.exprs.ty[body(&typed, "LibraryBuffer.make").as_usize()];
     assert!(matches!(result, typecheck::ty::Ty::Array { .. }));
@@ -75,13 +69,13 @@ fn inferred_repeat_materializes_concrete_seed_and_array_type() {
     let ty = &typed.exprs.ty[expression.as_usize()];
     assert!(matches!(ty, typecheck::ty::Ty::Array { elem, size }
         if **elem == typecheck::ty::Ty::i64() && size.as_const_int() == Some(4)));
-    assert!(matches!(
-        &typed.exprs.kind[expression.as_usize()],
-        typecheck::TypedExprKind::ArrayLit(items) if items.len() == 4
-    ));
     let seed = match &typed.exprs.kind[expression.as_usize()] {
-        typecheck::TypedExprKind::ArrayLit(items) => items[0],
-        _ => unreachable!(),
+        typecheck::TypedExprKind::FixedArrayAlloc { init, size }
+            if size.as_const_int() == Some(4) =>
+        {
+            *init
+        }
+        _ => panic!("expected a compact inferred repeat"),
     };
     assert_eq!(typed.exprs.ty[seed.as_usize()], typecheck::ty::Ty::i64());
     assert_eq!(
@@ -104,33 +98,37 @@ fn unconstrained_bracket_literal_never_infers_nominal_list() {
 
 #[test]
 fn range_iteration_uses_an_explicit_range_plan() {
-    let typed = check("main:\n    for value in 0 to 2\n    loop\n");
+    let typed = check("main:\n    for value in 0 to 2\n        iteration: 0\n");
     let plan = typed.exprs.kind.iter().find_map(|kind| match kind {
         typecheck::TypedExprKind::Loop(typecheck::TypedLoop {
-            kind: typecheck::TypedLoopKind::ForIn { plan, .. },
+            kind: typecheck::TypedLoopKind::ForIn { traversal, .. },
             ..
-        }) => Some(plan),
-        _ => None,
-    });
-
-    assert!(matches!(plan, Some(typecheck::IterationPlan::Range)));
-}
-
-#[test]
-fn fixed_array_iteration_preserves_structural_element_and_length() {
-    let typed = check("main:\n    for value in [1, 2, 3]\n    loop\n");
-    let plan = typed.exprs.kind.iter().find_map(|kind| match kind {
-        typecheck::TypedExprKind::Loop(typecheck::TypedLoop {
-            kind: typecheck::TypedLoopKind::ForIn { plan, .. },
-            ..
-        }) => Some(plan),
+        }) => Some(traversal),
         _ => None,
     });
 
     assert!(matches!(
         plan,
-        Some(typecheck::IterationPlan::FixedArray { element, length })
-            if *element == typecheck::ty::Ty::i64() && length.as_const_int() == Some(3)
+        Some(typecheck::SequenceTraversal::IntegerRange { .. })
+    ));
+}
+
+#[test]
+fn fixed_array_iteration_preserves_structural_element_and_length() {
+    let typed = check("main:\n    for value in [1, 2, 3]\n        iteration: 0\n");
+    let plan = typed.exprs.kind.iter().find_map(|kind| match kind {
+        typecheck::TypedExprKind::Loop(typecheck::TypedLoop {
+            kind: typecheck::TypedLoopKind::ForIn { traversal, .. },
+            ..
+        }) => Some(traversal),
+        _ => None,
+    });
+
+    assert!(matches!(
+        plan,
+        Some(typecheck::SequenceTraversal::Fixed { iterations })
+            if iterations.len() == 3 && iterations.iter().enumerate().all(|(index, statements)|
+                typed.exprs.ty_of(statements[0]).and_then(|ty| ty.anonymous_integer_validity()).is_some_and(|validity| validity.domain().storage_hull().is_some_and(|hull| hull.min() == ((index + 1) as u64).into() && hull.max() == ((index + 1) as u64).into())))
     ));
 }
 
@@ -174,7 +172,7 @@ fn bracket_array_forms_lower_to_structural_arrays() {
     for name in ["explicit", "repeated"] {
         let expression = body(&typed, name);
         assert!(matches!(
-            &typed.exprs.facts.const_facts.literal_materialization[expression.as_usize()],
+            typed.exprs.facts.const_facts.literal_materialization[expression.as_usize()].as_deref(),
             Some(typecheck::typed::LiteralMaterializationPlan::FixedArray {
                 declaration: None,
                 ..
@@ -199,7 +197,7 @@ fn bracket_array_forms_lower_to_structural_arrays() {
         typecheck::TypedExprKind::ArrayLit(items) if items.len() == 4
     ));
     assert!(matches!(
-        &typed.exprs.facts.const_facts.sequence_literal[body(&typed, "explicit").as_usize()],
+        &typed.exprs.facts.const_facts.sequence_literal[body(&typed, "explicit").as_usize()].as_deref(),
         Some(typecheck::typed::TypedSequenceLiteral::Elements(items)) if items.len() == 4
     ));
     assert!(matches!(
@@ -207,7 +205,7 @@ fn bracket_array_forms_lower_to_structural_arrays() {
         typecheck::TypedExprKind::FixedArrayAlloc { .. }
     ));
     assert!(matches!(
-        &typed.exprs.facts.const_facts.sequence_literal[body(&typed, "repeated").as_usize()],
+        &typed.exprs.facts.const_facts.sequence_literal[body(&typed, "repeated").as_usize()].as_deref(),
         Some(typecheck::typed::TypedSequenceLiteral::Repeat { count, .. })
             if count.as_const_int() == Some(4)
     ));
@@ -236,17 +234,11 @@ fn typed_aggregate_constants_preserve_fixed_array_category() {
 #[test]
 fn renamed_owned_sequence_uses_declared_builder_calls() {
     let typed = check(
-        "Byte is in 0 to 255\n\
-         #sequence_builder(x, empty, push)\n\
-         Bag(x Type) has\n\
-             empty() Bag(x)\n\
-             push(self Bag(x) own, item x own) Bag(x)\n\
-         make() Bag(Byte): [1, 2]\n\
-         repeat() Bag(Byte): [1; 3]\n",
+        "Byte is in 0 to 255\n#sequence_builder(x, empty, push)\nBag(x) has\n    empty() Bag(x)\n    push(self Bag(x) own, item x own) Bag(x)\nmake() Bag(Byte): return [1, 2]\nrepeat() Bag(Byte): return [1; 3]\n",
     );
     let expression = body(&typed, "make");
     assert!(matches!(
-        &typed.exprs.facts.const_facts.literal_materialization[expression.as_usize()],
+        &typed.exprs.facts.const_facts.literal_materialization[expression.as_usize()].as_deref(),
         Some(typecheck::typed::LiteralMaterializationPlan::OwnedSequence { .. })
     ));
     assert!(matches!(
@@ -271,13 +263,7 @@ fn renamed_owned_sequence_uses_declared_builder_calls() {
 #[test]
 fn owned_repeat_zero_and_one_have_expected_builder_shapes() {
     let typed = check(
-        "Byte is in 0 to 255\n\
-         #sequence_builder(x, empty, push)\n\
-         Bag(x Type) has\n\
-             empty() Bag(x)\n\
-             push(self Bag(x) own, item x own) Bag(x)\n\
-         zero() Bag(Byte): [1; 0]\n\
-         one() Bag(Byte): [1; 1]\n",
+        "Byte is in 0 to 255\n#sequence_builder(x, empty, push)\nBag(x) has\n    empty() Bag(x)\n    push(self Bag(x) own, item x own) Bag(x)\nzero() Bag(Byte): return [1; 0]\none() Bag(Byte): return [1; 1]\n",
     );
     let zero = body(&typed, "zero");
     let one = body(&typed, "one");
@@ -290,13 +276,26 @@ fn owned_repeat_zero_and_one_have_expected_builder_shapes() {
 }
 
 #[test]
+fn owned_builder_accepts_named_constant_repeat_count() {
+    let typed = check(
+        "Byte is in 0 to 255\n#sequence_builder(x, empty, push)\nBag(x) has\n    empty() Bag(x)\n    push(self Bag(x) own, item x own) Bag(x)\nn := 3\nvalues() Bag(Byte): return [1; n]\n",
+    );
+    let expression = body(&typed, "values");
+    assert!(matches!(
+        &typed.exprs.kind[expression.as_usize()],
+        typecheck::TypedExprKind::FnCall { args: Some(args), .. } if args.len() == 2
+    ));
+    assert!(
+        typed.exprs.facts.semantic_facts.flaws[expression.as_usize()]
+            .iter()
+            .all(|flaw| flaw.code.slug() != "type-sequence-builder-repeat-requires-constant-count")
+    );
+}
+
+#[test]
 fn owned_builder_rejects_runtime_repeat_count() {
     let typed = check(
-        "Byte is in 0 to 255\n\
-         #sequence_builder(x, empty, push)\n\
-         Bag(x Type) has empty() Bag(x)\n\
-         n := 3\n\
-         values() Bag(Byte): [1; n]\n",
+        "Byte is in 0 to 255\n#sequence_builder(x, empty, push)\nBag(x) has empty() Bag(x)\nvalues(n Byte) Bag(Byte): return [1; n]\n",
     );
     let expression = body(&typed, "values");
     assert!(
@@ -311,11 +310,7 @@ fn owned_builder_rejects_runtime_repeat_count() {
 #[test]
 fn owned_repeat_requires_rematerializable_seed_when_duplicated() {
     let typed = check(
-        "Byte is in 0 to 255\n\
-         #sequence_builder(x, empty, push)\n\
-         Bag(x Type) has empty() Bag(x)\n\
-         make() Byte\n\
-         values() Bag(Byte): [make(); 2]\n",
+        "Byte is in 0 to 255\n#sequence_builder(x, empty, push)\nBag(x) has empty() Bag(x)\nmake() Byte\nvalues() Bag(Byte): return [make(); 2]\n",
     );
     let expression = body(&typed, "values");
     assert!(
@@ -326,187 +321,27 @@ fn owned_repeat_requires_rematerializable_seed_when_duplicated() {
 }
 
 #[test]
-fn only_explicit_borrow_contract_permits_static_sequence_backing() {
-    let owned = check(
-        "Byte is in 0 to 255\n\
-         #sequence_builder(x, empty, push)\n\
-         Bag(x Type) has empty() Bag(x)\n",
+fn owned_repeat_once_moves_a_runtime_seed_without_rematerializing_it() {
+    let typed = check(
+        "Byte is in 0 to 255\n#sequence_builder(x, empty, push)\nBag(x) has\n    empty() Bag(x)\n    push(self Bag(x) own, item x own) Bag(x)\nmake() Byte\nvalues() Bag(Byte): return [make(); 1]\n",
     );
-    let bag = owned
-        .type_registry
-        .declaration_ids_by_display_name("Bag")
-        .into_iter()
-        .find_map(|id| owned.type_registry.declaration(id))
-        .expect("Bag declaration");
+    let expression = body(&typed, "values");
     assert!(
-        !bag.sequence_literal
-            .as_ref()
-            .expect("sequence contract")
-            .permits_static_backing()
+        typed
+            .all_flaws()
+            .iter()
+            .all(|(_, flaw)| { flaw.code.slug() != "type-sequence-repeat-seed-not-copyable" }),
+        "{:?}",
+        typed.all_flaws()
     );
-
-    let view = check(
-        "Byte is in 0 to 255\n\
-         #sequence_view(x)\n\
-         View(x Type) has\n",
-    );
-    let view = view
-        .type_registry
-        .declaration_ids_by_display_name("View")
-        .into_iter()
-        .find_map(|id| view.type_registry.declaration(id))
-        .expect("View declaration");
-    assert!(
-        view.sequence_literal
-            .as_ref()
-            .expect("sequence contract")
-            .permits_static_backing()
-    );
-}
-
-#[test]
-fn sequence_provenance_join_preserves_only_identical_static_backing() {
-    use typecheck::typed::SequenceProvenance;
-    let first = SequenceProvenance::Static(typecheck::ConstObjectId::from_raw(7));
-    assert!(first.is_static());
-    assert!(!first.is_scoped());
-    assert!(matches!(first.join(first), SequenceProvenance::Static(_)));
-    assert!(matches!(
-        first.join(SequenceProvenance::Static(
-            typecheck::ConstObjectId::from_raw(8)
-        )),
-        SequenceProvenance::Scoped
-    ));
-    assert!(matches!(
-        first.join(SequenceProvenance::Scoped),
-        SequenceProvenance::Scoped
-    ));
-}
-
-#[test]
-fn renamed_view_sequence_gets_static_literal_backing_and_provenance() {
-    let typed = check(
-        "Byte is in 0 to 255\n\
-         #sequence_view(x)\n\
-         View(x) has pointer @x, length Count(x)\n\
-         make() View(Byte): [1, 2]\n",
-    );
-    let expression = body(&typed, "make");
-    assert!(matches!(
-        &typed.exprs.facts.const_facts.literal_materialization[expression.as_usize()],
-        Some(
-            typecheck::typed::LiteralMaterializationPlan::BorrowedSequence {
-                backing: Some(_),
-                ..
-            }
-        )
-    ));
-    assert!(matches!(
-        typed.exprs.facts.semantic_facts.sequence_provenance[expression.as_usize()],
-        Some(typecheck::typed::SequenceProvenance::Static(_))
-    ));
-    assert!(
-        typed.exprs.facts.const_facts.const_object[expression.as_usize()]
-            .and_then(|id| typed.constant_objects.get(id))
-            .is_some()
-    );
-}
-
-#[test]
-fn renamed_view_sequence_accepts_empty_static_literal() {
-    let typed = check(
-        "Byte is in 0 to 255\n\
-         #sequence_view(x)\n\
-         View(x) has pointer @x, length Count(x)\n\
-         make() View(Byte): []\n",
-    );
-    let expression = body(&typed, "make");
-    assert!(matches!(
-        &typed.exprs.facts.const_facts.literal_materialization[expression.as_usize()],
-        Some(typecheck::typed::LiteralMaterializationPlan::BorrowedSequence { .. })
-    ));
-}
-
-#[test]
-fn typed_call_context_materializes_an_untyped_empty_sequence_local() {
-    let typed = check(
-        "Byte is in 0 to 255
-#sequence_view(x)
-Window(x Type) has pointer @x, length Count(x)
-identity(value Window(Byte)) Window(Byte): value
-entry() Window(Byte):
-    values := []
-    return identity(values)
-",
-    );
-    let initializer = typed
-        .exprs
-        .kind
-        .iter()
-        .find_map(|kind| match kind {
-            typecheck::TypedExprKind::Bind { name, body, .. } if name.as_str() == "values" => {
-                Some(*body)
-            }
-            _ => None,
-        })
-        .expect("values binding");
-
-    assert!(typed.exprs.facts.semantic_facts.flaws[initializer.as_usize()].is_empty());
-    assert!(matches!(
-        typed.exprs.facts.const_facts.literal_materialization[initializer.as_usize()],
-        Some(
-            typecheck::typed::LiteralMaterializationPlan::BorrowedSequence {
-                backing: Some(_),
-                ..
-            }
-        )
-    ));
-    assert!(matches!(
-        typed.exprs.facts.semantic_facts.sequence_provenance[initializer.as_usize()],
-        Some(typecheck::typed::SequenceProvenance::Static(_))
-    ));
-}
-
-#[test]
-fn typed_call_context_retargets_untyped_local_sequence_elements() {
-    let typed = check(
-        "Byte is in 0 to 255
-#sequence_view(x)
-Window(x Type) has pointer @x, length Count(x)
-identity(value Window(Byte)) Window(Byte): value
-entry() Window(Byte):
-    values := [1, 2]
-    return identity(values)
-",
-    );
-    let initializer = typed
-        .exprs
-        .kind
-        .iter()
-        .find_map(|kind| match kind {
-            typecheck::TypedExprKind::Bind { name, body, .. } if name.as_str() == "values" => {
-                Some(*body)
-            }
-            _ => None,
-        })
-        .expect("values binding");
-    let typecheck::TypedExprKind::ArrayLit(items) = &typed.exprs.kind[initializer.as_usize()]
+    let typecheck::TypedExprKind::FnCall {
+        args: Some(args), ..
+    } = &typed.exprs.kind[expression.as_usize()]
     else {
-        panic!("expected sequence elements");
+        panic!("one-element builder call")
     };
-
-    assert!(items.iter().all(|item| {
-        typed.exprs.ty[item.as_usize()]
-            .type_name()
-            .is_some_and(|name| name.as_str() == "Byte")
-    }));
-    assert!(matches!(
-        typed.exprs.facts.const_facts.literal_materialization[initializer.as_usize()],
-        Some(
-            typecheck::typed::LiteralMaterializationPlan::BorrowedSequence {
-                backing: Some(_),
-                ..
-            }
-        )
-    ));
+    assert_eq!(args.len(), 2);
+    assert!(
+        matches!(&typed.exprs.kind[args[1].as_usize()], typecheck::TypedExprKind::FnCall { target, .. } if target.0.as_str() == "make")
+    );
 }

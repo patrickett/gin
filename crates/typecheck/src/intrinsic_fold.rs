@@ -1,8 +1,7 @@
 //! Intrinsic folding — walk `Typed<Expr>` trees to propagate `const_value`
 //! and simplify compile-time-resolvable constructs.
 //!
-//! This runs after default materialization and entry-target merge. It is
-//! orchestrated by [`inject_compiler_intrinsics`].
+//! This runs after explicit target queries are materialized.
 
 use std::ops::ControlFlow;
 
@@ -21,6 +20,10 @@ use ast::{BindValue, FileAst, Spanned, WhenArm};
 ///    `const_value` on intrinsic `FnCall` references.
 pub fn inject_compiler_intrinsics(ast: &mut FileAst) {
     inject_when_in_tag_declares(ast);
+    inject_compiler_intrinsic_expressions(ast);
+}
+
+pub(crate) fn inject_compiler_intrinsic_expressions(ast: &mut FileAst) {
     let mut folder = IntrinsicFolder;
     let _ = folder.visit_file_ast(ast);
 }
@@ -28,8 +31,6 @@ pub fn inject_compiler_intrinsics(ast: &mut FileAst) {
 /// Propagates record field constants and simplifies compile-time `when`
 /// expressions in tag declares.
 ///
-/// Must run after [`crate::prepare_target::materialize_default_binds`] and
-/// [`crate::prepare_target::apply_entry_target_merge`].
 fn inject_when_in_tag_declares(ast: &mut FileAst) {
     for decl in ast.tags.values_mut() {
         let DeclareValue::When(when) = &mut decl.value else {
@@ -44,7 +45,8 @@ fn inject_when_in_tag_declares(ast: &mut FileAst) {
             .and_then(|s| s.const_value.as_ref())
             .map(|cv| (when.arms.clone(), cv.clone()));
         if let Some((arms, cv)) = should_simplify
-            && let Some(body) = find_matching_when_body(&arms, &cv)
+            && let Some(body) =
+                find_matching_when_body(&arms, &when.subject.as_ref().unwrap().value, &cv)
         {
             let mut simplified = (*body).clone();
             inject_typed_expr_intrinsics(&mut simplified);
@@ -90,7 +92,8 @@ fn inject_typed_expr_intrinsics(expr: &mut Typed<Expr>) {
             .map(|value| (when.arms.clone(), value.clone()));
 
         if let Some((arms, value)) = should_simplify
-            && let Some(body) = find_matching_when_body(&arms, &value)
+            && let Some(body) =
+                find_matching_when_body(&arms, &when.subject.as_ref().unwrap().value, &value)
         {
             let mut simplified = (*body).clone();
             inject_typed_expr_intrinsics(&mut simplified);
@@ -127,14 +130,14 @@ fn inject_typed_expr_intrinsics(expr: &mut Typed<Expr>) {
 /// Check if a `Typed<Expr>` base has a `ConstValue::Record` and propagate the
 /// matching field's value.
 fn record_from_bind_base(base: &Typed<Expr>) -> Option<&ConstValue> {
-    if let Some(cv @ ConstValue::Record { .. }) = base.const_value.as_ref() {
+    if let Some(cv @ ConstValue::Record { .. }) = base.const_value.as_deref() {
         return Some(cv);
     }
     if let Expr::Bind(b) = &base.value
         && b.params.is_none()
         && let BindValue::Expr(inner) = &b.value
     {
-        return inner.const_value.as_ref();
+        return inner.const_value.as_deref();
     }
     None
 }
@@ -144,7 +147,7 @@ fn propagate_record_field_on_expr(expr: &mut Typed<Expr>) {
         && let Some(ConstValue::Record { fields }) = record_from_bind_base(base)
         && let Some((_, v)) = fields.iter().find(|(n, _)| n == field)
     {
-        expr.const_value = Some(v.clone());
+        expr.const_value = Some(Box::new(v.clone()));
     }
 }
 

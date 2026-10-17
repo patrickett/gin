@@ -1,17 +1,18 @@
+mod support;
+
 use internment::Intern;
 use parser::cursor::TokenCursor;
+use support::{
+    check, check_lexed, check_parsed, def_flaw_codes, expect_flaw_code, expect_no_flaws, flaw_codes,
+};
 use typecheck::transform::{TransformCtx, transform};
 use typecheck::{BindBody, DefId, FileId};
 
 #[test]
 fn explicit_anonymous_result_surface_has_callable_owner() {
-    let source = "choose(value) True or False: True";
-    let typed = transform(
-        &TokenCursor::parse_source(source),
-        FileId(0),
-        &TransformCtx::new(),
-    );
-    let ty = &typed.defs[&DefId(Intern::from_ref("choose"))].return_type;
+    let source = "choose(value is in 0 to 1) True or False: return True";
+    let typed = check(source);
+    let ty = &typed.defs[&DefId::named(Intern::from_ref("choose"))].return_type;
     let ast::Ty::ResultFamily {
         owner: ast::ResultFamilyOwner::Callable(owner),
         alternatives,
@@ -28,7 +29,7 @@ fn explicit_anonymous_result_surface_has_callable_owner() {
             .collect::<Vec<_>>(),
         ["True", "False"]
     );
-    let BindBody::Expr(body) = typed.defs[&DefId(Intern::from_ref("choose"))].body else {
+    let BindBody::Expr(body) = typed.defs[&DefId::named(Intern::from_ref("choose"))].body else {
         panic!("expected expression body");
     };
     assert_eq!(
@@ -54,12 +55,8 @@ fn explicit_anonymous_result_surface_has_callable_owner() {
 
 #[test]
 fn inferred_alternative_construction_introduces_callable_family() {
-    let typed = transform(
-        &TokenCursor::parse_source("choose: Ready"),
-        FileId(0),
-        &TransformCtx::new(),
-    );
-    let bind = &typed.defs[&DefId(Intern::from_ref("choose"))];
+    let typed = check("choose: Ready");
+    let bind = &typed.defs[&DefId::named(Intern::from_ref("choose"))];
     let ast::Ty::ResultFamily {
         owner: ast::ResultFamilyOwner::Callable(owner),
         alternatives,
@@ -85,13 +82,10 @@ fn inferred_alternative_construction_introduces_callable_family() {
 
 #[test]
 fn inferred_branch_exits_extend_one_callable_family() {
-    let source = "choose(value):\n\tif value is 0\n\t\tTrue\n\treturn\n\treturn False";
-    let typed = transform(
-        &TokenCursor::parse_source(source),
-        FileId(0),
-        &TransformCtx::new(),
-    );
-    let bind = &typed.defs[&DefId(Intern::from_ref("choose"))];
+    let source =
+        "choose(value is in 0 to 1):\n\twhen value is 0 then\n\t\treturn True\n\treturn False";
+    let typed = check(source);
+    let bind = &typed.defs[&DefId::named(Intern::from_ref("choose"))];
     let ast::Ty::ResultFamily {
         owner: ast::ResultFamilyOwner::Callable(owner),
         alternatives,
@@ -115,10 +109,19 @@ fn inferred_branch_exits_extend_one_callable_family() {
     else {
         panic!("expected branching body");
     };
-    let typecheck::TypedExprKind::If(if_expr) = &typed.exprs.kind[exprs[0].as_usize()] else {
-        panic!("expected if exit");
-    };
-    let true_exit = *if_expr.stmts.last().expect("taken exit");
+    let true_exit = typed
+        .exprs
+        .kind
+        .iter()
+        .find_map(|kind| match kind {
+            typecheck::TypedExprKind::Return { value, .. } => *value,
+            _ => None,
+        })
+        .expect("taken exit");
+    assert!(matches!(
+        typed.exprs.kind[exprs[0].as_usize()],
+        typecheck::TypedExprKind::When(_)
+    ));
     for (exit, label) in [(true_exit, "True"), (*false_exit, "False")] {
         assert_eq!(typed.exprs.ty[exit.as_usize()], bind.return_type);
         assert!(matches!(
@@ -130,59 +133,48 @@ fn inferred_branch_exits_extend_one_callable_family() {
     }
 }
 
-fn flaw_codes(source: &str) -> Vec<String> {
-    transform(
-        &TokenCursor::parse_source(source),
-        FileId(0),
-        &TransformCtx::new(),
-    )
-    .all_flaws()
-    .into_iter()
-    .map(|(_, flaw)| flaw.code.slug().to_string())
-    .collect()
-}
-
 #[test]
 fn anonymous_result_alternative_cannot_name_public_parameter_type() {
-    let codes = flaw_codes("choose(value) True or False: True\naccept(value True): value");
+    let codes = flaw_codes(&check_parsed(
+        "choose(value) True or False: return True\naccept(value True): return value",
+    ));
 
     assert!(codes.contains(&"type-anonymous-result-not-nameable".to_string()));
 }
 
 #[test]
 fn anonymous_result_alternative_cannot_name_public_field_type() {
-    let codes = flaw_codes("choose(value) True or False: True\nHolder has\n\tvalue True");
+    let codes = flaw_codes(&check_parsed(
+        "choose(value) True or False: return True\nHolder has\n\tvalue True",
+    ));
 
     assert!(codes.contains(&"type-anonymous-result-not-nameable".to_string()));
 }
 
 #[test]
 fn anonymous_result_alternative_cannot_name_public_variant_payload() {
-    let codes =
-        flaw_codes("choose(value) True or False: True\nEnvelope is Wrapped(value True) or Empty");
+    let codes = flaw_codes(&check_parsed(
+        "choose(value) True or False: return True\nEnvelope is Wrapped(value True) or Empty",
+    ));
 
     assert!(codes.contains(&"type-anonymous-result-not-nameable".to_string()));
 }
 
 #[test]
 fn nominal_type_sharing_result_alternative_spelling_remains_nameable() {
-    let codes = flaw_codes(
-        "True is in 0 to 1\nchoose(value) True or False: True\naccept(value True) True: value",
-    );
+    let codes = flaw_codes(&check_parsed(
+        "True is in 0 to 1\nchoose(value) True or False: return True\naccept(value True) True: return value",
+    ));
 
     assert!(!codes.contains(&"type-anonymous-result-not-nameable".to_string()));
 }
 
 #[test]
 fn same_shaped_callable_families_are_incompatible() {
-    let typed = transform(
-        &TokenCursor::parse_source(
-            "first() True or False: True\nsecond() True or False: False\nbad: first() = second()",
-        ),
-        FileId(0),
-        &TransformCtx::new(),
+    let typed = check(
+        "first() True or False: return True\nsecond() True or False: return False\nbad: first() = second()",
     );
-    let owner = |name| match &typed.defs[&DefId(Intern::from_ref(name))].return_type {
+    let owner = |name| match &typed.defs[&DefId::named(Intern::from_ref(name))].return_type {
         ast::Ty::ResultFamily {
             owner: ast::ResultFamilyOwner::Callable(owner),
             alternatives,
@@ -203,27 +195,19 @@ fn same_shaped_callable_families_are_incompatible() {
     assert_eq!(first_owner.declaration.as_str(), "first");
     assert_eq!(second_owner.declaration.as_str(), "second");
     assert_ne!(first_owner, second_owner);
-    let flaws = typed
-        .all_flaws()
-        .into_iter()
-        .map(|(_, flaw)| flaw.code.slug().to_string())
-        .collect::<Vec<_>>();
+    let codes = flaw_codes(&typed);
 
     assert!(
-        flaws.contains(&"type-result-family-incompatible".to_string()),
-        "{flaws:?}"
+        codes.contains(&"type-result-family-incompatible".to_string()),
+        "{codes:?}"
     );
 }
 
 #[test]
 fn transparent_forwarding_preserves_result_family_owner() {
-    let typed = transform(
-        &TokenCursor::parse_source("origin() True or False: True\nforward(): origin()"),
-        FileId(0),
-        &TransformCtx::new(),
-    );
-    let origin = &typed.defs[&DefId(Intern::from_ref("origin"))].return_type;
-    let forwarded = &typed.defs[&DefId(Intern::from_ref("forward"))].return_type;
+    let typed = check("origin() True or False: return True\nforward(): return origin()");
+    let origin = &typed.defs[&DefId::named(Intern::from_ref("origin"))].return_type;
+    let forwarded = &typed.defs[&DefId::named(Intern::from_ref("forward"))].return_type;
 
     assert_eq!(forwarded, origin);
     assert!(matches!(
@@ -237,14 +221,10 @@ fn transparent_forwarding_preserves_result_family_owner() {
 
 #[test]
 fn matching_and_reconstructing_translates_into_wrapper_family() {
-    let source = "origin() True or False: True\nwrapper() Yes or No:\n\tif origin() is True\n\t\tYes\n\treturn\n\treturn No\nbad: origin() = wrapper()";
-    let typed = transform(
-        &TokenCursor::parse_source(source),
-        FileId(0),
-        &TransformCtx::new(),
-    );
-    let origin = &typed.defs[&DefId(Intern::from_ref("origin"))].return_type;
-    let wrapper = &typed.defs[&DefId(Intern::from_ref("wrapper"))];
+    let source = "origin() True or False: return True\nwrapper() Yes or No:\n\twhen origin() is True then\n\t\treturn Yes\n\treturn No\nbad: origin() = wrapper()";
+    let typed = check(source);
+    let origin = &typed.defs[&DefId::named(Intern::from_ref("origin"))].return_type;
+    let wrapper = &typed.defs[&DefId::named(Intern::from_ref("wrapper"))];
 
     assert!(matches!(
         &wrapper.return_type,
@@ -256,63 +236,38 @@ fn matching_and_reconstructing_translates_into_wrapper_family() {
                 == ["Yes", "No"]
     ));
     assert_ne!(&wrapper.return_type, origin);
+    let wrapper_codes = def_flaw_codes(&typed, "wrapper");
     assert!(
-        wrapper
-            .flaws
+        wrapper_codes
             .iter()
-            .all(|flaw| flaw.code.slug() != "type-result-family-mixed-owners")
+            .all(|code| code != "type-result-family-mixed-owners")
     );
-    assert!(
-        typed
-            .all_flaws()
-            .iter()
-            .any(|(_, flaw)| { flaw.code.slug() == "type-result-family-incompatible" })
-    );
+    assert!(flaw_codes(&typed).contains(&"type-result-family-incompatible".to_string()));
 }
 
 #[test]
 fn mixing_forwarded_and_constructed_families_is_rejected() {
-    let source = "origin() True or False: True\nmixed(value):\n\tif value is 0\n\t\torigin()\n\treturn\n\treturn Local";
-    let typed = transform(
-        &TokenCursor::parse_source(source),
-        FileId(0),
-        &TransformCtx::new(),
-    );
-    let flaws = &typed.defs[&DefId(Intern::from_ref("mixed"))].flaws;
+    let source = "origin() True or False: return True\nmixed(value is in 0 to 1):\n\twhen value is 0 then\n\t\treturn origin()\n\treturn Local";
+    let typed = check(source);
+    let codes = def_flaw_codes(&typed, "mixed");
 
-    assert!(
-        flaws
-            .iter()
-            .any(|flaw| { flaw.code.slug() == "type-result-family-mixed-owners" })
-    );
+    assert!(codes.contains(&"type-result-family-mixed-owners".to_string()));
 }
 
 #[test]
 fn forwarding_two_distinct_families_is_rejected() {
-    let source = "first() True or False: True\nsecond() True or False: False\nmixed(value):\n\tif value is 0\n\t\tfirst()\n\treturn\n\treturn second()";
-    let typed = transform(
-        &TokenCursor::parse_source(source),
-        FileId(0),
-        &TransformCtx::new(),
-    );
-    let flaws = &typed.defs[&DefId(Intern::from_ref("mixed"))].flaws;
+    let source = "first() True or False: return True\nsecond() True or False: return False\nmixed(value is in 0 to 1):\n\twhen value is 0 then\n\t\treturn first()\n\treturn second()";
+    let typed = check(source);
+    let codes = def_flaw_codes(&typed, "mixed");
 
-    assert!(
-        flaws
-            .iter()
-            .any(|flaw| { flaw.code.slug() == "type-result-family-mixed-owners" })
-    );
+    assert!(codes.contains(&"type-result-family-mixed-owners".to_string()));
 }
 
 #[test]
 fn local_callable_family_cannot_escape_enclosing_callable() {
-    let source = "outer:\n\tinner() True or False: True\n\treturn inner()";
-    let typed = transform(
-        &TokenCursor::parse_source(source),
-        FileId(0),
-        &TransformCtx::new(),
-    );
-    let outer = &typed.defs[&DefId(Intern::from_ref("outer"))];
+    let source = "outer:\n\tinner() True or False: return True\n\treturn inner()";
+    let typed = check(source);
+    let outer = &typed.defs[&DefId::named(Intern::from_ref("outer"))];
     let BindBody::Body {
         exprs,
         ret: Some(exit),
@@ -336,23 +291,15 @@ fn local_callable_family_cannot_escape_enclosing_callable() {
         &typed.exprs.ty[exit.as_usize()],
         ast::Ty::ResultFamily { owner, .. } if owner == &expected_owner
     ));
-    assert!(
-        outer
-            .flaws
-            .iter()
-            .any(|flaw| { flaw.code.slug() == "type-local-result-family-escapes" })
-    );
+    let codes = def_flaw_codes(&typed, "outer");
+    assert!(codes.contains(&"type-local-result-family-escapes".to_string()));
 }
 
 #[test]
 fn local_callable_family_may_circulate_inside_enclosing_body() {
-    let source = "outer:\n\tinner() True or False: True\n\tvalue: inner()\n\treturn 0";
-    let typed = transform(
-        &TokenCursor::parse_source(source),
-        FileId(0),
-        &TransformCtx::new(),
-    );
-    let outer = &typed.defs[&DefId(Intern::from_ref("outer"))];
+    let source = "outer:\n\tinner() True or False: return True\n\tvalue: inner()\n\treturn 0";
+    let typed = check(source);
+    let outer = &typed.defs[&DefId::named(Intern::from_ref("outer"))];
     let BindBody::Body { exprs, .. } = &outer.body else {
         panic!("expected body");
     };
@@ -368,96 +315,76 @@ fn local_callable_family_may_circulate_inside_enclosing_body() {
             ..
         }
     ));
+    let codes = def_flaw_codes(&typed, "outer");
     assert!(
-        outer
-            .flaws
+        codes
             .iter()
-            .all(|flaw| { flaw.code.slug() != "type-local-result-family-escapes" })
+            .all(|code| code != "type-local-result-family-escapes")
     );
 }
 
 #[test]
 fn proof_contract_names_must_refer_to_incoming_values() {
-    let typed = transform(
-        &TokenCursor::parse_source("check(value) True thus missing < value or False: True"),
-        FileId(0),
-        &TransformCtx::new(),
-    );
-    let flaws = &typed.defs[&DefId(Intern::from_ref("check"))].flaws;
+    let typed = check("check(value) True thus missing < value or False: return True");
+    let codes = def_flaw_codes(&typed, "check");
 
-    assert!(
-        flaws
-            .iter()
-            .any(|flaw| flaw.code.slug() == "type-proof-contract-unknown-name")
-    );
+    assert!(codes.contains(&"type-proof-contract-unknown-name".to_string()));
 }
 
 #[test]
 fn proof_contracts_require_a_gin_body() {
-    let parsed = TokenCursor::parse_source("Number is in 0 to 255\ncheck(value Number) True thus value = value or False extern\n");
-    assert!(parsed.parse_warnings.iter().any(|flaw| flaw.code.slug() == "parse-removed-extern"));
+    let parsed = TokenCursor::parse_source(
+        "Number is in 0 to 255\ncheck(value Number) True thus value = value or False extern\n",
+    );
+    assert!(
+        parsed
+            .parse_warnings
+            .iter()
+            .any(|flaw| flaw.code.slug() == "parse-removed-extern")
+    );
 }
 
 #[test]
 fn branch_facts_verify_complementary_result_contracts() {
-    let source = "less(left, right) True thus left < right or False thus left >= right:\n\tif left < right is True\n\t\tTrue\n\treturn\n\treturn False";
-    let typed = transform(
-        &TokenCursor::parse_source(source),
-        FileId(0),
-        &TransformCtx::new(),
-    );
-    let flaws = &typed.defs[&DefId(Intern::from_ref("less"))].flaws;
+    let source = "less(left, right) True thus left < right or False thus left >= right:\n\twhen left < right then\n\t\treturn True\n\treturn False";
+    let typed = check(source);
+    let codes = def_flaw_codes(&typed, "less");
 
     assert!(
-        flaws
+        codes
             .iter()
-            .all(|flaw| flaw.code.slug() != "type-result-proof-unproven"),
-        "{flaws:?}"
+            .all(|code| code != "type-result-proof-unproven"),
+        "{codes:?}"
     );
 }
 
 #[test]
 fn construction_without_required_fact_rejects_result_contract() {
-    let source = "less(left, right) True thus left < right or False thus left >= right: True";
-    let typed = transform(
-        &TokenCursor::parse_source(source),
-        FileId(0),
-        &TransformCtx::new(),
-    );
-    let flaws = &typed.defs[&DefId(Intern::from_ref("less"))].flaws;
+    let source =
+        "less(left, right) True thus left < right or False thus left >= right: return True";
+    let typed = check(source);
+    let codes = def_flaw_codes(&typed, "less");
 
-    assert!(
-        flaws
-            .iter()
-            .any(|flaw| flaw.code.slug() == "type-result-proof-unproven")
-    );
+    assert!(codes.contains(&"type-result-proof-unproven".to_string()));
 }
 
 #[test]
 fn construction_contradicting_known_fact_fails_result_contract() {
-    let source = "less(left, right) True thus left >= right or False:\n\tif left < right is True\n\t\tTrue\n\treturn\n\treturn False";
-    let typed = transform(
-        &TokenCursor::parse_source(source),
-        FileId(0),
-        &TransformCtx::new(),
-    );
-    let flaws = &typed.defs[&DefId(Intern::from_ref("less"))].flaws;
+    let source = "less(left, right) True thus left >= right or False:\n\twhen left < right then\n\t\treturn True\n\treturn False";
+    let typed = check(source);
+    let codes = def_flaw_codes(&typed, "less");
 
+    assert!(codes.contains(&"type-result-proof-failed".to_string()));
     assert!(
-        flaws
+        codes
             .iter()
-            .any(|flaw| flaw.code.slug() == "type-result-proof-failed")
-    );
-    assert!(
-        flaws
-            .iter()
-            .all(|flaw| flaw.code.slug() != "type-result-proof-unproven")
+            .all(|code| code != "type-result-proof-unproven")
     );
 }
 
 #[test]
 fn repeated_non_equivalent_contracts_for_one_alternative_conflict() {
-    let source = "check(value) True thus value = value or True thus value /= value: True";
+    let source = "check(value) True thus value = value or True thus value /= value: return True";
     let parsed = TokenCursor::parse_source(source);
     assert_eq!(
         parsed.defs[&Intern::from_ref("check")]
@@ -474,15 +401,9 @@ fn repeated_non_equivalent_contracts_for_one_alternative_conflict() {
             .proposition
     );
     let typed = transform(&parsed, FileId(0), &TransformCtx::new());
-    let bind = &typed.defs[&DefId(Intern::from_ref("check"))];
+    let bind = &typed.defs[&DefId::named(Intern::from_ref("check"))];
 
-    assert!(
-        bind.flaws
-            .iter()
-            .any(|flaw| flaw.code.slug() == "type-result-proof-conflict"),
-        "{:?}",
-        bind.flaws
-    );
+    assert!(def_flaw_codes(&typed, "check").contains(&"type-result-proof-conflict".to_string()));
     let ast::Ty::ResultFamily { alternatives, .. } = &bind.return_type else {
         panic!("expected result family");
     };
@@ -491,24 +412,19 @@ fn repeated_non_equivalent_contracts_for_one_alternative_conflict() {
 
 #[test]
 fn verified_contract_substitutes_call_arguments_into_result_evidence() {
-    let source = "Number is in 0 to 255\nless(left Number, right Number) True thus left < right or False thus left >= right:\n\tif left < right is True\n\t\tTrue\n\treturn\n\treturn False\ncomparison: less(1, 2)";
-    let typed = transform(
-        &TokenCursor::parse_source(source),
-        FileId(0),
-        &TransformCtx::new(),
-    );
-    let BindBody::Expr(call) = typed.defs[&DefId(Intern::from_ref("comparison"))].body else {
+    let source = "Number is in 0 to 255\nless(left Number, right Number) True thus left < right or False thus left >= right:\n\twhen left < right then\n\t\treturn True\n\treturn False\ncomparison: less(1, 2)";
+    let typed = check(source);
+    let BindBody::Expr(call) = typed.defs[&DefId::named(Intern::from_ref("comparison"))].body
+    else {
         panic!("expected call body");
     };
-    let evidence = typed.exprs.facts.semantic_facts.result_evidence[call.as_usize()]
-        .as_ref()
-        .unwrap_or_else(|| {
-            panic!(
-                "missing evidence for {:?} returning {:?}",
-                typed.exprs.kind[call.as_usize()],
-                typed.defs[&DefId(Intern::from_ref("less"))].return_type
-            )
-        });
+    let evidence = typed.exprs.result_evidence_of(call).unwrap_or_else(|| {
+        panic!(
+            "missing evidence for {:?} returning {:?}",
+            typed.exprs.kind[call.as_usize()],
+            typed.defs[&DefId::named(Intern::from_ref("less"))].return_type
+        )
+    });
 
     assert!(matches!(
         &evidence.owner,
@@ -537,13 +453,10 @@ fn verified_contract_substitutes_call_arguments_into_result_evidence() {
 
 #[test]
 fn transparent_forwarding_substitutes_outer_call_arguments_into_evidence() {
-    let source = "Number is in 0 to 255\nless(left Number, right Number) True thus left < right or False thus left >= right:\n\tif left < right is True\n\t\tTrue\n\treturn\n\treturn False\nforward(left Number, right Number): less(left, right)\ncomparison: forward(1, 2)";
-    let typed = transform(
-        &TokenCursor::parse_source(source),
-        FileId(0),
-        &TransformCtx::new(),
-    );
-    let BindBody::Expr(call) = typed.defs[&DefId(Intern::from_ref("comparison"))].body else {
+    let source = "Number is in 0 to 255\nless(left Number, right Number) True thus left < right or False thus left >= right:\n\twhen left < right then\n\t\treturn True\n\treturn False\nforward(left Number, right Number): return less(left, right)\ncomparison: forward(1, 2)";
+    let typed = check(source);
+    let BindBody::Expr(call) = typed.defs[&DefId::named(Intern::from_ref("comparison"))].body
+    else {
         panic!("expected call body");
     };
     let typecheck::TypedExprKind::FnCall {
@@ -553,8 +466,9 @@ fn transparent_forwarding_substitutes_outer_call_arguments_into_evidence() {
     else {
         panic!("expected forwarded call");
     };
-    let evidence = typed.exprs.facts.semantic_facts.result_evidence[call.as_usize()]
-        .as_ref()
+    let evidence = typed
+        .exprs
+        .result_evidence_of(call)
         .expect("forwarded evidence");
 
     assert!(evidence.alternatives.iter().all(|alternative| matches!(
@@ -566,13 +480,10 @@ fn transparent_forwarding_substitutes_outer_call_arguments_into_evidence() {
 
 #[test]
 fn inferred_generic_identity_preserves_result_family_and_evidence() {
-    let source = "Number is in 0 to 255\nless(left Number, right Number) True thus left < right or False thus left >= right:\n\tif left < right is True\n\t\tTrue\n\treturn\n\treturn False\nidentity(value x): value\ncomparison: identity(less(1, 2))";
-    let typed = transform(
-        &TokenCursor::parse_source(source),
-        FileId(0),
-        &TransformCtx::new(),
-    );
-    let BindBody::Expr(identity_call) = typed.defs[&DefId(Intern::from_ref("comparison"))].body
+    let source = "less(left is in 0 to 255, right is in 0 to 255) True thus left < right or False thus left >= right:\n\twhen left < right then\n\t\treturn True\n\treturn False\nidentity(value x): return value\ncomparison: identity(less(1, 2))";
+    let typed = check(source);
+    let BindBody::Expr(identity_call) =
+        typed.defs[&DefId::named(Intern::from_ref("comparison"))].body
     else {
         panic!("expected identity call");
     };
@@ -584,6 +495,11 @@ fn inferred_generic_identity_preserves_result_family_and_evidence() {
         panic!("expected call arguments");
     };
     let source_result = arguments[0];
+    expect_no_flaws(&typed);
+    assert!(typed.defs.values().any(
+        |bind| bind.name.as_str().starts_with("identity$specialized$")
+            && !matches!(bind.body, BindBody::Unlowered)
+    ));
 
     assert!(
         matches!(
@@ -601,4 +517,229 @@ fn inferred_generic_identity_preserves_result_family_and_evidence() {
         typed.exprs.facts.semantic_facts.result_evidence[source_result.as_usize()]
     );
     assert!(typed.exprs.facts.semantic_facts.result_evidence[identity_call.as_usize()].is_some());
+}
+
+#[test]
+fn generic_forwarding_uses_the_returned_parameters_proof() {
+    let source = "Byte is in 0 to 255\nByte has finish(self): return\nless(left is in 0 to 511, right is in 0 to 511) True thus left < right or False thus left >= right:\n    when left < right then\n        return True\n    return False\nsecond(first x, last x): return last\nnarrow(value is in 0 to 511) Byte:\n    zero is in 0 to 511: 0\n    when second(less(value + 0, 256), less(zero, 1)) is True then\n        return value as Byte\n    return 0\n";
+    let typed = check_parsed(source);
+    let codes = flaw_codes(&typed);
+    let (call, arguments) = typed
+        .exprs
+        .kind
+        .iter()
+        .enumerate()
+        .find_map(|(index, kind)| match kind {
+            typecheck::TypedExprKind::FnCall {
+                target,
+                args: Some(arguments),
+                ..
+            } if target.0.as_str().starts_with("second$specialized$") => Some((index, arguments)),
+            _ => None,
+        })
+        .expect("specialized forwarding call");
+    let evidence = &typed.exprs.facts.semantic_facts.result_evidence;
+    assert!(evidence[call].is_some());
+    assert_eq!(evidence[call], evidence[arguments[1].as_usize()]);
+    assert_ne!(evidence[call], evidence[arguments[0].as_usize()]);
+    assert!(
+        codes.contains(&"type-integer-narrowing-failed".to_string())
+            || codes.contains(&"type-integer-narrowing-unproven".to_string()),
+        "{codes:?}"
+    );
+    assert!(
+        codes
+            .iter()
+            .all(|code| code == "type-integer-narrowing-failed"
+                || code == "type-integer-narrowing-unproven"),
+        "{codes:?}"
+    );
+}
+
+#[test]
+fn generic_specializations_keep_distinct_result_family_owners() {
+    let source = "first(left is in 0 to 255, right is in 0 to 255) True thus left < right or False thus left >= right:\n    when left < right then\n        return True\n    return False\nsecond(left is in 0 to 255, right is in 0 to 255) True thus left < right or False thus left >= right:\n    when left < right then\n        return True\n    return False\nidentity(value x): return value\nbad: identity(first(1, 2)) = identity(second(1, 2))\n";
+    let typed = check(source);
+    expect_flaw_code(&typed, "type-result-family-incompatible");
+    let specializations = typed
+        .defs
+        .values()
+        .filter(|bind| bind.name.as_str().starts_with("identity$specialized$"))
+        .collect::<Vec<_>>();
+    assert_eq!(specializations.len(), 2);
+    assert!(
+        specializations
+            .iter()
+            .all(|bind| !matches!(bind.body, BindBody::Unlowered))
+    );
+    assert_ne!(
+        specializations[0].return_type,
+        specializations[1].return_type
+    );
+}
+
+#[test]
+fn generic_result_parameters_do_not_capture_unrelated_parameter_names() {
+    let source = "Byte is in 0 to 255\nByte has finish(self): return\nless(left is in 0 to 511, right is in 0 to 511) True thus left < right or False thus left >= right:\n    when left < right then\n        return True\n    return False\nconsume(proof x, left is in 0 to 511) Byte:\n    when proof is True then\n        return left as Byte\n    return 0\nrun(left is in 0 to 511) Byte:\n    zero is in 0 to 511: 0\n    return consume(less(zero, 1), left)\n";
+    let codes = flaw_codes(&check_parsed(source));
+    assert!(
+        codes
+            .iter()
+            .any(|code| code == "type-integer-narrowing-failed"
+                || code == "type-integer-narrowing-unproven"),
+        "{codes:?}"
+    );
+}
+
+#[test]
+fn integer_refinement_parameters_preserve_borrowing_in_the_signature() {
+    for (convention, mutable) in [("ref", false), ("mut", true)] {
+        for domain in ["0 to 511", "Domain"] {
+            let source = format!(
+                "Domain is in 0 to 511\nDomain has finish(self): return\nread(value {convention} is in {domain}) is in 0 to 511: return deref value\n"
+            );
+            let typed = check(&source);
+            assert!(
+                typed.all_flaws().is_empty(),
+                "{source}: {:?}",
+                typed.all_flaws()
+            );
+            let ty = &typed.defs[&DefId::named(Intern::from_ref("read"))].params[0].1;
+            assert!(
+                matches!(ty, ast::Ty::Ref {inner, mutable: actual} if *actual == mutable && inner.anonymous_integer_validity().is_some()),
+                "{ty:?}"
+            );
+        }
+    }
+}
+
+enum Expectation {
+    Empty,
+    Contains(&'static str),
+}
+
+const CASES: &[(&str, &str, &str, Expectation)] = &[
+    (
+        "nested_conditional_result_construction_checks_its_contract",
+        "less(left, right) True thus left >= right or False:\n    when left < right then\n        when left < right then\n            return True\n        return False\n    return False\n",
+        "less",
+        Expectation::Contains("type-result-proof-failed"),
+    ),
+    (
+        "nested_conditional_result_keeps_valid_enclosing_facts",
+        "less(left, right) True thus left < right or False:\n    when left < right then\n        when left < right then\n            return True\n        return False\n    return False\n",
+        "less",
+        Expectation::Empty,
+    ),
+    (
+        "nested_conditional_facts_do_not_prove_an_outer_result",
+        "equal(left, right) True thus left = right or False:\n    when left < right then\n        when left = right then\n            return False\n        return False\n    return True\n",
+        "equal",
+        Expectation::Contains("type-result-proof-unproven"),
+    ),
+    (
+        "conditional_expression_result_construction_checks_its_contract",
+        "less(left, right) True thus left >= right or False: return when left < right then True else False\n",
+        "less",
+        Expectation::Contains("type-result-proof-failed"),
+    ),
+    (
+        "conditional_expression_result_proves_taken_and_fallthrough_contracts",
+        "less(left, right) True thus left < right or False thus left >= right: return when left < right then True else False\n",
+        "less",
+        Expectation::Empty,
+    ),
+    (
+        "conditional_expression_arm_facts_do_not_prove_other_arms",
+        "equal(left, right) True thus left = right or False: return when left = right then False else True\n",
+        "equal",
+        Expectation::Contains("type-result-proof-failed"),
+    ),
+    (
+        "nested_result_proof_follows_a_cycle_of_equal_names",
+        "equal(left, right, third) True thus left = third or False:\n    when left = right then\n        when right = third then\n            when third = left then\n                return True\n            return False\n        return False\n    return False\n",
+        "equal",
+        Expectation::Empty,
+    ),
+    (
+        "cyclic_equal_names_do_not_prove_an_unrelated_name",
+        "equal(left, right, third) True thus left = third or False:\n    when left = right then\n        when right = left then\n            return True\n        return False\n    return False\n",
+        "equal",
+        Expectation::Contains("type-result-proof-unproven"),
+    ),
+    (
+        "while_loop_result_exit_checks_its_contract",
+        "less(left, right) True thus left >= right or False:\n    while left < right do\n        when left < right then\n            return True\n    return False\n",
+        "less",
+        Expectation::Contains("type-result-proof-failed"),
+    ),
+    (
+        "for_loop_result_exit_checks_its_contract",
+        "less(left, right) True thus left >= right or False:\n    for item in 0 to 1\n        when left < right then\n            return True\n    return False\n",
+        "less",
+        Expectation::Contains("type-result-proof-failed"),
+    ),
+    (
+        "while_loop_result_exit_keeps_its_taken_condition",
+        "less(left, right) True thus left < right or False:\n    while left < right do\n        when right >= left then\n            return True\n    return False\n",
+        "less",
+        Expectation::Empty,
+    ),
+];
+
+#[test]
+fn conditional_result_proof_cases() {
+    for &(name, source, def, ref expectation) in CASES {
+        let typed = check_lexed(source);
+        let codes = def_flaw_codes(&typed, def);
+        match expectation {
+            Expectation::Empty => assert!(codes.is_empty(), "case `{name}` failed: {codes:?}"),
+            Expectation::Contains(code) => assert!(
+                codes.contains(&code.to_string()),
+                "case `{name}` failed: {codes:?}"
+            ),
+        }
+    }
+}
+
+#[test]
+fn condition_form_result_proofs_use_negated_fallthrough_facts() {
+    for (relation, expected_failure) in [("<", false), (">=", true)] {
+        let source = format!(
+            "less(left, right) True thus left {relation} right or False: return when not left < right then False else True\n"
+        );
+        let typed = check_lexed(&source);
+        let codes = def_flaw_codes(&typed, "less");
+        if expected_failure {
+            assert!(
+                codes.contains(&"type-result-proof-failed".to_string()),
+                "{codes:?}"
+            );
+        } else {
+            assert!(codes.is_empty(), "{codes:?}");
+        }
+    }
+}
+
+#[test]
+fn loop_body_facts_do_not_prove_a_result_after_the_loop() {
+    for opening in ["while left < right do", "for item in 0 to 1"] {
+        let source = format!(
+            "equal(left, right) True thus left = right or False:\n    {opening}\n        when left = right then\n            return False\n    return True\n"
+        );
+        let typed = check_lexed(&source);
+        let codes = def_flaw_codes(&typed, "equal");
+        assert!(
+            codes.contains(&"type-result-proof-unproven".to_string()),
+            "{codes:?}"
+        );
+    }
+}
+
+#[test]
+fn for_loop_result_exit_keeps_enclosing_branch_facts() {
+    let source = "less(left, right) True thus left < right or False:\n    when left < right then\n        for item in 0 to 1\n            when right >= left then\n                return True\n        return False\n    return False\n";
+    let typed = check_lexed(source);
+    let codes = def_flaw_codes(&typed, "less");
+    assert!(codes.is_empty(), "{codes:?}");
 }

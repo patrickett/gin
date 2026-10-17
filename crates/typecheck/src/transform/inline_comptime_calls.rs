@@ -1,14 +1,17 @@
-use diagnostic::Diagnostic;
+use diagnostic::code::{CallCode, TypeCode};
+use diagnostic::{Diagnostic, DiagnosticCode};
 use internment::Intern;
+use std::collections::HashSet;
 
 use super::TransformCtx;
 use ast::expr::Literal;
-use ast::{ConstValue, FileAst, HashFloat};
+use ast::{ConstValue, FileAst};
 
+use crate::staging::has_invalid_compile_time_argument;
 use crate::staging::normalize;
 use crate::typed::{
-    Availability, AvailabilityRequirement, BindBody, CallCapability, DefId, ExprId, TypedExprKind,
-    TypedFileAst, walk_expr_children_of,
+    Availability, BindBody, CallCapability, DefId, ExprId, TypedExprKind, TypedFileAst,
+    walk_expr_children_of,
 };
 
 const MAX_INLINE_ROUNDS: usize = 32;
@@ -17,6 +20,7 @@ pub(super) fn stage_inline_package_calls(
     files: &mut [TypedFileAst],
     target: &flask::CompileTarget,
 ) {
+    let _profile = compiler_profile::span(compiler_profile::Phase::CompileTime);
     let programs: Vec<_> = files.iter().map(TypedFileAst::resolved_program).collect();
     let mut replacements = Vec::new();
     for (file_index, program) in programs.iter().copied().enumerate() {
@@ -39,11 +43,7 @@ pub(super) fn stage_inline_package_calls(
                 continue;
             }
             if bind.call_capability == CallCapability::RuntimeOnly
-                || bind.effects.unknown_memory
-                || !bind.effects.reads.is_empty()
-                || !bind.effects.writes.is_empty()
-                || !bind.effects.invalidates.is_empty()
-                || !bind.effects.consumes.is_empty()
+                || bind.effects.has_runtime_effects()
             {
                 continue;
             }
@@ -52,7 +52,10 @@ pub(super) fn stage_inline_package_calls(
                 crate::eval::Evaluator::new(program, crate::eval::CompileTimeHost::new(target))
                     .with_programs(programs.iter().copied());
             if let Ok(crate::eval::EvalOutcome::Complete(
-                value @ (ConstValue::Int(_) | ConstValue::Float(_) | ConstValue::Text(_)),
+                value @ (ConstValue::Proposition(_)
+                | ConstValue::Int(_)
+                | ConstValue::Float(_)
+                | ConstValue::Text(_)),
             )) = evaluator.eval(id)
             {
                 replacements.push((file_index, id, value));
@@ -60,7 +63,7 @@ pub(super) fn stage_inline_package_calls(
         }
     }
     for (file_index, id, value) in replacements {
-        replace_with_value(&mut files[file_index], id, value);
+        replace_with_scalar_value(&mut files[file_index], id, value);
         files[file_index].exprs.facts.semantic_facts.availability[id.as_usize()] =
             Availability::CompileTime;
     }
@@ -68,13 +71,21 @@ pub(super) fn stage_inline_package_calls(
 
 pub fn stage_inline_comptime_calls(
     typed: &mut TypedFileAst,
-    _file_ast: &FileAst,
-    _ctx: &TransformCtx,
+    file_ast: &FileAst,
+    ctx: &TransformCtx,
 ) {
+    let _profile = compiler_profile::span(compiler_profile::Phase::CompileTime);
+    let mut deferred = HashSet::new();
+    if matches!(ctx.compile_target, flask::CompileTarget::Library) {
+        deferred.extend(crate::prepare_target::target_dependent_bind_names(file_ast));
+        deferred.extend(crate::prepare_target::target_dependent_bind_names(
+            &ctx.compile_time_eval_ast,
+        ));
+    }
     let runtime_defs: Vec<DefId> = typed
         .defs
         .iter()
-        .filter(|(_, bind)| !bind.is_constant || bind.name.as_str() == "main")
+        .filter(|(_, bind)| !bind.is_constant || bind.attributes.entry)
         .map(|(id, _)| *id)
         .collect();
 
@@ -98,7 +109,7 @@ pub fn stage_inline_comptime_calls(
         for _ in 0..MAX_INLINE_ROUNDS {
             let mut changed = false;
             for root in &root_ids {
-                changed |= inline_in_expr(typed, *root, &params);
+                changed |= inline_in_expr(typed, *root, &params, &deferred);
             }
             if !changed {
                 break;
@@ -107,7 +118,12 @@ pub fn stage_inline_comptime_calls(
     }
 }
 
-fn inline_in_expr(typed: &mut TypedFileAst, expr_id: ExprId, params: &[Intern<String>]) -> bool {
+fn inline_in_expr(
+    typed: &mut TypedFileAst,
+    expr_id: ExprId,
+    params: &[Intern<String>],
+    deferred: &HashSet<Intern<String>>,
+) -> bool {
     let idx = expr_id.index();
     if idx >= typed.exprs.kind.len() {
         return false;
@@ -143,7 +159,7 @@ fn inline_in_expr(typed: &mut TypedFileAst, expr_id: ExprId, params: &[Intern<St
     });
     let mut changed = false;
     for child in children {
-        changed |= inline_in_expr(typed, child, params);
+        changed |= inline_in_expr(typed, child, params, deferred);
     }
 
     let TypedExprKind::FnCall { target, args, .. } = &root_kind else {
@@ -170,20 +186,25 @@ fn inline_in_expr(typed: &mut TypedFileAst, expr_id: ExprId, params: &[Intern<St
         crate::staging::NormalizeResult::Value(value) => {
             if !matches!(
                 value,
-                ConstValue::Text(_) | ConstValue::Int(_) | ConstValue::Float(_)
+                ConstValue::Proposition(_)
+                    | ConstValue::Text(_)
+                    | ConstValue::Int(_)
+                    | ConstValue::Float(_)
             ) {
                 return changed;
             }
-            replace_with_value(typed, expr_id, value);
+            replace_with_scalar_value(typed, expr_id, value);
             true
         }
         crate::staging::NormalizeResult::Unsupported(_) => {
-            emit_cannot_inline(
-                typed,
-                expr_id,
-                &target.0,
-                "could not evaluate at compile time",
-            );
+            if !deferred.contains(&target.0) {
+                emit_cannot_inline(
+                    typed,
+                    expr_id,
+                    &target.0,
+                    "could not evaluate at compile time",
+                );
+            }
             changed
         }
         crate::staging::NormalizeResult::Residual(_)
@@ -196,74 +217,44 @@ fn is_staging_bind(bind: &crate::typed::TypedBind) -> bool {
         && bind.call_capability == CallCapability::StagePolymorphic
 }
 
-fn has_invalid_compile_time_argument(
-    typed: &TypedFileAst,
-    bind: &crate::typed::TypedBind,
-    args: &[ExprId],
-) -> bool {
-    args.iter()
-        .zip(&bind.param_requirements)
-        .any(|(arg, requirement)| {
-            *requirement == AvailabilityRequirement::CompileTime
-                && (typed
-                    .exprs
-                    .availability_of(*arg)
-                    .unwrap_or(&Availability::Unknown)
-                    != &Availability::CompileTime
-                    || is_runtime_form_type_argument(typed, *arg))
-        })
-}
-
-fn is_runtime_form_type_argument(typed: &TypedFileAst, arg: ExprId) -> bool {
-    let Some(TypedExprKind::FnCall { target, .. }) = typed.exprs.kind_of(arg) else {
-        return false;
+fn replace_with_scalar_value(typed: &mut TypedFileAst, expr_id: ExprId, value: ConstValue) {
+    if matches!(value, ConstValue::Proposition(_)) {
+        let source = super::lower_exprs::append_derived_expr(
+            typed,
+            expr_id,
+            typed.exprs.kind[expr_id.index()].clone(),
+            typed.exprs.ty[expr_id.index()].clone(),
+        );
+        typed.exprs.kind[expr_id.index()] = TypedExprKind::Rematerialize {
+            source,
+            constant: value.clone(),
+        };
+        typed.exprs.facts.const_facts.const_value[expr_id.index()] = Some(value);
+        return;
+    }
+    let (literal, ty) = match &value {
+        ConstValue::Int(value) => (Literal::Int(*value), None),
+        ConstValue::Float(value) => (
+            Literal::Float(*value),
+            Some(crate::ty::Ty::Float {
+                value: Some(*value),
+            }),
+        ),
+        ConstValue::Text(value) => (
+            Literal::String(value.clone()),
+            Some(ast::Ty::Array {
+                elem: Box::new(ast::Ty::u8()),
+                size: ast::NormalExpr::from(value.len() as i128),
+            }),
+        ),
+        _ => unreachable!("only integer, float, and text constants can be inlined"),
     };
-    if target.0.as_str() == "Self" {
-        return false;
-    }
-    if !typed.defs.contains_key(target)
-        && typed.exprs.availability_of(arg) == Some(&Availability::CompileTime)
-    {
-        return false;
-    }
-    !typed.defs.get(target).is_some_and(|bind| {
-        bind.call_capability == CallCapability::StagePolymorphic
-            && bind
-                .param_kinds
-                .iter()
-                .all(|kind| matches!(kind, crate::ty::ParamKind::Type))
-    })
-}
-
-fn replace_with_value(typed: &mut TypedFileAst, expr_id: ExprId, value: ConstValue) {
     let idx = expr_id.as_usize();
-    typed.exprs.kind[idx] = TypedExprKind::Lit(const_value_to_literal(&value));
-    if let Some(ty) = const_value_to_ty(&value) {
+    typed.exprs.kind[idx] = TypedExprKind::Lit(literal);
+    if let Some(ty) = ty {
         typed.exprs.ty[idx] = ty;
     }
     typed.exprs.facts.const_facts.const_value[idx] = Some(value);
-}
-
-fn const_value_to_ty(value: &ConstValue) -> Option<crate::ty::Ty> {
-    match value {
-        ConstValue::Text(value) => Some(ast::Ty::Array {
-            elem: Box::new(ast::Ty::u8()),
-            size: ast::NormalExpr::from(value.len() as i128),
-        }),
-        ConstValue::Int(_) => None,
-        ConstValue::Float(value) => Some(crate::ty::Ty::Float {
-            value: Some(*value),
-        }),
-        ConstValue::ResultAlternative { .. }
-        | ConstValue::Tag { .. }
-        | ConstValue::Record { .. }
-        | ConstValue::ResultRow(_)
-        | ConstValue::FixedArray(_)
-        | ConstValue::Sequence(_)
-        | ConstValue::SequenceRepeat { .. } => {
-            Some(crate::ty::Ty::Opaque(Intern::from_ref("comptime")))
-        }
-    }
 }
 
 fn emit_cannot_inline(
@@ -275,13 +266,19 @@ fn emit_cannot_inline(
     let idx = expr_id.index();
     if typed.exprs.facts.semantic_facts.flaws[idx]
         .iter()
-        .any(|flaw| flaw.code.slug() == "type-cannot-call-comptime-with-runtime-args")
+        .any(|flaw| {
+            flaw.code
+                == DiagnosticCode::Type(TypeCode::Call(
+                    CallCode::CompileTimeRequiresConstantArguments,
+                ))
+        })
     {
         return;
     }
     typed.exprs.facts.semantic_facts.flaws[idx].push(
+        // type-cannot-call-comptime-with-runtime-args
         Diagnostic::new(
-            "type-cannot-call-comptime-with-runtime-args",
+            CallCode::CompileTimeRequiresConstantArguments,
             format!(
                 "cannot call comptime function `{}` with runtime arguments: {}",
                 fn_name.as_str(),
@@ -293,20 +290,6 @@ fn emit_cannot_inline(
     );
 }
 
-fn const_value_to_literal(value: &ConstValue) -> Literal {
-    match value {
-        ConstValue::Text(value) => Literal::String(value.clone()),
-        ConstValue::Int(value) => Literal::Int(*value),
-        ConstValue::Float(HashFloat(value)) => Literal::Float(HashFloat(*value)),
-        ConstValue::ResultAlternative { .. }
-        | ConstValue::Tag { .. }
-        | ConstValue::Record { .. }
-        | ConstValue::ResultRow(_)
-        | ConstValue::FixedArray(_)
-        | ConstValue::Sequence(_)
-        | ConstValue::SequenceRepeat { .. } => Literal::Number(0),
-    }
-}
 #[cfg(test)]
-#[path = "../../tests/inline_comptime_calls_tests.rs"]
+#[path = "inline_comptime_calls_tests.rs"]
 mod tests;

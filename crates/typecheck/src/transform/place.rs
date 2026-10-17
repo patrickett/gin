@@ -1,12 +1,13 @@
 use ast::integer::{CanonicalIntegerExpr, IntegerDomain, IntegerKnowledge, IntegerValidity};
 use diagnostic::Diagnostic;
+use diagnostic::code::OwnershipCode;
 
 use crate::ty::Ty;
 use crate::typed::{
     PlaceId, PlaceVersionComponent, PlaceVersionId, PlaceVersionOrigin, TypedFileAst,
 };
 
-pub(super) fn knowledge_domain(knowledge: &IntegerKnowledge) -> Option<IntegerDomain> {
+pub(crate) fn knowledge_domain(knowledge: &IntegerKnowledge) -> Option<IntegerDomain> {
     match knowledge {
         IntegerKnowledge::Exact(CanonicalIntegerExpr::Value(value)) => {
             IntegerDomain::bounded(*value, *value)
@@ -18,21 +19,14 @@ pub(super) fn knowledge_domain(knowledge: &IntegerKnowledge) -> Option<IntegerDo
     }
 }
 
-fn version_predecessors(origin: &PlaceVersionOrigin) -> Vec<PlaceVersionId> {
-    match origin {
-        PlaceVersionOrigin::Parameter
-        | PlaceVersionOrigin::Declared
-        | PlaceVersionOrigin::Initializer(_)
-        | PlaceVersionOrigin::Mutation(_) => Vec::new(),
-        PlaceVersionOrigin::Projection { base } => vec![*base],
-        PlaceVersionOrigin::Rebind { predecessor, .. } => predecessor.iter().copied().collect(),
-        PlaceVersionOrigin::Join(predecessors) => predecessors.clone(),
-        PlaceVersionOrigin::LoopPhi {
-            incoming,
-            backedges,
-        } => std::iter::once(*incoming)
-            .chain(backedges.iter().copied())
-            .collect(),
+pub(crate) fn knowledge_domain_or(
+    knowledge: Option<&IntegerKnowledge>,
+    fallback: impl FnOnce() -> Option<IntegerDomain>,
+) -> Option<IntegerDomain> {
+    match knowledge {
+        Some(IntegerKnowledge::Poison) => None,
+        Some(knowledge) => knowledge_domain(knowledge).or_else(fallback),
+        None => fallback(),
     }
 }
 
@@ -42,8 +36,9 @@ fn place_version_components(typed: &TypedFileAst) -> Vec<PlaceVersionComponent> 
         .place_versions
         .iter()
         .map(|version| {
-            version_predecessors(&version.origin)
-                .into_iter()
+            version
+                .origin
+                .predecessors()
                 .map(|version| version.0 as usize)
                 .collect::<Vec<_>>()
         })
@@ -136,8 +131,9 @@ pub(crate) fn stage_freeze_place_contracts(typed: &mut TypedFileAst) {
         {
             let name = typed.places[place_index].name;
             typed.exprs.facts.semantic_facts.flaws[write.as_usize()].push(
+                // type-cyclic-place-requires-explicit-contract
                 Diagnostic::new(
-                    "type-cyclic-place-requires-explicit-contract",
+                    OwnershipCode::CyclicPlaceRequiresContract,
                     format!(
                         "loop-carried place `{}` requires an explicit finite contract",
                         name.as_str()

@@ -83,7 +83,9 @@ impl ConstObjectStore {
                 });
             }
         }
-        let id = ConstObjectId(self.objects.len() as u32);
+        let id = ConstObjectId(
+            u32::try_from(self.objects.len()).expect("constant object identifiers exhausted"),
+        );
         self.objects.push(object);
         Ok(id)
     }
@@ -121,51 +123,9 @@ fn project<'a>(value: &'a ConstValue, path: &ConstPath) -> Option<&'a ConstValue
 }
 
 pub(crate) fn collect_closed_constants(typed: &mut crate::TypedFileAst) {
+    let _profile = compiler_profile::span(compiler_profile::Phase::Constants);
     for index in 0..typed.exprs.kind.len() {
         if typed.exprs.facts.const_facts.const_object[index].is_some() {
-            continue;
-        }
-        if matches!(
-            typed.exprs.facts.const_facts.literal_materialization[index],
-            Some(crate::typed::LiteralMaterializationPlan::BorrowedSequence { .. })
-        ) {
-            let values = if let Some(crate::typed::TypedSequenceLiteral::Elements(items)) =
-                typed.exprs.facts.const_facts.sequence_literal[index].as_ref()
-            {
-                let Some(values) = items
-                    .iter()
-                    .map(|item| typed.exprs.facts.const_facts.const_value[item.as_usize()].clone())
-                    .collect::<Option<Vec<_>>>()
-                else {
-                    continue;
-                };
-                ConstValue::Sequence(values.into())
-            } else {
-                continue;
-            };
-            let object = ConstObject {
-                ty: Ty::Unit,
-                value: values,
-                relocations: Vec::new(),
-            };
-            let Some(id) = typed.constant_objects.intern(object).ok() else {
-                continue;
-            };
-            typed.exprs.facts.const_facts.const_object[index] = Some(id);
-            if let Some(plan) =
-                typed.exprs.facts.const_facts.literal_materialization[index].as_mut()
-            {
-                match plan {
-                    crate::typed::LiteralMaterializationPlan::BorrowedSequence {
-                        backing, ..
-                    } => {
-                        *backing = Some(id);
-                    }
-                    _ => {}
-                }
-                typed.exprs.facts.semantic_facts.sequence_provenance[index] =
-                    Some(crate::typed::SequenceProvenance::Static(id));
-            }
             continue;
         }
         let Some(value) = typed.exprs.facts.const_facts.const_value[index].as_ref() else {
@@ -189,15 +149,6 @@ pub(crate) fn collect_closed_constants(typed: &mut crate::TypedFileAst) {
         };
         typed.exprs.facts.const_facts.const_object[index] =
             typed.constant_objects.intern(object).ok();
-        if let Some(id) = typed.exprs.facts.const_facts.const_object[index]
-            && let Some(crate::typed::LiteralMaterializationPlan::BorrowedSequence {
-                backing, ..
-            }) = typed.exprs.facts.const_facts.literal_materialization[index].as_mut()
-        {
-            *backing = Some(id);
-            typed.exprs.facts.semantic_facts.sequence_provenance[index] =
-                Some(crate::typed::SequenceProvenance::Static(id));
-        }
     }
 }
 
@@ -237,5 +188,60 @@ mod tests {
 
         assert_eq!(store.get(view).unwrap().relocations[0].target, backing);
         assert_eq!(store.iter().count(), 2);
+    }
+
+    #[test]
+    fn invalid_relocations_leave_the_store_unchanged() {
+        let mut store = ConstObjectStore::default();
+        let backing = store
+            .insert(ConstObject {
+                ty: Ty::Unit,
+                value: ConstValue::FixedArray(vec![ConstValue::Int(11.into())].into()),
+                relocations: Vec::new(),
+            })
+            .unwrap();
+        let invalid_path = ConstPath(vec![ConstProjection::FixedArrayElement(1)]);
+        let missing = ConstObjectId::from_raw(1);
+        for (relocation, error) in [
+            (
+                ConstRelocation {
+                    source: invalid_path.clone(),
+                    target: backing,
+                    target_path: ConstPath::default(),
+                },
+                ConstObjectError::InvalidSourcePath(invalid_path.clone()),
+            ),
+            (
+                ConstRelocation {
+                    source: ConstPath::default(),
+                    target: missing,
+                    target_path: ConstPath::default(),
+                },
+                ConstObjectError::UnknownTarget(missing),
+            ),
+            (
+                ConstRelocation {
+                    source: ConstPath::default(),
+                    target: backing,
+                    target_path: invalid_path.clone(),
+                },
+                ConstObjectError::InvalidTargetPath {
+                    target: backing,
+                    path: invalid_path,
+                },
+            ),
+        ] {
+            let before = store.clone();
+            assert_eq!(
+                store.insert(ConstObject {
+                    ty: Ty::Unit,
+                    value: ConstValue::Int(0.into()),
+                    relocations: vec![relocation],
+                }),
+                Err(error)
+            );
+            assert_eq!(store, before);
+            assert_eq!(store.get(missing), None);
+        }
     }
 }

@@ -8,18 +8,10 @@ use crate::type_registry::{ReferencePermission, ReferenceSemantics, TypeRegistry
 pub use ast::ty::*;
 
 /// Strip one level of safe-reference wrapper and return the inner type with mutability.
-pub fn reference_kind(ty: &Ty) -> Option<(&Ty, bool)> {
+fn reference_kind(ty: &Ty) -> Option<(&Ty, bool)> {
     match ty {
         Ty::Ref { inner, mutable } => Some((inner, *mutable)),
         _ => None,
-    }
-}
-
-/// Strip nested safe-reference wrappers to reach the referent type.
-pub fn reference_referent(ty: &Ty) -> &Ty {
-    match ty {
-        Ty::Ref { inner, .. } => reference_referent(inner),
-        _ => ty,
     }
 }
 
