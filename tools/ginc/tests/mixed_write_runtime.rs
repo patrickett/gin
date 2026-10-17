@@ -1,8 +1,9 @@
+mod common;
+use common::compile_exe;
 use std::process::Command;
 
-use ginc::cli::{Args, Emit, Profile};
-use ginc::compile::GinCompiler;
-use test_fixtures::{TempPackage, host_target_triple};
+use ginc::cli::Profile;
+use test_fixtures::TempPackage;
 
 #[test]
 fn mixed_local_write_and_runtime_extern_compile_and_run() {
@@ -11,26 +12,24 @@ fn mixed_local_write_and_runtime_extern_compile_and_run() {
         "main.gin",
         &test_fixtures::with_runtime(
             r#"SignedInt is in -2147483648 to 2147483647
+SignedInt has
+    finish(self):
+        return
 
-runtime_print_int(value SignedInt) SignedInt: runtime_print(value as RuntimeInt) as SignedInt
+runtime_print_int(value SignedInt) SignedInt: return runtime_print(value as RuntimeInt) as SignedInt
+#entry
 main:
     runtime_print_int(7)
-return 0
+    return 0
 "#,
         ),
     );
     let output = package.join("mixed_write_runtime");
-    let mut args = Args {
-        input: input.parent().unwrap().to_path_buf(),
-        output: Some(output.clone()),
-        emit: Emit::Exe,
-        profile: Profile::Debug,
-        target: Some(host_target_triple()),
-        no_cache: true,
-        ..Default::default()
-    };
-
-    let result = GinCompiler::compile(&mut args);
+    let result = compile_exe(
+        input.parent().unwrap().to_path_buf(),
+        &output.clone(),
+        Profile::Debug,
+    );
     assert!(result.is_success(), "mixed compilation failed: {result:?}");
     let output = Command::new(output).output().expect("run mixed example");
     assert!(output.status.success(), "mixed example failed");

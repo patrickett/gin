@@ -19,6 +19,48 @@ fn check(driver: &mut CompilerDriver, primary: &str, sources: Vec<(&str, &str)>)
 }
 
 #[test]
+fn todo_holes_block_codegen_even_in_unselected_constant_branches() {
+    let source = concat!(
+        "Word is in 0 to 255\nWord has\n    finish(self):\n        return\n",
+        "selected Word := when #target.arch is 'x86_64' then 42 else #todo\n",
+    );
+    let mut driver = CompilerDriver::default();
+    let parsed = driver
+        .parse(source_package(
+            "/virtual/main.gin",
+            vec![("/virtual/main.gin", source)],
+        ))
+        .unwrap();
+    let checked = driver.check(CompilePackage::new(
+        parsed,
+        CompileTarget::Concrete(flask::TargetTriple::parse("x86_64-unknown-linux-gnu").unwrap()),
+    ));
+    assert!(!checked.has_front_end_flaws());
+    assert!(
+        !checked.has_typecheck_flaws(),
+        "{:?}",
+        checked.primary_file().typecheck_diagnostics()
+    );
+    assert!(checked.has_holes());
+    assert!(
+        checked
+            .primary_file()
+            .typed()
+            .exprs
+            .kind
+            .iter()
+            .all(|kind| !matches!(kind, typecheck::TypedExprKind::Todo))
+    );
+    let context = codegen::NativeCompiler::create_context();
+    let lowered = driver.lower_package(&context, &checked);
+    assert!(lowered.module.is_none());
+    let diagnostic = &lowered.diagnostics[0].diagnostics[0];
+    assert_eq!(diagnostic.code.slug().as_str(), "unfilled-hole");
+    assert_eq!(diagnostic.category, Category::Flaw);
+    assert_eq!(&source[diagnostic.span.to_range()], "#todo");
+}
+
+#[test]
 fn parse_rejects_a_missing_primary_source() {
     let error = match CompilerDriver::default().parse(source_package(
         "/virtual/missing.gin",
@@ -40,8 +82,8 @@ fn parse_rejects_a_duplicate_primary_source_path() {
     let error = match CompilerDriver::default().parse(source_package(
         "/virtual/main.gin",
         vec![
-            ("/virtual/main.gin", "first:\nreturn"),
-            ("/virtual/main.gin", "second:\nreturn"),
+            ("/virtual/main.gin", "first:\n    return"),
+            ("/virtual/main.gin", "second:\n    return"),
         ],
     )) {
         Ok(_) => panic!("duplicate primary source path should fail"),
@@ -60,9 +102,9 @@ fn parse_rejects_a_duplicate_non_primary_source_path() {
     let error = match CompilerDriver::default().parse(source_package(
         "/virtual/main.gin",
         vec![
-            ("/virtual/main.gin", "main:\nreturn"),
-            ("/virtual/helper.gin", "first:\nreturn"),
-            ("/virtual/helper.gin", "second:\nreturn"),
+            ("/virtual/main.gin", "main:\n    return"),
+            ("/virtual/helper.gin", "first:\n    return"),
+            ("/virtual/helper.gin", "second:\n    return"),
         ],
     )) {
         Ok(_) => panic!("duplicate non-primary source path should fail"),
@@ -144,7 +186,7 @@ fn typecheck_diagnostics_are_attached_to_their_source() {
     let checked = check(
         &mut driver,
         "/virtual/unknown.gin",
-        vec![("/virtual/unknown.gin", "main:\nreturn missing")],
+        vec![("/virtual/unknown.gin", "main:\n    return missing")],
     );
 
     let file = checked.primary_file();
@@ -158,17 +200,14 @@ fn typecheck_diagnostics_are_attached_to_their_source() {
 
 #[test]
 fn driver_reuses_cached_imports_between_checks() {
-    let root = std::env::temp_dir().join(format!(
-        "gin_driver_cache_{}_{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .subsec_nanos()
-    ));
+    let root = test_fixtures::unique_temp_dir("driver_cache");
     let core = root.join("core");
     fs::create_dir_all(&core).unwrap();
-    fs::write(core.join("flask.jsonc"), "{}").unwrap();
+    fs::write(
+        core.join("mod.flask"),
+        "#settings\nmodule: 'core'\nversion: 0.0.0\n",
+    )
+    .unwrap();
     let main_path = root.join("main.gin");
     let int_path = core.join("int.gin");
     let main_source = "use core Int\n";
@@ -215,8 +254,8 @@ fn lowering_builds_one_module_from_every_checked_file() {
         .parse(source_package(
             "/virtual/consumer.gin",
             vec![
-                ("/virtual/provider.gin", "provider:\nreturn"),
-                ("/virtual/consumer.gin", "consumer:\nreturn"),
+                ("/virtual/provider.gin", "provider:\n    return"),
+                ("/virtual/consumer.gin", "consumer:\n    return"),
             ],
         ))
         .expect("valid primary source");
@@ -236,7 +275,8 @@ fn unresolved_builder_chain_is_lowered_once_and_preserves_independent_errors() {
     for length in [2, 8, 16] {
         let chain = ".missing_step('argument')".repeat(length);
         let source = format!(
-            "Builder has value Int\nstart() Builder: Builder(value: 1)\nresult: start(){chain}\nother: independent_missing\n"
+            "{}Builder has\n    value Word\n    finish(self):\n        return\nstart() Builder: return Builder(value: 1)\nresult: start(){chain}\nother: independent_missing\n",
+            test_fixtures::preludes::WORD_PRELUDE
         );
         let package = check(
             &mut CompilerDriver::default(),
@@ -285,11 +325,14 @@ fn unresolved_builder_chain_is_lowered_once_and_preserves_independent_errors() {
 
 #[test]
 fn valid_builder_chain_retains_receiver_types_and_argument_diagnostics() {
-    let source = "Builder has value Int\nBuilder.new() Builder: Builder(value: 1)\nBuilder.step(self) Builder: Builder(value: self.value)\nresult: Builder.new().step().step()\n";
+    let source = format!(
+        "{}Builder has\n    value Word\n    finish(self):\n        return\nBuilder.new() Builder: return Builder(value: 1)\nBuilder.step(self) Builder: return Builder(value: self.value)\nresult: Builder.new().step().step()\n",
+        test_fixtures::preludes::WORD_PRELUDE
+    );
     let package = check(
         &mut CompilerDriver::default(),
         "/virtual/valid.gin",
-        vec![("/virtual/valid.gin", source)],
+        vec![("/virtual/valid.gin", source.as_str())],
     );
     assert!(
         !package.has_typecheck_flaws(),
@@ -310,4 +353,26 @@ fn valid_builder_chain_retains_receiver_types_and_argument_diagnostics() {
         );
     }
     assert_eq!(errors.len(), 2, "{errors:?}");
+}
+
+#[test]
+fn checked_primary_and_file_lookup_survive_import_path_normalization() {
+    let package = test_fixtures::TempPackage::new("primary_path_normalization");
+    package.write_flask("fixture");
+    package.write("main.gin", "main: 42\n");
+    let original = package.join("./main.gin");
+    let canonical = original.canonicalize().unwrap();
+    let mut driver = CompilerDriver::default();
+    let parsed = driver
+        .parse(SourcePackage::new(
+            &original,
+            vec![SourceFile::new(&original, "main: 42\n")],
+        ))
+        .unwrap();
+    let checked = driver
+        .check(CompilePackage::new(parsed, CompileTarget::Library).with_import_resolution(true));
+    assert_eq!(checked.primary_path(), canonical);
+    assert_eq!(checked.file(&original).unwrap().path(), canonical);
+    assert!(!checked.has_front_end_flaws());
+    assert!(!checked.has_typecheck_flaws());
 }

@@ -10,7 +10,7 @@
 //!
 //! #[test]
 //! fn test_addition() {
-//!     compile_and_run("main: 1 + 2\n")
+//!     compile_and_run("#entry\nmain: 1 + 2\n")
 //!         .assert_compiled()
 //!         .assert_exit_code(3);
 //! }
@@ -28,12 +28,13 @@
 //! `std::env::temp_dir()` and cleaned up on `Drop`.
 
 use std::fs;
-use std::path::PathBuf;
-use std::process::Command;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ginc::cli::{Args, Emit, Profile};
-use ginc::compile::GinCompiler;
+use ginc::compile::{CompileResult, GinCompiler};
 
 /// Global counter for unique temp directory names (parallel-safe).
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -61,7 +62,7 @@ impl Default for Options {
 /// Provides builder-style assertion methods so tests read fluently:
 ///
 /// ```rust,ignore
-/// result.assert_compiled().assert_exit_code(0).assert_stdout_eq("ok\n");
+/// result.assert_compiled().assert_exit_code(0);
 /// ```
 pub struct RunResult {
     /// Compilation + linking succeeded and the executable exists on disk.
@@ -79,33 +80,6 @@ pub struct RunResult {
 }
 
 impl RunResult {
-    /// Whether the full compilation pipeline (codegen + link) succeeded.
-    pub fn compiled(&self) -> bool {
-        self.compiled
-    }
-
-    /// Whether the executable was actually launched.
-    pub fn ran(&self) -> bool {
-        self.ran
-    }
-
-    /// The process exit code, if the program ran and exited normally.
-    pub fn exit_code(&self) -> Option<i32> {
-        self.exit_code
-    }
-
-    /// The captured standard output of the program.
-    pub fn stdout(&self) -> &str {
-        &self.stdout
-    }
-
-    /// The captured standard error of the program.
-    pub fn stderr(&self) -> &str {
-        &self.stderr
-    }
-}
-
-impl RunResult {
     /// Assert that compilation and linking succeeded.
     ///
     /// Panics with a diagnostic message if the executable was not produced.
@@ -115,15 +89,6 @@ impl RunResult {
             "expected compilation to succeed, but no executable was produced.\n\
              stderr:\n{}",
             self.stderr,
-        );
-        self
-    }
-
-    /// Assert that compilation or linking failed (no executable produced).
-    pub fn assert_compile_failed(&self) -> &Self {
-        assert!(
-            !self.compiled,
-            "expected compilation to fail, but an executable was produced.",
         );
         self
     }
@@ -150,68 +115,6 @@ impl RunResult {
     /// Assert that the program exited with code 0.
     pub fn assert_success(&self) -> &Self {
         self.assert_exit_code(0)
-    }
-
-    /// Assert that the program exited with a non-zero code.
-    pub fn assert_failure(&self) -> &Self {
-        assert!(
-            self.ran,
-            "program was not run — compilation may have failed."
-        );
-        assert!(
-            self.exit_code.is_some_and(|c| c != 0),
-            "expected non-zero exit code, got {:?}\n\
-             stdout:\n{}\n\
-             stderr:\n{}",
-            self.exit_code,
-            self.stdout,
-            self.stderr,
-        );
-        self
-    }
-
-    /// Assert that stdout contains `needle`.
-    pub fn assert_stdout_contains(&self, needle: &str) -> &Self {
-        assert!(self.compiled, "cannot check stdout: compilation failed.");
-        assert!(
-            self.stdout.contains(needle),
-            "expected stdout to contain {needle:?}\n\nactual stdout:\n{}",
-            self.stdout,
-        );
-        self
-    }
-
-    /// Assert that stdout does NOT contain `needle`.
-    pub fn assert_stdout_not_contains(&self, needle: &str) -> &Self {
-        assert!(self.compiled, "cannot check stdout: compilation failed.");
-        assert!(
-            !self.stdout.contains(needle),
-            "expected stdout NOT to contain {needle:?}\n\nactual stdout:\n{}",
-            self.stdout,
-        );
-        self
-    }
-
-    /// Assert that stdout equals `expected` exactly.
-    pub fn assert_stdout_eq(&self, expected: &str) -> &Self {
-        assert!(self.compiled, "cannot check stdout: compilation failed.");
-        assert_eq!(
-            self.stdout, expected,
-            "expected stdout to equal {expected:?}\n\nactual stdout:\n{}",
-            self.stdout,
-        );
-        self
-    }
-
-    /// Assert that stderr contains `needle`.
-    pub fn assert_stderr_contains(&self, needle: &str) -> &Self {
-        assert!(self.compiled, "cannot check stderr: compilation failed.");
-        assert!(
-            self.stderr.contains(needle),
-            "expected stderr to contain {needle:?}\n\nactual stderr:\n{}",
-            self.stderr,
-        );
-        self
     }
 }
 
@@ -257,7 +160,7 @@ pub fn compile_and_run_with_options(source: &str, opts: Options) -> RunResult {
         emit: Emit::Exe,
         output: Some(exe_path.clone()),
         profile: opts.profile,
-        target: Some(test_target_triple()),
+        target: Some(test_fixtures::host_target_triple()),
         ..Default::default()
     };
 
@@ -270,7 +173,7 @@ pub fn compile_and_run_with_options(source: &str, opts: Options) -> RunResult {
             ran: false,
             exit_code: None,
             stdout: String::new(),
-            stderr: String::new(),
+            stderr: format!("{result:?}"),
             temp_dir,
         };
     }
@@ -296,8 +199,81 @@ pub fn compile_and_run_with_options(source: &str, opts: Options) -> RunResult {
     }
 }
 
-pub fn test_target_triple() -> String {
-    test_fixtures::host_target_triple()
+pub fn compile_exe(input: PathBuf, output: &Path, profile: Profile) -> CompileResult {
+    let mut args = Args {
+        input,
+        output: Some(output.to_path_buf()),
+        emit: Emit::Exe,
+        profile,
+        target: Some(test_fixtures::host_target_triple()),
+        no_cache: true,
+        ..Default::default()
+    };
+    GinCompiler::compile(&mut args)
+}
+
+pub fn require_success(result: &CompileResult, profile: Profile) {
+    assert!(result.is_success(), "{profile:?}: {result:?}");
+}
+
+pub fn compile_exe_checked(input: PathBuf, output: &Path, profile: Profile) {
+    let result = compile_exe(input, output, profile);
+    require_success(&result, profile);
+    assert!(
+        !result.has_typecheck_diagnostics(),
+        "{profile:?}: {result:?}"
+    );
+}
+
+pub fn compile_exe_with_gin_home(
+    input: PathBuf,
+    output: &Path,
+    gin_home: PathBuf,
+) -> CompileResult {
+    let mut args = Args {
+        input,
+        output: Some(output.to_path_buf()),
+        target: Some(test_fixtures::host_target_triple()),
+        no_cache: true,
+        gin_home: Some(flask::GinHome::new(gin_home)),
+        ..Default::default()
+    };
+    GinCompiler::compile(&mut args)
+}
+
+/// Compiles `input`, asserts a clean typecheck, then runs the executable with
+/// `stdin` on its standard input. `context` is the panic message used when the
+/// child cannot be spawned or waited on.
+pub fn compile_and_run_exe(
+    input: PathBuf,
+    output: &Path,
+    profile: Profile,
+    stdin: &str,
+    context: &str,
+) -> Output {
+    compile_exe_checked(input, output, profile);
+    let mut child = Command::new(output)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect(context);
+    child
+        .stdin
+        .as_mut()
+        .expect("child stdin")
+        .write_all(stdin.as_bytes())
+        .expect("write child stdin");
+    child.wait_with_output().expect(context)
+}
+
+/// Compile and run `input` under both profiles, asserting each run succeeds.
+pub fn run_in_profiles(package: &test_fixtures::TempPackage, input: PathBuf, context: &str) {
+    for profile in [Profile::Debug, Profile::Release] {
+        let executable = package.join(format!("program-{profile:?}"));
+        let run = compile_and_run_exe(input.clone(), &executable, profile, "", context);
+        assert!(run.status.success(), "{profile:?}: {run:?}");
+    }
 }
 
 /// Shorthand: compile-and-run with a unique test name.

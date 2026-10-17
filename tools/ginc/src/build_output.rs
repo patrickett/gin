@@ -64,9 +64,7 @@ impl BuildOutput {
             ),
             false,
         );
-        if let CompileResult::Success { output: Some(path) }
-        | CompileResult::SuccessWithTypecheckDiagnostics { output: Some(path) } = result
-        {
+        if let CompileResult::Success { output: Some(path) } = result {
             status("Artifact", &path.display().to_string(), false);
         }
     }

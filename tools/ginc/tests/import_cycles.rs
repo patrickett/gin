@@ -5,7 +5,10 @@ use test_fixtures::TempPackage;
 #[test]
 fn import_cycle_is_a_fatal_flaw() {
     let pkg = TempPackage::new("import_cycle_basic");
-    pkg.write("main.gin", "use './a.gin' as a\n\nmain:\n    return 0\n");
+    pkg.write(
+        "main.gin",
+        "use './a.gin' as a\n\n#entry\nmain:\n    return 0\n",
+    );
     pkg.write("a.gin", "use './b.gin' as b\nx: 1\n");
     pkg.write("b.gin", "use './a.gin' as a\nx: 2\n");
 

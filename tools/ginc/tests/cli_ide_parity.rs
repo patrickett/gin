@@ -1,16 +1,19 @@
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use analysis::{HoverDocExt, PackageCache};
+use analysis::{PackageCache, format_hover_markdown};
 use diagnostic::Diagnostic;
 use flask::{CompileTarget, TargetTriple};
 use ginc::driver::{CompilePackage, CompilerDriver, SourceFile, SourcePackage};
 
-fn diagnostic_identity(diagnostic: &Diagnostic) -> (&str, diagnostic::Category, &str) {
+fn diagnostic_identity(
+    diagnostic: &Diagnostic,
+) -> (String, diagnostic::Category, &str, usize, usize) {
     (
-        diagnostic.code.slug(),
+        diagnostic.code.to_string(),
         diagnostic.category,
         diagnostic.message.as_str(),
+        diagnostic.span.start(),
+        diagnostic.span.end(),
     )
 }
 
@@ -36,15 +39,17 @@ fn checked_source(
 
 #[test]
 fn cli_and_ide_match_hover_flaws_warnings_target_and_stale_interface_state() {
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("gin-cli-ide-parity-{suffix}"));
+    let root = test_fixtures::unique_temp_dir("cli-ide-parity");
     std::fs::create_dir_all(&root).expect("package directory");
     std::fs::write(
-        root.join("flask.jsonc"),
-        r#"{"name":"parity","version":"0","authors":[],"target":"wasm32-unknown-unknown"}"#,
+        root.join("mod.flask"),
+        r#"#settings
+module: "parity"
+version: 0.0.0
+target: "wasm32-unknown-unknown"
+
+#dependencies
+"#,
     )
     .expect("Flask config");
     let path = root.join("main.gin");
@@ -75,18 +80,32 @@ fn cli_and_ide_match_hover_flaws_warnings_target_and_stale_interface_state() {
         .iter()
         .map(diagnostic_identity)
         .collect::<Vec<_>>();
-    cli_identity.sort_by(|left, right| left.0.cmp(right.0));
-    ide_identity.sort_by(|left, right| left.0.cmp(right.0));
+    cli_identity.sort_by(|left, right| {
+        (left.0.as_str(), left.2, left.3, left.4).cmp(&(
+            right.0.as_str(),
+            right.2,
+            right.3,
+            right.4,
+        ))
+    });
+    ide_identity.sort_by(|left, right| {
+        (left.0.as_str(), left.2, left.3, left.4).cmp(&(
+            right.0.as_str(),
+            right.2,
+            right.3,
+            right.4,
+        ))
+    });
     assert_eq!(cli_identity, ide_identity);
     assert!(
         cli_identity
             .iter()
-            .any(|(code, _, _)| *code == "type-unknown-symbol")
+            .any(|(code, _, _, _, _)| *code == "type-unknown-symbol")
     );
     assert!(
         cli_identity
             .iter()
-            .any(|(code, _, _)| *code == "parse-bind-name-not-snake-case")
+            .any(|(code, _, _, _, _)| *code == "parse-bind-name-not-snake-case")
     );
 
     let hover_byte = source.find("badName() Index").expect("return type hover") + 10;
@@ -94,9 +113,7 @@ fn cli_and_ide_match_hover_flaws_warnings_target_and_stale_interface_state() {
         .primary_file()
         .typed()
         .hover_at_with_package(source, 3, 10, Some(cli.package_index()))
-        .map(|hover| {
-            ast::HoverDoc::format_markdown(&hover.markdown, hover.module_prefix.as_deref())
-        })
+        .map(|hover| format_hover_markdown(&hover.markdown, hover.module_prefix.as_deref()))
         .expect("CLI hover");
     let ide_hover = cache
         .hover(&path, hover_byte as u32)

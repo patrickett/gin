@@ -8,21 +8,26 @@ fn generated_vec_accepts_default_explicit_and_reordered_allocators() {
     let dependency = TempPackage::new("vec_dependency");
     let target = test_fixtures::host_target_triple();
     dependency.write(
-        "flask.jsonc",
-        "{\"name\":\"foundation\",\"version\":\"0.0.0\",\"authors\":[]}",
+        "mod.flask",
+        r#"#settings
+module: "foundation"
+version: 0.0.0
+
+#dependencies
+"#,
     );
-    dependency.write("primitive/int.gin", "Byte is in 0 to 255\nType is Unit\n");
+    dependency.write("primitive/int.gin", test_fixtures::preludes::BYTE_PRELUDE);
     dependency.write(
         "alloc/count.gin",
-        "use '../primitive' Byte\n#phantom(unit)\nCount(unit) is in 0 to 4294967295\n",
+        "use '../primitive' Byte\n#phantom(unit)\nCount(unit) is in 0 to 4294967295\nCount(unit) has\n    finish(self):\n        return\n",
     );
     dependency.write(
         "alloc/allocator.gin",
-        "use Count\nAllocation(element) has pointer @element, capacity Count(element)\nGlobalAllocator is ()\n",
+        "use Count\nAllocation(element) has\n    pointer @element, capacity Count(element)\n    finish(self):\n        return\nGlobalAllocator is ()\n",
     );
     dependency.write(
         "collection/vec.gin",
-        "use '../alloc' Allocation, Count, GlobalAllocator\nVec(element Type, allocator: GlobalAllocator) has storage Allocation(element), length Count(element)\n",
+        "use '../alloc' Allocation, Count, GlobalAllocator\nVec(element, allocator: GlobalAllocator) has\n    storage Allocation(element), length Count(element)\n    finish(self):\n        return\n",
     );
     let dependency_name = dependency
         .path()
@@ -32,29 +37,21 @@ fn generated_vec_accepts_default_explicit_and_reordered_allocators() {
     let dependency_path = format!("../{dependency_name}");
 
     package.write(
-        "flask.jsonc",
+        "mod.flask",
         &format!(
-            r#"{{
-  "name": "generated_vec_generic_arguments",
-  "version": "0.0.0",
-  "authors": [],
-  "target": "{target}",
-  "dependencies": {{
-    "foundation": {{ "path": "{dependency_path}" }}
-  }}
-}}"#,
+            r#"#settings
+module: "generated_vec_generic_arguments"
+version: 0.0.0
+target: "{target}"
+
+#dependencies
+foundation: "{dependency_path}"
+"#,
         ),
     );
     package.write(
         "main.gin",
-        "use foundation.collection Vec\n\
-\n\
-ArenaAllocator has marker Int\n\
-\n\
-default_values(value Vec(Int)) Vec(Int): value\n\
-explicit_values(value Vec(Int, allocator: ArenaAllocator)) Vec(Int, allocator: ArenaAllocator): value\n\
-reordered_values(value Vec(allocator: ArenaAllocator, element: Int)) Vec(allocator: ArenaAllocator, element: Int): value\
-",
+        "use foundation.collection Vec\n\nInt is in -9223372036854775808 to 9223372036854775807\nInt has finish(self): return\nArenaAllocator has\n    marker Int\n    finish(self):\n        return\n\ndefault_values(value Vec(Int)) Vec(Int): return value\nexplicit_values(value Vec(Int, allocator: ArenaAllocator)) Vec(Int, allocator: ArenaAllocator): return value\nreordered_values(value Vec(allocator: ArenaAllocator, element: Int)) Vec(allocator: ArenaAllocator, element: Int): return value",
     );
 
     let output = package.join("generated_vec_generic_arguments.ginif");

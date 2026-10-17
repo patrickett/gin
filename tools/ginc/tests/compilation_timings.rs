@@ -26,7 +26,7 @@ fn checking_distinguishes_frontend_from_diagnostic_rendering() {
     let package = TempPackage::new("timing_check");
     let input = package.write(
         "input.gin",
-        "Word is in 0 to 4294967295\nidentity(a Word) Word: a\n",
+        "Word is in 0 to 4294967295\nWord has\n    finish(self):\n        return\nidentity(a Word) Word: return a\n",
     );
     let report = package.join("timings.json");
     let mut args = Args {
@@ -47,4 +47,35 @@ fn checking_distinguishes_frontend_from_diagnostic_rendering() {
     assert!(names.contains(&"typecheck-diagnostics"));
     assert!(!names.contains(&"typecheck"));
     assert!(report["object_cache_hit"].is_null());
+}
+
+#[test]
+fn native_check_exposes_the_shared_semantic_phases() {
+    let package = TempPackage::new("shared_phase_profile");
+    let input = package.write(
+        "input.gin",
+        "Word is in 0 to 255\nWord has finish(self): return\nidentity(x Word) Word: return x\n",
+    );
+    let mut args = Args {
+        input,
+        ..Default::default()
+    };
+    let (result, report) =
+        compiler_profile::capture(|| GinCompiler::check(&mut args, CheckOptions::default()));
+    assert!(result.is_success());
+    for name in [
+        "parse",
+        "prepare",
+        "front-end",
+        "package-pass",
+        "lowering",
+        "flow",
+        "effects",
+    ] {
+        assert!(
+            report.phases.iter().any(|phase| phase.name == name),
+            "missing {name}"
+        );
+    }
+    assert!(!report.allocation_tracking);
 }

@@ -12,7 +12,10 @@ fn concrete_target_cli_preserves_wide_compile_time_integer_constants() {
         .skip(1)
         .collect::<Vec<_>>()
         .join("\n");
-    let input = package.write("main.gin", &format!("Byte is in 0 to 255\n{count}"));
+    let input = package.write(
+        "main.gin",
+        &format!("{}{count}", test_fixtures::preludes::BYTE_PRELUDE),
+    );
     let output = std::env::temp_dir().join(format!(
         "gin-count-{}-{}.ginif",
         std::process::id(),
@@ -30,7 +33,6 @@ fn concrete_target_cli_preserves_wide_compile_time_integer_constants() {
         timings_json: None,
         quiet: false,
         fast_llvm: false,
-        verbose: None,
         dependencies: Default::default(),
     };
 
@@ -57,7 +59,8 @@ fn assert_alignment_invalid(candidate: &str, test_name: &str) {
     let count = test_fixtures::semantic_fixtures::COUNT_GIN;
     let count = count.lines().skip(1).collect::<Vec<_>>().join("\n");
     let source = format!(
-        "Byte is in 0 to 255\n{count}\n\nmain:\n    if Alignment.try_new({candidate}) is Invalid\n        0\n    return\nreturn 1\n"
+        "{}{count}\n\n#entry\nmain:\n    when Alignment.try_new({candidate}) is Invalid then\n        return 0\n    return 1\n",
+        test_fixtures::preludes::BYTE_PRELUDE
     );
 
     cra(test_name, &source)

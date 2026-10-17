@@ -11,11 +11,15 @@ fn hello_world_example_writes_expected_stdout() {
         "main.gin",
         &test_fixtures::with_runtime(
             r#"SignedInt is in -2147483648 to 2147483647
+SignedInt has
+    finish(self):
+        return
 
-runtime_print_int(value SignedInt) SignedInt: runtime_print(value as RuntimeInt) as SignedInt
+runtime_print_int(value SignedInt) SignedInt: return runtime_print(value as RuntimeInt) as SignedInt
+#entry
 main:
     runtime_print_int(42)
-return 0
+    return 0
 "#,
         ),
     );

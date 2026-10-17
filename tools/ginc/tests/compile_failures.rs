@@ -53,8 +53,8 @@ fn unreadable_source_is_fatal_and_prevents_partial_output() {
 
     let first = dir.join("00_unreadable.gin");
     let second = dir.join("99_readable.gin");
-    write_source(&first, "main: 1\n");
-    write_source(&second, "main: 2\n");
+    write_source(&first, "#entry\nmain: 1\n");
+    write_source(&second, "#entry\nmain: 2\n");
 
     #[cfg(unix)]
     fs::set_permissions(&first, fs::Permissions::from_mode(0o000))
@@ -83,7 +83,7 @@ fn parse_failure_is_fatal_and_renderable() {
     fs::create_dir_all(&dir).expect("create input dir");
 
     let source = dir.join("main.gin");
-    write_source(&source, "main:\n");
+    write_source(&source, "#entry\nmain:\n");
 
     let mut args = Args {
         gin_home: Some(flask::GinHome::new(unique_temp_dir("ginc-failures-cache"))),
@@ -117,7 +117,7 @@ fn invalid_target_is_not_suppressed() {
     fs::create_dir_all(&dir).expect("create input dir");
 
     let source = dir.join("main.gin");
-    write_source(&source, "main: 1\n");
+    write_source(&source, "#entry\nmain: 1\n");
 
     let mut args = Args {
         gin_home: Some(flask::GinHome::new(unique_temp_dir("ginc-failures-cache"))),
@@ -140,7 +140,7 @@ fn parse_failure_precedes_invalid_target() {
     fs::create_dir_all(&dir).expect("create input dir");
 
     let source = dir.join("main.gin");
-    write_source(&source, "main:\n");
+    write_source(&source, "#entry\nmain:\n");
 
     let mut args = Args {
         gin_home: Some(flask::GinHome::new(unique_temp_dir("ginc-failures-cache"))),
@@ -169,7 +169,7 @@ fn missing_required_entry_target_still_fails_validation() {
 
 #[test]
 fn successful_compilation_is_success() {
-    let source = "main: 1\n";
+    let source = "#entry\nmain: 1\n";
     let source_path = unique_temp_dir("ginc-success");
     fs::create_dir_all(&source_path).expect("create temp dir");
     let source_file = source_path.join("main.gin");
@@ -192,14 +192,14 @@ fn successful_compilation_is_success() {
 }
 
 #[test]
-fn typecheck_flaws_do_not_block_emission() {
-    let dir = unique_temp_dir("ginc-typecheck-nonfatal");
+fn typecheck_flaws_block_emission() {
+    let dir = unique_temp_dir("ginc-typecheck-fatal");
     fs::create_dir_all(&dir).expect("create input dir");
 
     let source = dir.join("main.gin");
     write_source(
         &source,
-        "main: when 1 is\n    2 then 1\n    1 then 2\n    3 then 3\n",
+        "choose(value is in 0 to 3) is in 0 to 3: return when value is\n    2 then 1\n    1 then 2\n    3 then 3\n    3 then 0\n    else 0\n#entry\nmain: choose(1)\n",
     );
 
     let obj_path = dir.join("main.o");
@@ -214,8 +214,11 @@ fn typecheck_flaws_do_not_block_emission() {
     let result = GinCompiler::compile(&mut args);
 
     assert!(result.has_typecheck_diagnostics());
-    assert!(result.is_success());
-    assert!(obj_path.exists());
+    assert!(matches!(
+        result,
+        CompileResult::Failed(CompileFailure::TypecheckFailed)
+    ));
+    assert!(!obj_path.exists());
 }
 
 #[test]
@@ -224,7 +227,7 @@ fn interface_emission_succeeds() {
     fs::create_dir_all(&dir).expect("create temp dir");
 
     let source = dir.join("main.gin");
-    write_source(&source, "main:\nreturn 1\n");
+    write_source(&source, "#entry\nmain:\n    return 1\n");
 
     let interface_path = dir.join("main.ginif");
     let mut args = Args {
@@ -252,7 +255,7 @@ fn interface_emission_with_type_flaws_is_rejected() {
     let source = dir.join("main.gin");
     write_source(
         &source,
-        "main: when 1 is\n    2 then 1\n    1 then 2\n    3 then 3\n",
+        "#entry\nmain: when 1 is\n    2 then 1\n    1 then 2\n    3 then 3\n",
     );
 
     let interface_path = dir.join("main.ginif");
@@ -275,7 +278,7 @@ fn interface_emission_failed_build_does_not_clobber_prior_artifact() {
     fs::create_dir_all(&dir).expect("create temp dir");
 
     let source = dir.join("main.gin");
-    write_source(&source, "main:\nreturn 1\n");
+    write_source(&source, "#entry\nmain:\n    return 1\n");
 
     let interface_path = dir.join("main.ginif");
     let mut args = Args {
@@ -291,7 +294,7 @@ fn interface_emission_failed_build_does_not_clobber_prior_artifact() {
     );
     let stale_bytes = fs::read(&interface_path).expect("read first interface artifact");
 
-    write_source(&source, "main:\n");
+    write_source(&source, "#entry\nmain:\n");
     let second = GinCompiler::compile(&mut args);
     assert!(matches!(
         second,
@@ -312,8 +315,8 @@ fn interface_emission_is_deterministic_across_file_order() {
 
     let a = dir.join("a.gin");
     let b = dir.join("b.gin");
-    write_source(&a, "main:\nreturn 1\n\nx:\nreturn 2\n");
-    write_source(&b, "y:\nreturn 3\n\nz:\nreturn 4\n");
+    write_source(&a, "#entry\nmain:\n    return 1\n\nx:\n    return 2\n");
+    write_source(&b, "y:\n    return 3\n\nz:\n    return 4\n");
 
     let interface_path = dir.join("main.ginif");
     let mut args = Args {
@@ -329,8 +332,8 @@ fn interface_emission_is_deterministic_across_file_order() {
     );
     let first_bytes = fs::read(&interface_path).expect("read interface artifact");
 
-    write_source(&a, "x:\nreturn 2\n\nmain:\nreturn 1\n");
-    write_source(&b, "z:\nreturn 4\n\ny:\nreturn 3\n");
+    write_source(&a, "x:\n    return 2\n\n#entry\nmain:\n    return 1\n");
+    write_source(&b, "z:\n    return 4\n\ny:\n    return 3\n");
 
     let second = GinCompiler::compile(&mut args);
     assert!(
@@ -365,7 +368,7 @@ fn reserved_names_display_source_in_terminal_flaws() {
     let dir = unique_temp_dir("ginc-reserved-name");
     fs::create_dir_all(&dir).expect("create input dir");
     let source = dir.join("main.gin");
-    write_source(&source, "compute() value Int, return Int: 0\n");
+    write_source(&source, "compute() value Int, return Int: return 0\n");
 
     let output = Command::new(ginc_binary())
         .env("GIN_HOME", unique_temp_dir("ginc-reserved-name-cache"))
@@ -380,9 +383,40 @@ fn reserved_names_display_source_in_terminal_flaws() {
         "flaw",
         "parse-reserved-name",
         "`return` is a reserved keyword",
-        "compute() value Int, return Int: 0",
+        "compute() value Int, return Int: return 0",
         "main.gin:1:22",
         "choose a different name",
+    ] {
+        assert!(stderr.contains(expected), "missing {expected:?}: {stderr}");
+    }
+}
+
+#[test]
+fn record_integer_domain_is_fatal_before_emission() {
+    let dir = unique_temp_dir("ginc-record-domain");
+    fs::create_dir_all(&dir).expect("create input dir");
+    let source = dir.join("main.gin");
+    let artifact = dir.join("main.mlir");
+    write_source(
+        &source,
+        "Copy has\n    copy(self ref) Self: return (bits is in Self: self) as Self\nWord is in 0 to 9\nRecord has field Word\nRecord has Copy\n",
+    );
+
+    let output = Command::new(ginc_binary())
+        .env("GIN_HOME", unique_temp_dir("ginc-record-domain-cache"))
+        .arg(&source)
+        .args(["--emit", "mlir", "--output"])
+        .arg(&artifact)
+        .output()
+        .expect("run ginc binary");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!output.status.success(), "{stderr}");
+    assert!(!artifact.exists());
+    for expected in [
+        "type-non-integer-domain",
+        "`Self` resolves to record type `Record`",
+        "records have no integer domain",
     ] {
         assert!(stderr.contains(expected), "missing {expected:?}: {stderr}");
     }

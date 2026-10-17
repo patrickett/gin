@@ -1,7 +1,7 @@
 use clap::{Parser, ValueEnum};
 pub use codegen::emit::Profile;
 use std::collections::HashMap;
-use std::ffi::OsStr;
+
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
@@ -65,21 +65,8 @@ pub struct Args {
     #[arg(long)]
     pub fast_llvm: bool,
 
-    #[arg(short, long)]
-    pub verbose: Option<bool>,
-
-    /// Resolved dependency paths: name → directory. Populated by `begin build` from flask.jsonc.
+    /// Resolved dependency paths: name → directory. Populated by `begin build` from mod.flask.
     /// Not a CLI argument — set programmatically.
     #[arg(skip)]
     pub dependencies: HashMap<String, PathBuf>,
-}
-
-impl Args {
-    pub fn folder_name(&self) -> String {
-        self.input
-            .file_name()
-            .unwrap_or(OsStr::new("project"))
-            .to_string_lossy()
-            .to_string()
-    }
 }

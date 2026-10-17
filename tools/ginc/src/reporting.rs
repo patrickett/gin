@@ -1,4 +1,6 @@
 use clap::ValueEnum;
+#[cfg(test)]
+use diagnostic::code::SymbolCode;
 use diagnostic::{Category, Diagnostic, DiagnosticPathExt, Span};
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -72,7 +74,7 @@ impl DiagnosticReporter {
                 path.clone(),
                 d.span,
                 d.category,
-                d.code.slug().to_owned(),
+                d.code.to_string(),
                 d.message.clone(),
             )) {
                 continue;
@@ -100,7 +102,7 @@ impl DiagnosticReporter {
                     d.print(source, &filename);
                 }
                 MessageFormat::Short => {
-                    let (line, column) = position(source, d.span.start());
+                    let (line, column) = diagnostic::source_position(source, d.span.start());
                     let origin = if dependency { " [dependency]" } else { "" };
                     let help = d
                         .help
@@ -118,17 +120,17 @@ impl DiagnosticReporter {
                 }
                 MessageFormat::Json => {
                     let related: Vec<_> = d
-                        .related
+                        .related()
                         .iter()
                         .map(|r| json!({"range": range(source, r.span), "label": r.label}))
                         .collect();
                     println!(
                         "{}",
                         json!({
-                            "reason": "diagnostic", "severity": severity, "code": d.code.slug(),
+                            "reason": "diagnostic", "severity": severity, "code": d.code.slug().as_str(),
                             "file": path, "range": range(source, d.span), "message": d.message,
                             "help": d.help, "label": d.help_on_span, "related": related,
-                            "args": d.args, "dependency": dependency
+                            "args": d.args(), "dependency": dependency
                         })
                     );
                 }
@@ -183,26 +185,9 @@ fn single_line(text: &str) -> String {
     text.replace(['\n', '\r'], " ")
 }
 
-fn position(source: &str, offset: usize) -> (usize, usize) {
-    let mut offset = offset.min(source.len());
-    while !source.is_char_boundary(offset) {
-        offset -= 1;
-    }
-    let prefix = &source[..offset];
-    let line = prefix.bytes().filter(|b| *b == b'\n').count() + 1;
-    let column = prefix
-        .rsplit('\n')
-        .next()
-        .unwrap_or_default()
-        .chars()
-        .count()
-        + 1;
-    (line, column)
-}
-
 fn range(source: &str, span: Span) -> Value {
-    let (start_line, start_column) = position(source, span.start());
-    let (end_line, end_column) = position(source, span.end());
+    let (start_line, start_column) = diagnostic::source_position(source, span.start());
+    let (end_line, end_column) = diagnostic::source_position(source, span.end());
     json!({"byte_start": span.start(), "byte_end": span.end(),
         "start": {"line": start_line, "column": start_column},
         "end": {"line": end_line, "column": end_column}})
@@ -221,19 +206,19 @@ mod tests {
                 ..Default::default()
             },
         );
-        let d = Diagnostic::new("type-unknown-symbol", "unknown symbol").at_span(Span::new(1, 2));
+        let d = Diagnostic::new(SymbolCode::Unknown, "unknown symbol").at_span(Span::new(1, 2));
         assert!(reporter.emit(
             Path::new("/virtual/a.gin"),
             "abc",
             &[d.clone(), d.clone().with_help("additional help")]
         ));
-        reporter.emit(Path::new("/virtual/b.gin"), "abc", &[d.clone()]);
+        reporter.emit(Path::new("/virtual/b.gin"), "abc", std::slice::from_ref(&d));
         reporter.emit(
             Path::new("/virtual/a.gin"),
             "abc",
             &[
                 d.at_span(Span::new(2, 3)),
-                Diagnostic::new("type-unknown-symbol", "another symbol").at_span(Span::new(1, 2)),
+                Diagnostic::new(SymbolCode::Unknown, "another symbol").at_span(Span::new(1, 2)),
             ],
         );
         assert_eq!(reporter.errors, 4);
@@ -242,7 +227,7 @@ mod tests {
 
     #[test]
     fn positions_use_one_based_unicode_columns_and_byte_offsets() {
-        assert_eq!(position("é\nλ missing", 5), (2, 2));
+        assert_eq!(diagnostic::source_position("é\nλ missing", 5), (2, 2));
         let range = range("é\nλ missing", Span::new(6, 13));
         assert_eq!(range["start"]["column"], 3);
         assert_eq!(range["start"]["line"], 2);

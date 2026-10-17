@@ -3,12 +3,12 @@ use common::*;
 
 #[test]
 fn test_less_than() {
-    cra("cmp_lt", "main: 1 < 2\n").assert_compiled();
+    cra("cmp_lt", "#entry\nmain: when 1 < 2 then 0 else 1\n").assert_compiled();
 }
 
 #[test]
 fn test_greater_than() {
-    cra("cmp_gt", "main: 2 > 1\n").assert_compiled();
+    cra("cmp_gt", "#entry\nmain: when 2 > 1 then 0 else 1\n").assert_compiled();
 }
 
 // Equality test removed: `==` is no longer valid syntax.

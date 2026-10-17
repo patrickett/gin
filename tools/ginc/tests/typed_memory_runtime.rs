@@ -1,9 +1,10 @@
+mod common;
+use common::compile_exe;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use ginc::cli::{Args, Emit, Profile};
-use ginc::compile::GinCompiler;
-use test_fixtures::{TempPackage, host_target_triple};
+use ginc::cli::Profile;
+use test_fixtures::TempPackage;
 
 #[test]
 fn address_store_then_load_preserves_scalar_and_does_not_touch_other_slot() {
@@ -11,41 +12,42 @@ fn address_store_then_load_preserves_scalar_and_does_not_touch_other_slot() {
     let input = package.write(
         "main.gin",
         &test_fixtures::with_runtime(r#"Word is in 0 to 18446744073709551615
+Word has
+    finish(self):
+        return
 PointerToWord is @Word
-read_addr(address PointerToWord) Word: address.(0)
-copy_pointer(value ref PointerToWord) PointerToWord: deref value
-replace(previous Word, next Word) Word: next
+PointerToWord has
+    finish(self):
+        return
+read_addr(address PointerToWord) Word: return address.[0]
+copy_pointer(value ref PointerToWord) PointerToWord: return deref value
+replace(previous Word, next Word) Word: return next
 write_addr(address PointerToWord, value Word):
     pointer PointerToWord: address
-    pointer.(0):: replace(pointer.(0), value)
-return
-runtime_read_int() Word: runtime_word_bits(runtime_number) as Word
-runtime_print_int(value Word) Word: runtime_word_bits(runtime_print(runtime_signed_bits(value as RuntimeWord))) as Word
+    pointer.[0]:: replace(pointer.[0], value)
+    return
+runtime_read_int() Word: return runtime_word_bits(runtime_number) as Word
+runtime_print_int(value Word) Word: return runtime_word_bits(runtime_print(runtime_signed_bits(value as RuntimeWord))) as Word
 roundtrip(first Word, second Word, replacement Word) Word:
     first_address PointerToWord: @first
     second_address PointerToWord: @second
-    write_addr(copy_pointer(ref first_address), replacement)
+    write_addr(copy_pointer(first_address), replacement)
     runtime_print_int(read_addr(first_address))
     runtime_print_int(read_addr(second_address))
-return 0
+    return 0
 
+#entry
 main:
     roundtrip(runtime_read_int, runtime_read_int, runtime_read_int)
-return 0
+    return 0
 "#),
     );
     let output = package.join("typed_memory_runtime");
-    let mut args = Args {
-        input: input.parent().unwrap().to_path_buf(),
-        output: Some(output.clone()),
-        emit: Emit::Exe,
-        profile: Profile::Debug,
-        target: Some(host_target_triple()),
-        no_cache: true,
-        ..Default::default()
-    };
-
-    let result = GinCompiler::compile(&mut args);
+    let result = compile_exe(
+        input.parent().unwrap().to_path_buf(),
+        &output.clone(),
+        Profile::Debug,
+    );
     assert!(
         result.is_success(),
         "typed memory compilation failed: {result:?}"

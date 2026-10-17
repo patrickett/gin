@@ -26,12 +26,12 @@ fn interface_outputs_stay_outside_sources_and_change_with_implementation() {
     let pkg = TempPackage::new("artifact_source");
     let cache = TempPackage::new("artifact_cache");
     pkg.write_flask("pkg");
-    pkg.write("main.gin", "main:\nreturn 1\n");
+    pkg.write("main.gin", "#entry\nmain:\n    return 1\n");
     let (first, _) = compile(&pkg, &cache);
     assert!(first.starts_with(cache.path()));
     assert!(!pkg.join("target").exists());
     assert_eq!(std::fs::read_dir(pkg.path()).unwrap().count(), 2);
-    pkg.write("main.gin", "main:\nreturn 2\n");
+    pkg.write("main.gin", "#entry\nmain:\n    return 2\n");
     let (second, _) = compile(&pkg, &cache);
     assert_ne!(first, second);
     assert!(first.exists());
@@ -53,6 +53,25 @@ fn public_type_changes_are_visible_in_interfaces() {
     );
 }
 
+#[test]
+fn storage_ownership_changes_are_visible_in_interfaces() {
+    let pkg = TempPackage::new("interface_storage_ownership");
+    let cache = TempPackage::new("interface_storage_ownership_cache");
+    pkg.write_flask("pkg");
+    let source = "Element is Ready\nStorage has\n    address @Element\n    finish(self):\n        Storage(address) := self\n        raw: address as @Element\n        return\n";
+    pkg.write("types.gin", source);
+    let (_, old) = compile(&pkg, &cache);
+    pkg.write(
+        "types.gin",
+        &source.replace("address @Element", "address own Element"),
+    );
+    let (_, new) = compile(&pkg, &cache);
+    assert_eq!(
+        interface::classify_interfaces(&old, &new),
+        interface::Compatibility::Breaking
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn read_only_module_directories_can_emit_interfaces() {
@@ -60,7 +79,7 @@ fn read_only_module_directories_can_emit_interfaces() {
     let pkg = TempPackage::new("readonly_sources");
     let cache = TempPackage::new("readonly_cache");
     pkg.write_flask("pkg");
-    pkg.write("main.gin", "main:\nreturn\n");
+    pkg.write("main.gin", "#entry\nmain:\n    return\n");
     let original = std::fs::metadata(pkg.path()).unwrap().permissions();
     std::fs::set_permissions(pkg.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
     let result = GinCompiler::compile(&mut Args {
@@ -79,7 +98,7 @@ fn native_objects_and_executables_use_the_shared_cache() {
     let pkg = TempPackage::new("native_sources");
     let cache = TempPackage::new("native_cache");
     pkg.write_flask("pkg");
-    let input = pkg.write("main.gin", "main:\nreturn 0\n");
+    let input = pkg.write("main.gin", "#entry\nmain:\n    return 0\n");
     for emit in [Emit::Obj, Emit::Exe] {
         let result = GinCompiler::compile(&mut Args {
             input: input.clone(),
@@ -114,7 +133,7 @@ fn object_reuse_validates_content_and_respects_no_cache() {
     let cache = TempPackage::new("object_reuse_cache");
     pkg.write_flask("pkg");
     let mut args = Args {
-        input: pkg.write("main.gin", "main:\nreturn 0\n"),
+        input: pkg.write("main.gin", "#entry\nmain:\n    return 0\n"),
         emit: Emit::Obj,
         target: Some(test_fixtures::host_target_triple()),
         gin_home: Some(GinHome::new(cache.path().to_path_buf())),

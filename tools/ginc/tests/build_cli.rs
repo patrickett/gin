@@ -5,7 +5,10 @@ fn build_status_uses_stderr_and_timings_are_opt_in() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("input.gin"),
-        "Word is in 0 to 255\nidentity(a Word) Word: a\n",
+        format!(
+            "{}identity(a Word) Word: return a\n",
+            test_fixtures::preludes::WORD_PRELUDE
+        ),
     )
     .unwrap();
     for extra in [None, Some("--timings"), Some("--quiet")] {

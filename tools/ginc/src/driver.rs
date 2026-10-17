@@ -9,8 +9,8 @@ use diagnostic::{Category, Diagnostic};
 use flask::CompileTarget;
 use interface::PublicInterface;
 use parser::query::SourceParseExt;
-use resolve::{ImportDependencyGraph, ParsedFile, ParsedModuleCache};
-use typecheck::transform::PackageTransformOptions;
+use resolve::{ParsedFile, ParsedModuleCache};
+use typecheck::transform::{PackageCheckSession, PackageTransformOptions};
 use typecheck::{PackageSemanticIndex, TypedFileAst};
 
 #[derive(Clone)]
@@ -152,18 +152,27 @@ impl CheckedFile {
     pub fn has_typecheck_flaws(&self) -> bool {
         !self.typecheck_diagnostics.is_empty()
     }
+
+    pub fn hole_diagnostics(&self) -> Vec<Diagnostic> {
+        self.parsed.output.ast.hole_diagnostics(Category::Flaw)
+    }
 }
 
 pub struct CheckedPackage {
     primary_index: usize,
     files: Vec<CheckedFile>,
-    import_graph: Option<ImportDependencyGraph>,
     target: CompileTarget,
     public_interface: PublicInterface,
     package_index: PackageSemanticIndex,
 }
 
 impl CheckedPackage {
+    pub fn has_holes(&self) -> bool {
+        self.files
+            .iter()
+            .any(|file| !file.parsed.output.ast.todo_holes.is_empty())
+    }
+
     pub fn primary_path(&self) -> &Path {
         self.primary_file().path()
     }
@@ -177,7 +186,13 @@ impl CheckedPackage {
     }
 
     pub fn file(&self, path: &Path) -> Option<&CheckedFile> {
-        self.files.iter().find(|file| file.path() == path)
+        self.files
+            .iter()
+            .find(|file| file.path() == path)
+            .or_else(|| {
+                let canonical = path.canonicalize().ok()?;
+                self.files.iter().find(|file| file.path() == canonical)
+            })
     }
 
     pub fn primary_file(&self) -> &CheckedFile {
@@ -190,10 +205,6 @@ impl CheckedPackage {
 
     pub fn has_typecheck_flaws(&self) -> bool {
         self.files.iter().any(CheckedFile::has_typecheck_flaws)
-    }
-
-    pub fn import_graph(&self) -> Option<&ImportDependencyGraph> {
-        self.import_graph.as_ref()
     }
 
     pub fn public_interface(&self) -> &PublicInterface {
@@ -215,9 +226,22 @@ pub struct LoweredPackage<'c> {
     pub diagnostics: Vec<LoweredFileDiagnostics>,
 }
 
-#[derive(Default)]
+/// Checks packages through the shared session configuration
+/// (`resolve::default_check_session`) so the compiler and the editor run the same
+/// checking policy. Falls back to the stateless front end if the session cannot
+/// be constructed.
 pub struct CompilerDriver {
     cache: ParsedModuleCache,
+    session: Option<PackageCheckSession>,
+}
+
+impl Default for CompilerDriver {
+    fn default() -> Self {
+        Self {
+            cache: ParsedModuleCache::default(),
+            session: resolve::default_check_session(),
+        }
+    }
 }
 
 impl CompilerDriver {
@@ -258,42 +282,47 @@ impl CompilerDriver {
 
     pub fn check(&mut self, package: CompilePackage) -> CheckedPackage {
         let primary_path = package.parsed.primary_path;
+        let primary_path = if package.resolve_imports {
+            primary_path.canonicalize().unwrap_or(primary_path)
+        } else {
+            primary_path
+        };
         let target = package.target.clone();
-        let front_end = resolve::run_package_front_end(
-            package.parsed.files,
-            &package.dependencies,
-            std::mem::take(&mut self.cache),
-            resolve::PackageFrontEndOptions {
-                gin_home: package.gin_home,
-                compile_target: target.clone(),
-                transform: PackageTransformOptions::FULL,
-                resolve_imports: package.resolve_imports,
-                package_fallback: package.package_fallback,
-                transform_paths: None,
-            },
-        );
-        self.cache = front_end.cache;
-        let files: Vec<_> = front_end
+        let options = resolve::PackageFrontEndOptions {
+            gin_home: package.gin_home,
+            compile_target: target.clone(),
+            transform: PackageTransformOptions::FULL,
+            resolve_imports: package.resolve_imports,
+            package_fallback: package.package_fallback,
+            transform_paths: None,
+        };
+        // Both branches move `package.parsed.files`, but only one runs, so the
+        // conditional move is fine; `cache` is taken out and handed to the front end.
+        let cache = std::mem::take(&mut self.cache);
+        let files = package.parsed.files;
+        let dependencies = package.dependencies;
+        let front_end = match self.session.as_mut() {
+            Some(session) => resolve::run_package_front_end_with_session(
+                files,
+                &dependencies,
+                cache,
+                options,
+                session,
+            ),
+            None => resolve::run_package_front_end(files, &dependencies, cache, options),
+        };
+        let solved = resolve::AssembledPackage::assemble(front_end);
+        let package_index = solved.semantic_index();
+        self.cache = solved.cache;
+        let files: Vec<_> = solved
             .files
             .into_iter()
             .map(|file| {
                 let mut parsed = file.parsed;
                 parsed.output.symptoms.extend(file.import_diagnostics);
                 parsed.output.symptoms.extend(file.prepare_diagnostics);
-                let typed = file
-                    .typed
-                    .expect("full package transformation checks every file");
-                let typecheck_diagnostics = typed
-                    .all_flaws()
-                    .into_iter()
-                    .map(|(span, diagnostic)| {
-                        if diagnostic.span.start() == 0 && diagnostic.span.end() == 0 {
-                            diagnostic.clone().at_span_id(span, &typed.span_table)
-                        } else {
-                            diagnostic.clone()
-                        }
-                    })
-                    .collect();
+                let typed = file.typed;
+                let typecheck_diagnostics = typed.flaws_with_spans();
                 CheckedFile {
                     parsed,
                     typed,
@@ -301,9 +330,6 @@ impl CompilerDriver {
                 }
             })
             .collect();
-        let package_index = PackageSemanticIndex::from_typed_asts(
-            &files.iter().map(CheckedFile::typed).collect::<Vec<_>>(),
-        );
         let primary_index = files
             .iter()
             .position(|file| file.path() == primary_path)
@@ -312,9 +338,8 @@ impl CompilerDriver {
         CheckedPackage {
             primary_index,
             files,
-            import_graph: front_end.import_graph,
             target,
-            public_interface: front_end.public_interface,
+            public_interface: solved.public_interface,
             package_index,
         }
     }
@@ -324,6 +349,19 @@ impl CompilerDriver {
         context: &'c Context,
         package: &CheckedPackage,
     ) -> LoweredPackage<'c> {
+        if package.has_holes() {
+            return LoweredPackage {
+                module: None,
+                diagnostics: package
+                    .files()
+                    .iter()
+                    .map(|file| LoweredFileDiagnostics {
+                        path: file.path().to_path_buf(),
+                        diagnostics: file.hole_diagnostics(),
+                    })
+                    .collect(),
+            };
+        }
         let inputs: Vec<_> = package
             .files()
             .iter()

@@ -6,6 +6,7 @@ use crate::driver::{
     LoweredFileDiagnostics, ParsedPackage, SourceFile, SourcePackage,
 };
 use crate::reporting::{CheckOptions, DiagnosticReporter};
+use diagnostic::code::InterfaceCode;
 use diagnostic::{Category, Diagnostic, DiagnosticPathExt};
 use flask::TargetTriple;
 use flask::{CompileTarget, FlaskConfig};
@@ -38,6 +39,19 @@ impl CompilationTimings {
     }
 
     fn run<T>(&mut self, name: &'static str, action: impl FnOnce() -> T) -> T {
+        let phase = match name {
+            "discover-sources" => compiler_profile::Phase::Discover,
+            "read-sources" => compiler_profile::Phase::Read,
+            "parse" => compiler_profile::Phase::Parse,
+            "front-end" => compiler_profile::Phase::FrontEnd,
+            "typecheck-diagnostics" => compiler_profile::Phase::Diagnostics,
+            "mlir-lowering" => compiler_profile::Phase::Mlir,
+            "artifact-key" | "toolchain-identity" => compiler_profile::Phase::ArtifactKey,
+            "object-cache-lookup" => compiler_profile::Phase::ObjectCache,
+            "linking" => compiler_profile::Phase::Linking,
+            _ => compiler_profile::Phase::Other,
+        };
+        let _profile = compiler_profile::span(phase);
         if !self.enabled && self.json_path.is_none() {
             return action();
         }
@@ -91,10 +105,8 @@ pub struct GinCompiler;
 /// Final compiler outcome.
 #[derive(Debug)]
 pub enum CompileResult {
-    /// Compilation succeeded with no non-fatal diagnostics.
+    /// Compilation succeeded.
     Success { output: Option<PathBuf> },
-    /// Compilation succeeded with non-fatal type-check diagnostics.
-    SuccessWithTypecheckDiagnostics { output: Option<PathBuf> },
     /// Compilation failed.
     Failed(CompileFailure),
 }
@@ -227,7 +239,14 @@ impl GinCompiler {
                 .map(|p| p.to_path_buf())
                 .unwrap_or_default()
         };
-        let flask_config = FlaskConfig::find_package_config(&entry_dir).map(|(cfg, _)| cfg);
+        let flask_config = match FlaskConfig::discover(&entry_dir) {
+            Ok(config) => config.map(|(config, _)| config),
+            Err(error) => {
+                return CompileResult::Failed(CompileFailure::Resolution(flask::ResolutionError(
+                    error,
+                )));
+            }
+        };
         if let Some(config) = &flask_config
             && let Err(error) = config.validate_resolution()
         {
@@ -286,28 +305,22 @@ impl GinCompiler {
             return CompileResult::Failed(CompileFailure::ParseFailed);
         }
 
-        // Print type-check flaws from the typed AST (uses the diagnostic crate for proper
-        // messages, help text, and ariadne rendering).
-        //
-        // Type flaws are printed but do NOT gate compilation — type checking is
-        // best-effort diagnostics; codegen may still succeed for code the checker
-        // doesn't fully understand yet (e.g. template unions).
         let has_typecheck_flaws = timings.run("typecheck-diagnostics", || {
             print_type_diagnostics(&checked, reporter)
         });
+        if has_front_end_flaws {
+            return CompileResult::Failed(CompileFailure::ParseFailed);
+        }
+        if has_typecheck_flaws {
+            return CompileResult::Failed(CompileFailure::TypecheckFailed);
+        }
 
         if check_only {
-            return if has_front_end_flaws {
-                CompileResult::Failed(CompileFailure::ParseFailed)
-            } else if has_typecheck_flaws {
-                CompileResult::Failed(CompileFailure::TypecheckFailed)
-            } else {
-                CompileResult::Success { output: None }
-            };
+            return CompileResult::Success { output: None };
         }
 
         let emit_result = match args.emit {
-            crate::cli::Emit::Mlir => emit_mlir_typed(&driver, &checked, Some(&mut timings)),
+            crate::cli::Emit::Mlir => emit_mlir_typed(&driver, &checked, &mut timings),
             crate::cli::Emit::Interface => emit_interface(&checked, args),
             crate::cli::Emit::Obj | crate::cli::Emit::Exe => emit_native_typed(
                 &driver,
@@ -315,7 +328,7 @@ impl GinCompiler {
                 NativeEmitOptions {
                     args,
                     fast_llvm,
-                    timings: Some(&mut timings),
+                    timings: &mut timings,
                 },
             ),
         };
@@ -324,10 +337,6 @@ impl GinCompiler {
             Ok(output) => output,
             Err(failure) => return CompileResult::Failed(failure),
         };
-
-        if has_typecheck_flaws {
-            return CompileResult::SuccessWithTypecheckDiagnostics { output };
-        }
 
         CompileResult::Success { output }
     }
@@ -347,24 +356,12 @@ fn env_flag_enabled(name: &str) -> bool {
 }
 
 impl CompileResult {
-    pub fn emitted_path(&self) -> Option<&Path> {
-        match self {
-            Self::Success { output } | Self::SuccessWithTypecheckDiagnostics { output } => {
-                output.as_deref()
-            }
-            Self::Failed(_) => None,
-        }
-    }
-
     pub fn has_typecheck_diagnostics(&self) -> bool {
-        matches!(self, Self::SuccessWithTypecheckDiagnostics { .. })
+        matches!(self, Self::Failed(CompileFailure::TypecheckFailed))
     }
 
     pub fn is_success(&self) -> bool {
-        matches!(
-            self,
-            Self::Success { .. } | Self::SuccessWithTypecheckDiagnostics { .. }
-        )
+        matches!(self, Self::Success { .. })
     }
 }
 
@@ -451,14 +448,10 @@ fn print_package_codegen_diagnostics(
 fn emit_mlir_typed(
     driver: &CompilerDriver,
     package: &CheckedPackage,
-    mut timings: Option<&mut CompilationTimings>,
+    timings: &mut CompilationTimings,
 ) -> Result<Option<PathBuf>, CompileFailure> {
     let context = codegen::emit::NativeCompiler::create_context();
-    let lowered = if let Some(timings) = timings.as_mut() {
-        timings.run("mlir-lowering", || driver.lower_package(&context, package))
-    } else {
-        driver.lower_package(&context, package)
-    };
+    let lowered = timings.run("mlir-lowering", || driver.lower_package(&context, package));
     print_package_codegen_diagnostics(package, &lowered.diagnostics);
     let symptoms = lowered
         .diagnostics
@@ -483,7 +476,7 @@ fn emit_mlir_typed(
 struct NativeEmitOptions<'a> {
     args: &'a Args,
     fast_llvm: bool,
-    timings: Option<&'a mut CompilationTimings>,
+    timings: &'a mut CompilationTimings,
 }
 
 fn emit_native_typed(
@@ -494,25 +487,19 @@ fn emit_native_typed(
     let NativeEmitOptions {
         args,
         fast_llvm,
-        mut timings,
+        timings,
     } = options;
-    let dir = if let Some(timings) = timings.as_mut() {
-        timings.run("artifact-key", || artifact_directory(package, args))
-    } else {
-        artifact_directory(package, args)
-    }?;
+    let dir = timings.run("artifact-key", || artifact_directory(package, args))?;
     let staging = tempfile::tempdir_in(&dir).map_err(CompileFailure::ArtifactStorage)?;
     let obj_path = staging.path().join("module.o");
 
     let identity = if args.no_cache {
         None
-    } else if let Some(timings) = timings.as_mut() {
+    } else {
         timings.run(
             "toolchain-identity",
             codegen::emit::NativeCompiler::object_cache_identity,
         )
-    } else {
-        codegen::emit::NativeCompiler::object_cache_identity()
     };
     let cached_object = dir.join("module.o");
     let receipt = dir.join("module.o.sha256");
@@ -521,24 +508,14 @@ fn emit_native_typed(
             verified_object(&cached_object, &receipt, identity, &obj_path).unwrap_or(false)
         })
     };
-    let reused = if let Some(timings) = timings.as_mut() {
-        timings.run("object-cache-lookup", lookup)
-    } else {
-        lookup()
-    };
-    if let Some(timings) = timings.as_mut() {
-        timings.object_cache_hit = Some(reused);
-    }
+    let reused = timings.run("object-cache-lookup", lookup);
+    timings.object_cache_hit = Some(reused);
     if !reused {
         let profile = args.profile;
 
         let compiler = codegen::emit::NativeCompiler::default();
         let context = codegen::emit::NativeCompiler::create_context();
-        let lowered = if let Some(timings) = timings.as_mut() {
-            timings.run("mlir-lowering", || driver.lower_package(&context, package))
-        } else {
-            driver.lower_package(&context, package)
-        };
+        let lowered = timings.run("mlir-lowering", || driver.lower_package(&context, package));
         print_package_codegen_diagnostics(package, &lowered.diagnostics);
         let mut symptoms: Vec<_> = lowered
             .diagnostics
@@ -558,11 +535,9 @@ fn emit_native_typed(
             fast_llvm,
             package.target().triple_raw(),
         );
-        if let Some(timings) = timings.as_mut() {
-            timings.record("mlir-optimization", native_timings.optimization);
-            timings.record("llvm-lowering", native_timings.lowering);
-            timings.record("object-emission", native_timings.object_emission);
-        }
+        timings.record("mlir-optimization", native_timings.optimization);
+        timings.record("llvm-lowering", native_timings.lowering);
+        timings.record("object-emission", native_timings.object_emission);
         if !ok {
             print_codegen_diagnostics(package.primary_file(), &more);
             symptoms.extend(more);
@@ -572,31 +547,24 @@ fn emit_native_typed(
             });
         }
 
-        if symptoms.is_empty() && more.is_empty() {
-            if let Some(identity) = &identity {
-                cache_object(&obj_path, &cached_object, &receipt, identity)
-                    .map_err(CompileFailure::ArtifactStorage)?;
-            }
+        if symptoms.is_empty()
+            && more.is_empty()
+            && let Some(identity) = &identity
+        {
+            cache_object(&obj_path, &cached_object, &receipt, identity)
+                .map_err(CompileFailure::ArtifactStorage)?;
         }
     }
 
     if matches!(args.emit, crate::cli::Emit::Exe) {
         let exe_path = staging.path().join("module");
-        let (linked, link_symptoms) = if let Some(timings) = timings.as_mut() {
-            timings.run("linking", || {
-                codegen::emit::NativeCompiler::link_executable(
-                    &obj_path,
-                    &exe_path,
-                    package.target().triple_raw(),
-                )
-            })
-        } else {
+        let (linked, link_symptoms) = timings.run("linking", || {
             codegen::emit::NativeCompiler::link_executable(
                 &obj_path,
                 &exe_path,
                 package.target().triple_raw(),
             )
-        };
+        });
         if !linked {
             print_codegen_diagnostics(package.primary_file(), &link_symptoms);
             return Err(CompileFailure::EmissionFailed {
@@ -664,8 +632,9 @@ fn emit_interface(
     }) {
         return Err(CompileFailure::EmissionFailed {
             stage: CompileEmitStage::InterfaceEmission,
+            // interface-invalid-package
             diagnostics: vec![Diagnostic::new(
-                "interface-invalid-package",
+                InterfaceCode::InvalidPackage,
                 "cannot emit an authoritative interface for a package with type errors",
             )],
         });
@@ -707,7 +676,7 @@ fn artifact_directory(package: &CheckedPackage, args: &Args) -> Result<PathBuf, 
     let mut manifests = std::collections::BTreeSet::new();
     for file in files {
         if let Some((_, root)) = FlaskConfig::find_package_config(file.path()) {
-            manifests.insert(root.join(flask::PACKAGE_CONFIG_NAME));
+            manifests.insert(FlaskConfig::manifest_path(&root));
         }
         for bytes in [
             file.path().as_os_str().as_encoded_bytes(),

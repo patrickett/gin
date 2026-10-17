@@ -1,6 +1,8 @@
+mod common;
+use common::{compile_exe, require_success};
 use std::fs;
 
-use ginc::cli::{Args, Emit, Profile};
+use ginc::cli::{Args, Profile};
 use ginc::compile::GinCompiler;
 use test_fixtures::{host_target_triple, unique_temp_dir, write_file};
 
@@ -10,103 +12,50 @@ fn chained_nested_dep_a_b_loads_package_at_b() {
     fs::create_dir_all(&dir).unwrap();
 
     write_file(
-        &dir.join("flask.jsonc"),
-        r#"
-{
-  "name": "root",
-  "version": "0.0.0",
-  "authors": [],
-  "dependencies": {
-    "dep": { "path": "dep" }
-  }
-}
+        &dir.join("mod.flask"),
+        r#"#settings
+module: "root"
+version: 0.0.0
+
+#dependencies
+dep: "./dep"
 "#,
     );
 
     write_file(
-        &dir.join("dep/flask.jsonc"),
-        r#"{"name":"dep","version":"0.0.0","authors":[]}"#,
+        &dir.join("dep/mod.flask"),
+        r#"#settings
+module: "dep"
+version: 0.0.0
+
+#dependencies
+"#,
     );
     write_file(
-        &dir.join("dep/a/flask.jsonc"),
-        r#"{"name":"dep_a","version":"0.0.0","authors":[]}"#,
+        &dir.join("dep/a/mod.flask"),
+        r#"#settings
+module: "dep_a"
+version: 0.0.0
+
+#dependencies
+"#,
     );
     write_file(
-        &dir.join("dep/a/b/flask.jsonc"),
-        r#"{"name":"dep_ab","version":"0.0.0","authors":[]}"#,
+        &dir.join("dep/a/b/mod.flask"),
+        r#"#settings
+module: "dep_ab"
+version: 0.0.0
+
+#dependencies
+"#,
     );
     write_file(&dir.join("dep/a/b/x.gin"), "x: 1\n");
 
-    write_file(&dir.join("main.gin"), "use dep.a.b\n\nmain: 0\n");
+    write_file(&dir.join("main.gin"), "use dep.a.b\n\n#entry\nmain: 0\n");
 
     let exe = dir.join("out.exe");
-    let mut args = Args {
-        input: dir.join("main.gin"),
-        emit: Emit::Exe,
-        output: Some(exe.clone()),
-        profile: Profile::Debug,
-        target: Some(host_target_triple()),
-        no_cache: true,
-        ..Default::default()
-    };
-    let result = GinCompiler::compile(&mut args);
-    assert!(result.is_success(), "{result:?}");
-
-    assert!(
-        exe.exists(),
-        "expected compilation to succeed and produce an executable"
-    );
-
-    let _ = fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn chained_exports_dep_a_b_imports_folder_module_sources() {
-    let dir = unique_temp_dir("dep_a_b_folder");
-    fs::create_dir_all(&dir).unwrap();
-
-    write_file(
-        &dir.join("flask.jsonc"),
-        r#"
-{
-  "name": "root",
-  "version": "0.0.0",
-  "authors": [],
-  "dependencies": {
-    "dep": { "path": "dep" }
-  }
-}
-"#,
-    );
-
-    write_file(
-        &dir.join("dep/flask.jsonc"),
-        r#"{"name":"dep","version":"0.0.0","authors":[]}"#,
-    );
-    write_file(
-        &dir.join("dep/a/flask.jsonc"),
-        r#"{"name":"dep_a","version":"0.0.0","authors":[]}"#,
-    );
-    write_file(
-        &dir.join("dep/a/b/flask.jsonc"),
-        r#"{"name":"dep_ab","version":"0.0.0","authors":[]}"#,
-    );
-    write_file(&dir.join("dep/a/b/c.gin"), "y: 2\n");
-
-    write_file(&dir.join("main.gin"), "use dep.a.b\n\nmain: 0\n");
-
-    let exe = dir.join("out.exe");
-    let mut args = Args {
-        input: dir.join("main.gin"),
-        emit: Emit::Exe,
-        output: Some(exe.clone()),
-        profile: Profile::Debug,
-        target: Some(host_target_triple()),
-        no_cache: true,
-        ..Default::default()
-    };
-    let result = GinCompiler::compile(&mut args);
-    assert!(result.is_success(), "{result:?}");
+    let result = compile_exe(dir.join("main.gin"), &exe.clone(), Profile::Debug);
+    require_success(&result, Profile::Debug);
 
     assert!(
         exe.exists(),
@@ -122,36 +71,29 @@ fn missing_nested_package_is_a_fatal_import_flaw() {
     fs::create_dir_all(&dir).unwrap();
 
     write_file(
-        &dir.join("flask.jsonc"),
-        r#"
-{
-  "name": "root",
-  "version": "0.0.0",
-  "authors": [],
-  "dependencies": {
-    "dep": { "path": "dep" }
-  }
-}
+        &dir.join("mod.flask"),
+        r#"#settings
+module: "root"
+version: 0.0.0
+
+#dependencies
+dep: "./dep"
 "#,
     );
 
     write_file(
-        &dir.join("dep/flask.jsonc"),
-        r#"{"name":"dep","version":"0.0.0","authors":[]}"#,
+        &dir.join("dep/mod.flask"),
+        r#"#settings
+module: "dep"
+version: 0.0.0
+
+#dependencies
+"#,
     );
-    write_file(&dir.join("main.gin"), "use dep.io\n\nmain: 0\n");
+    write_file(&dir.join("main.gin"), "use dep.io\n\n#entry\nmain: 0\n");
 
     let exe = dir.join("out.exe");
-    let mut args = Args {
-        input: dir.join("main.gin"),
-        emit: Emit::Exe,
-        output: Some(exe.clone()),
-        profile: Profile::Debug,
-        target: Some(host_target_triple()),
-        no_cache: true,
-        ..Default::default()
-    };
-    GinCompiler::compile(&mut args);
+    compile_exe(dir.join("main.gin"), &exe, Profile::Debug);
 
     assert!(
         !exe.exists(),
@@ -167,28 +109,35 @@ fn chained_dep_utils_a_does_not_conflict_with_use_utils() {
     fs::create_dir_all(&dir).unwrap();
 
     write_file(
-        &dir.join("flask.jsonc"),
-        r#"
-{
-  "name": "root",
-  "version": "0.0.0",
-  "authors": [],
-  "dependencies": {
-    "utils": { "path": "utils" }
-  }
-}
+        &dir.join("mod.flask"),
+        r#"#settings
+module: "root"
+version: 0.0.0
+
+#dependencies
+utils: "./utils"
 "#,
     );
 
     write_file(
-        &dir.join("utils/flask.jsonc"),
-        r#"{"name":"utils","version":"0.0.0","authors":[]}"#,
+        &dir.join("utils/mod.flask"),
+        r#"#settings
+module: "utils"
+version: 0.0.0
+
+#dependencies
+"#,
     );
     write_file(&dir.join("utils/io.gin"), "x: 1\n");
 
     write_file(
-        &dir.join("utils/a/flask.jsonc"),
-        r#"{"name":"utils_a","version":"0.0.0","authors":[]}"#,
+        &dir.join("utils/a/mod.flask"),
+        r#"#settings
+module: "utils_a"
+version: 0.0.0
+
+#dependencies
+"#,
     );
     write_file(&dir.join("utils/a/io.gin"), "y: 2\n");
 
@@ -198,22 +147,14 @@ fn chained_dep_utils_a_does_not_conflict_with_use_utils() {
 use utils
 use utils.a
 
+#entry
 main: 0
 "#,
     );
 
     let exe = dir.join("out.exe");
-    let mut args = Args {
-        input: dir.join("main.gin"),
-        emit: Emit::Exe,
-        output: Some(exe.clone()),
-        profile: Profile::Debug,
-        target: Some(host_target_triple()),
-        no_cache: true,
-        ..Default::default()
-    };
-    let result = GinCompiler::compile(&mut args);
-    assert!(result.is_success(), "{result:?}");
+    let result = compile_exe(dir.join("main.gin"), &exe.clone(), Profile::Debug);
+    require_success(&result, Profile::Debug);
 
     assert!(
         exe.exists(),
@@ -227,18 +168,32 @@ main: 0
 fn nested_import_binds_its_module_name_for_calls() {
     let dir = unique_temp_dir("nested_module_call");
     write_file(
-        &dir.join("flask.jsonc"),
-        r#"{"name":"app","version":"0","authors":[],"dependencies":{"package":{"path":"dep"}}}"#,
+        &dir.join("mod.flask"),
+        r#"#settings
+module: "app"
+version: 0.0.0
+
+#dependencies
+package: "./dep"
+"#,
     );
     write_file(
-        &dir.join("dep/flask.jsonc"),
-        r#"{"name":"library","version":"0","authors":[]}"#,
+        &dir.join("dep/mod.flask"),
+        r#"#settings
+module: "library"
+version: 0.0.0
+
+#dependencies
+"#,
     );
-    write_file(&dir.join("dep/math/ops.gin"), "Word is in 0 to 255\nanswer Word: 42\n");
+    write_file(
+        &dir.join("dep/math/ops.gin"),
+        &format!("{}answer Word: 42\n", test_fixtures::preludes::WORD_PRELUDE),
+    );
     for source in [
-        "use package.math\nmain: math.answer\n",
-        "use package.math as numbers\nmain: numbers.answer\n",
-        "use package.math answer\nmain: answer\n",
+        "use package.math\n#entry\nmain: math.answer\n",
+        "use package.math as numbers\n#entry\nmain: numbers.answer\n",
+        "use package.math answer\n#entry\nmain: answer\n",
     ] {
         write_file(&dir.join("main.gin"), source);
         let exe = dir.join("out");

@@ -16,6 +16,7 @@ use common::*;
 
 use ginc::cli::{Args, Emit, Profile};
 use ginc::compile::GinCompiler;
+use test_fixtures::host_target_triple;
 
 fn ginc_debug_exe() -> PathBuf {
     let exe = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/ginc");
@@ -27,25 +28,13 @@ fn ginc_debug_exe() -> PathBuf {
     exe
 }
 
-const RANGE_PROGRAM: &str = "\
-Range(x) has
-    start x
-    end x
-
-    new(start x, end x) Range(x): Self(start, end)
-
-main:
-    r : Range.new(12, 1200)
-    return r.start
-return
-";
+const RANGE_PROGRAM: &str = "Range(x) has\n    finish(self):\n        return\n    start x\n    end x\n\n    new(start x, end x) Range(x): return Self(start, end)\n\n#entry\nmain:\n    r : Range.new(12, 1200)\n    return r.start\n";
 
 /// Capability-focused `Range` definitions.
-const GIN_CORE_RANGE_GIN: &str =
-    "Range(x) has\n    start x\n    end x\n\n    new(start x, end x) Range(x): Self(start, end)\n";
+const GIN_CORE_RANGE_GIN: &str = "Range(x) has\n    finish(self):\n        return\n    start x\n    end x\n\n    new(start x, end x) Range(x): return Self(start, end)\n";
 
 const RANGE_PKG_MAIN: &str =
-    "use Range\n\nmain:\n    r : Range.new(12, 1200)\n    return r.start\nreturn\n";
+    "use Range\n\n#entry\nmain:\n    r : Range.new(12, 1200)\n    return r.start\n";
 
 #[test]
 fn range_new_compiles_and_runs() {
@@ -60,39 +49,15 @@ fn range_new_compiles_and_runs() {
     .assert_exit_code(12);
 }
 
-/// Capability-focused `Range` definitions plus a caller in one translation unit.
-#[test]
-fn range_new_single_file_uses_range_fixture_text() {
-    let src = format!(
-        "{GIN_CORE_RANGE_GIN}\n\nmain:\n    r : Range.new(12, 1200)\n    return r.start\nreturn\n"
-    );
-    compile_and_run_with_options(
-        &src,
-        Options {
-            test_name: "range_new_from_range_fixture".into(),
-            ..Default::default()
-        },
-    )
-    .assert_compiled()
-    .assert_exit_code(12);
-}
+const STANDALONE_PKG_FLASK: &str = r#"#settings
+module: "range_dir_smoke"
+version: 0.0.0
 
-const STANDALONE_PKG_FLASK: &str = r#"{
-  "name": "range_dir_smoke",
-  "version": "0.0.0",
-  "authors": [],
-  "dependencies": {}
-}"#;
+#dependencies
+"#;
 
 fn unique_temp_pkg(name: &str) -> PathBuf {
-    let mut dir = std::env::temp_dir();
-    let pid = std::process::id();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .subsec_nanos();
-    dir.push(format!("gin_{name}_{pid}_{nanos}"));
-    dir
+    test_fixtures::unique_temp_dir(name)
 }
 
 fn write_pkg_file(path: &std::path::Path, contents: &str) {
@@ -113,13 +78,13 @@ fn range_new_pkg_folder_emits_mlir_with_range_fixture() {
     let _ = fs::remove_dir_all(&dir);
 
     fs::create_dir_all(&dir).unwrap();
-    write_pkg_file(&dir.join("flask.jsonc"), STANDALONE_PKG_FLASK);
+    write_pkg_file(&dir.join("mod.flask"), STANDALONE_PKG_FLASK);
     let main = format!(
-        "{GIN_CORE_RANGE_GIN}\n\nmain:\n    r : Range.new(12, 1200)\n    return r.start\nreturn\n"
+        "{GIN_CORE_RANGE_GIN}\n\n#entry\nmain:\n    r : Range.new(12, 1200)\n    return r.start\n"
     );
     write_pkg_file(&dir.join("main.gin"), &main);
 
-    let target = test_target_triple();
+    let target = host_target_triple();
     let out = Command::new(ginc_debug_exe())
         .arg(&dir)
         .args(["--emit", "mlir", "--target", &target])
@@ -145,13 +110,10 @@ fn range_new_pkg_folder_emits_mlir_with_range_fixture() {
 
 #[test]
 fn range_new_pkg_folder_compiles_exe_with_output_flag() {
-    // NOTE: This test requires cross-file codegen which isn't yet wired through the typed AST.
-    // The single-file variant passes; this multi-file variant needs the typed AST codegen
-    // to accept &[TypedFileAst] for full cross-file support.
     let dir = unique_temp_pkg("range_pkg_exe");
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    write_pkg_file(&dir.join("flask.jsonc"), STANDALONE_PKG_FLASK);
+    write_pkg_file(&dir.join("mod.flask"), STANDALONE_PKG_FLASK);
     write_pkg_file(&dir.join("range.gin"), GIN_CORE_RANGE_GIN);
     write_pkg_file(&dir.join("main.gin"), RANGE_PKG_MAIN);
     let exe_path = dir.join("runner_main");
@@ -160,12 +122,15 @@ fn range_new_pkg_folder_compiles_exe_with_output_flag() {
         emit: Emit::Exe,
         output: Some(exe_path.clone()),
         profile: Profile::Debug,
-        target: Some(test_target_triple()),
+        target: Some(host_target_triple()),
         ..Default::default()
     };
-    GinCompiler::compile(&mut args);
-    if !exe_path.exists() {
-        eprintln!("NOTE: multi-file package compilation needs cross-file typed AST codegen");
-    }
+    let result = GinCompiler::compile(&mut args);
+    assert!(result.is_success(), "{result:?}");
+    assert!(!result.has_typecheck_diagnostics(), "{result:?}");
+    let output = Command::new(&exe_path)
+        .output()
+        .expect("run range constructor example");
+    assert_eq!(output.status.code(), Some(12), "{output:?}");
     let _ = fs::remove_dir_all(&dir);
 }

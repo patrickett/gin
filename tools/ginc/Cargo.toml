@@ -7,13 +7,13 @@ edition = "2024"
 workspace = true
 
 [dependencies]
+compiler-profile = { workspace = true }
 ast = { workspace = true }
 interface = { workspace = true }
 diagnostic = { workspace = true }
 typecheck = { workspace = true }
 codegen = { workspace = true }
 resolve = { workspace = true }
-analysis = { workspace = true }
 parser = { workspace = true }
 flask = { workspace = true }
 clap = { workspace = true }
@@ -27,6 +27,7 @@ serde_json = { workspace = true }
 sha2 = { workspace = true, features = ["asm"] }
 
 [dev-dependencies]
+analysis = { workspace = true }
 ed25519-dalek = "2"
 semver = { workspace = true }
 tar = "0.4"
@@ -36,3 +37,6 @@ test-fixtures = { workspace = true }
 # [[bench]]
 # name = "lexer_bench"
 # harness = false
+
+[features]
+profile-allocations = ["compiler-profile/allocations"]

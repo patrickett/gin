@@ -39,14 +39,18 @@ exec "$GIN_TEST_REAL_CC" "$@"
         (
             "unused_assembly",
             r#"Word is in -9223372036854775808 to 9223372036854775807
-runtime_print_int(value Word) Word: runtime_print(value as RuntimeInt) as Word
+Word has
+    finish(self):
+        return
+runtime_print_int(value Word) Word: return runtime_print(value as RuntimeInt) as Word
+#entry
 main: 0
 "#,
             0,
         ),
         (
             "local_definition",
-            "Word is in -9223372036854775808 to 9223372036854775807\nruntime_print_int(value Word) Word: value\nmain: runtime_print_int(23)\n",
+            "Word is in -9223372036854775808 to 9223372036854775807\nWord has\n    finish(self):\n        return\nruntime_print_int(value Word) Word: return value\n#entry\nmain: runtime_print_int(23)\n",
             23,
         ),
     ] {

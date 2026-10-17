@@ -1,44 +1,21 @@
-use ginc::cli::{Args, Emit, Profile};
-use ginc::compile::GinCompiler;
-use std::process::Command;
-use test_fixtures::{TempPackage, host_target_triple};
+mod common;
+use common::compile_and_run_exe;
+use ginc::cli::Profile;
+use test_fixtures::TempPackage;
 
 #[test]
 fn checked_named_integer_conversion_preserves_runtime_width_and_boundaries() {
     let package = TempPackage::new("numeric_narrowing");
     package.write(
         "main.gin",
-        r#"
-Signed is in -9223372036854775808 to 9223372036854775807
-Byte is in 0 to 255
-narrow(value Signed) Byte: when value is in 0 to 255 then value as Byte else 0
-check(value Signed, expected Byte) Signed:
-    actual is in 0 to 255: narrow(value)
-    expected_bits is in 0 to 255: expected
-return when actual = expected_bits is True then 0 else 1
-main:
-    negative is in 0 to 255: check(-1, 0)
-    zero is in 0 to 255: check(0, 0)
-    high_bit is in 0 to 255: check(128, 128)
-    maximum is in 0 to 255: check(255, 255)
-    outside is in 0 to 255: check(256, 0)
-    signed_min is in 0 to 255: check(-9223372036854775808, 0)
-    signed_max is in 0 to 255: check(9223372036854775807, 0)
-return negative + zero + high_bit + maximum + outside + signed_min + signed_max
-"#,
+        &format!("\nSigned is in -9223372036854775808 to 9223372036854775807\nSigned has\n    finish(self):\n        return\n{}narrow(value Signed) Byte: return when value is in 0 to 255 then value as Byte else 0\ncheck(value Signed, expected Byte) is in 0 to 1:\n    actual is in 0 to 255: narrow(value)\n    expected_bits is in 0 to 255: expected\n    return when actual = expected_bits then 0 else 1\n#entry\nmain:\n    negative is in 0 to 255: check(-1, 0)\n    zero is in 0 to 255: check(0, 0)\n    high_bit is in 0 to 255: check(128, 128)\n    maximum is in 0 to 255: check(255, 255)\n    outside is in 0 to 255: check(256, 0)\n    signed_min is in 0 to 255: check(-9223372036854775808, 0)\n    signed_max is in 0 to 255: check(9223372036854775807, 0)\n    return negative + zero + high_bit + maximum + outside + signed_min + signed_max\n", test_fixtures::preludes::BYTE_PRELUDE),
     );
-    let output = package.join("narrowing");
-    let mut args = Args {
-        input: package.join("main.gin").parent().unwrap().to_path_buf(),
-        output: Some(output.clone()),
-        emit: Emit::Exe,
-        profile: Profile::Debug,
-        target: Some(host_target_triple()),
-        no_cache: true,
-        ..Default::default()
-    };
-    let result = GinCompiler::compile(&mut args);
-    assert!(result.is_success(), "{result:?}");
-    assert!(!result.has_typecheck_diagnostics(), "{result:?}");
-    assert!(Command::new(output).status().unwrap().success());
+    let output = compile_and_run_exe(
+        package.join("main.gin").parent().unwrap().to_path_buf(),
+        &package.join("narrowing"),
+        Profile::Debug,
+        "",
+        "run numeric narrowing",
+    );
+    assert!(output.status.success());
 }

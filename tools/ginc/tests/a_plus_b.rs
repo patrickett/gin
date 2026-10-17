@@ -1,9 +1,10 @@
+mod common;
+use common::compile_exe;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use ginc::cli::{Args, Emit, Profile};
-use ginc::compile::GinCompiler;
-use test_fixtures::{TempPackage, host_target_triple};
+use ginc::cli::Profile;
+use test_fixtures::TempPackage;
 
 #[test]
 fn a_plus_b_example_reads_adds_and_prints_integers() {
@@ -11,57 +12,49 @@ fn a_plus_b_example_reads_adds_and_prints_integers() {
     let input = package.write(
         "main.gin",
         &test_fixtures::with_runtime(
-            r#"SignedInt is in -2147483648 to 2147483647
-
-add_bits(a SignedInt, b SignedInt) SignedInt:
-    left is in -2147483648 to 2147483647: a
-    right is in -2147483648 to 2147483647: b
-return (left + right) as SignedInt
-#infix('+')
-add(a SignedInt, b SignedInt) SignedInt: add_bits(a, b)
-
-runtime_read_int() SignedInt: runtime_number() as SignedInt
-runtime_print_int(value SignedInt) SignedInt: runtime_print(value as RuntimeInt) as SignedInt
+            r#"#entry
 main:
-    left := runtime_read_int
-    right := runtime_read_int
-    runtime_print_int(left + right)
-return 0
+    left is in RuntimeInt: runtime_number
+    right is in RuntimeInt: runtime_number
+    when left is in -2147483648 to 2147483647 and right is in -2147483648 to 2147483647 then
+        runtime_print((left + right) as RuntimeInt)
+        return 0
+    return 1
 "#,
         ),
     );
     let output = package.join("a_plus_b");
-    let mut args = Args {
-        input: input.parent().unwrap().to_path_buf(),
-        output: Some(output.clone()),
-        emit: Emit::Exe,
-        profile: Profile::Debug,
-        target: Some(host_target_triple()),
-        no_cache: true,
-        ..Default::default()
-    };
-
-    let result = GinCompiler::compile(&mut args);
-    assert!(result.is_success(), "A+B compilation failed: {result:?}");
-
-    let mut process = Command::new(&output)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("run compiled A+B example");
-    process
-        .stdin
-        .take()
-        .expect("child stdin")
-        .write_all(b"20 22\n")
-        .expect("write A+B input");
-    let output = process.wait_with_output().expect("wait for A+B example");
-
-    assert!(
-        output.status.success(),
-        "A+B exited unsuccessfully: status={:?}, stderr={}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
+    let result = compile_exe(
+        input.parent().unwrap().to_path_buf(),
+        &output.clone(),
+        Profile::Debug,
     );
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "42\n");
+    assert!(result.is_success(), "A+B compilation failed: {result:?}");
+    assert!(
+        !result.has_typecheck_diagnostics(),
+        "A+B typecheck failed: {result:?}"
+    );
+
+    for (input, expected, status) in [
+        ("20 22\n", "42\n", 0),
+        ("2147483647 2147483647\n", "4294967294\n", 0),
+        ("-2147483648 -2147483648\n", "-4294967296\n", 0),
+        ("2147483648 1\n", "", 1),
+        ("1 -2147483649\n", "", 1),
+    ] {
+        let mut process = Command::new(&output)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("run compiled A+B example");
+        process
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = process.wait_with_output().expect("wait for A+B example");
+        assert_eq!(output.status.code(), Some(status), "{input}: {output:?}");
+        assert_eq!(output.stdout, expected.as_bytes(), "{input}");
+    }
 }
