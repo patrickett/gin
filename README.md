@@ -36,5 +36,5 @@ main:
     task := Task.default
     prefix := log_prefix(task.level)
     log := prefix + ' ' + task.name
-return 0
+    return 0
 ```
