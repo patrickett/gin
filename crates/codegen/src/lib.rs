@@ -4,6 +4,8 @@ pub mod emit;
 mod jit;
 mod lower;
 mod mlir_ext;
+mod process;
+mod stack;
 
 pub use emit::{NativeCompiler, Profile};
 pub use jit::{JitError, NativeEngine};
@@ -68,6 +70,16 @@ pub struct Slot<'c> {
     pub is_slot: bool,
 }
 
+impl<'c> Slot<'c> {
+    fn value(value: Value<'c, 'c>, ty: Ty) -> Self {
+        Self {
+            value,
+            ty,
+            is_slot: false,
+        }
+    }
+}
+
 /// Scoped symbol table for MLIR values during codegen.
 /// This replaces RuntimeSymbolTable to avoid expensive HashMap cloning on every scope entry.
 /// Instead, scopes are pushed onto a stack and popped when exiting, providing O(1) scope management.
@@ -78,7 +90,6 @@ pub struct Slot<'c> {
 pub struct ScopedSymbolTable<'c> {
     /// Stack of scopes, where each scope maps interned variable names to Slot info.
     scopes: Vec<HashMap<Intern<String>, Slot<'c>>>,
-    lowered_scopes: Vec<HashMap<Intern<String>, LoweredValue<'c>>>,
 }
 
 impl<'c> ScopedSymbolTable<'c> {
@@ -86,7 +97,6 @@ impl<'c> ScopedSymbolTable<'c> {
     pub fn new() -> Self {
         Self {
             scopes: vec![HashMap::new()],
-            lowered_scopes: vec![HashMap::new()],
         }
     }
 
@@ -94,7 +104,6 @@ impl<'c> ScopedSymbolTable<'c> {
     /// This creates a new HashMap for the inner scope, allowing variables to shadow outer ones.
     pub fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
-        self.lowered_scopes.push(HashMap::new());
     }
 
     /// Pop the current scope from the stack (e.g., when exiting a block, loop, or function).
@@ -108,47 +117,20 @@ impl<'c> ScopedSymbolTable<'c> {
             "Cannot pop the global scope from ScopedSymbolTable"
         );
         self.scopes.pop();
-        self.lowered_scopes.pop();
     }
 
     /// Insert a variable binding in the current (innermost) scope.
     pub fn insert(&mut self, name: Intern<String>, value: Value<'c, 'c>, ty: Ty, is_slot: bool) {
-        if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name, Slot { value, ty, is_slot });
-        }
-        if let Some(scope) = self.lowered_scopes.last_mut() {
-            scope.insert(name, LoweredValue::scalar(value));
-        }
-    }
-
-    pub fn insert_lowered(&mut self, name: Intern<String>, value: LoweredValue<'c>, ty: Ty) {
-        let Some(first) = value.values().first().copied() else {
-            return;
-        };
-        if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(
-                name,
-                Slot {
-                    value: first,
-                    ty,
-                    is_slot: false,
-                },
-            );
-        }
-        if let Some(scope) = self.lowered_scopes.last_mut() {
-            scope.insert(name, value);
-        }
+        self.scopes
+            .last_mut()
+            .expect("symbol table must retain its global scope")
+            .insert(name, Slot { value, ty, is_slot });
     }
 
     /// Look up a variable by name, searching from innermost to outermost scope.
     /// Returns the Slot from the first scope that contains the name.
     pub fn get(&self, name: &Intern<String>) -> Option<&Slot<'c>> {
-        for scope in self.scopes.iter().rev() {
-            if let Some(slot) = scope.get(name) {
-                return Some(slot);
-            }
-        }
-        None
+        self.scopes.iter().rev().find_map(|scope| scope.get(name))
     }
 
     /// Look up a variable and return just its MLIR value.
@@ -156,75 +138,14 @@ impl<'c> ScopedSymbolTable<'c> {
         self.get(name).map(|s| s.value)
     }
 
-    pub fn get_lowered(&self, name: &Intern<String>) -> Option<&LoweredValue<'c>> {
-        self.lowered_scopes
-            .iter()
-            .rev()
-            .find_map(|scope| scope.get(name))
-    }
-
     pub fn assign(&mut self, name: &Intern<String>, slot: Slot<'c>) -> bool {
         for scope in self.scopes.iter_mut().rev() {
             if let Some(binding) = scope.get_mut(name) {
                 *binding = slot;
-                if let Some(lowered) = self
-                    .lowered_scopes
-                    .iter_mut()
-                    .rev()
-                    .find_map(|scope| scope.get_mut(name))
-                {
-                    *lowered = LoweredValue::scalar(binding.value);
-                }
                 return true;
             }
         }
         false
-    }
-
-    pub fn assign_lowered(
-        &mut self,
-        name: &Intern<String>,
-        value: LoweredValue<'c>,
-        ty: Ty,
-    ) -> bool {
-        let Some(first) = value.values().first().copied() else {
-            return false;
-        };
-        for scope in self.scopes.iter_mut().rev() {
-            if let Some(binding) = scope.get_mut(name) {
-                *binding = Slot {
-                    value: first,
-                    ty,
-                    is_slot: false,
-                };
-                if let Some(lowered) = self
-                    .lowered_scopes
-                    .iter_mut()
-                    .rev()
-                    .find_map(|scope| scope.get_mut(name))
-                {
-                    *lowered = value;
-                }
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Check if a variable exists and is a stack slot.
-    pub fn is_slot(&self, name: &Intern<String>) -> bool {
-        self.get(name).is_some_and(|s| s.is_slot)
-    }
-
-    /// Get the number of active scopes (always at least 1).
-    pub fn depth(&self) -> usize {
-        self.scopes.len()
-    }
-}
-
-impl<'c> Default for ScopedSymbolTable<'c> {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

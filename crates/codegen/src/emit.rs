@@ -6,8 +6,8 @@
 // maybe also greedy-shuffling to minimize argument-copying overhead in tail calls.
 
 use diagnostic::Diagnostic;
+use diagnostic::code::CodegenCode;
 use melior::{Context, dialect::DialectRegistry, ir::Module, pass, utility};
-use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 use strum::Display;
@@ -20,6 +20,38 @@ pub enum Profile {
     Debug,
     #[strum(to_string = "release")]
     Release,
+}
+
+fn codegen_internal(message: impl Into<String>) -> Diagnostic {
+    // codegen-internal
+    Diagnostic::new(CodegenCode::Internal, message.into())
+        .with_help("an internal compiler error occurred")
+        .at_span(diagnostic::Span::new(0, 0))
+}
+
+fn run_tool(
+    command: &mut Command,
+    input: Option<&[u8]>,
+    spawn_label: &str,
+    status_message: impl FnOnce(&std::process::Output) -> String,
+    symptoms: &mut Vec<Diagnostic>,
+) -> Option<std::process::Output> {
+    let result = match input {
+        Some(input) => crate::process::run_with_input(command, input),
+        None => command.output(),
+    };
+    let output = match result {
+        Ok(output) => output,
+        Err(error) => {
+            symptoms.push(codegen_internal(format!("{spawn_label}: {error}")));
+            return None;
+        }
+    };
+    if output.status.success() {
+        return Some(output);
+    }
+    symptoms.push(codegen_internal(status_message(&output)));
+    None
 }
 
 const GIN_RUNTIME_C: &str = r#"
@@ -97,17 +129,7 @@ impl NativeCompiler {
         &self.context
     }
 
-    /// Compile a pre-built MLIR `Module` to a native object file.
-    ///
-    /// This is the preferred codegen path when you already have a `Module` in hand.
-    ///
-    /// **Note:** Due to an LLVM 21 limitation where `OperationBuilder` cannot set
-    /// `operandSegmentSizes` for `llvm.call`, the module is briefly serialized to
-    /// text so `fix_llvm_call_segments` can patch it, then re-parsed into the same
-    /// context. This round-trip will be eliminated once the upstream API is fixed.
-    ///
-    /// Pipeline: serialize → fix `llvm.call` segments → re-parse → optimize (Release)
-    /// → lower to LLVM dialect → `mlir-translate` → LLVM IR → `cc -c` → object file.
+    /// The input is reparsed into this compiler's context before optimization and lowering.
     pub fn llvm_ir_from_module(
         &self,
         module: &Module,
@@ -133,16 +155,6 @@ impl NativeCompiler {
     }
 
     /// Compile a pre-built MLIR `Module` to a native object file and return phase timings.
-    pub fn native_from_module_with_timings(
-        &self,
-        module: &Module,
-        obj_path: &Path,
-        profile: Profile,
-        fast: bool,
-    ) -> (bool, Vec<Diagnostic>, NativeCodegenTimings) {
-        self.native_from_module_with_timings_for_target(module, obj_path, profile, fast, None)
-    }
-
     pub fn native_from_module_with_timings_for_target(
         &self,
         module: &Module,
@@ -151,6 +163,7 @@ impl NativeCompiler {
         fast: bool,
         target: Option<&str>,
     ) -> (bool, Vec<Diagnostic>, NativeCodegenTimings) {
+        let _profile = compiler_profile::span(compiler_profile::Phase::NativeEmission);
         let mut symptoms = Vec::new();
         let mut timings = NativeCodegenTimings::default();
         let mut fixed_module = match self.reparse_for_backend(module) {
@@ -161,13 +174,17 @@ impl NativeCompiler {
             }
         };
 
+        let optimization_profile =
+            compiler_profile::span(compiler_profile::Phase::MlirOptimization);
         let start = std::time::Instant::now();
         if !self.optimize(&mut fixed_module, profile, fast, &mut symptoms) {
             timings.optimization = start.elapsed();
             return (false, symptoms, timings);
         }
         timings.optimization = start.elapsed();
+        drop(optimization_profile);
 
+        let lowering_profile = compiler_profile::span(compiler_profile::Phase::LlvmLowering);
         let start = std::time::Instant::now();
         if !self.lower_to_llvm(&mut fixed_module, &mut symptoms) {
             timings.lowering = start.elapsed();
@@ -182,7 +199,9 @@ impl NativeCompiler {
             return (false, symptoms, timings);
         };
         timings.lowering += start.elapsed();
+        drop(lowering_profile);
 
+        let _emission_profile = compiler_profile::span(compiler_profile::Phase::ObjectEmission);
         let start = std::time::Instant::now();
         let ok = Self::compile_llvm_ir_to_object(
             &llvm_ir,
@@ -218,11 +237,7 @@ impl NativeCompiler {
         match pm.run(module) {
             Ok(()) => true,
             Err(e) => {
-                symptoms.push(
-                    Diagnostic::new("codegen-internal", format!("Optimization pass failed: {e}"))
-                        .with_help("an internal compiler error occurred")
-                        .at_span(diagnostic::Span::new(0, 0)),
-                );
+                symptoms.push(codegen_internal(format!("Optimization pass failed: {e}")));
                 false
             }
         }
@@ -246,14 +261,7 @@ impl NativeCompiler {
         match pm.run(module) {
             Ok(()) => true,
             Err(e) => {
-                symptoms.push(
-                    Diagnostic::new(
-                        "codegen-internal",
-                        format!("MLIR pass pipeline failed: {e}"),
-                    )
-                    .with_help("an internal compiler error occurred")
-                    .at_span(diagnostic::Span::new(0, 0)),
-                );
+                symptoms.push(codegen_internal(format!("MLIR pass pipeline failed: {e}")));
                 false
             }
         }
@@ -263,18 +271,12 @@ impl NativeCompiler {
         &'a self,
         module: &Module,
     ) -> Result<Module<'a>, Box<Diagnostic>> {
+        crate::stack::verify_stack_storage(module).map_err(Box::new)?;
         let mlir_text = module.as_operation().to_string();
-        let fixed_text = Self::fix_llvm_call_segments(&mlir_text);
-
-        Module::parse(&self.context, &fixed_text).ok_or_else(|| {
-            Box::new(
-                Diagnostic::new(
-                    "codegen-internal",
-                    "Failed to re-parse MLIR after fixing llvm.call segments",
-                )
-                .with_help("an internal compiler error occurred")
-                .at_span(diagnostic::Span::new(0, 0)),
-            )
+        Module::parse(&self.context, &mlir_text).ok_or_else(|| {
+            Box::new(codegen_internal(
+                "Failed to re-parse MLIR module for backend",
+            ))
         })
     }
 
@@ -289,52 +291,6 @@ impl NativeCompiler {
         utility::register_all_llvm_translations(&context);
 
         context
-    }
-
-    /// Fix `operandSegmentSizes` in MLIR text for `llvm.call` operations.
-    ///
-    /// `OperationBuilder` can't set `operandSegmentSizes` as a computed property
-    /// in LLVM 21. This patches the serialized text to correct the values before
-    /// re-parsing.
-    fn fix_llvm_call_segments(mlir_text: &str) -> String {
-        use std::fmt::Write;
-
-        let mut result = String::with_capacity(mlir_text.len());
-        let mut remaining = mlir_text;
-
-        while let Some(call_start) = remaining.find("\"llvm.call\"(") {
-            result.push_str(&remaining[..call_start]);
-            let after_call = &remaining[call_start..];
-
-            let open_paren = "\"llvm.call\"(".len();
-            if let Some(close_paren) = after_call[open_paren..].find(')') {
-                let operand_str = &after_call[open_paren..open_paren + close_paren];
-                let num_operands = if operand_str.trim().is_empty() {
-                    0i32
-                } else {
-                    operand_str.split(',').count() as i32
-                };
-
-                if let Some(seg_start) = after_call.find("operandSegmentSizes = array<i32:") {
-                    result.push_str(&after_call[..seg_start]);
-                    let after_seg = &after_call[seg_start..];
-                    if let Some(seg_end) = after_seg.find('>') {
-                        // Segments are [normalOperands, op_bundle_operands]
-                        let _ = write!(
-                            result,
-                            "operandSegmentSizes = array<i32: {num_operands}, 0>"
-                        );
-                        remaining = &after_call[seg_start + seg_end + 1..];
-                        continue;
-                    }
-                }
-            }
-
-            result.push_str(&after_call[..open_paren]);
-            remaining = &after_call[open_paren..];
-        }
-        result.push_str(remaining);
-        result
     }
 
     /// Link an object file into an executable.
@@ -371,65 +327,20 @@ impl NativeCompiler {
             if let Some(triple) = target {
                 runtime_compile.arg(format!("--target={triple}"));
             }
-            let mut runtime_compile =
-                match runtime_compile.stdin(std::process::Stdio::piped()).spawn() {
-                    Ok(child) => child,
-                    Err(error) => {
-                        symptoms.push(
-                            Diagnostic::new(
-                                "codegen-internal",
-                                format!("Failed to run runtime compiler '{cc}': {error}"),
-                            )
-                            .with_help("an internal compiler error occurred")
-                            .at_span(diagnostic::Span::new(0, 0)),
-                        );
-                        return (false, symptoms);
-                    }
-                };
-            if let Err(error) = runtime_compile
-                .stdin
-                .take()
-                .expect("runtime compiler stdin was piped")
-                .write_all(GIN_RUNTIME_C.as_bytes())
-            {
-                let _ = runtime_compile.wait();
-                let _ = std::fs::remove_file(&runtime_object);
-                symptoms.push(
-                    Diagnostic::new(
-                        "codegen-internal",
-                        format!("Failed to provide Gin runtime source: {error}"),
+            let runtime_result = run_tool(
+                &mut runtime_compile,
+                Some(GIN_RUNTIME_C.as_bytes()),
+                &format!("Failed to compile the Gin runtime with '{cc}'"),
+                |result| {
+                    format!(
+                        "Compiling the Gin runtime failed:\n{}",
+                        String::from_utf8_lossy(&result.stderr)
                     )
-                    .with_help("an internal compiler error occurred")
-                    .at_span(diagnostic::Span::new(0, 0)),
-                );
-                return (false, symptoms);
-            }
-            let runtime_result = match runtime_compile.wait_with_output() {
-                Ok(result) => result,
-                Err(error) => {
-                    let _ = std::fs::remove_file(&runtime_object);
-                    symptoms.push(
-                        Diagnostic::new(
-                            "codegen-internal",
-                            format!("Failed to compile the Gin runtime: {error}"),
-                        )
-                        .with_help("an internal compiler error occurred")
-                        .at_span(diagnostic::Span::new(0, 0)),
-                    );
-                    return (false, symptoms);
-                }
-            };
-            if !runtime_result.status.success() {
-                let stderr = String::from_utf8_lossy(&runtime_result.stderr);
+                },
+                &mut symptoms,
+            );
+            if runtime_result.is_none() {
                 let _ = std::fs::remove_file(&runtime_object);
-                symptoms.push(
-                    Diagnostic::new(
-                        "codegen-internal",
-                        format!("Compiling the Gin runtime failed:\n{stderr}"),
-                    )
-                    .with_help("an internal compiler error occurred")
-                    .at_span(diagnostic::Span::new(0, 0)),
-                );
                 return (false, symptoms);
             }
         }
@@ -443,36 +354,21 @@ impl NativeCompiler {
             cmd.arg(format!("--target={triple}"));
         }
 
-        let result = match cmd.output() {
-            Ok(o) => o,
-            Err(e) => {
-                let _ = std::fs::remove_file(&runtime_object);
-                symptoms.push(
-                    Diagnostic::new(
-                        "codegen-internal",
-                        format!("Failed to run linker '{cc}': {e}"),
-                    )
-                    .with_help("an internal compiler error occurred")
-                    .at_span(diagnostic::Span::new(0, 0)),
-                );
-                return (false, symptoms);
-            }
-        };
-
-        if !result.status.success() {
-            let stderr = String::from_utf8_lossy(&result.stderr);
-            let _ = std::fs::remove_file(&runtime_object);
-            symptoms.push(
-                Diagnostic::new(
-                    "codegen-internal",
-                    format!(
-                        "Linking failed (exit {}):\n{stderr}",
-                        result.status.code().unwrap_or(-1)
-                    ),
+        let linked = run_tool(
+            &mut cmd,
+            None,
+            &format!("Failed to run linker '{cc}'"),
+            |result| {
+                format!(
+                    "Linking failed (exit {}):\n{}",
+                    result.status.code().unwrap_or(-1),
+                    String::from_utf8_lossy(&result.stderr)
                 )
-                .with_help("an internal compiler error occurred")
-                .at_span(diagnostic::Span::new(0, 0)),
-            );
+            },
+            &mut symptoms,
+        );
+        if linked.is_none() {
+            let _ = std::fs::remove_file(&runtime_object);
             return (false, symptoms);
         }
 
@@ -494,8 +390,9 @@ impl NativeCompiler {
                     Err(error) => error.to_string(),
                 };
                 symptoms.push(
+                    // codegen-object-symbols
                     Diagnostic::new(
-                        "codegen-object-symbols",
+                        CodegenCode::ObjectSymbols,
                         format!("Failed to inspect object symbols with '{nm}': {reason}"),
                     )
                     .at_span(diagnostic::Span::new(0, 0)),
@@ -578,14 +475,9 @@ impl NativeCompiler {
             }
         }
 
-        symptoms.push(
-            Diagnostic::new(
-                "codegen-internal",
-                format!("'{name}' not found. Install LLVM or add it to PATH."),
-            )
-            .with_help("an internal compiler error occurred")
-            .at_span(diagnostic::Span::new(0, 0)),
-        );
+        symptoms.push(codegen_internal(format!(
+            "'{name}' not found. Install LLVM or add it to PATH."
+        )));
         None
     }
 
@@ -611,14 +503,9 @@ impl NativeCompiler {
         match Command::new("cc").arg("--version").output() {
             Ok(output) if output.status.success() => Some("cc".into()),
             _ => {
-                symptoms.push(
-                    Diagnostic::new(
-                        "codegen-internal",
-                        "No C compiler found. Install LLVM or set $CC.",
-                    )
-                    .with_help("an internal compiler error occurred")
-                    .at_span(diagnostic::Span::new(0, 0)),
-                );
+                symptoms.push(codegen_internal(
+                    "No C compiler found. Install LLVM or set $CC.",
+                ));
                 None
             }
         }
@@ -633,77 +520,26 @@ impl NativeCompiler {
 
         let mut cmd = Command::new(&mlir_translate);
         cmd.arg("--mlir-to-llvmir");
-        cmd.stdin(std::process::Stdio::piped());
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
-
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => {
-                symptoms.push(
-                    Diagnostic::new(
-                        "codegen-internal",
-                        format!("Failed to run mlir-translate: {e}"),
-                    )
-                    .with_help("an internal compiler error occurred")
-                    .at_span(diagnostic::Span::new(0, 0)),
-                );
-                return None;
-            }
-        };
-
-        use std::io::Write;
-        if let Err(e) = child.stdin.take().unwrap().write_all(mlir_text.as_bytes()) {
-            symptoms.push(
-                Diagnostic::new(
-                    "codegen-internal",
-                    format!("Failed to write to mlir-translate stdin: {e}"),
+        let output = run_tool(
+            &mut cmd,
+            Some(mlir_text.as_bytes()),
+            "mlir-translate failed",
+            |output| {
+                format!(
+                    "mlir-translate failed (exit {}):\n{}",
+                    output.status.code().unwrap_or(-1),
+                    String::from_utf8_lossy(&output.stderr)
                 )
-                .with_help("an internal compiler error occurred")
-                .at_span(diagnostic::Span::new(0, 0)),
-            );
-            return None;
-        }
-
-        let output = match child.wait_with_output() {
-            Ok(o) => o,
-            Err(e) => {
-                symptoms.push(
-                    Diagnostic::new("codegen-internal", format!("mlir-translate failed: {e}"))
-                        .with_help("an internal compiler error occurred")
-                        .at_span(diagnostic::Span::new(0, 0)),
-                );
-                return None;
-            }
-        };
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            symptoms.push(
-                Diagnostic::new(
-                    "codegen-internal",
-                    format!(
-                        "mlir-translate failed (exit {}):\n{stderr}",
-                        output.status.code().unwrap_or(-1)
-                    ),
-                )
-                .with_help("an internal compiler error occurred")
-                .at_span(diagnostic::Span::new(0, 0)),
-            );
-            return None;
-        }
+            },
+            symptoms,
+        )?;
 
         match String::from_utf8(output.stdout) {
             Ok(s) => Some(s),
             Err(e) => {
-                symptoms.push(
-                    Diagnostic::new(
-                        "codegen-internal",
-                        format!("mlir-translate output is not UTF-8: {e}"),
-                    )
-                    .with_help("an internal compiler error occurred")
-                    .at_span(diagnostic::Span::new(0, 0)),
-                );
+                symptoms.push(codegen_internal(format!(
+                    "mlir-translate output is not UTF-8: {e}"
+                )));
                 None
             }
         }
@@ -718,19 +554,7 @@ impl NativeCompiler {
         target: Option<&str>,
         symptoms: &mut Vec<Diagnostic>,
     ) -> bool {
-        let ll_path = obj_path.with_extension("ll");
-
-        if let Err(e) = std::fs::write(&ll_path, llvm_ir) {
-            symptoms.push(
-                Diagnostic::new("codegen-internal", format!("Failed to write LLVM IR: {e}"))
-                    .with_help("an internal compiler error occurred")
-                    .at_span(diagnostic::Span::new(0, 0)),
-            );
-            return false;
-        }
-
         let Some(cc) = Self::find_cc(symptoms) else {
-            let _ = std::fs::remove_file(&ll_path);
             return false;
         };
 
@@ -747,43 +571,245 @@ impl NativeCompiler {
         command
             .arg("-c")
             .arg(opt_flag)
-            .arg(&ll_path)
+            .args(["-x", "ir", "-"])
             .arg("-o")
             .arg(obj_path);
         if let Some(triple) = target {
             command.arg(format!("--target={triple}"));
         }
-        let result = match command.output() {
-            Ok(o) => o,
-            Err(e) => {
-                symptoms.push(
-                    Diagnostic::new("codegen-internal", format!("Failed to run '{cc}': {e}"))
-                        .with_help("an internal compiler error occurred")
-                        .at_span(diagnostic::Span::new(0, 0)),
-                );
-                let _ = std::fs::remove_file(&ll_path);
-                return false;
-            }
-        };
-
-        let _ = std::fs::remove_file(&ll_path);
-
-        if !result.status.success() {
-            let stderr = String::from_utf8_lossy(&result.stderr);
-            symptoms.push(
-                Diagnostic::new(
-                    "codegen-internal",
-                    format!(
-                        "Compiling LLVM IR failed (exit {}):\n{stderr}",
-                        result.status.code().unwrap_or(-1)
-                    ),
+        let result = run_tool(
+            &mut command,
+            Some(llvm_ir.as_bytes()),
+            &format!("Failed to compile LLVM IR with '{cc}'"),
+            |result| {
+                format!(
+                    "Compiling LLVM IR failed (exit {}):\n{}",
+                    result.status.code().unwrap_or(-1),
+                    String::from_utf8_lossy(&result.stderr)
                 )
-                .with_help("an internal compiler error occurred")
-                .at_span(diagnostic::Span::new(0, 0)),
-            );
+            },
+            symptoms,
+        );
+        if result.is_none() {
             return false;
         }
 
         true
+    }
+}
+
+#[cfg(test)]
+mod process_tests {
+    use super::*;
+    use melior::ir::operation::OperationLike;
+
+    #[test]
+    fn backend_reparse_rejects_invalid_llvm_call_segments() {
+        use melior::ir::attribute::{DenseI32ArrayAttribute, FlatSymbolRefAttribute};
+        use melior::ir::operation::OperationBuilder;
+        use melior::ir::r#type::IntegerType;
+        use melior::ir::{BlockLike, Identifier, Location, RegionLike};
+        let context = NativeCompiler::create_context();
+        let module = Module::parse(
+            &context,
+            r#"module {
+            llvm.func @callee(i64) -> i64
+            llvm.func @caller(%value: i64) -> i64 {
+                llvm.return %value : i64
+            }
+        }"#,
+        )
+        .unwrap();
+        let caller = module
+            .body()
+            .first_operation()
+            .unwrap()
+            .next_in_block()
+            .unwrap();
+        let block = caller.region(0).unwrap().first_block().unwrap();
+        let call = OperationBuilder::new("llvm.call", Location::unknown(&context))
+            .add_attributes(&[
+                (
+                    Identifier::new(&context, "callee"),
+                    FlatSymbolRefAttribute::new(&context, "callee").into(),
+                ),
+                (
+                    Identifier::new(&context, "op_bundle_sizes"),
+                    DenseI32ArrayAttribute::new(&context, &[]).into(),
+                ),
+            ])
+            .add_operands(&[block.argument(0).unwrap().into()])
+            .add_results(&[IntegerType::new(&context, 64).into()])
+            .build()
+            .unwrap();
+        block.insert_operation(0, call);
+        assert!(!module.as_operation().verify());
+        assert!(
+            NativeCompiler::default()
+                .reparse_for_backend(&module)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn backend_reparse_preserves_indirect_llvm_calls() {
+        let context = NativeCompiler::create_context();
+        let module = Module::parse(
+            &context,
+            r#"module {
+            llvm.func @caller(%callee: !llvm.ptr, %value: i64) -> i64 {
+                %result = llvm.call %callee(%value) : !llvm.ptr, (i64) -> i64
+                llvm.return %result : i64
+            }
+        }"#,
+        )
+        .unwrap();
+        assert!(module.as_operation().verify());
+        let (llvm, diagnostics) =
+            NativeCompiler::default().llvm_ir_from_module(&module, Profile::Debug, true);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let llvm = llvm.unwrap();
+        assert!(llvm.contains("call i64 %"), "{llvm}");
+    }
+
+    #[test]
+    fn backend_reparse_preserves_llvm_call_operand_bundles() {
+        let context = NativeCompiler::create_context();
+        let module = Module::parse(
+            &context,
+            r#"module {
+            llvm.func @callee(i64) -> i64
+            llvm.func @caller(%value: i64) -> i64 {
+                %result = "llvm.call"(%value, %value) <{
+                    callee = @callee,
+                    operandSegmentSizes = array<i32: 1, 1>,
+                    op_bundle_sizes = array<i32: 1>,
+                    op_bundle_tags = ["deopt"]
+                }> : (i64, i64) -> i64
+                llvm.return %result : i64
+            }
+        }"#,
+        )
+        .unwrap();
+        assert!(module.as_operation().verify());
+        let compiler = NativeCompiler::default();
+        let (llvm, diagnostics) = compiler.llvm_ir_from_module(&module, Profile::Debug, true);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let llvm = llvm.unwrap();
+        assert!(llvm.contains("call i64 @callee(i64"), "{llvm}");
+        assert!(llvm.contains("\"deopt\"(i64"), "{llvm}");
+    }
+
+    #[test]
+    fn translates_llvm_module_through_piped_input() {
+        let mut diagnostics = Vec::new();
+        let output = NativeCompiler::mlir_to_llvm_ir(
+            r#"module {
+                llvm.func @answer() -> i64 {
+                    %result = llvm.mlir.constant(42 : i64) : i64
+                    llvm.return %result : i64
+                }
+            }"#,
+            &mut diagnostics,
+        )
+        .unwrap_or_else(|| panic!("translation failed: {diagnostics:?}"));
+        assert!(diagnostics.is_empty());
+        assert!(output.contains("define i64 @answer()"));
+        assert!(output.contains("ret i64 42"));
+    }
+
+    #[test]
+    fn failed_translation_captures_tool_diagnostic() {
+        let mut diagnostics = Vec::new();
+        assert!(NativeCompiler::mlir_to_llvm_ir("invalid module", &mut diagnostics).is_none());
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message.contains("mlir-translate failed"));
+        assert!(diagnostics[0].message.contains("error:"));
+    }
+
+    #[test]
+    fn object_compilation_preserves_neighboring_llvm_ir() {
+        for (profile, fast, valid) in [
+            (Profile::Debug, false, true),
+            (Profile::Release, false, true),
+            (Profile::Release, true, true),
+            (Profile::Debug, false, false),
+        ] {
+            let package = test_fixtures::TempPackage::new("codegen_neighboring_ir");
+            let object = package.join("answer.o");
+            let neighboring_ir = package.write("answer.ll", "user-owned LLVM IR");
+            let mut diagnostics = Vec::new();
+            let input = if valid {
+                "define i32 @main() { ret i32 42 }"
+            } else {
+                "invalid LLVM IR"
+            };
+            let compiled = NativeCompiler::compile_llvm_ir_to_object(
+                input,
+                &object,
+                profile,
+                fast,
+                None,
+                &mut diagnostics,
+            );
+            assert_eq!(compiled, valid, "{diagnostics:?}");
+            assert_eq!(
+                std::fs::read_to_string(neighboring_ir).unwrap(),
+                "user-owned LLVM IR"
+            );
+            if valid {
+                assert!(diagnostics.is_empty());
+                assert!(object.is_file());
+                #[cfg(unix)]
+                {
+                    let executable = package.join("answer");
+                    let (linked, diagnostics) =
+                        NativeCompiler::link_executable(&object, &executable, None);
+                    assert!(linked, "{diagnostics:?}");
+                    let output = Command::new(executable).output().unwrap();
+                    assert_eq!(output.status.code(), Some(42));
+                    assert!(output.stdout.is_empty());
+                    assert!(output.stderr.is_empty());
+                }
+            } else {
+                assert_eq!(diagnostics.len(), 1);
+                assert!(diagnostics[0].message.contains("error:"));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compiles_and_links_legacy_runtime_from_stdin() {
+        let package = test_fixtures::TempPackage::new("codegen_legacy_runtime_stdin");
+        let object = package.join("answer.o");
+        let executable = package.join("answer");
+        let mut diagnostics = Vec::new();
+        assert!(
+            NativeCompiler::compile_llvm_ir_to_object(
+                "declare i64 @runtime_print_int(i64)\ndefine i32 @main() {\n%result = call i64 @runtime_print_int(i64 42)\nret i32 0\n}\n",
+                &object,
+                Profile::Debug,
+                true,
+                None,
+                &mut diagnostics,
+            ),
+            "{diagnostics:?}"
+        );
+        assert!(diagnostics.is_empty());
+        let (linked, diagnostics) = NativeCompiler::link_executable(&object, &executable, None);
+        assert!(linked, "{diagnostics:?}");
+        assert!(diagnostics.is_empty());
+        let output = Command::new(executable).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"42\n");
+        assert!(output.stderr.is_empty());
+        assert!(!std::fs::read_dir(package.join("")).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains("gin-runtime-")
+        }));
     }
 }

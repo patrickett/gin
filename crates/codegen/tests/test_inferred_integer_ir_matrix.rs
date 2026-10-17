@@ -16,14 +16,18 @@ fn targetless_library_cannot_be_codegened() {
     let source = "Window is in 0 to 255\nvalue Window: 1\n";
     let typed = transform_file(parse_from_str(source), FileId(0));
     let context = NativeCompiler::create_context();
-    let (module, diagnostics) = CodegenContext::build_module_from_resolved_program(
+    let (module, diagnostics) = CodegenContext::build_module_from_resolved_program_for_target(
         &context,
         typed.resolved_program(),
         CodegenSourceMap::new("targetless.gin", source, &typed.span_table),
+        &flask::CompileTarget::Library,
     );
     assert!(module.is_none());
     assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0].code.slug(), "unsupported-target-layout");
+    assert_eq!(
+        diagnostics[0].code.slug().as_str(),
+        "unsupported-target-layout"
+    );
 }
 
 #[test]
@@ -97,16 +101,14 @@ Signed is in -128 to 127
 unsigned_less_bits(a Unsigned, b Unsigned) Decision:
     left is in 0 to 255: a
     right is in 0 to 255: b
-return left < right
-#infix('<')
-unsigned_less(a Unsigned, b Unsigned) Decision: unsigned_less_bits(a, b)
+    return left < right
+unsigned_less(a Unsigned, b Unsigned) Decision: return unsigned_less_bits(a, b)
 
 signed_greater_equal_bits(a Signed, b Signed) Decision:
     left is in -128 to 127: a
     right is in -128 to 127: b
-return left >= right
-#infix('>=')
-signed_greater_equal(a Signed, b Signed) Decision: signed_greater_equal_bits(a, b)
+    return left >= right
+signed_greater_equal(a Signed, b Signed) Decision: return signed_greater_equal_bits(a, b)
 
 SmallPair has left I2, right I9
 
@@ -115,9 +117,9 @@ lit_i2 I2: 2
 lit_i9 I9: 256
 lit_i128 I128: 1
 
-compare_unsigned(a Unsigned, b Unsigned) Decision: a < b
-compare_signed(a Signed, b Signed) Decision: a >= b
-mk_pair(a I2, b I9) SmallPair: SmallPair(left: a, right: b)
+compare_unsigned(a Unsigned, b Unsigned) Decision: return a < b
+compare_signed(a Signed, b Signed) Decision: return a >= b
+mk_pair(a I2, b I9) SmallPair: return SmallPair(left: a, right: b)
 pair: mk_pair(1, 256)
 left_field: pair.left
 right_field: pair.right

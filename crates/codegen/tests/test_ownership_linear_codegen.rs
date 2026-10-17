@@ -20,17 +20,15 @@ fn rematerialized_conversions_emit_constants_without_ownership_helpers() {
 
 #[test]
 fn test_linear_ownership_paths_do_not_emit_copy_or_drop_helpers() {
-    let source = "\
-Int is in 1 to 400
-
-IntPair has a Int, b Int
-
-consume_pair(value IntPair) Int: 0
-
-main:
-    pair: IntPair(a: 1, b: 2)
-    consume_pair(pair)
-";
+    let source = "Int is in 1 to 400\nInt has\n    finish(self):\n        return\n\nIntPair has\n    a Int\n    b Int\n    finish(self):\n        return\n\nconsume_pair(value IntPair) Int: return 1\n\nmain:\n    pair: IntPair(a: 1, b: 2)\n    consume_pair(pair)\n    return\n";
+    let parsed = parser::parse_from_str(source);
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "{:?}",
+        parsed.parse_warnings
+    );
+    let typed = typecheck::transform::transform_file(parsed, typecheck::FileId(0));
+    assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
     let (mlir_text, diagnostics) = support::codegen_to_mlir_text(source, "ownership.gin", false);
     assert!(
         diagnostics.is_empty(),
@@ -58,27 +56,44 @@ I2 is in 0 to 2
 I9 is in 0 to 256
 I128 is in -170141183460469231731687303715884105728 to 170141183460469231731687303715884105727
 Signed128 is in -128 to 127
+Bool is False or True
 Decision is Lower or Upper
+I1 has
+    finish(self):
+        return
+I2 has
+    finish(self):
+        return
+I9 has
+    finish(self):
+        return
+I128 has
+    finish(self):
+        return
+Signed128 has
+    finish(self):
+        return
 
-unsigned_less_bits(a I2, b I2) False or True:
+
+unsigned_less_bits(a I2, b I2) I1:
     left is in 0 to 2: a
     right is in 0 to 2: b
-return left < right
-signed_less_bits(a Signed128, b Signed128) False or True:
+    return when left < right then 1 else 0
+signed_less_bits(a Signed128, b Signed128) I1:
     left is in -128 to 127: a
     right is in -128 to 127: b
-return left < right
+    return when left < right then 1 else 0
 
 main:
-    i1_zero: I1: 0
-    i1_one: I1: 1
-    i2_zero: I2: 0
-    i2_one: I2: 1
-    i2_value: I2: 2
-    signed_min: Signed128: -128
-    signed_max: Signed128: 127
-    i9_value: I9: 256
-    i128_value: I128: 1
+    i1_zero I1: 0
+    i1_one I1: 1
+    i2_zero I2: 0
+    i2_one I2: 1
+    i2_value I2: 2
+    signed_min Signed128: -128
+    signed_max Signed128: 127
+    i9_value I9: 256
+    i128_value I128: 1
 
     compare_u1: 0 < 1
     compare_u2: 0 < 2
@@ -88,8 +103,17 @@ main:
 
     comparison_family: Decision: when compare_u2 then Decision.Lower else Decision.Upper
     sum_projection: when comparison_family is Decision.Lower then True else False
-    sum_projection
+    return sum_projection
 "#;
+
+    let parsed = parser::parse_from_str(source);
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "{:?}",
+        parsed.parse_warnings
+    );
+    let typed = typecheck::transform::transform_file(parsed, typecheck::FileId(0));
+    assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
 
     let (mlir, diagnostics) = support::codegen_to_mlir_text(source, "backend_matrix.gin", false);
 
@@ -131,18 +155,18 @@ I2 is in 0 to 2
 I9 is in 0 to 256
 I128 is in -170141183460469231731687303715884105728 to 170141183460469231731687303715884105727
 Signed is in -128 to 127
-keep_i1(value I1) I1: value
-keep_i2(value I2) I2: value
-keep_i9(value I9) I9: value
-keep_i128(value I128) I128: value
+keep_i1(value I1) I1: return value
+keep_i2(value I2) I2: return value
+keep_i9(value I9) I9: return value
+keep_i128(value I128) I128: return value
 unsigned_less(a I2, b I2) False or True:
     left is in 0 to 2: a
     right is in 0 to 2: b
-return left < right
+    return left < right
 signed_less(a Signed, b Signed) False or True:
     left is in -128 to 127: a
     right is in -128 to 127: b
-return left < right"#;
+    return left < right"#;
     let (llvm, diagnostics) = support::codegen_to_llvm_ir(source, "exact_backend.gin");
 
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
@@ -185,7 +209,7 @@ fn straight_line_rebind_replaces_the_ssa_place_version() {
 
 #[test]
 fn conditional_rebind_lowers_the_place_join_as_an_scf_result() {
-    let source = "Byte is in 0 to 255\nmain() Byte:\n    value Byte: 1\n    if 1 < 2 is True\n        value :: 2\n    return\nreturn value";
+    let source = "Byte is in 0 to 255\nmain(condition Byte) Byte:\n    value Byte: 1\n    when condition < 2 then\n        value :: 2\n    return value";
     let (mlir, diagnostics) = support::codegen_to_mlir_text(source, "ssa_join.gin", false);
 
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
@@ -203,7 +227,7 @@ fn conditional_rebind_lowers_the_place_join_as_an_scf_result() {
 
 #[test]
 fn multi_arm_rebind_lowers_the_place_join_as_a_when_result() {
-    let source = "Byte is in 0 to 255\nFlag is Left or Right\nmain(condition Flag) Byte:\n    value Byte: 1\n    choice Byte: when condition is\n        Flag.Left then value :: 2\n                  else value :: 3\nreturn value";
+    let source = "Byte is in 0 to 255\nFlag is Left or Right\nmain(condition Flag) Byte:\n    value Byte: 1\n    choice Byte: when condition is\n        Flag.Left then value :: 2\n                  else value :: 3\n    return value";
     let (mlir, diagnostics) = support::codegen_to_mlir_text(source, "ssa_when_join.gin", false);
 
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
@@ -220,7 +244,7 @@ fn multi_arm_rebind_lowers_the_place_join_as_a_when_result() {
 
 #[test]
 fn loop_rebind_lowers_the_place_version_as_a_while_iteration_argument() {
-    let source = "Small is in 0 to 2\nFlag is True or False\nmain(flag Flag) Small:\n    value Small: 0\n    while flag is Flag.True\n        value :: 1\n    loop\nreturn value";
+    let source = "Small is in 0 to 2\nFlag is True or False\nmain(flag Flag) Small:\n    value Small: 0\n    while flag is Flag.True do\n        value :: 1\n    return value";
     let (mlir, diagnostics) = support::codegen_to_mlir_text(source, "ssa_loop_phi.gin", false);
 
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
@@ -235,24 +259,32 @@ fn loop_rebind_lowers_the_place_version_as_a_while_iteration_argument() {
 }
 
 #[test]
+#[allow(unsafe_code)]
 fn for_rebind_lowers_the_place_version_as_an_iteration_argument() {
-    let source = "Small is in 0 to 2\nmain() Small:\n    value Small: 0\n    for index in 0 to 2\n        value :: 1\n    loop\nreturn value";
-    let (mlir, diagnostics) = support::codegen_to_mlir_text(source, "ssa_for_phi.gin", false);
-
+    let source = "Small is in 0 to 3\nSmall has\n    finish(self):\n        return\nreplace(previous Small, next Small) Small: return next\n#entry\nmain() Small:\n    value Small: 0\n    for index in 0 to 2\n        value :: replace(value, index as Small)\n    return value";
+    let target = flask::CompileTarget::Concrete(
+        flask::TargetTriple::parse(&test_fixtures::host_target_triple()).unwrap(),
+    );
+    let (mlir, diagnostics) =
+        support::codegen_assembly_to_mlir_text_for_target(source, "ssa_for_phi.gin", target);
     assert!(diagnostics.is_empty(), "{diagnostics:?}");
-    assert!(mlir.contains("scf.for"), "{mlir}");
-    assert!(mlir.contains(": (index, index, index, i2) -> i2"), "{mlir}");
+    assert!(mlir.contains("scf.while"), "{mlir}");
+    assert!(mlir.contains(": (i2, i1, i2) -> (i2, i1, i2)"), "{mlir}");
     assert!(
         !mlir.contains("llvm.alloca")
             && !mlir.contains("llvm.store")
             && !mlir.contains("llvm.load"),
         "for-loop `::` should lower through a loop-carried SSA value\n{mlir}"
     );
+    let context = codegen::NativeCompiler::create_context();
+    let module = melior::ir::Module::parse(&context, &mlir).unwrap();
+    let engine = codegen::NativeEngine::new(module, "main").unwrap();
+    assert_eq!(unsafe { engine.invoke_i64() }.unwrap(), 2);
 }
 
 #[test]
 fn fixed_array_for_loop_unrolls_structural_elements() {
-    let source = "main:\n    for value in [1, 2, 3]\n    loop\n";
+    let source = "main:\n    for value in [1, 2, 3]\n        iteration: 0\n";
     let (mlir, diagnostics) = support::codegen_to_mlir_text(source, "array_for.gin", false);
 
     assert!(diagnostics.is_empty(), "{diagnostics:?}");

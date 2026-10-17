@@ -7,9 +7,9 @@ ViewLength is in 0 to 18446744073709551615
 Slice(element) has ptr @element, len ViewLength
 Byte is in 0 to 255
 Size is in 0 to 18446744073709551615
-pointer(text Slice(ViewByte)) @Byte: text.ptr as @Byte
-length(text Slice(ViewByte)) Size: text.len as Size
-view(pointer @Byte, length Size) Slice(ViewByte): Slice(ptr: pointer as @ViewByte, len: length as ViewLength)
+pointer(text Slice(ViewByte)) @Byte: return text.ptr as @Byte
+length(text Slice(ViewByte)) Size: return text.len as Size
+view(pointer @Byte, length Size) Slice(ViewByte): return Slice(ptr: pointer as @ViewByte, len: length as ViewLength)
 "#;
     let (mlir, diagnostics) = support::codegen_to_mlir_text(source, "text.gin", false);
     assert!(diagnostics.is_empty(), "{diagnostics:?}\n{mlir}");

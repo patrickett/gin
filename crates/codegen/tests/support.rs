@@ -1,12 +1,12 @@
-use codegen::{CodegenContext, CodegenSourceMap, NativeCompiler};
+use codegen::{CodegenContext, CodegenSourceMap, NativeCompiler, NativeEngine};
 use diagnostic::Diagnostic;
 use melior::Context;
 use melior::dialect::DialectRegistry;
 use melior::ir::operation::{OperationLike, OperationPrintingFlags};
 use melior::utility;
 use parser::parse_from_str;
-use typecheck::FileId;
 use typecheck::transform::{TransformCtx, transform, transform_file};
+use typecheck::{FileId, TypedFileAst};
 
 fn test_target() -> flask::CompileTarget {
     flask::CompileTarget::Concrete(
@@ -95,10 +95,12 @@ pub fn codegen_to_mlir_text(
     (mlir_text, symptoms)
 }
 
+#[allow(dead_code)]
 pub fn codegen_assembly_to_mlir_text(source: &str, filename: &str) -> (String, Vec<Diagnostic>) {
     codegen_assembly_to_mlir_text_for_target(source, filename, test_target())
 }
 
+#[allow(dead_code)]
 pub fn codegen_assembly_to_mlir_text_for_target(
     source: &str,
     filename: &str,
@@ -108,6 +110,12 @@ pub fn codegen_assembly_to_mlir_text_for_target(
     let mut transform_context = TransformCtx::new();
     transform_context.compile_target = target.clone();
     let typed = transform(&ast, FileId(0), &transform_context);
+    assert!(ast.parse_warnings.is_empty(), "{:?}", ast.parse_warnings);
+    assert!(
+        typed.all_flaws().is_empty(),
+        "{source}\n{:?}",
+        typed.all_flaws()
+    );
     let context = NativeCompiler::create_context();
     let (module, diagnostics) = CodegenContext::build_module_from_resolved_program_for_target(
         &context,
@@ -126,39 +134,6 @@ pub fn codegen_assembly_to_mlir_text_for_target(
             .expect("MLIR print"),
         diagnostics,
     )
-}
-
-pub fn codegen_assembly_to_object(
-    source: &str,
-    filename: &str,
-    target: flask::CompileTarget,
-    object: &std::path::Path,
-) -> (bool, Vec<Diagnostic>) {
-    let ast = parse_from_str(source);
-    let mut transform_context = TransformCtx::new();
-    transform_context.compile_target = target.clone();
-    let typed = transform(&ast, FileId(0), &transform_context);
-    let context = NativeCompiler::create_context();
-    let (module, diagnostics) = CodegenContext::build_module_from_resolved_program_for_target(
-        &context,
-        typed.resolved_program(),
-        CodegenSourceMap::new(filename, source, &typed.span_table),
-        &target,
-    );
-    let Some(module) = module else {
-        return (false, diagnostics);
-    };
-    let compiler = NativeCompiler::default();
-    let (ok, more, _) = compiler.native_from_module_with_timings_for_target(
-        &module,
-        object,
-        codegen::Profile::Debug,
-        true,
-        target.triple_raw(),
-    );
-    let mut diagnostics = diagnostics;
-    diagnostics.extend(more);
-    (ok, diagnostics)
 }
 
 pub fn codegen_to_mlir_text_with_package_context(
@@ -204,4 +179,75 @@ pub fn codegen_verifies(source: &str, filename: &str) -> (bool, Vec<Diagnostic>)
     );
     let verified = module.is_some_and(|module| module.as_operation().verify());
     (verified, symptoms)
+}
+
+#[allow(dead_code)]
+pub fn typed(source: &str) -> TypedFileAst {
+    let parsed = parse_from_str(source);
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "{source}: {:?}",
+        parsed.parse_warnings
+    );
+    let mut scope = TransformCtx::new();
+    scope.compile_target = test_fixtures::host_compile_target();
+    let typed = transform(&parsed, FileId(0), &scope);
+    assert!(
+        typed.all_flaws().is_empty(),
+        "{source}: {:?}",
+        typed.all_flaws()
+    );
+    typed
+}
+
+#[allow(dead_code)]
+pub fn assert_valid_source(source: &str) {
+    let parsed = parse_from_str(source);
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "{:?}",
+        parsed.parse_warnings
+    );
+    let typed = transform_file(parsed, FileId(0));
+    assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
+}
+
+/// Build a native engine for `source`, asserting the parse, typecheck, and codegen
+/// stages are all clean. The target is the host triple the tests run on.
+#[allow(dead_code)]
+pub fn native_engine_for_source(source: &str, filename: &str, export: &str) -> NativeEngine {
+    let parsed = parser::query::SourceParseExt::parse_source_full(source);
+    assert!(
+        parsed.symptoms.is_empty(),
+        "{source}: {:?}",
+        parsed.symptoms
+    );
+    let target = test_fixtures::host_compile_target();
+    let mut scope = TransformCtx::new();
+    scope.compile_target = target.clone();
+    let typed = transform(&parsed.ast, FileId(0), &scope);
+    assert!(
+        typed.all_flaws().is_empty(),
+        "{source}: {:?}",
+        typed.all_flaws()
+    );
+    let context = NativeCompiler::create_context();
+    let (module, diagnostics) = CodegenContext::build_module_from_resolved_program_for_target(
+        &context,
+        typed.resolved_program(),
+        CodegenSourceMap::new(filename, source, &typed.span_table),
+        &target,
+    );
+    assert!(diagnostics.is_empty(), "{source}: {diagnostics:?}");
+    NativeEngine::new_with_export_abi(module.unwrap(), export).unwrap()
+}
+
+#[allow(dead_code)]
+pub fn llvm_function_body<'a>(llvm: &'a str, name: &str) -> &'a str {
+    let definition = llvm
+        .lines()
+        .find(|line| line.starts_with("define ") && line.contains(&format!("@{name}(")))
+        .unwrap();
+    let start = llvm.find(definition).unwrap();
+    llvm[start..].split_once("\n}").unwrap().0
 }

@@ -35,9 +35,7 @@ main Signed64: 42";
 
 #[test]
 fn test_typed_ast_fn_call_codegen() {
-    let source = "Signed64 is in -9223372036854775808 to 9223372036854775807\n\
-first(a Signed64, b Signed64) Signed64: a\n\
-main() Signed64: first(1, 2)";
+    let source = "Signed64 is in -9223372036854775808 to 9223372036854775807\nfirst(a Signed64, b Signed64) Signed64: return a\nmain() Signed64: return first(1, 2)";
     let mlir = typed_codegen_to_mlir(source, "test.gin").expect("codegen should succeed");
 
     assert!(mlir.contains("func.func"), "should have func operations");

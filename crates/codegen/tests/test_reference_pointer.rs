@@ -18,8 +18,8 @@ fn function_type_of<'a>(mlir: &'a str, symbol: &str) -> Option<&'a str> {
 fn named_and_compatibility_references_share_pointer_type() {
     let source = r#"Word is in 0 to 255
 RefWord is ref Word
-move_named(address RefWord, index Word) RefWord: address
-move_compat(address ref Word, index Word) ref Word: address
+move_named(address RefWord, index Word) RefWord: return address
+move_compat(address ref Word, index Word) ref Word: return address
 entry(value Word) Word:
     ref_value: ref Word: ref value
     named_ptr: RefWord: move_named(ref_value, 1)
@@ -49,8 +49,8 @@ entry(value Word) Word:
 fn named_and_compatibility_reference_loads_lower_to_pointer_loads() {
     let source = r#"Word is in 0 to 255
 RefWord is ref Word
-load_named(address RefWord) Word: deref address
-load_compat(address ref Word) Word: deref address
+load_named(address RefWord) Word: return deref address
+load_compat(address ref Word) Word: return deref address
 entry(value Word) Word:
     ref_value: ref Word: ref value
     named: Word: load_named(ref_value)
@@ -81,10 +81,10 @@ entry(value Word) Word:
 fn generic_reference_alias_and_compat_reference_invoke_identical_pointer_ops() {
     let source = r#"Word is in 0 to 255
 RefAlias(x) is ref x
-move_named(address RefAlias(Word), index Word) RefAlias(Word): address
-move_compat(address ref Word, index Word) ref Word: address
-load_named(address RefAlias(Word)) Word: deref address
-load_compat(address ref Word) Word: deref address
+move_named(address RefAlias(Word), index Word) RefAlias(Word): return address
+move_compat(address ref Word, index Word) ref Word: return address
+load_named(address RefAlias(Word)) Word: return deref address
+load_compat(address ref Word) Word: return deref address
 entry(value Word) Word:
     ref_value: ref Word: ref value
     alias_ptr: RefAlias(Word): move_named(ref_value, 1)

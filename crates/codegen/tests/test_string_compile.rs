@@ -27,17 +27,6 @@ fn test_compile_number_literal() {
 }
 
 #[test]
-fn test_compile_empty_function() {
-    let source = format!("{INTEGER_TYPES}hello_text: 42\n");
-    let (mlir_text, symptoms) = support::codegen_to_mlir_text(&source, "test.gin", false);
-    assert!(
-        symptoms.is_empty(),
-        "expected no codegen symptoms: {symptoms:?}"
-    );
-    assert!(!mlir_text.is_empty());
-}
-
-#[test]
 fn test_compile_string_literal() {
     let (mlir_text, symptoms) = support::codegen_to_mlir_text(
         &format!("{STRING_TYPES}hello_text String: String(pointer: (@'hello') as @Byte, len: 5)\n"),
@@ -72,33 +61,17 @@ fn string_local_passes_to_string_parameter() {
     let source = format!(
         "{STRING_TYPES}\
 identity(value String) String:
-return value
+    return value
 
 entry() String:
     message := String(pointer: (@'hello') as @Byte, len: 5)
-return identity(message)
+    return identity(message)
 "
     );
     let (verified, symptoms) = support::codegen_verifies(&source, "string_local.gin");
 
     assert!(symptoms.is_empty(), "unexpected symptoms: {symptoms:?}");
     assert!(verified, "string local should produce valid MLIR");
-}
-
-#[test]
-fn test_compile_string_literal_with_print() {
-    let (mlir_text, symptoms) = support::codegen_to_mlir_text(
-        &format!("{STRING_TYPES}hello_text String: String(pointer: (@'hello') as @Byte, len: 5)\n"),
-        "test.gin",
-        false,
-    );
-
-    // Print any diagnostics for debugging
-    for symptom in &symptoms {
-        eprintln!("codegen symptom: {symptom:?}");
-    }
-
-    assert!(!mlir_text.is_empty());
 }
 
 #[test]
@@ -121,10 +94,9 @@ fn test_compile_const_union_string() {
     let src = format!(
         "{INTEGER_TYPES}LogLevel is 'debug' or 'info' or 'warn' or 'error'
 
-main:
+main() DefaultInteger:
     level LogLevel: 'debug'
     return 0
-return
 "
     );
     let (mlir_text, symptoms) = support::codegen_to_mlir_text(&src, "test_const_union.gin", false);
@@ -142,20 +114,25 @@ return
 
 #[test]
 fn test_compile_const_union_function_arg() {
-    let src = format!(
-        "{INTEGER_TYPES}LogLevel is 'debug' or 'info' or 'warn' or 'error'
+    let src = "LogLevel is 'debug' or 'info' or 'warn' or 'error'
 
 set_log_level(level LogLevel):
-    return 0
+    return
 
-main:
-    set_log_level(LogLevel('warn'))
-    return 0
-return
-"
+main():
+    set_log_level('warn' as LogLevel)
+    return
+";
+    let parsed = parse_from_str(src);
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "{:?}",
+        parsed.parse_warnings
     );
+    let typed = typecheck::transform::transform_file(parsed, typecheck::FileId(0));
+    assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
     let (mlir_text, symptoms) =
-        support::codegen_to_mlir_text(&src, "test_const_union_fn.gin", false);
+        support::codegen_to_mlir_text(src, "test_const_union_fn.gin", false);
     assert!(
         symptoms.is_empty(),
         "expected no codegen symptoms for ConstUnion fn arg: {symptoms:?}"
@@ -172,9 +149,7 @@ return
 fn test_when_basic_ternary() {
     // Basic single-line ternary with string payloads.
     let src = format!(
-        "{INTEGER_TYPES}{STRING_TYPES}
-main() String: when 1 < 2 is True and 2 < 3 is True then String(pointer: (@'debug') as @Byte, len: 5) else String(pointer: (@'info') as @Byte, len: 4)
-"
+        "{INTEGER_TYPES}{STRING_TYPES}\nmain() String: return when 1 < 2 and 2 < 3 then String(pointer: (@'debug') as @Byte, len: 5) else String(pointer: (@'info') as @Byte, len: 4)\n"
     );
     let (mlir_text, symptoms) =
         support::codegen_to_mlir_text(&src, "test_const_union_when.gin", false);
@@ -200,13 +175,13 @@ fn test_compile_const_union_in_when() {
     let src = format!(
         "{STRING_TYPES}LogLevel is 'debug' or 'info' or 'warn' or 'error'
 
-main:
+main() String:
     level LogLevel: 'debug'
-    result String: when level
-        'debug': String(pointer: (@'debug') as @Byte, len: 5)
-        'info': String(pointer: (@'info') as @Byte, len: 4)
+    result String: when level is
+        'debug' then String(pointer: (@'debug') as @Byte, len: 5)
+        'info' then String(pointer: (@'info') as @Byte, len: 4)
         else String(pointer: (@'error') as @Byte, len: 5)
-return result
+    return result
 "
     );
     let (mlir_text, symptoms) =

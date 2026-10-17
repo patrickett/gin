@@ -12,7 +12,7 @@ fn ctfe_and_codegen_consume_the_same_resolved_program() {
     let source = "answer: 42\n";
     let typed = transform_file(parse_from_str(source), FileId(0));
     let program = typed.resolved_program();
-    let bind = &program.defs[&DefId(Intern::from_ref("answer"))];
+    let bind = &program.defs[&DefId::named(Intern::from_ref("answer"))];
     let expr = match bind.body {
         BindBody::Expr(expr) => expr,
         _ => panic!("expected expression body"),

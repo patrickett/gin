@@ -19,10 +19,7 @@ same := 1 = 2
 
 #[test]
 fn lowercase_pattern_binding_reuses_the_subject_value() {
-    let source = "\
-Bool is True or False
-identity(value Bool) Bool: when value is bound then bound
-";
+    let source = "Bool is True or False\nidentity(value Bool) Bool: return when value is bound then bound\n";
     let (verified, symptoms) = support::codegen_verifies(source, "pattern_binding.gin");
 
     assert!(symptoms.is_empty(), "{symptoms:?}");

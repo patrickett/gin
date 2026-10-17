@@ -7,6 +7,7 @@ edition = "2024"
 workspace = true
 
 [dependencies]
+compiler-profile = { workspace = true }
 ast = { workspace = true }
 
 typecheck = { workspace = true }
@@ -29,4 +30,12 @@ test-fixtures = { workspace = true }
 
 [[bench]]
 name = "codegen_bench"
+harness = false
+
+[[bench]]
+name = "validated_gather"
+harness = false
+
+[[bench]]
+name = "runtime_gather"
 harness = false

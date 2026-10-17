@@ -4,27 +4,20 @@
 
 use crate::prelude::*;
 use melior::dialect::arith::CmpiPredicate;
+use melior::ir::OperationRef;
 
 /// Extension trait for [`melior::Context`] to simplify common operations.
 pub trait ContextExt {
     fn i64(&self) -> Type<'_>;
-    fn i128(&self) -> Type<'_>;
     fn i1(&self) -> Type<'_>;
     fn f64(&self) -> Type<'_>;
     /// LLVM opaque pointer type
     fn llvm_ptr(&self) -> Type<'_>;
-    /// Tagged union type — `!llvm.struct<(i64, i64)>` (discriminant, payload)
-    /// All union values use this uniform layout; unit variants leave the payload slot as zero.
-    fn union_type(&self) -> Type<'_>;
 }
 
 impl ContextExt for Context {
     fn i64(&self) -> Type<'_> {
         Type::from(IntegerType::new(self, 64))
-    }
-
-    fn i128(&self) -> Type<'_> {
-        Type::from(IntegerType::new(self, 128))
     }
 
     fn i1(&self) -> Type<'_> {
@@ -38,10 +31,6 @@ impl ContextExt for Context {
     fn llvm_ptr(&self) -> Type<'_> {
         r#type::pointer(self, 0)
     }
-
-    fn union_type(&self) -> Type<'_> {
-        r#type::r#struct(self, &[self.i64(), self.i64()], false)
-    }
 }
 
 /// Extension trait for creating MLIR attributes.
@@ -50,7 +39,6 @@ pub trait AttributeExt<'c> {
     fn f64_attr(&self, value: f64) -> Attribute<'c>;
     fn str_attr(&self, value: &str) -> Attribute<'c>;
     fn symbol_ref_attr(&self, name: &str) -> Attribute<'c>;
-    fn type_attr(&self, ty: Type<'c>) -> Attribute<'c>;
 }
 
 impl<'c> AttributeExt<'c> for &'c Context {
@@ -69,19 +57,12 @@ impl<'c> AttributeExt<'c> for &'c Context {
     fn symbol_ref_attr(&self, name: &str) -> Attribute<'c> {
         FlatSymbolRefAttribute::new(self, name).into()
     }
-
-    fn type_attr(&self, ty: Type<'c>) -> Attribute<'c> {
-        TypeAttribute::new(ty).into()
-    }
 }
 
 /// Extension trait for building MLIR operations.
 pub trait OperationBuilderExt<'c> {
     fn i64_const(&self, value: i64, loc: Location<'c>) -> Operation<'c>;
     /// Create an integer constant of arbitrary bit-width.
-    /// Note: melior's `IntegerAttribute::new` currently takes `i64`, so values
-    /// exceeding 64 bits are truncated. Full i128 constant support requires a
-    /// future melior API update or manual LLVMAPInt construction.
     fn int_const(&self, ty: Type<'c>, value: i128, loc: Location<'c>) -> Operation<'c>;
     fn const_op(&self, attr: Attribute<'c>, ty: Type<'c>, loc: Location<'c>) -> Operation<'c>;
     fn build_binop(
@@ -93,13 +74,6 @@ pub trait OperationBuilderExt<'c> {
         loc: Location<'c>,
     ) -> Operation<'c>;
     fn build_cmpi(
-        &self,
-        predicate: u64,
-        lhs: Value<'c, 'c>,
-        rhs: Value<'c, 'c>,
-        loc: Location<'c>,
-    ) -> Operation<'c>;
-    fn build_cmpf(
         &self,
         predicate: u64,
         lhs: Value<'c, 'c>,
@@ -129,37 +103,25 @@ pub trait OperationBuilderExt<'c> {
 impl<'c> OperationBuilderExt<'c> for &'c Context {
     fn i64_const(&self, value: i64, loc: Location<'c>) -> Operation<'c> {
         let ty = self.i64();
-        let attr = IntegerAttribute::new(ty, value);
-        let value_id = Identifier::new(self, "value");
-        OperationBuilder::new("arith.constant", loc)
-            .add_attributes(&[(value_id, attr.into())])
-            .add_results(&[ty])
-            .build()
-            .expect("arith.constant build should succeed")
+        self.const_op(IntegerAttribute::new(ty, value).into(), ty, loc)
     }
 
     fn int_const(&self, ty: Type<'c>, value: i128, loc: Location<'c>) -> Operation<'c> {
-        let attr: Attribute<'c> = if value >= i64::MIN as i128 && value <= i64::MAX as i128 {
-            // Fast path: value fits in i64, use native IntegerAttribute
+        let width = IntegerType::try_from(ty)
+            .map(|integer| integer.width())
+            .unwrap_or(128);
+        // MLIR's i64 constructor zero-extends into wider signless integers.
+        let native_attribute_preserves_bits = width <= 64 || value >= 0;
+        let attr: Attribute<'c> = if native_attribute_preserves_bits
+            && value >= i64::MIN as i128
+            && value <= i64::MAX as i128
+        {
             IntegerAttribute::new(ty, value as i64).into()
         } else {
-            // Slow path: value exceeds i64 range — use MLIR's attribute parser
-            // which internally constructs an LLVM APInt from the string form.
-            let width = IntegerType::try_from(ty)
-                .map(|it| it.width())
-                .unwrap_or(128);
-            let source = format!("{value} : i{width}");
-            Attribute::parse(self, &source).unwrap_or_else(|| {
-                // Fallback: truncate if parser fails (should not happen for valid i128)
-                IntegerAttribute::new(ty, value as i64).into()
-            })
+            let source = format!("{value} : {ty}");
+            Attribute::parse(self, &source).expect("integer constant must fit its representation")
         };
-        let value_id = Identifier::new(self, "value");
-        OperationBuilder::new("arith.constant", loc)
-            .add_attributes(&[(value_id, attr)])
-            .add_results(&[ty])
-            .build()
-            .expect("arith.constant build should succeed")
+        self.const_op(attr, ty, loc)
     }
 
     fn const_op(&self, attr: Attribute<'c>, ty: Type<'c>, loc: Location<'c>) -> Operation<'c> {
@@ -203,23 +165,6 @@ impl<'c> OperationBuilderExt<'c> for &'c Context {
             .expect("arith.cmpi build should succeed")
     }
 
-    fn build_cmpf(
-        &self,
-        predicate: u64,
-        lhs: Value<'c, 'c>,
-        rhs: Value<'c, 'c>,
-        loc: Location<'c>,
-    ) -> Operation<'c> {
-        let pred_attr = self.i64_attr(predicate as i64);
-        let pred_id = Identifier::new(self, "predicate");
-        OperationBuilder::new("arith.cmpf", loc)
-            .add_attributes(&[(pred_id, pred_attr)])
-            .add_operands(&[lhs, rhs])
-            .add_results(&[self.i1()])
-            .build()
-            .expect("arith.cmpf build should succeed")
-    }
-
     fn llvm_undef(&self, ty: Type<'c>, loc: Location<'c>) -> Operation<'c> {
         melior::dialect::llvm::undef(ty, loc)
     }
@@ -260,6 +205,14 @@ impl<'c> OperationBuilderExt<'c> for &'c Context {
 /// Extension trait for [`melior::ir::Block`] to simplify appending operations.
 pub trait BlockExt<'c> {
     fn append_op(&self, op: Operation<'c>) -> Value<'c, 'c>;
+    fn append_scf_if(
+        &self,
+        condition: Value<'c, 'c>,
+        result_types: &[Type<'c>],
+        then_region: Region<'c>,
+        else_region: Region<'c>,
+        loc: Location<'c>,
+    ) -> OperationRef<'c, 'c>;
     fn const_i64(&self, ctx: &'c Context, value: i64, loc: Location<'c>) -> Value<'c, 'c>;
     /// Create an integer constant of the given MLIR type.
     fn const_int(
@@ -315,18 +268,6 @@ pub trait BlockExt<'c> {
         idx: Value<'c, 'c>,
         loc: Location<'c>,
     ) -> Option<Value<'c, 'c>>;
-    /// `llvm.intr.memset` — fill `len` bytes starting at `dst` with `val` (i8).
-    fn memset_bytes(
-        &self,
-        cctx: &CodegenContext<'_, 'c>,
-        dst: Value<'c, 'c>,
-        val: Value<'c, 'c>,
-        len: Value<'c, 'c>,
-        loc: Location<'c>,
-    ) -> Option<()>;
-    /// `llvm.alloca 1 x elem_ty` — allocate a single scalar slot on the stack.
-    fn alloca_typed(&self, ctx: &'c Context, elem_ty: Type<'c>, loc: Location<'c>)
-    -> Value<'c, 'c>;
     /// `llvm.load elem_ty, ptr` — load a typed value from a pointer.
     fn load_typed(
         &self,
@@ -352,6 +293,23 @@ impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
             .result(0)
             .expect("append_operation result 0 should exist")
             .into()
+    }
+
+    fn append_scf_if(
+        &self,
+        condition: Value<'c, 'c>,
+        result_types: &[Type<'c>],
+        then_region: Region<'c>,
+        else_region: Region<'c>,
+        loc: Location<'c>,
+    ) -> OperationRef<'c, 'c> {
+        self.append_operation(scf_dialect::r#if(
+            condition,
+            result_types,
+            then_region,
+            else_region,
+            loc,
+        ))
     }
 
     fn const_i64(&self, ctx: &'c Context, value: i64, loc: Location<'c>) -> Value<'c, 'c> {
@@ -472,62 +430,15 @@ impl<'c> BlockExt<'c> for BlockRef<'c, 'c> {
         loc: Location<'c>,
     ) -> Option<Value<'c, 'c>> {
         let ctx = cctx.mlir;
-        let op = OperationBuilder::new("llvm.getelementptr", loc)
-            .add_attributes(&[
-                (
-                    Identifier::new(ctx, "rawConstantIndices"),
-                    DenseI32ArrayAttribute::new(ctx, &[i32::MIN]).into(),
-                ),
-                (
-                    Identifier::new(ctx, "elem_type"),
-                    TypeAttribute::new(IntegerType::new(ctx, 8).into()).into(),
-                ),
-            ])
-            .add_operands(&[base, idx])
-            .add_results(&[ctx.llvm_ptr()])
-            .build()
-            .map_err(|e| cctx.emit_internal(format!("GEP: {e}")))
-            .ok()?;
-        Some(self.append_op(op))
-    }
-
-    fn memset_bytes(
-        &self,
-        cctx: &CodegenContext<'_, 'c>,
-        dst: Value<'c, 'c>,
-        val: Value<'c, 'c>,
-        len: Value<'c, 'c>,
-        loc: Location<'c>,
-    ) -> Option<()> {
-        let ctx = cctx.mlir;
-        let op = OperationBuilder::new("llvm.intr.memset", loc)
-            .add_attributes(&[(
-                Identifier::new(ctx, "isVolatile"),
-                IntegerAttribute::new(IntegerType::new(ctx, 1).into(), 0).into(),
-            )])
-            .add_operands(&[dst, val, len])
-            .build()
-            .map_err(|e| cctx.emit_internal(format!("memset: {e}")))
-            .ok()?;
-        self.append_operation(op);
-        Some(())
-    }
-
-    fn alloca_typed(
-        &self,
-        ctx: &'c Context,
-        elem_ty: Type<'c>,
-        loc: Location<'c>,
-    ) -> Value<'c, 'c> {
-        let count_one = self.const_i64(ctx, 1, loc);
-        self.append_op(melior::dialect::llvm::alloca(
-            ctx,
-            count_one,
-            r#type::pointer(ctx, 0),
+        self.gep_typed_result(
+            cctx,
+            base,
+            IntegerType::new(ctx, 8).into(),
+            &[idx],
+            &[i32::MIN],
+            ctx.llvm_ptr(),
             loc,
-            melior::dialect::llvm::AllocaOptions::default()
-                .elem_type(Some(TypeAttribute::new(elem_ty))),
-        ))
+        )
     }
 
     fn load_typed(

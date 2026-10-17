@@ -1,7 +1,13 @@
 use crate::prelude::*;
 use ast::ty::Ty;
+use diagnostic::DiagnosticCode;
+use diagnostic::code::{LayoutCode, ReferenceCode, RepresentationCode, TypeCode};
 use typecheck::layout::LayoutKind;
 use typecheck::representation::Repr;
+
+#[cfg(test)]
+#[path = "type_cache_tests.rs"]
+mod tests;
 
 impl<'a, 'c> CodegenContext<'a, 'c> {
     pub(crate) fn result_types_to_mlir(&self, ty: &Ty) -> Vec<Type<'c>> {
@@ -32,6 +38,12 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
             .type_registry
             .nominal_integer_interpretation_for_type(source)
             .or_else(|| source.anonymous_operation_interpretation())
+            .or_else(|| {
+                self.program
+                    .type_registry
+                    .discriminant_semantics_for_type(source)
+                    .map(|semantics| semantics.interpretation)
+            })
             == Some(ast::ty::IntegerInterpretation::Signed);
         let operation = if source_width > target_width {
             "arith.trunci"
@@ -53,31 +65,42 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
 
     /// Convert a resolved `Ty` to its MLIR `Type` representation.
     pub fn ty_to_mlir(&self, ty: &Ty) -> Type<'c> {
+        if let Some(mapped) = self.type_cache.borrow().get(ty).copied() {
+            return mapped;
+        }
+        let diagnostic_count = self.symptoms.count();
+        let mapped = self.uncached_ty_to_mlir(ty);
+        if self.symptoms.count() == diagnostic_count {
+            self.type_cache.borrow_mut().insert(ty.clone(), mapped);
+        }
+        mapped
+    }
+
+    fn uncached_ty_to_mlir(&self, ty: &Ty) -> Type<'c> {
         let mlir_ctx = self.mlir;
         if self.reference_pointee_ty(ty).is_some() {
             return self.repr_to_mlir(&Repr::Address { address_space: 0 });
         }
-        if let Ok(repr) = Repr::derive(ty, Some(self.program.type_registry)) {
-            if self.target_layout.layout_repr(&repr).is_err() {
-                self.emit_internal("target layout cannot represent this type");
-                return r#type::r#struct(mlir_ctx, &[], false);
+        for registry in [Some(self.program.type_registry), None] {
+            if let Ok(repr) = Repr::derive(ty, registry) {
+                if self.target_layout.layout_repr(&repr).is_err() {
+                    self.emit_internal("target layout cannot represent this type");
+                    return r#type::r#struct(mlir_ctx, &[], false);
+                }
+                return self.repr_to_mlir(&repr);
             }
-            return self.repr_to_mlir(&repr);
-        }
-        if let Ok(repr) = Repr::derive(ty, None) {
-            if self.target_layout.layout_repr(&repr).is_err() {
-                self.emit_internal("target layout cannot represent this type");
-                return r#type::r#struct(mlir_ctx, &[], false);
-            }
-            return self.repr_to_mlir(&repr);
         }
         match ty {
-            Ty::Ptr { .. } | Ty::Address { .. } | Ty::Ref { .. } => {
+            Ty::Ptr { .. } | Ty::OwnedStorage { .. } | Ty::Address { .. } | Ty::Ref { .. } => {
                 self.repr_to_mlir(&Repr::Address { address_space: 0 })
             }
-            Ty::AnonymousInteger { .. } | Ty::ResultFamily { .. } | Ty::Named { .. } => {
+            Ty::Proposition(_)
+            | Ty::AnonymousInteger { .. }
+            | Ty::ResultFamily { .. }
+            | Ty::Named { .. } => {
+                // type-representation-unavailable
                 self.emit_symptom(
-                    "type-representation-unavailable",
+                    DiagnosticCode::Representation(RepresentationCode::Unavailable),
                     format!(
                         "type `{}` has no concrete codegen representation",
                         ty.format_for_hover()
@@ -87,28 +110,45 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
             }
             Ty::Float { .. } => mlir_ctx.f64(),
             Ty::Union { .. } => {
+                // sum-representation-missing
                 self.emit_symptom(
-                    "sum-representation-missing",
+                    DiagnosticCode::Representation(RepresentationCode::SumMissing),
                     "tagged-sum representation is unavailable during codegen".to_string(),
                 );
                 r#type::r#struct(mlir_ctx, &[], false)
             }
-            Ty::UnresolvedLiteral(_) => mlir_ctx.i1(),
-            Ty::UnresolvedSequence { .. } => {
+            Ty::UnresolvedLiteral(_) => {
+                // literal-representation-unavailable
                 self.emit_symptom(
-                    "sequence-representation-unavailable",
+                    DiagnosticCode::Representation(RepresentationCode::LiteralUnavailable),
+                    "unresolved literal reached codegen before materialization".to_string(),
+                );
+                r#type::r#struct(mlir_ctx, &[], false)
+            }
+            Ty::UnresolvedSequence { .. } => {
+                // sequence-representation-unavailable
+                self.emit_symptom(
+                    DiagnosticCode::Representation(RepresentationCode::SequenceUnavailable),
                     "unresolved sequence reached codegen before materialization".to_string(),
                 );
                 r#type::r#struct(mlir_ctx, &[], false)
             }
             Ty::Literal(ast::ConstValue::Text(_)) => {
+                // text-literal-requires-representation
                 self.emit_symptom(
-                    "text-literal-requires-representation",
+                    DiagnosticCode::Representation(RepresentationCode::TextLiteralRequired),
                     "compile-time text must be materialized as a byte array".into(),
                 );
                 r#type::r#struct(mlir_ctx, &[], false)
             }
-            Ty::Literal(_) => mlir_ctx.i64(),
+            Ty::Literal(_) => {
+                // literal-representation-unavailable
+                self.emit_symptom(
+                    DiagnosticCode::Representation(RepresentationCode::LiteralUnavailable),
+                    "compile-time literal must be materialized before runtime use".to_string(),
+                );
+                r#type::r#struct(mlir_ctx, &[], false)
+            }
             Ty::Sequence(fields) => r#type::r#struct(
                 mlir_ctx,
                 &fields
@@ -117,37 +157,28 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                     .collect::<Vec<_>>(),
                 false,
             ),
-            ty if ty.union_literal_values().is_some() => {
-                let n = ty.union_literal_values().unwrap().len();
-                if n <= 256 {
-                    if n == 2 {
-                        mlir_ctx.i1()
-                    } else {
-                        IntegerType::new(mlir_ctx, 8).into()
-                    }
-                } else if n <= 65536 {
-                    IntegerType::new(mlir_ctx, 16).into()
-                } else {
-                    mlir_ctx.i64()
-                }
-            }
             Ty::Record { .. } | Ty::Unit => {
+                // product-representation-missing
                 self.emit_symptom(
-                    "product-representation-missing",
+                    DiagnosticCode::Representation(RepresentationCode::ProductMissing),
                     "product representation is unavailable during codegen".to_string(),
                 );
                 r#type::r#struct(mlir_ctx, &[], false)
             }
-            Ty::Opaque(_) => {
+            Ty::Opaque(name) => {
+                // unsupported-type-representation
                 self.emit_symptom(
-                    "unsupported-type-representation",
-                    "opaque type reached codegen without a physical representation".to_string(),
+                    DiagnosticCode::Representation(RepresentationCode::Unsupported),
+                    format!(
+                        "opaque type `{name}` reached codegen without a physical representation"
+                    ),
                 );
                 r#type::r#struct(mlir_ctx, &[], false)
             }
             Ty::Array { .. } => {
+                // array-representation-missing
                 self.emit_symptom(
-                    "array-representation-missing",
+                    DiagnosticCode::Representation(RepresentationCode::ArrayMissing),
                     "fixed-array representation is unavailable during codegen".to_string(),
                 );
                 r#type::r#struct(mlir_ctx, &[], false)
@@ -170,8 +201,9 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         }
 
         if ty.is_ref() {
+            // incompatible-reference-kind
             self.emit_symptom(
-                "incompatible-reference-kind",
+                DiagnosticCode::Type(TypeCode::Reference(ReferenceCode::KindIncompatible)),
                 format!(
                     "reference type `{}` has no resolved reference semantics",
                     ty.format_for_hover()
@@ -196,11 +228,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
                 r#type::r#struct(self.mlir, &field_types, false)
             }
             Repr::Array { element, length } => {
-                let Ok(length) = u32::try_from(*length) else {
-                    self.emit_symptom(
-                        "array-layout-overflow",
-                        "fixed-array length exceeds the MLIR array dimension".to_string(),
-                    );
+                let Some(length) = self.mlir_array_length(*length) else {
                     return r#type::r#struct(self.mlir, &[], false);
                 };
                 r#type::array(self.repr_to_mlir(element), length)
@@ -225,8 +253,9 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
             ..
         } = layout.kind
         else {
+            // sum-representation-missing
             self.emit_symptom(
-                "sum-representation-missing",
+                DiagnosticCode::Representation(RepresentationCode::SumMissing),
                 "sum representation did not produce sum layout".to_string(),
             );
             return r#type::r#struct(self.mlir, &[], false);
@@ -239,8 +268,9 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
         let mut fields = vec![discriminant_ty];
         let Some(prefix_padding) = payload_offset.checked_sub(discriminant_size(&discriminant))
         else {
+            // sum-layout-overflow
             self.emit_symptom(
-                "sum-layout-overflow",
+                DiagnosticCode::Layout(LayoutCode::SumOverflow),
                 "tagged-sum payload offset precedes its discriminant".to_string(),
             );
             return r#type::r#struct(self.mlir, &[], false);
@@ -258,8 +288,9 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
             return;
         }
         let Ok(count) = u32::try_from(count) else {
+            // sum-layout-overflow
             self.emit_symptom(
-                "sum-layout-overflow",
+                DiagnosticCode::Layout(LayoutCode::SumOverflow),
                 "tagged-sum padding does not fit an MLIR array length".to_string(),
             );
             return;
@@ -281,7 +312,7 @@ impl<'a, 'c> CodegenContext<'a, 'c> {
 
 fn discriminant_size(repr: &Repr) -> u64 {
     match repr {
-        Repr::Bits { width } => u64::from(width.div_ceil(8)),
+        Repr::Bits { width } => typecheck::layout::scalar_size_bytes(*width),
         _ => 0,
     }
 }

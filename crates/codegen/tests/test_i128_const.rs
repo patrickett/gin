@@ -1,5 +1,25 @@
 mod support;
 
+#[test]
+fn small_negative_constants_preserve_sign_across_64_bit_boundary() {
+    use codegen::OperationBuilderExt;
+    use codegen::emit::NativeCompiler;
+    use melior::ir::{Location, Type, operation::OperationLike, r#type::IntegerType};
+
+    let context = NativeCompiler::create_context();
+    for width in [64, 65, 72, 127, 128] {
+        let ty: Type<'_> = IntegerType::new(&context, width).into();
+        for value in [-1_i128, -2, i128::from(i64::MIN), i128::from(i64::MIN) + 1] {
+            let operation = (&context).int_const(ty, value, Location::unknown(&context));
+            assert_eq!(
+                operation.attribute("value").unwrap().to_string(),
+                format!("{value} : i{width}"),
+                "{operation}"
+            );
+        }
+    }
+}
+
 // TODO: Introduce `insta` snapshot testing for MLIR and LLVM IR output. Current tests use
 // `assert!(mlir_text.contains(...))` which only checks for scattered substrings — it catches
 // outright bugs (e.g., truncated constants) but cannot detect regressions in IR quality such

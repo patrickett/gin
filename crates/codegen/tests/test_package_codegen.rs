@@ -1,27 +1,30 @@
 use codegen::{CodegenContext, CodegenSourceMap, NativeCompiler, NativeEngine, ResolvedFileInput};
-use flask::CompileTarget;
 use melior::ir::operation::OperationLike;
 use parser::query::SourceParseExt;
+use test_fixtures::host_compile_target as test_target;
 use typecheck::transform::{PackageTransformOptions, transform_package_with_shared_context};
 
-fn test_target() -> CompileTarget {
-    CompileTarget::Concrete(
-        flask::TargetTriple::parse("x86_64-unknown-linux-gnu").expect("test target"),
-    )
-}
-
 #[test]
+#[allow(unsafe_code)]
 fn invokes_caller_with_definition_from_another_typed_file() {
     let sources = [
         (
             "provider.gin",
-            "Signed64 is in -9223372036854775808 to 9223372036854775807\nhelper() Signed64: 42",
+            "Signed64 is in -9223372036854775808 to 9223372036854775807\nSigned64 has\n    finish(self):\n        return\nhelper() Signed64: return 42",
         ),
-        ("caller.gin", "answer() Signed64: helper()"),
+        ("caller.gin", "answer() Signed64: return helper()"),
     ];
     let mut asts: Vec<_> = sources
         .iter()
-        .map(|(_, source)| source.parse_source_full().ast)
+        .map(|(_, source)| {
+            let parsed = source.parse_source_full();
+            assert!(
+                parsed.ast.parse_warnings.is_empty(),
+                "{:?}",
+                parsed.ast.parse_warnings
+            );
+            parsed.ast
+        })
         .collect();
     for ast in &mut asts {
         assert!(
@@ -71,7 +74,7 @@ fn invokes_caller_with_definition_from_another_typed_file() {
     assert!(mlir.contains("@answer"));
 
     let engine = NativeEngine::new(module, "answer").expect("native engine");
-    assert_eq!(engine.invoke_i64().expect("native result"), 42);
+    assert_eq!(unsafe { engine.invoke_i64() }.expect("native result"), 42);
 }
 
 #[test]
@@ -80,13 +83,24 @@ fn ordinary_call_uses_the_defined_signature() {
         (
             "provider.gin",
             r#"Signed64 is in -9223372036854775808 to 9223372036854775807
-external(value Signed64) Signed64: value"#,
+Signed64 has
+    finish(self):
+        return
+external(value Signed64) Signed64: return value"#,
         ),
-        ("caller.gin", "answer() Signed64: external(42)"),
+        ("caller.gin", "answer() Signed64: return external(42)"),
     ];
     let mut asts: Vec<_> = sources
         .iter()
-        .map(|(_, source)| source.parse_source_full().ast)
+        .map(|(_, source)| {
+            let parsed = source.parse_source_full();
+            assert!(
+                parsed.ast.parse_warnings.is_empty(),
+                "{:?}",
+                parsed.ast.parse_warnings
+            );
+            parsed.ast
+        })
         .collect();
     for ast in &mut asts {
         assert!(typecheck::prepare_parse_ast(ast, &test_target()).is_empty());
@@ -140,13 +154,21 @@ fn duplicate_function_symbols_return_an_invalid_module_diagnostic() {
     let sources = [
         (
             "first.gin",
-            "Signed64 is in -9223372036854775808 to 9223372036854775807\nduplicate() Signed64: 1",
+            "Signed64 is in -9223372036854775808 to 9223372036854775807\nSigned64 has\n    finish(self):\n        return\nduplicate() Signed64: return 1",
         ),
-        ("second.gin", "duplicate() Signed64: 2"),
+        ("second.gin", "duplicate() Signed64: return 2"),
     ];
     let asts = sources
         .iter()
-        .map(|(_, source)| source.parse_source_full().ast)
+        .map(|(_, source)| {
+            let parsed = source.parse_source_full();
+            assert!(
+                parsed.ast.parse_warnings.is_empty(),
+                "{:?}",
+                parsed.ast.parse_warnings
+            );
+            parsed.ast
+        })
         .collect();
     let artifacts = transform_package_with_shared_context(
         asts,
@@ -180,31 +202,40 @@ fn duplicate_function_symbols_return_an_invalid_module_diagnostic() {
 }
 
 #[test]
+#[allow(unsafe_code)]
 fn string_globals_use_deterministic_internal_namespaces() {
     let sources = [
         (
             "first.gin",
-            r#"Signed64 is in -9223372036854775808 to 9223372036854775807
-Byte is in 0 to 255
-String has pointer @Byte, len Signed64
-first() String: String(pointer: (@'first') as @Byte, len: 5)
-answer() Signed64: 42"#,
+            format!(
+                "Signed64 is in -9223372036854775808 to 9223372036854775807\nSigned64 has\n    finish(self):\n        return\n{}String has\n    pointer @Byte\n    len Signed64\n    finish(self):\n        return\nfirst() String: return String(pointer: (@'first') as @Byte, len: 5)\nanswer() Signed64: return 42",
+                test_fixtures::preludes::BYTE_PRELUDE
+            ),
         ),
         (
             "second.gin",
-            r#"Byte is in 0 to 255
-String has pointer @Byte, len Signed64
-second() String: String(pointer: (@'second') as @Byte, len: 6)"#,
+            r#"second() String: return String(pointer: (@'second') as @Byte, len: 6)"#.to_string(),
         ),
     ];
     let asts = sources
         .iter()
-        .map(|(_, source)| source.parse_source_full().ast)
+        .map(|(_, source)| {
+            let parsed = source.parse_source_full();
+            assert!(
+                parsed.ast.parse_warnings.is_empty(),
+                "{:?}",
+                parsed.ast.parse_warnings
+            );
+            parsed.ast
+        })
         .collect();
     let artifacts = transform_package_with_shared_context(
         asts,
         PackageTransformOptions::FULL.with_compile_target(test_target()),
     );
+    for typed in &artifacts.typed_asts {
+        assert!(typed.all_flaws().is_empty(), "{:?}", typed.all_flaws());
+    }
     let inputs: Vec<_> = artifacts
         .typed_asts
         .iter()
@@ -212,7 +243,7 @@ second() String: String(pointer: (@'second') as @Byte, len: 6)"#,
         .map(|(typed, (filename, source))| {
             ResolvedFileInput::new(
                 typed.resolved_program(),
-                CodegenSourceMap::new(filename, source, &typed.span_table),
+                CodegenSourceMap::new(filename, &source, &typed.span_table),
             )
         })
         .collect();
@@ -228,5 +259,5 @@ second() String: String(pointer: (@'second') as @Byte, len: 6)"#,
     assert!(mlir.contains("__gin-string-0_0"), "{mlir}");
     assert!(mlir.contains("__gin-string-1_0"), "{mlir}");
     let engine = NativeEngine::new(module, "answer").expect("native engine");
-    assert_eq!(engine.invoke_i64().expect("native result"), 42);
+    assert_eq!(unsafe { engine.invoke_i64() }.expect("native result"), 42);
 }
